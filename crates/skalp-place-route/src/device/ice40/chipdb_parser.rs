@@ -15,15 +15,12 @@ use crate::device::{Bel, BelId, BelType, Pip, PipId, Wire, WireId, WireType};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-static CHIPDB_1K: LazyLock<ChipDb> = LazyLock::new(|| {
-    ChipDb::parse(include_str!("chipdb/chipdb-1k.txt")).expect("chipdb-1k parse")
-});
-static CHIPDB_5K: LazyLock<ChipDb> = LazyLock::new(|| {
-    ChipDb::parse(include_str!("chipdb/chipdb-5k.txt")).expect("chipdb-5k parse")
-});
-static CHIPDB_8K: LazyLock<ChipDb> = LazyLock::new(|| {
-    ChipDb::parse(include_str!("chipdb/chipdb-8k.txt")).expect("chipdb-8k parse")
-});
+static CHIPDB_1K: LazyLock<ChipDb> =
+    LazyLock::new(|| ChipDb::parse(include_str!("chipdb/chipdb-1k.txt")).expect("chipdb-1k parse"));
+static CHIPDB_5K: LazyLock<ChipDb> =
+    LazyLock::new(|| ChipDb::parse(include_str!("chipdb/chipdb-5k.txt")).expect("chipdb-5k parse"));
+static CHIPDB_8K: LazyLock<ChipDb> =
+    LazyLock::new(|| ChipDb::parse(include_str!("chipdb/chipdb-8k.txt")).expect("chipdb-8k parse"));
 
 /// PLL extra_cell configuration: maps PLL parameter bits to PLLCONFIG registers
 /// Each entry describes where a single PLL parameter bit lives in the ipcon/io tile
@@ -771,7 +768,11 @@ impl ChipDb {
             .collect();
         rows.sort_unstable();
         rows.dedup();
-        if rows.is_empty() { None } else { Some(rows) }
+        if rows.is_empty() {
+            None
+        } else {
+            Some(rows)
+        }
     }
 
     /// Derive unique colbuf source rows for RAM columns from parsed .colbuf entries.
@@ -793,7 +794,11 @@ impl ChipDb {
             .collect();
         rows.sort_unstable();
         rows.dedup();
-        if rows.is_empty() { None } else { Some(rows) }
+        if rows.is_empty() {
+            None
+        } else {
+            Some(rows)
+        }
     }
 
     /// Get PLL extra_cell data (first PLL if multiple exist)

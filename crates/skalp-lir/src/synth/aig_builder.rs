@@ -722,7 +722,10 @@ impl<'a> AigBuilder<'a> {
             }
 
             CellFunction::Custom(name) => {
-                panic!("Cannot convert Custom('{}') cell to AIG — should be partitioned out", name);
+                panic!(
+                    "Cannot convert Custom('{}') cell to AIG — should be partitioned out",
+                    name
+                );
             }
 
             // NCL Threshold Gates - These are stateful (hysteresis) and should not be

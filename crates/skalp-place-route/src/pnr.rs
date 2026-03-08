@@ -2084,10 +2084,8 @@ set_io btn A6
         let model = DelayModel::ice40_default();
 
         // Local→Span4 should be more expensive than Local→Local
-        let local_to_local =
-            model.pip_delay_typed(&WireType::Local(0), &WireType::Local(1));
-        let local_to_span4 =
-            model.pip_delay_typed(&WireType::Local(0), &WireType::Span4H(0));
+        let local_to_local = model.pip_delay_typed(&WireType::Local(0), &WireType::Local(1));
+        let local_to_span4 = model.pip_delay_typed(&WireType::Local(0), &WireType::Span4H(0));
 
         assert!(
             local_to_span4 > local_to_local,
@@ -2097,8 +2095,7 @@ set_io btn A6
         );
 
         // BelPin→Local should be fast (direct connection)
-        let belpin_to_local =
-            model.pip_delay_typed(&WireType::BelPin, &WireType::Local(0));
+        let belpin_to_local = model.pip_delay_typed(&WireType::BelPin, &WireType::Local(0));
         assert!(
             belpin_to_local < local_to_local,
             "BelPin→Local ({:.3}ns) should be faster than Local→Local ({:.3}ns)",
@@ -2107,10 +2104,8 @@ set_io btn A6
         );
 
         // Span12→Span12 should be slower than Span4→Span4
-        let span4_to_span4 =
-            model.pip_delay_typed(&WireType::Span4H(0), &WireType::Span4V(0));
-        let span12_to_span12 =
-            model.pip_delay_typed(&WireType::Span12H(0), &WireType::Span12V(0));
+        let span4_to_span4 = model.pip_delay_typed(&WireType::Span4H(0), &WireType::Span4V(0));
+        let span12_to_span12 = model.pip_delay_typed(&WireType::Span12H(0), &WireType::Span12V(0));
         assert!(
             span12_to_span12 > span4_to_span4,
             "Span12→Span12 ({:.3}ns) should be slower than Span4→Span4 ({:.3}ns)",
@@ -2326,16 +2321,26 @@ set_io btn A6
         let in_net = netlist.add_net(GateNet::new_input(GateNetId(0), "a".to_string()));
         let out_net = netlist.add_net(GateNet::new_output(GateNetId(1), "y".to_string()));
         let mut lut = Cell::new_comb(
-            CellId(0), "SB_LUT4".to_string(), "ice40".to_string(), 0.0,
-            "top.inv_lut".to_string(), vec![in_net], vec![out_net],
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.inv_lut".to_string(),
+            vec![in_net],
+            vec![out_net],
         );
         lut.lut_init = Some(0x5555);
         let lut_id = netlist.add_cell(lut);
         netlist.nets[out_net.0 as usize].driver = Some(lut_id);
         netlist.nets[in_net.0 as usize].fanout.push((lut_id, 0));
         let io_in = Cell::new_comb(
-            CellId(0), "SB_IO".to_string(), "ice40".to_string(), 0.0,
-            "io.a".to_string(), vec![], vec![in_net],
+            CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "io.a".to_string(),
+            vec![],
+            vec![in_net],
         );
         let io_in_id = netlist.add_cell(io_in);
         netlist.nets[in_net.0 as usize].driver = Some(io_in_id);
@@ -2348,8 +2353,13 @@ set_io btn A6
         println!("Placement: {:?}", result.placement.placements);
         println!("Routes: {} nets", result.routing.routes.len());
         for (net_id, route) in &result.routing.routes {
-            println!("  net {:?}: {} wires, {} pips, delay={}ps",
-                net_id, route.wires.len(), route.pips.len(), route.delay);
+            println!(
+                "  net {:?}: {} wires, {} pips, delay={}ps",
+                net_id,
+                route.wires.len(),
+                route.pips.len(),
+                route.delay
+            );
         }
         println!("Routing success: {}", result.routing.success);
         println!("Wirelength: {}", result.routing.wirelength);
@@ -2357,7 +2367,11 @@ set_io btn A6
         // --- 4-bit counter ---
         let mut netlist2 = GateNetlist::new("counter_4".to_string(), "ice40".to_string());
         let mut nid = 0u32;
-        let mut next = || { let id = nid; nid += 1; id };
+        let mut next = || {
+            let id = nid;
+            nid += 1;
+            id
+        };
 
         let clock_net = netlist2.add_net({
             let mut net = GateNet::new_input(GateNetId(next()), "clk".to_string());
@@ -2367,47 +2381,81 @@ set_io btn A6
         let carry_in = netlist2.add_net(GateNet::new(GateNetId(next()), "carry_in".to_string()));
         let mut carry_nets = vec![carry_in];
         for i in 0..4 {
-            carry_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("carry_{}", i))));
+            carry_nets
+                .push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("carry_{}", i))));
         }
         let mut dff_out_nets = Vec::new();
         let mut lut_out_nets = Vec::new();
         for i in 0..4 {
-            dff_out_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("q_{}", i))));
-            lut_out_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("lut_{}", i))));
+            dff_out_nets
+                .push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("q_{}", i))));
+            lut_out_nets
+                .push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("lut_{}", i))));
         }
         for i in 0..4 {
             let mut lut = Cell::new_comb(
-                CellId(0), "SB_LUT4".to_string(), "ice40".to_string(), 0.0,
-                format!("cnt.lut{}", i), vec![dff_out_nets[i], carry_nets[i]], vec![lut_out_nets[i]],
+                CellId(0),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("cnt.lut{}", i),
+                vec![dff_out_nets[i], carry_nets[i]],
+                vec![lut_out_nets[i]],
             );
             lut.lut_init = Some(0x6666);
             let lut_id = netlist2.add_cell(lut);
             netlist2.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
-            netlist2.nets[dff_out_nets[i].0 as usize].fanout.push((lut_id, 0));
-            netlist2.nets[carry_nets[i].0 as usize].fanout.push((lut_id, 1));
+            netlist2.nets[dff_out_nets[i].0 as usize]
+                .fanout
+                .push((lut_id, 0));
+            netlist2.nets[carry_nets[i].0 as usize]
+                .fanout
+                .push((lut_id, 1));
 
             let carry = Cell::new_comb(
-                CellId(0), "SB_CARRY".to_string(), "ice40".to_string(), 0.0,
-                format!("cnt.carry{}", i), vec![lut_out_nets[i], carry_nets[i]], vec![carry_nets[i + 1]],
+                CellId(0),
+                "SB_CARRY".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("cnt.carry{}", i),
+                vec![lut_out_nets[i], carry_nets[i]],
+                vec![carry_nets[i + 1]],
             );
             let carry_id = netlist2.add_cell(carry);
             netlist2.nets[carry_nets[i + 1].0 as usize].driver = Some(carry_id);
-            netlist2.nets[lut_out_nets[i].0 as usize].fanout.push((carry_id, 0));
-            netlist2.nets[carry_nets[i].0 as usize].fanout.push((carry_id, 1));
+            netlist2.nets[lut_out_nets[i].0 as usize]
+                .fanout
+                .push((carry_id, 0));
+            netlist2.nets[carry_nets[i].0 as usize]
+                .fanout
+                .push((carry_id, 1));
 
             let mut dff = Cell::new_seq(
-                CellId(0), "SB_DFF".to_string(), "ice40".to_string(), 0.0,
-                format!("cnt.dff{}", i), vec![lut_out_nets[i]], vec![dff_out_nets[i]],
-                clock_net, None,
+                CellId(0),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("cnt.dff{}", i),
+                vec![lut_out_nets[i]],
+                vec![dff_out_nets[i]],
+                clock_net,
+                None,
             );
             dff.clock = Some(clock_net);
             let dff_id = netlist2.add_cell(dff);
             netlist2.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
-            netlist2.nets[lut_out_nets[i].0 as usize].fanout.push((dff_id, 0));
+            netlist2.nets[lut_out_nets[i].0 as usize]
+                .fanout
+                .push((dff_id, 0));
         }
         let clk_io = Cell::new_comb(
-            CellId(0), "SB_IO".to_string(), "ice40".to_string(), 0.0,
-            "io.clk".to_string(), vec![], vec![clock_net],
+            CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "io.clk".to_string(),
+            vec![],
+            vec![clock_net],
         );
         let clk_io_id = netlist2.add_cell(clk_io);
         netlist2.nets[clock_net.0 as usize].driver = Some(clk_io_id);
@@ -2421,8 +2469,13 @@ set_io btn A6
         println!("Placement: {:?}", result2.placement.placements);
         println!("Routes: {} nets", result2.routing.routes.len());
         for (net_id, route) in &result2.routing.routes {
-            println!("  net {:?}: {} wires, {} pips, delay={}ps",
-                net_id, route.wires.len(), route.pips.len(), route.delay);
+            println!(
+                "  net {:?}: {} wires, {} pips, delay={}ps",
+                net_id,
+                route.wires.len(),
+                route.pips.len(),
+                route.delay
+            );
         }
         println!("Routing success: {}", result2.routing.success);
         println!("Wirelength: {}", result2.routing.wirelength);

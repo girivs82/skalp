@@ -89,8 +89,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
     pub fn with_carry_chains(mut self, carry_chains: Vec<CarryChain>) -> Self {
         for chain in &carry_chains {
             for &cell_id in &chain.cells {
-                self.carry_chain_membership
-                    .insert(cell_id, chain.chain_id);
+                self.carry_chain_membership.insert(cell_id, chain.chain_id);
             }
         }
         self.carry_chains = carry_chains;
@@ -521,8 +520,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     let (_, height) = self.device.grid_size();
                     for (i, &cell_id) in chain.cells.iter().enumerate() {
                         if let Some(&old_loc) = placement.placements.get(&cell_id) {
-                            let old_key =
-                                (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
+                            let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
                             new_loc_map.remove(&old_key);
 
                             // Place consecutively: tile_y advances every 8 LCs
@@ -531,19 +529,16 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                                 .min(height.saturating_sub(2).max(1));
                             let bel_idx = lc_offset % 8;
 
-                            let new_loc = PlacementLoc::new(
-                                *new_x,
-                                tile_y,
-                                bel_idx,
-                                BelType::Carry,
-                            );
+                            let new_loc =
+                                PlacementLoc::new(*new_x, tile_y, bel_idx, BelType::Carry);
 
                             let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
                             // If occupied by non-chain cell, displace it to the carry's old position
                             // but preserve the displaced cell's original bel_type
                             if let Some(&occupant) = loc_map.get(&new_key) {
                                 if !chain.cells.contains(&occupant) {
-                                    let occupant_bel_type = placement.placements
+                                    let occupant_bel_type = placement
+                                        .placements
                                         .get(&occupant)
                                         .map(|loc| loc.bel_type)
                                         .unwrap_or(old_loc.bel_type);

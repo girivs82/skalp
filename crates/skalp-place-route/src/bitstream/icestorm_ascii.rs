@@ -108,7 +108,7 @@ impl IoConfig {
             output_enable: 1,    // Output always enabled (PIN_TYPE[1:0] = 01)
             output_driver: 0,    // D_OUT_0 combinational (PIN_TYPE[3:2] = 00)
             input_pin: 0,        // Not used
-            input_enable: false,  // No input
+            input_enable: false, // No input
             pullup_enable: false,
         }
     }
@@ -137,9 +137,9 @@ impl IoConfig {
 /// Used when chipdb .colbuf section is unavailable.
 fn colbuf_source_rows_fallback(grid_height: u32) -> Vec<u32> {
     match grid_height {
-        18 => vec![4, 5, 12, 13],       // HX1K / LP1K (14x18)
-        34 => vec![8, 9, 25, 26],       // HX8K / LP8K (34x34)
-        33 => vec![8, 9, 24, 25],       // UP5K (26x33)
+        18 => vec![4, 5, 12, 13], // HX1K / LP1K (14x18)
+        34 => vec![8, 9, 25, 26], // HX8K / LP8K (34x34)
+        33 => vec![8, 9, 24, 25], // UP5K (26x33)
         _ => {
             // Conservative fallback: compute quadrant boundaries
             let q = grid_height / 4;
@@ -152,9 +152,9 @@ fn colbuf_source_rows_fallback(grid_height: u32) -> Vec<u32> {
 /// Used when chipdb .colbuf section is unavailable.
 fn ramb_colbuf_source_rows_fallback(grid_height: u32) -> Vec<u32> {
     match grid_height {
-        18 => vec![3, 5, 11, 13],       // HX1K / LP1K
-        34 => vec![7, 9, 23, 25],       // HX8K / LP8K
-        33 => vec![7, 9, 23, 25],       // UP5K
+        18 => vec![3, 5, 11, 13], // HX1K / LP1K
+        34 => vec![7, 9, 23, 25], // HX8K / LP8K
+        33 => vec![7, 9, 23, 25], // UP5K
         _ => {
             let q = grid_height / 4;
             vec![q - 1, q + 1, 3 * q - 1, 3 * q + 1]
@@ -408,7 +408,11 @@ impl<'a> IceStormAscii<'a> {
                 // - Normal LUTs: even bel indices (0, 2, 4, ..., 14) → lc_idx = bel_index / 2
                 // - Carry-associated LUTs from legalization: same bel_index as carry (0-14)
                 // - Fallback carry LUTs at bel_index=16: map to LC 0 in the tile
-                let lc_idx = if loc.bel_index >= 16 { 0 } else { loc.bel_index / 2 };
+                let lc_idx = if loc.bel_index >= 16 {
+                    0
+                } else {
+                    loc.bel_index / 2
+                };
                 lut_inits.insert((loc.tile_x, loc.tile_y, lc_idx), init);
             }
         }
@@ -761,7 +765,9 @@ impl<'a> IceStormAscii<'a> {
         // These rows contain the column buffers that distribute global signals.
         // Prefer chipdb .colbuf data; fall back to hardcoded per-variant values.
         let (_, height) = self.device.grid_size();
-        let colbuf_rows = self.chipdb.as_ref()
+        let colbuf_rows = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.colbuf_source_rows())
             .unwrap_or_else(|| colbuf_source_rows_fallback(height));
         let is_colbuf_row = colbuf_rows.contains(&y);
@@ -774,11 +780,16 @@ impl<'a> IceStormAscii<'a> {
         asc.push_str(&format!(".logic_tile {} {}\n", x, y));
 
         // Get tile dimensions from chipdb (fallback to known iCE40 defaults)
-        let (num_rows, num_cols) = self.chipdb.as_ref()
+        let (num_rows, num_cols) = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.tile_dimensions.get(&TileType::Logic))
             .map(|d| (d.rows as usize, d.columns as usize))
             .unwrap_or((16, 54));
-        debug_assert!(num_rows <= 16 && num_cols <= 54, "Logic tile dims exceed static array");
+        debug_assert!(
+            num_rows <= 16 && num_cols <= 54,
+            "Logic tile dims exceed static array"
+        );
 
         // Create a 16x54 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 54]; 16];
@@ -840,11 +851,20 @@ impl<'a> IceStormAscii<'a> {
             }
 
             // Set column buffer control bits for global networks (data-driven from chipdb)
-            let colbuf_positions = self.colbuf_positions_for_tile(TileType::Logic)
-                .unwrap_or_else(|| vec![
-                    (0, 1, 0), (1, 2, 1), (5, 2, 2), (7, 2, 3),
-                    (9, 2, 4), (11, 2, 5), (13, 2, 6), (15, 2, 7),
-                ]);
+            let colbuf_positions = self
+                .colbuf_positions_for_tile(TileType::Logic)
+                .unwrap_or_else(|| {
+                    vec![
+                        (0, 1, 0),
+                        (1, 2, 1),
+                        (5, 2, 2),
+                        (7, 2, 3),
+                        (9, 2, 4),
+                        (11, 2, 5),
+                        (13, 2, 6),
+                        (15, 2, 7),
+                    ]
+                });
 
             for (row, col, glb_idx) in &colbuf_positions {
                 if (global_config.active_networks >> glb_idx) & 1 == 1 {
@@ -924,22 +944,30 @@ impl<'a> IceStormAscii<'a> {
 
         // IO tiles at column buffer rows also need ColBufCtrl bits
         let (_, height) = self.device.grid_size();
-        let colbuf_rows = self.chipdb.as_ref()
+        let colbuf_rows = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.colbuf_source_rows())
             .unwrap_or_else(|| colbuf_source_rows_fallback(height));
         let is_colbuf_row = colbuf_rows.contains(&y);
         let needs_colbuf = global_config.active_networks != 0 && is_colbuf_row;
 
-        let has_cells_or_pips = !cells_in_tile.is_empty() || !pips_in_tile.is_empty() || has_pll_bits;
+        let has_cells_or_pips =
+            !cells_in_tile.is_empty() || !pips_in_tile.is_empty() || has_pll_bits;
 
         asc.push_str(&format!(".io_tile {} {}\n", x, y));
 
         // Get tile dimensions from chipdb (fallback to known iCE40 defaults)
-        let (num_rows, num_cols) = self.chipdb.as_ref()
+        let (num_rows, num_cols) = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.tile_dimensions.get(&TileType::IoTop))
             .map(|d| (d.rows as usize, d.columns as usize))
             .unwrap_or((16, 18));
-        debug_assert!(num_rows <= 16 && num_cols <= 18, "IO tile dims exceed static array");
+        debug_assert!(
+            num_rows <= 16 && num_cols <= 18,
+            "IO tile dims exceed static array"
+        );
 
         // Create a 16x18 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 18]; 16];
@@ -948,8 +976,12 @@ impl<'a> IceStormAscii<'a> {
         // This prevents floating inputs and matches nextpnr/icestorm behavior.
         // Skip IE on IO tile positions that lack physical pads (derived from chipdb).
         let has_pads = self.padded_io_tiles.is_empty() || self.padded_io_tiles.contains(&(x, y));
-        let ie_0_pos = self.lookup_config_bit(TileType::IoTop, "IoCtrl.IE_0").unwrap_or((9, 3));
-        let ie_1_pos = self.lookup_config_bit(TileType::IoTop, "IoCtrl.IE_1").unwrap_or((6, 3));
+        let ie_0_pos = self
+            .lookup_config_bit(TileType::IoTop, "IoCtrl.IE_0")
+            .unwrap_or((9, 3));
+        let ie_1_pos = self
+            .lookup_config_bit(TileType::IoTop, "IoCtrl.IE_1")
+            .unwrap_or((6, 3));
         if !has_cells_or_pips && has_pads {
             bits[ie_0_pos.0][ie_0_pos.1] = true; // IE_0 — input enable for IOB_0
             bits[ie_1_pos.0][ie_1_pos.1] = true; // IE_1 — input enable for IOB_1
@@ -958,8 +990,12 @@ impl<'a> IceStormAscii<'a> {
         if let Some(ref chipdb) = self.chipdb {
             // Set I/O cell configuration bits from chipdb tile_bits lookups.
             // IOB_0/IOB_1 PINTYPE, IoCtrl IE/REN positions are all data-driven.
-            let ren_0_pos = self.lookup_config_bit(TileType::IoTop, "IoCtrl.REN_0").unwrap_or((6, 2));
-            let ren_1_pos = self.lookup_config_bit(TileType::IoTop, "IoCtrl.REN_1").unwrap_or((1, 3));
+            let ren_0_pos = self
+                .lookup_config_bit(TileType::IoTop, "IoCtrl.REN_0")
+                .unwrap_or((6, 2));
+            let ren_1_pos = self
+                .lookup_config_bit(TileType::IoTop, "IoCtrl.REN_1")
+                .unwrap_or((1, 3));
 
             // Build PINTYPE position arrays from chipdb for IOB_0 and IOB_1
             let iob0_pintype: Vec<(usize, usize)> = (0..6)
@@ -1038,11 +1074,20 @@ impl<'a> IceStormAscii<'a> {
 
         // Set column buffer control bits for global networks in IO tiles (data-driven from chipdb)
         if needs_colbuf {
-            let io_colbuf_positions = self.colbuf_positions_for_tile(TileType::IoTop)
-                .unwrap_or_else(|| vec![
-                    (1, 9, 0), (0, 9, 1), (3, 9, 2), (2, 9, 3),
-                    (5, 9, 4), (4, 9, 5), (7, 9, 6), (6, 9, 7),
-                ]);
+            let io_colbuf_positions = self
+                .colbuf_positions_for_tile(TileType::IoTop)
+                .unwrap_or_else(|| {
+                    vec![
+                        (1, 9, 0),
+                        (0, 9, 1),
+                        (3, 9, 2),
+                        (2, 9, 3),
+                        (5, 9, 4),
+                        (4, 9, 5),
+                        (7, 9, 6),
+                        (6, 9, 7),
+                    ]
+                });
 
             for (row, col, glb_idx) in &io_colbuf_positions {
                 if (global_config.active_networks >> glb_idx) & 1 == 1 {
@@ -1372,7 +1417,9 @@ impl<'a> IceStormAscii<'a> {
         // 3. RAM config bits — for tiles with placed RAM cells
 
         let (_, height) = self.device.grid_size();
-        let ram_colbuf_rows = self.chipdb.as_ref()
+        let ram_colbuf_rows = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.ramb_colbuf_source_rows())
             .unwrap_or_else(|| ramb_colbuf_source_rows_fallback(height));
         let is_colbuf_row = ram_colbuf_rows.contains(&y);
@@ -1381,17 +1428,23 @@ impl<'a> IceStormAscii<'a> {
         asc.push_str(&format!(".ramb_tile {} {}\n", x, y));
 
         // Get tile dimensions from chipdb (fallback to known iCE40 defaults)
-        let (num_rows, num_cols) = self.chipdb.as_ref()
+        let (num_rows, num_cols) = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.tile_dimensions.get(&TileType::RamBottom))
             .map(|d| (d.rows as usize, d.columns as usize))
             .unwrap_or((16, 42));
-        debug_assert!(num_rows <= 16 && num_cols <= 42, "RAM tile dims exceed static array");
+        debug_assert!(
+            num_rows <= 16 && num_cols <= 42,
+            "RAM tile dims exceed static array"
+        );
 
         // Create a 16x42 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 42]; 16];
 
         // RamConfig.PowerUp — always set on all ramb tiles (data-driven from chipdb)
-        let powerup_pos = self.lookup_config_bit(TileType::RamBottom, "RamConfig.PowerUp")
+        let powerup_pos = self
+            .lookup_config_bit(TileType::RamBottom, "RamConfig.PowerUp")
             .unwrap_or((1, 7));
         bits[powerup_pos.0][powerup_pos.1] = true;
 
@@ -1421,11 +1474,20 @@ impl<'a> IceStormAscii<'a> {
 
         // Set ColBufCtrl bits for global networks at column buffer rows (data-driven from chipdb)
         if needs_colbuf {
-            let colbuf_positions = self.colbuf_positions_for_tile(TileType::RamBottom)
-                .unwrap_or_else(|| vec![
-                    (0, 1, 0), (1, 2, 1), (5, 2, 2), (7, 2, 3),
-                    (9, 2, 4), (11, 2, 5), (13, 2, 6), (15, 2, 7),
-                ]);
+            let colbuf_positions = self
+                .colbuf_positions_for_tile(TileType::RamBottom)
+                .unwrap_or_else(|| {
+                    vec![
+                        (0, 1, 0),
+                        (1, 2, 1),
+                        (5, 2, 2),
+                        (7, 2, 3),
+                        (9, 2, 4),
+                        (11, 2, 5),
+                        (13, 2, 6),
+                        (15, 2, 7),
+                    ]
+                });
 
             for (row, col, glb_idx) in &colbuf_positions {
                 if (global_config.active_networks >> glb_idx) & 1 == 1 {
@@ -1490,11 +1552,16 @@ impl<'a> IceStormAscii<'a> {
         asc.push_str(&format!(".ramt_tile {} {}\n", x, y));
 
         // Get tile dimensions from chipdb (fallback to known iCE40 defaults)
-        let (num_rows, num_cols) = self.chipdb.as_ref()
+        let (num_rows, num_cols) = self
+            .chipdb
+            .as_ref()
             .and_then(|db| db.tile_dimensions.get(&TileType::RamTop))
             .map(|d| (d.rows as usize, d.columns as usize))
             .unwrap_or((16, 42));
-        debug_assert!(num_rows <= 16 && num_cols <= 42, "RAM top tile dims exceed static array");
+        debug_assert!(
+            num_rows <= 16 && num_cols <= 42,
+            "RAM top tile dims exceed static array"
+        );
 
         // Create a 16x42 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 42]; 16];
@@ -1586,5 +1653,4 @@ impl<'a> IceStormAscii<'a> {
 
         asc.push('\n');
     }
-
 }

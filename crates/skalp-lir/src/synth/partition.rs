@@ -42,10 +42,7 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         .iter()
         .filter(|c| {
             // Cells with a known incompatible function
-            if c.function
-                .as_ref()
-                .is_some_and(|f| !f.is_aig_compatible())
-            {
+            if c.function.as_ref().is_some_and(|f| !f.is_aig_compatible()) {
                 return true;
             }
             // Cells with no function that are infrastructure (SB_GND, SB_VCC, SB_IO, etc.)
@@ -309,10 +306,7 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
 /// The AIG round-trip creates a new netlist with independent net IDs, but preserves
 /// net **names** for inputs and outputs. We use name-based matching to bridge the
 /// optimized netlist's ID space back to the original.
-pub fn merge_after_aig(
-    optimized: GateNetlist,
-    partition: &NetlistPartition,
-) -> GateNetlist {
+pub fn merge_after_aig(optimized: GateNetlist, partition: &NetlistPartition) -> GateNetlist {
     let mut merged = GateNetlist::new(partition.orig_name.clone(), partition.orig_library.clone());
 
     // Step 1: Build name-based bridge: optimizable net name → original net ID.

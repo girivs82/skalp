@@ -36,10 +36,7 @@ fn icetime_path() -> &'static str {
 }
 
 fn tools_available() -> bool {
-    Command::new(yosys_path())
-        .arg("--version")
-        .output()
-        .is_ok()
+    Command::new(yosys_path()).arg("--version").output().is_ok()
         && Command::new(nextpnr_path())
             .arg("--version")
             .output()
@@ -135,8 +132,7 @@ fn hx1k_lc_mappings() -> &'static Vec<LcBitMapping> {
     use std::sync::OnceLock;
     static LC_MAPPINGS: OnceLock<Vec<LcBitMapping>> = OnceLock::new();
     LC_MAPPINGS.get_or_init(|| {
-        let chipdb = ChipDb::load_embedded(Ice40Variant::Hx1k)
-            .expect("HX1K chipdb should load");
+        let chipdb = ChipDb::load_embedded(Ice40Variant::Hx1k).expect("HX1K chipdb should load");
         chipdb.lc_mappings
     })
 }
@@ -723,10 +719,7 @@ fn test_cross_validation_summary() {
         let s_bits = count_routing_bits(&skalp_asc);
         let n_bits = count_routing_bits(&nextpnr_asc);
         // Use skalp's internal STA for S-Fmax (icetime can't trace skalp's routing)
-        let s_fmax = skalp_result
-            .timing
-            .as_ref()
-            .map(|t| t.design_frequency);
+        let s_fmax = skalp_result.timing.as_ref().map(|t| t.design_frequency);
         let n_fmax = run_icetime(&nextpnr_asc);
 
         println!(
@@ -764,11 +757,7 @@ fn test_skalp_sources_compile() {
 
     for (name, source) in designs {
         let netlist = synthesize_skalp(source);
-        assert!(
-            !netlist.cells.is_empty(),
-            "{} should produce cells",
-            name
-        );
+        assert!(!netlist.cells.is_empty(), "{} should produce cells", name);
 
         // Verify no stale cell ID references (regression for gate_optimizer fix)
         let max_cell_id = netlist.cells.len() as u32;
@@ -777,14 +766,20 @@ fn test_skalp_sources_compile() {
                 assert!(
                     d.0 < max_cell_id,
                     "{}: stale driver CellId({}) in net '{}' (max={})",
-                    name, d.0, net.name, max_cell_id
+                    name,
+                    d.0,
+                    net.name,
+                    max_cell_id
                 );
             }
             for (cid, _) in &net.fanout {
                 assert!(
                     cid.0 < max_cell_id,
                     "{}: stale fanout CellId({}) in net '{}' (max={})",
-                    name, cid.0, net.name, max_cell_id
+                    name,
+                    cid.0,
+                    net.name,
+                    max_cell_id
                 );
             }
         }
@@ -800,4 +795,3 @@ fn test_skalp_sources_compile() {
         );
     }
 }
-

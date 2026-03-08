@@ -53,8 +53,8 @@ pub use resub::Resub;
 pub use retiming::{
     run_retiming, run_retiming_with_config, Retiming, RetimingConfig, RetimingStats,
 };
-pub use rewrite::Rewrite;
 pub(crate) use rewrite::rebuild_aig_topological;
+pub use rewrite::Rewrite;
 pub use scorr::Scorr;
 pub use strash::Strash;
 

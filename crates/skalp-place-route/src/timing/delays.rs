@@ -82,15 +82,15 @@ impl DelayModel {
             ram_read_delay: 3.5,     // 3.5ns
             ram_write_delay: 0.0,    // Write is synchronous
             // Wire-type-aware PIP delays (from iCE40 datasheet Table 4.2)
-            pip_belpin_to_local: 0.03,    // 30ps — direct connection
-            pip_local_to_local: 0.05,     // 50ps — intra-tile switch
-            pip_local_to_span4: 0.15,     // 150ps — mux into span wire
-            pip_span4_to_span4: 0.10,     // 100ps — switch box traversal
-            pip_span4_to_local: 0.10,     // 100ps — entering tile from span
-            pip_span12_to_span12: 0.15,   // 150ps — long-distance switch
-            pip_local_to_belpin: 0.02,    // 20ps — entering BEL input
-            pip_global_to_local: 0.05,    // 50ps — clock distribution
-            fanout_delay_per_load: 0.02,  // 20ps per additional fanout (capacitive)
+            pip_belpin_to_local: 0.03,   // 30ps — direct connection
+            pip_local_to_local: 0.05,    // 50ps — intra-tile switch
+            pip_local_to_span4: 0.15,    // 150ps — mux into span wire
+            pip_span4_to_span4: 0.10,    // 100ps — switch box traversal
+            pip_span4_to_local: 0.10,    // 100ps — entering tile from span
+            pip_span12_to_span12: 0.15,  // 150ps — long-distance switch
+            pip_local_to_belpin: 0.02,   // 20ps — entering BEL input
+            pip_global_to_local: 0.05,   // 50ps — clock distribution
+            fanout_delay_per_load: 0.02, // 20ps per additional fanout (capacitive)
         }
     }
 
@@ -236,9 +236,10 @@ impl DelayModel {
             (WireType::Local(_), WireType::Span4H(_) | WireType::Span4V(_)) => {
                 self.pip_local_to_span4
             }
-            (WireType::Span4H(_) | WireType::Span4V(_), WireType::Span4H(_) | WireType::Span4V(_)) => {
-                self.pip_span4_to_span4
-            }
+            (
+                WireType::Span4H(_) | WireType::Span4V(_),
+                WireType::Span4H(_) | WireType::Span4V(_),
+            ) => self.pip_span4_to_span4,
             (WireType::Span4H(_) | WireType::Span4V(_), WireType::Local(_)) => {
                 self.pip_span4_to_local
             }

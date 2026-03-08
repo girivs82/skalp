@@ -29,28 +29,21 @@ fn build_counter(n: usize) -> GateNetlist {
 
     let mut carry_nets = vec![carry_in];
     for i in 0..n {
-        carry_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next_net()),
-            format!("carry_{}", i),
-        )));
+        carry_nets
+            .push(netlist.add_net(GateNet::new(GateNetId(next_net()), format!("carry_{}", i))));
     }
 
     // DFF feedback nets (Q output feeds back to LUT)
     let mut dff_out_nets = Vec::new();
     for i in 0..n {
-        dff_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next_net()),
-            format!("q_{}", i),
-        )));
+        dff_out_nets.push(netlist.add_net(GateNet::new(GateNetId(next_net()), format!("q_{}", i))));
     }
 
     // LUT output nets
     let mut lut_out_nets = Vec::new();
     for i in 0..n {
-        lut_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next_net()),
-            format!("lut_{}", i),
-        )));
+        lut_out_nets
+            .push(netlist.add_net(GateNet::new(GateNetId(next_net()), format!("lut_{}", i))));
     }
 
     // Build N counter stages: LUT + CARRY + DFF
@@ -156,10 +149,7 @@ fn build_shift_register(n: usize) -> GateNetlist {
     // DFF output nets
     let mut dff_out_nets = Vec::new();
     for i in 0..n {
-        dff_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next_net()),
-            format!("q_{}", i),
-        )));
+        dff_out_nets.push(netlist.add_net(GateNet::new(GateNetId(next_net()), format!("q_{}", i))));
     }
 
     // Build N DFFs in series
@@ -229,10 +219,8 @@ fn build_adder(n: usize) -> GateNetlist {
     let carry_in = netlist.add_net(GateNet::new(GateNetId(next_net()), "cin".to_string()));
     let mut carry_nets = vec![carry_in];
     for i in 0..n {
-        carry_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next_net()),
-            format!("carry_{}", i),
-        )));
+        carry_nets
+            .push(netlist.add_net(GateNet::new(GateNetId(next_net()), format!("carry_{}", i))));
     }
 
     // Sum output nets

@@ -813,20 +813,14 @@ mod tests {
         // Create LUT output nets
         let mut lut_out_nets = Vec::new();
         for i in 0..n {
-            let net = GateNet::new(
-                GateNetId((n + 1 + i) as u32),
-                format!("lut{}_out", i),
-            );
+            let net = GateNet::new(GateNetId((n + 1 + i) as u32), format!("lut{}_out", i));
             lut_out_nets.push(netlist.add_net(net));
         }
 
         // Create DFF output nets
         let mut dff_out_nets = Vec::new();
         for i in 0..n {
-            let net = GateNet::new(
-                GateNetId((2 * n + 1 + i) as u32),
-                format!("dff{}_out", i),
-            );
+            let net = GateNet::new(GateNetId((2 * n + 1 + i) as u32), format!("dff{}_out", i));
             dff_out_nets.push(netlist.add_net(net));
         }
 
@@ -914,30 +908,17 @@ mod tests {
             let output_net_id = carry_cell.outputs[0];
             let net = &netlist.nets[output_net_id.0 as usize];
             let drives_next = net.fanout.iter().any(|(id, _)| *id == next_carry);
-            assert!(
-                drives_next,
-                "Carry {} should drive carry {}",
-                i,
-                i + 1
-            );
+            assert!(drives_next, "Carry {} should drive carry {}", i, i + 1);
         }
 
         // Each carry should have an associated LUT
         for (i, lut) in chain.associated_luts.iter().enumerate() {
-            assert!(
-                lut.is_some(),
-                "Carry {} should have an associated LUT",
-                i
-            );
+            assert!(lut.is_some(), "Carry {} should have an associated LUT", i);
         }
 
         // Each carry should have an associated DFF (driven by CO)
         for (i, dff) in chain.associated_dffs.iter().enumerate() {
-            assert!(
-                dff.is_some(),
-                "Carry {} should have an associated DFF",
-                i
-            );
+            assert!(dff.is_some(), "Carry {} should have an associated DFF", i);
         }
     }
 

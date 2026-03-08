@@ -908,9 +908,9 @@ fn detect_adder_chains(physical_cells: &[Cell]) -> Vec<AdderChain> {
 
     for cell in physical_cells {
         let func = match &cell.function {
-            Some(CellFunction::Carry) | Some(CellFunction::FullAdder) | Some(CellFunction::HalfAdder) => {
-                cell.function.as_ref().unwrap()
-            }
+            Some(CellFunction::Carry)
+            | Some(CellFunction::FullAdder)
+            | Some(CellFunction::HalfAdder) => cell.function.as_ref().unwrap(),
             _ => continue,
         };
 
@@ -943,7 +943,12 @@ fn detect_adder_chains(physical_cells: &[Cell]) -> Vec<AdderChain> {
         // Try FullAdder/HalfAdder chain (ASIC path)
         let adder_cells: Vec<&&Cell> = cells
             .iter()
-            .filter(|c| matches!(c.function, Some(CellFunction::FullAdder | CellFunction::HalfAdder)))
+            .filter(|c| {
+                matches!(
+                    c.function,
+                    Some(CellFunction::FullAdder | CellFunction::HalfAdder)
+                )
+            })
             .collect();
 
         if !adder_cells.is_empty() {
@@ -971,7 +976,12 @@ fn build_carry_chain(cells: &[&&Cell]) -> Option<AdderChain> {
         .filter_map(|c| {
             let suffix = c.path.rsplit('.').next()?;
             // Extract digit from suffix like "carry1" → 1
-            let idx: usize = suffix.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+            let idx: usize = suffix
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()?;
             Some((idx, **c))
         })
         .collect();
@@ -1039,7 +1049,12 @@ fn build_adder_chain(cells: &[&&Cell]) -> Option<AdderChain> {
         .iter()
         .filter_map(|c| {
             let suffix = c.path.rsplit('.').next()?;
-            let idx: usize = suffix.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+            let idx: usize = suffix
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()?;
             Some((idx, **c))
         })
         .collect();
@@ -1170,11 +1185,11 @@ fn rebuild_adder_chain(
 
     // 6. Remove old chain cells, add rebuilt cells with remapped nets
     let chain_ids: HashSet<CellId> = chain.cells.iter().copied().collect();
-    partition.physical_cells.retain(|c| !chain_ids.contains(&c.id));
+    partition
+        .physical_cells
+        .retain(|c| !chain_ids.contains(&c.id));
 
-    let remap = |id: &GateNetId| -> GateNetId {
-        temp_to_orig.get(id).copied().unwrap_or(*id)
-    };
+    let remap = |id: &GateNetId| -> GateNetId { temp_to_orig.get(id).copied().unwrap_or(*id) };
 
     for cell in &rebuilt.cells {
         let new_cell = Cell {

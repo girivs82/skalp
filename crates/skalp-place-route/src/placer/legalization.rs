@@ -40,12 +40,8 @@ impl<'a, D: Device> Legalizer<'a, D> {
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
 
         // Phase 1: Legalize carry chains into consecutive LC slots
-        let chain_cells = self.legalize_carry_chains(
-            &placement,
-            carry_chains,
-            &mut result,
-            &mut used_bels,
-        )?;
+        let chain_cells =
+            self.legalize_carry_chains(&placement, carry_chains, &mut result, &mut used_bels)?;
 
         // Phase 2: Legalize remaining cells
         let mut cells: Vec<(CellId, PlacementLoc)> = placement
@@ -112,9 +108,8 @@ impl<'a, D: Device> Legalizer<'a, D> {
             // Find contiguous available LC slots in the best column.
             // Each tile has 8 LCs (bel_index 0..7). A chain of N needs N consecutive slots.
             // Search expanding from best_col.
-            let placed = self.find_consecutive_lc_slots(
-                chain, best_col, n, width, height, used_bels, result,
-            );
+            let placed = self
+                .find_consecutive_lc_slots(chain, best_col, n, width, height, used_bels, result);
 
             if !placed {
                 // Fallback: try every column
@@ -123,9 +118,9 @@ impl<'a, D: Device> Legalizer<'a, D> {
                     if col == best_col {
                         continue;
                     }
-                    if self.find_consecutive_lc_slots(
-                        chain, col, n, width, height, used_bels, result,
-                    ) {
+                    if self
+                        .find_consecutive_lc_slots(chain, col, n, width, height, used_bels, result)
+                    {
                         found = true;
                         break;
                     }
@@ -133,19 +128,17 @@ impl<'a, D: Device> Legalizer<'a, D> {
                 if !found {
                     // Last resort: place without consecutive constraint
                     for &cell_id in &chain.cells {
-                        let loc = placement.placements.get(&cell_id).cloned().unwrap_or(
-                            PlacementLoc::new(best_col, height / 2, 0, BelType::Carry),
-                        );
+                        let loc =
+                            placement.placements.get(&cell_id).cloned().unwrap_or(
+                                PlacementLoc::new(best_col, height / 2, 0, BelType::Carry),
+                            );
                         let legal = self.find_legal_location(
                             loc.tile_x,
                             loc.tile_y,
                             BelType::Carry,
                             used_bels,
                         )?;
-                        used_bels.insert(
-                            (legal.tile_x, legal.tile_y, legal.bel_index),
-                            cell_id,
-                        );
+                        used_bels.insert((legal.tile_x, legal.tile_y, legal.bel_index), cell_id);
                         result.placements.insert(cell_id, legal);
                         chain_cells.insert(cell_id);
                     }

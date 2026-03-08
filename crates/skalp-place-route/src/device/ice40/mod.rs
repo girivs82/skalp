@@ -650,13 +650,7 @@ impl Ice40Device {
     }
 
     /// Create BELs for a tile
-    fn create_tile_bels(
-        &self,
-        tile_type: TileType,
-        x: u32,
-        y: u32,
-        bel_id: &mut u32,
-    ) -> Vec<Bel> {
+    fn create_tile_bels(&self, tile_type: TileType, x: u32, y: u32, bel_id: &mut u32) -> Vec<Bel> {
         let mut bels = Vec::new();
 
         match tile_type {
