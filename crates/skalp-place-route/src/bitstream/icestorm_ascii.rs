@@ -413,6 +413,24 @@ impl<'a> IceStormAscii<'a> {
             }
         }
 
+        // For DFF-only cells, ensure their LC has a pass-through LUT.
+        // On ice40, the DFF D input is always the LUT output — without a
+        // meaningful LUT init, the DFF captures 0 every cycle.
+        // The router connects DFF data to LUT input I0, so use 0xAAAA (buffer for I0).
+        for loc in placement.placements.values() {
+            let is_dff = matches!(
+                loc.bel_type,
+                BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE
+            );
+            if is_dff {
+                let lc_idx = loc.bel_index / 2;
+                // Only set pass-through if no LUT already placed in this LC
+                lut_inits
+                    .entry((loc.tile_x, loc.tile_y, lc_idx))
+                    .or_insert(0xAAAA);
+            }
+        }
+
         lut_inits
     }
 
