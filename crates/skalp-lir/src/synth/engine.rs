@@ -13,10 +13,12 @@
 //! let optimized = engine.optimize(&gate_netlist, &tech_library);
 //! ```
 
+use super::datapath::{AdderArchitecture, AdderConfig, AdderOptimizer, DatapathConfig};
 use super::liberty::LibertyLibrary;
 use super::mapping::{
     CutMapper, CutMapperConfig, DelayMapper, DelayMappingConfig, MappingObjective, MappingResult,
 };
+use super::partition::NetlistPartition;
 use super::passes::{
     Balance, BufferConfig, BufferInsertion, ConstProp, Dc2, Dce, Dchoice, Fraig, FraigConfig, Pass,
     PassResult, Refactor, Resub, Retiming, RetimingConfig, Rewrite, Scorr, Strash,
@@ -24,11 +26,12 @@ use super::passes::{
 use super::sta::{Sta, StaResult};
 use super::timing::{TimePs, TimingConstraints};
 use super::{Aig, AigBuilder, AigWriter};
-use crate::gate_netlist::GateNetlist;
+use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use crate::pipeline_annotations::{ModuleAnnotations, PipelineAnnotations};
-use crate::tech_library::TechLibrary;
+use crate::tech_library::{CellFunction, TechLibrary};
 use indexmap::IndexMap;
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Synthesis preset configurations
@@ -255,8 +258,12 @@ impl SynthEngine {
         let start = Instant::now();
         self.pass_results.clear();
 
-        // Phase 0: Partition — extract AIG-incompatible cells (RAM, DSP, PLL, etc.)
-        let partition = super::partition::partition_for_aig(netlist);
+        // Phase 0: Partition — extract AIG-incompatible cells (RAM, DSP, PLL, arithmetic, etc.)
+        let mut partition = super::partition::partition_for_aig(netlist);
+
+        // Phase 0.5: Datapath optimization — rebuild adder chains if a better architecture exists
+        self.run_datapath_optimization(&mut partition, library);
+
         let aig_input = partition
             .as_ref()
             .map(|p| &p.optimizable)
@@ -829,6 +836,361 @@ impl SynthEngine {
     pub fn total_time_ms(&self) -> u64 {
         self.total_time_ms
     }
+
+    /// Run datapath optimization on partitioned-out arithmetic cells.
+    ///
+    /// For FPGA targets with carry chain support, adder cells are already optimal
+    /// (ripple carry via XOR + Carry primitives) and are simply preserved.
+    /// For ASIC targets or wide adders, the optimizer may select a better architecture
+    /// (CLA, Kogge-Stone, Brent-Kung) and rebuild the chain.
+    fn run_datapath_optimization(
+        &self,
+        partition: &mut Option<NetlistPartition>,
+        library: &TechLibrary,
+    ) {
+        let part = match partition.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let chains = detect_adder_chains(&part.physical_cells);
+        if chains.is_empty() {
+            return;
+        }
+
+        // FPGA with carry chains: ripple carry is already optimal, skip rebuild
+        if library.is_fpga() && library.has_function(&CellFunction::Carry) {
+            return;
+        }
+
+        let dp_config = if let Some(period) = self.config.target_period {
+            DatapathConfig::with_timing(period)
+        } else {
+            DatapathConfig::default()
+        };
+        let optimizer = AdderOptimizer::with_config(dp_config);
+
+        for chain in &chains {
+            let arch = optimizer.select_architecture(chain.width, None);
+
+            // Only rebuild if a better architecture than ripple carry is available
+            if arch != AdderArchitecture::RippleCarry {
+                rebuild_adder_chain(part, chain, &optimizer, arch, library);
+            }
+        }
+    }
+}
+
+/// Detected adder chain in the physical partition
+struct AdderChain {
+    width: usize,
+    cells: Vec<CellId>,
+    input_a_nets: Vec<GateNetId>,
+    input_b_nets: Vec<GateNetId>,
+    carry_in: Option<GateNetId>,
+    sum_nets: Vec<GateNetId>,
+    carry_out: Option<GateNetId>,
+}
+
+/// Detect adder chains among partitioned-out physical cells.
+///
+/// Groups cells by path prefix (e.g., "top.add0.carry1" → prefix "top.add0"),
+/// then within each group finds Carry/FullAdder/HalfAdder chains and traces
+/// their I/O nets.
+fn detect_adder_chains(physical_cells: &[Cell]) -> Vec<AdderChain> {
+    // Group arithmetic cells by path prefix
+    let mut groups: HashMap<String, Vec<&Cell>> = HashMap::new();
+
+    for cell in physical_cells {
+        let func = match &cell.function {
+            Some(CellFunction::Carry) | Some(CellFunction::FullAdder) | Some(CellFunction::HalfAdder) => {
+                cell.function.as_ref().unwrap()
+            }
+            _ => continue,
+        };
+
+        // Extract prefix: "top.add0.carry1" → "top.add0"
+        // The last segment contains the cell type + bit index
+        let prefix = match cell.path.rfind('.') {
+            Some(pos) => &cell.path[..pos],
+            None => continue,
+        };
+
+        groups.entry(prefix.to_string()).or_default().push(cell);
+    }
+
+    let mut chains = Vec::new();
+
+    for cells in groups.values() {
+        // Try to build a carry chain from Carry cells (FPGA path)
+        let carry_cells: Vec<&&Cell> = cells
+            .iter()
+            .filter(|c| matches!(c.function, Some(CellFunction::Carry)))
+            .collect();
+
+        if !carry_cells.is_empty() {
+            if let Some(chain) = build_carry_chain(&carry_cells) {
+                chains.push(chain);
+                continue;
+            }
+        }
+
+        // Try FullAdder/HalfAdder chain (ASIC path)
+        let adder_cells: Vec<&&Cell> = cells
+            .iter()
+            .filter(|c| matches!(c.function, Some(CellFunction::FullAdder | CellFunction::HalfAdder)))
+            .collect();
+
+        if !adder_cells.is_empty() {
+            if let Some(chain) = build_adder_chain(&adder_cells) {
+                chains.push(chain);
+            }
+        }
+    }
+
+    chains
+}
+
+/// Build an AdderChain from a set of Carry cells (FPGA carry chain path).
+///
+/// Carry cells have 3 inputs (a, b, cin) and 1 output (cout).
+/// They are connected in a chain where each cell's cout feeds the next cell's cin.
+fn build_carry_chain(cells: &[&&Cell]) -> Option<AdderChain> {
+    if cells.is_empty() {
+        return None;
+    }
+
+    // Sort by bit index extracted from path suffix
+    let mut indexed: Vec<(usize, &Cell)> = cells
+        .iter()
+        .filter_map(|c| {
+            let suffix = c.path.rsplit('.').next()?;
+            // Extract digit from suffix like "carry1" → 1
+            let idx: usize = suffix.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+            Some((idx, **c))
+        })
+        .collect();
+    indexed.sort_by_key(|(idx, _)| *idx);
+
+    if indexed.is_empty() {
+        return None;
+    }
+
+    let width = indexed.len();
+    let mut cell_ids = Vec::with_capacity(width);
+    let mut input_a_nets = Vec::with_capacity(width);
+    let mut input_b_nets = Vec::with_capacity(width);
+    let mut carry_in = None;
+    let mut carry_out = None;
+
+    for (i, (_idx, cell)) in indexed.iter().enumerate() {
+        cell_ids.push(cell.id);
+
+        // Carry cell inputs: [a, b, cin]
+        if cell.inputs.len() >= 2 {
+            input_a_nets.push(cell.inputs[0]);
+            input_b_nets.push(cell.inputs[1]);
+        }
+        if i == 0 && cell.inputs.len() >= 3 {
+            carry_in = Some(cell.inputs[2]);
+        }
+
+        // Last cell's output is the chain carry-out
+        if i == width - 1 {
+            if let Some(&cout) = cell.outputs.first() {
+                carry_out = Some(cout);
+            }
+        }
+    }
+
+    // For FPGA carry chains, sum nets come from the XOR cells (not the Carry cells).
+    // We don't have them here since XOR cells are AIG-compatible and stayed in the
+    // optimizable partition. The sum nets are handled by the AIG path.
+    // We provide empty sum_nets since we won't rebuild FPGA carry chains.
+    let sum_nets = vec![GateNetId(0); width];
+
+    Some(AdderChain {
+        width,
+        cells: cell_ids,
+        input_a_nets,
+        input_b_nets,
+        carry_in,
+        sum_nets,
+        carry_out,
+    })
+}
+
+/// Build an AdderChain from FullAdder/HalfAdder cells (ASIC path).
+///
+/// HalfAdder: inputs [a, b], outputs [sum, carry]
+/// FullAdder: inputs [a, b, cin], outputs [sum, carry]
+fn build_adder_chain(cells: &[&&Cell]) -> Option<AdderChain> {
+    if cells.is_empty() {
+        return None;
+    }
+
+    // Sort by bit index from path
+    let mut indexed: Vec<(usize, &Cell)> = cells
+        .iter()
+        .filter_map(|c| {
+            let suffix = c.path.rsplit('.').next()?;
+            let idx: usize = suffix.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
+            Some((idx, **c))
+        })
+        .collect();
+    indexed.sort_by_key(|(idx, _)| *idx);
+
+    if indexed.is_empty() {
+        return None;
+    }
+
+    let width = indexed.len();
+    let mut cell_ids = Vec::with_capacity(width);
+    let mut input_a_nets = Vec::with_capacity(width);
+    let mut input_b_nets = Vec::with_capacity(width);
+    let mut sum_nets = Vec::with_capacity(width);
+    let mut carry_in = None;
+    let mut carry_out = None;
+
+    for (i, (_idx, cell)) in indexed.iter().enumerate() {
+        cell_ids.push(cell.id);
+
+        // Both HA and FA have a, b as first two inputs
+        if cell.inputs.len() >= 2 {
+            input_a_nets.push(cell.inputs[0]);
+            input_b_nets.push(cell.inputs[1]);
+        }
+
+        // First cell: if FA, carry_in is input[2]; if HA, no carry_in
+        if i == 0
+            && matches!(cell.function, Some(CellFunction::FullAdder))
+            && cell.inputs.len() >= 3
+        {
+            carry_in = Some(cell.inputs[2]);
+        }
+
+        // Both HA and FA have [sum, carry] as outputs
+        if !cell.outputs.is_empty() {
+            sum_nets.push(cell.outputs[0]);
+        }
+
+        // Last cell's carry output
+        if i == width - 1 && cell.outputs.len() >= 2 {
+            carry_out = Some(cell.outputs[1]);
+        }
+    }
+
+    Some(AdderChain {
+        width,
+        cells: cell_ids,
+        input_a_nets,
+        input_b_nets,
+        carry_in,
+        sum_nets,
+        carry_out,
+    })
+}
+
+/// Rebuild an adder chain using a better architecture.
+///
+/// Generates the new adder in a temporary AIG, converts it to a gate netlist,
+/// and replaces the old chain cells in the partition.
+fn rebuild_adder_chain(
+    partition: &mut NetlistPartition,
+    chain: &AdderChain,
+    optimizer: &AdderOptimizer,
+    arch: AdderArchitecture,
+    library: &TechLibrary,
+) {
+    // 1. Generate adder in a temporary AIG
+    let mut config = AdderConfig::new(chain.width).with_architecture(arch);
+    if chain.carry_in.is_some() {
+        config = config.with_carry_in();
+    }
+    if chain.carry_out.is_some() {
+        config = config.with_carry_out();
+    }
+
+    let mut temp_aig = Aig::new("adder_rebuild".to_string());
+    let result = optimizer.generate(&mut temp_aig, &config);
+
+    // 2. Register outputs in temp AIG
+    for (i, &sum_lit) in result.sum.iter().enumerate() {
+        temp_aig.add_output(format!("sum{}", i), sum_lit);
+    }
+    if let Some(cout) = result.carry_out {
+        temp_aig.add_output("cout".to_string(), cout);
+    }
+
+    // 3. Convert to gate netlist via AigWriter
+    let writer = AigWriter::new(library);
+    let rebuilt = writer.write(&temp_aig);
+
+    // 4. Build I/O name → original net ID mapping
+    //    AdderOptimizer creates inputs "a0".."aN", "b0".."bN", "cin"
+    //    and we registered outputs "sum0".."sumN", "cout"
+    let mut io_map: HashMap<String, GateNetId> = HashMap::new();
+    for i in 0..chain.width {
+        io_map.insert(format!("a{}", i), chain.input_a_nets[i]);
+        io_map.insert(format!("b{}", i), chain.input_b_nets[i]);
+        io_map.insert(format!("sum{}", i), chain.sum_nets[i]);
+    }
+    if let Some(cin) = chain.carry_in {
+        io_map.insert("cin".into(), cin);
+    }
+    if let Some(cout) = chain.carry_out {
+        io_map.insert("cout".into(), cout);
+    }
+
+    // 5. Map temp net IDs → original net IDs
+    //    I/O nets: use io_map. Internal nets: allocate new IDs.
+    let max_orig_id = partition
+        .physical_cells
+        .iter()
+        .flat_map(|c| c.inputs.iter().chain(c.outputs.iter()))
+        .map(|id| id.0)
+        .max()
+        .unwrap_or(0);
+    let mut next_id = max_orig_id + 1000; // offset to avoid collisions
+    let mut temp_to_orig: HashMap<GateNetId, GateNetId> = HashMap::new();
+
+    for net in &rebuilt.nets {
+        if let Some(&orig_id) = io_map.get(&net.name) {
+            temp_to_orig.insert(net.id, orig_id);
+        } else {
+            temp_to_orig.insert(net.id, GateNetId(next_id));
+            next_id += 1;
+        }
+    }
+
+    // 6. Remove old chain cells, add rebuilt cells with remapped nets
+    let chain_ids: HashSet<CellId> = chain.cells.iter().copied().collect();
+    partition.physical_cells.retain(|c| !chain_ids.contains(&c.id));
+
+    let remap = |id: &GateNetId| -> GateNetId {
+        temp_to_orig.get(id).copied().unwrap_or(*id)
+    };
+
+    for cell in &rebuilt.cells {
+        let new_cell = Cell {
+            id: cell.id,
+            cell_type: cell.cell_type.clone(),
+            library: cell.library.clone(),
+            function: cell.function.clone(),
+            fit: cell.fit,
+            failure_modes: cell.failure_modes.clone(),
+            inputs: cell.inputs.iter().map(&remap).collect(),
+            outputs: cell.outputs.iter().map(&remap).collect(),
+            path: cell.path.clone(),
+            clock: cell.clock.map(|id| remap(&id)),
+            reset: cell.reset.map(|id| remap(&id)),
+            source_op: Some("DatapathOpt".to_string()),
+            safety_classification: cell.safety_classification.clone(),
+            lut_init: cell.lut_init,
+            parameters: cell.parameters.clone(),
+        };
+        partition.physical_cells.push(new_cell);
+    }
 }
 
 /// Result of synthesis optimization
@@ -1036,4 +1398,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ice40_adder_preserves_carry_chain() {
+        use crate::lir::{Lir, LirOp};
+        use crate::tech_mapper::map_word_lir_to_gates;
+
+        // Build 8-bit adder LIR
+        let mut lir = Lir::new("test_adder8".to_string());
+        let a = lir.add_input("a".to_string(), 8);
+        let b = lir.add_input("b".to_string(), 8);
+        let sum = lir.add_output("sum".to_string(), 8);
+
+        lir.add_node(
+            LirOp::Add {
+                width: 8,
+                has_carry: false,
+            },
+            vec![a, b],
+            sum,
+            "test.add".to_string(),
+        );
+
+        // Tech-map to ice40
+        let lib =
+            crate::tech_library::get_stdlib_library("ice40").expect("Failed to load ice40 library");
+        let mapped = map_word_lir_to_gates(&lir, &lib);
+
+        // Count carry cells before synthesis
+        let carry_before = mapped
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| matches!(c.function, Some(CellFunction::Carry)))
+            .count();
+        assert!(
+            carry_before > 0,
+            "Tech mapper should produce Carry cells for ice40 adder"
+        );
+
+        // Run synthesis
+        let mut engine = SynthEngine::with_preset(SynthPreset::Balanced);
+        let result = engine.optimize(&mapped.netlist, &lib);
+
+        // Carry cells must be preserved (not destroyed by AIG optimization)
+        let carry_after = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| matches!(c.function, Some(CellFunction::Carry)))
+            .count();
+        assert_eq!(
+            carry_after, carry_before,
+            "Carry cells must be preserved through synthesis: before={}, after={}",
+            carry_before, carry_after
+        );
+
+        // Total cell count should be better than before (was 57 LUTs without carry preservation).
+        // With carry cells preserved, the AIG only processes XOR logic.
+        // The carry chain (7 cells) is kept intact; XOR cells get some AIG overhead.
+        let logic_cells = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| {
+                !matches!(
+                    c.cell_type.as_str(),
+                    "SB_IO" | "SB_VCC" | "SB_GND" | "SB_GB"
+                )
+            })
+            .count();
+        assert!(
+            logic_cells <= 45,
+            "8-bit ice40 adder should have fewer than 45 logic cells (was 57 before), got {}",
+            logic_cells
+        );
+    }
 }

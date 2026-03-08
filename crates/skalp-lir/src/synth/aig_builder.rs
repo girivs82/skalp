@@ -416,72 +416,12 @@ impl<'a> AigBuilder<'a> {
                 self.aig.add_mux(sel, d1, d0)
             }
 
-            // Half adder: sum = a ^ b, cout = a & b
-            // This is a multi-output cell - handle specially
-            CellFunction::HalfAdder => {
-                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
-
-                // Compute both outputs
-                let sum_lit = self.aig.add_xor(a, b);
-                let carry_lit = self.aig.add_and(a, b);
-
-                // Map outputs: first is sum, second is carry
-                if let Some(&sum_net) = cell.outputs.first() {
-                    self.net_map[sum_net.0 as usize] = Some(sum_lit);
-                    self.aig.register_net(sum_net, sum_lit);
-                }
-                if let Some(&carry_net) = cell.outputs.get(1) {
-                    self.net_map[carry_net.0 as usize] = Some(carry_lit);
-                    self.aig.register_net(carry_net, carry_lit);
-                }
-
-                // Return early - we've already mapped outputs
-                return;
-            }
-
-            // Full adder: sum = a ^ b ^ cin, cout = (a & b) | (cin & (a ^ b))
-            // This is a multi-output cell - handle specially
-            CellFunction::FullAdder => {
-                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
-                let cin = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
-
-                // Compute both outputs
-                let ab_xor = self.aig.add_xor(a, b);
-                let sum_lit = self.aig.add_xor(ab_xor, cin);
-
-                // Carry = (a & b) | (cin & (a ^ b)) = majority function
-                let ab_and = self.aig.add_and(a, b);
-                let cin_ab_xor = self.aig.add_and(cin, ab_xor);
-                let carry_lit = self.aig.add_or(ab_and, cin_ab_xor);
-
-                // Map outputs: first is sum, second is carry
-                if let Some(&sum_net) = cell.outputs.first() {
-                    self.net_map[sum_net.0 as usize] = Some(sum_lit);
-                    self.aig.register_net(sum_net, sum_lit);
-                }
-                if let Some(&cout_net) = cell.outputs.get(1) {
-                    self.net_map[cout_net.0 as usize] = Some(carry_lit);
-                    self.aig.register_net(cout_net, carry_lit);
-                }
-
-                // Return early - we've already mapped outputs
-                return;
-            }
-
-            // Carry cell: CO = (a & b) | ((a | b) & cin) = majority(a, b, cin)
-            // This is a single-output cell used in FPGA carry chains
-            CellFunction::Carry => {
-                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
-                let cin = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
-
-                // Carry = (a & b) | (cin & (a | b)) = majority function
-                let ab_and = self.aig.add_and(a, b);
-                let ab_or = self.aig.add_or(a, b);
-                let cin_ab_or = self.aig.add_and(cin, ab_or);
-                self.aig.add_or(ab_and, cin_ab_or)
+            // Arithmetic primitives — partitioned out before AIG building
+            CellFunction::HalfAdder | CellFunction::FullAdder | CellFunction::Carry => {
+                panic!(
+                    "BUG: {:?} cell '{}' reached AigBuilder — should have been partitioned out",
+                    cell.function, cell.path
+                );
             }
 
             // Sequential elements
@@ -1175,10 +1115,9 @@ mod tests {
     }
 
     #[test]
-    fn test_half_adder_both_outputs() {
-        // HalfAdder has 2 outputs: sum = a ^ b, carry = a & b
-        // This test verifies that both outputs are computed correctly
-        // and are DIFFERENT (the bug was that all outputs got the same value)
+    #[should_panic(expected = "should have been partitioned out")]
+    fn test_half_adder_panics_in_aig_builder() {
+        // HalfAdder cells must be partitioned out before AIG building
         let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
 
         let a = netlist.add_input("a".to_string());
@@ -1198,32 +1137,13 @@ mod tests {
         netlist.add_cell(ha_cell);
 
         let builder = AigBuilder::new(&netlist);
-        let aig = builder.build();
-
-        // Get the output literals
-        let outputs = aig.outputs();
-        assert_eq!(outputs.len(), 2, "HalfAdder should have 2 outputs");
-
-        let (sum_name, sum_lit) = &outputs[0];
-        let (carry_name, carry_lit) = &outputs[1];
-
-        // Verify output names
-        assert_eq!(sum_name, "sum");
-        assert_eq!(carry_name, "carry");
-
-        // CRITICAL: sum and carry must be DIFFERENT
-        // sum = a ^ b (XOR), carry = a & b (AND)
-        // These are different functions, so their AIG literals must differ
-        assert_ne!(
-            sum_lit, carry_lit,
-            "BUG: HalfAdder sum and carry must be different! sum={:?}, carry={:?}",
-            sum_lit, carry_lit
-        );
+        let _aig = builder.build(); // Should panic
     }
 
     #[test]
-    fn test_full_adder_both_outputs() {
-        // FullAdder has 2 outputs: sum = a ^ b ^ cin, carry = (a & b) | (cin & (a ^ b))
+    #[should_panic(expected = "should have been partitioned out")]
+    fn test_full_adder_panics_in_aig_builder() {
+        // FullAdder cells must be partitioned out before AIG building
         let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
 
         let a = netlist.add_input("a".to_string());
@@ -1244,83 +1164,6 @@ mod tests {
         netlist.add_cell(fa_cell);
 
         let builder = AigBuilder::new(&netlist);
-        let aig = builder.build();
-
-        let outputs = aig.outputs();
-        assert_eq!(outputs.len(), 2, "FullAdder should have 2 outputs");
-
-        let (sum_name, sum_lit) = &outputs[0];
-        let (cout_name, cout_lit) = &outputs[1];
-
-        assert_eq!(sum_name, "sum");
-        assert_eq!(cout_name, "cout");
-
-        // CRITICAL: sum and cout must be DIFFERENT
-        assert_ne!(
-            sum_lit, cout_lit,
-            "BUG: FullAdder sum and cout must be different! sum={:?}, cout={:?}",
-            sum_lit, cout_lit
-        );
-    }
-
-    #[test]
-    fn test_adder_chain_functional() {
-        // Test a chain of half adder + full adder (2-bit adder)
-        // This simulates what happens when adding counter + 1
-        let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
-
-        // Inputs: a[0], a[1], b[0], b[1]
-        let a0 = netlist.add_input("a0".to_string());
-        let a1 = netlist.add_input("a1".to_string());
-        let b0 = netlist.add_input("b0".to_string());
-        let b1 = netlist.add_input("b1".to_string());
-
-        // Intermediate carry
-        let c0 = netlist.add_net(GateNet::new(GateNetId(0), "c0".to_string()));
-
-        // Outputs
-        let s0 = netlist.add_output("s0".to_string());
-        let s1 = netlist.add_output("s1".to_string());
-        let cout = netlist.add_output("cout".to_string());
-
-        // Half adder for bit 0
-        let ha_cell = Cell::new_comb(
-            CellId(0),
-            "HA_X1".to_string(),
-            "generic".to_string(),
-            0.2,
-            "add.ha0".to_string(),
-            vec![a0, b0],
-            vec![s0, c0],
-        );
-        netlist.add_cell(ha_cell);
-
-        // Full adder for bit 1
-        let fa_cell = Cell::new_comb(
-            CellId(1),
-            "FA_X1".to_string(),
-            "generic".to_string(),
-            0.3,
-            "add.fa1".to_string(),
-            vec![a1, b1, c0],
-            vec![s1, cout],
-        );
-        netlist.add_cell(fa_cell);
-
-        let builder = AigBuilder::new(&netlist);
-        let aig = builder.build();
-
-        let outputs = aig.outputs();
-        assert_eq!(
-            outputs.len(),
-            3,
-            "2-bit adder should have 3 outputs (s0, s1, cout)"
-        );
-
-        // All outputs should be different
-        let lits: Vec<_> = outputs.iter().map(|(_, lit)| lit).collect();
-        assert_ne!(lits[0], lits[1], "s0 and s1 must be different");
-        assert_ne!(lits[0], lits[2], "s0 and cout must be different");
-        assert_ne!(lits[1], lits[2], "s1 and cout must be different");
+        let _aig = builder.build(); // Should panic
     }
 }

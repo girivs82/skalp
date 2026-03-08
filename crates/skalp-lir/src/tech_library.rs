@@ -1020,6 +1020,9 @@ impl CellFunction {
             | CellFunction::FpLe32
             | CellFunction::FpGe32 => false,
 
+            // Arithmetic primitives — preserve carry chain structure, optimize via datapath pass
+            CellFunction::FullAdder | CellFunction::HalfAdder | CellFunction::Carry => false,
+
             // I/O pads — physical interface cells, not representable in AIG
             CellFunction::InputPad
             | CellFunction::OutputPad
