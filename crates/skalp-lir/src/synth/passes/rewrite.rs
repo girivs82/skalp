@@ -25,8 +25,8 @@ use indexmap::IndexMap;
 pub struct Rewrite {
     /// Cut parameters
     cut_params: CutParams,
-    /// NPN database
-    npn_db: NpnDatabase,
+    /// NPN database (global cached reference)
+    npn_db: &'static NpnDatabase,
     /// Zero-cost mode: allow rewrites with gain >= 0 (instead of > 0)
     /// This enables more depth optimization without area increase
     zero_cost: bool,
@@ -41,7 +41,7 @@ impl Rewrite {
     pub fn new() -> Self {
         Self {
             cut_params: CutParams::default(),
-            npn_db: NpnDatabase::new(),
+            npn_db: NpnDatabase::global(),
             zero_cost: false,
             rewritten_count: 0,
             total_gain: 0,
@@ -54,7 +54,7 @@ impl Rewrite {
     pub fn zero_cost() -> Self {
         Self {
             cut_params: CutParams::default(),
-            npn_db: NpnDatabase::new(),
+            npn_db: NpnDatabase::global(),
             zero_cost: true,
             rewritten_count: 0,
             total_gain: 0,
@@ -65,7 +65,7 @@ impl Rewrite {
     pub fn with_params(cut_params: CutParams) -> Self {
         Self {
             cut_params,
-            npn_db: NpnDatabase::new(),
+            npn_db: NpnDatabase::global(),
             zero_cost: false,
             rewritten_count: 0,
             total_gain: 0,
@@ -76,7 +76,7 @@ impl Rewrite {
     pub fn with_params_zero_cost(cut_params: CutParams) -> Self {
         Self {
             cut_params,
-            npn_db: NpnDatabase::new(),
+            npn_db: NpnDatabase::global(),
             zero_cost: true,
             rewritten_count: 0,
             total_gain: 0,

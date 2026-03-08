@@ -19,9 +19,13 @@
 //! - Debnath, D., & Sasao, T. (2004). Efficient computation of canonical form for Boolean matching in large libraries.
 
 use indexmap::IndexMap;
+use std::sync::LazyLock;
 
 /// Maximum number of inputs for NPN canonicalization (limited by u64 truth table)
 pub const MAX_NPN_INPUTS: usize = 6;
+
+/// Global cached NPN database — computed once on first access, reused thereafter.
+static NPN_DATABASE: LazyLock<NpnDatabase> = LazyLock::new(NpnDatabase::new_complete);
 
 /// Result of NPN canonicalization
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +192,12 @@ impl NpnDatabase {
     pub fn new() -> Self {
         // Use the complete database with all 222 classes
         Self::new_complete()
+    }
+
+    /// Get a reference to the global cached NPN database.
+    /// The database is computed once on first access and reused thereafter.
+    pub fn global() -> &'static NpnDatabase {
+        &NPN_DATABASE
     }
 
     /// Initialize all 222 NPN equivalence classes for 4-input functions

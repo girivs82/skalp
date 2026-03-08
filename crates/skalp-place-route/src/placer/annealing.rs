@@ -159,7 +159,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let cells: Vec<CellId> = current.placements.keys().copied().collect();
         let moves_per_temp = cells.len().max(100);
 
-        for _iteration in 0..self.max_iterations {
+        // Scale iterations to design size — tiny designs converge quickly
+        let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
+
+        for _iteration in 0..effective_iterations {
             // Perform several moves at each temperature
             for _ in 0..moves_per_temp {
                 // Generate a random move (biased toward critical cells in timing mode)
@@ -257,10 +260,13 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let batch_size = self.parallel_batch_size;
         let batches_per_temp = (cells.len().max(100) / batch_size).max(1);
 
+        // Scale iterations to design size — tiny designs converge quickly
+        let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
+
         // Thread-safe counter for accepted moves (for statistics)
         let accepted_count = AtomicUsize::new(0);
 
-        for _iteration in 0..self.max_iterations {
+        for _iteration in 0..effective_iterations {
             // Process batches at this temperature
             for _ in 0..batches_per_temp {
                 // Generate a batch of candidate moves using different seeds

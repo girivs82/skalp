@@ -13,6 +13,17 @@
 use super::{Ice40Variant, TileType};
 use crate::device::{Bel, BelId, BelType, Pip, PipId, Wire, WireId, WireType};
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+static CHIPDB_1K: LazyLock<ChipDb> = LazyLock::new(|| {
+    ChipDb::parse(include_str!("chipdb/chipdb-1k.txt")).expect("chipdb-1k parse")
+});
+static CHIPDB_5K: LazyLock<ChipDb> = LazyLock::new(|| {
+    ChipDb::parse(include_str!("chipdb/chipdb-5k.txt")).expect("chipdb-5k parse")
+});
+static CHIPDB_8K: LazyLock<ChipDb> = LazyLock::new(|| {
+    ChipDb::parse(include_str!("chipdb/chipdb-8k.txt")).expect("chipdb-8k parse")
+});
 
 /// PLL extra_cell configuration: maps PLL parameter bits to PLLCONFIG registers
 /// Each entry describes where a single PLL parameter bit lives in the ipcon/io tile
@@ -632,15 +643,16 @@ impl ChipDb {
         Ok(chipdb)
     }
 
-    /// Load embedded chipdb for a variant
+    /// Load embedded chipdb for a variant.
+    /// Uses a global cache — the chipdb is parsed once per variant on first access.
     pub fn load_embedded(variant: Ice40Variant) -> Result<Self, String> {
-        let content = match variant {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => include_str!("chipdb/chipdb-1k.txt"),
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k => include_str!("chipdb/chipdb-5k.txt"),
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => include_str!("chipdb/chipdb-8k.txt"),
-            Ice40Variant::Up5k => include_str!("chipdb/chipdb-5k.txt"),
+        let cached = match variant {
+            Ice40Variant::Hx1k | Ice40Variant::Lp1k => &*CHIPDB_1K,
+            Ice40Variant::Hx4k | Ice40Variant::Lp4k => &*CHIPDB_5K,
+            Ice40Variant::Hx8k | Ice40Variant::Lp8k => &*CHIPDB_8K,
+            Ice40Variant::Up5k => &*CHIPDB_5K,
         };
-        Self::parse(content)
+        Ok(cached.clone())
     }
 
     /// Get wire ID for a BEL pin at a specific tile location

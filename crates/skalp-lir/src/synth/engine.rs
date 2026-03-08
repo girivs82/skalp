@@ -514,6 +514,11 @@ impl SynthEngine {
 
     /// Run the optimization pass sequence
     fn run_optimization_passes(&mut self, aig: &mut Aig) {
+        // Skip optimization for trivial designs — not worth the pass overhead
+        if aig.and_count() <= 2 {
+            return;
+        }
+
         let passes = self.get_pass_sequence();
 
         for iteration in 0..self.config.max_iterations {
@@ -1302,6 +1307,29 @@ mod tests {
     fn test_optimize_aig_simple() {
         use crate::synth::{Aig, AigLit};
 
+        // Build a non-trivial AIG (>2 AND nodes) so optimization passes run
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let abc = aig.add_and(ab, AigLit::new(c));
+        let not_ab = aig.add_and(AigLit::not(a), AigLit::not(b));
+        let result = aig.add_and(abc, not_ab.invert());
+        aig.add_output("y".to_string(), result);
+
+        let mut engine = SynthEngine::with_preset(SynthPreset::Quick);
+        let results = engine.optimize_aig(&mut aig, None);
+
+        // Should have run some passes
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_optimize_aig_trivial_skipped() {
+        use crate::synth::{Aig, AigLit};
+
+        // Trivial AIG (≤2 AND nodes) — optimization passes should be skipped
         let mut aig = Aig::new("test".to_string());
         let a = aig.add_input("a".to_string(), None);
         let b = aig.add_input("b".to_string(), None);
@@ -1311,8 +1339,8 @@ mod tests {
         let mut engine = SynthEngine::with_preset(SynthPreset::Quick);
         let results = engine.optimize_aig(&mut aig, None);
 
-        // Should have run some passes
-        assert!(!results.is_empty());
+        // Trivial designs skip optimization — no passes run
+        assert!(results.is_empty());
     }
 
     #[test]
