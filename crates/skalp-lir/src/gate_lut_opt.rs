@@ -173,7 +173,7 @@ fn project_constant_inputs(netlist: &mut GateNetlist) -> LutOptStats {
         // Process from highest input index to lowest so indices stay valid
         let mut remaining_inputs = cell.inputs.clone();
         let mut sorted_consts = const_inputs.clone();
-        sorted_consts.sort_by(|a, b| b.0.cmp(&a.0)); // descending
+        sorted_consts.sort_by_key(|b| std::cmp::Reverse(b.0)); // descending
 
         for (input_idx, const_val) in &sorted_consts {
             projected = project_truth_table(projected, *input_idx, *const_val);
@@ -563,11 +563,7 @@ mod tests {
         let stats = project_constant_inputs(&mut netlist);
         assert_eq!(stats.constants_projected, 1);
         // The LUT should now have fewer inputs
-        let lut_cell = netlist
-            .cells
-            .iter()
-            .find(|c| c.lut_init.is_some())
-            .unwrap();
+        let lut_cell = netlist.cells.iter().find(|c| c.lut_init.is_some()).unwrap();
         assert!(lut_cell.inputs.len() < 4);
     }
 
