@@ -45,18 +45,12 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
             if c.function.as_ref().is_some_and(|f| !f.is_aig_compatible()) {
                 return true;
             }
-            // Cells with no function that are infrastructure (SB_GND, SB_VCC, SB_IO, etc.)
-            // The AIG builder can't handle these — they have no CellFunction mapping
+            // Cells with no function can't be converted to AIG nodes.
+            // Known infrastructure cells (SB_GND, SB_VCC, etc.) are incompatible,
+            // and so is anything else without a function (e.g., NCL threshold gates
+            // like TH22_X1 that don't go through the tech_mapper).
             if c.function.is_none() {
-                let upper = c.cell_type.to_uppercase();
-                if upper.starts_with("SB_GND")
-                    || upper.starts_with("SB_VCC")
-                    || upper.starts_with("SB_IO")
-                    || upper.starts_with("SB_GB")
-                    || upper.starts_with("TIE")
-                {
-                    return true;
-                }
+                return true;
             }
             false
         })

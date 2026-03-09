@@ -40,6 +40,11 @@ pub fn optimize_luts(netlist: &mut GateNetlist) -> LutOptStats {
     stats += eliminate_buffer_luts(netlist);
     stats += project_constant_inputs(netlist);
     stats += combine_lut_pairs(netlist);
+    // Rebuild connectivity before DCE so fanout data is current.
+    // Without this, remove_dead_cells() sees stale fanout=0 on nets
+    // that are actually consumed (e.g. SB_IO output nets used by LUTs)
+    // and incorrectly removes those cells.
+    netlist.rebuild_net_connectivity();
     netlist.remove_dead_cells();
     netlist.rebuild_net_connectivity();
     stats

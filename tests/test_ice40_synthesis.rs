@@ -572,6 +572,7 @@ impl TestMux {
     // Test sel=0: should output a
     tb.set("sel", 0u8).set("a", 0x55u8).set("b", 0xAAu8);
     tb.clock(1).await;
+
     let result = tb.get_u32("y").await;
     assert_eq!(
         result, 0x55,
