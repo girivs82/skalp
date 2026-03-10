@@ -354,14 +354,14 @@ impl Refactor {
             if tt == var_tt {
                 return Some(FactoredForm {
                     gates: vec![],
-                    result_lit: (i as u8) * 2,
+                    result_lit: (i as u16) * 2,
                     is_constant: None,
                 });
             }
             if tt == (var_tt ^ mask) {
                 return Some(FactoredForm {
                     gates: vec![],
-                    result_lit: (i as u8) * 2 + 1,
+                    result_lit: (i as u16) * 2 + 1,
                     is_constant: None,
                 });
             }
@@ -414,9 +414,9 @@ impl Refactor {
                 let sub_result = remap_result_lit(sub.result_lit, num_inputs, gates.len());
 
                 // AND with variable
-                let var_lit = (best_var as u8) * 2;
+                let var_lit = (best_var as u16) * 2;
                 gates.push((var_lit, sub_result));
-                let result = ((num_inputs + gates.len() - 1) as u8) * 2;
+                let result = ((num_inputs + gates.len() - 1) as u16) * 2;
 
                 return Some(FactoredForm {
                     gates,
@@ -433,9 +433,9 @@ impl Refactor {
                 let sub_result = remap_result_lit(sub.result_lit, num_inputs, gates.len());
 
                 // AND with negated variable
-                let var_lit = (best_var as u8) * 2 + 1;
+                let var_lit = (best_var as u16) * 2 + 1;
                 gates.push((var_lit, sub_result));
-                let result = ((num_inputs + gates.len() - 1) as u8) * 2;
+                let result = ((num_inputs + gates.len() - 1) as u16) * 2;
 
                 return Some(FactoredForm {
                     gates,
@@ -453,9 +453,9 @@ impl Refactor {
                 let sub_result = remap_result_lit(sub.result_lit, num_inputs, gates.len());
 
                 // x AND !f_x
-                let var_lit = (best_var as u8) * 2;
+                let var_lit = (best_var as u16) * 2;
                 gates.push((var_lit, sub_result));
-                let and_result = ((num_inputs + gates.len() - 1) as u8) * 2;
+                let and_result = ((num_inputs + gates.len() - 1) as u16) * 2;
 
                 // Result is NOT of that
                 return Some(FactoredForm {
@@ -474,9 +474,9 @@ impl Refactor {
                 let sub_result = remap_result_lit(sub.result_lit, num_inputs, gates.len());
 
                 // x' AND !f_x'
-                let var_lit = (best_var as u8) * 2 + 1;
+                let var_lit = (best_var as u16) * 2 + 1;
                 gates.push((var_lit, sub_result));
-                let and_result = ((num_inputs + gates.len() - 1) as u8) * 2;
+                let and_result = ((num_inputs + gates.len() - 1) as u16) * 2;
 
                 return Some(FactoredForm {
                     gates,
@@ -528,8 +528,8 @@ impl Refactor {
         }
 
         // Build product terms and OR them
-        let mut gates: Vec<(u8, u8)> = Vec::new();
-        let mut product_lits: Vec<u8> = Vec::new();
+        let mut gates: Vec<(u16, u16)> = Vec::new();
+        let mut product_lits: Vec<u16> = Vec::new();
 
         for &minterm in &minterms {
             let product_lit = self.build_product_term(&mut gates, minterm, num_inputs);
@@ -560,16 +560,16 @@ impl Refactor {
         num_inputs: usize,
         complement: bool,
     ) -> Option<FactoredForm> {
-        let mut gates: Vec<(u8, u8)> = Vec::new();
-        let mut current_lit: Option<u8> = None;
+        let mut gates: Vec<(u16, u16)> = Vec::new();
+        let mut current_lit: Option<u16> = None;
 
         for i in 0..num_inputs {
             let bit = (minterm >> i) & 1;
-            let var_lit = (i as u8) * 2 + if bit == 0 { 1 } else { 0 };
+            let var_lit = (i as u16) * 2 + if bit == 0 { 1 } else { 0 };
 
             if let Some(prev) = current_lit {
                 gates.push((prev, var_lit));
-                current_lit = Some(((num_inputs + gates.len() - 1) as u8) * 2);
+                current_lit = Some(((num_inputs + gates.len() - 1) as u16) * 2);
             } else {
                 current_lit = Some(var_lit);
             }
@@ -588,16 +588,16 @@ impl Refactor {
     /// Build a product term (AND of literals) for a minterm
     fn build_product_term(
         &self,
-        gates: &mut Vec<(u8, u8)>,
+        gates: &mut Vec<(u16, u16)>,
         minterm: usize,
         num_inputs: usize,
-    ) -> u8 {
-        let mut lits: Vec<u8> = Vec::new();
+    ) -> u16 {
+        let mut lits: Vec<u16> = Vec::new();
 
         for i in 0..num_inputs {
             let bit = (minterm >> i) & 1;
             // If bit is 1, use variable; if 0, use complement
-            let lit = (i as u8) * 2 + if bit == 0 { 1 } else { 0 };
+            let lit = (i as u16) * 2 + if bit == 0 { 1 } else { 0 };
             lits.push(lit);
         }
 
@@ -605,7 +605,7 @@ impl Refactor {
     }
 
     /// AND multiple literals together
-    fn and_lits(&self, gates: &mut Vec<(u8, u8)>, lits: &[u8], num_inputs: usize) -> u8 {
+    fn and_lits(&self, gates: &mut Vec<(u16, u16)>, lits: &[u16], num_inputs: usize) -> u16 {
         if lits.is_empty() {
             return 1; // Constant 1
         }
@@ -624,7 +624,7 @@ impl Refactor {
                     let left = current_lits[i];
                     let right = current_lits[i + 1];
                     gates.push((left, right));
-                    let new_lit = ((num_inputs + gates.len() - 1) as u8) * 2;
+                    let new_lit = ((num_inputs + gates.len() - 1) as u16) * 2;
                     next_lits.push(new_lit);
                 } else {
                     next_lits.push(current_lits[i]);
@@ -638,7 +638,7 @@ impl Refactor {
     }
 
     /// OR multiple literals together: a + b = !(!a * !b)
-    fn or_products(&self, gates: &mut Vec<(u8, u8)>, lits: &[u8], num_inputs: usize) -> u8 {
+    fn or_products(&self, gates: &mut Vec<(u16, u16)>, lits: &[u16], num_inputs: usize) -> u16 {
         if lits.is_empty() {
             return 0; // Constant 0
         }
@@ -647,7 +647,7 @@ impl Refactor {
         }
 
         // OR is implemented as NAND of complements
-        let neg_lits: Vec<u8> = lits.iter().map(|&l| l ^ 1).collect();
+        let neg_lits: Vec<u16> = lits.iter().map(|&l| l ^ 1).collect();
         let and_result = self.and_lits(gates, &neg_lits, num_inputs);
         and_result ^ 1 // Invert the result
     }
@@ -821,9 +821,9 @@ struct ConeInfo {
 #[derive(Debug, Clone)]
 struct FactoredForm {
     /// Gates as (left_lit, right_lit) pairs
-    gates: Vec<(u8, u8)>,
+    gates: Vec<(u16, u16)>,
     /// Result literal
-    result_lit: u8,
+    result_lit: u16,
     /// If Some(true), result is constant 1; if Some(false), constant 0
     is_constant: Option<bool>,
 }
@@ -895,7 +895,7 @@ fn compute_cofactors(tt: u64, var: usize, num_inputs: usize) -> (u64, u64) {
 }
 
 /// Remap a result literal after adding gates
-fn remap_result_lit(lit: u8, num_inputs: usize, gates_added: usize) -> u8 {
+fn remap_result_lit(lit: u16, num_inputs: usize, gates_added: usize) -> u16 {
     let idx = (lit / 2) as usize;
     let inv = lit & 1;
 
@@ -903,7 +903,7 @@ fn remap_result_lit(lit: u8, num_inputs: usize, gates_added: usize) -> u8 {
         lit // Input literal, no change
     } else {
         // Gate reference - need to remap
-        ((idx + gates_added) as u8) * 2 + inv
+        ((idx + gates_added) as u16) * 2 + inv
     }
 }
 
