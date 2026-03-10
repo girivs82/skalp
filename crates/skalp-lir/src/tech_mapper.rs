@@ -1037,6 +1037,7 @@ impl<'a> TechMapper<'a> {
     ) {
         let carry_info = LibraryCellInfo::from_library_cell(carry_cell);
         let xor_info = self.get_cell_info(&CellFunction::Xor2);
+        let lut4_info = self.get_cell_info(&CellFunction::Lut4);
         // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
         let tie_low_fpga = self.get_tie_low();
 
@@ -1054,39 +1055,21 @@ impl<'a> TechMapper<'a> {
             self.stats.nets_created += 1;
 
             if let Some(cin) = carry_net {
-                // Full adder using XOR + Carry
-                // First XOR: a XOR b
-                let ab_xor = self.alloc_net_id();
-                self.netlist
-                    .add_net(GateNet::new(ab_xor, format!("{}.ab_xor{}", path, bit)));
-                self.stats.nets_created += 1;
-
-                let mut xor1_cell = Cell::new_comb(
+                // Full adder sum: single LUT4 computes a XOR b XOR cin
+                // INIT = 0x9696 (3-input XOR truth table)
+                let mut sum_cell = Cell::new_comb(
                     CellId(0),
-                    xor_info.name.clone(),
+                    lut4_info.name.clone(),
                     self.library.name.clone(),
-                    xor_info.fit,
-                    format!("{}.xor1_{}", path, bit),
-                    vec![a, b],
-                    vec![ab_xor],
-                );
-                xor1_cell.source_op = Some("XOR".to_string());
-                xor_info.apply_to_cell(&mut xor1_cell);
-                self.add_cell(xor1_cell);
-
-                // Second XOR: (a XOR b) XOR cin = sum
-                let mut xor2_cell = Cell::new_comb(
-                    CellId(0),
-                    xor_info.name.clone(),
-                    self.library.name.clone(),
-                    xor_info.fit,
-                    format!("{}.xor2_{}", path, bit),
-                    vec![ab_xor, cin],
+                    lut4_info.fit,
+                    format!("{}.sum_{}", path, bit),
+                    vec![a, b, cin],
                     vec![sum],
                 );
-                xor2_cell.source_op = Some("XOR".to_string());
-                xor_info.apply_to_cell(&mut xor2_cell);
-                self.add_cell(xor2_cell);
+                sum_cell.lut_init = Some(0x9696);
+                sum_cell.source_op = Some("XOR3".to_string());
+                lut4_info.apply_to_cell(&mut sum_cell);
+                self.add_cell(sum_cell);
 
                 // Carry cell: cout = (a & b) | ((a | b) & cin)
                 let mut carry_cell = Cell::new_comb(

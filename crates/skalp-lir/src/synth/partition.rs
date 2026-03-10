@@ -6,6 +6,7 @@
 //! the netlist into combinational cones bounded by physical cells.
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use crate::tech_library::CellFunction;
 use std::collections::{HashMap, HashSet};
 
 /// Result of partitioning a netlist for AIG optimization.
@@ -43,6 +44,16 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         .filter(|c| {
             // Cells with a known incompatible function
             if c.function.as_ref().is_some_and(|f| !f.is_aig_compatible()) {
+                // Exception: TIE cells produce constants that the AIG builder
+                // handles natively (true_lit / false_lit). Keeping them in the
+                // optimizable partition lets the optimizer fold away logic
+                // driven by constants (e.g., XOR(a, 0) = a in counters).
+                if matches!(
+                    c.function.as_ref(),
+                    Some(CellFunction::TieHigh | CellFunction::TieLow)
+                ) {
+                    return false;
+                }
                 return true;
             }
             // Cells with no function can't be converted to AIG nodes.

@@ -549,6 +549,7 @@ impl SynthEngine {
             SynthPreset::Quick => vec!["strash".to_string(), "dce".to_string()],
             // Balanced: Use Resyn2-strength sequence for better QoR
             SynthPreset::Balanced => vec![
+                "strash".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
                 "refactor".to_string(),
@@ -591,8 +592,9 @@ impl SynthEngine {
                 "resub".to_string(),
                 "dce".to_string(),
             ],
-            // ABC's resyn2: balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
+            // ABC's resyn2: strash; balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
             SynthPreset::Resyn2 => vec![
+                "strash".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
                 "refactor".to_string(),
@@ -608,6 +610,7 @@ impl SynthEngine {
             // ABC's compress2-style: aggressive area optimization with resubstitution
             // Key: run refactor AFTER balance to find better factorizations
             SynthPreset::Compress2 => vec![
+                "strash".to_string(),
                 "balance".to_string(),
                 "resub".to_string(),
                 "rewrite".to_string(),
