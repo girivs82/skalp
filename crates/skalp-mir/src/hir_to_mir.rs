@@ -18230,6 +18230,54 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 hir::HirExpression::Port(port_id) => {
+                    // Handle reset.active / reset.inactive field access
+                    if field_name == "active" || field_name == "inactive" {
+                        if let Some(hir) = self.hir {
+                            if let Some(entity_id) = self.current_entity_id {
+                                if let Some(entity) =
+                                    hir.entities.iter().find(|e| e.id == entity_id)
+                                {
+                                    if let Some(port) =
+                                        entity.ports.iter().find(|p| p.id == *port_id)
+                                    {
+                                        if let hir::HirType::Reset { polarity, .. } =
+                                            &port.port_type
+                                        {
+                                            if let Some(&port_id_mir) =
+                                                self.port_map.get(port_id)
+                                            {
+                                                let port_ref =
+                                                    Expression::with_unknown_type(
+                                                        ExpressionKind::Ref(LValue::Port(
+                                                            port_id_mir,
+                                                        )),
+                                                    );
+                                                // active.high + .active => direct
+                                                // active.high + .inactive => negate
+                                                // active.low + .active => negate
+                                                // active.low + .inactive => direct
+                                                let needs_negate = matches!(
+                                                    (polarity, field_name),
+                                                    (hir::HirResetPolarity::ActiveHigh, "inactive")
+                                                        | (hir::HirResetPolarity::ActiveLow, "active")
+                                                );
+                                                if needs_negate {
+                                                    return Some(Expression::unary(
+                                                        UnaryOp::Not,
+                                                        port_ref,
+                                                        Type::Bool,
+                                                    ));
+                                                } else {
+                                                    return Some(port_ref);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
                     let belongs = self.port_belongs_to_current_entity(port_id);
                     if belongs {

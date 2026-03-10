@@ -8697,7 +8697,15 @@ impl HirBuilderContext {
                         .children_with_tokens()
                         .filter_map(|elem| elem.into_token())
                         .find(|t| {
-                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                            matches!(
+                                t.kind(),
+                                SyntaxKind::Ident
+                                    | SyntaxKind::IntLiteral
+                                    | SyntaxKind::ActiveKw
+                                    | SyntaxKind::InactiveKw
+                                    | SyntaxKind::RiseKw
+                                    | SyntaxKind::FallKw
+                            )
                         })
                         .map(|t| t.text().to_string());
 
@@ -8740,7 +8748,17 @@ impl HirBuilderContext {
             let field_name = node
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
-                .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+                .find(|t| {
+                    matches!(
+                        t.kind(),
+                        SyntaxKind::Ident
+                            | SyntaxKind::IntLiteral
+                            | SyntaxKind::ActiveKw
+                            | SyntaxKind::InactiveKw
+                            | SyntaxKind::RiseKw
+                            | SyntaxKind::FallKw
+                    )
+                })
                 .map(|t| t.text().to_string())?;
 
             // Look for a preceding sibling that could be the base
@@ -8805,7 +8823,17 @@ impl HirBuilderContext {
         let field_name = node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+            .find(|t| {
+                matches!(
+                    t.kind(),
+                    SyntaxKind::Ident
+                        | SyntaxKind::IntLiteral
+                        | SyntaxKind::ActiveKw
+                        | SyntaxKind::InactiveKw
+                        | SyntaxKind::RiseKw
+                        | SyntaxKind::FallKw
+                )
+            })
             .map(|t| {
                 // For tuple indices, convert numeric literal to string (e.g., "0", "1", "2")
                 // For struct fields, just use the identifier as-is

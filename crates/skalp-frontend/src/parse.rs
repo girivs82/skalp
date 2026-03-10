@@ -5001,7 +5001,9 @@ impl<'a> ParseState<'a> {
                                     self.start_node(SyntaxKind::FieldExpr);
                                     self.bump(); // consume dot
 
-                                    if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::IntLiteral)
+                                    if self.at(SyntaxKind::Ident)
+                                        || self.at(SyntaxKind::IntLiteral)
+                                        || self.at_field_keyword()
                                     {
                                         self.bump(); // consume field name or tuple index
                                     } else {
@@ -5385,8 +5387,12 @@ impl<'a> ParseState<'a> {
                     self.start_node(SyntaxKind::FieldExpr);
                     self.bump(); // consume dot
 
-                    // Accept either identifier (struct field) or numeric literal (tuple field: .0, .1, .2)
-                    if self.at(SyntaxKind::Ident) || self.at(SyntaxKind::IntLiteral) {
+                    // Accept identifier, numeric literal (tuple field), or
+                    // clock/reset keywords (rise, fall, active, inactive)
+                    if self.at(SyntaxKind::Ident)
+                        || self.at(SyntaxKind::IntLiteral)
+                        || self.at_field_keyword()
+                    {
                         self.bump(); // consume field name or index
                     } else {
                         self.error("expected field name or tuple index after '.'");
@@ -5703,6 +5709,20 @@ impl<'a> ParseState<'a> {
     /// Check if current token is of given kind
     fn at(&self, kind: SyntaxKind) -> bool {
         self.current_kind() == Some(kind)
+    }
+
+    /// Check if current token is a keyword that can appear as a field name after '.'
+    /// (e.g., clock.rise, clock.fall, reset.active, reset.inactive)
+    fn at_field_keyword(&self) -> bool {
+        matches!(
+            self.current_kind(),
+            Some(
+                SyntaxKind::RiseKw
+                    | SyntaxKind::FallKw
+                    | SyntaxKind::ActiveKw
+                    | SyntaxKind::InactiveKw
+            )
+        )
     }
 
     /// Peek ahead by offset tokens (skipping trivia) and check if it's the given kind
