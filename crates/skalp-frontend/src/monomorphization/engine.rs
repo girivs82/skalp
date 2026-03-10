@@ -700,10 +700,12 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .iter()
                     .map(|arg| self.substitute_expr(arg, &instantiation.const_args))
                     .collect();
-                // BUG FIX: Remap port IDs in connection expressions
-                // Instance connections like `a: a` where the right-side `a` is a Port expression
+                // BUG FIX: Substitute const params AND remap port IDs in connection expressions
+                // Instance connections like `round_num: START_ROUND` need const substitution,
+                // and connections like `a: a` where the right-side `a` is a Port expression
                 // need to be remapped to the specialized entity's port IDs
                 for connection in &mut new_instance.connections {
+                    connection.expr = self.substitute_expr(&connection.expr, &instantiation.const_args);
                     connection.expr = self.remap_expr_ports(&connection.expr, port_id_map);
                 }
                 // Also remap port IDs in named generic args (they may reference ports)
