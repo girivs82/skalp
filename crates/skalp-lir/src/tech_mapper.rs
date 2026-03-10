@@ -3684,16 +3684,26 @@ impl<'a> TechMapper<'a> {
                 }
             }
         } else {
-            // Sync reset: MUX selects between reset_value and D-input, feeds regular DFF
-            let use_mux_for_reset = reset.is_some();
-            let dff_func = CellFunction::Dff;
+            // Sync reset: use DffR (reset-to-0) when possible, otherwise MUX + Dff
+            let has_reset = reset.is_some();
+
+            // Check if all reset bits are 0 — can use DffR directly (no MUX needed)
+            let all_reset_zero = reset_val == 0;
+            let use_dffr = has_reset && all_reset_zero;
+
+            let dff_func = if use_dffr {
+                CellFunction::DffR
+            } else {
+                CellFunction::Dff
+            };
             let dff_info = self.get_cell_info(&dff_func);
 
             for bit in 0..width as usize {
                 let d_orig = inputs[0].get(bit).copied().unwrap_or(tie_low);
                 let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
-                let d = if use_mux_for_reset {
+                let d = if has_reset && !use_dffr {
+                    // Non-zero reset value: need MUX to select between reset_value and D
                     let reset_bit_val = (reset_val >> bit) & 1 != 0;
 
                     let reset_bit_net = self
@@ -3735,7 +3745,7 @@ impl<'a> TechMapper<'a> {
                 };
 
                 let dff_inputs = vec![d];
-                let dff_reset = if use_mux_for_reset { None } else { reset };
+                let dff_reset = if use_dffr { reset } else { None };
 
                 let mut cell = Cell::new_seq(
                     CellId(0),
