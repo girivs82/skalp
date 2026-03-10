@@ -93,6 +93,26 @@ impl TypeFlattener {
         Self::is_scalar_type(element_type)
     }
 
+    /// Get the bit width of a scalar data type, or None for non-scalar types.
+    pub fn get_scalar_width(data_type: &DataType) -> Option<u32> {
+        match data_type {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => {
+                Some(*w as u32)
+            }
+            DataType::Bool | DataType::Clock { .. } | DataType::Reset { .. } | DataType::Event => {
+                Some(1)
+            }
+            DataType::Float16 => Some(16),
+            DataType::Float32 => Some(32),
+            DataType::Float64 => Some(64),
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. } => Some(*default as u32),
+            _ => None,
+        }
+    }
+
     /// Flatten a port with composite type into multiple scalar ports
     ///
     /// # Arguments

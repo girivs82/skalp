@@ -25,6 +25,7 @@
 //! ```
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use crate::tech_library::CellFunction;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
@@ -873,10 +874,12 @@ impl GateOptimizer {
 
             let cell_type = cell.cell_type.to_uppercase();
 
-            if matches!(
+            let is_buffer = matches!(
                 cell_type.as_str(),
                 "BUF" | "BUF_X1" | "BUFF" | "CLKBUF" | "BUFFER"
-            ) {
+            ) || cell.function == Some(CellFunction::Buf);
+
+            if is_buffer {
                 if let (Some(&input), Some(&output)) = (cell.inputs.first(), cell.outputs.first()) {
                     // IMPORTANT: Do NOT remove buffers that drive output ports!
                     // Output port net IDs are fixed (part of module interface).

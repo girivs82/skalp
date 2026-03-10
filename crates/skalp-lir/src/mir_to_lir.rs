@@ -158,6 +158,9 @@ pub struct MirToLirTransform {
     memory_signals: IndexMap<SignalId, MemoryInfo>,
     /// Whether the target has BRAM (from tech library)
     target_has_bram: bool,
+    /// Expression memoization cache for CSE: (expression, expected_width) -> LirSignalId
+    /// Shared conditions across registers (e.g., FSM state comparisons) are computed once
+    expression_cache: HashMap<(Expression, u32), LirSignalId>,
 }
 
 impl MirToLirTransform {
@@ -185,6 +188,7 @@ impl MirToLirTransform {
             async_reset: false,
             memory_signals: IndexMap::new(),
             target_has_bram: false,
+            expression_cache: HashMap::new(),
         }
     }
 
@@ -210,8 +214,11 @@ impl MirToLirTransform {
                     return false;
                 }
                 let total_bits = element_width as usize * config.depth as usize;
-                // Heuristic: use BRAM when memory > 256 bits and depth > 16
-                total_bits > 256 && config.depth > 16
+                // Heuristic: use BRAM for memories >= 128 bits with depth >= 4,
+                // or any memory > 256 bits regardless of depth.
+                // This covers common register files (e.g., 8×32 = 256 bits, depth 8)
+                // while avoiding BRAM for tiny arrays (e.g., 2×8 = 16 bits).
+                (total_bits >= 128 && config.depth >= 4) || total_bits > 256
             }
         }
     }
@@ -626,7 +633,11 @@ impl MirToLirTransform {
 
         // Check for memory inference
         if let Some(ref mem_config) = signal.memory_config {
-            let element_width = width; // signal type IS the element type
+            // For Array types, element_width is the inner type width, not total
+            let element_width = match &signal.signal_type {
+                DataType::Array(inner, _) => Self::get_type_width(inner),
+                _ => width, // Non-array: signal type IS the element type
+            };
             if Self::should_use_bram(mem_config, element_width, self.target_has_bram) {
                 self.create_memory_signal(signal, mem_config, element_width);
                 return;
@@ -927,6 +938,15 @@ impl MirToLirTransform {
                         }
                     }
 
+                    // Skip full-signal assignments to memory signals (e.g., `regs = 0` for reset).
+                    // BRAM contents are initialized via cell parameters, not runtime reset registers.
+                    // Creating a Reg driving rdata_signal would conflict with the MemBlock output.
+                    if let LValue::Signal(sig_id) = &assign.lhs {
+                        if self.memory_signals.contains_key(sig_id) {
+                            return;
+                        }
+                    }
+
                     // Non-blocking assignment -> create register
                     let target_signal = self.get_lvalue_signal(&assign.lhs);
                     let target_width = self.get_lvalue_width(&assign.lhs);
@@ -1001,6 +1021,123 @@ impl MirToLirTransform {
                 let mut handled_targets: Vec<LValue> = Vec::new();
 
                 for target in &all_targets {
+                    // Skip full-signal assignments to memory signals (e.g., `regs = 0` for reset).
+                    // BRAM contents are zero-initialized; runtime reset is not needed.
+                    if let LValue::Signal(sig_id) = target {
+                        if self.memory_signals.contains_key(sig_id) {
+                            continue;
+                        }
+                    }
+
+                    // Handle memory BitSelect writes with proper conditional write enable.
+                    // Build BRAM write enable from the enclosing if-condition.
+                    if let LValue::BitSelect { base, index } = target {
+                        if let Some(mem_signal_id) = self.get_memory_signal_id(base) {
+                            // Find the write data expression from whichever branch has it
+                            let write_rhs = Self::find_assignment_expr(&all_then_assigns, target)
+                                .or_else(|| Self::find_assignment_expr(&all_else_assigns, target));
+
+                            if let Some(rhs_expr) = write_rhs {
+                                let mem_info = self.memory_signals[&mem_signal_id].clone();
+
+                                // Set the MemBlock clock
+                                if let Some(clk) = clock_signal {
+                                    self.lir.set_node_clock(mem_info.node_id, clk);
+                                }
+
+                                // Wire write address combinationally
+                                let addr_signal = self.transform_expression(index, mem_info.addr_width);
+                                let path_waddr = self.unique_node_path("mem_waddr");
+                                self.lir.add_node(
+                                    LirOp::Buf { width: mem_info.addr_width },
+                                    vec![addr_signal],
+                                    mem_info.waddr_signal,
+                                    path_waddr,
+                                );
+
+                                // Wire write data combinationally
+                                let data_signal = self.transform_expression(rhs_expr, mem_info.element_width);
+                                let path_wdata = self.unique_node_path("mem_wdata");
+                                self.lir.add_node(
+                                    LirOp::Buf { width: mem_info.element_width },
+                                    vec![data_signal],
+                                    mem_info.wdata_signal,
+                                    path_wdata,
+                                );
+
+                                // Build write enable from the enclosing conditions:
+                                // The memory write occurs only when NOT in reset AND the
+                                // inner condition is true. Build: !rst & condition
+                                let cond_signal = self.transform_expression(&if_stmt.condition, 1);
+
+                                // Determine the inner condition (e.g., `we == 1`)
+                                // If the write is in the else branch (condition is reset),
+                                // we need: !reset & inner_condition
+                                if is_reset_condition {
+                                    // Write is in else branch — find the inner if condition
+                                    let inner_cond = if let Some(ref else_block) = if_stmt.else_block {
+                                        Self::find_condition_for_target(else_block, target)
+                                    } else {
+                                        None
+                                    };
+
+                                    let we_signal_val = if let Some(inner) = inner_cond {
+                                        // we = !rst & inner_condition
+                                        let not_rst = self.alloc_temp_signal(1);
+                                        let path = self.unique_node_path("not_rst");
+                                        self.lir.add_node(
+                                            LirOp::Not { width: 1 },
+                                            vec![cond_signal],
+                                            not_rst,
+                                            path,
+                                        );
+                                        let inner_sig = self.transform_expression(&inner, 1);
+                                        let we_and = self.alloc_temp_signal(1);
+                                        let path = self.unique_node_path("mem_we_and");
+                                        self.lir.add_node(
+                                            LirOp::And { width: 1 },
+                                            vec![not_rst, inner_sig],
+                                            we_and,
+                                            path,
+                                        );
+                                        we_and
+                                    } else {
+                                        // No inner condition: we = !rst
+                                        let not_rst = self.alloc_temp_signal(1);
+                                        let path = self.unique_node_path("not_rst");
+                                        self.lir.add_node(
+                                            LirOp::Not { width: 1 },
+                                            vec![cond_signal],
+                                            not_rst,
+                                            path,
+                                        );
+                                        not_rst
+                                    };
+
+                                    let path_we = self.unique_node_path("mem_we");
+                                    self.lir.add_node(
+                                        LirOp::Buf { width: 1 },
+                                        vec![we_signal_val],
+                                        mem_info.we_signal,
+                                        path_we,
+                                    );
+                                } else {
+                                    // Write is in then branch: we = condition
+                                    let path_we = self.unique_node_path("mem_we");
+                                    self.lir.add_node(
+                                        LirOp::Buf { width: 1 },
+                                        vec![cond_signal],
+                                        mem_info.we_signal,
+                                        path_we,
+                                    );
+                                }
+
+                                handled_targets.push(target.clone());
+                            }
+                            continue;
+                        }
+                    }
+
                     let target_signal = self.get_lvalue_signal(target);
                     let target_width = self.get_lvalue_width(target);
                     // Get then and else expressions (direct assignments only)
@@ -2386,6 +2523,34 @@ impl MirToLirTransform {
             .map(|(_, expr)| expr)
     }
 
+    /// Find the if-condition that guards a specific assignment target in a block.
+    /// Searches through nested if-statements for the target.
+    fn find_condition_for_target(block: &Block, target: &LValue) -> Option<Expression> {
+        for stmt in &block.statements {
+            if let Statement::If(if_stmt) = stmt {
+                let then_assigns = Self::collect_all_assignments_recursive(&if_stmt.then_block);
+                if then_assigns.iter().any(|(lv, _)| lv == target) {
+                    return Some(if_stmt.condition.clone());
+                }
+                if let Some(ref else_block) = if_stmt.else_block {
+                    let else_assigns = Self::collect_all_assignments_recursive(else_block);
+                    if else_assigns.iter().any(|(lv, _)| lv == target) {
+                        // Target is in else branch — negate condition
+                        return Some(Expression {
+                            kind: ExpressionKind::Unary {
+                                op: UnaryOp::Not,
+                                operand: Box::new(if_stmt.condition.clone()),
+                            },
+                            ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// BUG #255 FIX: Synthesize a case arm block for a specific target, handling conditionals
     /// Returns the signal representing the value of target after executing the block
     fn synthesize_case_arm_for_target(
@@ -2554,8 +2719,29 @@ impl MirToLirTransform {
         }
     }
 
-    /// Transform an expression and return its output signal ID
+    /// Transform an expression and return its output signal ID.
+    /// Uses memoization to avoid duplicating logic for structurally identical expressions
+    /// (CSE — common subexpression elimination).
     fn transform_expression(&mut self, expr: &Expression, expected_width: u32) -> LirSignalId {
+        // CSE: check if we've already transformed this exact expression at this width
+        let cache_key = (expr.clone(), expected_width);
+        if let Some(&cached) = self.expression_cache.get(&cache_key) {
+            return cached;
+        }
+
+        let result = self.transform_expression_inner(expr, expected_width);
+
+        // Cache the result for future CSE lookups
+        self.expression_cache.insert(cache_key, result);
+        result
+    }
+
+    /// Inner implementation of expression transformation (called via memoizing wrapper)
+    fn transform_expression_inner(
+        &mut self,
+        expr: &Expression,
+        expected_width: u32,
+    ) -> LirSignalId {
         match &expr.kind {
             ExpressionKind::Literal(value) => self.create_constant(value, expected_width),
             ExpressionKind::Ref(lvalue) => self.get_lvalue_signal(lvalue),
@@ -4220,35 +4406,36 @@ impl MirToLirTransform {
     }
 
     /// Handle a memory read operation: wire address to raddr, return rdata.
+    ///
+    /// Uses combinational (Buf) connection for the address because the BRAM
+    /// primitive (e.g., SB_RAM256x16) has internal registers on all ports.
+    /// Adding an external Reg would double-register the address.
     fn handle_memory_read(&mut self, mem_signal_id: SignalId, index: &Expression) -> LirSignalId {
         let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index expression to get the address signal
         let addr_signal = self.transform_expression(index, mem_info.addr_width);
 
-        // Wire address to the memory's raddr input
-        // Create a buffer/assignment node: raddr <= addr
+        // Wire address combinationally to the memory's raddr input
         let path = self.unique_node_path("mem_raddr");
         self.lir.add_node(
-            LirOp::Reg {
+            LirOp::Buf {
                 width: mem_info.addr_width,
-                has_enable: false,
-                has_reset: false,
-                async_reset: false,
-                reset_value: None,
             },
             vec![addr_signal],
             mem_info.raddr_signal,
             path,
         );
 
-        // Return the rdata signal (read data output)
+        // Return the rdata signal (read data output from BRAM)
         mem_info.rdata_signal
     }
 
     /// Handle a memory write operation in a sequential context.
     ///
     /// Wires the index to waddr, the data to wdata, and asserts we.
+    /// Uses combinational (Buf) connections because the BRAM primitive
+    /// (e.g., SB_RAM256x16) has internal registers on all ports.
     fn handle_memory_write(
         &mut self,
         mem_signal_id: SignalId,
@@ -4264,65 +4451,39 @@ impl MirToLirTransform {
             self.lir.set_node_clock(mem_info.node_id, clk);
         }
 
-        // Transform the index → write address
+        // Transform the index → write address (combinational drive)
         let addr_signal = self.transform_expression(index, mem_info.addr_width);
         let path_waddr = self.unique_node_path("mem_waddr");
-        if let Some(clk) = clock_signal {
-            self.lir.add_seq_node(
-                LirOp::Reg {
-                    width: mem_info.addr_width,
-                    has_enable: false,
-                    has_reset: false,
-                    async_reset: false,
-                    reset_value: None,
-                },
-                vec![addr_signal],
-                mem_info.waddr_signal,
-                path_waddr,
-                clk,
-                None,
-            );
-        }
+        self.lir.add_node(
+            LirOp::Buf {
+                width: mem_info.addr_width,
+            },
+            vec![addr_signal],
+            mem_info.waddr_signal,
+            path_waddr,
+        );
 
-        // Transform the RHS → write data
+        // Transform the RHS → write data (combinational drive)
         let data_signal = self.transform_expression(rhs, mem_info.element_width);
         let path_wdata = self.unique_node_path("mem_wdata");
-        if let Some(clk) = clock_signal {
-            self.lir.add_seq_node(
-                LirOp::Reg {
-                    width: mem_info.element_width,
-                    has_enable: false,
-                    has_reset: false,
-                    async_reset: false,
-                    reset_value: None,
-                },
-                vec![data_signal],
-                mem_info.wdata_signal,
-                path_wdata,
-                clk,
-                None,
-            );
-        }
+        self.lir.add_node(
+            LirOp::Buf {
+                width: mem_info.element_width,
+            },
+            vec![data_signal],
+            mem_info.wdata_signal,
+            path_wdata,
+        );
 
-        // Assert write enable
+        // Assert write enable (combinational drive)
         let we_const = self.create_constant_value(1, 1);
         let path_we = self.unique_node_path("mem_we");
-        if let Some(clk) = clock_signal {
-            self.lir.add_seq_node(
-                LirOp::Reg {
-                    width: 1,
-                    has_enable: false,
-                    has_reset: true,
-                    async_reset: false,
-                    reset_value: Some(0),
-                },
-                vec![we_const],
-                mem_info.we_signal,
-                path_we,
-                clk,
-                None,
-            );
-        }
+        self.lir.add_node(
+            LirOp::Buf { width: 1 },
+            vec![we_const],
+            mem_info.we_signal,
+            path_we,
+        );
     }
 
     fn get_lvalue_width(&self, lvalue: &LValue) -> u32 {

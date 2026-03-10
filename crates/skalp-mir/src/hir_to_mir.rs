@@ -611,13 +611,45 @@ impl<'hir> HirToMir<'hir> {
                     .and_then(|expr| self.convert_literal_expr(expr));
                 let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
+                // Auto-detect memory-eligible arrays for BRAM inference.
+                // If the signal doesn't already have #[memory], check if it's a
+                // scalar array large enough for BRAM (same heuristic as should_use_bram).
+                let auto_memory_config = if hir_signal.memory_config.is_none() {
+                    if let DataType::Array(ref element_type, size) = signal_type {
+                        let elem_width = TypeFlattener::get_scalar_width(element_type);
+                        if let Some(ew) = elem_width {
+                            let total_bits = ew as usize * size;
+                            if (total_bits >= 128 && size >= 4) || total_bits > 256 {
+                                Some(skalp_frontend::hir::MemoryConfig {
+                                    depth: size as u32,
+                                    width: Some(ew),
+                                    ports: 1,
+                                    style: skalp_frontend::hir::MemoryStyle::Auto,
+                                    read_latency: 1,
+                                    read_only: false,
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let is_memory = hir_signal.memory_config.is_some() || auto_memory_config.is_some();
+                let effective_memory_config = hir_signal.memory_config.clone().or(auto_memory_config);
+
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
                     &signal_type,
                     initial,
                     clock_domain,
                     hir_signal.span.clone(),
-                    hir_signal.memory_config.is_some(),
+                    is_memory,
                 );
 
                 if !flattened_fields.is_empty() {
@@ -640,10 +672,9 @@ impl<'hir> HirToMir<'hir> {
                 self.signal_owner.insert(hir_signal.id, entity.id);
 
                 for mut signal in flattened_signals {
-                    // Propagate memory config from HIR signal to MIR signal
-                    // Memory signals should typically not flatten (they're arrays)
-                    if hir_signal.memory_config.is_some() {
-                        signal.memory_config = hir_signal.memory_config.clone();
+                    // Propagate memory config (explicit or auto-inferred) to MIR signal
+                    if let Some(ref mem_config) = effective_memory_config {
+                        signal.memory_config = Some(mem_config.clone());
                     }
                     // Propagate trace config from HIR signal to MIR signal
                     if hir_signal.trace_config.is_some() {
@@ -903,13 +934,43 @@ impl<'hir> HirToMir<'hir> {
                             .and_then(|expr| self.convert_literal_expr(expr));
                         let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
+                        // Auto-detect memory-eligible arrays for BRAM inference
+                        let auto_memory_config = if hir_signal.memory_config.is_none() {
+                            if let DataType::Array(ref element_type, size) = signal_type {
+                                let elem_width = TypeFlattener::get_scalar_width(element_type);
+                                if let Some(ew) = elem_width {
+                                    let total_bits = ew as usize * size;
+                                    if (total_bits >= 128 && size >= 4) || total_bits > 256 {
+                                        Some(skalp_frontend::hir::MemoryConfig {
+                                            depth: size as u32,
+                                            width: Some(ew),
+                                            ports: 1,
+                                            style: skalp_frontend::hir::MemoryStyle::Auto,
+                                            read_latency: 1,
+                                            read_only: false,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let is_memory = hir_signal.memory_config.is_some() || auto_memory_config.is_some();
+                        let effective_memory_config = hir_signal.memory_config.clone().or(auto_memory_config);
+
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
                             &signal_type,
                             initial,
                             clock_domain,
                             hir_signal.span.clone(),
-                            hir_signal.memory_config.is_some(),
+                            is_memory,
                         );
 
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
@@ -938,10 +999,9 @@ impl<'hir> HirToMir<'hir> {
 
                         // Add all flattened signals to the module
                         for mut signal in flattened_signals {
-                            // Propagate memory config from HIR signal to MIR signal
-                            // Memory signals should typically not flatten (they're arrays)
-                            if hir_signal.memory_config.is_some() {
-                                signal.memory_config = hir_signal.memory_config.clone();
+                            // Propagate memory config (explicit or auto-inferred) to MIR signal
+                            if let Some(ref mem_config) = effective_memory_config {
+                                signal.memory_config = Some(mem_config.clone());
                             }
                             // Propagate trace config from HIR signal to MIR signal
                             if hir_signal.trace_config.is_some() {
@@ -4100,20 +4160,19 @@ impl<'hir> HirToMir<'hir> {
             // For rd_data__position__x, we want "position__x"
             let field_suffix = lhs_field.field_path.join(FIELD_SEPARATOR);
 
-            // Build multiplexer by iterating from last index to first
-            // Result: (index == 0) ? mem_0__x : (index == 1) ? mem_1__x : ... : mem_7__x
+            // Build balanced binary MUX tree using address bit selection.
+            // For N elements, uses ceil(log2(N)) address bits:
+            //   level 0: addr[0] selects between pairs (0,1), (2,3), ...
+            //   level 1: addr[1] selects between level-0 results
+            // Produces O(log N) depth instead of O(N) from a linear chain.
             let mut sorted_indices: Vec<_> = array_by_index.keys().collect();
             sorted_indices.sort_by_key(|s| s.parse::<usize>().unwrap_or(0));
 
-            let mut mux_expr: Option<Expression> = None;
-
-            for idx_str in sorted_indices.iter().rev() {
-                let array_index: usize = idx_str.parse().ok()?;
-
-                // Find the field at this index that matches our LHS field suffix
+            // Collect element expressions for each array index
+            let mut element_exprs: Vec<Expression> = Vec::new();
+            for idx_str in &sorted_indices {
                 let fields_at_index = array_by_index.get(*idx_str)?;
                 let matching_array_field = fields_at_index.iter().find(|f| {
-                    // Get the field suffix (everything after array index)
                     let array_field_suffix: Vec<String> =
                         f.field_path.iter().skip(1).cloned().collect();
                     let array_field_suffix_str = array_field_suffix.join(FIELD_SEPARATOR);
@@ -4121,7 +4180,6 @@ impl<'hir> HirToMir<'hir> {
                     // BUG #31 FIX: When LHS field_path is empty ([]), it means we're working with
                     // an already-flattened leaf port (e.g., rd_data_value). In this case, we should
                     // match array elements that also have a single-component suffix after the index.
-                    // Example: LHS=rd_data_value (field_path=[]), array=mem_N_value (field_path=["N","value"])
                     if field_suffix.is_empty() && array_field_suffix.len() == 1 {
                         return true;
                     }
@@ -4129,7 +4187,6 @@ impl<'hir> HirToMir<'hir> {
                     array_field_suffix_str == field_suffix
                 })?;
 
-                // Create reference to this array element's field
                 let array_element_ref = if array_is_signal {
                     Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(
                         matching_array_field.id,
@@ -4139,27 +4196,72 @@ impl<'hir> HirToMir<'hir> {
                         matching_array_field.id,
                     ))))
                 };
-
-                if mux_expr.is_none() {
-                    // First iteration (highest index) - use as default
-                    mux_expr = Some(array_element_ref);
-                } else {
-                    // Subsequent iterations - wrap previous with conditional
-                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
-                        op: BinaryOp::Equal,
-                        left: Box::new(mir_index.clone()),
-                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                            Value::Integer(array_index as i64),
-                        ))),
-                    });
-
-                    mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
-                        cond: Box::new(condition),
-                        then_expr: Box::new(array_element_ref),
-                        else_expr: Box::new(mux_expr.unwrap()),
-                    }));
-                }
+                element_exprs.push(array_element_ref);
             }
+
+            let num_elements = element_exprs.len();
+            let mux_expr = if num_elements == 0 {
+                return None;
+            } else if num_elements == 1 {
+                Some(element_exprs.into_iter().next().unwrap())
+            } else {
+                // Extract LValue from index for bit selection
+                let index_lvalue = match &mir_index.kind {
+                    ExpressionKind::Ref(lv) => Some(lv.clone()),
+                    _ => None,
+                };
+
+                // Pad to next power of 2
+                let padded_size = num_elements.next_power_of_two();
+                let addr_bits = (padded_size as f64).log2() as u32;
+                let mut current_level = element_exprs;
+                while current_level.len() < padded_size {
+                    current_level.push(current_level.last().unwrap().clone());
+                }
+
+                // Build balanced tree level by level
+                for bit in 0..addr_bits {
+                    let mut next_level = Vec::new();
+                    let select = if let Some(ref lv) = index_lvalue {
+                        Expression::with_unknown_type(ExpressionKind::Ref(LValue::BitSelect {
+                            base: Box::new(lv.clone()),
+                            index: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(bit as i64)),
+                            )),
+                        }))
+                    } else {
+                        let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::RightShift,
+                            left: Box::new(mir_index.clone()),
+                            right: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(bit as i64)),
+                            )),
+                        });
+                        Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(shifted),
+                            right: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(1)),
+                            )),
+                        })
+                    };
+
+                    for pair in current_level.chunks(2) {
+                        let lo = pair[0].clone(); // selected when bit == 0
+                        let hi = pair[1].clone(); // selected when bit == 1
+                        next_level.push(Expression::with_unknown_type(
+                            ExpressionKind::Conditional {
+                                cond: Box::new(select.clone()),
+                                then_expr: Box::new(hi),
+                                else_expr: Box::new(lo),
+                            },
+                        ));
+                    }
+                    current_level = next_level;
+                }
+
+                current_level.into_iter().next()
+            };
 
             // Create LHS reference
             let lhs_lval = if lhs_is_signal {
@@ -6405,6 +6507,9 @@ impl<'hir> HirToMir<'hir> {
                             if let Some(expr) = self.try_resolve_flattened_array_index(base, index)
                             {
                                 result_stack.push(Some(expr));
+                            } else if let Some(expr) = self.try_build_dynamic_array_mux_tree(base, index, depth) {
+                                // Dynamic index into flattened array — balanced MUX tree
+                                result_stack.push(Some(expr));
                             } else {
                                 work_stack.push(ExprWork::BuildIndex);
                                 work_stack.push(ExprWork::Convert(index));
@@ -7877,127 +7982,7 @@ impl<'hir> HirToMir<'hir> {
 
                 // BUG #29 FIX: Check if this is a dynamic index into a flattened array
                 // If so, generate a MUX tree instead of BitSelect
-                let mut try_dynamic_array_index = || -> Option<Expression> {
-                    // Check if base is a flattened signal or port
-                    let (base_hir_id, is_signal) = match base.as_ref() {
-                        hir::HirExpression::Signal(id)
-                            if self.flattened_signals.contains_key(id) => {
-                                (id.0, true)
-                            }
-                        hir::HirExpression::Port(id)
-                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
-                            if self.flattened_ports.contains_key(id)
-                                && self.port_belongs_to_current_entity(id)
-                            => {
-                                (id.0, false)
-                            }
-                        _ => return None,
-                    };
-
-                    // Get flattened fields and clone to avoid borrow issues (ownership verified above)
-                    let fields = if is_signal {
-                        self.flattened_signals
-                            .get(&hir::SignalId(base_hir_id))?
-                            .clone()
-                    } else {
-                        self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
-                    };
-
-                    // Group fields by array index (first component of path)
-                    // For simple arrays: ["0"], ["1"], etc.
-                    // For arrays of structs: ["0", "x"], ["0", "y"], ["1", "x"], ["1", "y"], etc.
-                    let mut array_groups: IndexMap<usize, Vec<FlattenedField>> = IndexMap::new();
-
-                    for field in &fields {
-                        if let Some(first) = field.field_path.first() {
-                            // Check if first component is numeric (array index)
-                            if first.chars().all(|c| c.is_ascii_digit()) {
-                                if let Ok(idx) = first.parse::<usize>() {
-                                    array_groups.entry(idx).or_default().push(field.clone());
-                                }
-                            }
-                        }
-                    }
-
-                    // Must have at least one array element
-                    if array_groups.is_empty() {
-                        return None;
-                    }
-
-                    // Convert array_groups to sorted vec
-                    let mut array_elements: Vec<(usize, Vec<FlattenedField>)> =
-                        array_groups.into_iter().collect();
-                    array_elements.sort_by_key(|(idx, _)| *idx);
-
-                    // Convert index expression to MIR (needs mutable borrow)
-                    let mir_index = self.convert_expression(index, depth + 1)?;
-
-                    // NOTE: For arrays of structs, we can't build struct literals in MIR
-                    // because MIR only has scalar expressions. The array read should be
-                    // handled by try_expand_array_index_read_assignment which creates
-                    // multiple assignments (one per struct field).
-                    //
-                    // This code path is only for simple scalar arrays where a single
-                    // MUX tree can select the value.
-
-                    // Build element expressions - only handle simple scalar arrays here
-                    let mut element_exprs: Vec<(usize, Expression)> = Vec::new();
-
-                    for (array_idx, group_fields) in &array_elements {
-                        if group_fields.len() == 1 && group_fields[0].field_path.len() == 1 {
-                            // Simple scalar array element - just reference the field
-                            let field = &group_fields[0];
-                            let elem_expr = if is_signal {
-                                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
-                                    SignalId(field.id),
-                                )))
-                            } else {
-                                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(
-                                    PortId(field.id),
-                                )))
-                            };
-                            element_exprs.push((*array_idx, elem_expr));
-                        } else {
-                            // Array of structs - this should be handled by try_expand_array_index_read_assignment
-                            // instead of here. Fall back to BitSelect.
-                            return None;
-                        }
-                    }
-
-                    // Build MUX tree: (idx == 0) ? elem_0 : ((idx == 1) ? elem_1 : ...)
-                    let mut mux_expr = None;
-
-                    // Build from last to first (nested ternaries)
-                    for (array_idx, elem_expr) in element_exprs.iter().rev() {
-                        if let Some(else_expr) = mux_expr {
-                            // Build condition: index == array_idx
-                            let index_literal = Expression::with_unknown_type(
-                                ExpressionKind::Literal(Value::Integer(*array_idx as i64)),
-                            );
-                            let condition = Expression::with_unknown_type(ExpressionKind::Binary {
-                                op: BinaryOp::Equal,
-                                left: Box::new(mir_index.clone()),
-                                right: Box::new(index_literal),
-                            });
-
-                            // Build ternary: condition ? elem_expr : else_expr
-                            mux_expr =
-                                Some(Expression::with_unknown_type(ExpressionKind::Conditional {
-                                    cond: Box::new(condition),
-                                    then_expr: Box::new(elem_expr.clone()),
-                                    else_expr: Box::new(else_expr),
-                                }));
-                        } else {
-                            // Last element (no else branch)
-                            mux_expr = Some(elem_expr.clone());
-                        }
-                    }
-
-                    mux_expr
-                };
-
-                // Try dynamic array index expansion
-                if let Some(expr) = try_dynamic_array_index() {
+                if let Some(expr) = self.try_build_dynamic_array_mux_tree(base, index, depth) {
                     return Some(expr);
                 }
 
@@ -23267,6 +23252,150 @@ impl<'hir> HirToMir<'hir> {
             }
         }
         None
+    }
+
+    /// Build a balanced MUX tree for dynamic array index access on a flattened array.
+    /// For `arr[idx]` where `arr` is flattened into `arr_0, arr_1, ..., arr_N`,
+    /// generates a balanced binary MUX tree using address bit selection.
+    fn try_build_dynamic_array_mux_tree(
+        &mut self,
+        base: &hir::HirExpression,
+        index: &hir::HirExpression,
+        depth: usize,
+    ) -> Option<Expression> {
+        // Check if base is a flattened signal or port
+        let (base_hir_id, is_signal) = match base {
+            hir::HirExpression::Signal(id) if self.flattened_signals.contains_key(id) => {
+                (id.0, true)
+            }
+            hir::HirExpression::Port(id)
+                if self.flattened_ports.contains_key(id)
+                    && self.port_belongs_to_current_entity(id) =>
+            {
+                (id.0, false)
+            }
+            _ => return None,
+        };
+
+        // Get flattened fields
+        let fields = if is_signal {
+            self.flattened_signals
+                .get(&hir::SignalId(base_hir_id))?
+                .clone()
+        } else {
+            self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
+        };
+
+        // Group fields by array index (first component of path)
+        let mut array_groups: IndexMap<usize, Vec<FlattenedField>> = IndexMap::new();
+        for field in &fields {
+            if let Some(first) = field.field_path.first() {
+                if first.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(idx) = first.parse::<usize>() {
+                        array_groups.entry(idx).or_default().push(field.clone());
+                    }
+                }
+            }
+        }
+
+        if array_groups.is_empty() {
+            return None;
+        }
+
+        // Convert to sorted vec
+        let mut array_elements: Vec<(usize, Vec<FlattenedField>)> =
+            array_groups.into_iter().collect();
+        array_elements.sort_by_key(|(idx, _)| *idx);
+
+        // Convert index expression to MIR
+        let mir_index = self.convert_expression(index, depth + 1)?;
+
+        // Build element expressions - only handle simple scalar arrays
+        let mut element_exprs: Vec<(usize, Expression)> = Vec::new();
+        for (array_idx, group_fields) in &array_elements {
+            if group_fields.len() == 1 && group_fields[0].field_path.len() == 1 {
+                let field = &group_fields[0];
+                let elem_expr = if is_signal {
+                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                        SignalId(field.id),
+                    )))
+                } else {
+                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(
+                        PortId(field.id),
+                    )))
+                };
+                element_exprs.push((*array_idx, elem_expr));
+            } else {
+                // Array of structs — handled by try_expand_array_index_read_assignment
+                return None;
+            }
+        }
+
+        let num_elements = element_exprs.len();
+        if num_elements == 0 {
+            return None;
+        }
+        if num_elements == 1 {
+            return Some(element_exprs[0].1.clone());
+        }
+
+        // Extract LValue from index for bit selection
+        let index_lvalue = match &mir_index.kind {
+            ExpressionKind::Ref(lv) => Some(lv.clone()),
+            _ => None,
+        };
+
+        // Pad to next power of 2
+        let padded_size = num_elements.next_power_of_two();
+        let addr_bits = (padded_size as f64).log2() as u32;
+        let mut current_level: Vec<Expression> =
+            element_exprs.iter().map(|(_, e)| e.clone()).collect();
+        while current_level.len() < padded_size {
+            current_level.push(current_level.last().unwrap().clone());
+        }
+
+        // Build balanced tree level by level
+        for bit in 0..addr_bits {
+            let mut next_level = Vec::new();
+            let select = if let Some(ref lv) = index_lvalue {
+                Expression::with_unknown_type(ExpressionKind::Ref(LValue::BitSelect {
+                    base: Box::new(lv.clone()),
+                    index: Box::new(Expression::with_unknown_type(
+                        ExpressionKind::Literal(Value::Integer(bit as i64)),
+                    )),
+                }))
+            } else {
+                let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::RightShift,
+                    left: Box::new(mir_index.clone()),
+                    right: Box::new(Expression::with_unknown_type(
+                        ExpressionKind::Literal(Value::Integer(bit as i64)),
+                    )),
+                });
+                Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::BitwiseAnd,
+                    left: Box::new(shifted),
+                    right: Box::new(Expression::with_unknown_type(
+                        ExpressionKind::Literal(Value::Integer(1)),
+                    )),
+                })
+            };
+
+            for pair in current_level.chunks(2) {
+                let lo = pair[0].clone();
+                let hi = pair[1].clone();
+                next_level.push(Expression::with_unknown_type(
+                    ExpressionKind::Conditional {
+                        cond: Box::new(select.clone()),
+                        then_expr: Box::new(hi),
+                        else_expr: Box::new(lo),
+                    },
+                ));
+            }
+            current_level = next_level;
+        }
+
+        current_level.into_iter().next()
     }
 
     ///

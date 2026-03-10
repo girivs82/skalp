@@ -7379,6 +7379,17 @@ pub fn synthesize(
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
     }
 
+    // Step 4: Buffer removal (remove buffer cells that just pass signals through)
+    {
+        let mut gate_opt = crate::gate_optimizer::GateOptimizer::new();
+        gate_opt.set_enable_constant_folding(false);
+        gate_opt.set_enable_dce(false);
+        gate_opt.set_enable_boolean_simp(false);
+        gate_opt.set_enable_mux_opt(false);
+        gate_opt.set_enable_buffer_removal(true);
+        gate_opt.optimize(&mut result.netlist);
+    }
+
     result
 }
 

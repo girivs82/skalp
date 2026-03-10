@@ -361,7 +361,7 @@ pub struct VariableId(pub u32);
 /// - `skalp_mir::type_width` - Type width calculation utilities
 /// - `skalp_mir::signal_naming` - Naming convention utilities
 /// - `skalp_mir::mir_validation` - MIR invariant validation
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DataType {
     /// Bit vector (synthesis-friendly)
     Bit(usize),
@@ -572,7 +572,7 @@ pub enum AssignmentKind {
 }
 
 /// Left-hand value (assignable)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LValue {
     /// Port reference
     Port(PortId),
@@ -596,7 +596,7 @@ pub enum LValue {
 }
 
 /// Expression (right-hand side) with type information
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Expression {
     /// The kind/variant of this expression
     pub kind: ExpressionKind,
@@ -614,7 +614,7 @@ fn default_unknown_type() -> Type {
 }
 
 /// Expression kinds (variants)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExpressionKind {
     /// Literal value
     Literal(Value),
@@ -790,6 +790,23 @@ pub enum Value {
 // We use bitwise comparison for floats to maintain Eq semantics
 impl Eq for Value {}
 
+// Custom Hash implementation for Value (f64 doesn't implement Hash)
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Integer(v) => v.hash(state),
+            Value::Float(v) => v.to_bits().hash(state),
+            Value::BitVector { width, value } => {
+                width.hash(state);
+                value.hash(state);
+            }
+            Value::String(s) => s.hash(state),
+            Value::HighZ | Value::Unknown => {}
+        }
+    }
+}
+
 impl Value {
     /// Compare floats using bitwise equality (required for Eq)
     pub fn eq_float(a: f64, b: f64) -> bool {
@@ -798,7 +815,7 @@ impl Value {
 }
 
 /// Binary operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
     Add,
@@ -831,7 +848,7 @@ pub enum BinaryOp {
 }
 
 /// Unary operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
     BitwiseNot,
@@ -840,7 +857,7 @@ pub enum UnaryOp {
 }
 
 /// Reduction operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReduceOp {
     And,
     Or,
@@ -942,7 +959,7 @@ pub enum GenericParameterType {
 }
 
 /// Struct type definition in MIR
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructType {
     /// Struct name
     pub name: String,
@@ -953,7 +970,7 @@ pub struct StructType {
 }
 
 /// Struct field in MIR
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructField {
     /// Field name
     pub name: String,
@@ -962,7 +979,7 @@ pub struct StructField {
 }
 
 /// Enum type definition in MIR
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnumType {
     /// Enum name
     pub name: String,
@@ -973,7 +990,7 @@ pub struct EnumType {
 }
 
 /// Enum variant in MIR
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnumVariant {
     /// Variant name
     pub name: String,
@@ -982,7 +999,7 @@ pub struct EnumVariant {
 }
 
 /// Union type definition in MIR
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UnionType {
     /// Union name
     pub name: String,

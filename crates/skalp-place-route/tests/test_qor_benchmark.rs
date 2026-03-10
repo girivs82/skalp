@@ -12,7 +12,7 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_hir_codegen::generate_systemverilog_files;
-use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, synthesize_balanced};
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir_with_bram, synthesize_balanced};
 use skalp_mir::MirCompiler;
 use skalp_place_route::packing::CellPacker;
 use skalp_place_route::{
@@ -224,7 +224,7 @@ fn run_skalp_flow(design: &BenchmarkDesign) -> FlowResult {
                 return result;
             }
         };
-        let lir_result = lower_mir_module_to_lir(module);
+        let lir_result = lower_mir_module_to_lir_with_bram(module);
 
         // Synthesize
         let library = match get_stdlib_library("ice40") {
@@ -704,7 +704,7 @@ fn test_qor_designs_compile() {
             assert!(!mir.modules.is_empty(), "no modules in MIR");
 
             let module = mir.modules.last().unwrap();
-            let lir_result = lower_mir_module_to_lir(module);
+            let lir_result = lower_mir_module_to_lir_with_bram(module);
             let library = get_stdlib_library("ice40").expect("ice40 library");
             let synth = synthesize_balanced(&lir_result.lir, &library);
             assert!(!synth.netlist.cells.is_empty(), "synthesis produced no cells");
@@ -835,7 +835,7 @@ fn test_qor_profile_stages() {
         let module = mir.modules.last().unwrap();
 
         let t2 = Instant::now();
-        let lir_result = lower_mir_module_to_lir(module);
+        let lir_result = lower_mir_module_to_lir_with_bram(module);
         let t_lir = t2.elapsed();
 
         let library = get_stdlib_library("ice40").expect("ice40 library");
