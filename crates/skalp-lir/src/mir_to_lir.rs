@@ -2919,6 +2919,53 @@ impl MirToLirTransform {
 
             // Comparison (result is 1 bit)
             BinaryOp::Equal => {
+                // Optimize x == 0 → NOT(RedOr(x))
+                let left_const = extract_constant_value(left);
+                let right_const = extract_constant_value(right);
+                if right_const == Some(0) {
+                    let left_sig = self.transform_expression(left, operand_width);
+                    let or_out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("eq0_redor");
+                    self.lir.add_node(
+                        LirOp::RedOr {
+                            width: operand_width,
+                        },
+                        vec![left_sig],
+                        or_out,
+                        path,
+                    );
+                    let result = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("eq0_inv");
+                    self.lir.add_node(
+                        LirOp::Not { width: 1 },
+                        vec![or_out],
+                        result,
+                        path,
+                    );
+                    return result;
+                }
+                if left_const == Some(0) {
+                    let right_sig = self.transform_expression(right, operand_width);
+                    let or_out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("eq0_redor");
+                    self.lir.add_node(
+                        LirOp::RedOr {
+                            width: operand_width,
+                        },
+                        vec![right_sig],
+                        or_out,
+                        path,
+                    );
+                    let result = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("eq0_inv");
+                    self.lir.add_node(
+                        LirOp::Not { width: 1 },
+                        vec![or_out],
+                        result,
+                        path,
+                    );
+                    return result;
+                }
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
                 (
@@ -2931,6 +2978,37 @@ impl MirToLirTransform {
                 )
             }
             BinaryOp::NotEqual => {
+                // Optimize x != 0 → RedOr(x)
+                let left_const = extract_constant_value(left);
+                let right_const = extract_constant_value(right);
+                if right_const == Some(0) {
+                    let left_sig = self.transform_expression(left, operand_width);
+                    let result = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("ne0_redor");
+                    self.lir.add_node(
+                        LirOp::RedOr {
+                            width: operand_width,
+                        },
+                        vec![left_sig],
+                        result,
+                        path,
+                    );
+                    return result;
+                }
+                if left_const == Some(0) {
+                    let right_sig = self.transform_expression(right, operand_width);
+                    let result = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("ne0_redor");
+                    self.lir.add_node(
+                        LirOp::RedOr {
+                            width: operand_width,
+                        },
+                        vec![right_sig],
+                        result,
+                        path,
+                    );
+                    return result;
+                }
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
                 (
@@ -2978,12 +3056,31 @@ impl MirToLirTransform {
                 (left_sig, right_sig, op, 1)
             }
             BinaryOp::Greater => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
                 // Use signed comparison if either operand is signed
                 let left_signed = self.infer_expression_is_signed(left);
                 let right_signed = self.infer_expression_is_signed(right);
                 let is_signed = left_signed || right_signed;
+
+                // Optimize x > 0 (unsigned) → RedOr(x)
+                if !is_signed {
+                    if extract_constant_value(right) == Some(0) {
+                        let left_sig = self.transform_expression(left, operand_width);
+                        let result = self.alloc_temp_signal(1);
+                        let path = self.unique_node_path("gt0_redor");
+                        self.lir.add_node(
+                            LirOp::RedOr {
+                                width: operand_width,
+                            },
+                            vec![left_sig],
+                            result,
+                            path,
+                        );
+                        return result;
+                    }
+                }
+
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
                 let op = if is_signed {
                     LirOp::Sgt {
                         width: operand_width,
