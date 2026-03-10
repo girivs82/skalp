@@ -3096,26 +3096,66 @@ impl MirToLirTransform {
 
                     let is_signed = self.infer_expression_is_signed(left);
 
-                    // Check if divisor is power of 2 - use right shift
+                    // Check if divisor is power of 2 - use bit rewiring (no logic cells)
                     if divisor.is_power_of_two() {
-                        let shift_amount = divisor.trailing_zeros() as u64;
-                        let shift_const =
-                            self.create_constant(&Value::Integer(shift_amount as i64), div_width);
+                        let shift_amount = divisor.trailing_zeros();
 
-                        // BUG #250: Use arithmetic shift for signed operands
+                        if !is_signed && shift_amount < div_width {
+                            // Unsigned: x / (2^n) == x[width-1 : n], zero-extended
+                            // This is pure wiring — no barrel shifter needed
+                            let range_width = div_width - shift_amount;
+                            let range_out = self.alloc_temp_signal(range_width);
+                            let path = self.unique_node_path("div_pow2_range");
+                            self.lir.add_node(
+                                LirOp::RangeSelect {
+                                    width: div_width,
+                                    high: div_width - 1,
+                                    low: shift_amount,
+                                },
+                                vec![dividend_sig],
+                                range_out,
+                                path,
+                            );
+                            if range_width < div_width {
+                                let result = self.alloc_temp_signal(div_width);
+                                let path = self.unique_node_path("div_pow2_zext");
+                                self.lir.add_node(
+                                    LirOp::ZeroExtend {
+                                        from: range_width,
+                                        to: div_width,
+                                    },
+                                    vec![range_out],
+                                    result,
+                                    path,
+                                );
+                                return result;
+                            }
+                            return range_out;
+                        }
+
+                        // Signed: use arithmetic shift (preserves sign)
                         if is_signed {
+                            let shift_const = self.create_constant(
+                                &Value::Integer(shift_amount as i64),
+                                div_width,
+                            );
                             return self.create_arithmetic_shift_right_node(
                                 dividend_sig,
                                 shift_const,
                                 div_width,
                             );
-                        } else {
-                            return self.create_shift_right_node(
-                                dividend_sig,
-                                shift_const,
-                                div_width,
-                            );
                         }
+
+                        // Fallback for edge cases
+                        let shift_const = self.create_constant(
+                            &Value::Integer(shift_amount as i64),
+                            div_width,
+                        );
+                        return self.create_shift_right_node(
+                            dividend_sig,
+                            shift_const,
+                            div_width,
+                        );
                     }
 
                     // For signed division, use sign-magnitude approach:
@@ -3260,6 +3300,22 @@ impl MirToLirTransform {
                 if let Some(divisor) = extract_constant_value(right) {
                     if divisor == 0 {
                         return self.create_constant(&Value::Integer(0), operand_width);
+                    }
+                    // Power-of-2 optimization: x % (2^n) == x & ((2^n) - 1)
+                    if divisor.is_power_of_two() {
+                        let mask = divisor - 1;
+                        let mask_const = self.create_constant_value(mask, operand_width);
+                        let result = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("mod_pow2");
+                        self.lir.add_node(
+                            LirOp::And {
+                                width: operand_width,
+                            },
+                            vec![left_sig, mask_const],
+                            result,
+                            path,
+                        );
+                        return result;
                     }
                     let right_sig = self.transform_expression(right, operand_width);
                     // BUG #268 FIX: Zero-extend operands to operand_width if narrower
