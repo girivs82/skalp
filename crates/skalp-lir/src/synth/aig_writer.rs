@@ -393,17 +393,56 @@ impl AigWriterState<'_> {
             })
             .unwrap_or(CellSafetyClassification::Functional);
 
-        // Create cell with the mapped cell type
-        let cell = Cell::new_comb(
-            CellId(self.next_cell_id),
-            mapped.cell_type.clone(),
-            self.library.name.clone(),
-            mapped.area, // Use mapped area (which includes FIT estimate)
-            format!("aig.n{}", id.0),
-            input_nets,
-            vec![output_net],
-        )
-        .with_safety_classification(safety);
+        // Create cell — use LUT cell when truth table is available (FPGA mapping)
+        let cell = if let Some(tt) = mapped.truth_table {
+            // Check if this is an FPGA LUT cell type (SB_LUT4, LUT4, etc.)
+            if self.library.is_fpga() {
+                // Expand K-input truth table to 16-bit LUT4 INIT
+                // For K<4 inputs, replicate the pattern to fill 16 bits
+                let num_inputs = mapped.inputs.len();
+                let lut_init = expand_truth_table_to_lut4(tt, num_inputs);
+
+                // Pad inputs to 4 for LUT4 (unused inputs connected to first input)
+                let mut padded_inputs = input_nets.clone();
+                while padded_inputs.len() < 4 {
+                    padded_inputs.push(padded_inputs[0]);
+                }
+
+                Cell::new_lut(
+                    CellId(self.next_cell_id),
+                    mapped.cell_type.clone(),
+                    self.library.name.clone(),
+                    mapped.area,
+                    format!("aig.n{}", id.0),
+                    padded_inputs,
+                    vec![output_net],
+                    lut_init,
+                )
+                .with_safety_classification(safety)
+            } else {
+                Cell::new_comb(
+                    CellId(self.next_cell_id),
+                    mapped.cell_type.clone(),
+                    self.library.name.clone(),
+                    mapped.area,
+                    format!("aig.n{}", id.0),
+                    input_nets,
+                    vec![output_net],
+                )
+                .with_safety_classification(safety)
+            }
+        } else {
+            Cell::new_comb(
+                CellId(self.next_cell_id),
+                mapped.cell_type.clone(),
+                self.library.name.clone(),
+                mapped.area,
+                format!("aig.n{}", id.0),
+                input_nets,
+                vec![output_net],
+            )
+            .with_safety_classification(safety)
+        };
 
         self.next_cell_id += 1;
         self.netlist.add_cell(cell);
@@ -1375,6 +1414,52 @@ impl AigWriterState<'_> {
 pub fn write_aig_to_gates(aig: &Aig, library: &TechLibrary) -> GateNetlist {
     let writer = AigWriter::new(library);
     writer.write(aig)
+}
+
+/// Expand a K-input truth table to a 16-bit LUT4 INIT value.
+///
+/// For K<4 inputs, the K-bit pattern is replicated to fill 16 bits.
+/// This ensures that unused higher-order inputs don't affect the output.
+/// Example: 2-input AND (tt=0x8, K=2) → 0x8888 (replicated 4×)
+fn expand_truth_table_to_lut4(tt: u64, num_inputs: usize) -> u64 {
+    let k_bits = 1usize << num_inputs; // number of entries in the K-input truth table
+    let k_mask = (1u64 << k_bits) - 1;
+    let base = tt & k_mask;
+
+    match num_inputs {
+        0 => {
+            // Constant: replicate bit 0 across all 16 bits
+            if base & 1 != 0 { 0xFFFF } else { 0x0000 }
+        }
+        1 => {
+            // 2-entry → replicate 8 times to fill 16 bits
+            let mut init = 0u64;
+            for i in 0..8 {
+                init |= base << (i * 2);
+            }
+            init & 0xFFFF
+        }
+        2 => {
+            // 4-entry → replicate 4 times
+            let mut init = 0u64;
+            for i in 0..4 {
+                init |= base << (i * 4);
+            }
+            init & 0xFFFF
+        }
+        3 => {
+            // 8-entry → replicate 2 times
+            (base | (base << 8)) & 0xFFFF
+        }
+        4 => {
+            // Already 16 entries, just mask
+            base & 0xFFFF
+        }
+        _ => {
+            // For >4 inputs, truncate (shouldn't happen for LUT4)
+            base & 0xFFFF
+        }
+    }
 }
 
 #[cfg(test)]

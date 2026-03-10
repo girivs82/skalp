@@ -826,6 +826,12 @@ pub enum CellFunction {
     Oai21, // OR-AND-Invert: ~((a | b) & c)
     Oai22, // ~((a | b) & (c | d))
 
+    // Lookup tables (FPGA)
+    /// 4-input lookup table — implements ANY Boolean function of up to 4 inputs
+    Lut4,
+    /// 6-input lookup table — implements ANY Boolean function of up to 6 inputs
+    Lut6,
+
     // Multiplexers
     Mux2,
     Mux4,
@@ -1020,6 +1026,9 @@ impl CellFunction {
             | CellFunction::FpLe32
             | CellFunction::FpGe32 => false,
 
+            // LUT cells — FPGA output primitives, not decomposable into AIG
+            CellFunction::Lut4 | CellFunction::Lut6 => false,
+
             // Arithmetic primitives — preserve carry chain structure, optimize via datapath pass
             CellFunction::FullAdder | CellFunction::HalfAdder | CellFunction::Carry => false,
 
@@ -1070,6 +1079,21 @@ impl CellFunction {
             CellFunction::Aoi22 | CellFunction::Oai22 => (
                 vec!["a".into(), "b".into(), "c".into(), "d".into()],
                 vec!["y".into()],
+            ),
+            CellFunction::Lut4 => (
+                vec!["I0".into(), "I1".into(), "I2".into(), "I3".into()],
+                vec!["O".into()],
+            ),
+            CellFunction::Lut6 => (
+                vec![
+                    "I0".into(),
+                    "I1".into(),
+                    "I2".into(),
+                    "I3".into(),
+                    "I4".into(),
+                    "I5".into(),
+                ],
+                vec!["O".into()],
             ),
             CellFunction::Mux2 => (
                 vec!["sel".into(), "d0".into(), "d1".into()],
@@ -3215,6 +3239,8 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "aoi22" => Ok(CellFunction::Aoi22),
         "oai21" => Ok(CellFunction::Oai21),
         "oai22" => Ok(CellFunction::Oai22),
+        "lut4" | "sb_lut4" => Ok(CellFunction::Lut4),
+        "lut6" | "lut6_2" => Ok(CellFunction::Lut6),
         "mux2" => Ok(CellFunction::Mux2),
         "mux4" => Ok(CellFunction::Mux4),
         "ha" | "half_adder" | "halfadder" => Ok(CellFunction::HalfAdder),
@@ -3305,6 +3331,8 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::Aoi22 => "aoi22".to_string(),
         CellFunction::Oai21 => "oai21".to_string(),
         CellFunction::Oai22 => "oai22".to_string(),
+        CellFunction::Lut4 => "lut4".to_string(),
+        CellFunction::Lut6 => "lut6".to_string(),
         CellFunction::Mux2 => "mux2".to_string(),
         CellFunction::Mux4 => "mux4".to_string(),
         CellFunction::HalfAdder => "half_adder".to_string(),

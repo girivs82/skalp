@@ -721,6 +721,14 @@ impl<'a> AigBuilder<'a> {
                 inputs.first().copied().unwrap_or(AigLit::true_lit())
             }
 
+            // LUT cells — FPGA primitives, should be partitioned out before AIG optimization
+            CellFunction::Lut4 | CellFunction::Lut6 => {
+                panic!(
+                    "Cannot convert LUT cell to AIG — LUT cells should be partitioned out. \
+                     LUT4/LUT6 are FPGA output primitives, not AIG input cells."
+                );
+            }
+
             CellFunction::Custom(name) => {
                 panic!(
                     "Cannot convert Custom('{}') cell to AIG — should be partitioned out",

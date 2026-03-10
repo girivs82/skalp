@@ -128,8 +128,16 @@ pub fn place_and_route(
         placer.place_with_carry_chains(netlist, &packing.carry_chains)?
     };
 
-    // Run routing — use timing-driven routing when frequency constraints exist
-    let mut router_config = config.router.clone();
+    // Run routing — scale iterations to design size for faster small-design compilation
+    let net_count = netlist.nets.len();
+    let mut router_config = if config.router.max_iterations == RouterConfig::default().max_iterations
+    {
+        // Default config: auto-scale iterations based on design complexity
+        RouterConfig::for_design_size(net_count)
+    } else {
+        // User explicitly configured iterations: respect their choice
+        config.router.clone()
+    };
     let freq_constraints = collect_frequency_constraints(netlist, &config);
     if !freq_constraints.is_empty() && router_config.timing_weight < 0.3 {
         router_config.timing_weight = 0.5;

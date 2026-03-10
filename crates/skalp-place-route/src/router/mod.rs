@@ -61,12 +61,34 @@ impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             algorithm: RoutingAlgorithm::PathFinderAStar,
-            max_iterations: 100, // Increased for better convergence
+            max_iterations: 100,
             allow_ripup: true,
             max_congestion: 1.5,
-            history_cost_factor: 1.0, // Increased for stronger congestion avoidance
-            present_congestion_factor: 1.5, // Increased to penalize current congestion more
+            history_cost_factor: 1.0,
+            present_congestion_factor: 1.5,
             timing_weight: 0.3,
+        }
+    }
+}
+
+impl RouterConfig {
+    /// Create a configuration scaled to the design size.
+    ///
+    /// Small designs converge quickly and don't need 100 iterations.
+    /// Scaling down avoids wasting time on unused PathFinder iterations.
+    pub fn for_design_size(net_count: usize) -> Self {
+        let max_iterations = if net_count <= 50 {
+            15
+        } else if net_count <= 200 {
+            30
+        } else if net_count <= 1000 {
+            50
+        } else {
+            100
+        };
+        Self {
+            max_iterations,
+            ..Default::default()
         }
     }
 }

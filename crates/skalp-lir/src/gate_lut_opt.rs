@@ -39,7 +39,18 @@ pub fn optimize_luts(netlist: &mut GateNetlist) -> LutOptStats {
     let mut stats = LutOptStats::default();
     stats += eliminate_buffer_luts(netlist);
     stats += project_constant_inputs(netlist);
-    stats += combine_lut_pairs(netlist);
+
+    // Iterative LUT combining: after merging A→B, the merged LUT may feed
+    // another LUT C with total inputs ≤ 4, enabling further combining.
+    for _ in 0..10 {
+        let iter_stats = combine_lut_pairs(netlist);
+        if iter_stats.luts_combined == 0 {
+            break;
+        }
+        stats += iter_stats;
+        netlist.rebuild_net_connectivity();
+    }
+
     // Rebuild connectivity before DCE so fanout data is current.
     // Without this, remove_dead_cells() sees stale fanout=0 on nets
     // that are actually consumed (e.g. SB_IO output nets used by LUTs)

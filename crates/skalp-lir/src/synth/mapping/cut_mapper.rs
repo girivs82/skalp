@@ -37,10 +37,10 @@ impl Default for CutMapperConfig {
     fn default() -> Self {
         Self {
             cut_size: 4,
-            max_cuts: 8,
+            max_cuts: 12,
             use_priority_cuts: true,
             area_recovery: true,
-            recovery_iterations: 2,
+            recovery_iterations: 4,
             use_choices: false,
         }
     }
@@ -85,10 +85,10 @@ impl CutMapperConfig {
         let cut_size = library.get_lut_size();
         Self {
             cut_size,
-            max_cuts: if cut_size <= 4 { 8 } else { 12 },
+            max_cuts: if cut_size <= 4 { 12 } else { 16 },
             use_priority_cuts: true,
             area_recovery: true,
-            recovery_iterations: 2,
+            recovery_iterations: 5,
             use_choices: false,
         }
     }
@@ -110,10 +110,10 @@ impl CutMapperConfig {
         let cut_size = library.get_lut_size();
         Self {
             cut_size,
-            max_cuts: if cut_size <= 4 { 10 } else { 14 },
+            max_cuts: if cut_size <= 4 { 16 } else { 20 },
             use_priority_cuts: true,
             area_recovery: true,
-            recovery_iterations: 3,
+            recovery_iterations: 8,
             use_choices: true,
         }
     }
@@ -369,6 +369,7 @@ impl CutMapper {
                             area: dff_area,
                             delay: dff_delay,
                             output_inverted: false,
+                            truth_table: None,
                         },
                     );
                     best_match.insert(node_id, None);
@@ -392,6 +393,7 @@ impl CutMapper {
                             area: barrier_area,
                             delay: barrier_delay,
                             output_inverted: false,
+                            truth_table: None,
                         },
                     );
                     best_match.insert(node_id, None);
@@ -428,6 +430,7 @@ impl CutMapper {
                                 area: match_.area,
                                 delay: match_.delay,
                                 output_inverted: match_.output_inverted,
+                                truth_table: Some(match_.cut.truth_table),
                             },
                         );
                     } else {
@@ -454,6 +457,7 @@ impl CutMapper {
                                 area: and_area,
                                 delay: and_delay,
                                 output_inverted: false,
+                                truth_table: Some(0x8), // AND2 truth table
                             },
                         );
                     }
@@ -705,10 +709,10 @@ mod tests {
     fn test_cut_mapper_config_default() {
         let config = CutMapperConfig::default();
         assert_eq!(config.cut_size, 4);
-        assert_eq!(config.max_cuts, 8);
+        assert_eq!(config.max_cuts, 12);
         assert!(config.use_priority_cuts);
         assert!(config.area_recovery);
-        assert_eq!(config.recovery_iterations, 2);
+        assert_eq!(config.recovery_iterations, 4);
         assert!(!config.use_choices);
     }
 

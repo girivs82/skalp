@@ -58,6 +58,8 @@ pub struct MappedNode {
     /// When true, the actual function is !cell_function
     /// This can be absorbed if consumers use the inverted output
     pub output_inverted: bool,
+    /// Truth table for LUT cells (used by AIG writer to emit LUT INIT values)
+    pub truth_table: Option<u64>,
 }
 
 /// Mapping statistics
@@ -136,6 +138,9 @@ pub struct CellMatcher {
     cells: IndexMap<String, CellTiming>,
     /// Truth table to cell mapping
     tt_to_cell: IndexMap<u64, Vec<CellMatch>>,
+    /// Universal LUT cell for FPGA targets: (cell_name, area, delay, max_inputs)
+    /// When set, ANY truth table with ≤max_inputs is implementable in one cell.
+    universal_lut: Option<(String, f64, f64, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +162,7 @@ impl CellMatcher {
         let mut matcher = Self {
             cells: IndexMap::new(),
             tt_to_cell: IndexMap::new(),
+            universal_lut: None,
         };
         matcher.init_basic_cells();
         matcher
@@ -172,10 +178,29 @@ impl CellMatcher {
         let mut matcher = Self {
             cells: IndexMap::new(),
             tt_to_cell: IndexMap::new(),
+            universal_lut: None,
         };
 
         // Add cells from the library based on their function
         for (name, cell) in library.iter_cells() {
+            // Detect universal LUT cells for FPGA targets
+            match &cell.function {
+                CellFunction::Lut4 => {
+                    let area = 1.0 + cell.fit * 15.0;
+                    let delay = 15.0 + cell.fit * 50.0;
+                    matcher.universal_lut = Some((name.to_string(), area, delay, 4));
+                }
+                CellFunction::Lut6 => {
+                    let area = 1.0 + cell.fit * 15.0;
+                    let delay = 15.0 + cell.fit * 50.0;
+                    // Only upgrade if we don't already have a LUT (prefer larger)
+                    if matcher.universal_lut.as_ref().map_or(true, |(_, _, _, k)| *k < 6) {
+                        matcher.universal_lut = Some((name.to_string(), area, delay, 6));
+                    }
+                }
+                _ => {}
+            }
+
             if let Some(tt_pin_pairs) = Self::function_to_truth_tables(&cell.function) {
                 // Use library cell costs - fit represents relative complexity
                 // Scale to reasonable area units (fit ~0.05-0.2 → area ~1-4)
@@ -446,6 +471,35 @@ impl CellMatcher {
                         area: cell.area,
                         delay: cell.delay,
                         pin_mapping: cell.input_pins.clone(),
+                        input_inversions: vec![false; num_inputs],
+                        output_inverted: false,
+                    });
+                }
+            }
+        }
+
+        // Universal LUT fallback: for FPGA targets, ANY truth table with ≤K inputs
+        // can be implemented in a single LUT cell. This avoids the AND2_X1 fallback
+        // which wastes 2–3 of the LUT's 4 inputs.
+        if matches.is_empty() {
+            if let Some((ref lut_name, area, delay, max_inputs)) = self.universal_lut {
+                if num_inputs <= max_inputs {
+                    let pin_names: Vec<String> = (0..num_inputs)
+                        .map(|i| format!("I{}", i))
+                        .collect();
+                    matches.push(CutMatch {
+                        cut: Cut {
+                            leaves: Vec::new(),
+                            truth_table: tt,
+                            area_cost: area as f32,
+                            arrival_time: delay as f32,
+                            area_flow: area as f32,
+                            edge_count: num_inputs as u32,
+                        },
+                        cell_type: lut_name.clone(),
+                        area,
+                        delay,
+                        pin_mapping: pin_names,
                         input_inversions: vec![false; num_inputs],
                         output_inverted: false,
                     });

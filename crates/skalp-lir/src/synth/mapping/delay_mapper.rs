@@ -158,6 +158,7 @@ impl DelayMapper {
                             area: 4.0,
                             delay: clk_to_q,
                             output_inverted: false,
+                            truth_table: None,
                         },
                     );
                     best_cut.insert(node_id, None);
@@ -177,6 +178,7 @@ impl DelayMapper {
                             area: 2.0,
                             delay: barrier_delay,
                             output_inverted: false,
+                            truth_table: None,
                         },
                     );
                     best_cut.insert(node_id, None);
@@ -206,6 +208,7 @@ impl DelayMapper {
                                 area: match_.area,
                                 delay: match_.delay,
                                 output_inverted: match_.output_inverted,
+                                truth_table: Some(cut.truth_table),
                             },
                         );
                     } else {
@@ -224,6 +227,7 @@ impl DelayMapper {
                                 area: 2.0,
                                 delay: 25.0,
                                 output_inverted: false,
+                                truth_table: Some(0x8),
                             },
                         );
                     }
@@ -364,6 +368,7 @@ impl DelayMapper {
                                     area: match_.area,
                                     delay: match_.delay,
                                     output_inverted: match_.output_inverted,
+                                    truth_table: Some(cut.truth_table),
                                 },
                             );
                             break;

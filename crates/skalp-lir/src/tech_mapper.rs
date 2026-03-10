@@ -7254,7 +7254,14 @@ pub fn synthesize(
 /// Convenience function that uses `SynthPreset::Balanced` for a good
 /// trade-off between optimization quality and runtime.
 pub fn synthesize_balanced(lir: &Lir, library: &TechLibrary) -> crate::synth::SynthResult {
-    synthesize(lir, library, crate::synth::SynthPreset::Balanced)
+    // FPGA targets benefit from Auto (parallel Resyn2 + Compress2) since
+    // the extra runtime is small relative to place-and-route
+    let preset = if library.is_fpga() {
+        crate::synth::SynthPreset::Auto
+    } else {
+        crate::synth::SynthPreset::Balanced
+    };
+    synthesize(lir, library, preset)
 }
 
 /// Full synthesis with area-focused optimization
