@@ -1122,6 +1122,8 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map a subtractor (a - b = a + ~b + 1)
+    ///
+    /// Uses FPGA carry chain when available, otherwise falls back to FullAdder cells.
     fn map_subtractor(
         &mut self,
         width: u32,
@@ -1135,10 +1137,15 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        // Invert b, then add with carry_in=1
+        // Check for FPGA carry chain support
+        if let Some(carry_cell) = self.library.find_best_cell(&CellFunction::Carry).cloned() {
+            self.map_subtractor_fpga_carry_chain(width, inputs, outputs, path, &carry_cell);
+            return;
+        }
+
+        // Fallback: Invert b, then add with carry_in=1 using FullAdder cells
         let inv_info = self.get_cell_info(&CellFunction::Inv);
         let fa_info = self.get_cell_info(&CellFunction::FullAdder);
-        // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
         let sub_tie_low = self.get_tie_low();
 
         // Create inverted b nets
@@ -1171,7 +1178,6 @@ impl<'a> TechMapper<'a> {
             .add_net(GateNet::new(const_1, format!("{}.const_1", path)));
         self.stats.nets_created += 1;
 
-        // Add TIE_HIGH cell to drive the constant 1 net
         let mut tie_cell = Cell::new_comb(
             CellId(0),
             "TIE_HIGH".to_string(),
@@ -1207,6 +1213,140 @@ impl<'a> TechMapper<'a> {
             cell.source_op = Some("FullAdder".to_string());
             fa_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
+
+            carry_net = cout;
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map a subtractor using FPGA carry chain (a - b = a + ~b + 1)
+    ///
+    /// Uses LUT4 for XNOR (a XOR ~b = a XNOR b) and Carry cells for borrow propagation.
+    /// Carry_in = 1 (TIE_HIGH) for two's complement subtraction.
+    fn map_subtractor_fpga_carry_chain(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+        carry_cell: &LibraryCell,
+    ) {
+        let carry_info = LibraryCellInfo::from_library_cell(carry_cell);
+        let lut4_info = self.get_cell_info(&CellFunction::Lut4);
+        let sub_tie_low = self.get_tie_low();
+
+        // Create TIE_HIGH for carry_in = 1
+        let const_1 = self.alloc_net_id();
+        self.netlist
+            .add_net(GateNet::new(const_1, format!("{}.carry_in", path)));
+        self.stats.nets_created += 1;
+
+        let mut tie_cell = Cell::new_comb(
+            CellId(0),
+            "TIE_HIGH".to_string(),
+            self.library.name.clone(),
+            0.01,
+            format!("{}.tie_high", path),
+            vec![],
+            vec![const_1],
+        );
+        tie_cell.function = Some(CellFunction::TieHigh);
+        tie_cell.source_op = Some("Constant".to_string());
+        self.add_cell(tie_cell);
+
+        let mut carry_net = const_1;
+
+        for bit in 0..width as usize {
+            let a = inputs[0].get(bit).copied().unwrap_or(sub_tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(sub_tie_low);
+            let diff = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+            let cout = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(cout, format!("{}.cout{}", path, bit)));
+            self.stats.nets_created += 1;
+
+            // Subtraction: diff = a XOR ~b XOR cin = a XNOR b XOR cin
+            // For bit 0: diff = a XNOR b XOR 1 = a XOR b (since cin=1)
+            //   which equals half-adder with inverted logic
+            // For bits 1+: use LUT4 with INIT = 0x6969 (a XNOR b XOR cin)
+
+            if bit == 0 {
+                // First bit with carry_in=1: diff = a XOR ~b XOR 1 = a XNOR b XOR 1
+                // Use LUT4: INIT = 0x6969 for (a XNOR b XOR cin) with cin=1
+                let mut sum_cell = Cell::new_comb(
+                    CellId(0),
+                    lut4_info.name.clone(),
+                    self.library.name.clone(),
+                    lut4_info.fit,
+                    format!("{}.diff_{}", path, bit),
+                    vec![a, b, carry_net],
+                    vec![diff],
+                );
+                sum_cell.lut_init = Some(0x6969);
+                sum_cell.source_op = Some("SUB_XOR3".to_string());
+                lut4_info.apply_to_cell(&mut sum_cell);
+                self.add_cell(sum_cell);
+            } else {
+                // LUT4: diff = a XNOR b XOR cin (INIT = 0x6969)
+                let mut sum_cell = Cell::new_comb(
+                    CellId(0),
+                    lut4_info.name.clone(),
+                    self.library.name.clone(),
+                    lut4_info.fit,
+                    format!("{}.diff_{}", path, bit),
+                    vec![a, b, carry_net],
+                    vec![diff],
+                );
+                sum_cell.lut_init = Some(0x6969);
+                sum_cell.source_op = Some("SUB_XOR3".to_string());
+                lut4_info.apply_to_cell(&mut sum_cell);
+                self.add_cell(sum_cell);
+            }
+
+            // Carry cell: cout = (~b & a) | ((~b | a) & cin) = (a & ~b) | ((a | ~b) & cin)
+            // This is the standard carry cell with b inverted.
+            // On iCE40, the SB_CARRY computes: CO = (I0 & I1) | ((I0 | I1) & CI)
+            // For subtraction, we feed ~b as I0 (or I1). But we don't have ~b as a net.
+            // Alternative: SB_CARRY with I0=a, I1=~b. We need to create ~b.
+            // Actually, for the carry chain: we need the carry to propagate correctly.
+            // a + ~b + cin: carry = (a & ~b) | ((a | ~b) & cin)
+            // With SB_CARRY(I0, I1, CI) = (I0 & I1) | ((I0 | I1) & CI)
+            // We need I0=a, I1=~b.
+
+            // Create inverted b for carry cell
+            let inv_info = self.get_cell_info(&CellFunction::Inv);
+            let not_b = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(not_b, format!("{}.not_b{}", path, bit)));
+            self.stats.nets_created += 1;
+
+            let mut inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.inv_b{}", path, bit),
+                vec![b],
+                vec![not_b],
+            );
+            inv_cell.source_op = Some("Inverter".to_string());
+            inv_info.apply_to_cell(&mut inv_cell);
+            self.add_cell(inv_cell);
+
+            let mut carry_cell = Cell::new_comb(
+                CellId(0),
+                carry_info.name.clone(),
+                self.library.name.clone(),
+                carry_info.fit,
+                format!("{}.carry{}", path, bit),
+                vec![a, not_b, carry_net],
+                vec![cout],
+            );
+            carry_cell.source_op = Some("Carry".to_string());
+            carry_info.apply_to_cell(&mut carry_cell);
+            self.add_cell(carry_cell);
 
             carry_net = cout;
         }
