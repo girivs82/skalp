@@ -131,11 +131,10 @@ impl<'a> SharedCodegen<'a> {
                     BinaryOperation::Sar | BinaryOperation::SDiv | BinaryOperation::SMod => {
                         left_width
                     }
-                    // Left shift can produce a result wider than the left operand.
-                    // E.g., `1-bit << 7` = 0x80 (8-bit). Use full 32-bit width
-                    // to avoid premature truncation; downstream nodes/registers
-                    // apply the correct final mask.
-                    BinaryOperation::Shl => 32,
+                    // Shift results preserve the left operand's width.
+                    // Use at least 32 bits to avoid truncation of small shifts
+                    // (e.g., 1-bit << 7 = 0x80 needs 8+ bits).
+                    BinaryOperation::Shl => std::cmp::max(left_width, 32),
                     BinaryOperation::Shr => left_width,
                     BinaryOperation::Div | BinaryOperation::Mod => left_width,
                     BinaryOperation::Add | BinaryOperation::Sub => {
@@ -584,44 +583,21 @@ impl<'a> SharedCodegen<'a> {
         let width = sir_type.width();
         let sanitized_name = self.sanitize_name(name);
 
-        // Check if this is an array type - arrays should not be decomposed
-        let is_array_type = matches!(sir_type, SirType::Array(_, _));
-
-        if width > 256 && !is_array_type {
-            // Decompose into multiple 256-bit chunks
-            let num_parts = width.div_ceil(256);
-            let last_part_width = width - (num_parts - 1) * 256;
-
-            // Track this decomposition in the type mapper
-            // Note: We can't mutate type_mapper here, but the decomposition info
-            // should be pre-computed. For now, just generate the parts.
-
-            for part_idx in 0..num_parts {
-                let part_width = if part_idx == num_parts - 1 {
-                    last_part_width
-                } else {
-                    256
-                };
-
-                let (base_type, array_opt) = self.type_mapper.get_type_for_width(part_width);
-                let part_name = format!("{}_part{}", sanitized_name, part_idx);
-
-                if let Some(array_size) = array_opt {
-                    self.write_indented(&format!("{} {}[{}];\n", base_type, part_name, array_size));
-                } else {
-                    self.write_indented(&format!("{} {};\n", base_type, part_name));
-                }
-            }
-            true
+        // For wide non-array types (e.g. bit[320]), use flat u32 arrays
+        // matching how intermediate nodes are stored via create_sir_type_for_width.
+        // Both C++ and Metal backends handle wide signals as flat u32 arrays.
+        let effective_type = if width > 256 && !matches!(sir_type, SirType::Array(_, _)) {
+            self.create_sir_type_for_width(width)
         } else {
-            // Normal case: single field
-            let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
-            self.write_indented(&format!(
-                "{} {}{};\n",
-                base_type, sanitized_name, array_suffix
-            ));
-            false
-        }
+            sir_type.clone()
+        };
+
+        let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(&effective_type);
+        self.write_indented(&format!(
+            "{} {}{};\n",
+            base_type, sanitized_name, array_suffix
+        ));
+        false
     }
 
     /// Generate the Inputs struct definition

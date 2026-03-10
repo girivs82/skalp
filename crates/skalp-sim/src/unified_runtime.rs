@@ -1564,16 +1564,19 @@ impl UnifiedSimulator {
     /// sim.set_input_bytes("wide_data", &wide_value).await;
     /// ```
     pub async fn set_input_bytes(&mut self, name: &str, value: &[u8]) {
+        // Resolve user-facing path to internal name (same as set_input)
+        let internal_name = self.resolve_path(name);
+
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: set_input_bytes called before loading design");
             }
             SimulatorBackend::CompiledCpu(runtime) => {
-                let _ = runtime.set_input(name, value).await;
+                let _ = runtime.set_input(&internal_name, value).await;
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(runtime) => {
-                let _ = runtime.set_input(name, value).await;
+                let _ = runtime.set_input(&internal_name, value).await;
             }
             // For non-behavioral backends, convert bytes to u64 and use set_input
             _ => {

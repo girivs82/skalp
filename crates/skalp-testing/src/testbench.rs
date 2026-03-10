@@ -74,6 +74,8 @@ pub struct Testbench {
     sim: UnifiedSimulator,
     mode: TestbenchMode,
     pending_inputs: IndexMap<String, u64>,
+    /// Pending wide inputs (>64 bits) — flushed via set_input_bytes
+    pending_inputs_wide: IndexMap<String, Vec<u8>>,
     cycle_count: u64,
     /// Available input port names
     input_names: Vec<String>,
@@ -287,6 +289,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::Ncl,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
@@ -433,6 +436,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::Behavioral,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -545,6 +549,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::GateLevel,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -606,6 +611,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::Behavioral,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -703,6 +709,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::GateLevel,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -766,6 +773,7 @@ impl Testbench {
             sim,
             mode: TestbenchMode::Ncl,
             pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
@@ -933,6 +941,9 @@ impl Testbench {
         for (signal, value) in self.pending_inputs.drain(..) {
             self.sim.set_input(&signal, value).await;
         }
+        for (signal, bytes) in self.pending_inputs_wide.drain(..) {
+            self.sim.set_input_bytes(&signal, &bytes).await;
+        }
     }
 
     /// Set an input signal value (chainable)
@@ -940,6 +951,25 @@ impl Testbench {
         let bytes = value.into_bytes();
         let val = bytes_to_u64(&bytes);
         self.pending_inputs.insert(signal.to_string(), val);
+        self
+    }
+
+    /// Set a wide input signal from a byte slice (chainable)
+    ///
+    /// Use this for signals wider than 64 bits (e.g., 256-bit hashes, 320-bit
+    /// state vectors). The bytes are little-endian: byte 0 contains bits [7:0].
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Set a 256-bit hash input
+    /// let hash = [0u8; 32];
+    /// tb.set_bytes("hash_in", &hash);
+    /// ```
+    pub fn set_bytes(&mut self, signal: &str, value: &[u8]) -> &mut Self {
+        // Remove from narrow pending map if present (wide takes precedence)
+        self.pending_inputs.shift_remove(signal);
+        self.pending_inputs_wide
+            .insert(signal.to_string(), value.to_vec());
         self
     }
 
@@ -1097,6 +1127,9 @@ impl Testbench {
         for (signal, value) in self.pending_inputs.drain(..) {
             self.sim.set_input(&signal, value).await;
         }
+        for (signal, bytes) in self.pending_inputs_wide.drain(..) {
+            self.sim.set_input_bytes(&signal, &bytes).await;
+        }
         if self.coverage_enabled {
             self.step_with_coverage_update().await;
         } else {
@@ -1107,7 +1140,7 @@ impl Testbench {
 
     /// Get an output value as u32
     pub async fn get_u32(&mut self, signal: &str) -> u32 {
-        if !self.pending_inputs.is_empty() {
+        if !self.pending_inputs.is_empty() || !self.pending_inputs_wide.is_empty() {
             self.step().await;
         }
 
@@ -1120,7 +1153,7 @@ impl Testbench {
 
     /// Get an output value as u64
     pub async fn get_u64(&mut self, signal: &str) -> u64 {
-        if !self.pending_inputs.is_empty() {
+        if !self.pending_inputs.is_empty() || !self.pending_inputs_wide.is_empty() {
             self.step().await;
         }
 
@@ -1129,6 +1162,41 @@ impl Testbench {
         }
 
         self.get_bitblasted_value(signal, 64).await
+    }
+
+    /// Get a wide output value as bytes (little-endian)
+    ///
+    /// Use this for signals wider than 64 bits. The `num_bytes` argument
+    /// specifies the expected byte count (e.g., 32 for a 256-bit signal,
+    /// 40 for 320-bit).
+    ///
+    /// Falls back to reading the signal as u64 and zero-extending if the
+    /// byte-based backend is not available.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let hash: Vec<u8> = tb.get_bytes("hash_out", 32).await;
+    /// ```
+    pub async fn get_bytes(&mut self, signal: &str, num_bytes: usize) -> Vec<u8> {
+        if !self.pending_inputs.is_empty() || !self.pending_inputs_wide.is_empty() {
+            self.step().await;
+        }
+
+        // Try byte-based output first (works for behavioral with wide types)
+        if let Some(bytes) = self.sim.get_output_bytes(signal).await {
+            let mut result = bytes;
+            result.resize(num_bytes, 0);
+            return result;
+        }
+
+        // Fall back to u64-based output (truncated to low 8 bytes)
+        if let Some(val) = self.sim.get_output(signal).await {
+            let mut result = val.to_le_bytes().to_vec();
+            result.resize(num_bytes, 0);
+            return result;
+        }
+
+        vec![0u8; num_bytes]
     }
 
     /// Get an output value as a specific type
@@ -1142,7 +1210,7 @@ impl Testbench {
     /// let data: Vec<u8> = tb.get_as("large_output").await;
     /// ```
     pub async fn get_as<T: FromSignalValue>(&mut self, signal: &str) -> T {
-        if !self.pending_inputs.is_empty() {
+        if !self.pending_inputs.is_empty() || !self.pending_inputs_wide.is_empty() {
             self.step().await;
         }
 

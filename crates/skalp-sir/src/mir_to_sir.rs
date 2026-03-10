@@ -3500,8 +3500,18 @@ impl<'a> MirToSirConverter<'a> {
                         | BinaryOp::GreaterEqual
                 );
 
-                let operand_width = if is_comparison {
+                // Shift operations: operands should keep their natural widths.
+                // The result width is determined by the left operand, not the
+                // assignment target. Propagating target_width would truncate
+                // the shifted value (e.g., 64-bit << 45 stored in uint32_t).
+                let is_shift = matches!(
+                    op,
+                    BinaryOp::LeftShift | BinaryOp::RightShift
+                );
+
+                let operand_width = if is_comparison || is_shift {
                     // Comparisons: operands should use their own type widths, not the 1-bit result width
+                    // Shifts: operands should use their own type widths, not the target width
                     None
                 } else {
                     // Arithmetic: propagate target width so integer literals get correct width
