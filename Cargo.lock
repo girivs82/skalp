@@ -3324,6 +3324,7 @@ dependencies = [
  "rayon",
  "serde",
  "skalp-frontend",
+ "skalp-hir-codegen",
  "skalp-lir",
  "skalp-mir",
  "tempfile",
