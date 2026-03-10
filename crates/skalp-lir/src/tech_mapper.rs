@@ -7924,7 +7924,7 @@ mod tests {
             "Should have 3 Carry cells for 4-bit adder (bits 1-3)"
         );
 
-        // Count XOR cells (should have 7: 1 for first bit, 2 for each of bits 1-3)
+        // Count XOR cells (should have 1 for first bit half-adder)
         let xor_cells: Vec<_> = result
             .netlist
             .cells
@@ -7933,8 +7933,21 @@ mod tests {
             .collect();
         assert_eq!(
             xor_cells.len(),
-            7,
-            "Should have 7 XOR cells for 4-bit adder"
+            1,
+            "Should have 1 XOR cell for first bit half-adder"
+        );
+
+        // Count LUT4 cells for sum (bits 1-3 use single LUT4 with INIT=0x9696)
+        let sum_lut4_cells: Vec<_> = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type == "SB_LUT4" && c.lut_init == Some(0x9696))
+            .collect();
+        assert_eq!(
+            sum_lut4_cells.len(),
+            3,
+            "Should have 3 LUT4 sum cells for bits 1-3"
         );
 
         // Count AND cells (should have 1 for first bit carry)
@@ -7946,9 +7959,9 @@ mod tests {
             .collect();
         assert_eq!(and_cells.len(), 1, "Should have 1 AND cell for first bit");
 
-        // Core adder cells = 1 SB_GND + 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3) = 12
+        // Core adder cells = 1 SB_GND + 1 XOR + 1 AND (bit 0) + 3 * (1 LUT4 + 1 Carry) (bits 1-3) = 9
         // IO buffers = 8 SB_IO (4 inputs a + 4 inputs b) + 4 SB_IO (4 outputs sum) + 1 SB_VCC = 13
-        // Total = 25
+        // Total = 22
         let logic_cells = result
             .netlist
             .cells
@@ -7956,12 +7969,12 @@ mod tests {
             .filter(|c| c.cell_type != "SB_IO" && c.cell_type != "SB_VCC")
             .count();
         assert_eq!(
-            logic_cells, 12,
-            "Should have 12 logic cells for 4-bit ice40 adder"
+            logic_cells, 9,
+            "Should have 9 logic cells for 4-bit ice40 adder"
         );
         assert_eq!(
-            result.stats.cells_created, 25,
-            "Should have 25 cells total (12 logic + 12 SB_IO + 1 SB_VCC)"
+            result.stats.cells_created, 22,
+            "Should have 22 cells total (9 logic + 12 SB_IO + 1 SB_VCC)"
         );
     }
 }
