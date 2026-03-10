@@ -2919,52 +2919,17 @@ impl MirToLirTransform {
 
             // Comparison (result is 1 bit)
             BinaryOp::Equal => {
-                // Optimize x == 0 → NOT(RedOr(x))
+                // Optimize x == const → NOT(RedOr(XOR(x, const)))
+                // For const=0, XOR(x, 0) = x, so this reduces to NOT(RedOr(x))
                 let left_const = extract_constant_value(left);
                 let right_const = extract_constant_value(right);
-                if right_const == Some(0) {
+                if let Some(c) = right_const {
                     let left_sig = self.transform_expression(left, operand_width);
-                    let or_out = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("eq0_redor");
-                    self.lir.add_node(
-                        LirOp::RedOr {
-                            width: operand_width,
-                        },
-                        vec![left_sig],
-                        or_out,
-                        path,
-                    );
-                    let result = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("eq0_inv");
-                    self.lir.add_node(
-                        LirOp::Not { width: 1 },
-                        vec![or_out],
-                        result,
-                        path,
-                    );
-                    return result;
+                    return self.emit_const_equality(left_sig, c, operand_width, false);
                 }
-                if left_const == Some(0) {
+                if let Some(c) = left_const {
                     let right_sig = self.transform_expression(right, operand_width);
-                    let or_out = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("eq0_redor");
-                    self.lir.add_node(
-                        LirOp::RedOr {
-                            width: operand_width,
-                        },
-                        vec![right_sig],
-                        or_out,
-                        path,
-                    );
-                    let result = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("eq0_inv");
-                    self.lir.add_node(
-                        LirOp::Not { width: 1 },
-                        vec![or_out],
-                        result,
-                        path,
-                    );
-                    return result;
+                    return self.emit_const_equality(right_sig, c, operand_width, false);
                 }
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
@@ -2978,36 +2943,16 @@ impl MirToLirTransform {
                 )
             }
             BinaryOp::NotEqual => {
-                // Optimize x != 0 → RedOr(x)
+                // Optimize x != const → RedOr(XOR(x, const))
                 let left_const = extract_constant_value(left);
                 let right_const = extract_constant_value(right);
-                if right_const == Some(0) {
+                if let Some(c) = right_const {
                     let left_sig = self.transform_expression(left, operand_width);
-                    let result = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("ne0_redor");
-                    self.lir.add_node(
-                        LirOp::RedOr {
-                            width: operand_width,
-                        },
-                        vec![left_sig],
-                        result,
-                        path,
-                    );
-                    return result;
+                    return self.emit_const_equality(left_sig, c, operand_width, true);
                 }
-                if left_const == Some(0) {
+                if let Some(c) = left_const {
                     let right_sig = self.transform_expression(right, operand_width);
-                    let result = self.alloc_temp_signal(1);
-                    let path = self.unique_node_path("ne0_redor");
-                    self.lir.add_node(
-                        LirOp::RedOr {
-                            width: operand_width,
-                        },
-                        vec![right_sig],
-                        result,
-                        path,
-                    );
-                    return result;
+                    return self.emit_const_equality(right_sig, c, operand_width, true);
                 }
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
@@ -3654,6 +3599,60 @@ impl MirToLirTransform {
             path,
         );
         out
+    }
+
+    /// Emit optimized constant equality/inequality check.
+    ///
+    /// For `x == const`: NOT(RedOr(XOR(x, const)))
+    /// For `x != const`: RedOr(XOR(x, const))
+    ///
+    /// When const=0, XOR(x, 0) = x, so we skip the XOR entirely.
+    /// The AIG optimizer further folds XOR(bit, 1) = NOT(bit), XOR(bit, 0) = bit.
+    fn emit_const_equality(
+        &mut self,
+        signal: LirSignalId,
+        constant: u64,
+        width: u32,
+        is_not_equal: bool,
+    ) -> LirSignalId {
+        let xor_input = if constant == 0 {
+            // XOR(x, 0) = x — skip XOR
+            signal
+        } else {
+            let const_sig = self.create_constant_value(constant, width);
+            let xor_out = self.alloc_temp_signal(width);
+            let path = self.unique_node_path("eqc_xor");
+            self.lir.add_node(
+                LirOp::Xor { width },
+                vec![signal, const_sig],
+                xor_out,
+                path,
+            );
+            xor_out
+        };
+
+        let or_out = self.alloc_temp_signal(1);
+        let path = self.unique_node_path("eqc_redor");
+        self.lir.add_node(
+            LirOp::RedOr { width },
+            vec![xor_input],
+            or_out,
+            path,
+        );
+
+        if is_not_equal {
+            or_out
+        } else {
+            let result = self.alloc_temp_signal(1);
+            let path = self.unique_node_path("eqc_inv");
+            self.lir.add_node(
+                LirOp::Not { width: 1 },
+                vec![or_out],
+                result,
+                path,
+            );
+            result
+        }
     }
 
     /// Create a right-shift node
