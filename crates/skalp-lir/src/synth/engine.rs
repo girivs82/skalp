@@ -285,14 +285,22 @@ impl SynthEngine {
             self.run_timing_analysis(&aig);
         }
 
+        // Phase 3.5: DFF functional decomposition via cofactoring
+        // Extract enable/reset signals from latch data cones AFTER ABC optimization.
+        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+
         // Phase 4: Map to library cells using available primitives
         self.run_technology_mapping(&aig, library);
 
         // Phase 5: Convert back to GateNetlist using technology mapping results
         let writer = if let Some(ref mapping) = self.mapping_result {
-            AigWriter::with_mapping(library, mapping)
+            let mut w = AigWriter::with_mapping(library, mapping);
+            w.set_latch_decompositions(latch_decomps);
+            w
         } else {
-            AigWriter::new(library)
+            let mut w = AigWriter::new(library);
+            w.set_latch_decompositions(latch_decomps);
+            w
         };
         let mut optimized = writer.write(&aig);
 

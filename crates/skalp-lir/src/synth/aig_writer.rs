@@ -9,10 +9,11 @@ use crate::gate_netlist::{
 use crate::tech_library::{CellFunction, TechLibrary};
 
 use super::aig::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
+use super::dff_decompose::LatchDecomp;
 use super::mapping::{MappedNode, MappingResult};
 
 use indexmap::IndexMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Writer for converting AIG to GateNetlist
 pub struct AigWriter<'a> {
@@ -20,6 +21,8 @@ pub struct AigWriter<'a> {
     library: &'a TechLibrary,
     /// Optional mapping result for technology-mapped output
     mapping_result: Option<&'a MappingResult>,
+    /// Cofactor-based latch decompositions (enable/reset extraction)
+    latch_decomps: HashMap<AigNodeId, LatchDecomp>,
 }
 
 impl<'a> AigWriter<'a> {
@@ -28,6 +31,7 @@ impl<'a> AigWriter<'a> {
         Self {
             library,
             mapping_result: None,
+            latch_decomps: HashMap::new(),
         }
     }
 
@@ -39,7 +43,13 @@ impl<'a> AigWriter<'a> {
         Self {
             library,
             mapping_result: Some(mapping),
+            latch_decomps: HashMap::new(),
         }
+    }
+
+    /// Set latch decomposition results from cofactor analysis
+    pub fn set_latch_decompositions(&mut self, decomps: HashMap<AigNodeId, LatchDecomp>) {
+        self.latch_decomps = decomps;
     }
 
     /// Write AIG to gate netlist
@@ -51,7 +61,7 @@ impl<'a> AigWriter<'a> {
             node_to_net: IndexMap::new(),
             lit_to_net: IndexMap::new(),
             next_cell_id: 0,
-            sdffe_consumed_nodes: HashSet::new(),
+            latch_decomps: &self.latch_decomps,
         };
 
         // Phase 1: Create nets for inputs
@@ -62,9 +72,6 @@ impl<'a> AigWriter<'a> {
 
         // Phase 3: Pre-create latch output nets (needed for sequential circuits with feedback)
         state.pre_create_latch_nets(aig);
-
-        // Phase 3.5: Pre-scan latches for SDFFE patterns and mark consumed nodes
-        state.pre_scan_sdffe_patterns(aig);
 
         // Phase 4: Process nodes in topological order
         state.process_nodes(aig);
@@ -100,8 +107,8 @@ struct AigWriterState<'a> {
     /// Next cell ID
     next_cell_id: u32,
 
-    /// Nodes consumed by SDFFE patterns (don't emit cells for these)
-    sdffe_consumed_nodes: HashSet<AigNodeId>,
+    /// Cofactor-based latch decompositions
+    latch_decomps: &'a HashMap<AigNodeId, LatchDecomp>,
 }
 
 impl AigWriterState<'_> {
@@ -189,39 +196,6 @@ impl AigWriterState<'_> {
         }
     }
 
-    /// Pre-scan latches for SDFFE patterns and mark consumed nodes
-    ///
-    /// This must be called before process_nodes so that MUX nodes that are
-    /// absorbed into SDFFE cells are not emitted as separate cells.
-    fn pre_scan_sdffe_patterns(&mut self, aig: &Aig) {
-        for (id, node) in aig.iter_nodes() {
-            if let AigNode::Latch { data, .. } = node {
-                // Try to detect enable pattern
-                if let Some((_enable_lit, _new_data_lit)) =
-                    self.detect_enable_pattern(aig, *data, id)
-                {
-                    // Mark the MUX nodes as consumed
-                    // The MUX is: data = ~(~X & ~Y) where X and Y are the AND terms
-                    if data.inverted {
-                        // data.node is the outer AND
-                        self.sdffe_consumed_nodes.insert(data.node);
-
-                        // Get the two inner ANDs
-                        if let Some(AigNode::And { left, right }) = aig.get_node(data.node) {
-                            // Both X and Y are inverted inputs to the outer AND
-                            if left.inverted {
-                                self.sdffe_consumed_nodes.insert(left.node);
-                            }
-                            if right.inverted {
-                                self.sdffe_consumed_nodes.insert(right.node);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Process all nodes
     fn process_nodes(&mut self, aig: &Aig) {
         // Get nodes in topological order
@@ -296,19 +270,6 @@ impl AigWriterState<'_> {
 
     /// Process an AND node
     fn process_and_node(&mut self, aig: &Aig, id: AigNodeId, left: AigLit, right: AigLit) {
-        // Skip nodes consumed by SDFFE patterns - the MUX logic is absorbed into the FF
-        if self.sdffe_consumed_nodes.contains(&id) {
-            // Still need to create a net for this node in case it's referenced elsewhere
-            // (shouldn't happen for properly detected patterns, but be safe)
-            if let indexmap::map::Entry::Vacant(e) = self.node_to_net.entry(id) {
-                let output_net = self
-                    .netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
-                e.insert(output_net);
-            }
-            return;
-        }
-
         // Check if we have a technology-mapped cell for this node
         if let Some(mapping) = self.mapping_result {
             if let Some(mapped) = mapping.mapped_nodes.get(&id) {
@@ -494,9 +455,13 @@ impl AigWriterState<'_> {
             })
             .unwrap_or(CellSafetyClassification::Functional);
 
-        // Try to detect enable pattern: D = (enable & new_value) | (~enable & Q)
-        // If found, use SDFFE instead of DFFR to save combinational logic
-        if let Some((enable_lit, new_data_lit)) = self.detect_enable_pattern(aig, data, id) {
+        // Use cofactor-based decomposition for enable detection (functional, depth-independent)
+        let enable_pattern = self
+            .latch_decomps
+            .get(&id)
+            .and_then(|decomp| decomp.enable.map(|e| (e, decomp.data)));
+
+        if let Some((enable_lit, new_data_lit)) = enable_pattern {
             let enable_net = self.get_or_create_lit_net(aig, enable_lit);
             let new_data_net = self.get_or_create_lit_net(aig, new_data_lit);
 
@@ -899,109 +864,6 @@ impl AigWriterState<'_> {
         self.library
             .find_best_cell(&CellFunction::TieLow)
             .map(|cell| (cell.name.clone(), cell.fit))
-    }
-
-    /// Detect MUX-style enable pattern in latch data input
-    ///
-    /// Pattern: D = (enable & new_value) | (~enable & Q)
-    /// In AIG: D = NOT(AND(NOT(AND(enable, new_value)), NOT(AND(NOT(enable), Q))))
-    ///
-    /// Returns Some((enable_lit, data_lit)) if pattern is detected
-    fn detect_enable_pattern(
-        &self,
-        aig: &Aig,
-        data: AigLit,
-        latch_id: AigNodeId,
-    ) -> Option<(AigLit, AigLit)> {
-        // Pattern: D = NOT(AND(X, Y)) where D.inverted = true
-        if !data.inverted {
-            return None;
-        }
-
-        // Get the AND node for the inverted MUX output
-        let mux_and = match aig.get_node(data.node) {
-            Some(AigNode::And { left, right }) => (*left, *right),
-            _ => {
-                return None;
-            }
-        };
-
-        // Both inputs should be inverted (they are the NORed halves of the MUX)
-        // X = NOT(AND(enable, new_value))
-        // Y = NOT(AND(NOT(enable), Q))
-        if !mux_and.0.inverted || !mux_and.1.inverted {
-            return None;
-        }
-
-        // Try both orderings
-        for (x, y) in [(mux_and.0, mux_and.1), (mux_and.1, mux_and.0)] {
-            if let Some(result) = self.try_extract_enable_pattern(aig, x, y, latch_id) {
-                return Some(result);
-            }
-        }
-
-        None
-    }
-
-    /// Try to extract enable pattern from two AND nodes
-    /// x = NOT(AND(enable, new_value))
-    /// y = NOT(AND(NOT(enable), Q))
-    fn try_extract_enable_pattern(
-        &self,
-        aig: &Aig,
-        x: AigLit,
-        y: AigLit,
-        latch_id: AigNodeId,
-    ) -> Option<(AigLit, AigLit)> {
-        // x.node should be AND(enable, new_value)
-        let (x_left, x_right) = match aig.get_node(x.node) {
-            Some(AigNode::And { left, right }) => (*left, *right),
-            _ => {
-                return None;
-            }
-        };
-
-        // y.node should be AND(NOT(enable), Q)
-        let (y_left, y_right) = match aig.get_node(y.node) {
-            Some(AigNode::And { left, right }) => (*left, *right),
-            _ => {
-                return None;
-            }
-        };
-
-        // One of y's inputs should be the latch output (Q)
-        // The other should be the inverted enable
-        let (enable_inv, q_input) = if y_left.node == latch_id {
-            (y_right, y_left)
-        } else if y_right.node == latch_id {
-            (y_left, y_right)
-        } else {
-            return None;
-        };
-
-        // Q should not be inverted in the feedback path
-        if q_input.inverted {
-            return None;
-        }
-
-        // enable_inv should be inverted (it's ~enable in the pattern)
-        if !enable_inv.inverted {
-            return None;
-        }
-
-        let enable_node = enable_inv.node;
-
-        // Check if one of x's inputs matches the enable
-        let (potential_enable, new_value) = if x_left.node == enable_node && !x_left.inverted {
-            (x_left, x_right)
-        } else if x_right.node == enable_node && !x_right.inverted {
-            (x_right, x_left)
-        } else {
-            return None;
-        };
-
-        // Found the pattern!
-        Some((potential_enable, new_value))
     }
 
     /// Process a barrier node (power domain boundary)

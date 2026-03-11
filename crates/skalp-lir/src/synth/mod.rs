@@ -37,6 +37,7 @@ mod aig;
 mod aig_builder;
 mod aig_writer;
 pub mod cuts;
+pub mod dff_decompose;
 pub mod datapath;
 mod engine;
 pub mod liberty;
