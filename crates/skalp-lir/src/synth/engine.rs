@@ -520,7 +520,12 @@ impl SynthEngine {
         self.pass_results.clone()
     }
 
-    /// Run the optimization pass sequence
+    /// Run the optimization pass sequence with convergence detection.
+    ///
+    /// Terminates when:
+    /// - Exact convergence: and_count and max_level unchanged
+    /// - Epsilon convergence: < 1% improvement for 2 consecutive iterations
+    /// - Max iteration cap reached (10, regardless of preset)
     fn run_optimization_passes(&mut self, aig: &mut Aig) {
         // Skip optimization for trivial designs — not worth the pass overhead
         if aig.and_count() <= 2 {
@@ -528,9 +533,12 @@ impl SynthEngine {
         }
 
         let passes = self.get_pass_sequence();
+        let max_iters = self.config.max_iterations.max(10); // Raise cap; convergence does real termination
+        let mut consecutive_small_improvement = 0u32;
 
-        for iteration in 0..self.config.max_iterations {
+        for _iteration in 0..max_iters {
             let before = aig.compute_stats();
+            let before_and = before.and_count;
 
             for pass_name in &passes {
                 if let Some(result) = self.run_pass(aig, pass_name) {
@@ -540,9 +548,25 @@ impl SynthEngine {
 
             let after = aig.compute_stats();
 
-            // Check for convergence
+            // Exact convergence: nothing changed
             if before.and_count == after.and_count && before.max_level == after.max_level {
                 break;
+            }
+
+            // Epsilon convergence: < 1% improvement for 2 consecutive iterations
+            let improvement = if before_and > 0 {
+                (before_and as f64 - after.and_count as f64) / before_and as f64
+            } else {
+                0.0
+            };
+
+            if improvement.abs() < 0.01 {
+                consecutive_small_improvement += 1;
+                if consecutive_small_improvement >= 2 {
+                    break;
+                }
+            } else {
+                consecutive_small_improvement = 0;
             }
         }
     }
@@ -1177,14 +1201,21 @@ fn rebuild_adder_chain(
 
     // 5. Map temp net IDs → original net IDs
     //    I/O nets: use io_map. Internal nets: allocate new IDs.
+    // Compute actual max net ID across the entire partition to avoid collisions
     let max_orig_id = partition
         .physical_cells
         .iter()
-        .flat_map(|c| c.inputs.iter().chain(c.outputs.iter()))
+        .flat_map(|c| {
+            c.inputs
+                .iter()
+                .chain(c.outputs.iter())
+                .chain(c.clock.iter())
+                .chain(c.reset.iter())
+        })
         .map(|id| id.0)
         .max()
         .unwrap_or(0);
-    let mut next_id = max_orig_id + 1000; // offset to avoid collisions
+    let mut next_id = max_orig_id + 1;
     let mut temp_to_orig: HashMap<GateNetId, GateNetId> = HashMap::new();
 
     for net in &rebuilt.nets {

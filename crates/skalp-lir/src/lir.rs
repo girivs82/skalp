@@ -1101,6 +1101,18 @@ pub struct LirSignal {
     /// Set via #[detection_signal] attribute on port
     #[serde(default)]
     pub is_detection: bool,
+    /// NCL dual-rail annotation: set during NCL expansion instead of relying on suffix matching
+    #[serde(default)]
+    pub ncl_rail: Option<NclRail>,
+}
+
+/// NCL (Null Convention Logic) dual-rail designation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NclRail {
+    /// True rail (data = 1 represented by rail = 1)
+    True,
+    /// False rail (data = 0 represented by rail = 1)
+    False,
 }
 
 /// Low-level Intermediate Representation (word-level)
@@ -1166,6 +1178,7 @@ impl Lir {
             is_input: false,
             is_output: false,
             is_detection: false,
+            ncl_rail: None,
         });
         id
     }

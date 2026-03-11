@@ -594,6 +594,11 @@ impl Ice40Device {
             }
         }
 
+        // Create BEL pin wires for the synthetic device model
+        // Each LC gets dedicated input/output wires so multiple LCs in a tile
+        // don't contend for the same local routing wires
+        self.create_bel_pin_wires(&mut wire_id);
+
         // Create PIPs (interconnect)
         self.create_pips();
 
@@ -1039,6 +1044,110 @@ impl Ice40Device {
         self.tile_wires.insert((x, y), tile_wire_ids);
     }
 
+    /// Create BEL pin wires for the synthetic device model.
+    /// Maps iCE40 BEL pin names (e.g., "lutff_0/out", "lutff_0/in_0") to
+    /// dedicated wires, and adds PIPs connecting them to local routing wires.
+    /// This prevents multiple LCs from contending for the same routing wires.
+    fn create_bel_pin_wires(&mut self, wire_id: &mut u32) {
+        let (width, height) = self.grid_size;
+
+        for y in 0..height {
+            for x in 0..width {
+                let tile_wires = match self.tile_wires.get(&(x, y)) {
+                    Some(tw) => tw.clone(),
+                    None => continue,
+                };
+
+                // Check if this is a logic tile (has local wires)
+                let is_logic = tile_wires.iter().any(|&w| {
+                    matches!(self.wires.get(w.0 as usize).map(|w| &w.wire_type),
+                             Some(WireType::Local(_)))
+                });
+
+                if is_logic {
+                    // Create BEL pin wires for each of the 8 LCs
+                    for lc in 0..8u32 {
+                        // Output wire: "lutff_{lc}/out"
+                        let out_wire_id = WireId(*wire_id);
+                        let out_name = format!("lutff_{}/out", lc);
+                        let out_wire = Wire {
+                            id: out_wire_id,
+                            name: format!("{}_{}_{}", out_name, x, y),
+                            wire_type: WireType::Local(lc as u8),
+                            tile_x: x,
+                            tile_y: y,
+                            delay: 30, // BEL pin wire — fast
+                        };
+                        self.wire_names.insert(out_wire.name.clone(), out_wire.id);
+                        self.wires.push(out_wire);
+                        self.bel_wires.insert((x, y, out_name), out_wire_id);
+                        *wire_id += 1;
+
+                        // 4 input wires: "lutff_{lc}/in_{0..3}"
+                        for inp in 0..4u32 {
+                            let in_wire_id = WireId(*wire_id);
+                            let in_name = format!("lutff_{}/in_{}", lc, inp);
+                            let in_wire = Wire {
+                                id: in_wire_id,
+                                name: format!("{}_{}_{}", in_name, x, y),
+                                wire_type: WireType::Local(lc as u8),
+                                tile_x: x,
+                                tile_y: y,
+                                delay: 30,
+                            };
+                            self.wire_names.insert(in_wire.name.clone(), in_wire.id);
+                            self.wires.push(in_wire);
+                            self.bel_wires.insert((x, y, in_name), in_wire_id);
+                            *wire_id += 1;
+                        }
+                    }
+                }
+
+                // I/O tiles: create BEL pin wires for 2 IOBs
+                let is_io = tile_wires.iter().any(|&w| {
+                    matches!(self.wires.get(w.0 as usize).map(|w| &w.wire_type),
+                             Some(WireType::Global(_)))
+                }) && !is_logic;
+
+                if is_io {
+                    for iob in 0..2u32 {
+                        // D_IN_0: signal from pad into fabric
+                        let din_wire_id = WireId(*wire_id);
+                        let din_name = format!("io_{}/D_IN_0", iob);
+                        let din_wire = Wire {
+                            id: din_wire_id,
+                            name: format!("{}_{}_{}", din_name, x, y),
+                            wire_type: WireType::Local(iob as u8),
+                            tile_x: x,
+                            tile_y: y,
+                            delay: 50,
+                        };
+                        self.wire_names.insert(din_wire.name.clone(), din_wire.id);
+                        self.wires.push(din_wire);
+                        self.bel_wires.insert((x, y, din_name), din_wire_id);
+                        *wire_id += 1;
+
+                        // D_OUT_0: signal from fabric to pad
+                        let dout_wire_id = WireId(*wire_id);
+                        let dout_name = format!("io_{}/D_OUT_0", iob);
+                        let dout_wire = Wire {
+                            id: dout_wire_id,
+                            name: format!("{}_{}_{}", dout_name, x, y),
+                            wire_type: WireType::Local(iob as u8),
+                            tile_x: x,
+                            tile_y: y,
+                            delay: 50,
+                        };
+                        self.wire_names.insert(dout_wire.name.clone(), dout_wire.id);
+                        self.wires.push(dout_wire);
+                        self.bel_wires.insert((x, y, dout_name), dout_wire_id);
+                        *wire_id += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// Create PIPs (Programmable Interconnect Points)
     fn create_pips(&mut self) {
         let mut pip_id = 0u32;
@@ -1052,6 +1161,154 @@ impl Ice40Device {
 
                     // Create PIPs to adjacent tiles
                     self.create_neighbor_pips(x, y, &tile_wires, &mut pip_id);
+                }
+            }
+        }
+
+        // Create PIPs between BEL pin wires and local routing wires
+        self.create_bel_pin_pips(&mut pip_id);
+    }
+
+    /// Create PIPs connecting BEL pin wires to/from local routing wires.
+    /// - BEL output → local wire (LC output drives into routing fabric)
+    /// - Local wire → BEL input (routing fabric drives LC input)
+    /// - BEL output → BEL input in same LC (direct LC internal path, no routing)
+    fn create_bel_pin_pips(&mut self, pip_id: &mut u32) {
+        let (width, height) = self.grid_size;
+
+        for y in 0..height {
+            for x in 0..width {
+                let tile_wires = match self.tile_wires.get(&(x, y)) {
+                    Some(tw) => tw.clone(),
+                    None => continue,
+                };
+
+                // Get local routing wires for this tile
+                let local_wires: Vec<_> = tile_wires
+                    .iter()
+                    .filter(|&&w| {
+                        matches!(
+                            self.wires.get(w.0 as usize).map(|w| &w.wire_type),
+                            Some(WireType::Local(_))
+                        )
+                    })
+                    .copied()
+                    .collect();
+
+                if local_wires.is_empty() {
+                    continue;
+                }
+
+                // Logic tile: connect LC BEL pins to local routing
+                for lc in 0..8u32 {
+                    let out_name = format!("lutff_{}/out", lc);
+                    let out_wire = self.bel_wires.get(&(x, y, out_name)).copied();
+
+                    if let Some(out_w) = out_wire {
+                        // BEL output → each local routing wire
+                        for &local in &local_wires {
+                            let pip = Pip {
+                                id: PipId(*pip_id),
+                                src_wire: out_w,
+                                dst_wire: local,
+                                delay: 30,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(local).or_default().push(pip.id);
+                            self.wire_src_pips.entry(out_w).or_default().push(pip.id);
+                            self.pips.push(pip);
+                            *pip_id += 1;
+                        }
+                    }
+
+                    for inp in 0..4u32 {
+                        let in_name = format!("lutff_{}/in_{}", lc, inp);
+                        let in_wire = self.bel_wires.get(&(x, y, in_name)).copied();
+
+                        if let Some(in_w) = in_wire {
+                            // Each local routing wire → BEL input
+                            for &local in &local_wires {
+                                let pip = Pip {
+                                    id: PipId(*pip_id),
+                                    src_wire: local,
+                                    dst_wire: in_w,
+                                    delay: 30,
+                                    configurable: true,
+                                    tile_x: x,
+                                    tile_y: y,
+                                };
+                                self.wire_to_pips.entry(in_w).or_default().push(pip.id);
+                                self.wire_src_pips.entry(local).or_default().push(pip.id);
+                                self.pips.push(pip);
+                                *pip_id += 1;
+                            }
+                        }
+                    }
+
+                    // Direct intra-LC connection: output → input 0 (LUT→DFF path)
+                    if let Some(out_w) = out_wire {
+                        let in0_name = format!("lutff_{}/in_0", lc);
+                        if let Some(in0_w) = self.bel_wires.get(&(x, y, in0_name)).copied() {
+                            let pip = Pip {
+                                id: PipId(*pip_id),
+                                src_wire: out_w,
+                                dst_wire: in0_w,
+                                delay: 10, // Very fast: direct LC internal path
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(in0_w).or_default().push(pip.id);
+                            self.wire_src_pips.entry(out_w).or_default().push(pip.id);
+                            self.pips.push(pip);
+                            *pip_id += 1;
+                        }
+                    }
+                }
+
+                // I/O tile: connect IOB BEL pins to local routing
+                for iob in 0..2u32 {
+                    // D_IN_0 (pad → fabric): BEL output → local routing
+                    let din_name = format!("io_{}/D_IN_0", iob);
+                    if let Some(din_w) = self.bel_wires.get(&(x, y, din_name)).copied() {
+                        for &local in &local_wires {
+                            let pip = Pip {
+                                id: PipId(*pip_id),
+                                src_wire: din_w,
+                                dst_wire: local,
+                                delay: 50,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(local).or_default().push(pip.id);
+                            self.wire_src_pips.entry(din_w).or_default().push(pip.id);
+                            self.pips.push(pip);
+                            *pip_id += 1;
+                        }
+                    }
+
+                    // D_OUT_0 (fabric → pad): local routing → BEL input
+                    let dout_name = format!("io_{}/D_OUT_0", iob);
+                    if let Some(dout_w) = self.bel_wires.get(&(x, y, dout_name)).copied() {
+                        for &local in &local_wires {
+                            let pip = Pip {
+                                id: PipId(*pip_id),
+                                src_wire: local,
+                                dst_wire: dout_w,
+                                delay: 50,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(dout_w).or_default().push(pip.id);
+                            self.wire_src_pips.entry(local).or_default().push(pip.id);
+                            self.pips.push(pip);
+                            *pip_id += 1;
+                        }
+                    }
                 }
             }
         }

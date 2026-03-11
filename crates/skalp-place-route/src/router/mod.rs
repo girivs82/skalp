@@ -55,6 +55,9 @@ pub struct RouterConfig {
     pub present_congestion_factor: f64,
     /// Timing weight for timing-driven routing
     pub timing_weight: f64,
+    /// Strict congestion check: require congestion <= 1.0 for success
+    /// When false, accepts congestion <= 4.0 (for development/debugging)
+    pub strict_congestion: bool,
 }
 
 impl Default for RouterConfig {
@@ -67,27 +70,29 @@ impl Default for RouterConfig {
             history_cost_factor: 1.0,
             present_congestion_factor: 1.5,
             timing_weight: 0.3,
+            strict_congestion: true,
         }
     }
 }
 
 impl RouterConfig {
-    /// Create a configuration scaled to the design size.
+    /// Create a configuration with convergence-based termination.
     ///
-    /// Small designs converge quickly and don't need 100 iterations.
-    /// Scaling down avoids wasting time on unused PathFinder iterations.
-    pub fn for_design_size(net_count: usize) -> Self {
-        let max_iterations = if net_count <= 50 {
-            15
-        } else if net_count <= 200 {
-            30
-        } else if net_count <= 1000 {
-            50
-        } else {
-            100
-        };
+    /// Sets a generous cap of 200 iterations; actual termination is handled by
+    /// convergence detection in PathFinder (stops when congestion ≤ 1.0 or
+    /// < 5% improvement for 5 consecutive iterations).
+    pub fn for_design_size(_net_count: usize) -> Self {
         Self {
-            max_iterations,
+            max_iterations: 200,
+            ..Default::default()
+        }
+    }
+
+    /// Create a relaxed configuration for development/debugging
+    /// Accepts higher congestion levels as "success"
+    pub fn relaxed() -> Self {
+        Self {
+            strict_congestion: false,
             ..Default::default()
         }
     }
@@ -278,7 +283,12 @@ impl<D: Device + Clone> Router<D> {
 
         result.congestion = pathfinder_result.congestion;
         result.iterations = pathfinder_result.iterations;
-        result.success = pathfinder_result.success;
+        // In strict mode, require congestion <= 1.0; in relaxed mode, accept <= 4.0
+        if self.config.strict_congestion {
+            result.success = pathfinder_result.success;
+        } else {
+            result.success = result.congestion <= 4.0;
+        }
 
         Ok(result)
     }

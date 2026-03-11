@@ -6,6 +6,7 @@
 
 use crate::gate_netlist::{CellId, CellSafetyClassification, GateNetId};
 use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Type of optimization barrier (power domain boundary cells)
 ///
@@ -311,6 +312,12 @@ pub struct Aig {
     ///
     /// Each alternative is stored as an AigLit to handle potential inversions.
     choices: IndexMap<AigNodeId, Vec<AigLit>>,
+
+    /// Input node IDs that are clock signals
+    pub clock_inputs: HashSet<AigNodeId>,
+
+    /// Input node IDs that are reset signals
+    pub reset_inputs: HashSet<AigNodeId>,
 }
 
 impl Aig {
@@ -324,6 +331,8 @@ impl Aig {
             net_to_lit: IndexMap::new(),
             strash_map: IndexMap::new(),
             choices: IndexMap::new(),
+            clock_inputs: HashSet::new(),
+            reset_inputs: HashSet::new(),
         };
 
         // Node 0 is always constant false
@@ -429,6 +438,43 @@ impl Aig {
         self.nodes.push(AigNode::Input { name, source_net });
         self.safety_info.push(safety);
         id
+    }
+
+    /// Copy clock/reset input metadata from an old AIG, remapping node IDs.
+    /// Call this after copying inputs from old_aig to preserve clock/reset flags.
+    pub fn copy_clock_reset_metadata(
+        &mut self,
+        old_aig: &Aig,
+        node_map: &indexmap::IndexMap<AigNodeId, AigLit>,
+    ) {
+        for &old_id in &old_aig.clock_inputs {
+            if let Some(lit) = node_map.get(&old_id) {
+                self.clock_inputs.insert(lit.node);
+            }
+        }
+        for &old_id in &old_aig.reset_inputs {
+            if let Some(lit) = node_map.get(&old_id) {
+                self.reset_inputs.insert(lit.node);
+            }
+        }
+    }
+
+    /// Copy clock/reset input metadata using a HashMap mapping.
+    pub fn copy_clock_reset_metadata_hashmap(
+        &mut self,
+        old_aig: &Aig,
+        node_map: &std::collections::HashMap<AigNodeId, AigLit>,
+    ) {
+        for &old_id in &old_aig.clock_inputs {
+            if let Some(lit) = node_map.get(&old_id) {
+                self.clock_inputs.insert(lit.node);
+            }
+        }
+        for &old_id in &old_aig.reset_inputs {
+            if let Some(lit) = node_map.get(&old_id) {
+                self.reset_inputs.insert(lit.node);
+            }
+        }
     }
 
     /// Add an AND gate with structural hashing

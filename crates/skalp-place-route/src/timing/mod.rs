@@ -455,6 +455,123 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
     }
 }
 
+/// Per-net slack information for timing-driven routing
+#[derive(Debug, Clone)]
+pub struct NetSlack {
+    /// Net ID
+    pub net_id: GateNetId,
+    /// Worst slack on any path through this net (ns, negative = violation)
+    pub slack: f64,
+    /// Criticality score: max(0, 1 - slack/target_period)
+    pub criticality: f64,
+}
+
+impl<D: Device + Clone> TimingAnalyzer<D> {
+    /// Pre-routing STA using estimated wire delays from placement distances.
+    ///
+    /// Returns per-net slack/criticality for timing-driven routing.
+    /// Wire delay is estimated using `delay_model.estimated_path_delay(manhattan_distance)`.
+    pub fn pre_routing_sta(
+        &self,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+    ) -> Vec<NetSlack> {
+        let target_period = 1000.0 / self.config.target_frequency; // ns
+
+        // Build a synthetic RoutingResult with estimated delays
+        let mut synthetic_routing = super::router::RoutingResult::new();
+        for net in &netlist.nets {
+            if net.driver.is_none() || net.fanout.is_empty() {
+                continue;
+            }
+
+            let mut route = super::router::Route::new(net.id);
+
+            // Estimate delay from placement distance
+            if let Some(driver_id) = net.driver {
+                if let Some(src_loc) = placement.get(driver_id) {
+                    let mut max_dist = 0u32;
+                    for (sink_id, _) in &net.fanout {
+                        if let Some(sink_loc) = placement.get(*sink_id) {
+                            let dist = src_loc.tile_x.abs_diff(sink_loc.tile_x)
+                                + src_loc.tile_y.abs_diff(sink_loc.tile_y);
+                            max_dist = max_dist.max(dist);
+                        }
+                    }
+                    let delay_ns = self.delay_model.estimated_path_delay(max_dist);
+                    route.delay = (delay_ns * 1000.0) as u32; // ns to ps
+                }
+            }
+
+            synthetic_routing.routes.insert(net.id, route);
+        }
+
+        // Run full STA with synthetic routing
+        let clock_domains = self.find_clock_domains(netlist);
+
+        // Compute per-net slack by tracing paths
+        let mut net_slacks = Vec::new();
+        let mut net_worst_slack: HashMap<GateNetId, f64> = HashMap::new();
+
+        for registers in clock_domains.values() {
+            for &reg_id in registers {
+                let cell = match netlist.get_cell(reg_id) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                for &input_net in &cell.inputs {
+                    let mut visited = HashSet::new();
+                    let delay = self.trace_path_delay(
+                        input_net,
+                        netlist,
+                        placement,
+                        &synthetic_routing,
+                        &mut visited,
+                    );
+                    let slack = target_period - delay - self.config.setup_margin;
+
+                    // Attribute slack to all nets on this path
+                    for &visited_net in &visited {
+                        let entry = net_worst_slack.entry(visited_net).or_insert(f64::MAX);
+                        *entry = entry.min(slack);
+                    }
+                }
+            }
+        }
+
+        // Also handle combinational paths (PI → PO)
+        for net in &netlist.nets {
+            if net.is_output {
+                let mut visited = HashSet::new();
+                let delay = self.trace_path_delay(
+                    net.id,
+                    netlist,
+                    placement,
+                    &synthetic_routing,
+                    &mut visited,
+                );
+                let slack = target_period - delay - self.config.setup_margin;
+                for &visited_net in &visited {
+                    let entry = net_worst_slack.entry(visited_net).or_insert(f64::MAX);
+                    *entry = entry.min(slack);
+                }
+            }
+        }
+
+        for (net_id, slack) in net_worst_slack {
+            let criticality = (1.0 - slack / target_period).clamp(0.0, 1.0);
+            net_slacks.push(NetSlack {
+                net_id,
+                slack,
+                criticality,
+            });
+        }
+
+        net_slacks
+    }
+}
+
 /// Timing-driven placer wrapper
 pub struct TimingDrivenPlacer<D: Device> {
     /// Underlying placer config

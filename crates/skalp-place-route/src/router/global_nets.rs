@@ -8,6 +8,7 @@ use super::Route;
 use crate::device::{Device, WireId, WireType};
 use crate::error::Result;
 use crate::placer::PlacementResult;
+use crate::timing::DelayModel;
 use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
 
 /// Tracks which global networks are in use
@@ -59,6 +60,7 @@ impl GlobalNetworkAllocator {
 pub struct GlobalNetRouter<'a, D: Device> {
     device: &'a D,
     allocator: GlobalNetworkAllocator,
+    delay_model: DelayModel,
 }
 
 impl<'a, D: Device> GlobalNetRouter<'a, D> {
@@ -67,6 +69,16 @@ impl<'a, D: Device> GlobalNetRouter<'a, D> {
         Self {
             device,
             allocator: GlobalNetworkAllocator::new(),
+            delay_model: DelayModel::ice40_default(),
+        }
+    }
+
+    /// Create a new global net router with a specific delay model
+    pub fn with_delay_model(device: &'a D, delay_model: DelayModel) -> Self {
+        Self {
+            device,
+            allocator: GlobalNetworkAllocator::new(),
+            delay_model,
         }
     }
 
@@ -137,7 +149,8 @@ impl<'a, D: Device> GlobalNetRouter<'a, D> {
         }
 
         // Global clock routes have minimal delay due to dedicated routing
-        route.delay = 50; // ~50ps for global network
+        // Use delay model's global_clock_delay (in ns) converted to ps
+        route.delay = (self.delay_model.global_clock_delay * 1000.0) as u32;
 
         Ok(route)
     }

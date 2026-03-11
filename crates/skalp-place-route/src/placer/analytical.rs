@@ -16,12 +16,17 @@ use std::collections::HashMap;
 /// Analytical placer using quadratic wirelength minimization
 pub struct AnalyticalPlacer<'a, D: Device> {
     device: &'a D,
+    /// Resolved I/O constraints: signal_name → (tile_x, tile_y, bel_idx)
+    resolved_io_constraints: HashMap<String, (u32, u32, usize)>,
 }
 
 impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     /// Create a new analytical placer
     pub fn new(device: &'a D) -> Self {
-        Self { device }
+        Self {
+            device,
+            resolved_io_constraints: HashMap::new(),
+        }
     }
 
     /// Perform analytical placement with carry chain column constraints
@@ -69,6 +74,16 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
 
         let (x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
         self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
+    }
+
+    /// Set resolved I/O constraints (signal_name → tile location).
+    /// When set, constrained I/Os use physical pin locations as anchors.
+    pub fn with_resolved_constraints(
+        mut self,
+        constraints: HashMap<String, (u32, u32, usize)>,
+    ) -> Self {
+        self.resolved_io_constraints = constraints;
+        self
     }
 
     /// Solve for continuous x, y positions via Laplacian + conjugate gradient
@@ -120,7 +135,9 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         }
 
         // Add anchor points for I/O cells
+        // Use center positions as initial estimates for connectivity-driven placement
         let (width, height) = self.device.grid_size();
+        let initial_positions: Vec<(f64, f64)> = vec![(width as f64 / 2.0, height as f64 / 2.0); n];
         for cell in &netlist.cells {
             let idx = cell_indices[&cell.id];
 
@@ -128,7 +145,22 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 let anchor_weight = 100.0;
                 laplacian[idx][idx] += anchor_weight;
 
-                let (ax, ay) = self.get_io_anchor(&cell.path, width, height);
+                // Use resolved physical pin location if available from constraints
+                let signal_name = cell.path.split('.').next_back().unwrap_or(&cell.path);
+                let signal_name = signal_name
+                    .strip_suffix("_ibuf")
+                    .or_else(|| signal_name.strip_suffix("_obuf"))
+                    .unwrap_or(signal_name);
+
+                let (ax, ay) = if let Some(&(tx, ty, _bel)) =
+                    self.resolved_io_constraints.get(signal_name)
+                {
+                    (tx as f64, ty as f64)
+                } else {
+                    self.get_io_anchor(
+                        cell.id, netlist, &initial_positions, cell_indices, width, height,
+                    )
+                };
                 bx[idx] += anchor_weight * ax;
                 by[idx] += anchor_weight * ay;
             } else {
@@ -284,30 +316,111 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         Ok(x)
     }
 
-    /// Get I/O anchor position based on port name
-    fn get_io_anchor(&self, path: &str, width: u32, height: u32) -> (f64, f64) {
-        // Try to infer position from name
-        let path_lower = path.to_lowercase();
-
-        if path_lower.contains("clk") || path_lower.contains("clock") {
-            // Clocks typically at bottom
-            return (width as f64 / 2.0, 0.5);
+    /// Get I/O anchor position based on connectivity to internal cells.
+    ///
+    /// Strategy:
+    /// 1. For clock/reset nets, place at bottom center (global buffer locations)
+    /// 2. For other I/Os, find connected internal cells and compute their center of gravity,
+    ///    then project to the nearest perimeter position.
+    /// 3. Fall back to even distribution around perimeter for unconnected I/Os.
+    fn get_io_anchor(
+        &self,
+        cell_id: CellId,
+        netlist: &GateNetlist,
+        cell_positions: &[(f64, f64)],
+        cell_indices: &HashMap<CellId, usize>,
+        width: u32,
+        height: u32,
+    ) -> (f64, f64) {
+        // Check if this I/O drives or sinks a clock/reset net
+        for net in &netlist.nets {
+            let connected = net.driver == Some(cell_id)
+                || net.fanout.iter().any(|(id, _)| *id == cell_id);
+            if connected && net.is_clock {
+                return (width as f64 / 2.0, 0.5);
+            }
+            if connected && net.is_reset {
+                return (width as f64 / 2.0 + 1.0, 0.5);
+            }
         }
 
-        if path_lower.contains("rst") || path_lower.contains("reset") {
-            // Resets typically at bottom
-            return (width as f64 / 2.0 + 1.0, 0.5);
+        // Find center of gravity of connected internal cells
+        let mut cx = 0.0f64;
+        let mut cy = 0.0f64;
+        let mut count = 0u32;
+
+        for net in &netlist.nets {
+            let io_connected = net.driver == Some(cell_id)
+                || net.fanout.iter().any(|(id, _)| *id == cell_id);
+            if !io_connected {
+                continue;
+            }
+
+            // Collect positions of all connected cells (excluding self)
+            if let Some(driver) = net.driver {
+                if driver != cell_id {
+                    if let Some(&idx) = cell_indices.get(&driver) {
+                        cx += cell_positions[idx].0;
+                        cy += cell_positions[idx].1;
+                        count += 1;
+                    }
+                }
+            }
+            for (sink_id, _) in &net.fanout {
+                if *sink_id != cell_id {
+                    if let Some(&idx) = cell_indices.get(sink_id) {
+                        cx += cell_positions[idx].0;
+                        cy += cell_positions[idx].1;
+                        count += 1;
+                    }
+                }
+            }
         }
 
-        // Default: distribute around perimeter
-        let hash = path.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));
-        let side = hash % 4;
+        if count > 0 {
+            cx /= count as f64;
+            cy /= count as f64;
 
-        match side {
-            0 => (0.5, (hash % height as u64) as f64), // Left
-            1 => ((width - 1) as f64 - 0.5, (hash % height as u64) as f64), // Right
-            2 => ((hash % width as u64) as f64, 0.5),  // Bottom
-            _ => ((hash % width as u64) as f64, (height - 1) as f64 - 0.5), // Top
+            // Project center of gravity to nearest perimeter position
+            let w = width as f64;
+            let h = height as f64;
+
+            // Distance to each edge
+            let d_left = cx;
+            let d_right = w - 1.0 - cx;
+            let d_bottom = cy;
+            let d_top = h - 1.0 - cy;
+            let min_d = d_left.min(d_right).min(d_bottom).min(d_top);
+
+            if min_d == d_left {
+                (0.5, cy.clamp(0.5, h - 1.5))
+            } else if min_d == d_right {
+                (w - 1.5, cy.clamp(0.5, h - 1.5))
+            } else if min_d == d_bottom {
+                (cx.clamp(0.5, w - 1.5), 0.5)
+            } else {
+                (cx.clamp(0.5, w - 1.5), h - 1.5)
+            }
+        } else {
+            // No connected internal cells — distribute evenly around perimeter
+            let path = &netlist.cells.iter().find(|c| c.id == cell_id)
+                .map(|c| c.path.as_str())
+                .unwrap_or("");
+            let hash = path.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));
+            let perimeter = 2 * (width + height) as u64;
+            let pos = hash % perimeter;
+            let w = width as u64;
+            let h = height as u64;
+
+            if pos < w {
+                (pos as f64, 0.5) // Bottom
+            } else if pos < w + h {
+                ((width - 1) as f64 - 0.5, (pos - w) as f64) // Right
+            } else if pos < 2 * w + h {
+                ((2 * w + h - pos) as f64, (height - 1) as f64 - 0.5) // Top
+            } else {
+                (0.5, (2 * w + 2 * h - pos) as f64) // Left
+            }
         }
     }
 

@@ -124,12 +124,14 @@ impl<'a> AigBuilder<'a> {
             self.net_map[net_id.0 as usize] = Some(lit);
             self.aig.register_net(net_id, lit);
 
-            // Track clock and reset inputs
+            // Track clock and reset inputs (both in builder and in AIG)
             if net.is_clock {
                 self.clock_nodes.push(aig_id);
+                self.aig.clock_inputs.insert(aig_id);
             }
             if net.is_reset {
                 self.reset_nodes.push(aig_id);
+                self.aig.reset_inputs.insert(aig_id);
             }
         }
     }
@@ -223,11 +225,18 @@ impl<'a> AigBuilder<'a> {
             .map(|&net_id| self.get_or_create_net_lit(net_id))
             .collect();
 
-        // Use cell's function field if available, otherwise parse from cell type name
-        let function = cell
-            .function
-            .clone()
-            .unwrap_or_else(|| self.parse_cell_function(&cell.cell_type));
+        // Use cell's function field if available, otherwise parse from cell type name.
+        // Name-based fallback is kept for external netlist compatibility.
+        let function = cell.function.clone().unwrap_or_else(|| {
+            let parsed = self.parse_cell_function(&cell.cell_type);
+            if !matches!(parsed, CellFunction::Custom(_)) {
+                eprintln!(
+                    "warning: cell '{}' type '{}' has no function field; inferred {:?} from name",
+                    cell.path, cell.cell_type, parsed
+                );
+            }
+            parsed
+        });
 
         // Build AIG for this cell
         let safety =
@@ -846,12 +855,21 @@ impl<'a> AigBuilder<'a> {
         }
 
         // Fallback: name-based detection for nets without driver info
+        // This fires for external netlists that lack tie cell drivers — emit a warning
         if net.name.contains("const_0") || net.name.contains("gnd") || net.name.contains("vss") {
+            eprintln!(
+                "warning: constant-low net '{}' detected by name only (no TieLow driver cell)",
+                net.name
+            );
             let lit = AigLit::false_lit();
             self.net_map[net_id.0 as usize] = Some(lit);
             return lit;
         }
         if net.name.contains("const_1") || net.name.contains("vdd") || net.name.contains("vcc") {
+            eprintln!(
+                "warning: constant-high net '{}' detected by name only (no TieHigh driver cell)",
+                net.name
+            );
             let lit = AigLit::true_lit();
             self.net_map[net_id.0 as usize] = Some(lit);
             return lit;

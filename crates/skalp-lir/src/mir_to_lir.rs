@@ -200,7 +200,12 @@ impl MirToLirTransform {
         self.target_has_bram = has_bram;
     }
 
-    /// Determine whether a memory signal should use BRAM inference
+    /// Determine whether a memory signal should use BRAM inference.
+    ///
+    /// Uses a cost model comparison instead of magic thresholds:
+    /// - FF cost = total_bits (1 LUT per FF bit for distributed RAM)
+    /// - BRAM cost = ceil(total_bits / bram_tile_size) * bram_lut_equiv + addr_decode
+    /// Chooses whichever is cheaper.
     fn should_use_bram(
         config: &skalp_frontend::hir::MemoryConfig,
         element_width: u32,
@@ -214,11 +219,21 @@ impl MirToLirTransform {
                     return false;
                 }
                 let total_bits = element_width as usize * config.depth as usize;
-                // Heuristic: use BRAM for memories >= 128 bits with depth >= 4,
-                // or any memory > 256 bits regardless of depth.
-                // This covers common register files (e.g., 8×32 = 256 bits, depth 8)
-                // while avoiding BRAM for tiny arrays (e.g., 2×8 = 16 bits).
-                (total_bits >= 128 && config.depth >= 4) || total_bits > 256
+                let addr_bits = Self::clog2(config.depth) as usize;
+
+                // Cost model: FF-based distributed RAM
+                // Each bit needs 1 LUT (as DFF), plus address decode MUX tree
+                let ff_cost = total_bits + addr_bits * element_width as usize;
+
+                // Cost model: BRAM-based
+                // iCE40 EBR: 4096 bits per tile, ~8 LUT equivalent overhead
+                let bram_tile_bits: usize = 4096;
+                let bram_lut_equiv: usize = 8;
+                let bram_tiles = (total_bits + bram_tile_bits - 1) / bram_tile_bits;
+                // Address decode for BRAM is minimal (built into BRAM primitive)
+                let bram_cost = bram_tiles * bram_lut_equiv;
+
+                bram_cost < ff_cost
             }
         }
     }

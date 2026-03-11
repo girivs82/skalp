@@ -151,6 +151,7 @@ impl NclExpander {
             is_input: false,
             is_output: false,
             is_detection: false,
+            ncl_rail: None,
         });
         id
     }
@@ -2985,6 +2986,7 @@ mod tests {
             is_input: true,
             is_output: false,
             is_detection: false,
+            ncl_rail: None,
         };
 
         let pair = expander.create_dual_rail(&original);

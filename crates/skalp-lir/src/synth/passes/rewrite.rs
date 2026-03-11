@@ -467,6 +467,9 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
             input_ids.push(id);
         }
     }
+    // Propagate clock/reset input metadata to new AIG
+    new_aig.copy_clock_reset_metadata(aig, &node_map);
+
     // Pre-create latch/barrier outputs as placeholders in node_map
     // This allows AND nodes to resolve references to latch outputs during phase 1
     // The latch data inputs will be properly connected in phase 2

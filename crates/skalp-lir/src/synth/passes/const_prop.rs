@@ -175,6 +175,9 @@ impl Pass for ConstProp {
             }
         }
 
+        // Propagate clock/reset input metadata to new AIG
+        new_aig.copy_clock_reset_metadata(aig, &self.replacements);
+
         // Copy outputs with resolved literals
         for (name, lit) in aig.outputs() {
             let resolved = self.resolve(*lit);

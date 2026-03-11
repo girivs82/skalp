@@ -147,7 +147,40 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let mut best = current.clone();
         let mut best_cost = current_cost;
 
-        let mut temperature = self.initial_temp;
+        // VPR-style initial temperature calibration:
+        // Perform random moves and set T so that ~95% are accepted.
+        let mut temperature = {
+            let mut delta_sum = 0.0f64;
+            let mut delta_count = 0u32;
+            let mut cal_rng = rand::rngs::StdRng::seed_from_u64(12345);
+            let cal_cells: Vec<CellId> = current.placements.keys().copied().collect();
+            let cal_loc_map: HashMap<(u32, u32, usize), CellId> = current
+                .placements
+                .iter()
+                .map(|(&cid, loc)| ((loc.tile_x, loc.tile_y, loc.bel_index), cid))
+                .collect();
+
+            for _ in 0..100.min(cal_cells.len() * 2) {
+                let move_op = self.generate_move(&current, &cal_cells, &mut cal_rng);
+                let (new_pl, _) = self.apply_move(&current, &cal_loc_map, &move_op);
+                let new_cost =
+                    self.calculate_combined_cost(&new_pl, netlist, &net_criticalities);
+                let delta = (new_cost - current_cost).abs();
+                if delta > 0.0 {
+                    delta_sum += delta;
+                    delta_count += 1;
+                }
+            }
+
+            if delta_count > 0 {
+                let avg_delta = delta_sum / delta_count as f64;
+                // T = -avg_delta / ln(acceptance_rate)
+                // For 95% acceptance: ln(0.95) ≈ -0.0513
+                avg_delta / 0.0513
+            } else {
+                self.initial_temp
+            }
+        };
 
         // Build reverse mapping: location -> cell_id
         let mut location_to_cell: HashMap<(u32, u32, usize), CellId> = HashMap::new();
@@ -162,6 +195,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
 
         for _iteration in 0..effective_iterations {
+            // Track acceptance rate for convergence detection
+            let mut accepted_moves = 0u32;
+            let mut total_moves = 0u32;
+
             // Perform several moves at each temperature
             for _ in 0..moves_per_temp {
                 // Generate a random move (biased toward critical cells in timing mode)
@@ -192,7 +229,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     rng.gen::<f64>() < probability
                 };
 
+                total_moves += 1;
                 if accept {
+                    accepted_moves += 1;
                     current = new_placement;
                     location_to_cell = new_loc_map;
                     current_cost = new_cost;
@@ -207,8 +246,14 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             // Cool down
             temperature *= self.cooling_rate;
 
-            // Early termination if temperature is too low
-            if temperature < 0.01 {
+            // Early termination based on acceptance rate
+            // When acceptance rate drops below 0.1%, the solution has frozen
+            let acceptance_rate = if total_moves > 0 {
+                accepted_moves as f64 / total_moves as f64
+            } else {
+                0.0
+            };
+            if acceptance_rate < 0.001 {
                 break;
             }
         }

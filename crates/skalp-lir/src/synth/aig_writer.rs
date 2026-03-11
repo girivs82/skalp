@@ -116,9 +116,31 @@ impl AigWriterState<'_> {
     fn create_input_nets(&mut self, aig: &Aig) {
         for (id, node) in aig.iter_nodes() {
             if let AigNode::Input { name, source_net } = node {
-                // Check if this is a special input (clock, reset)
-                let is_clock = name.contains("clk") || name.contains("clock");
-                let is_reset = name.contains("rst") || name.contains("reset");
+                // Use AIG-level clock/reset flags (populated from GateNet.is_clock/is_reset
+                // during AIG building). Fall back to name matching with a warning.
+                let is_clock = if aig.clock_inputs.contains(&id) {
+                    true
+                } else if name.contains("clk") || name.contains("clock") {
+                    eprintln!(
+                        "warning: clock input '{}' detected by name only (no is_clock flag)",
+                        name
+                    );
+                    true
+                } else {
+                    false
+                };
+
+                let is_reset = if aig.reset_inputs.contains(&id) {
+                    true
+                } else if !is_clock && (name.contains("rst") || name.contains("reset")) {
+                    eprintln!(
+                        "warning: reset input '{}' detected by name only (no is_reset flag)",
+                        name
+                    );
+                    true
+                } else {
+                    false
+                };
 
                 let net_id = if is_clock {
                     self.netlist.add_clock(name.clone())

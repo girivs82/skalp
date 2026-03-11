@@ -84,6 +84,9 @@ impl Pass for Strash {
             }
         }
 
+        // Propagate clock/reset input metadata to new AIG
+        new_aig.copy_clock_reset_metadata(aig, &node_map);
+
         // Phase 1a': Pre-create latches and barriers (now clock/reset inputs are in node_map)
         for (id, node) in aig.iter_nodes() {
             match node {

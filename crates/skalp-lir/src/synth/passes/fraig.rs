@@ -592,6 +592,9 @@ impl Fraig {
             }
         }
 
+        // Propagate clock/reset input metadata to new AIG
+        new_aig.copy_clock_reset_metadata(aig, &old_to_new);
+
         // Second pass: add other nodes
         for (old_id, node) in aig.iter_nodes() {
             // Check if this node was merged

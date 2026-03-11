@@ -148,7 +148,7 @@ pub struct PathFinder<'a, D: Device> {
     timing_weight: f64,
 }
 
-impl<'a, D: Device> PathFinder<'a, D> {
+impl<'a, D: Device + Clone> PathFinder<'a, D> {
     /// Create a new PathFinder router
     pub fn new(
         device: &'a D,
@@ -196,10 +196,11 @@ impl<'a, D: Device> PathFinder<'a, D> {
         let net_criticalities = self.calculate_net_criticalities(netlist, placement);
 
         // Collect nets to route with their criticality score
+        // Skip clock/reset nets — they're handled by the global net router
         let mut nets_with_criticality: Vec<_> = netlist
             .nets
             .iter()
-            .filter(|net| net.driver.is_some() && !net.fanout.is_empty())
+            .filter(|net| net.driver.is_some() && !net.fanout.is_empty() && !net.is_clock && !net.is_reset)
             .map(|net| {
                 let crit = net_criticalities
                     .iter()
@@ -253,20 +254,58 @@ impl<'a, D: Device> PathFinder<'a, D> {
                 net_criticality,
             )?;
 
-            // Track wire usage
+            // Track wire usage for intermediate routing wires only
+            // Source and sink wires are BEL pin wires — dedicated per cell,
+            // not shared routing resources
             for &wire in &route.wires {
-                congestion.add_usage(wire);
+                if wire != route.source && !route.sinks.contains(&wire) {
+                    congestion.add_usage(wire);
+                }
             }
 
             result.routes.insert(net_id, route);
         }
 
-        // Iterative rip-up and reroute
+        // Iterative rip-up and reroute with convergence detection
+        // Classic PathFinder: escalate present_factor each iteration to force
+        // nets off congested wires
+        let mut congestion_history: Vec<f64> = Vec::new();
+        let base_present_factor = self.present_factor;
+        let base_history_factor = self.history_factor;
+
         for iteration in 0..self.max_iterations {
             if !congestion.has_overuse() {
                 result.iterations = iteration;
                 break;
             }
+
+            // Convergence check: require minimum 15 iterations before checking,
+            // then stop if < 2% improvement over 8 consecutive iterations
+            let current_max = congestion.max_congestion();
+            congestion_history.push(current_max);
+            if congestion_history.len() >= 15 {
+                let window = 8;
+                if congestion_history.len() >= window {
+                    let recent =
+                        &congestion_history[congestion_history.len() - window..];
+                    let oldest = recent[0];
+                    let newest = recent[window - 1];
+                    if oldest > 0.0 && (oldest - newest) / oldest < 0.02 {
+                        result.iterations = iteration;
+                        break;
+                    }
+                }
+            }
+
+            // Classic PathFinder: escalate cost factors each iteration
+            // This creates increasing pressure to avoid congested wires
+            let iter_present_factor =
+                base_present_factor * (1.0 + iteration as f64 * 0.5);
+            let iter_history_factor =
+                base_history_factor * (1.0 + iteration as f64 * 0.2);
+
+            // Update history costs BEFORE rip-up so we capture the actual congestion
+            congestion.update_history();
 
             // Find nets using congested wires
             let overused = congestion.overused_wires();
@@ -279,35 +318,37 @@ impl<'a, D: Device> PathFinder<'a, D> {
                 .map(|(&id, _)| id)
                 .collect();
 
-            // Rip up congested nets
+            // Rip up congested nets (only intermediate wires tracked)
             for &net_id in &congested_nets {
                 if let Some(route) = result.routes.get(&net_id) {
                     for &wire in &route.wires {
-                        congestion.remove_usage(wire);
+                        if wire != route.source && !route.sinks.contains(&wire) {
+                            congestion.remove_usage(wire);
+                        }
                     }
                 }
             }
 
-            // Update history costs
-            congestion.update_history();
-
-            // Reroute with updated costs
+            // Reroute with escalated costs
             for &net_id in &congested_nets {
-                // Get criticality for this net
                 let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
 
-                let route = self.route_net_with_costs(
+                let route = self.route_net_with_costs_escalated(
                     net_id,
                     netlist,
                     placement,
                     &congestion,
                     &astar,
                     net_criticality,
+                    iter_present_factor,
+                    iter_history_factor,
                 )?;
 
-                // Track wire usage
+                // Track wire usage (intermediate wires only)
                 for &wire in &route.wires {
-                    congestion.add_usage(wire);
+                    if wire != route.source && !route.sinks.contains(&wire) {
+                        congestion.add_usage(wire);
+                    }
                 }
 
                 result.routes.insert(net_id, route);
@@ -320,10 +361,8 @@ impl<'a, D: Device> PathFinder<'a, D> {
         result.congestion = congestion.max_congestion();
         result.wirelength = result.routes.values().map(|r| r.wires.len() as u64).sum();
 
-        // Success if congestion is below acceptable threshold
-        // Some congestion is expected due to limited routing resources in our simplified model
-        // Real iCE40 has more complex routing that would resolve these conflicts
-        result.success = result.congestion <= 4.0;
+        // Success requires no wire overuse (congestion <= 1.0)
+        result.success = result.congestion <= 1.0;
 
         Ok(result)
     }
@@ -418,6 +457,30 @@ impl<'a, D: Device> PathFinder<'a, D> {
         astar: &AStarRouter<D>,
         net_criticality: f64,
     ) -> Result<Route> {
+        self.route_net_with_costs_escalated(
+            net_id,
+            netlist,
+            placement,
+            congestion,
+            astar,
+            net_criticality,
+            self.present_factor,
+            self.history_factor,
+        )
+    }
+
+    /// Route a net with escalated congestion costs (used during rip-up/reroute iterations)
+    fn route_net_with_costs_escalated(
+        &self,
+        net_id: GateNetId,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+        congestion: &CongestionTracker,
+        astar: &AStarRouter<D>,
+        net_criticality: f64,
+        present_factor: f64,
+        history_factor: f64,
+    ) -> Result<Route> {
         let net = &netlist.nets[net_id.0 as usize];
         let mut route = Route::new(net_id);
 
@@ -449,8 +512,8 @@ impl<'a, D: Device> PathFinder<'a, D> {
         // For critical nets: reduce congestion penalty, increase delay penalty
         // For non-critical nets: normal congestion-based routing
         let timing_factor = net_criticality * self.timing_weight;
-        let adjusted_present_factor = self.present_factor * (1.0 - timing_factor * 0.5);
-        let adjusted_history_factor = self.history_factor * (1.0 - timing_factor * 0.3);
+        let adjusted_present_factor = present_factor * (1.0 - timing_factor * 0.5);
+        let adjusted_history_factor = history_factor * (1.0 - timing_factor * 0.3);
 
         let wire_costs: HashMap<WireId, f64> = congestion
             .usage
@@ -780,11 +843,11 @@ impl<'a, D: Device> PathFinder<'a, D> {
         }
     }
 
-    /// Calculate net criticalities for timing-driven routing
-    /// Criticality is based on:
-    /// - Path length (longer paths = more critical)
-    /// - Fanout (high fanout = more critical)
-    /// - Whether the net is on a timing-critical path (connected to registers)
+    /// Calculate net criticalities for timing-driven routing.
+    ///
+    /// When timing_weight > 0, uses pre-routing STA with estimated wire delays
+    /// to compute real slack-based criticality. Falls back to heuristic
+    /// (bbox + fanout) when timing_weight == 0.
     fn calculate_net_criticalities(
         &self,
         netlist: &GateNetlist,
@@ -792,7 +855,53 @@ impl<'a, D: Device> PathFinder<'a, D> {
     ) -> Vec<NetCriticality> {
         let mut criticalities = Vec::new();
 
-        // First pass: calculate raw metrics for each net
+        // Use real STA when timing-driven
+        if self.timing_weight > 0.0 {
+            let timing_config = crate::timing::TimingConfig::default();
+            let analyzer = crate::timing::TimingAnalyzer::with_delay_model(
+                timing_config,
+                self.device.clone(),
+                crate::timing::DelayModel::ice40_default(),
+            );
+            let net_slacks = analyzer.pre_routing_sta(netlist, placement);
+
+            for ns in &net_slacks {
+                if let Some(net) = netlist.nets.get(ns.net_id.0 as usize) {
+                    if net.driver.is_none() || net.fanout.is_empty() {
+                        continue;
+                    }
+                    let bbox = self.calculate_net_bbox(net, placement);
+                    criticalities.push(NetCriticality {
+                        net_id: ns.net_id,
+                        criticality: ns.criticality,
+                        slack: ns.slack,
+                        bbox,
+                    });
+                }
+            }
+
+            // Add nets not covered by STA (e.g., no register paths)
+            let sta_nets: HashSet<GateNetId> =
+                net_slacks.iter().map(|ns| ns.net_id).collect();
+            for net in &netlist.nets {
+                if net.driver.is_none() || net.fanout.is_empty() {
+                    continue;
+                }
+                if !sta_nets.contains(&net.id) {
+                    let bbox = self.calculate_net_bbox(net, placement);
+                    criticalities.push(NetCriticality {
+                        net_id: net.id,
+                        criticality: 0.0,
+                        slack: f64::MAX,
+                        bbox,
+                    });
+                }
+            }
+
+            return criticalities;
+        }
+
+        // Fallback: heuristic criticality (non-timing-driven mode)
         let mut max_bbox = 1u32;
         let mut max_fanout = 1usize;
 
@@ -806,7 +915,6 @@ impl<'a, D: Device> PathFinder<'a, D> {
             max_fanout = max_fanout.max(net.fanout.len());
         }
 
-        // Second pass: calculate normalized criticality
         for net in &netlist.nets {
             if net.driver.is_none() || net.fanout.is_empty() {
                 continue;
@@ -814,26 +922,16 @@ impl<'a, D: Device> PathFinder<'a, D> {
 
             let bbox = self.calculate_net_bbox(net, placement);
             let fanout = net.fanout.len();
-
-            // Check if net is timing-critical (connected to sequential elements)
             let is_timing_critical = self.is_timing_critical_net(net, netlist);
 
-            // Normalize metrics to 0.0-1.0 range
             let bbox_factor = bbox as f64 / max_bbox as f64;
             let fanout_factor = fanout as f64 / max_fanout as f64;
-
-            // Calculate criticality score
-            // Higher weight for timing-critical nets
             let timing_bonus = if is_timing_critical { 0.3 } else { 0.0 };
 
-            // Criticality = weighted combination of factors
-            // bbox contributes 40%, fanout 30%, timing 30%
             let criticality = (0.4 * bbox_factor + 0.3 * fanout_factor + timing_bonus).min(1.0);
 
-            // Estimate slack based on bbox (larger bbox = longer path = less slack)
-            // This is a rough estimate; real timing analysis would be more accurate
             let estimated_delay_ns = bbox as f64 * 0.5 + fanout as f64 * 0.1;
-            let target_period_ns = 10.0; // 100 MHz target
+            let target_period_ns = 10.0;
             let slack = target_period_ns - estimated_delay_ns;
 
             criticalities.push(NetCriticality {

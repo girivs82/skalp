@@ -17,7 +17,7 @@
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
-use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSafetyInfo, LirSignalId};
+use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSafetyInfo, LirSignal, LirSignalId, NclRail};
 use crate::tech_library::{
     CellFunction, DecompConnectivity, IoCellInfo, LibraryCell, LibraryFailureMode, TechLibrary,
 };
@@ -297,6 +297,30 @@ impl<'a> TechMapper<'a> {
         nets
     }
 
+    /// Check if a signal is a true rail in NCL.
+    /// Uses the `ncl_rail` annotation if set during NCL expansion,
+    /// falling back to suffix matching for legacy compatibility.
+    fn is_ncl_true_rail_signal(signal: &LirSignal) -> bool {
+        if let Some(rail) = signal.ncl_rail {
+            return rail == NclRail::True;
+        }
+        // Suffix fallback for signals not annotated during NCL expansion
+        let name = &signal.name;
+        name.ends_with("_t") || name.contains("_t[") || name.ends_with("_t]")
+    }
+
+    /// Check if a signal is a false rail in NCL.
+    /// Uses the `ncl_rail` annotation if set during NCL expansion,
+    /// falling back to suffix matching for legacy compatibility.
+    fn is_ncl_false_rail_signal(signal: &LirSignal) -> bool {
+        if let Some(rail) = signal.ncl_rail {
+            return rail == NclRail::False;
+        }
+        // Suffix fallback for signals not annotated during NCL expansion
+        let name = &signal.name;
+        name.ends_with("_f") || name.contains("_f[") || name.ends_with("_f]")
+    }
+
     /// Check if a signal name indicates a true rail in NCL (ends with _t)
     fn is_ncl_true_rail(signal_name: &str) -> bool {
         signal_name.ends_with("_t") || signal_name.contains("_t[") || signal_name.ends_with("_t]")
@@ -316,10 +340,10 @@ impl<'a> TechMapper<'a> {
             // Simple logic gates - decompose to per-bit operations
             // For NCL: detect dual-rail patterns and use TH22/TH12 instead
             LirOp::And { width } => {
-                // Check if this is an NCL operation by looking at signal names
+                // Check if this is an NCL operation using signal annotation or name
                 let output_signal = &word_lir.signals[node.output.0 as usize];
-                let is_ncl_t = Self::is_ncl_true_rail(&output_signal.name);
-                let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
+                let is_ncl_t = Self::is_ncl_true_rail_signal(output_signal);
+                let is_ncl_f = Self::is_ncl_false_rail_signal(output_signal);
 
                 if is_ncl_t || is_ncl_f {
                     // NCL AND on dual rails → C-element (TH22)
@@ -350,10 +374,10 @@ impl<'a> TechMapper<'a> {
                 }
             }
             LirOp::Or { width } => {
-                // Check if this is an NCL operation by looking at signal names
+                // Check if this is an NCL operation using signal annotation or name
                 let output_signal = &word_lir.signals[node.output.0 as usize];
-                let is_ncl_t = Self::is_ncl_true_rail(&output_signal.name);
-                let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
+                let is_ncl_t = Self::is_ncl_true_rail_signal(output_signal);
+                let is_ncl_f = Self::is_ncl_false_rail_signal(output_signal);
 
                 if is_ncl_f || is_ncl_t {
                     // NCL OR on dual rails → TH12 (1-of-2)

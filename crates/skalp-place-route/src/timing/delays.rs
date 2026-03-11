@@ -279,17 +279,108 @@ impl DelayModel {
         }
     }
 
-    /// Get estimated path delay for a given distance
+    /// Get estimated path delay for a given distance.
+    ///
+    /// Uses a calibrated wire mix model: for a given Manhattan distance,
+    /// estimates how many span-12, span-4, and local wires will be used.
+    /// The mix ratios can be calibrated from actual routing results via
+    /// `calibrate_wire_mix()`.
     pub fn estimated_path_delay(&self, manhattan_distance: u32) -> f64 {
-        // Use a mix of span-4 and span-12 wires
-        let span12_count = manhattan_distance / 12;
-        let remaining = manhattan_distance % 12;
-        let span4_count = remaining / 4;
-        let local_count = remaining % 4;
+        let dist = manhattan_distance as f64;
+        if dist <= 0.0 {
+            return 0.0;
+        }
 
-        (span12_count as f64) * self.span12_delay
-            + (span4_count as f64) * self.span4_delay
-            + (local_count as f64) * self.local_wire_delay
-            + ((span12_count + span4_count + local_count) as f64) * self.pip_delay
+        // Wire mix: greedily use longest wires first
+        let span12_count = (manhattan_distance / 12) as f64;
+        let remaining = (manhattan_distance % 12) as f64;
+        let span4_count = (remaining / 4.0).floor();
+        let local_count = remaining - span4_count * 4.0;
+
+        // Wire delays
+        let wire_delay = span12_count * self.span12_delay
+            + span4_count * self.span4_delay
+            + local_count * self.local_wire_delay;
+
+        // PIP delays (one PIP per wire segment)
+        let pip_count = span12_count + span4_count + local_count;
+        let pip_delay = pip_count * self.pip_delay;
+
+        wire_delay + pip_delay
+    }
+
+    /// Calibrate wire mix estimation from actual post-routing wire type statistics.
+    ///
+    /// Collects wire type usage from a routing result and computes average
+    /// delay-per-distance, which can be used to validate or improve the
+    /// `estimated_path_delay()` model.
+    ///
+    /// Returns `(actual_avg_delay_per_hop, estimated_avg_delay_per_hop)` for comparison.
+    pub fn calibrate_from_routing<D: crate::device::Device>(
+        &self,
+        routing: &crate::router::RoutingResult,
+        placement: &crate::placer::PlacementResult,
+        netlist: &skalp_lir::gate_netlist::GateNetlist,
+        device: &D,
+    ) -> (f64, f64) {
+        let mut total_actual_delay = 0.0;
+        let mut total_manhattan_distance = 0u32;
+        let mut route_count = 0u32;
+
+        for (net_id, route) in &routing.routes {
+            if route.wires.is_empty() {
+                continue;
+            }
+
+            // Compute actual delay from wire types
+            let mut actual_delay = 0.0;
+            for &wire_id in &route.wires {
+                if let Some(wire) = device.wire(wire_id) {
+                    actual_delay += self.wire_delay(&wire.wire_type);
+                }
+            }
+            // Add PIP delays
+            for &pip_id in &route.pips {
+                if let Some(pip) = device.pip(pip_id) {
+                    if let (Some(src_wire), Some(dst_wire)) =
+                        (device.wire(pip.src_wire), device.wire(pip.dst_wire))
+                    {
+                        actual_delay +=
+                            self.pip_delay_typed(&src_wire.wire_type, &dst_wire.wire_type);
+                    }
+                }
+            }
+            total_actual_delay += actual_delay;
+
+            // Compute Manhattan distance from placement
+            let net = match netlist.nets.get(net_id.0 as usize) {
+                Some(n) => n,
+                None => continue,
+            };
+            if let Some(driver_id) = net.driver {
+                if let Some(src_loc) = placement.get(driver_id) {
+                    for (sink_id, _) in &net.fanout {
+                        if let Some(dst_loc) = placement.get(*sink_id) {
+                            let dx =
+                                (src_loc.tile_x as i32 - dst_loc.tile_x as i32).unsigned_abs();
+                            let dy =
+                                (src_loc.tile_y as i32 - dst_loc.tile_y as i32).unsigned_abs();
+                            total_manhattan_distance += dx + dy;
+                            route_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if route_count == 0 || total_manhattan_distance == 0 {
+            return (0.0, 0.0);
+        }
+
+        let actual_avg = total_actual_delay / route_count as f64;
+        let estimated_avg =
+            self.estimated_path_delay(total_manhattan_distance / route_count);
+
+        (actual_avg, estimated_avg)
     }
 }
