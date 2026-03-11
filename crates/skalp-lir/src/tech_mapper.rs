@@ -7523,20 +7523,10 @@ pub fn synthesize(
     // Step 1: Initial tech mapping
     let mut initial_result = map_lir_to_gates(lir, library);
 
-    // Step 1.5: Buffer removal BEFORE AIG optimization.
-    // Output port buffers (from `output = signal` assignments) must be removed here
-    // because the AIG optimizer converts identity buffers to LUT4 cells instead of
-    // eliminating them. The reverse net replacement wires the driver of the internal
-    // signal directly to the output port net.
-    {
-        let mut gate_opt = crate::gate_optimizer::GateOptimizer::new();
-        gate_opt.set_enable_constant_folding(false);
-        gate_opt.set_enable_dce(false);
-        gate_opt.set_enable_boolean_simp(false);
-        gate_opt.set_enable_mux_opt(false);
-        gate_opt.set_enable_buffer_removal(true);
-        gate_opt.optimize(&mut initial_result.netlist);
-    }
+    // Note: Pre-AIG buffer removal was removed because it breaks the AIG partition
+    // merge. The reverse net replacement rewires cell outputs to use output port net
+    // IDs, but the AIG round-trip creates new nets and relies on name-based matching.
+    // The output port nets end up disconnected in combinational designs (e.g., ALU).
 
     // Step 2: Run synthesis engine with AIG optimization
     let mut engine = SynthEngine::with_preset(preset);

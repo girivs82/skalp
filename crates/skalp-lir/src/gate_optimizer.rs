@@ -935,17 +935,10 @@ impl GateOptimizer {
                 let input = pass_input;
                 let output = pass_output;
 
-                    // For buffers driving output ports, use REVERSE replacement:
-                    // Replace the input net with the output net everywhere, so the
-                    // driver of the internal net now drives the output port directly.
+                    // Do NOT remove buffers that drive output ports!
+                    // Output port net IDs are fixed (part of module interface).
+                    // If we remove the buffer, the output port would have no driver.
                     if output_port_nets.contains(&output) {
-                        // Don't reverse-replace if input is also an output port or alias target
-                        if output_port_nets.contains(&input) || alias_targets.contains(&input) {
-                            continue;
-                        }
-                        self.net_replacements.insert(input, output);
-                        self.cells_to_remove.insert(cell.id);
-                        removed += 1;
                         continue;
                     }
 
