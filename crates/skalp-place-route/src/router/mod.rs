@@ -258,7 +258,10 @@ impl<D: Device + Clone> Router<D> {
                 pathfinder.route(netlist, placement)
             }
             RoutingAlgorithm::MazeRouting => {
-                let astar = AStarRouter::new(&self.device);
+                let astar = AStarRouter::with_delay_model(
+                    &self.device,
+                    crate::timing::DelayModel::ice40_default(),
+                );
                 self.simple_astar_route(&astar, netlist, placement)
             }
             RoutingAlgorithm::TimingDriven => {

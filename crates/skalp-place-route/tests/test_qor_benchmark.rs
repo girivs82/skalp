@@ -45,6 +45,18 @@ struct FlowResult {
     fmax_mhz: Option<f64>,
     bitstream_bytes: Option<usize>,
     compile_time: Duration,
+    // PnR-specific metrics
+    placement_wirelength: Option<u64>,
+    placement_cost: Option<f64>,
+    utilization: Option<f64>,
+    congestion: Option<f64>,
+    routing_iterations: Option<usize>,
+    routing_success: Option<bool>,
+    worst_slack_ns: Option<f64>,
+    critical_path_stages: Option<usize>,
+    place_time: Option<Duration>,
+    route_time: Option<Duration>,
+    timing_time: Option<Duration>,
 }
 
 struct QorComparison {
@@ -247,17 +259,40 @@ fn run_skalp_flow(design: &BenchmarkDesign) -> FlowResult {
         result.ios = Some(stats.io_cells);
         result.total_lcs = Some(stats.total_lcs);
 
-        // Place and route (HX8K, with timing)
+        // Place and route (HX8K, with timing) — capture detailed PnR metrics
         let config = PnrConfig {
             timing: Some(TimingConfig::default()),
             ..PnrConfig::default()
         };
+
+        // Run P&R with stage-level timing
+        let t_pnr_start = Instant::now();
         match place_and_route(&synth.netlist, Ice40Variant::Hx8k, config) {
             Ok(pnr) => {
+                let _t_pnr = t_pnr_start.elapsed();
+
+                // Routing metrics
                 result.wirelength = Some(pnr.routing.wirelength as usize);
+                result.congestion = Some(pnr.routing.congestion);
+                result.routing_iterations = Some(pnr.routing.iterations);
+                result.routing_success = Some(pnr.routing.success);
+
+                // Placement metrics
+                result.placement_wirelength = Some(pnr.placement.wirelength);
+                result.placement_cost = Some(pnr.placement.cost);
+                result.utilization = Some(pnr.placement.utilization);
+
+                // Timing metrics
                 if let Some(ref timing) = pnr.timing {
                     result.fmax_mhz = Some(timing.design_frequency);
+                    result.worst_slack_ns = Some(timing.worst_negative_slack);
+                    result.critical_path_stages = Some(
+                        timing.critical_paths.first()
+                            .map(|p| p.path.len())
+                            .unwrap_or(0)
+                    );
                 }
+
                 result.bitstream_bytes = Some(pnr.bitstream.data.len());
                 result.success = true;
             }
@@ -576,6 +611,20 @@ fn print_single_comparison(cmp: &QorComparison) {
     println!("{:<20} {:>10} {:>10}", "Bitstream (B)", fmt_opt(cmp.skalp.bitstream_bytes), fmt_opt(cmp.reference.bitstream_bytes));
     println!("{:<20} {:>10.2?} {:>10.2?}", "Compile time", cmp.skalp.compile_time, cmp.reference.compile_time);
 
+    // PnR detail metrics
+    if cmp.skalp.congestion.is_some() {
+        println!();
+        println!("  PnR Details:");
+        println!("    Placement WL:    {}", cmp.skalp.placement_wirelength.map(|w| format!("{}", w)).unwrap_or("-".into()));
+        println!("    Placement cost:  {}", cmp.skalp.placement_cost.map(|c| format!("{:.1}", c)).unwrap_or("-".into()));
+        println!("    Utilization:     {}", cmp.skalp.utilization.map(|u| format!("{:.1}%", u * 100.0)).unwrap_or("-".into()));
+        println!("    Congestion:      {}", fmt_opt_f64(cmp.skalp.congestion));
+        println!("    Route iters:     {}", cmp.skalp.routing_iterations.map(|i| format!("{}", i)).unwrap_or("-".into()));
+        println!("    Route success:   {}", cmp.skalp.routing_success.map(|s| format!("{}", s)).unwrap_or("-".into()));
+        println!("    Worst slack:     {}", cmp.skalp.worst_slack_ns.map(|s| format!("{:.2} ns", s)).unwrap_or("-".into()));
+        println!("    Crit path depth: {}", cmp.skalp.critical_path_stages.map(|n| format!("{}", n)).unwrap_or("-".into()));
+    }
+
     if let Some(ref e) = cmp.skalp.error {
         println!("  skalp error: {}", e);
     }
@@ -663,15 +712,66 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
         println!("{:<20} | {} {} | {} {}", cmp.design_name, sf, rf, sb, rb);
     }
 
+    // PnR quality table
+    println!();
+    println!(
+        "{:<20} | {:>6} {:>7} {:>5} {:>5} {:>7} {:>8} {:>6}",
+        "Design", "PlcWL", "RteWL", "Cong", "Iter", "Util%", "Slack", "CritD"
+    );
+    println!("{}+{}", "-".repeat(20), "-".repeat(52));
+
+    for cmp in comparisons {
+        let plc_wl = cmp.skalp.placement_wirelength
+            .map(|w| format!("{:>6}", w)).unwrap_or_else(|| "     -".to_string());
+        let rte_wl = cmp.skalp.wirelength
+            .map(|w| format!("{:>7}", w)).unwrap_or_else(|| "      -".to_string());
+        let cong = cmp.skalp.congestion
+            .map(|c| format!("{:>5.2}", c)).unwrap_or_else(|| "    -".to_string());
+        let iter = cmp.skalp.routing_iterations
+            .map(|i| format!("{:>5}", i)).unwrap_or_else(|| "    -".to_string());
+        let util = cmp.skalp.utilization
+            .map(|u| format!("{:>7.1}", u * 100.0)).unwrap_or_else(|| "      -".to_string());
+        let slack = cmp.skalp.worst_slack_ns
+            .map(|s| format!("{:>8.2}", s)).unwrap_or_else(|| "       -".to_string());
+        let crit_d = cmp.skalp.critical_path_stages
+            .map(|n| format!("{:>6}", n)).unwrap_or_else(|| "     -".to_string());
+
+        println!(
+            "{:<20} | {} {} {} {} {} {} {}",
+            cmp.design_name, plc_wl, rte_wl, cong, iter, util, slack, crit_d
+        );
+    }
+
     // Summary statistics
     println!();
     if !lut_ratios.is_empty() {
         let geo_mean_lut = geometric_mean(&lut_ratios);
         println!("Geometric mean LUT ratio:  {:.2}x", geo_mean_lut);
     }
-    if !fmax_ratios.is_empty() {
-        let geo_mean_fmax = geometric_mean(&fmax_ratios);
-        println!("Geometric mean Fmax ratio: {:.2}x", geo_mean_fmax);
+    // Fmax geomean: only include designs with DFFs (sequential logic)
+    // Purely combinational designs have meaningless Fmax
+    let seq_fmax_ratios: Vec<f64> = comparisons.iter().filter_map(|cmp| {
+        let has_dffs = cmp.skalp.dffs.map(|d| d > 0).unwrap_or(false);
+        if !has_dffs { return None; }
+        match (cmp.skalp.fmax_mhz, cmp.reference.fmax_mhz) {
+            (Some(s), Some(r)) if r > 0.0 => Some(s / r),
+            _ => None,
+        }
+    }).collect();
+    if !seq_fmax_ratios.is_empty() {
+        let geo_mean_fmax = geometric_mean(&seq_fmax_ratios);
+        println!("Geometric mean Fmax ratio: {:.2}x (sequential designs only, n={})", geo_mean_fmax, seq_fmax_ratios.len());
+    }
+    // Wirelength stats
+    let wl_ratios: Vec<f64> = comparisons.iter().filter_map(|cmp| {
+        match (cmp.skalp.placement_wirelength, cmp.skalp.wirelength) {
+            (Some(p), Some(r)) if p > 0 => Some(r as f64 / p as f64),
+            _ => None,
+        }
+    }).collect();
+    if !wl_ratios.is_empty() {
+        let avg_ratio = wl_ratios.iter().sum::<f64>() / wl_ratios.len() as f64;
+        println!("Avg route/place WL ratio:  {:.1}x (lower = better routing efficiency)", avg_ratio);
     }
     println!("Designs passing both flows: {}/{}", both_pass, total);
 }

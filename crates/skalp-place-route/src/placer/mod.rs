@@ -77,7 +77,7 @@ pub struct PlacerConfig {
 impl Default for PlacerConfig {
     fn default() -> Self {
         Self {
-            algorithm: PlacementAlgorithm::AnalyticalWithRefinement,
+            algorithm: PlacementAlgorithm::AnalyticalTimingDriven,
             max_iterations: 5000,
             initial_temperature: 100.0,
             cooling_rate: 0.95,

@@ -190,7 +190,10 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     ) -> Result<RoutingResult> {
         let mut result = RoutingResult::new();
         let mut congestion = CongestionTracker::new();
-        let astar = AStarRouter::new(self.device);
+        let astar = AStarRouter::with_delay_model(
+            self.device,
+            crate::timing::DelayModel::ice40_default(),
+        );
 
         // Calculate net criticality for timing-driven routing
         let net_criticalities = self.calculate_net_criticalities(netlist, placement);

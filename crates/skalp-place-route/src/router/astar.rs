@@ -210,7 +210,12 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         )))
     }
 
-    /// Manhattan distance heuristic
+    /// Wire-type-aware Manhattan distance heuristic.
+    ///
+    /// Estimates minimum cost to reach the target tile, accounting for
+    /// available wire types: span-12 covers 12 tiles/hop, span-4 covers
+    /// 4 tiles/hop, local covers 1 tile/hop. This provides a tighter
+    /// (but still admissible) heuristic than flat Manhattan distance.
     fn heuristic(&self, wire: WireId, target_x: u32, target_y: u32) -> f64 {
         let wire_info = match self.device.wire(wire) {
             Some(w) => w,
@@ -219,9 +224,24 @@ impl<'a, D: Device> AStarRouter<'a, D> {
 
         let dx = (wire_info.tile_x as i32 - target_x as i32).unsigned_abs();
         let dy = (wire_info.tile_y as i32 - target_y as i32).unsigned_abs();
+        let dist = dx + dy;
 
-        // Scale by expected wire cost
-        (dx + dy) as f64 * 2.0
+        if dist == 0 {
+            return 0.0;
+        }
+
+        // Estimate minimum hops using available wire types:
+        // span-12: ~2 cost units per hop, covers 12 tiles
+        // span-4: ~2 cost units per hop, covers 4 tiles
+        // local: ~1 cost unit per hop, covers 1 tile
+        let span12_hops = dist / 12;
+        let remaining = dist % 12;
+        let span4_hops = remaining / 4;
+        let local_hops = remaining % 4;
+
+        // Cost per hop: span-12 PIP ≈ 2.0, span-4 PIP ≈ 2.0, local PIP ≈ 1.5
+        // This is admissible (≤ actual cost) since real paths may need more hops
+        span12_hops as f64 * 2.0 + span4_hops as f64 * 2.0 + local_hops as f64 * 1.5
     }
 
     /// Reconstruct path from came_from map
