@@ -370,37 +370,65 @@ impl<'a> TechMapper<'a> {
                 // Check if D is driven by a Mux2
                 if let Some(mux_node) = signal_driver.get(&d_signal) {
                     if let LirOp::Mux2 { .. } = &mux_node.op {
-                        let sel_signal = mux_node.inputs[0];
-                        let d0_signal = mux_node.inputs[1];
-                        let d1_signal = mux_node.inputs[2];
+                        let mut sel_signal = mux_node.inputs[0];
+                        let mut d0_signal = mux_node.inputs[1];
+                        let mut d1_signal = mux_node.inputs[2];
+                        let mut outer_mux_id = mux_node.id;
+
+                        // Peel off reset MUX: if this Reg has sync reset and the
+                        // top-level Mux2 is the reset select (sel=reset, one arm is
+                        // the reset value constant), look inside the other arm for
+                        // the enable pattern. The DFFSR already handles reset via
+                        // its R pin, so this outer MUX is redundant.
+                        let mut peeled_reset_mux = false;
+                        if *has_reset && node.reset.is_some() {
+                            let reset_sig = node.reset.unwrap();
+                            if sel_signal == reset_sig {
+                                // sel=reset: when reset=1→d1 (reset value), when reset=0→d0 (normal)
+                                // Look inside d0 (normal operation) for enable pattern
+                                if let Some(inner_mux) = signal_driver.get(&d0_signal) {
+                                    if let LirOp::Mux2 { .. } = &inner_mux.op {
+                                        sel_signal = inner_mux.inputs[0];
+                                        d0_signal = inner_mux.inputs[1];
+                                        d1_signal = inner_mux.inputs[2];
+                                        outer_mux_id = inner_mux.id;
+                                        peeled_reset_mux = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Helper: mark MUX nodes for skipping when enable found
+                        let mut mark_enable = |en_sig, data_sig, invert, dead_subtree: Option<LirSignalId>| {
+                            self.reg_enable_info
+                                .insert(node.id, (en_sig, data_sig, invert));
+                            // Skip the MUX that feeds D (outer_mux_id)
+                            self.skip_nodes.insert(outer_mux_id);
+                            // If we peeled a reset MUX, skip it too
+                            if peeled_reset_mux {
+                                self.skip_nodes.insert(mux_node.id);
+                            }
+                            // Skip dead subtree Mux2 nodes (deep match)
+                            if let Some(dead_sig) = dead_subtree {
+                                Self::collect_mux_nodes(&signal_driver, dead_sig, &signal_use_count, &mut self.skip_nodes);
+                            }
+                        };
 
                         if d0_signal == q_signal {
                             // d0 = Q: sel=0→hold, sel=1→load
-                            self.reg_enable_info
-                                .insert(node.id, (sel_signal, d1_signal, false));
-                            self.skip_nodes.insert(mux_node.id);
+                            mark_enable(sel_signal, d1_signal, false, None);
                         } else if d1_signal == q_signal {
                             // d1 = Q: sel=1→hold, sel=0→load
-                            self.reg_enable_info
-                                .insert(node.id, (sel_signal, d0_signal, true));
-                            self.skip_nodes.insert(mux_node.id);
+                            mark_enable(sel_signal, d0_signal, true, None);
                         } else {
                             // Deep pattern: check if an entire Mux2 subtree is
                             // functionally equivalent to Q (all leaves == Q).
                             let d0_is_q = Self::mux_tree_all_leaves_eq(&signal_driver, d0_signal, q_signal);
                             let d1_is_q = Self::mux_tree_all_leaves_eq(&signal_driver, d1_signal, q_signal);
                             if d0_is_q && !d1_is_q {
-                                // d0 subtree ≡ Q: sel=0→hold, sel=1→load
-                                self.reg_enable_info
-                                    .insert(node.id, (sel_signal, d1_signal, false));
-                                self.skip_nodes.insert(mux_node.id);
-                                Self::collect_mux_nodes(&signal_driver, d0_signal, &signal_use_count, &mut self.skip_nodes);
+                                mark_enable(sel_signal, d1_signal, false, Some(d0_signal));
                             } else if d1_is_q && !d0_is_q {
-                                // d1 subtree ≡ Q: sel=1→hold, sel=0→load
-                                self.reg_enable_info
-                                    .insert(node.id, (sel_signal, d0_signal, true));
-                                self.skip_nodes.insert(mux_node.id);
-                                Self::collect_mux_nodes(&signal_driver, d1_signal, &signal_use_count, &mut self.skip_nodes);
+                                mark_enable(sel_signal, d0_signal, true, Some(d1_signal));
                             }
                         }
                     }
@@ -7809,19 +7837,33 @@ pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapRe
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
     }
 
+    // DFFE absorption: convert DFF+LUT(MUX) → DFFE, saving LUT cells
+    let dffe_absorbed = crate::gate_optimizer::absorb_dffe(&mut result.netlist, library);
+
+    // Run DCE again if DFFE absorption simplified LUTs
+    if dffe_absorbed > 0 {
+        let mut dce_opt = GateOptimizer::new();
+        dce_opt.set_enable_constant_folding(false);
+        dce_opt.set_enable_boolean_simp(false);
+        dce_opt.set_enable_mux_opt(false);
+        dce_opt.set_enable_buffer_removal(true);
+        dce_opt.optimize(&mut result.netlist);
+    }
+
     // Update stats with optimization info
     result.stats.cells_created = result.netlist.cells.len();
     result.stats.nets_created = result.netlist.nets.len();
 
     // Add optimization summary to warnings (as info)
-    if opt_stats.cells_removed > 0 {
+    if opt_stats.cells_removed > 0 || dffe_absorbed > 0 {
         result.warnings.push(format!(
-            "Optimization: removed {} cells ({} → {}), FIT {} → {}",
+            "Optimization: removed {} cells ({} → {}), FIT {} → {}, DFFE absorbed: {}",
             opt_stats.cells_removed,
             opt_stats.cells_before,
             opt_stats.cells_after,
             opt_stats.fit_before,
-            opt_stats.fit_after
+            opt_stats.fit_after,
+            dffe_absorbed
         ));
     }
 
@@ -7864,20 +7906,37 @@ pub fn map_lir_to_gates_with_opt_level(
 
     let opt_stats = optimizer.optimize(&mut result.netlist);
 
+    // DFFE absorption for opt_level >= 2
+    let dffe_absorbed = if opt_level >= 2 {
+        crate::gate_optimizer::absorb_dffe(&mut result.netlist, library)
+    } else {
+        0
+    };
+
+    if dffe_absorbed > 0 {
+        let mut dce_opt = GateOptimizer::new();
+        dce_opt.set_enable_constant_folding(false);
+        dce_opt.set_enable_boolean_simp(false);
+        dce_opt.set_enable_mux_opt(false);
+        dce_opt.set_enable_buffer_removal(true);
+        dce_opt.optimize(&mut result.netlist);
+    }
+
     // Update stats with optimization info
     result.stats.cells_created = result.netlist.cells.len();
     result.stats.nets_created = result.netlist.nets.len();
 
     // Add optimization summary to warnings (as info)
-    if opt_stats.cells_removed > 0 {
+    if opt_stats.cells_removed > 0 || dffe_absorbed > 0 {
         result.warnings.push(format!(
-            "Optimization (level {}): removed {} cells ({} → {}), FIT {} → {}",
+            "Optimization (level {}): removed {} cells ({} → {}), FIT {} → {}, DFFE: {}",
             opt_level,
             opt_stats.cells_removed,
             opt_stats.cells_before,
             opt_stats.cells_after,
             opt_stats.fit_before,
-            opt_stats.fit_after
+            opt_stats.fit_after,
+            dffe_absorbed
         ));
     }
 
@@ -7936,7 +7995,10 @@ pub fn synthesize(
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
     }
 
-    // Step 4: Buffer removal (remove buffer cells that just pass signals through)
+    // Step 4: DFFE absorption (convert DFF+LUT MUX feedback → DFFE)
+    let _dffe_absorbed = crate::gate_optimizer::absorb_dffe(&mut result.netlist, library);
+
+    // Step 5: Buffer removal and cleanup
     {
         let mut gate_opt = crate::gate_optimizer::GateOptimizer::new();
         gate_opt.set_enable_constant_folding(false);
