@@ -27,6 +27,20 @@ use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
 use std::collections::HashMap;
 
+/// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
+/// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
+pub(crate) fn is_constant_cell(cell_type: &str) -> bool {
+    cell_type.starts_with("TIE_")
+        || cell_type.starts_with("TIE0")
+        || cell_type.starts_with("TIE1")
+        || cell_type.starts_with("TIEH")
+        || cell_type.starts_with("TIEL")
+        || cell_type == "SB_GND"
+        || cell_type == "SB_VCC"
+        || cell_type == "GND"
+        || cell_type == "VCC"
+}
+
 /// Placement algorithm selection
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PlacementAlgorithm {
@@ -473,6 +487,9 @@ impl<D: Device + Clone> Placer<D> {
         let mut required_dsps = 0usize;
 
         for cell in &netlist.cells {
+            if is_constant_cell(&cell.cell_type) {
+                continue;
+            }
             let cell_type = &cell.cell_type;
             if cell_type.contains("LUT") || cell_type.starts_with("SB_LUT") {
                 required_luts += 1;
@@ -605,6 +622,12 @@ impl<D: Device + Clone> Placer<D> {
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
 
         for cell in &netlist.cells {
+            // Skip constant cells (TIE_HIGH/TIE_LOW/GND/VCC) — on iCE40 these
+            // use hardwired fabric resources, not physical LUTs
+            if is_constant_cell(&cell.cell_type) {
+                continue;
+            }
+
             let cell_id = cell.id;
             // Determine required BEL type
             let bel_type = self.cell_to_bel_type(&cell.cell_type);

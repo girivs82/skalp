@@ -6,7 +6,7 @@
 //! 2. Solves Lx = b using conjugate gradient
 //! 3. Produces continuous cell positions
 
-use super::{BelType, PlacementLoc, PlacementResult};
+use super::{is_constant_cell, BelType, PlacementLoc, PlacementResult};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
@@ -35,18 +35,18 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         netlist: &GateNetlist,
         carry_chains: &[CarryChain],
     ) -> Result<PlacementResult> {
-        let n = netlist.cells.len();
-        if n == 0 {
-            return Ok(PlacementResult::new());
-        }
-
-        // Build cell index map
+        // Build cell index map, excluding constant cells (hardwired VCC/GND on FPGA)
         let cell_indices: HashMap<CellId, usize> = netlist
             .cells
             .iter()
+            .filter(|cell| !is_constant_cell(&cell.cell_type))
             .enumerate()
             .map(|(i, cell)| (cell.id, i))
             .collect();
+
+        if cell_indices.is_empty() {
+            return Ok(PlacementResult::new());
+        }
 
         // Solve for continuous positions (same as place())
         let (mut x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
@@ -60,17 +60,18 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
 
     /// Perform analytical placement
     pub fn place(&self, netlist: &GateNetlist) -> Result<PlacementResult> {
-        let n = netlist.cells.len();
-        if n == 0 {
-            return Ok(PlacementResult::new());
-        }
-
+        // Build cell index map, excluding constant cells (hardwired VCC/GND on FPGA)
         let cell_indices: HashMap<CellId, usize> = netlist
             .cells
             .iter()
+            .filter(|cell| !is_constant_cell(&cell.cell_type))
             .enumerate()
             .map(|(i, cell)| (cell.id, i))
             .collect();
+
+        if cell_indices.is_empty() {
+            return Ok(PlacementResult::new());
+        }
 
         let (x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
         self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
@@ -92,7 +93,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         netlist: &GateNetlist,
         cell_indices: &HashMap<CellId, usize>,
     ) -> Result<(Vec<f64>, Vec<f64>)> {
-        let n = netlist.cells.len();
+        let n = cell_indices.len();
 
         // Build sparse connectivity matrix (Laplacian) — O(nnz) storage & multiply
         // Each row stores only non-zero entries: Vec<(column_index, value)>
@@ -141,7 +142,10 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let (width, height) = self.device.grid_size();
         let initial_positions: Vec<(f64, f64)> = vec![(width as f64 / 2.0, height as f64 / 2.0); n];
         for cell in &netlist.cells {
-            let idx = cell_indices[&cell.id];
+            let idx = match cell_indices.get(&cell.id) {
+                Some(&i) => i,
+                None => continue, // constant cell, not placed
+            };
 
             if cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO") {
                 let anchor_weight = 100.0;
@@ -207,7 +211,11 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let mut result = PlacementResult::new();
         let mut used_locations: HashMap<(u32, u32, usize), bool> = HashMap::new();
 
-        for (idx, cell) in netlist.cells.iter().enumerate() {
+        for cell in &netlist.cells {
+            let idx = match _cell_indices.get(&cell.id) {
+                Some(&i) => i,
+                None => continue, // constant cell, not placed
+            };
             let cell_id = cell.id;
             let bel_type = self.cell_to_bel_type(&cell.cell_type);
 
