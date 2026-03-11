@@ -930,7 +930,7 @@ impl LirToAig {
                 self.set_output_bit(node.output, 0, result);
             }
 
-            LirOp::Add { width, has_carry } => {
+            LirOp::Add { width, has_carry, .. } => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
                 let mut carry = self.aig.false_lit();

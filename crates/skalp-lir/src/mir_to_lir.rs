@@ -2996,14 +2996,27 @@ impl MirToLirTransform {
         let (left_signal, right_signal, word_op, result_width) = match op {
             // Arithmetic - use expected_width for operands
             BinaryOp::Add => {
-                let left_sig = self.transform_expression(left, arithmetic_operand_width);
-                let right_sig = self.transform_expression(right, arithmetic_operand_width);
+                // Detect constant operand for carry chain constant folding
+                let right_const = Self::try_extract_constant(right);
+                let left_const = Self::try_extract_constant(left);
+                let const_b = right_const.or_else(|| {
+                    // If left is constant, swap operands so const is always on the right
+                    if left_const.is_some() { left_const } else { None }
+                });
+                let (actual_left, actual_right) = if right_const.is_none() && left_const.is_some() {
+                    (right, left) // swap so constant is on the right
+                } else {
+                    (left, right)
+                };
+                let left_sig = self.transform_expression(actual_left, arithmetic_operand_width);
+                let right_sig = self.transform_expression(actual_right, arithmetic_operand_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::Add {
                         width: arithmetic_operand_width,
                         has_carry: false,
+                        const_b,
                     },
                     expected_width,
                 )
@@ -3021,6 +3034,7 @@ impl MirToLirTransform {
                     LirOp::Add {
                         width: widen_width,
                         has_carry: false,
+                        const_b: None,
                     },
                     widen_width,
                 )
@@ -3707,6 +3721,7 @@ impl MirToLirTransform {
                     LirOp::Add {
                         width: negate_width,
                         has_carry: false,
+                        const_b: None,
                     },
                     vec![inv_out, one],
                     out,
@@ -3902,6 +3917,7 @@ impl MirToLirTransform {
             LirOp::Add {
                 width,
                 has_carry: false,
+                const_b: None,
             },
             vec![inverted, one],
             negated,
@@ -3957,6 +3973,7 @@ impl MirToLirTransform {
             LirOp::Add {
                 width,
                 has_carry: false,
+                const_b: None,
             },
             vec![inverted, one],
             negated,
@@ -4170,6 +4187,7 @@ impl MirToLirTransform {
                     LirOp::Add {
                         width,
                         has_carry: false,
+                        const_b: None,
                     },
                     vec![inverted, one],
                     negated,

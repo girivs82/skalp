@@ -116,6 +116,8 @@ pub struct TechMapper<'a> {
     c_elem_counter: u32,
     /// Physical constraints per port name (pin location, IO standard, drive strength, etc.)
     port_constraints: IndexMap<String, PhysicalConstraints>,
+    /// Set of output port signal IDs (for buffer elimination)
+    output_signals: std::collections::HashSet<LirSignalId>,
 }
 
 impl<'a> TechMapper<'a> {
@@ -131,6 +133,7 @@ impl<'a> TechMapper<'a> {
             module_safety_info: None,
             c_elem_counter: 0,
             port_constraints: IndexMap::new(),
+            output_signals: std::collections::HashSet::new(),
         }
     }
 
@@ -191,6 +194,7 @@ impl<'a> TechMapper<'a> {
         }
 
         for &output_id in &word_lir.outputs {
+            self.output_signals.insert(output_id);
             if let Some(nets) = self.signal_to_net.get(&output_id) {
                 for &net_id in nets {
                     if let Some(net) = self.netlist.get_net_mut(net_id) {
@@ -464,8 +468,8 @@ impl<'a> TechMapper<'a> {
             }
 
             // Adder - ripple carry chain
-            LirOp::Add { width, has_carry } => {
-                self.map_adder(*width, *has_carry, &input_nets, &output_nets, &node.path);
+            LirOp::Add { width, has_carry, const_b } => {
+                self.map_adder(*width, *has_carry, *const_b, &input_nets, &output_nets, &node.path);
             }
 
             // Subtractor
@@ -927,6 +931,7 @@ impl<'a> TechMapper<'a> {
         &mut self,
         width: u32,
         _has_carry: bool,
+        const_b: Option<u64>,
         inputs: &[Vec<GateNetId>],
         outputs: &[GateNetId],
         path: &str,
@@ -963,7 +968,7 @@ impl<'a> TechMapper<'a> {
         // Check for FPGA carry chain support
         if let Some(carry_cell) = self.library.find_best_cell(&CellFunction::Carry) {
             // Use FPGA carry chain: XOR for sum, Carry cell for carry propagation
-            self.map_adder_fpga_carry_chain(width, inputs, outputs, path, carry_cell);
+            self.map_adder_fpga_carry_chain(width, const_b, inputs, outputs, path, carry_cell);
             return;
         }
 
@@ -1030,13 +1035,13 @@ impl<'a> TechMapper<'a> {
     fn map_adder_fpga_carry_chain(
         &mut self,
         width: u32,
+        const_b: Option<u64>,
         inputs: &[Vec<GateNetId>],
         outputs: &[GateNetId],
         path: &str,
         carry_cell: &LibraryCell,
     ) {
         let carry_info = LibraryCellInfo::from_library_cell(carry_cell);
-        let xor_info = self.get_cell_info(&CellFunction::Xor2);
         let lut4_info = self.get_cell_info(&CellFunction::Lut4);
         // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
         let tie_low_fpga = self.get_tie_low();
@@ -1045,8 +1050,10 @@ impl<'a> TechMapper<'a> {
 
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(tie_low_fpga);
-            let b = inputs[1].get(bit).copied().unwrap_or(tie_low_fpga);
             let sum = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+            // Extract known constant bit value if available
+            let b_bit = const_b.map(|v| ((v >> bit) & 1) as u8);
 
             // Create carry output net
             let cout = self.alloc_net_id();
@@ -1055,64 +1062,207 @@ impl<'a> TechMapper<'a> {
             self.stats.nets_created += 1;
 
             if let Some(cin) = carry_net {
-                // Full adder sum: single LUT4 computes a XOR b XOR cin
-                // INIT = 0x9696 (3-input XOR truth table)
-                let mut sum_cell = Cell::new_comb(
-                    CellId(0),
-                    lut4_info.name.clone(),
-                    self.library.name.clone(),
-                    lut4_info.fit,
-                    format!("{}.sum_{}", path, bit),
-                    vec![a, b, cin],
-                    vec![sum],
-                );
-                sum_cell.lut_init = Some(0x9696);
-                sum_cell.source_op = Some("XOR3".to_string());
-                lut4_info.apply_to_cell(&mut sum_cell);
-                self.add_cell(sum_cell);
+                // Full adder stage (bit > 0)
+                match b_bit {
+                    Some(0) => {
+                        // b=0: sum = a XOR cin (2-input), carry = a AND cin
+                        // LUT INIT for XOR(I0=a, I1=cin): 0x6666
+                        let mut sum_cell = Cell::new_comb(
+                            CellId(0),
+                            lut4_info.name.clone(),
+                            self.library.name.clone(),
+                            lut4_info.fit,
+                            format!("{}.sum_{}", path, bit),
+                            vec![a, cin],
+                            vec![sum],
+                        );
+                        sum_cell.lut_init = Some(0x6666); // XOR(a, cin)
+                        sum_cell.source_op = Some("XOR2_const".to_string());
+                        lut4_info.apply_to_cell(&mut sum_cell);
+                        self.add_cell(sum_cell);
 
-                // Carry cell: cout = (a & b) | ((a | b) & cin)
-                let mut carry_cell = Cell::new_comb(
-                    CellId(0),
-                    carry_info.name.clone(),
-                    self.library.name.clone(),
-                    carry_info.fit,
-                    format!("{}.carry{}", path, bit),
-                    vec![a, b, cin],
-                    vec![cout],
-                );
-                carry_cell.source_op = Some("Carry".to_string());
-                carry_info.apply_to_cell(&mut carry_cell);
-                self.add_cell(carry_cell);
+                        // Carry: when b=0, cout = a AND cin
+                        // SB_CARRY computes: cout = (I0 & I1) | ((I0 | I1) & CI)
+                        // With I1=0: cout = 0 | (I0 & CI) = a & cin — correct!
+                        let mut cc = Cell::new_comb(
+                            CellId(0),
+                            carry_info.name.clone(),
+                            self.library.name.clone(),
+                            carry_info.fit,
+                            format!("{}.carry{}", path, bit),
+                            vec![a, tie_low_fpga, cin],
+                            vec![cout],
+                        );
+                        cc.source_op = Some("Carry".to_string());
+                        carry_info.apply_to_cell(&mut cc);
+                        self.add_cell(cc);
+                    }
+                    Some(1) => {
+                        // b=1: sum = a XOR 1 XOR cin = NOT(a) XOR cin = XNOR(a, cin)
+                        // LUT INIT for XNOR(I0=a, I1=cin): 0x9999
+                        let mut sum_cell = Cell::new_comb(
+                            CellId(0),
+                            lut4_info.name.clone(),
+                            self.library.name.clone(),
+                            lut4_info.fit,
+                            format!("{}.sum_{}", path, bit),
+                            vec![a, cin],
+                            vec![sum],
+                        );
+                        sum_cell.lut_init = Some(0x9999); // XNOR(a, cin)
+                        sum_cell.source_op = Some("XNOR2_const".to_string());
+                        lut4_info.apply_to_cell(&mut sum_cell);
+                        self.add_cell(sum_cell);
+
+                        // Carry: when b=1, cout = (a & 1) | ((a | 1) & cin) = a | cin
+                        // SB_CARRY with I1=1: cout = (I0 & 1) | ((I0 | 1) & CI) = I0 | CI
+                        // But we need I1 to be high. Use tie_high.
+                        let tie_high_fpga = self.get_tie_high();
+                        let mut cc = Cell::new_comb(
+                            CellId(0),
+                            carry_info.name.clone(),
+                            self.library.name.clone(),
+                            carry_info.fit,
+                            format!("{}.carry{}", path, bit),
+                            vec![a, tie_high_fpga, cin],
+                            vec![cout],
+                        );
+                        cc.source_op = Some("Carry".to_string());
+                        carry_info.apply_to_cell(&mut cc);
+                        self.add_cell(cc);
+                    }
+                    _ => {
+                        // Non-constant b: standard 3-input XOR
+                        let b = inputs[1].get(bit).copied().unwrap_or(tie_low_fpga);
+                        let mut sum_cell = Cell::new_comb(
+                            CellId(0),
+                            lut4_info.name.clone(),
+                            self.library.name.clone(),
+                            lut4_info.fit,
+                            format!("{}.sum_{}", path, bit),
+                            vec![a, b, cin],
+                            vec![sum],
+                        );
+                        sum_cell.lut_init = Some(0x9696);
+                        sum_cell.source_op = Some("XOR3".to_string());
+                        lut4_info.apply_to_cell(&mut sum_cell);
+                        self.add_cell(sum_cell);
+
+                        let mut cc = Cell::new_comb(
+                            CellId(0),
+                            carry_info.name.clone(),
+                            self.library.name.clone(),
+                            carry_info.fit,
+                            format!("{}.carry{}", path, bit),
+                            vec![a, b, cin],
+                            vec![cout],
+                        );
+                        cc.source_op = Some("Carry".to_string());
+                        carry_info.apply_to_cell(&mut cc);
+                        self.add_cell(cc);
+                    }
+                }
             } else {
-                // Half adder for first bit: XOR for sum, AND for carry
-                let mut xor_cell = Cell::new_comb(
-                    CellId(0),
-                    xor_info.name.clone(),
-                    self.library.name.clone(),
-                    xor_info.fit,
-                    format!("{}.xor_{}", path, bit),
-                    vec![a, b],
-                    vec![sum],
-                );
-                xor_cell.source_op = Some("XOR".to_string());
-                xor_info.apply_to_cell(&mut xor_cell);
-                self.add_cell(xor_cell);
+                // Half adder for first bit (bit 0, no carry in)
+                match b_bit {
+                    Some(0) => {
+                        // a + 0: sum = a (buffer), carry = 0
+                        // LUT as buffer: INIT = 0xAAAA (pass-through I0)
+                        let mut sum_cell = Cell::new_comb(
+                            CellId(0),
+                            lut4_info.name.clone(),
+                            self.library.name.clone(),
+                            lut4_info.fit,
+                            format!("{}.sum_{}", path, bit),
+                            vec![a],
+                            vec![sum],
+                        );
+                        sum_cell.lut_init = Some(0xAAAA);
+                        sum_cell.source_op = Some("BUF_const".to_string());
+                        lut4_info.apply_to_cell(&mut sum_cell);
+                        self.add_cell(sum_cell);
 
-                // For the first bit, carry = a & b
-                let and_info = self.get_cell_info(&CellFunction::And2);
-                let mut and_cell = Cell::new_comb(
-                    CellId(0),
-                    and_info.name.clone(),
-                    self.library.name.clone(),
-                    and_info.fit,
-                    format!("{}.and_{}", path, bit),
-                    vec![a, b],
-                    vec![cout],
-                );
-                and_cell.source_op = Some("AND".to_string());
-                and_info.apply_to_cell(&mut and_cell);
-                self.add_cell(and_cell);
+                        // carry = a AND 0 = 0, just use tie_low for carry
+                        // Connect cout to tie_low — but we need a net.
+                        // Actually, map carry cell with b=0: cout = a & 0 = 0
+                        let mut cc = Cell::new_comb(
+                            CellId(0),
+                            carry_info.name.clone(),
+                            self.library.name.clone(),
+                            carry_info.fit,
+                            format!("{}.carry{}", path, bit),
+                            vec![a, tie_low_fpga, tie_low_fpga],
+                            vec![cout],
+                        );
+                        cc.source_op = Some("Carry".to_string());
+                        carry_info.apply_to_cell(&mut cc);
+                        self.add_cell(cc);
+                    }
+                    Some(1) => {
+                        // a + 1: sum = NOT(a), carry = a
+                        // LUT as inverter: INIT = 0x5555
+                        let mut sum_cell = Cell::new_comb(
+                            CellId(0),
+                            lut4_info.name.clone(),
+                            self.library.name.clone(),
+                            lut4_info.fit,
+                            format!("{}.sum_{}", path, bit),
+                            vec![a],
+                            vec![sum],
+                        );
+                        sum_cell.lut_init = Some(0x5555);
+                        sum_cell.source_op = Some("INV_const".to_string());
+                        lut4_info.apply_to_cell(&mut sum_cell);
+                        self.add_cell(sum_cell);
+
+                        // carry = a AND 1 = a
+                        // SB_CARRY with I1=1, CI=0: cout = (a & 1) | ((a|1) & 0) = a
+                        let tie_high_fpga = self.get_tie_high();
+                        let mut cc = Cell::new_comb(
+                            CellId(0),
+                            carry_info.name.clone(),
+                            self.library.name.clone(),
+                            carry_info.fit,
+                            format!("{}.carry{}", path, bit),
+                            vec![a, tie_high_fpga, tie_low_fpga],
+                            vec![cout],
+                        );
+                        cc.source_op = Some("Carry".to_string());
+                        carry_info.apply_to_cell(&mut cc);
+                        self.add_cell(cc);
+                    }
+                    _ => {
+                        // Non-constant b: standard half adder
+                        let b = inputs[1].get(bit).copied().unwrap_or(tie_low_fpga);
+                        let xor_info = self.get_cell_info(&CellFunction::Xor2);
+                        let mut xor_cell = Cell::new_comb(
+                            CellId(0),
+                            xor_info.name.clone(),
+                            self.library.name.clone(),
+                            xor_info.fit,
+                            format!("{}.xor_{}", path, bit),
+                            vec![a, b],
+                            vec![sum],
+                        );
+                        xor_cell.source_op = Some("XOR".to_string());
+                        xor_info.apply_to_cell(&mut xor_cell);
+                        self.add_cell(xor_cell);
+
+                        let and_info = self.get_cell_info(&CellFunction::And2);
+                        let mut and_cell = Cell::new_comb(
+                            CellId(0),
+                            and_info.name.clone(),
+                            self.library.name.clone(),
+                            and_info.fit,
+                            format!("{}.and_{}", path, bit),
+                            vec![a, b],
+                            vec![cout],
+                        );
+                        and_cell.source_op = Some("AND".to_string());
+                        and_info.apply_to_cell(&mut and_cell);
+                        self.add_cell(and_cell);
+                    }
+                }
             }
 
             carry_net = Some(cout);
@@ -1767,6 +1917,7 @@ impl<'a> TechMapper<'a> {
         self.map_adder(
             cross_width,
             false,
+            None,
             &[pp_lh_padded, pp_hl_padded],
             &cross_sum_outs,
             &format!("{}.dsp_cross_add", path),
@@ -1814,6 +1965,7 @@ impl<'a> TechMapper<'a> {
         self.map_adder(
             add1_width,
             false,
+            None,
             &[add1_a, add1_b],
             &add1_outs,
             &format!("{}.dsp_add1", path),
@@ -1853,6 +2005,7 @@ impl<'a> TechMapper<'a> {
         self.map_adder(
             final_width,
             false,
+            None,
             &[add2_a, add2_b],
             &final_outs,
             &format!("{}.dsp_final_add", path),
@@ -7368,7 +7521,22 @@ pub fn synthesize(
     use crate::synth::SynthEngine;
 
     // Step 1: Initial tech mapping
-    let initial_result = map_lir_to_gates(lir, library);
+    let mut initial_result = map_lir_to_gates(lir, library);
+
+    // Step 1.5: Buffer removal BEFORE AIG optimization.
+    // Output port buffers (from `output = signal` assignments) must be removed here
+    // because the AIG optimizer converts identity buffers to LUT4 cells instead of
+    // eliminating them. The reverse net replacement wires the driver of the internal
+    // signal directly to the output port net.
+    {
+        let mut gate_opt = crate::gate_optimizer::GateOptimizer::new();
+        gate_opt.set_enable_constant_folding(false);
+        gate_opt.set_enable_dce(false);
+        gate_opt.set_enable_boolean_simp(false);
+        gate_opt.set_enable_mux_opt(false);
+        gate_opt.set_enable_buffer_removal(true);
+        gate_opt.optimize(&mut initial_result.netlist);
+    }
 
     // Step 2: Run synthesis engine with AIG optimization
     let mut engine = SynthEngine::with_preset(preset);
@@ -7756,6 +7924,7 @@ mod tests {
             LirOp::Add {
                 width: 4,
                 has_carry: false,
+                const_b: None,
             },
             vec![a, b],
             sum,
@@ -7914,6 +8083,7 @@ mod tests {
             LirOp::Add {
                 width: 4,
                 has_carry: false,
+                const_b: None,
             },
             vec![a, b],
             sum,

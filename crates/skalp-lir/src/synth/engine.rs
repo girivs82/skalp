@@ -1461,6 +1461,7 @@ mod tests {
             LirOp::Add {
                 width: 8,
                 has_carry: false,
+                const_b: None,
             },
             vec![a, b],
             sum,

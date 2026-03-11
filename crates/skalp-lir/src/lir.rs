@@ -695,7 +695,9 @@ mod tests {
 pub enum LirOp {
     // === Arithmetic ===
     /// Addition: result = a + b (with optional carry-out)
-    Add { width: u32, has_carry: bool },
+    /// If `const_b` is Some, operand b is a known constant — the carry chain can
+    /// fold the constant into LUT INITs and avoid creating separate TIE cells.
+    Add { width: u32, has_carry: bool, const_b: Option<u64> },
     /// Subtraction: result = a - b (with optional borrow-out)
     Sub { width: u32, has_borrow: bool },
     /// Multiplication: result = a * b
@@ -884,7 +886,7 @@ impl LirOp {
     /// Returns the output width of this operation
     pub fn output_width(&self) -> u32 {
         match self {
-            LirOp::Add { width, has_carry } => {
+            LirOp::Add { width, has_carry, .. } => {
                 if *has_carry {
                     width + 1
                 } else {
@@ -1384,7 +1386,8 @@ mod lir_tests {
         assert_eq!(
             LirOp::Add {
                 width: 8,
-                has_carry: false
+                has_carry: false,
+                const_b: None,
             }
             .output_width(),
             8
@@ -1392,7 +1395,8 @@ mod lir_tests {
         assert_eq!(
             LirOp::Add {
                 width: 8,
-                has_carry: true
+                has_carry: true,
+                const_b: None,
             }
             .output_width(),
             9
@@ -1414,6 +1418,7 @@ mod lir_tests {
             LirOp::Add {
                 width: 8,
                 has_carry: false,
+                const_b: None,
             },
             vec![a, b],
             sum,
@@ -1445,7 +1450,8 @@ mod lir_tests {
         .is_sequential());
         assert!(!LirOp::Add {
             width: 8,
-            has_carry: false
+            has_carry: false,
+            const_b: None,
         }
         .is_sequential());
     }

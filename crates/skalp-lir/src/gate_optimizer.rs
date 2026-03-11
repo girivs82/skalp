@@ -860,12 +860,14 @@ impl GateOptimizer {
         // because output port net IDs are fixed (part of module interface)
         let output_port_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
 
+
         // BUG #246 FIX: Build set of "alias target" nets - nets that are the canonical
         // representative after hierarchical port stitching. These nets have other nets
         // pointing to them via alias_of, so they must not be replaced by buffer removal.
         // If we replace them, the alias chains become broken and EC mismatches occur.
         let alias_targets: HashSet<GateNetId> =
             netlist.nets.iter().filter_map(|net| net.alias_of).collect();
+
 
         for cell in &netlist.cells {
             if self.cells_to_remove.contains(&cell.id) {
@@ -879,12 +881,71 @@ impl GateOptimizer {
                 "BUF" | "BUF_X1" | "BUFF" | "CLKBUF" | "BUFFER"
             ) || cell.function == Some(CellFunction::Buf);
 
-            if is_buffer {
+            // Also detect identity LUT4 cells (output = one input, no logic).
+            // These are created by the AIG writer when forwarding inputs to outputs.
+            // INIT patterns for identity: 0xAAAA (I0), 0xCCCC (I1), 0xF0F0 (I2), 0xFF00 (I3)
+            // With input padding (unused inputs tied to I0): 0xAAAA maps to any single-input pass-through
+            let identity_input = if !is_buffer {
+                if let Some(init) = cell.lut_init {
+                    match init {
+                        0xAAAA => cell.inputs.get(0).copied(),
+                        0xCCCC => cell.inputs.get(1).copied(),
+                        0xF0F0 => cell.inputs.get(2).copied(),
+                        0xFF00 => cell.inputs.get(3).copied(),
+                        _ => {
+                            // Check for identity with duplicate inputs:
+                            // When unused LUT inputs are tied to I0, identity of I0 = 0xAAAA (standard)
+                            // When all 4 inputs are the same net, any of the above patterns match I0
+                            if cell.inputs.len() >= 2 {
+                                let all_same = cell.inputs.iter().all(|&i| i == cell.inputs[0]);
+                                if all_same && (init == 0xAAAA || init == 0xCCCC || init == 0xF0F0 || init == 0xFF00) {
+                                    cell.inputs.get(0).copied()
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let (is_pass_through, pass_input, pass_output) = if is_buffer {
                 if let (Some(&input), Some(&output)) = (cell.inputs.first(), cell.outputs.first()) {
-                    // IMPORTANT: Do NOT remove buffers that drive output ports!
-                    // Output port net IDs are fixed (part of module interface).
-                    // If we remove the buffer, the output port would have no driver.
+                    (true, input, output)
+                } else {
+                    (false, GateNetId(0), GateNetId(0))
+                }
+            } else if let Some(input) = identity_input {
+                if let Some(&output) = cell.outputs.first() {
+                    (true, input, output)
+                } else {
+                    (false, GateNetId(0), GateNetId(0))
+                }
+            } else {
+                (false, GateNetId(0), GateNetId(0))
+            };
+
+            if is_pass_through {
+                let input = pass_input;
+                let output = pass_output;
+
+                    // For buffers driving output ports, use REVERSE replacement:
+                    // Replace the input net with the output net everywhere, so the
+                    // driver of the internal net now drives the output port directly.
                     if output_port_nets.contains(&output) {
+                        // Don't reverse-replace if input is also an output port or alias target
+                        if output_port_nets.contains(&input) || alias_targets.contains(&input) {
+                            continue;
+                        }
+                        self.net_replacements.insert(input, output);
+                        self.cells_to_remove.insert(cell.id);
+                        removed += 1;
                         continue;
                     }
 
@@ -901,7 +962,6 @@ impl GateOptimizer {
                     self.net_replacements.insert(output, input);
                     self.cells_to_remove.insert(cell.id);
                     removed += 1;
-                }
             }
         }
 
@@ -1006,11 +1066,18 @@ impl GateOptimizer {
     // ========================================================================
 
     fn apply_optimizations(&mut self, netlist: &mut GateNetlist) {
-        // First, apply net replacements to all cell inputs
+        // Apply net replacements to all cell inputs AND outputs.
+        // Output rewiring is needed for output port buffer elimination, where
+        // the internal net is replaced by the output port net (reverse replacement).
         for cell in &mut netlist.cells {
             for input in &mut cell.inputs {
                 while let Some(&replacement) = self.net_replacements.get(input) {
                     *input = replacement;
+                }
+            }
+            for output in &mut cell.outputs {
+                while let Some(&replacement) = self.net_replacements.get(output) {
+                    *output = replacement;
                 }
             }
         }

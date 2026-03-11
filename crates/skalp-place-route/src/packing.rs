@@ -34,6 +34,8 @@ pub enum PackedCellType {
     Pll,
     /// Global buffer
     GlobalBuf,
+    /// Constant (TIE_HIGH/TIE_LOW/SB_GND/SB_VCC) — dedicated resource, not a LUT
+    Constant,
     /// Other/unknown
     Other(String),
 }
@@ -522,12 +524,9 @@ impl<'a> CellPacker<'a> {
             || cell_type_str == "GND"
             || cell_type_str == "VCC"
         {
-            // FPGA: constant cells become LUT4 with all-0 or all-1 init
-            let is_high = cell_type_str.contains("HIGH")
-                || cell_type_str == "VCC"
-                || cell_type_str.contains("HI");
-            let init = if is_high { 0xFFFF } else { 0x0000 };
-            (PackedCellType::Lut4Only, Some(init), None)
+            // FPGA: constant cells (SB_GND/SB_VCC) are dedicated resources, not LUTs.
+            // On iCE40, these map to dedicated routing resources and don't consume logic cells.
+            (PackedCellType::Constant, None, None)
         } else {
             (PackedCellType::Other(cell_type_str), None, None)
         };
