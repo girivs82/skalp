@@ -94,8 +94,11 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     ) -> Result<(Vec<f64>, Vec<f64>)> {
         let n = netlist.cells.len();
 
-        // Build connectivity matrix (Laplacian)
-        let mut laplacian = vec![vec![0.0f64; n]; n];
+        // Build sparse connectivity matrix (Laplacian) — O(nnz) storage & multiply
+        // Each row stores only non-zero entries: Vec<(column_index, value)>
+        let mut laplacian: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        // Diagonal stored separately for fast accumulation
+        let mut diag = vec![0.0f64; n];
         let mut bx = vec![0.0f64; n];
         let mut by = vec![0.0f64; n];
 
@@ -126,16 +129,15 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                     let ci = cell_indices[&connected_cells[i]];
                     let cj = cell_indices[&connected_cells[j]];
 
-                    laplacian[ci][ci] += weight;
-                    laplacian[cj][cj] += weight;
-                    laplacian[ci][cj] -= weight;
-                    laplacian[cj][ci] -= weight;
+                    diag[ci] += weight;
+                    diag[cj] += weight;
+                    laplacian[ci].push((cj, -weight));
+                    laplacian[cj].push((ci, -weight));
                 }
             }
         }
 
         // Add anchor points for I/O cells
-        // Use center positions as initial estimates for connectivity-driven placement
         let (width, height) = self.device.grid_size();
         let initial_positions: Vec<(f64, f64)> = vec![(width as f64 / 2.0, height as f64 / 2.0); n];
         for cell in &netlist.cells {
@@ -143,9 +145,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
 
             if cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO") {
                 let anchor_weight = 100.0;
-                laplacian[idx][idx] += anchor_weight;
+                diag[idx] += anchor_weight;
 
-                // Use resolved physical pin location if available from constraints
                 let signal_name = cell.path.split('.').next_back().unwrap_or(&cell.path);
                 let signal_name = signal_name
                     .strip_suffix("_ibuf")
@@ -165,14 +166,31 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 by[idx] += anchor_weight * ay;
             } else {
                 let center_weight = 0.01;
-                laplacian[idx][idx] += center_weight;
+                diag[idx] += center_weight;
                 bx[idx] += center_weight * (width as f64 / 2.0);
                 by[idx] += center_weight * (height as f64 / 2.0);
             }
         }
 
-        let x_positions = self.conjugate_gradient(&laplacian, &bx, n)?;
-        let y_positions = self.conjugate_gradient(&laplacian, &by, n)?;
+        // Merge duplicate off-diagonal entries per row and sort for cache efficiency
+        for row in &mut laplacian {
+            row.sort_unstable_by_key(|&(col, _)| col);
+            // Merge duplicates
+            let mut merged: Vec<(usize, f64)> = Vec::with_capacity(row.len());
+            for &(col, val) in row.iter() {
+                if let Some(last) = merged.last_mut() {
+                    if last.0 == col {
+                        last.1 += val;
+                        continue;
+                    }
+                }
+                merged.push((col, val));
+            }
+            *row = merged;
+        }
+
+        let x_positions = Self::conjugate_gradient_sparse(&laplacian, &diag, &bx, n)?;
+        let y_positions = Self::conjugate_gradient_sparse(&laplacian, &diag, &by, n)?;
 
         Ok((x_positions, y_positions))
     }
@@ -257,32 +275,41 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         }
     }
 
-    /// Conjugate gradient solver for Ax = b
-    fn conjugate_gradient(&self, a: &[Vec<f64>], b: &[f64], n: usize) -> Result<Vec<f64>> {
+    /// Sparse conjugate gradient solver for Ax = b.
+    ///
+    /// Uses sparse Laplacian (off-diagonal entries) + separate diagonal vector.
+    /// Matrix-vector multiply is O(nnz) instead of O(n²).
+    /// Temp vectors are allocated once and reused across iterations.
+    fn conjugate_gradient_sparse(
+        off_diag: &[Vec<(usize, f64)>],
+        diag: &[f64],
+        b: &[f64],
+        n: usize,
+    ) -> Result<Vec<f64>> {
         let mut x = vec![0.0; n];
         let mut r = b.to_vec();
         let mut p = r.clone();
+        // Pre-allocate temp vectors (reused every iteration)
+        let mut ap = vec![0.0; n];
 
         let max_iterations = n * 2;
         let tolerance = 1e-6;
 
         for _ in 0..max_iterations {
-            // r_dot_r = r · r
             let r_dot_r: f64 = r.iter().map(|&ri| ri * ri).sum();
 
             if r_dot_r.sqrt() < tolerance {
                 break;
             }
 
-            // Ap = A * p
-            let mut ap = vec![0.0; n];
+            // Sparse matrix-vector multiply: ap = A * p
             for i in 0..n {
-                for (j, &p_j) in p.iter().enumerate() {
-                    ap[i] += a[i][j] * p_j;
+                ap[i] = diag[i] * p[i]; // Diagonal contribution
+                for &(j, val) in &off_diag[i] {
+                    ap[i] += val * p[j]; // Off-diagonal contributions
                 }
             }
 
-            // p_dot_ap = p · Ap
             let p_dot_ap: f64 = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum();
 
             if p_dot_ap.abs() < 1e-12 {
@@ -291,26 +318,20 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
 
             let alpha = r_dot_r / p_dot_ap;
 
-            // x = x + alpha * p
+            // x += alpha * p; r -= alpha * ap (fused to avoid extra loop)
+            let mut r_new_dot = 0.0;
             for i in 0..n {
                 x[i] += alpha * p[i];
+                r[i] -= alpha * ap[i];
+                r_new_dot += r[i] * r[i];
             }
 
-            // r_new = r - alpha * Ap
-            let mut r_new = vec![0.0; n];
-            for i in 0..n {
-                r_new[i] = r[i] - alpha * ap[i];
-            }
-
-            let r_new_dot: f64 = r_new.iter().map(|&ri| ri * ri).sum();
             let beta = r_new_dot / r_dot_r;
 
-            // p = r_new + beta * p
+            // p = r + beta * p
             for i in 0..n {
-                p[i] = r_new[i] + beta * p[i];
+                p[i] = r[i] + beta * p[i];
             }
-
-            r = r_new;
         }
 
         Ok(x)

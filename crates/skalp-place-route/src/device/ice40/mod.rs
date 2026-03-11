@@ -1652,6 +1652,10 @@ impl Device for Ice40Device {
         &self.clock_resources
     }
 
+    fn wire_count(&self) -> usize {
+        self.wires.len()
+    }
+
     fn can_place(&self, cell_type: &str, bel_type: BelType) -> bool {
         match bel_type {
             BelType::Lut4 => {

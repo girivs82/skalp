@@ -10,12 +10,10 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// A* search node
 #[derive(Clone)]
-#[allow(dead_code)]
 struct AStarNode {
     wire: WireId,
     g_score: f64, // Cost from start
     f_score: f64, // g_score + heuristic
-    parent: Option<(WireId, PipId)>,
 }
 
 impl Eq for AStarNode {}
@@ -107,35 +105,109 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         let target_x = sink_wire.tile_x;
         let target_y = sink_wire.tile_y;
 
+        // Use Vec-indexed arrays for O(1) lookups when wire_count is known,
+        // falling back to HashMap for unknown wire domains.
+        let num_wires = self.device.wire_count();
+        let use_vec = num_wires > 0;
+
         let mut open_set = BinaryHeap::new();
-        let mut came_from: HashMap<WireId, (WireId, PipId)> = HashMap::new();
-        let mut g_scores: HashMap<WireId, f64> = HashMap::new();
-        let mut closed_set: HashSet<WireId> = HashSet::new();
+
+        // Vec-based storage for O(1) access (indexed by WireId)
+        let mut g_scores_vec: Vec<f64> = if use_vec {
+            vec![f64::MAX; num_wires]
+        } else {
+            Vec::new()
+        };
+        let mut closed_vec: Vec<bool> = if use_vec {
+            vec![false; num_wires]
+        } else {
+            Vec::new()
+        };
+        let mut came_from_vec: Vec<Option<(WireId, PipId)>> = if use_vec {
+            vec![None; num_wires]
+        } else {
+            Vec::new()
+        };
+
+        // HashMap fallback for unknown wire domains
+        let mut g_scores_map: HashMap<WireId, f64> = HashMap::new();
+        let mut closed_map: HashSet<WireId> = HashSet::new();
+        let mut came_from_map: HashMap<WireId, (WireId, PipId)> = HashMap::new();
+
+        // Helper closures via inline functions below
+        macro_rules! get_g {
+            ($w:expr) => {
+                if use_vec {
+                    g_scores_vec[$w.0 as usize]
+                } else {
+                    g_scores_map.get(&$w).copied().unwrap_or(f64::MAX)
+                }
+            };
+        }
+        macro_rules! set_g {
+            ($w:expr, $v:expr) => {
+                if use_vec {
+                    g_scores_vec[$w.0 as usize] = $v;
+                } else {
+                    g_scores_map.insert($w, $v);
+                }
+            };
+        }
+        macro_rules! is_closed {
+            ($w:expr) => {
+                if use_vec {
+                    closed_vec[$w.0 as usize]
+                } else {
+                    closed_map.contains(&$w)
+                }
+            };
+        }
+        macro_rules! set_closed {
+            ($w:expr) => {
+                if use_vec {
+                    closed_vec[$w.0 as usize] = true;
+                } else {
+                    closed_map.insert($w);
+                }
+            };
+        }
+        macro_rules! set_came_from {
+            ($w:expr, $from:expr, $pip:expr) => {
+                if use_vec {
+                    came_from_vec[$w.0 as usize] = Some(($from, $pip));
+                } else {
+                    came_from_map.insert($w, ($from, $pip));
+                }
+            };
+        }
 
         // Initialize with source
         let h = self.heuristic(source, target_x, target_y);
-        g_scores.insert(source, 0.0);
+        set_g!(source, 0.0);
         open_set.push(AStarNode {
             wire: source,
             g_score: 0.0,
             f_score: h,
-            parent: None,
         });
 
         while let Some(current) = open_set.pop() {
             // Check if we reached the sink
             if current.wire == sink {
-                return Ok(self.reconstruct_path(source, sink, &came_from));
+                return Ok(if use_vec {
+                    self.reconstruct_path_vec(source, sink, &came_from_vec)
+                } else {
+                    self.reconstruct_path(source, sink, &came_from_map)
+                });
             }
 
             // Skip if already processed
-            if closed_set.contains(&current.wire) {
+            if is_closed!(current.wire) {
                 continue;
             }
-            closed_set.insert(current.wire);
+            set_closed!(current.wire);
 
-            // Get current g-score
-            let current_g = g_scores.get(&current.wire).copied().unwrap_or(f64::MAX);
+            // Use g-score from the node itself (already computed when pushed)
+            let current_g = current.g_score;
 
             // Expand neighbors via PIPs (forward routing - current wire is source)
             for pip_id in self.device.wire_src_pips(current.wire) {
@@ -144,8 +216,6 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                     None => continue,
                 };
 
-                // Get the destination wire (the one we're routing to)
-                // Since we're using wire_src_pips, current.wire should be pip.src_wire
                 let neighbor = pip.dst_wire;
 
                 // Skip blocked wires
@@ -154,16 +224,14 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                 }
 
                 // Skip already visited
-                if closed_set.contains(&neighbor) {
+                if is_closed!(neighbor) {
                     continue;
                 }
 
                 // Calculate cost with optional timing awareness
-                // Use wire-type-aware PIP delay when a delay model is available
                 let base_pip_cost = pip.cost() as f64;
                 let timing_cost = if timing_weight > 0.0 {
                     if let Some(ref model) = self.delay_model {
-                        // Compute PIP delay from source/destination wire types
                         let src_wire = self.device.wire(current.wire);
                         let dst_wire = self.device.wire(neighbor);
                         let typed_delay = match (src_wire, dst_wire) {
@@ -172,7 +240,7 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                             }
                             _ => model.pip_delay,
                         };
-                        timing_weight * (typed_delay / 0.05) // Normalize: 50ps = 1.0 cost unit
+                        timing_weight * (typed_delay / 0.05)
                     } else {
                         timing_weight * (pip.delay as f64 / 50.0)
                     }
@@ -184,11 +252,10 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                 let tentative_g = current_g + pip_cost * wire_cost;
 
                 // Check if this is a better path
-                let neighbor_g = g_scores.get(&neighbor).copied().unwrap_or(f64::MAX);
+                let neighbor_g = get_g!(neighbor);
                 if tentative_g < neighbor_g {
-                    // Record this path
-                    came_from.insert(neighbor, (current.wire, pip_id));
-                    g_scores.insert(neighbor, tentative_g);
+                    set_came_from!(neighbor, current.wire, pip_id);
+                    set_g!(neighbor, tentative_g);
 
                     let h = self.heuristic(neighbor, target_x, target_y);
                     let f = tentative_g + h;
@@ -197,7 +264,6 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                         wire: neighbor,
                         g_score: tentative_g,
                         f_score: f,
-                        parent: Some((current.wire, pip_id)),
                     });
                 }
             }
@@ -244,7 +310,34 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         span12_hops as f64 * 2.0 + span4_hops as f64 * 2.0 + local_hops as f64 * 1.5
     }
 
-    /// Reconstruct path from came_from map
+    /// Reconstruct path from Vec-based came_from
+    fn reconstruct_path_vec(
+        &self,
+        source: WireId,
+        sink: WireId,
+        came_from: &[Option<(WireId, PipId)>],
+    ) -> (Vec<WireId>, Vec<PipId>) {
+        let mut wires = vec![sink];
+        let mut pips = Vec::new();
+        let mut current = sink;
+
+        while let Some((prev, pip)) = came_from[current.0 as usize] {
+            wires.push(prev);
+            pips.push(pip);
+            current = prev;
+
+            if current == source {
+                break;
+            }
+        }
+
+        wires.reverse();
+        pips.reverse();
+
+        (wires, pips)
+    }
+
+    /// Reconstruct path from HashMap-based came_from (fallback)
     fn reconstruct_path(
         &self,
         source: WireId,

@@ -55,20 +55,16 @@ impl NetCostCache {
                 cell_to_nets.entry(*cell_id).or_default().push(i);
             }
 
-            // Compute HPWL cost
-            net_wl_cost[i] = Self::compute_net_wl(net, placement);
-
-            // Compute timing cost
-            if timing_weight > 0.0 {
-                let criticality = net_criticalities
-                    .get(&net.id)
-                    .copied()
-                    .unwrap_or(0.0);
-                if criticality >= 0.1 {
-                    let delay = Self::compute_net_delay(net, placement, delay_model);
-                    net_timing_cost[i] = delay * criticality * criticality;
-                }
-            }
+            // Compute HPWL + timing in a single pass over the net's cells
+            let criticality = if timing_weight > 0.0 {
+                net_criticalities.get(&net.id).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let (wl, timing) =
+                Self::compute_net_costs(net, placement, delay_model, criticality);
+            net_wl_cost[i] = wl;
+            net_timing_cost[i] = timing;
         }
 
         // Deduplicate net indices per cell (a cell can appear as both driver and fanout)
@@ -127,21 +123,13 @@ impl NetCostCache {
 
         for &net_idx in affected {
             let net = &netlist.nets[net_idx];
-            let new_wl = Self::compute_net_wl(net, new_placement);
-            let new_timing = if timing_weight > 0.0 {
-                let criticality = net_criticalities
-                    .get(&net.id)
-                    .copied()
-                    .unwrap_or(0.0);
-                if criticality >= 0.1 {
-                    let delay = Self::compute_net_delay(net, new_placement, delay_model);
-                    delay * criticality * criticality
-                } else {
-                    0.0
-                }
+            let criticality = if timing_weight > 0.0 {
+                net_criticalities.get(&net.id).copied().unwrap_or(0.0)
             } else {
                 0.0
             };
+            let (new_wl, new_timing) =
+                Self::compute_net_costs(net, new_placement, delay_model, criticality);
 
             wl_delta += new_wl - self.net_wl_cost[net_idx];
             timing_delta += new_timing - self.net_timing_cost[net_idx];
@@ -167,26 +155,41 @@ impl NetCostCache {
         }
     }
 
-    /// Compute HPWL cost for a single net (weighted by sqrt(fanout)).
-    fn compute_net_wl(
+    /// Compute HPWL and timing cost for a net in a single pass over its cells.
+    /// Returns (wirelength_cost, timing_cost).
+    fn compute_net_costs(
         net: &skalp_lir::gate_netlist::GateNet,
         placement: &PlacementResult,
-    ) -> f64 {
+        delay_model: &DelayModel,
+        criticality: f64,
+    ) -> (f64, f64) {
         let mut min_x = f64::MAX;
         let mut max_x = f64::MIN;
         let mut min_y = f64::MAX;
         let mut max_y = f64::MIN;
         let mut connected = 0u32;
 
+        // Track driver location for delay computation
+        let mut driver_x = 0i32;
+        let mut driver_y = 0i32;
+        let mut has_driver = false;
+        let mut max_delay: f64 = 0.0;
+        let compute_timing = criticality >= 0.1;
+
         if let Some(driver) = net.driver {
             if let Some(loc) = placement.placements.get(&driver) {
                 let x = loc.tile_x as f64;
                 let y = loc.tile_y as f64;
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
+                min_x = x;
+                max_x = x;
+                min_y = y;
+                max_y = y;
                 connected += 1;
+                if compute_timing {
+                    driver_x = loc.tile_x as i32;
+                    driver_y = loc.tile_y as i32;
+                    has_driver = true;
+                }
             }
         }
 
@@ -199,40 +202,41 @@ impl NetCostCache {
                 min_y = min_y.min(y);
                 max_y = max_y.max(y);
                 connected += 1;
+
+                // Compute delay in same pass (avoids re-fetching placement)
+                if compute_timing && has_driver {
+                    let dx = (driver_x - loc.tile_x as i32).unsigned_abs();
+                    let dy = (driver_y - loc.tile_y as i32).unsigned_abs();
+                    let routing_delay = delay_model.estimated_path_delay(dx + dy);
+                    max_delay = max_delay.max(routing_delay);
+                }
             }
         }
 
-        if connected >= 2 {
+        let wl = if connected >= 2 {
             let hpwl = (max_x - min_x) + (max_y - min_y);
             hpwl * (connected as f64).sqrt()
         } else {
             0.0
-        }
-    }
-
-    /// Compute timing delay for a single net (max sink delay).
-    fn compute_net_delay(
-        net: &skalp_lir::gate_netlist::GateNet,
-        placement: &PlacementResult,
-        delay_model: &DelayModel,
-    ) -> f64 {
-        let driver_loc = match net.driver.and_then(|d| placement.placements.get(&d)) {
-            Some(loc) => loc,
-            None => return 0.0,
         };
 
-        let mut max_delay: f64 = 0.0;
-        for (sink_id, _) in &net.fanout {
-            if let Some(sink_loc) = placement.placements.get(sink_id) {
-                let dx = (driver_loc.tile_x as i32 - sink_loc.tile_x as i32).unsigned_abs();
-                let dy = (driver_loc.tile_y as i32 - sink_loc.tile_y as i32).unsigned_abs();
-                let distance = dx + dy;
-                let routing_delay = delay_model.estimated_path_delay(distance);
-                max_delay = max_delay.max(routing_delay);
-            }
-        }
-        max_delay
+        let timing = if compute_timing {
+            max_delay * criticality * criticality
+        } else {
+            0.0
+        };
+
+        (wl, timing)
     }
+}
+
+/// Record of changes made by apply_move_in_place, for efficient undo.
+struct UndoRecord {
+    /// (cell_id, previous_location) — restore these on undo
+    placement_changes: Vec<(CellId, PlacementLoc)>,
+    /// (key, previous_value) — restore these in loc_map on undo
+    /// None means the key didn't exist before (should be removed on undo)
+    loc_map_changes: Vec<((u32, u32, usize), Option<CellId>)>,
 }
 
 /// Move operation for simulated annealing
@@ -382,25 +386,37 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let mut delta_count = 0u32;
             let mut cal_rng = rand::rngs::StdRng::seed_from_u64(12345);
             let cal_cells: Vec<CellId> = current.placements.keys().copied().collect();
-            let cal_loc_map: HashMap<(u32, u32, usize), CellId> = current
+            // Use a temporary copy for calibration (cloned once, not per-move)
+            let mut cal_placement = current.clone();
+            let mut cal_loc_map: HashMap<(u32, u32, usize), CellId> = cal_placement
                 .placements
                 .iter()
                 .map(|(&cid, loc)| ((loc.tile_x, loc.tile_y, loc.bel_index), cid))
                 .collect();
 
             for _ in 0..100.min(cal_cells.len() * 2) {
-                let move_op = self.generate_move(&current, &cal_cells, &mut cal_rng);
-                let (new_pl, _) = self.apply_move(&current, &cal_loc_map, &move_op);
-                let affected = self.moved_cells_with_displaced(&move_op, &current, &cal_loc_map);
+                let move_op = self.generate_move(&cal_placement, &cal_cells, &mut cal_rng);
+                let affected = self.moved_cells_with_displaced(
+                    &move_op,
+                    &cal_placement,
+                    &cal_loc_map,
+                );
+                let undo = self.apply_move_in_place(
+                    &mut cal_placement,
+                    &mut cal_loc_map,
+                    &move_op,
+                );
                 let affected_nets = cost_cache.affected_nets(&affected);
                 let (delta, _) = cost_cache.compute_delta(
                     &affected_nets,
-                    &new_pl,
+                    &cal_placement,
                     netlist,
                     &net_criticalities,
                     &self.delay_model,
                     self.timing_weight,
                 );
+                // Undo — calibration only measures deltas, doesn't keep moves
+                Self::undo_move(&mut cal_placement, &mut cal_loc_map, undo);
                 let delta = delta.abs();
                 if delta > 0.0 {
                     delta_sum += delta;
@@ -450,18 +466,25 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     self.generate_move(&current, &cells, &mut rng)
                 };
 
-                // Incremental cost delta: only recompute nets connected to moved cells
-                let (new_placement, new_loc_map) =
-                    self.apply_move(&current, &location_to_cell, &move_op);
+                // Determine affected cells before mutation
                 let affected = self.moved_cells_with_displaced(
                     &move_op,
                     &current,
                     &location_to_cell,
                 );
+
+                // Apply move in-place (no clone), get undo record
+                let undo = self.apply_move_in_place(
+                    &mut current,
+                    &mut location_to_cell,
+                    &move_op,
+                );
+
+                // Incremental cost delta: only recompute nets connected to moved cells
                 let affected_nets = cost_cache.affected_nets(&affected);
                 let (delta, updates) = cost_cache.compute_delta(
                     &affected_nets,
-                    &new_placement,
+                    &current,
                     netlist,
                     &net_criticalities,
                     &self.delay_model,
@@ -479,8 +502,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 total_moves += 1;
                 if accept {
                     accepted_moves += 1;
-                    current = new_placement;
-                    location_to_cell = new_loc_map;
                     cost_cache.apply_updates(&updates);
                     current_cost = cost_cache.combined_cost(self.timing_weight);
 
@@ -488,6 +509,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                         best = current.clone();
                         best_cost = current_cost;
                     }
+                } else {
+                    // Rejected: undo the in-place mutation
+                    Self::undo_move(&mut current, &mut location_to_cell, undo);
                 }
             }
 
@@ -915,6 +939,158 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         }
 
         (new_placement, new_loc_map)
+    }
+
+    /// Apply a move in-place, returning an UndoRecord for reversal.
+    /// This avoids cloning the entire placement HashMap on every move attempt.
+    fn apply_move_in_place(
+        &self,
+        placement: &mut PlacementResult,
+        loc_map: &mut HashMap<(u32, u32, usize), CellId>,
+        move_op: &Move,
+    ) -> UndoRecord {
+        let mut undo = UndoRecord {
+            placement_changes: Vec::new(),
+            loc_map_changes: Vec::new(),
+        };
+
+        match move_op {
+            Move::Swap(cell1, cell2) => {
+                let loc1 = placement.placements[cell1];
+                let loc2 = placement.placements[cell2];
+
+                // Record undo
+                undo.placement_changes.push((*cell1, loc1));
+                undo.placement_changes.push((*cell2, loc2));
+                let key1 = (loc1.tile_x, loc1.tile_y, loc1.bel_index);
+                let key2 = (loc2.tile_x, loc2.tile_y, loc2.bel_index);
+                undo.loc_map_changes.push((key1, Some(*cell1)));
+                undo.loc_map_changes.push((key2, Some(*cell2)));
+
+                // Apply swap
+                placement.placements.insert(*cell1, loc2);
+                placement.placements.insert(*cell2, loc1);
+                loc_map.insert(key1, *cell2);
+                loc_map.insert(key2, *cell1);
+            }
+            Move::Relocate(cell_id, new_loc) => {
+                let old_loc = placement.placements[cell_id];
+                let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
+                let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
+
+                if let Some(&occupant) = loc_map.get(&new_key) {
+                    if occupant != *cell_id {
+                        let occupant_old_loc = placement.placements[&occupant];
+
+                        // Record undo
+                        undo.placement_changes.push((*cell_id, old_loc));
+                        undo.placement_changes.push((occupant, occupant_old_loc));
+                        undo.loc_map_changes.push((old_key, Some(*cell_id)));
+                        undo.loc_map_changes.push((new_key, Some(occupant)));
+
+                        // Apply: swap cell with occupant
+                        placement.placements.insert(*cell_id, *new_loc);
+                        let displaced_loc = PlacementLoc::new(
+                            old_loc.tile_x,
+                            old_loc.tile_y,
+                            old_loc.bel_index,
+                            occupant_old_loc.bel_type,
+                        );
+                        placement.placements.insert(occupant, displaced_loc);
+                        loc_map.insert(new_key, *cell_id);
+                        loc_map.insert(old_key, occupant);
+                    }
+                } else {
+                    // Record undo
+                    undo.placement_changes.push((*cell_id, old_loc));
+                    undo.loc_map_changes.push((old_key, Some(*cell_id)));
+                    undo.loc_map_changes.push((new_key, None));
+
+                    // Apply: simple move
+                    placement.placements.insert(*cell_id, *new_loc);
+                    loc_map.remove(&old_key);
+                    loc_map.insert(new_key, *cell_id);
+                }
+            }
+            Move::RelocateCarryChain(chain_id, new_x, new_start_y) => {
+                if let Some(chain) = self.carry_chains.get(*chain_id) {
+                    let (_, height) = self.device.grid_size();
+                    // Snapshot current loc_map state for new keys before any mutations
+                    let chain_cell_set: HashSet<CellId> =
+                        chain.cells.iter().copied().collect();
+
+                    for (i, &cell_id) in chain.cells.iter().enumerate() {
+                        if let Some(&old_loc) = placement.placements.get(&cell_id) {
+                            let old_key =
+                                (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
+
+                            let tile_y = (*new_start_y + (i as u32 / 8))
+                                .min(height.saturating_sub(2).max(1));
+                            let bel_idx = i % 8;
+                            let new_loc =
+                                PlacementLoc::new(*new_x, tile_y, bel_idx, BelType::Carry);
+                            let new_key =
+                                (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
+
+                            // Record undo for old key
+                            undo.placement_changes.push((cell_id, old_loc));
+                            undo.loc_map_changes
+                                .push((old_key, loc_map.get(&old_key).copied()));
+
+                            // Check for displaced occupant
+                            if let Some(&occupant) = loc_map.get(&new_key) {
+                                if !chain_cell_set.contains(&occupant) {
+                                    let occ_loc = placement.placements[&occupant];
+                                    undo.placement_changes.push((occupant, occ_loc));
+                                    undo.loc_map_changes
+                                        .push((new_key, Some(occupant)));
+
+                                    let displaced_loc = PlacementLoc::new(
+                                        old_loc.tile_x,
+                                        old_loc.tile_y,
+                                        old_loc.bel_index,
+                                        occ_loc.bel_type,
+                                    );
+                                    placement.placements.insert(occupant, displaced_loc);
+                                    loc_map.insert(old_key, occupant);
+                                }
+                            } else {
+                                undo.loc_map_changes.push((new_key, None));
+                                loc_map.remove(&old_key);
+                            }
+
+                            placement.placements.insert(cell_id, new_loc);
+                            loc_map.insert(new_key, cell_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        undo
+    }
+
+    /// Undo a move applied by apply_move_in_place.
+    fn undo_move(
+        placement: &mut PlacementResult,
+        loc_map: &mut HashMap<(u32, u32, usize), CellId>,
+        undo: UndoRecord,
+    ) {
+        // Restore placement locations
+        for (cell_id, old_loc) in undo.placement_changes {
+            placement.placements.insert(cell_id, old_loc);
+        }
+        // Restore loc_map entries (in reverse order to handle chain dependencies)
+        for (key, old_value) in undo.loc_map_changes.into_iter().rev() {
+            match old_value {
+                Some(cell_id) => {
+                    loc_map.insert(key, cell_id);
+                }
+                None => {
+                    loc_map.remove(&key);
+                }
+            }
+        }
     }
 
     /// Estimate delay for a single net based on current placement

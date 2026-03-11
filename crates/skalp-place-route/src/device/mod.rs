@@ -274,6 +274,11 @@ pub trait Device: Send + Sync {
     /// Check if a cell type can be placed on a BEL type
     fn can_place(&self, cell_type: &str, bel_type: BelType) -> bool;
 
+    /// Total number of wires in the device (for Vec-indexed data structures)
+    fn wire_count(&self) -> usize {
+        0
+    }
+
     // BEL pin wire methods (optional, for proper routing endpoints)
 
     /// Get wire ID for a LUT output pin
