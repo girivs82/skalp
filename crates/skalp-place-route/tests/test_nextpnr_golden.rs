@@ -741,6 +741,34 @@ fn test_cross_validation_summary() {
     println!("{}", "-".repeat(85));
 }
 
+// ===== Dump skalp ASC files for offline comparison =====
+
+#[test]
+#[ignore]
+fn test_dump_skalp_asc() {
+    let designs: &[(&str, &str)] = &[
+        ("inverter", INVERTER_SK),
+        ("and_gate", AND_GATE_SK),
+        ("dff_reset", DFF_RESET_SK),
+        ("counter_4", COUNTER_4_SK),
+        ("counter_16", COUNTER_16_SK),
+        ("shiftreg_8", SHIFTREG_8_SK),
+    ];
+
+    let outdir = std::path::Path::new("/tmp/asc-compare");
+    std::fs::create_dir_all(outdir).unwrap();
+
+    for (name, source) in designs {
+        let netlist = synthesize_skalp(source);
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+        let asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
+        let path = outdir.join(format!("{}_skalp.asc", name));
+        std::fs::write(&path, &asc).unwrap();
+        println!("Wrote {} ({} bytes)", path.display(), asc.len());
+    }
+}
+
 // ===== Compile smoke test (non-ignored) =====
 
 #[test]
