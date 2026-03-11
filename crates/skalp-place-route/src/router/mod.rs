@@ -134,6 +134,17 @@ impl Route {
     }
 }
 
+/// Extra bit configuration (absolute bitstream position)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtraBitConfig {
+    /// Bank number
+    pub bank: u32,
+    /// Row address
+    pub addr_x: u32,
+    /// Column address
+    pub addr_y: u32,
+}
+
 /// Routing result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingResult {
@@ -147,6 +158,8 @@ pub struct RoutingResult {
     pub iterations: usize,
     /// Whether all nets were successfully routed
     pub success: bool,
+    /// Extra bits to set (e.g., padin_glb_netwk for GBUF routing)
+    pub extra_bits: Vec<ExtraBitConfig>,
 }
 
 impl RoutingResult {
@@ -158,6 +171,7 @@ impl RoutingResult {
             wirelength: 0,
             iterations: 0,
             success: true,
+            extra_bits: Vec::new(),
         }
     }
 }
@@ -231,6 +245,9 @@ impl<D: Device + Clone> Router<D> {
                 }
             }
         }
+
+        // Collect extra bits (padin_glb_netwk) from successful GBUF routes
+        result.extra_bits = global_router.take_extra_bits();
 
         // Route carry chain nets through dedicated wires
         for net_id in &carry_net_ids {

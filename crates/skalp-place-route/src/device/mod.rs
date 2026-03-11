@@ -314,6 +314,17 @@ pub trait Device: Send + Sync {
     fn io_input_wire(&self, _tile_x: u32, _tile_y: u32, _iob_idx: usize) -> Option<WireId> {
         None
     }
+
+    /// Check if an IO pad is GBUF-capable, return the global network number
+    fn gbufpin_for_pad(&self, _tile_x: u32, _tile_y: u32, _pio_num: u8) -> Option<u8> {
+        None
+    }
+
+    /// Get the padin_glb_netwk extra bit for a global network
+    /// Returns (bank, addr_x, addr_y)
+    fn padin_extra_bit(&self, _glb_num: u8) -> Option<(u32, u32, u32)> {
+        None
+    }
 }
 
 /// Tile trait

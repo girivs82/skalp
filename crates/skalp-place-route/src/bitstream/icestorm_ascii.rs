@@ -374,6 +374,11 @@ impl<'a> IceStormAscii<'a> {
             }
         }
 
+        // Emit extra bits (padin_glb_netwk for GBUF routing)
+        for eb in &routing.extra_bits {
+            asc.push_str(&format!(".extra_bit {} {} {}\n", eb.bank, eb.addr_x, eb.addr_y));
+        }
+
         Ok(asc)
     }
 

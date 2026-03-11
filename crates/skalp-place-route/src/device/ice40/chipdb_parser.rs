@@ -57,6 +57,10 @@ pub struct ChipDb {
     pub tile_bits: HashMap<TileType, Vec<ConfigBit>>,
     /// Global buffer inputs
     pub gbufin: Vec<GbufIn>,
+    /// Global buffer pins — maps IO pads to global networks
+    pub gbufpin: Vec<GbufPin>,
+    /// Extra bits (absolute bitstream positions, e.g., padin_glb_netwk)
+    pub extra_bits: Vec<ExtraBit>,
     /// Tile bit dimensions by type
     pub tile_dimensions: HashMap<TileType, TileBitDimensions>,
     /// LC bit mappings (for logic tiles)
@@ -179,6 +183,32 @@ pub struct GbufIn {
     pub glb_num: u8,
 }
 
+/// Global buffer pin — maps a physical IO pad to a global network
+#[derive(Debug, Clone)]
+pub struct GbufPin {
+    /// Tile X
+    pub tile_x: u32,
+    /// Tile Y
+    pub tile_y: u32,
+    /// PIO number (0 or 1 for IOB_0/IOB_1)
+    pub pio_num: u8,
+    /// Global network index (0-7)
+    pub glb_num: u8,
+}
+
+/// Extra bit — a configuration bit at an absolute bitstream position
+#[derive(Debug, Clone)]
+pub struct ExtraBit {
+    /// Semantic name (e.g., "padin_glb_netwk.0")
+    pub name: String,
+    /// Bank number
+    pub bank: u32,
+    /// Row address
+    pub addr_x: u32,
+    /// Column address
+    pub addr_y: u32,
+}
+
 /// Current buffer/routing context for multi-line parsing
 #[derive(Debug, Clone)]
 struct BufferContext {
@@ -203,6 +233,8 @@ impl ChipDb {
             packages: HashMap::new(),
             tile_bits: HashMap::new(),
             gbufin: Vec::new(),
+            gbufpin: Vec::new(),
+            extra_bits: Vec::new(),
             tile_dimensions: HashMap::new(),
             lc_mappings: Vec::new(),
             bel_wires: HashMap::new(),
@@ -319,6 +351,12 @@ impl ChipDb {
                     }
                     ".gbufin" => {
                         current_section = Section::GbufIn;
+                    }
+                    ".gbufpin" => {
+                        current_section = Section::GbufPin;
+                    }
+                    ".extra_bits" => {
+                        current_section = Section::ExtraBits;
                     }
                     ".logic_tile_bits" => {
                         current_tile_type = Some(TileType::Logic);
@@ -538,6 +576,30 @@ impl ChipDb {
                             tile_x,
                             tile_y,
                             glb_num,
+                        });
+                    }
+                }
+                Section::GbufPin => {
+                    // Format: TILE_X TILE_Y PIO_NUM GLB_NUM
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        chipdb.gbufpin.push(GbufPin {
+                            tile_x: parts[0].parse().unwrap_or(0),
+                            tile_y: parts[1].parse().unwrap_or(0),
+                            pio_num: parts[2].parse().unwrap_or(0),
+                            glb_num: parts[3].parse().unwrap_or(0),
+                        });
+                    }
+                }
+                Section::ExtraBits => {
+                    // Format: NAME BANK ADDR_X ADDR_Y
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        chipdb.extra_bits.push(ExtraBit {
+                            name: parts[0].to_string(),
+                            bank: parts[1].parse().unwrap_or(0),
+                            addr_x: parts[2].parse().unwrap_or(0),
+                            addr_y: parts[3].parse().unwrap_or(0),
                         });
                     }
                 }
@@ -947,6 +1009,8 @@ enum Section {
     Buffer,
     Pins,
     GbufIn,
+    GbufPin,
+    ExtraBits,
     TileBits,
     ExtraCell,
     ColBuf,
@@ -1060,6 +1124,25 @@ mod tests {
         // Check that we can build PIPs
         let pips = chipdb.build_pips();
         assert!(!pips.is_empty(), "Should have PIPs");
+
+        // Check gbufpin parsing (HX1K has 8 GBUF-capable pads)
+        assert_eq!(chipdb.gbufpin.len(), 8, "HX1K should have 8 gbufpin entries");
+        // Verify a known entry: tile(7,0) IOB_0 → glb_netwk_3
+        assert!(
+            chipdb.gbufpin.iter().any(|g| g.tile_x == 7 && g.tile_y == 0 && g.pio_num == 0 && g.glb_num == 3),
+            "Should have gbufpin entry for tile(7,0) IOB_0 → glb_netwk_3"
+        );
+
+        // Check extra_bits parsing (should have 8 padin_glb_netwk entries)
+        let padin_bits: Vec<_> = chipdb.extra_bits.iter()
+            .filter(|eb| eb.name.starts_with("padin_glb_netwk"))
+            .collect();
+        assert_eq!(padin_bits.len(), 8, "Should have 8 padin_glb_netwk extra bits");
+        // Verify a known entry: padin_glb_netwk.0 at bank 0, row 330, col 142
+        assert!(
+            padin_bits.iter().any(|eb| eb.name == "padin_glb_netwk.0" && eb.bank == 0 && eb.addr_x == 330 && eb.addr_y == 142),
+            "Should have padin_glb_netwk.0 at (0, 330, 142)"
+        );
     }
 
     #[test]

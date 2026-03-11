@@ -126,6 +126,10 @@ pub struct Ice40Device {
     clock_resources: ClockResources,
     /// Global buffer input locations: (tile_x, tile_y, glb_num)
     gbufin: Vec<(u32, u32, u8)>,
+    /// Global buffer pin mappings: (tile_x, tile_y, pio_num, glb_num)
+    gbufpin: Vec<(u32, u32, u8, u8)>,
+    /// Extra bits for padin_glb_netwk: glb_num -> (bank, addr_x, addr_y)
+    padin_extra_bits: Vec<(u8, u32, u32, u32)>,
     /// Logic tiles
     pub logic_tiles: Vec<LogicTile>,
     /// I/O tiles
@@ -167,6 +171,27 @@ impl Ice40Device {
             .map(|g| (g.tile_x, g.tile_y, g.glb_num))
             .collect();
 
+        // Extract gbufpin mappings from chipdb
+        let gbufpin: Vec<(u32, u32, u8, u8)> = chipdb
+            .gbufpin
+            .iter()
+            .map(|g| (g.tile_x, g.tile_y, g.pio_num, g.glb_num))
+            .collect();
+
+        // Extract padin_glb_netwk extra bits
+        let padin_extra_bits: Vec<(u8, u32, u32, u32)> = chipdb
+            .extra_bits
+            .iter()
+            .filter_map(|eb| {
+                if let Some(suffix) = eb.name.strip_prefix("padin_glb_netwk.") {
+                    let glb_num: u8 = suffix.parse().ok()?;
+                    Some((glb_num, eb.bank, eb.addr_x, eb.addr_y))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let mut device = Self {
             variant,
             grid_size,
@@ -182,6 +207,8 @@ impl Ice40Device {
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
             gbufin,
+            gbufpin,
+            padin_extra_bits,
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
@@ -318,6 +345,8 @@ impl Ice40Device {
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
             gbufin: Vec::new(), // Synthetic device has no gbufin info
+            gbufpin: Vec::new(),
+            padin_extra_bits: Vec::new(),
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
@@ -408,6 +437,31 @@ impl Ice40Device {
     /// Returns list of (tile_x, tile_y, global_network_index)
     pub fn gbuf_locations(&self) -> &[(u32, u32, u8)] {
         &self.gbufin
+    }
+
+    /// Check if an IO pad is GBUF-capable, return the global network number if so
+    pub fn gbufpin_for_pad(&self, tile_x: u32, tile_y: u32, pio_num: u8) -> Option<u8> {
+        self.gbufpin
+            .iter()
+            .find(|&&(gx, gy, gp, _)| gx == tile_x && gy == tile_y && gp == pio_num)
+            .map(|&(_, _, _, glb_num)| glb_num)
+    }
+
+    /// Get the IO pad location for a given global network
+    pub fn gbufpin_for_network(&self, glb_num: u8) -> Option<(u32, u32, u8)> {
+        self.gbufpin
+            .iter()
+            .find(|&&(_, _, _, g)| g == glb_num)
+            .map(|&(x, y, p, _)| (x, y, p))
+    }
+
+    /// Get the padin_glb_netwk extra bit position for a global network
+    /// Returns (bank, addr_x, addr_y)
+    pub fn padin_extra_bit(&self, glb_num: u8) -> Option<(u32, u32, u32)> {
+        self.padin_extra_bits
+            .iter()
+            .find(|&&(g, _, _, _)| g == glb_num)
+            .map(|&(_, bank, ax, ay)| (bank, ax, ay))
     }
 
     /// Get the global buffer location nearest to a given tile
@@ -1706,6 +1760,14 @@ impl Device for Ice40Device {
 
     fn io_input_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<WireId> {
         Ice40Device::io_input_wire(self, tile_x, tile_y, iob_idx)
+    }
+
+    fn gbufpin_for_pad(&self, tile_x: u32, tile_y: u32, pio_num: u8) -> Option<u8> {
+        Ice40Device::gbufpin_for_pad(self, tile_x, tile_y, pio_num)
+    }
+
+    fn padin_extra_bit(&self, glb_num: u8) -> Option<(u32, u32, u32)> {
+        Ice40Device::padin_extra_bit(self, glb_num)
     }
 }
 

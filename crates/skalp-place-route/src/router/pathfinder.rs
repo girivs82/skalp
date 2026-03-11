@@ -199,11 +199,11 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let net_criticalities = self.calculate_net_criticalities(netlist, placement);
 
         // Collect nets to route with their criticality score
-        // Skip clock/reset nets — they're handled by the global net router
+        // Clock/reset nets are routed here when GBUF routing is unavailable
         let mut nets_with_criticality: Vec<_> = netlist
             .nets
             .iter()
-            .filter(|net| net.driver.is_some() && !net.fanout.is_empty() && !net.is_clock && !net.is_reset)
+            .filter(|net| net.driver.is_some() && !net.fanout.is_empty())
             .map(|net| {
                 let crit = net_criticalities
                     .iter()
