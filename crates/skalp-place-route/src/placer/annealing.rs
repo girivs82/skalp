@@ -15,6 +15,226 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Incremental cost cache for O(affected_nets) cost updates instead of O(all_nets).
+///
+/// Pre-computes per-net HPWL and timing costs, and maintains a cell→nets index
+/// so that move evaluation only recomputes costs for nets connected to moved cells.
+struct NetCostCache {
+    /// Per-net HPWL cost (already weighted by sqrt(fanout))
+    net_wl_cost: Vec<f64>,
+    /// Per-net timing cost (delay * criticality²)
+    net_timing_cost: Vec<f64>,
+    /// Total wirelength cost (sum of net_wl_cost)
+    total_wl_cost: f64,
+    /// Total timing cost (sum of net_timing_cost)
+    total_timing_cost: f64,
+    /// Cell → list of net indices that the cell participates in
+    cell_to_nets: HashMap<CellId, Vec<usize>>,
+}
+
+impl NetCostCache {
+    /// Build the cache from scratch for a given placement.
+    fn build(
+        placement: &PlacementResult,
+        netlist: &GateNetlist,
+        net_criticalities: &HashMap<GateNetId, f64>,
+        delay_model: &DelayModel,
+        timing_weight: f64,
+    ) -> Self {
+        let num_nets = netlist.nets.len();
+        let mut net_wl_cost = vec![0.0f64; num_nets];
+        let mut net_timing_cost = vec![0.0f64; num_nets];
+        let mut cell_to_nets: HashMap<CellId, Vec<usize>> = HashMap::new();
+
+        for (i, net) in netlist.nets.iter().enumerate() {
+            // Build cell_to_nets index
+            if let Some(driver) = net.driver {
+                cell_to_nets.entry(driver).or_default().push(i);
+            }
+            for (cell_id, _) in &net.fanout {
+                cell_to_nets.entry(*cell_id).or_default().push(i);
+            }
+
+            // Compute HPWL cost
+            net_wl_cost[i] = Self::compute_net_wl(net, placement);
+
+            // Compute timing cost
+            if timing_weight > 0.0 {
+                let criticality = net_criticalities
+                    .get(&net.id)
+                    .copied()
+                    .unwrap_or(0.0);
+                if criticality >= 0.1 {
+                    let delay = Self::compute_net_delay(net, placement, delay_model);
+                    net_timing_cost[i] = delay * criticality * criticality;
+                }
+            }
+        }
+
+        // Deduplicate net indices per cell (a cell can appear as both driver and fanout)
+        for nets in cell_to_nets.values_mut() {
+            nets.sort_unstable();
+            nets.dedup();
+        }
+
+        let total_wl_cost = net_wl_cost.iter().sum();
+        let total_timing_cost = net_timing_cost.iter().sum();
+
+        Self {
+            net_wl_cost,
+            net_timing_cost,
+            total_wl_cost,
+            total_timing_cost,
+            cell_to_nets,
+        }
+    }
+
+    /// Get the combined cost using the same formula as calculate_combined_cost.
+    fn combined_cost(&self, timing_weight: f64) -> f64 {
+        if timing_weight == 0.0 {
+            self.total_wl_cost
+        } else {
+            (1.0 - timing_weight) * self.total_wl_cost
+                + timing_weight * self.total_timing_cost
+        }
+    }
+
+    /// Collect the unique set of net indices affected by moving the given cells.
+    fn affected_nets(&self, cells: &[CellId]) -> Vec<usize> {
+        let mut nets: HashSet<usize> = HashSet::new();
+        for cell in cells {
+            if let Some(cell_nets) = self.cell_to_nets.get(cell) {
+                nets.extend(cell_nets);
+            }
+        }
+        nets.into_iter().collect()
+    }
+
+    /// Compute the cost delta for a new placement, updating only affected nets.
+    /// Returns (delta, affected net indices with their new costs) for later commit.
+    fn compute_delta(
+        &self,
+        affected: &[usize],
+        new_placement: &PlacementResult,
+        netlist: &GateNetlist,
+        net_criticalities: &HashMap<GateNetId, f64>,
+        delay_model: &DelayModel,
+        timing_weight: f64,
+    ) -> (f64, Vec<(usize, f64, f64)>) {
+        let mut wl_delta = 0.0;
+        let mut timing_delta = 0.0;
+        let mut updates = Vec::with_capacity(affected.len());
+
+        for &net_idx in affected {
+            let net = &netlist.nets[net_idx];
+            let new_wl = Self::compute_net_wl(net, new_placement);
+            let new_timing = if timing_weight > 0.0 {
+                let criticality = net_criticalities
+                    .get(&net.id)
+                    .copied()
+                    .unwrap_or(0.0);
+                if criticality >= 0.1 {
+                    let delay = Self::compute_net_delay(net, new_placement, delay_model);
+                    delay * criticality * criticality
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            wl_delta += new_wl - self.net_wl_cost[net_idx];
+            timing_delta += new_timing - self.net_timing_cost[net_idx];
+            updates.push((net_idx, new_wl, new_timing));
+        }
+
+        let delta = if timing_weight == 0.0 {
+            wl_delta
+        } else {
+            (1.0 - timing_weight) * wl_delta + timing_weight * timing_delta
+        };
+
+        (delta, updates)
+    }
+
+    /// Apply cached updates after a move is accepted.
+    fn apply_updates(&mut self, updates: &[(usize, f64, f64)]) {
+        for &(net_idx, new_wl, new_timing) in updates {
+            self.total_wl_cost += new_wl - self.net_wl_cost[net_idx];
+            self.total_timing_cost += new_timing - self.net_timing_cost[net_idx];
+            self.net_wl_cost[net_idx] = new_wl;
+            self.net_timing_cost[net_idx] = new_timing;
+        }
+    }
+
+    /// Compute HPWL cost for a single net (weighted by sqrt(fanout)).
+    fn compute_net_wl(
+        net: &skalp_lir::gate_netlist::GateNet,
+        placement: &PlacementResult,
+    ) -> f64 {
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::MIN;
+        let mut min_y = f64::MAX;
+        let mut max_y = f64::MIN;
+        let mut connected = 0u32;
+
+        if let Some(driver) = net.driver {
+            if let Some(loc) = placement.placements.get(&driver) {
+                let x = loc.tile_x as f64;
+                let y = loc.tile_y as f64;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                connected += 1;
+            }
+        }
+
+        for (cell_id, _) in &net.fanout {
+            if let Some(loc) = placement.placements.get(cell_id) {
+                let x = loc.tile_x as f64;
+                let y = loc.tile_y as f64;
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+                connected += 1;
+            }
+        }
+
+        if connected >= 2 {
+            let hpwl = (max_x - min_x) + (max_y - min_y);
+            hpwl * (connected as f64).sqrt()
+        } else {
+            0.0
+        }
+    }
+
+    /// Compute timing delay for a single net (max sink delay).
+    fn compute_net_delay(
+        net: &skalp_lir::gate_netlist::GateNet,
+        placement: &PlacementResult,
+        delay_model: &DelayModel,
+    ) -> f64 {
+        let driver_loc = match net.driver.and_then(|d| placement.placements.get(&d)) {
+            Some(loc) => loc,
+            None => return 0.0,
+        };
+
+        let mut max_delay: f64 = 0.0;
+        for (sink_id, _) in &net.fanout {
+            if let Some(sink_loc) = placement.placements.get(sink_id) {
+                let dx = (driver_loc.tile_x as i32 - sink_loc.tile_x as i32).unsigned_abs();
+                let dy = (driver_loc.tile_y as i32 - sink_loc.tile_y as i32).unsigned_abs();
+                let distance = dx + dy;
+                let routing_delay = delay_model.estimated_path_delay(distance);
+                max_delay = max_delay.max(routing_delay);
+            }
+        }
+        max_delay
+    }
+}
+
 /// Move operation for simulated annealing
 #[derive(Debug, Clone)]
 enum Move {
@@ -143,7 +363,15 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             HashMap::new()
         };
 
-        let mut current_cost = self.calculate_combined_cost(&current, netlist, &net_criticalities);
+        // Build incremental cost cache: O(nets) once, then O(affected) per move
+        let mut cost_cache = NetCostCache::build(
+            &current,
+            netlist,
+            &net_criticalities,
+            &self.delay_model,
+            self.timing_weight,
+        );
+        let mut current_cost = cost_cache.combined_cost(self.timing_weight);
         let mut best = current.clone();
         let mut best_cost = current_cost;
 
@@ -163,9 +391,17 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             for _ in 0..100.min(cal_cells.len() * 2) {
                 let move_op = self.generate_move(&current, &cal_cells, &mut cal_rng);
                 let (new_pl, _) = self.apply_move(&current, &cal_loc_map, &move_op);
-                let new_cost =
-                    self.calculate_combined_cost(&new_pl, netlist, &net_criticalities);
-                let delta = (new_cost - current_cost).abs();
+                let affected = self.moved_cells_with_displaced(&move_op, &current, &cal_loc_map);
+                let affected_nets = cost_cache.affected_nets(&affected);
+                let (delta, _) = cost_cache.compute_delta(
+                    &affected_nets,
+                    &new_pl,
+                    netlist,
+                    &net_criticalities,
+                    &self.delay_model,
+                    self.timing_weight,
+                );
+                let delta = delta.abs();
                 if delta > 0.0 {
                     delta_sum += delta;
                     delta_count += 1;
@@ -214,12 +450,23 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     self.generate_move(&current, &cells, &mut rng)
                 };
 
-                // Calculate cost delta
+                // Incremental cost delta: only recompute nets connected to moved cells
                 let (new_placement, new_loc_map) =
                     self.apply_move(&current, &location_to_cell, &move_op);
-                let new_cost =
-                    self.calculate_combined_cost(&new_placement, netlist, &net_criticalities);
-                let delta = new_cost - current_cost;
+                let affected = self.moved_cells_with_displaced(
+                    &move_op,
+                    &current,
+                    &location_to_cell,
+                );
+                let affected_nets = cost_cache.affected_nets(&affected);
+                let (delta, updates) = cost_cache.compute_delta(
+                    &affected_nets,
+                    &new_placement,
+                    netlist,
+                    &net_criticalities,
+                    &self.delay_model,
+                    self.timing_weight,
+                );
 
                 // Acceptance criterion
                 let accept = if delta <= 0.0 {
@@ -234,7 +481,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     accepted_moves += 1;
                     current = new_placement;
                     location_to_cell = new_loc_map;
-                    current_cost = new_cost;
+                    cost_cache.apply_updates(&updates);
+                    current_cost = cost_cache.combined_cost(self.timing_weight);
 
                     if current_cost < best_cost {
                         best = current.clone();
@@ -288,7 +536,15 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             HashMap::new()
         };
 
-        let mut current_cost = self.calculate_combined_cost(&current, netlist, &net_criticalities);
+        // Build incremental cost cache
+        let mut cost_cache = NetCostCache::build(
+            &current,
+            netlist,
+            &net_criticalities,
+            &self.delay_model,
+            self.timing_weight,
+        );
+        let mut current_cost = cost_cache.combined_cost(self.timing_weight);
         let mut best = current.clone();
         let mut best_cost = current_cost;
 
@@ -334,24 +590,34 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     })
                     .collect();
 
-                // Evaluate all moves in parallel
+                // Evaluate all moves in parallel using incremental cost
                 #[allow(clippy::type_complexity)]
                 let evaluated: Vec<(
                     Move,
                     PlacementResult,
                     HashMap<(u32, u32, usize), CellId>,
                     f64,
+                    Vec<(usize, f64, f64)>,
                 )> = moves
                     .into_par_iter()
                     .map(|move_op| {
                         let (new_placement, new_loc_map) =
                             self.apply_move(&current, &location_to_cell, &move_op);
-                        let new_cost = self.calculate_combined_cost(
+                        let affected = self.moved_cells_with_displaced(
+                            &move_op,
+                            &current,
+                            &location_to_cell,
+                        );
+                        let affected_nets = cost_cache.affected_nets(&affected);
+                        let (delta, updates) = cost_cache.compute_delta(
+                            &affected_nets,
                             &new_placement,
                             netlist,
                             &net_criticalities,
+                            &self.delay_model,
+                            self.timing_weight,
                         );
-                        (move_op, new_placement, new_loc_map, new_cost)
+                        (move_op, new_placement, new_loc_map, delta, updates)
                     })
                     .collect();
 
@@ -360,30 +626,29 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 let mut best_delta = f64::MAX;
                 let mut rng = rand::rngs::StdRng::seed_from_u64(42 + _iteration as u64);
 
-                for (idx, (_, _, _, new_cost)) in evaluated.iter().enumerate() {
-                    let delta = new_cost - current_cost;
-
+                for (idx, (_, _, _, delta, _)) in evaluated.iter().enumerate() {
                     // Check acceptance
-                    let accept = if delta <= 0.0 {
+                    let accept = if *delta <= 0.0 {
                         true
                     } else {
-                        let probability = (-delta / temperature).exp();
+                        let probability = (-*delta / temperature).exp();
                         rng.gen::<f64>() < probability
                     };
 
-                    if accept && delta < best_delta {
+                    if accept && *delta < best_delta {
                         best_move_idx = Some(idx);
-                        best_delta = delta;
+                        best_delta = *delta;
                     }
                 }
 
                 // Apply the best accepted move
                 if let Some(idx) = best_move_idx {
-                    let (_, new_placement, new_loc_map, new_cost) =
+                    let (_, new_placement, new_loc_map, _, updates) =
                         evaluated.into_iter().nth(idx).unwrap();
                     current = new_placement;
                     location_to_cell = new_loc_map;
-                    current_cost = new_cost;
+                    cost_cache.apply_updates(&updates);
+                    current_cost = cost_cache.combined_cost(self.timing_weight);
                     accepted_count.fetch_add(1, Ordering::Relaxed);
 
                     if current_cost < best_cost {
@@ -505,6 +770,50 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         Move::Relocate(cell_id, *current_loc)
     }
 
+    /// Get all cells affected by a move, including displaced occupants.
+    fn moved_cells_with_displaced(
+        &self,
+        move_op: &Move,
+        placement: &PlacementResult,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+    ) -> Vec<CellId> {
+        match move_op {
+            Move::Swap(c1, c2) => vec![*c1, *c2],
+            Move::Relocate(cell_id, new_loc) => {
+                let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
+                if let Some(&occupant) = loc_map.get(&new_key) {
+                    if occupant != *cell_id {
+                        return vec![*cell_id, occupant];
+                    }
+                }
+                vec![*cell_id]
+            }
+            Move::RelocateCarryChain(chain_id, new_x, new_start_y) => {
+                let mut cells = Vec::new();
+                if let Some(chain) = self.carry_chains.get(*chain_id) {
+                    let (_, height) = self.device.grid_size();
+                    let chain_cell_set: HashSet<CellId> = chain.cells.iter().copied().collect();
+                    for (i, &cell_id) in chain.cells.iter().enumerate() {
+                        cells.push(cell_id);
+                        // Check for displaced occupants
+                        let tile_y = (*new_start_y + (i as u32 / 8))
+                            .min(height.saturating_sub(2).max(1));
+                        let bel_idx = i % 8;
+                        let key = (*new_x, tile_y, bel_idx);
+                        if let Some(&occupant) = loc_map.get(&key) {
+                            if !chain_cell_set.contains(&occupant)
+                                && placement.placements.contains_key(&occupant)
+                            {
+                                cells.push(occupant);
+                            }
+                        }
+                    }
+                }
+                cells
+            }
+        }
+    }
+
     /// Apply a move to create a new placement
     fn apply_move(
         &self,
@@ -606,99 +915,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         }
 
         (new_placement, new_loc_map)
-    }
-
-    /// Calculate placement cost (HPWL-based)
-    fn calculate_cost(&self, placement: &PlacementResult, netlist: &GateNetlist) -> f64 {
-        let mut total_hpwl = 0.0;
-
-        for net in &netlist.nets {
-            let mut min_x = f64::MAX;
-            let mut max_x = f64::MIN;
-            let mut min_y = f64::MAX;
-            let mut max_y = f64::MIN;
-            let mut connected = 0;
-
-            // Driver
-            if let Some(driver) = net.driver {
-                if let Some(loc) = placement.placements.get(&driver) {
-                    min_x = min_x.min(loc.tile_x as f64);
-                    max_x = max_x.max(loc.tile_x as f64);
-                    min_y = min_y.min(loc.tile_y as f64);
-                    max_y = max_y.max(loc.tile_y as f64);
-                    connected += 1;
-                }
-            }
-
-            // Fanout
-            for (cell_id, _) in &net.fanout {
-                if let Some(loc) = placement.placements.get(cell_id) {
-                    min_x = min_x.min(loc.tile_x as f64);
-                    max_x = max_x.max(loc.tile_x as f64);
-                    min_y = min_y.min(loc.tile_y as f64);
-                    max_y = max_y.max(loc.tile_y as f64);
-                    connected += 1;
-                }
-            }
-
-            // HPWL with net weighting
-            if connected >= 2 {
-                let hpwl = (max_x - min_x) + (max_y - min_y);
-                // Weight by net fanout (high fanout nets matter more)
-                let weight = (connected as f64).sqrt();
-                total_hpwl += hpwl * weight;
-            }
-        }
-
-        total_hpwl
-    }
-
-    /// Calculate combined cost with timing weight
-    fn calculate_combined_cost(
-        &self,
-        placement: &PlacementResult,
-        netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
-    ) -> f64 {
-        // Wirelength cost (HPWL)
-        let wl_cost = self.calculate_cost(placement, netlist);
-
-        if self.timing_weight == 0.0 {
-            return wl_cost;
-        }
-
-        // Timing cost based on critical path delays
-        let timing_cost = self.calculate_timing_cost(placement, netlist, net_criticalities);
-
-        // Combine costs
-        (1.0 - self.timing_weight) * wl_cost + self.timing_weight * timing_cost
-    }
-
-    /// Calculate timing cost based on estimated path delays
-    fn calculate_timing_cost(
-        &self,
-        placement: &PlacementResult,
-        netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
-    ) -> f64 {
-        let mut total_timing_cost = 0.0;
-
-        for net in &netlist.nets {
-            let criticality = net_criticalities.get(&net.id).copied().unwrap_or(0.0);
-
-            // Skip non-critical nets (< 0.1 criticality)
-            if criticality < 0.1 {
-                continue;
-            }
-
-            // Calculate estimated delay for this net based on placement
-            let net_delay = self.estimate_net_delay(net.id, placement, netlist);
-
-            // Weight by criticality (critical paths contribute more to cost)
-            total_timing_cost += net_delay * criticality * criticality; // Square for emphasis
-        }
-
-        total_timing_cost
     }
 
     /// Estimate delay for a single net based on current placement
