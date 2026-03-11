@@ -98,35 +98,51 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         }
     }
 
-    // A net driven by a physical cell that is consumed by any logic cell is a boundary input
-    // A net driven by a logic cell that is consumed by a physical cell is a boundary output
+    // Compute boundary nets by iterating cell connections directly, rather than
+    // relying on net.fanout which may be stale (not rebuilt after earlier transforms).
+    //
+    // A phys-driven net consumed by any logic cell is a boundary input.
+    // A net consumed by a physical cell but driven by a logic cell (or primary input)
+    // is a boundary output.
+    for cell in &netlist.cells {
+        if physical_cell_ids.contains(&cell.id) {
+            continue; // skip physical cells — we want logic cell inputs
+        }
+        for &net_id in cell.inputs.iter().chain(cell.clock.iter()).chain(cell.reset.iter()) {
+            if phys_driven_nets.contains(&net_id) {
+                boundary_inputs.insert(net_id);
+            }
+        }
+    }
+    // Also mark phys-driven nets that are primary outputs as boundary inputs
     for &net_id in &phys_driven_nets {
         let net = &netlist.nets[net_id.0 as usize];
-        // Check if any fanout cell is a logic cell
-        let has_logic_consumer = net
-            .fanout
-            .iter()
-            .any(|(cid, _)| !physical_cell_ids.contains(cid));
-        // Also check if it's a primary output
-        if has_logic_consumer || net.is_output {
+        if net.is_output {
             boundary_inputs.insert(net_id);
         }
     }
 
-    for &net_id in &phys_consumed_nets {
-        let net = &netlist.nets[net_id.0 as usize];
-        // If driven by a logic cell (or is a primary input), it's a boundary output
-        if let Some(driver) = net.driver {
-            if !physical_cell_ids.contains(&driver) {
-                boundary_outputs.insert(net_id);
-            }
-        } else if net.is_input {
-            // Primary input consumed by physical cell — it will be in the optimizable
-            // netlist as a primary input anyway, so just mark as boundary output
-            boundary_outputs.insert(net_id);
+    // For boundary outputs: check if phys-consumed nets are driven by logic cells
+    // Again, avoid relying on net.driver — scan logic cell outputs instead.
+    let mut logic_driven_nets: HashSet<GateNetId> = HashSet::new();
+    for cell in &netlist.cells {
+        if physical_cell_ids.contains(&cell.id) {
+            continue;
+        }
+        for &net_id in &cell.outputs {
+            logic_driven_nets.insert(net_id);
         }
     }
-
+    for &net_id in &phys_consumed_nets {
+        if logic_driven_nets.contains(&net_id) {
+            boundary_outputs.insert(net_id);
+        } else {
+            let net = &netlist.nets[net_id.0 as usize];
+            if net.is_input {
+                boundary_outputs.insert(net_id);
+            }
+        }
+    }
     // Build the optimizable sub-netlist
     let mut opt = GateNetlist::new(netlist.name.clone(), netlist.library_name.clone());
     let mut orig_to_opt: HashMap<GateNetId, GateNetId> = HashMap::new();

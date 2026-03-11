@@ -82,6 +82,29 @@ impl<'a> AigWriter<'a> {
         // Phase 6: Remove dead cells (cells whose outputs have no fanout)
         state.netlist.remove_dead_cells();
 
+        // Phase 7: Compute lut_init for FPGA LUT cells that don't have it set.
+        // The AIG writer creates cells via Cell::new_comb for inversions and
+        // unmapped AND nodes — these don't get lut_init from the mapping pass.
+        if self.library.is_fpga() {
+            // Collect init values first to avoid borrow conflict
+            let inits: Vec<(usize, u64)> = state
+                .netlist
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.lut_init.is_none() && c.cell_type.contains("LUT4"))
+                .filter_map(|(i, c)| {
+                    state
+                        .netlist
+                        .compute_lut4_init(&c.cell_type)
+                        .map(|v| (i, v as u64))
+                })
+                .collect();
+            for (i, init) in inits {
+                state.netlist.cells[i].lut_init = Some(init);
+            }
+        }
+
         state.netlist.update_stats();
         state.netlist
     }

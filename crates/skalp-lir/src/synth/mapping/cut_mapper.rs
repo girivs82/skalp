@@ -491,8 +491,11 @@ impl CutMapper {
         let mut best_cost = f64::MAX;
 
         for cut in &cut_set.cuts {
-            // Skip trivial cuts
+            // Skip trivial cuts (empty leaves or self-referencing)
             if cut.leaves.is_empty() {
+                continue;
+            }
+            if cut.leaves.len() == 1 && cut.leaves[0] == node_id {
                 continue;
             }
 

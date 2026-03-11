@@ -146,8 +146,24 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
     let mut in_logic_tile = false;
     let mut tile_bits: Vec<Vec<bool>> = Vec::new();
 
+    // Helper closure to process accumulated tile bits
+    let mut process_tile = |tile_bits: &[Vec<bool>], inits: &mut Vec<u16>| {
+        if !tile_bits.is_empty() {
+            for mapping in lc_mappings {
+                let init = extract_lc_lut_init_chipdb(tile_bits, mapping);
+                if init != 0 {
+                    inits.push(init);
+                }
+            }
+        }
+    };
+
     for line in asc.lines() {
         if line.starts_with(".logic_tile") {
+            // Process previous tile before starting new one
+            if in_logic_tile {
+                process_tile(&tile_bits, &mut inits);
+            }
             in_logic_tile = true;
             tile_bits.clear();
             continue;
@@ -155,14 +171,7 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
 
         if in_logic_tile {
             if line.is_empty() || line.starts_with('.') {
-                if !tile_bits.is_empty() {
-                    for mapping in lc_mappings {
-                        let init = extract_lc_lut_init_chipdb(&tile_bits, mapping);
-                        if init != 0 {
-                            inits.push(init);
-                        }
-                    }
-                }
+                process_tile(&tile_bits, &mut inits);
                 in_logic_tile = false;
                 continue;
             }
@@ -170,6 +179,11 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
             let row: Vec<bool> = line.chars().map(|c| c == '1').collect();
             tile_bits.push(row);
         }
+    }
+
+    // Process last tile if file ends while in a logic tile
+    if in_logic_tile {
+        process_tile(&tile_bits, &mut inits);
     }
 
     inits.sort();

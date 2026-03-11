@@ -834,6 +834,17 @@ impl GateNetlist {
                     return false;
                 }
 
+                // I/O pad cells must be preserved — they represent physical pins
+                if matches!(
+                    cell.function,
+                    Some(CellFunction::InputPad)
+                        | Some(CellFunction::OutputPad)
+                        | Some(CellFunction::BidirPad)
+                        | Some(CellFunction::ClockPad)
+                ) {
+                    return false;
+                }
+
                 cell.outputs.iter().all(|&out_net| {
                     // Check if this output net is a primary output
                     if output_nets.contains(&out_net) {
@@ -1410,7 +1421,7 @@ impl GateNetlist {
     ///
     /// Returns the 16-bit INIT value that programs the LUT4 to implement
     /// the function specified in the cell type name.
-    fn compute_lut4_init(&self, cell_type: &str) -> Option<u16> {
+    pub(crate) fn compute_lut4_init(&self, cell_type: &str) -> Option<u16> {
         // Map common functions to LUT4 INIT values
         // For a 4-input LUT: output = INIT[{I3,I2,I1,I0}]
         // NOTE: Order matters! More specific patterns must come before less specific ones
