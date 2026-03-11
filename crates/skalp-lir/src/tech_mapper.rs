@@ -17,7 +17,7 @@
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
-use crate::lir::{Lir, LirNode, LirOp, LirSafetyInfo, LirSignalId};
+use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSafetyInfo, LirSignalId};
 use crate::tech_library::{
     CellFunction, DecompConnectivity, IoCellInfo, LibraryCell, LibraryFailureMode, TechLibrary,
 };
@@ -118,6 +118,12 @@ pub struct TechMapper<'a> {
     port_constraints: IndexMap<String, PhysicalConstraints>,
     /// Set of output port signal IDs (for buffer elimination)
     output_signals: std::collections::HashSet<LirSignalId>,
+    /// Enable info for registers: maps Reg node ID → (enable_signal, data_signal, invert_enable)
+    /// Populated by pre-pass that detects Mux2→Reg enable patterns.
+    /// invert_enable=true when d1=Q (sel=1→hold, need ~sel for enable)
+    reg_enable_info: IndexMap<LirNodeId, (LirSignalId, LirSignalId, bool)>,
+    /// Mux2 nodes absorbed into DffE/DffRE — skipped during mapping
+    skip_nodes: std::collections::HashSet<LirNodeId>,
 }
 
 impl<'a> TechMapper<'a> {
@@ -134,6 +140,8 @@ impl<'a> TechMapper<'a> {
             c_elem_counter: 0,
             port_constraints: IndexMap::new(),
             output_signals: std::collections::HashSet::new(),
+            reg_enable_info: IndexMap::new(),
+            skip_nodes: std::collections::HashSet::new(),
         }
     }
 
@@ -240,8 +248,18 @@ impl<'a> TechMapper<'a> {
             }
         }
 
+        // Phase 1.5: Detect Mux2→Reg enable patterns for DffE/DffRE absorption
+        // When a Reg's D-input comes from a Mux2 where one data arm feeds back
+        // the Reg's own Q output, the Mux2 is an enable gate:
+        //   Mux2(sel=enable, d0=Q_feedback, d1=D_new) → Reg
+        // We absorb the Mux2 into the DFF hardware (DffE/DffRE) and skip mapping it.
+        self.detect_enable_patterns(word_lir);
+
         // Phase 2: Map each node to cells
         for node in &word_lir.nodes {
+            if self.skip_nodes.contains(&node.id) {
+                continue;
+            }
             self.map_node(node, word_lir);
             self.stats.nodes_processed += 1;
         }
@@ -298,6 +316,145 @@ impl<'a> TechMapper<'a> {
     /// Check if a signal name indicates a false rail in NCL (ends with _f)
     fn is_ncl_false_rail(signal_name: &str) -> bool {
         signal_name.ends_with("_f") || signal_name.contains("_f[") || signal_name.ends_with("_f]")
+    }
+
+    /// Detect Mux2→Reg enable patterns and mark nodes for DffE/DffRE absorption.
+    ///
+    /// Pattern: A Reg node whose D-input signal is driven by a Mux2, where one
+    /// of the Mux2's data inputs is the Reg's own output (Q feedback).
+    ///
+    /// Mux2 inputs are [sel, d0, d1] with sel=0→d0, sel=1→d1.
+    /// Two cases:
+    ///   - d0 = Q_feedback → enable = sel,  D_new = d1 (sel=1 → load new data)
+    ///   - d1 = Q_feedback → enable = ~sel, D_new = d0 (sel=0 → load new data)
+    ///
+    /// We only handle the non-inverted case (d0 = Q_feedback) to avoid creating
+    /// extra inverter logic. The inverted case is rare in practice.
+    fn detect_enable_patterns(&mut self, lir: &Lir) {
+        // Check if the library supports DffE or DffRE
+        let has_dffe = self.library.find_best_cell(&CellFunction::DffE).is_some();
+        let has_dffre = self.library.find_best_cell(&CellFunction::DffRE).is_some();
+        if !has_dffe && !has_dffre {
+            return;
+        }
+
+        // Build signal→driver map for quick lookup
+        let signal_driver: IndexMap<LirSignalId, &LirNode> = lir
+            .nodes
+            .iter()
+            .map(|n| (n.output, n))
+            .collect();
+
+        // Build signal use-count map (how many nodes consume each signal)
+        let mut signal_use_count: IndexMap<LirSignalId, usize> = IndexMap::new();
+        for node in &lir.nodes {
+            for input in &node.inputs {
+                *signal_use_count.entry(*input).or_insert(0) += 1;
+            }
+        }
+
+        for node in &lir.nodes {
+            if let LirOp::Reg { has_reset, .. } = &node.op {
+                // Skip if no suitable cell: need DffRE for reset registers, DffE for plain
+                if *has_reset && !has_dffre {
+                    continue;
+                }
+                if !has_reset && !has_dffe {
+                    continue;
+                }
+
+                // Reg input[0] = D signal
+                let d_signal = node.inputs[0];
+                let q_signal = node.output;
+
+                // Check if D is driven by a Mux2
+                if let Some(mux_node) = signal_driver.get(&d_signal) {
+                    if let LirOp::Mux2 { .. } = &mux_node.op {
+                        let sel_signal = mux_node.inputs[0];
+                        let d0_signal = mux_node.inputs[1];
+                        let d1_signal = mux_node.inputs[2];
+
+                        if d0_signal == q_signal {
+                            // d0 = Q: sel=0→hold, sel=1→load
+                            self.reg_enable_info
+                                .insert(node.id, (sel_signal, d1_signal, false));
+                            self.skip_nodes.insert(mux_node.id);
+                        } else if d1_signal == q_signal {
+                            // d1 = Q: sel=1→hold, sel=0→load
+                            self.reg_enable_info
+                                .insert(node.id, (sel_signal, d0_signal, true));
+                            self.skip_nodes.insert(mux_node.id);
+                        } else {
+                            // Deep pattern: check if an entire Mux2 subtree is
+                            // functionally equivalent to Q (all leaves == Q).
+                            let d0_is_q = Self::mux_tree_all_leaves_eq(&signal_driver, d0_signal, q_signal);
+                            let d1_is_q = Self::mux_tree_all_leaves_eq(&signal_driver, d1_signal, q_signal);
+                            if d0_is_q && !d1_is_q {
+                                // d0 subtree ≡ Q: sel=0→hold, sel=1→load
+                                self.reg_enable_info
+                                    .insert(node.id, (sel_signal, d1_signal, false));
+                                self.skip_nodes.insert(mux_node.id);
+                                Self::collect_mux_nodes(&signal_driver, d0_signal, &signal_use_count, &mut self.skip_nodes);
+                            } else if d1_is_q && !d0_is_q {
+                                // d1 subtree ≡ Q: sel=1→hold, sel=0→load
+                                self.reg_enable_info
+                                    .insert(node.id, (sel_signal, d0_signal, true));
+                                self.skip_nodes.insert(mux_node.id);
+                                Self::collect_mux_nodes(&signal_driver, d1_signal, &signal_use_count, &mut self.skip_nodes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collect Mux2 node IDs in a dead subtree (all leaves ≡ Q) for skipping.
+    /// Only skips nodes whose output signal has a single consumer (exclusively
+    /// part of this dead subtree). Multi-use signals are kept — they'll become
+    /// identity gates that the optimizer can handle.
+    fn collect_mux_nodes(
+        signal_driver: &IndexMap<LirSignalId, &LirNode>,
+        signal: LirSignalId,
+        signal_use_count: &IndexMap<LirSignalId, usize>,
+        skip_nodes: &mut std::collections::HashSet<LirNodeId>,
+    ) {
+        if let Some(driver) = signal_driver.get(&signal) {
+            if let LirOp::Mux2 { .. } = &driver.op {
+                let uses = signal_use_count.get(&signal).copied().unwrap_or(0);
+                if uses <= 1 {
+                    skip_nodes.insert(driver.id);
+                }
+                let d0 = driver.inputs[1];
+                let d1 = driver.inputs[2];
+                Self::collect_mux_nodes(signal_driver, d0, signal_use_count, skip_nodes);
+                Self::collect_mux_nodes(signal_driver, d1, signal_use_count, skip_nodes);
+            }
+        }
+    }
+
+    /// Check if a MUX tree's leaves are ALL equal to `target`.
+    /// Walks through Mux2 nodes recursively; at leaf nodes (non-Mux2 drivers
+    /// or primary inputs), checks if the signal equals `target`.
+    /// Returns true iff the subtree is functionally equivalent to `target`
+    /// regardless of select signals.
+    fn mux_tree_all_leaves_eq(
+        signal_driver: &IndexMap<LirSignalId, &LirNode>,
+        signal: LirSignalId,
+        target: LirSignalId,
+    ) -> bool {
+        if signal == target {
+            return true;
+        }
+        if let Some(driver) = signal_driver.get(&signal) {
+            if let LirOp::Mux2 { .. } = &driver.op {
+                let d0 = driver.inputs[1];
+                let d1 = driver.inputs[2];
+                return Self::mux_tree_all_leaves_eq(signal_driver, d0, target)
+                    && Self::mux_tree_all_leaves_eq(signal_driver, d1, target);
+            }
+        }
+        false
     }
 
     /// Map a single node to cells
@@ -631,16 +788,44 @@ impl<'a> TechMapper<'a> {
                 } else {
                     None
                 };
-                self.map_register(
-                    *width,
-                    &input_nets,
-                    &output_nets,
-                    &node.path,
-                    clock_net,
-                    reset_net,
-                    *reset_value,
-                    *async_reset,
-                );
+
+                // Check if this Reg has an absorbed enable pattern
+                let enable_info = self.reg_enable_info.get(&node.id).cloned();
+                if let Some((enable_sig, data_sig, invert_enable)) = enable_info {
+                    let enable_nets = self
+                        .signal_to_net
+                        .get(&enable_sig)
+                        .cloned()
+                        .unwrap_or_default();
+                    let data_nets = self
+                        .signal_to_net
+                        .get(&data_sig)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.map_register_with_enable(
+                        *width,
+                        &data_nets,
+                        &enable_nets,
+                        invert_enable,
+                        &output_nets,
+                        &node.path,
+                        clock_net,
+                        reset_net,
+                        *reset_value,
+                        *async_reset,
+                    );
+                } else {
+                    self.map_register(
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                        clock_net,
+                        reset_net,
+                        *reset_value,
+                        *async_reset,
+                    );
+                }
             }
 
             // Constant
@@ -3912,6 +4097,220 @@ impl<'a> TechMapper<'a> {
                     dff_reset,
                 );
                 cell.source_op = Some("Register".to_string());
+                dff_info.apply_to_cell(&mut cell);
+                self.add_cell(cell);
+            }
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map a register with an absorbed enable MUX, using DffE or DffRE cells.
+    ///
+    /// Instead of Mux2 + Dff, we use the DFF's built-in enable pin:
+    /// - DffE: D flip-flop with enable (no reset)
+    /// - DffRE: D flip-flop with reset and enable
+    #[allow(clippy::too_many_arguments)]
+    fn map_register_with_enable(
+        &mut self,
+        width: u32,
+        data_nets: &[GateNetId],
+        enable_nets: &[GateNetId],
+        invert_enable: bool,
+        outputs: &[GateNetId],
+        path: &str,
+        clock: Option<GateNetId>,
+        reset: Option<GateNetId>,
+        reset_value: Option<u64>,
+        async_reset: bool,
+    ) {
+        let reset_val = reset_value.unwrap_or(0);
+        let clk = clock.unwrap_or(GateNetId(0));
+        let tie_low = self.get_tie_low();
+
+        // Get enable net (single bit — it's the Mux2 select)
+        let raw_enable = enable_nets.first().copied().unwrap_or(tie_low);
+
+        // Invert enable if needed (d1=Q case: sel=1 means hold, so enable = ~sel)
+        let enable = if invert_enable {
+            let inv_en_net = self
+                .netlist
+                .add_net_with_name(format!("{}.inv_en", path));
+            let inv_info = self.get_cell_info(&CellFunction::Inv);
+            let mut inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.inv_en", path),
+                vec![raw_enable],
+                vec![inv_en_net],
+            );
+            inv_cell.source_op = Some("EnableInvert".to_string());
+            inv_info.apply_to_cell(&mut inv_cell);
+            self.add_cell(inv_cell);
+            inv_en_net
+        } else {
+            raw_enable
+        };
+
+        let has_reset = reset.is_some();
+
+        if async_reset && has_reset {
+            // Async reset with enable — need DffRE equivalent
+            // For now, fall back to DffR + external enable MUX if no async reset+enable cell
+            // iCE40 has SB_DFFER (async reset + enable)
+            let dff_func = CellFunction::DffRE;
+            let dff_info = self.get_cell_info(&dff_func);
+
+            for bit in 0..width as usize {
+                let d = data_nets.get(bit).copied().unwrap_or(tie_low);
+                let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
+                let reset_bit_val = (reset_val >> bit) & 1 != 0;
+
+                if reset_bit_val {
+                    // Reset-to-1: invert D and Q around a reset-to-0 DffRE
+                    let inv_d_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.inv_d_bit{}", path, bit));
+                    let inv_info = self.get_cell_info(&CellFunction::Inv);
+                    let mut inv_d_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_info.fit,
+                        format!("{}.inv_d{}", path, bit),
+                        vec![d],
+                        vec![inv_d_net],
+                    );
+                    inv_d_cell.source_op = Some("AsyncResetInvD".to_string());
+                    inv_info.apply_to_cell(&mut inv_d_cell);
+                    self.add_cell(inv_d_cell);
+
+                    let dff_q_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.dff_q_bit{}", path, bit));
+                    let mut cell = Cell::new_seq_with_enable(
+                        CellId(0),
+                        dff_info.name.clone(),
+                        self.library.name.clone(),
+                        dff_info.fit,
+                        format!("{}.bit{}", path, bit),
+                        inv_d_net,
+                        enable,
+                        dff_q_net,
+                        clk,
+                        reset,
+                    );
+                    cell.source_op = Some("RegisterWithEnable".to_string());
+                    dff_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+
+                    let inv_q_info = self.get_cell_info(&CellFunction::Inv);
+                    let mut inv_q_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_q_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_q_info.fit,
+                        format!("{}.inv_q{}", path, bit),
+                        vec![dff_q_net],
+                        vec![q],
+                    );
+                    inv_q_cell.source_op = Some("AsyncResetInvQ".to_string());
+                    inv_q_info.apply_to_cell(&mut inv_q_cell);
+                    self.add_cell(inv_q_cell);
+                } else {
+                    let mut cell = Cell::new_seq_with_enable(
+                        CellId(0),
+                        dff_info.name.clone(),
+                        self.library.name.clone(),
+                        dff_info.fit,
+                        format!("{}.bit{}", path, bit),
+                        d,
+                        enable,
+                        q,
+                        clk,
+                        reset,
+                    );
+                    cell.source_op = Some("RegisterWithEnable".to_string());
+                    dff_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+                }
+            }
+        } else {
+            // Sync reset or no reset — use DffRE (reset+enable) or DffE (enable only)
+            let all_reset_zero = reset_val == 0;
+            let use_dffre = has_reset && all_reset_zero;
+
+            let dff_func = if use_dffre {
+                CellFunction::DffRE
+            } else if has_reset {
+                // Non-zero reset: need MUX for reset value + DffE
+                CellFunction::DffE
+            } else {
+                CellFunction::DffE
+            };
+            let dff_info = self.get_cell_info(&dff_func);
+
+            for bit in 0..width as usize {
+                let d_orig = data_nets.get(bit).copied().unwrap_or(tie_low);
+                let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+                let d = if has_reset && !use_dffre {
+                    // Non-zero reset value: need MUX to select between reset_value and D
+                    let reset_bit_val = (reset_val >> bit) & 1 != 0;
+                    let reset_bit_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
+                    let tie_cell_name = if reset_bit_val { "TIE_HIGH" } else { "TIE_LOW" };
+                    let mut tie_cell = Cell::new_comb(
+                        CellId(0),
+                        tie_cell_name.to_string(),
+                        self.library.name.clone(),
+                        0.01,
+                        format!("{}.rst_tie{}", path, bit),
+                        vec![],
+                        vec![reset_bit_net],
+                    );
+                    tie_cell.source_op = Some("ResetValue".to_string());
+                    self.add_cell(tie_cell);
+
+                    let mux_out = self
+                        .netlist
+                        .add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
+                    let mux_info = self.get_cell_info(&CellFunction::Mux2);
+                    let mut mux_cell = Cell::new_comb(
+                        CellId(0),
+                        mux_info.name.clone(),
+                        self.library.name.clone(),
+                        mux_info.fit,
+                        format!("{}.rst_mux{}", path, bit),
+                        vec![reset.unwrap(), d_orig, reset_bit_net],
+                        vec![mux_out],
+                    );
+                    mux_cell.source_op = Some("ResetMux".to_string());
+                    mux_info.apply_to_cell(&mut mux_cell);
+                    self.add_cell(mux_cell);
+                    mux_out
+                } else {
+                    d_orig
+                };
+
+                let dff_reset = if use_dffre { reset } else { None };
+
+                let mut cell = Cell::new_seq_with_enable(
+                    CellId(0),
+                    dff_info.name.clone(),
+                    self.library.name.clone(),
+                    dff_info.fit,
+                    format!("{}.bit{}", path, bit),
+                    d,
+                    enable,
+                    q,
+                    clk,
+                    dff_reset,
+                );
+                cell.source_op = Some("RegisterWithEnable".to_string());
                 dff_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
             }
@@ -7521,7 +7920,7 @@ pub fn synthesize(
     use crate::synth::SynthEngine;
 
     // Step 1: Initial tech mapping
-    let mut initial_result = map_lir_to_gates(lir, library);
+    let initial_result = map_lir_to_gates(lir, library);
 
     // Note: Pre-AIG buffer removal was removed because it breaks the AIG partition
     // merge. The reverse net replacement rewires cell outputs to use output port net

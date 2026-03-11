@@ -500,8 +500,12 @@ impl AigWriterState<'_> {
             let enable_net = self.get_or_create_lit_net(aig, enable_lit);
             let new_data_net = self.get_or_create_lit_net(aig, new_data_lit);
 
-            // Find SDFFE cell (with enable and reset)
-            let (cell_type, cell_fit) = self.find_sdffe_cell();
+            // Use DffRE (enable + reset) when reset is present, DffE (enable only) otherwise
+            let (cell_type, cell_fit) = if reset_net.is_some() {
+                self.find_dffre_cell_or_fallback()
+            } else {
+                self.find_sdffe_cell()
+            };
 
             // Create SDFFE cell with enable input
             // Inputs: [D, E] where D is the new data and E is the enable
@@ -867,6 +871,18 @@ impl AigWriterState<'_> {
              Cannot synthesize latches with enable pattern without this primitive.",
             self.library.name
         )
+    }
+
+    /// Find a DffRE cell (DFF with enable + reset) in the library.
+    /// Falls back to DffE if DffRE is not available (reset handled externally).
+    fn find_dffre_cell_or_fallback(&self) -> (String, f64) {
+        // Try DffRE first (combined enable + reset)
+        let dffre_cells = self.library.find_cells_by_function(&CellFunction::DffRE);
+        if let Some(cell) = dffre_cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        // Fall back to DffE (enable only, reset handled as external MUX)
+        self.find_sdffe_cell()
     }
 
     /// Try to find a TIE_HIGH cell in the library (constant 1 driver)
