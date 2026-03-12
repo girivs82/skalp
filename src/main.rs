@@ -3043,17 +3043,28 @@ fn run_equivalence_check(
 
                     if unresolved_outputs.is_empty() {
                         // All output diff gates proven — SAT passed for combinational equivalence
-                        // Unresolved latch gates are SAT-hard (multiplier cones), covered by Phase 1 sim
                         sat_passed = true;
                         println!(
                             "   ✓ All {} output gates proven equivalent",
                             total_gates - unresolved_latches.len()
                         );
                         if !unresolved_latches.is_empty() {
-                            println!(
-                                "   ⚠ {} latch gates unresolved (SAT-hard, covered by Phase 1 sim)",
-                                unresolved_latches.len()
-                            );
+                            // When BRAM is used, gate AIG has far fewer latches than MIR AIG
+                            // (BRAM storage is opaque to SAT). Unresolved latches in this case
+                            // are expected — their next-state functions depend on memory state
+                            // that only exists on the MIR side.
+                            let has_bram_gap = mir_aig.latches.len() > gate_aig.latches.len() * 2;
+                            if has_bram_gap {
+                                println!(
+                                    "   ℹ {} latch gates unresolved (BRAM storage not modeled in SAT, verified by simulation)",
+                                    unresolved_latches.len()
+                                );
+                            } else {
+                                println!(
+                                    "   ⚠ {} latch gates unresolved (SAT-hard, covered by Phase 1 sim)",
+                                    unresolved_latches.len()
+                                );
+                            }
                         }
                     } else {
                         // Unresolved output gates — cannot pass
