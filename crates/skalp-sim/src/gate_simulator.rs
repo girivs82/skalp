@@ -259,6 +259,9 @@ pub struct GateLevelSimulator {
     output_ports: Vec<SirSignalId>,
     /// Clock signal IDs
     clock_signals: Vec<SirSignalId>,
+    /// Map from buffered clock signal → source clock signal.
+    /// Built during init by scanning ClkBuf primitives.
+    clock_buffer_map: std::collections::HashMap<u32, SirSignalId>,
     /// Active fault injection (if any)
     active_fault: Option<FaultInjectionConfig>,
     /// Detection signals (output signals that indicate fault detection)
@@ -281,6 +284,7 @@ impl GateLevelSimulator {
             input_ports: Vec::new(),
             output_ports: Vec::new(),
             clock_signals: Vec::new(),
+            clock_buffer_map: std::collections::HashMap::new(),
             active_fault: None,
             detection_signals: Vec::new(),
             total_fit: 0.0,
@@ -288,6 +292,7 @@ impl GateLevelSimulator {
         };
         sim.initialize();
         sim.initialize_ram_state();
+        sim.build_clock_buffer_map();
         sim
     }
 
@@ -378,6 +383,26 @@ impl GateLevelSimulator {
                     let dw = *data_width as usize;
                     // Initialize memory to all zeros
                     self.ram_state.insert(id.0, vec![vec![false; dw]; depth]);
+                }
+            }
+        }
+    }
+
+    /// Build clock buffer map: buffered_clock_signal → source_clock_signal.
+    /// Scans comb_blocks for ClkBuf primitives and records the mapping.
+    fn build_clock_buffer_map(&mut self) {
+        for block in &self.sir.top_module.comb_blocks {
+            for op in &block.operations {
+                if let SirOperation::Primitive {
+                    ptype: PrimitiveType::ClkBuf,
+                    inputs,
+                    outputs,
+                    ..
+                } = op
+                {
+                    if let (Some(&src), Some(&dst)) = (inputs.first(), outputs.first()) {
+                        self.clock_buffer_map.insert(dst.0, src);
+                    }
                 }
             }
         }
@@ -621,6 +646,14 @@ impl GateLevelSimulator {
             self.update_sequential(*clock_id, edge.clone());
         }
 
+        // Phase 3.5: Re-evaluate RAM block reads after sequential writes.
+        // RAM blocks are sequential (have clock) so they're only in seq_blocks.
+        // After Phase 3 writes new data, the read outputs must be refreshed
+        // so that Phase 4's combinational evaluation sees current memory contents.
+        // This models the combinational read path (rd_data = memory[rd_ptr])
+        // that the source code expresses outside the clock process.
+        self.refresh_ram_reads();
+
         // Phase 4: Re-evaluate combinational with new register values
         self.evaluate_combinational();
 
@@ -855,6 +888,78 @@ impl GateLevelSimulator {
         }
     }
 
+    /// Re-evaluate RAM block reads (without writing) after sequential updates.
+    /// This refreshes the BRAM read output signals so that combinational logic
+    /// downstream (Phase 4) sees the current memory contents.
+    fn refresh_ram_reads(&mut self) {
+        let mut found_ram = false;
+        for block in &self.sir.top_module.seq_blocks.clone() {
+            for op in &block.operations {
+                if let SirOperation::Primitive {
+                    id,
+                    ptype: PrimitiveType::RamBlock { addr_width, data_width },
+                    inputs,
+                    outputs,
+                    ..
+                } = op
+                {
+                    found_ram = true;
+                    let aw = *addr_width as usize;
+                    let dw = *data_width as usize;
+
+                    // Read current input signal values
+                    let input_values: Vec<bool> = inputs
+                        .iter()
+                        .map(|sig_id| {
+                            self.state
+                                .signals
+                                .get(&sig_id.0)
+                                .and_then(|v| v.first().copied())
+                                .unwrap_or(false)
+                        })
+                        .collect();
+
+                    // Parse raddr and RE from input layout
+                    let raddr_bits = &input_values[..aw];
+                    let re = input_values.get(aw + 2).copied().unwrap_or(true);
+
+                    let raddr: usize = raddr_bits
+                        .iter()
+                        .enumerate()
+                        .fold(0, |acc, (i, &b)| acc | ((b as usize) << i));
+
+                    // Read-only: no write side effects
+                    let read_data = if re {
+                        if let Some(mem) = self.ram_state.get(&id.0) {
+                            let depth = 1usize << aw;
+                            if raddr < depth {
+                                mem[raddr].clone()
+                            } else {
+                                vec![false; dw]
+                            }
+                        } else {
+                            vec![false; dw]
+                        }
+                    } else {
+                        vec![false; dw]
+                    };
+
+
+                    // Update output signals
+                    for (i, out_id) in outputs.iter().enumerate() {
+                        let bit = read_data.get(i).copied().unwrap_or(false);
+                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                        let mut bits = vec![false; width];
+                        bits[0] = bit;
+                        self.state.signals.insert(out_id.0, bits);
+                    }
+                }
+            }
+        }
+        // refresh_ram_reads is a no-op for designs without RamBlock — that's fine.
+        let _ = found_ram;
+    }
+
     /// Evaluate a behavioral expression (fallback)
     fn evaluate_expression(&self, expr: &crate::sir::SirExpression) -> Vec<bool> {
         use crate::sir::SirExpression;
@@ -877,8 +982,12 @@ impl GateLevelSimulator {
         let mut pending_updates: Vec<(u32, Vec<bool>)> = Vec::new();
 
         for block in &self.sir.top_module.seq_blocks.clone() {
-            // Check if this block uses this clock with matching edge
-            if block.clock == clock_id {
+            // Check if this block uses this clock with matching edge.
+            // Also match buffered clocks: if block.clock is a ClkBuf output
+            // driven by clock_id, treat it as the same clock domain.
+            let clock_matches = block.clock == clock_id
+                || self.clock_buffer_map.get(&block.clock.0) == Some(&clock_id);
+            if clock_matches {
                 let matches_edge = match (&block.clock_edge, &edge) {
                     (EdgeType::Rising, EdgeType::Rising) => true,
                     (EdgeType::Falling, EdgeType::Falling) => true,

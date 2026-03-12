@@ -6568,6 +6568,16 @@ impl<'a> TechMapper<'a> {
             tie_low
         };
 
+        // BRAM has registered read output (1-cycle latency), but the source may use
+        // combinational reads (rd_data = memory[rd_ptr] outside clock process).
+        // The gate-level simulator handles this via refresh_ram_reads() which re-reads
+        // from RAM state with the current read address after each sequential update.
+        // A forwarding MUX approach doesn't work here because after DFF updates, the
+        // address registers show post-increment values while the write happened at the
+        // pre-increment address, causing false matches.
+        let bram_outputs = outputs.to_vec();
+        let need_forwarding = false;
+
         if depth_blocks == 1 && width_blocks == 1 {
             // Simple case: single RAM block
             self.instantiate_ram_block(
@@ -6583,7 +6593,7 @@ impl<'a> TechMapper<'a> {
                 waddr_nets,
                 wdata_nets,
                 we_net,
-                outputs,
+                &bram_outputs,
                 clk,
                 tie_low,
                 tie_high,
@@ -6607,7 +6617,7 @@ impl<'a> TechMapper<'a> {
                 waddr_nets,
                 wdata_nets,
                 we_net,
-                outputs,
+                &bram_outputs,
                 clk,
                 tie_low,
                 tie_high,
@@ -6633,7 +6643,7 @@ impl<'a> TechMapper<'a> {
                 waddr_nets,
                 wdata_nets,
                 we_net,
-                outputs,
+                &bram_outputs,
                 clk,
                 tie_low,
                 tie_high,
@@ -6641,6 +6651,95 @@ impl<'a> TechMapper<'a> {
                 path,
                 ram_info,
             );
+        }
+
+        // Add write-forwarding MUX: output[i] = (we & addr_match) ? wdata[i] : bram_rdata[i]
+        // This makes the BRAM behave as if it has combinational read-after-write semantics.
+        // BRAM has registered read output, so same-cycle writes aren't visible on the read port.
+        // The forwarding MUX bypasses the BRAM output with wdata when we=1 and raddr==waddr.
+        if need_forwarding {
+            let xor_info = self.get_cell_info(&CellFunction::Xor2);
+            let inv_info = self.get_cell_info(&CellFunction::Inv);
+            let and_info = self.get_cell_info(&CellFunction::And2);
+            let mux_info = self.get_cell_info(&CellFunction::Mux2);
+
+            // Build address comparator: addr_match = AND(XNOR(raddr[i], waddr[i]) for all i)
+            let aw = addr_width.min(raddr_nets.len() as u32).min(waddr_nets.len() as u32) as usize;
+            let mut addr_match = tie_high;
+            for i in 0..aw {
+                let ra = raddr_nets[i];
+                let wa = waddr_nets[i];
+                // XNOR(ra, wa) = ~(ra ^ wa)
+                let xor_net = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(xor_net, format!("{}.fwd_addr_xor[{}]", path, i)));
+                let mut xor_cell = Cell::new_comb(
+                    CellId(0), xor_info.name.clone(), self.library.name.clone(),
+                    xor_info.fit, format!("{}.fwd_xor_{}", path, i),
+                    vec![ra, wa], vec![xor_net],
+                );
+                xor_cell.source_op = Some("fwd_addr_cmp".to_string());
+                xor_info.apply_to_cell(&mut xor_cell);
+                self.add_cell(xor_cell);
+
+                let xnor_net = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(xnor_net, format!("{}.fwd_addr_xnor[{}]", path, i)));
+                let mut inv_cell = Cell::new_comb(
+                    CellId(0), inv_info.name.clone(), self.library.name.clone(),
+                    inv_info.fit, format!("{}.fwd_inv_{}", path, i),
+                    vec![xor_net], vec![xnor_net],
+                );
+                inv_cell.source_op = Some("fwd_addr_cmp".to_string());
+                inv_info.apply_to_cell(&mut inv_cell);
+                self.add_cell(inv_cell);
+
+                // AND into running match
+                let new_match = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(new_match, format!("{}.fwd_addr_match_{}", path, i)));
+                let mut and_cell = Cell::new_comb(
+                    CellId(0), and_info.name.clone(), self.library.name.clone(),
+                    and_info.fit, format!("{}.fwd_and_{}", path, i),
+                    vec![addr_match, xnor_net], vec![new_match],
+                );
+                and_cell.source_op = Some("fwd_addr_cmp".to_string());
+                and_info.apply_to_cell(&mut and_cell);
+                self.add_cell(and_cell);
+                addr_match = new_match;
+            }
+
+            // forward_sel = we & addr_match
+            let fwd_sel = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(fwd_sel, format!("{}.fwd_sel", path)));
+            let mut sel_cell = Cell::new_comb(
+                CellId(0), and_info.name.clone(), self.library.name.clone(),
+                and_info.fit, format!("{}.fwd_sel_gate", path),
+                vec![we_net, addr_match], vec![fwd_sel],
+            );
+            sel_cell.source_op = Some("fwd_sel".to_string());
+            and_info.apply_to_cell(&mut sel_cell);
+            self.add_cell(sel_cell);
+
+            // For each data bit: output[i] = fwd_sel ? wdata[i] : bram_rdata[i]
+            // MUX2(sel, d0, d1) = sel ? d1 : d0
+            for i in 0..data_width as usize {
+                let bram_bit = bram_outputs[i];
+                let wdata_bit = if i < wdata_nets.len() {
+                    wdata_nets[i]
+                } else {
+                    tie_low
+                };
+                let mut mux_cell = Cell::new_comb(
+                    CellId(0), mux_info.name.clone(), self.library.name.clone(),
+                    mux_info.fit, format!("{}.fwd_mux_{}", path, i),
+                    vec![fwd_sel, bram_bit, wdata_bit], vec![outputs[i]],
+                );
+                mux_cell.source_op = Some("fwd_mux".to_string());
+                mux_info.apply_to_cell(&mut mux_cell);
+                self.add_cell(mux_cell);
+            }
         }
 
         self.stats.direct_mappings += 1;

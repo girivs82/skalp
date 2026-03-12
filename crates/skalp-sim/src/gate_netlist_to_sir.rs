@@ -216,11 +216,22 @@ impl GateNetlistToSirConverter {
                 // RAM block: compute addr/data widths from pin counts
                 // Outputs = rdata[0..data_width]
                 let data_width = cell.outputs.len() as u8;
-                // Inputs: raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE + [wmask]
-                // Minimum inputs without mask = 2*aw + dw + 6
+                // Inputs: raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE + [wmask[dw]]
+                // With mask:    total = 2*aw + 2*dw + 6  →  aw = (total - 2*dw - 6) / 2
+                // Without mask: total = 2*aw + dw + 6    →  aw = (total - dw - 6) / 2
                 let total_inputs = cell.inputs.len();
-                // Try without mask first: total = 2*aw + dw + 6
-                let addr_width = ((total_inputs - data_width as usize - 6) / 2) as u8;
+                let dw = data_width as usize;
+                // Try with mask first (most common for real BRAMs)
+                let addr_width_with_mask = total_inputs.saturating_sub(2 * dw + 6) / 2;
+                let addr_width_without_mask = total_inputs.saturating_sub(dw + 6) / 2;
+                // Use the one that gives a power-of-2 depth and valid addr width
+                let addr_width = if addr_width_with_mask > 0
+                    && 2 * addr_width_with_mask + 2 * dw + 6 == total_inputs
+                {
+                    addr_width_with_mask as u8
+                } else {
+                    addr_width_without_mask as u8
+                };
                 PrimitiveType::RamBlock { addr_width, data_width }
             } else if let Some(func) = &cell.function {
                 // Use the library-provided function for accurate mapping
