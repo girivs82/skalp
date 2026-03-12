@@ -776,13 +776,24 @@ impl GateLevelSimulator {
                         false
                     };
 
-                    // BUG FIX: Always evaluate DFFs normally, regardless of reset_active.
-                    // Reset behavior is now handled by MUX in front of DFFs (tech_mapper change).
-                    // The MUX selects the reset value when rst=1, and the DFF latches it.
-                    // Previously, forcing all registers to 0 broke non-zero reset values.
-
+                    // Evaluate DFFs normally first (captures D input)
                     for op in &block.operations {
                         self.evaluate_operation(op);
+                    }
+
+                    // For DffSR (sync reset to 0) cells: override output to 0 when reset active.
+                    // DffSR cells rely on built-in sync reset (no explicit MUX in the netlist).
+                    // Other DFF types with non-zero reset use MUX-based reset which is already
+                    // handled by combinational evaluation setting the correct D input.
+                    if reset_active {
+                        for op in &block.operations {
+                            if let SirOperation::Primitive { ptype: PrimitiveType::DffSR, outputs, .. } = op {
+                                for out_id in outputs {
+                                    let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                                    self.state.signals.insert(out_id.0, vec![false; width]);
+                                }
+                            }
+                        }
                     }
                 }
             }

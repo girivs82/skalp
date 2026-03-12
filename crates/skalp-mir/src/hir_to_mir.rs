@@ -1199,7 +1199,14 @@ impl<'hir> HirToMir<'hir> {
                         let var_id = self.next_variable_id();
                         self.variable_map.insert(hir_var.id, var_id);
 
-                        let mir_var_type = self.convert_type(&hir_var.var_type);
+                        let mut mir_var_type = self.convert_type(&hir_var.var_type);
+                        // Widen variable type by 1 if its initial value is an addition
+                        // This preserves the carry bit for expressions like `let result = a + b`
+                        if let Some(ref init_expr) = hir_var.initial_value {
+                            if Self::hir_expr_contains_add(init_expr) {
+                                mir_var_type = Self::widen_type_by_one(mir_var_type);
+                            }
+                        }
                         let variable = Variable {
                             id: var_id,
                             name: hir_var.name.clone(),
@@ -17335,23 +17342,35 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Vec4(element_type) => {
                 DataType::Vec4(Box::new(self.convert_type(element_type)))
             }
-            // Parametric types - preserve parameter name and default
-            hir::HirType::BitParam(param_name) => DataType::BitParam {
-                param: param_name.clone(),
-                default: 8,
-            },
-            hir::HirType::LogicParam(param_name) => DataType::LogicParam {
-                param: param_name.clone(),
-                default: 8,
-            },
-            hir::HirType::IntParam(param_name) => DataType::IntParam {
-                param: param_name.clone(),
-                default: 32,
-            },
-            hir::HirType::NatParam(param_name) => DataType::NatParam {
-                param: param_name.clone(),
-                default: 32,
-            },
+            // Parametric types - try to resolve via const_evaluator, fall back to BitParam
+            hir::HirType::BitParam(param_name) => {
+                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                    DataType::Bit(val.as_nat().unwrap_or(8))
+                } else {
+                    DataType::BitParam { param: param_name.clone(), default: 8 }
+                }
+            }
+            hir::HirType::LogicParam(param_name) => {
+                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                    DataType::Logic(val.as_nat().unwrap_or(8))
+                } else {
+                    DataType::LogicParam { param: param_name.clone(), default: 8 }
+                }
+            }
+            hir::HirType::IntParam(param_name) => {
+                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                    DataType::Int(val.as_nat().unwrap_or(32))
+                } else {
+                    DataType::IntParam { param: param_name.clone(), default: 32 }
+                }
+            }
+            hir::HirType::NatParam(param_name) => {
+                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                    DataType::Nat(val.as_nat().unwrap_or(32))
+                } else {
+                    DataType::NatParam { param: param_name.clone(), default: 32 }
+                }
+            }
             // Expression-based types - need const evaluation
             hir::HirType::BitExpr(expr) => {
                 // Try to evaluate const expression to get concrete width
@@ -19410,6 +19429,44 @@ impl<'hir> HirToMir<'hir> {
         Some(Expression::with_unknown_type(ExpressionKind::Literal(
             Value::Integer(0),
         )))
+    }
+
+    /// Check if an HIR expression contains an addition at the top level
+    fn hir_expr_contains_add(expr: &hir::HirExpression) -> bool {
+        match expr {
+            hir::HirExpression::Binary(bin) => matches!(
+                bin.op,
+                hir::HirBinaryOp::Add | hir::HirBinaryOp::WidenAdd | hir::HirBinaryOp::Sub
+            ),
+            _ => false,
+        }
+    }
+
+    /// Widen a MIR DataType by 1 bit (for carry/borrow preservation)
+    fn widen_type_by_one(ty: DataType) -> DataType {
+        match ty {
+            DataType::Bit(w) => DataType::Bit(w + 1),
+            DataType::Logic(w) => DataType::Logic(w + 1),
+            DataType::Int(w) => DataType::Int(w + 1),
+            DataType::Nat(w) => DataType::Nat(w + 1),
+            DataType::BitParam { param, default } => DataType::BitParam {
+                param,
+                default: default + 1,
+            },
+            DataType::LogicParam { param, default } => DataType::LogicParam {
+                param,
+                default: default + 1,
+            },
+            DataType::IntParam { param, default } => DataType::IntParam {
+                param,
+                default: default + 1,
+            },
+            DataType::NatParam { param, default } => DataType::NatParam {
+                param,
+                default: default + 1,
+            },
+            other => other,
+        }
     }
 
     /// Find the value of a specific variant in an enum

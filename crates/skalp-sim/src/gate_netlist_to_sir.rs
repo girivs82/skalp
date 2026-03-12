@@ -423,7 +423,7 @@ impl GateNetlistToSirConverter {
 
             // Sequential
             CellFunction::Dff => PrimitiveType::DffP,
-            CellFunction::DffR => PrimitiveType::DffP, // DFF with reset
+            CellFunction::DffR => PrimitiveType::DffSR, // DFF with sync reset to 0
             CellFunction::DffE => PrimitiveType::DffE, // DFF with enable
             CellFunction::DffRE => PrimitiveType::DffE, // DFF with reset and enable
             CellFunction::Latch => PrimitiveType::Dlatch,

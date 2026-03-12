@@ -191,7 +191,8 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
         | PrimitiveType::DffN
         | PrimitiveType::DffNeg
         | PrimitiveType::DffAR
-        | PrimitiveType::DffAS => {
+        | PrimitiveType::DffAS
+        | PrimitiveType::DffSR => {
             // DFF inputs: [d] - data input only
             // Clock is associated with the sequential block, not the primitive inputs
             // On clock edge, sample D input and store to Q output

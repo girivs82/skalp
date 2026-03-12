@@ -87,6 +87,10 @@ pub enum PrimitiveType {
     DffAR,
     /// D Flip-Flop with async set (inputs: [clk, d, set])
     DffAS,
+    /// D Flip-Flop with synchronous reset to 0 (inputs: [d])
+    /// Reset is handled by the SequentialBlock's reset spec, not a cell input.
+    /// On clock edge: if reset active, Q=0; else Q=D.
+    DffSR,
     /// D Flip-Flop with scan (inputs: [clk, d, scan_in, scan_en, rst])
     DffScan,
     /// D Latch (level-sensitive, inputs: [en, d])
@@ -242,6 +246,7 @@ impl PrimitiveType {
                 | PrimitiveType::DffE
                 | PrimitiveType::DffAR
                 | PrimitiveType::DffAS
+                | PrimitiveType::DffSR
                 | PrimitiveType::DffScan
                 | PrimitiveType::Dlatch
                 | PrimitiveType::SRlatch
@@ -296,6 +301,7 @@ impl PrimitiveType {
             PrimitiveType::DffE => 4,
             PrimitiveType::DffAR => 3,
             PrimitiveType::DffAS => 3,
+            PrimitiveType::DffSR => 1, // D input only; reset is block-level
             PrimitiveType::DffScan => 5,
             PrimitiveType::Dlatch => 2,
             PrimitiveType::SRlatch => 2,
@@ -379,7 +385,8 @@ impl PrimitiveType {
             | PrimitiveType::DffN
             | PrimitiveType::DffNeg
             | PrimitiveType::DffAR
-            | PrimitiveType::DffAS => 1.0,
+            | PrimitiveType::DffAS
+            | PrimitiveType::DffSR => 1.0,
             PrimitiveType::DffE => 1.2,
             PrimitiveType::DffScan => 1.5,
             PrimitiveType::Dlatch | PrimitiveType::SRlatch => 0.8,
@@ -449,6 +456,7 @@ impl PrimitiveType {
             PrimitiveType::DffE => "DFFE",
             PrimitiveType::DffAR => "DFFAR",
             PrimitiveType::DffAS => "DFFAS",
+            PrimitiveType::DffSR => "DFFSR",
             PrimitiveType::DffScan => "DFFSCAN",
             PrimitiveType::Dlatch => "DLATCH",
             PrimitiveType::SRlatch => "SRLATCH",

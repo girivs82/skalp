@@ -2836,13 +2836,13 @@ impl<'a> TechMapper<'a> {
         for bit in 0..out_width {
             let src_bit = low as usize + bit;
             let src = data.get(src_bit).copied().unwrap_or_else(|| {
-                // If the source bit doesn't exist, warn but continue
+                // If the source bit doesn't exist, zero-pad (tie low)
                 self.warnings.push(format!(
-                    "RangeSelect: bit {} out of range for input width {}",
+                    "RangeSelect: bit {} out of range for input width {}, zero-padding",
                     src_bit,
                     data.len()
                 ));
-                data.first().copied().unwrap_or(GateNetId(0))
+                self.get_tie_low()
             });
             let dst = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
