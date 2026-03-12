@@ -8347,7 +8347,7 @@ impl<'a> MirToAig<'a> {
 
     fn build_adder(&mut self, a: &[AigLit], b: &[AigLit]) -> Vec<AigLit> {
         let width = a.len().max(b.len());
-        let mut result = Vec::with_capacity(width);
+        let mut result = Vec::with_capacity(width + 1);
         let mut carry = self.aig.false_lit();
 
         for i in 0..width {
@@ -8364,6 +8364,11 @@ impl<'a> MirToAig<'a> {
             let carry_and_xor = self.aig.add_and(carry, sum_ab);
             carry = self.aig.add_or(a_and_b, carry_and_xor);
         }
+
+        // Include carry-out so wider result types (e.g., bit[9] = bit[8] + bit[8])
+        // capture the overflow bit. Assignments to narrower targets will simply
+        // ignore the extra bit since assign_lvalue only writes values.len() bits.
+        result.push(carry);
 
         result
     }

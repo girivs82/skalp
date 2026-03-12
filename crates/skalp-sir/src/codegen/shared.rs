@@ -138,7 +138,11 @@ impl<'a> SharedCodegen<'a> {
                     BinaryOperation::Shr => left_width,
                     BinaryOperation::Div | BinaryOperation::Mod => left_width,
                     BinaryOperation::Add | BinaryOperation::Sub => {
-                        std::cmp::max(left_width, right_width)
+                        // +1 to capture carry/borrow — the result is masked to the
+                        // output signal's declared width when assigned, so the extra
+                        // bit is harmless for same-width uses (e.g., counter + 1)
+                        // but necessary when the target is wider (e.g., bit[9] = bit[8] + bit[8]).
+                        std::cmp::max(left_width, right_width) + 1
                     }
                     BinaryOperation::And | BinaryOperation::Or | BinaryOperation::Xor => {
                         std::cmp::max(left_width, right_width)
