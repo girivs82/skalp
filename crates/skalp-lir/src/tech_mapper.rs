@@ -6525,10 +6525,10 @@ impl<'a> TechMapper<'a> {
         let (ram_cell, ram_info) = match self.library.find_ram_cell() {
             Some(info) => info,
             None => {
-                self.warnings.push(format!(
-                    "No RAM cell in library '{}' — cannot map MemBlock at {}",
-                    self.library.name, path
-                ));
+                // No RAM cell available — decompose into DFFs with write decode + read MUX
+                self.map_memory_block_as_dffs(
+                    data_width, addr_width, depth, has_write, inputs, outputs, path, clock,
+                );
                 return;
             }
         };
@@ -6797,6 +6797,217 @@ impl<'a> TechMapper<'a> {
             .insert("WRITE_MODE".to_string(), block_width.to_string());
         ram_cell_info.apply_to_cell(&mut cell);
         self.add_cell(cell);
+    }
+
+    /// Decompose a MemBlock into individual DFFs with write address decode and read MUX.
+    ///
+    /// Used when the technology library has no RAM cell. Creates:
+    /// - `depth × data_width` DFFs for storage
+    /// - Address comparators and AND gates for write enable per entry
+    /// - MUX per DFF to select between write data and feedback (hold)
+    /// - MUX tree for read port address decoding
+    #[allow(clippy::too_many_arguments)]
+    fn map_memory_block_as_dffs(
+        &mut self,
+        data_width: u32,
+        addr_width: u32,
+        depth: u32,
+        has_write: bool,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+        clock: Option<GateNetId>,
+    ) {
+        let tie_low = self.get_tie_low();
+        let clk = clock.unwrap_or(tie_low);
+        let dff_info = self.get_cell_info(&CellFunction::Dff);
+        let mux_info = self.get_cell_info(&CellFunction::Mux2);
+
+        // Extract input nets: [raddr, waddr, wdata, we]
+        let raddr_nets = &inputs[0];
+        let waddr_nets = if has_write && inputs.len() > 1 {
+            &inputs[1]
+        } else {
+            &inputs[0]
+        };
+        let wdata_nets = if has_write && inputs.len() > 2 {
+            &inputs[2]
+        } else {
+            &Vec::new()
+        };
+        let we_net = if has_write && inputs.len() > 3 {
+            inputs[3].first().copied().unwrap_or(tie_low)
+        } else {
+            tie_low
+        };
+
+        let dw = data_width as usize;
+        let aw = addr_width as usize;
+
+        // Storage: dff_q[entry][bit] — Q outputs of all memory DFFs
+        let mut dff_q: Vec<Vec<GateNetId>> = Vec::with_capacity(depth as usize);
+
+        for entry in 0..depth as usize {
+            let mut entry_q = Vec::with_capacity(dw);
+
+            // --- Write address decode: entry_we = we AND (waddr == entry) ---
+            // Compare each address bit: match_bit[i] = XNOR(waddr[i], const_bit[i])
+            // entry_we = we AND match_bit[0] AND match_bit[1] AND ...
+            let entry_we_net = if has_write {
+                // Build address match chain
+                let mut match_net = we_net;
+                let and_info = self.get_cell_info(&CellFunction::And2);
+                let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
+
+                for bit in 0..aw {
+                    let addr_bit = waddr_nets.get(bit).copied().unwrap_or(tie_low);
+                    let entry_bit = if (entry >> bit) & 1 != 0 {
+                        self.get_tie_high()
+                    } else {
+                        tie_low
+                    };
+
+                    // XNOR: output is 1 when bits match
+                    let xnor_out = self
+                        .netlist
+                        .add_net_with_name(format!("{}.we_match_e{}_b{}", path, entry, bit));
+                    let mut xnor_cell = Cell::new_comb(
+                        CellId(0),
+                        xnor_info.name.clone(),
+                        self.library.name.clone(),
+                        xnor_info.fit,
+                        format!("{}.we_xnor_e{}_b{}", path, entry, bit),
+                        vec![addr_bit, entry_bit],
+                        vec![xnor_out],
+                    );
+                    xnor_cell.source_op = Some("MemDffDecode".to_string());
+                    xnor_info.apply_to_cell(&mut xnor_cell);
+                    self.add_cell(xnor_cell);
+
+                    // AND with accumulated match
+                    let and_out = self
+                        .netlist
+                        .add_net_with_name(format!("{}.we_and_e{}_b{}", path, entry, bit));
+                    let mut and_cell = Cell::new_comb(
+                        CellId(0),
+                        and_info.name.clone(),
+                        self.library.name.clone(),
+                        and_info.fit,
+                        format!("{}.we_and_e{}_b{}", path, entry, bit),
+                        vec![match_net, xnor_out],
+                        vec![and_out],
+                    );
+                    and_cell.source_op = Some("MemDffDecode".to_string());
+                    and_info.apply_to_cell(&mut and_cell);
+                    self.add_cell(and_cell);
+                    match_net = and_out;
+                }
+                match_net
+            } else {
+                tie_low
+            };
+
+            // --- DFFs with write MUX for each data bit ---
+            for bit in 0..dw {
+                let q_net = self
+                    .netlist
+                    .add_net_with_name(format!("{}.mem_e{}_b{}", path, entry, bit));
+
+                let wdata_bit = wdata_nets.get(bit).copied().unwrap_or(tie_low);
+
+                // MUX: sel=entry_we, d0=Q_feedback (hold), d1=wdata_bit (write)
+                let mux_out = self
+                    .netlist
+                    .add_net_with_name(format!("{}.mux_e{}_b{}", path, entry, bit));
+                let mut mux_cell = Cell::new_comb(
+                    CellId(0),
+                    mux_info.name.clone(),
+                    self.library.name.clone(),
+                    mux_info.fit,
+                    format!("{}.wmux_e{}_b{}", path, entry, bit),
+                    vec![entry_we_net, q_net, wdata_bit], // [sel, d0, d1]
+                    vec![mux_out],
+                );
+                mux_cell.source_op = Some("MemDffWrite".to_string());
+                mux_info.apply_to_cell(&mut mux_cell);
+                self.add_cell(mux_cell);
+
+                // DFF: captures MUX output on clock edge
+                let mut dff_cell = Cell::new_seq(
+                    CellId(0),
+                    dff_info.name.clone(),
+                    self.library.name.clone(),
+                    dff_info.fit,
+                    format!("{}.dff_e{}_b{}", path, entry, bit),
+                    vec![mux_out],
+                    vec![q_net],
+                    clk,
+                    None,
+                );
+                dff_cell.source_op = Some("MemDffStorage".to_string());
+                dff_info.apply_to_cell(&mut dff_cell);
+                self.add_cell(dff_cell);
+
+                entry_q.push(q_net);
+            }
+
+            dff_q.push(entry_q);
+        }
+
+        // --- Read MUX tree: rdata[bit] = MUX(raddr, dff_q[0][bit], dff_q[1][bit], ...) ---
+        // Build a binary MUX tree for each output bit
+        for bit in 0..dw {
+            let output_net = outputs.get(bit).copied().unwrap_or(tie_low);
+
+            // Collect all entries for this bit
+            let mut level: Vec<GateNetId> = dff_q.iter().map(|e| e[bit]).collect();
+
+            // Pad to power of 2 with tie_low
+            let padded_depth = 1usize << aw;
+            while level.len() < padded_depth {
+                level.push(tie_low);
+            }
+
+            // Binary MUX tree: log2(depth) levels
+            for addr_bit_idx in 0..aw {
+                let raddr_bit = raddr_nets.get(addr_bit_idx).copied().unwrap_or(tie_low);
+                let mut next_level = Vec::with_capacity(level.len() / 2);
+
+                for pair in 0..(level.len() / 2) {
+                    let d0 = level[pair * 2];     // selected when addr bit = 0
+                    let d1 = level[pair * 2 + 1]; // selected when addr bit = 1
+
+                    let is_final = addr_bit_idx == aw - 1 && next_level.is_empty();
+                    let mux_out = if is_final {
+                        output_net
+                    } else {
+                        self.netlist.add_net_with_name(format!(
+                            "{}.rmux_b{}_l{}_p{}",
+                            path, bit, addr_bit_idx, pair
+                        ))
+                    };
+
+                    let mut mux_cell = Cell::new_comb(
+                        CellId(0),
+                        mux_info.name.clone(),
+                        self.library.name.clone(),
+                        mux_info.fit,
+                        format!("{}.rmux_b{}_l{}_p{}", path, bit, addr_bit_idx, pair),
+                        vec![raddr_bit, d0, d1], // [sel, d0, d1]
+                        vec![mux_out],
+                    );
+                    mux_cell.source_op = Some("MemDffRead".to_string());
+                    mux_info.apply_to_cell(&mut mux_cell);
+                    self.add_cell(mux_cell);
+
+                    next_level.push(mux_out);
+                }
+
+                level = next_level;
+            }
+        }
+
+        self.stats.direct_mappings += 1;
     }
 
     /// Width tiling: multiple RAM blocks in parallel, each handling a data slice.

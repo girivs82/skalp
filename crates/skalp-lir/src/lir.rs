@@ -132,6 +132,15 @@ pub enum PrimitiveType {
     MemCell,
     /// Register file cell
     RegCell,
+    /// RAM block (multi-bit synchronous read/write memory)
+    /// Inputs: [raddr[0..aw], RCLK, RCLKE, RE, wdata[0..dw], waddr[0..aw], WCLK, WCLKE, WE, ...]
+    /// Outputs: [rdata[0..dw]]
+    RamBlock {
+        /// Number of address bits
+        addr_width: u8,
+        /// Number of data bits
+        data_width: u8,
+    },
 
     // === Special ===
     /// Clock buffer (special timing properties)
@@ -252,6 +261,7 @@ impl PrimitiveType {
                 | PrimitiveType::SRlatch
                 | PrimitiveType::MemCell
                 | PrimitiveType::RegCell
+                | PrimitiveType::RamBlock { .. }
                 | PrimitiveType::RetentionDff { .. }
                 // NCL threshold gates are state-holding (hysteresis behavior)
                 | PrimitiveType::Th12
@@ -311,6 +321,10 @@ impl PrimitiveType {
             PrimitiveType::CompBit => 4,
             PrimitiveType::MemCell => 3,
             PrimitiveType::RegCell => 3,
+            PrimitiveType::RamBlock { addr_width, data_width } => {
+                // raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE
+                *addr_width * 2 + *data_width + 6
+            }
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
             PrimitiveType::Lut4 { .. } => 4,
@@ -353,6 +367,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 2,
             PrimitiveType::CompBit => 2,
+            PrimitiveType::RamBlock { data_width, .. } => *data_width,
             PrimitiveType::PowerSwitch { .. } => 0,
             // FP32 arithmetic operations have 32 output bits
             PrimitiveType::Fp32Add
@@ -396,6 +411,10 @@ impl PrimitiveType {
             PrimitiveType::CompBit => 0.15,
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
+            PrimitiveType::RamBlock { addr_width, data_width } => {
+                // FIT scales with memory size
+                2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64)
+            }
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0,
             // FPGA LUTs - SRAM-based configuration memory
@@ -432,7 +451,7 @@ impl PrimitiveType {
 
     /// Returns true if this primitive type represents memory
     pub fn is_memory(&self) -> bool {
-        matches!(self, PrimitiveType::MemCell | PrimitiveType::RegCell)
+        matches!(self, PrimitiveType::MemCell | PrimitiveType::RegCell | PrimitiveType::RamBlock { .. })
     }
 
     /// Returns the short name for this primitive type
@@ -466,6 +485,7 @@ impl PrimitiveType {
             PrimitiveType::CompBit => "COMP",
             PrimitiveType::MemCell => "MEM",
             PrimitiveType::RegCell => "REG",
+            PrimitiveType::RamBlock { .. } => "RAM",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
             PrimitiveType::Lut4 { .. } => "LUT4",
@@ -549,6 +569,9 @@ impl std::fmt::Display for PrimitiveType {
             PrimitiveType::Thmn { m, n } => write!(f, "TH{}{}", m, n),
             PrimitiveType::ThmnW { m, n, .. } => write!(f, "TH{}{}W", m, n),
             PrimitiveType::NclCompletion { width } => write!(f, "NCLCOMP{}", width),
+            PrimitiveType::RamBlock { addr_width, data_width } => {
+                write!(f, "RAM{}x{}", 1u64 << addr_width, data_width)
+            }
             _ => write!(f, "{}", self.short_name()),
         }
     }

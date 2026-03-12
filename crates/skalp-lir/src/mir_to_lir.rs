@@ -215,8 +215,11 @@ impl MirToLirTransform {
             MemoryStyle::Block | MemoryStyle::Ultra => true,
             MemoryStyle::Distributed | MemoryStyle::Register => false,
             MemoryStyle::Auto => {
+                // Always create MemBlock for Auto style. The tech mapper will decide
+                // implementation: BRAM when available, DFF decomposition otherwise.
+                // Without MemBlock, dynamic array writes (memory[ptr] = data) are lost.
                 if !target_has_bram {
-                    return false;
+                    return true; // Tech mapper will decompose to DFFs
                 }
                 let total_bits = element_width as usize * config.depth as usize;
                 let addr_bits = Self::clog2(config.depth) as usize;

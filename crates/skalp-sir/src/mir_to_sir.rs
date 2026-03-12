@@ -1707,13 +1707,26 @@ impl<'a> MirToSirConverter<'a> {
             // Synthesize the conditional array write:
             // 1. Get the old array value
             // 2. Build a mux tree for the write conditions
-            // 3. Create ArrayWrite node
-            // 4. Create flip-flop
+            // 3. Guard write value with write_enable (no-op when disabled)
+            // 4. Create ArrayWrite node
+            // 5. Create flip-flop
             let old_array = self.create_lvalue_ref_node(&array_base);
-            let (index_node, value_node) = self.synthesize_array_write_in_if(if_stmt, &array_base);
+            let (index_node, value_node, write_enable) =
+                self.synthesize_array_write_in_if(if_stmt, &array_base);
 
             if index_node != 0 && value_node != 0 {
-                let array_write = self.create_array_write_node(old_array, index_node, value_node);
+                // Guard the write: when write_enable is false, write back the old value
+                // at the same index (effectively a no-op write).
+                let guarded_value = if write_enable != 0 {
+                    // Conditional write: MUX(write_enable, new_value, old_value_at_index)
+                    let old_element = self.create_array_read_node(old_array, index_node);
+                    self.create_mux_node(write_enable, value_node, old_element)
+                } else {
+                    // Unconditional write (write_enable == 0 means always enabled)
+                    value_node
+                };
+                let array_write =
+                    self.create_array_write_node(old_array, index_node, guarded_value);
                 let ff_node = self.create_flipflop_with_input(array_write, clock, edge.clone());
                 self.connect_node_to_signal(ff_node, &array_name);
             }
@@ -1776,14 +1789,18 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Synthesize array write from an if statement, returning (index, value, write_enable).
+    /// The write_enable is the accumulated condition under which the write actually occurs.
+    /// When write_enable is 0, the write is unconditional (always enabled).
     fn synthesize_array_write_in_if(
         &mut self,
         if_stmt: &IfStatement,
         array_base: &LValue,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         // Find array write in then branch (recursively search nested ifs)
         let mut then_index = 0;
         let mut then_value = 0;
+        let mut then_write_enable: usize = 0; // 0 = unconditional (direct assignment found)
         for stmt in &if_stmt.then_block.statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -1791,17 +1808,20 @@ impl<'a> MirToSirConverter<'a> {
                         if self.lvalues_match(base, array_base) {
                             then_index = self.create_expression_node(index);
                             then_value = self.create_expression_node(&assign.rhs);
+                            // Direct assignment — unconditional within this branch
+                            then_write_enable = 0;
                             break;
                         }
                     }
                 }
                 Statement::If(nested_if) => {
                     // Recursively search nested if statements
-                    let (nested_index, nested_value) =
+                    let (nested_index, nested_value, nested_we) =
                         self.synthesize_array_write_in_if(nested_if, array_base);
                     if nested_index != 0 && nested_value != 0 {
                         then_index = nested_index;
                         then_value = nested_value;
+                        then_write_enable = nested_we;
                         break;
                     }
                 }
@@ -1812,6 +1832,7 @@ impl<'a> MirToSirConverter<'a> {
         // Find array write in else branch (if any, recursively search nested ifs)
         let mut else_index = 0;
         let mut else_value = 0;
+        let mut else_write_enable: usize = 0;
         if let Some(else_block) = &if_stmt.else_block {
             for stmt in &else_block.statements {
                 match stmt {
@@ -1820,17 +1841,19 @@ impl<'a> MirToSirConverter<'a> {
                             if self.lvalues_match(base, array_base) {
                                 else_index = self.create_expression_node(index);
                                 else_value = self.create_expression_node(&assign.rhs);
+                                else_write_enable = 0;
                                 break;
                             }
                         }
                     }
                     Statement::If(nested_if) => {
                         // Recursively search nested if statements
-                        let (nested_index, nested_value) =
+                        let (nested_index, nested_value, nested_we) =
                             self.synthesize_array_write_in_if(nested_if, array_base);
                         if nested_index != 0 && nested_value != 0 {
                             else_index = nested_index;
                             else_value = nested_value;
+                            else_write_enable = nested_we;
                             break;
                         }
                     }
@@ -1842,24 +1865,69 @@ impl<'a> MirToSirConverter<'a> {
         // Build conditional mux for both index and value
         let condition = self.create_expression_node(&if_stmt.condition);
 
-        // If only then branch has array write, use then values when condition is true
-        // For now, we'll assume writes happen in both branches or we need to preserve old value
-        // TODO: Handle case where write only happens in one branch (need to preserve array)
         if then_index != 0 && else_index == 0 {
-            // Only then branch writes - for now just use then values
-            // Proper implementation would require "no-write" muxing
-            (then_index, then_value)
+            // Only then branch writes — write enable = condition AND sub-condition
+            let write_enable = if then_write_enable != 0 {
+                // Nested condition: condition AND nested_write_enable
+                self.create_binary_op_node(
+                    &skalp_mir::BinaryOp::And,
+                    condition,
+                    then_write_enable,
+                )
+            } else {
+                // Direct write in then branch: write enable = condition
+                condition
+            };
+            (then_index, then_value, write_enable)
         } else if then_index == 0 && else_index != 0 {
-            // Only else branch writes
-            (else_index, else_value)
+            // Only else branch writes — write enable = !condition AND sub-condition
+            let not_condition =
+                self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
+            let write_enable = if else_write_enable != 0 {
+                self.create_binary_op_node(
+                    &skalp_mir::BinaryOp::And,
+                    not_condition,
+                    else_write_enable,
+                )
+            } else {
+                not_condition
+            };
+            (else_index, else_value, write_enable)
         } else if then_index != 0 && else_index != 0 {
             // Both branches write - mux the index and value
             let final_index = self.create_mux_node(condition, then_index, else_index);
             let final_value = self.create_mux_node(condition, then_value, else_value);
-            (final_index, final_value)
+            // Write enable = (condition AND then_we) OR (!condition AND else_we)
+            // If both are unconditional (0), always write
+            let write_enable = if then_write_enable == 0 && else_write_enable == 0 {
+                0 // unconditional
+            } else {
+                let then_we = if then_write_enable != 0 {
+                    self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::And,
+                        condition,
+                        then_write_enable,
+                    )
+                } else {
+                    condition
+                };
+                let not_cond =
+                    self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
+                let else_we = if else_write_enable != 0 {
+                    self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::And,
+                        not_cond,
+                        else_write_enable,
+                    )
+                } else {
+                    not_cond
+                };
+                self.create_binary_op_node(&skalp_mir::BinaryOp::Or, then_we, else_we)
+            };
+            (final_index, final_value, write_enable)
         } else {
             // No writes found
-            (0, 0)
+            (0, 0, 0)
         }
     }
 

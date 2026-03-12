@@ -251,6 +251,12 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![data_in]
         }
 
+        PrimitiveType::RamBlock { data_width, .. } => {
+            // RAM evaluation is handled specially in gate_simulator.rs (needs persistent state).
+            // Return all-zero as fallback (actual read is done by simulator's RAM state).
+            vec![false; *data_width as usize]
+        }
+
         // === Power Infrastructure ===
         PrimitiveType::LevelShifter { .. } => {
             // Level shifter passes signal through with voltage translation

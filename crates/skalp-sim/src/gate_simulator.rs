@@ -265,6 +265,8 @@ pub struct GateLevelSimulator {
     detection_signals: Vec<SirSignalId>,
     /// Total FIT of the design
     total_fit: f64,
+    /// RAM block state: primitive_id -> memory contents (Vec of data_width-bit words)
+    ram_state: IndexMap<u32, Vec<Vec<bool>>>,
 }
 
 impl GateLevelSimulator {
@@ -282,8 +284,10 @@ impl GateLevelSimulator {
             active_fault: None,
             detection_signals: Vec::new(),
             total_fit: 0.0,
+            ram_state: IndexMap::new(),
         };
         sim.initialize();
+        sim.initialize_ram_state();
         sim
     }
 
@@ -358,6 +362,25 @@ impl GateLevelSimulator {
 
         // Calculate total FIT from primitives
         self.total_fit = self.calculate_total_fit();
+    }
+
+    /// Initialize RAM block state by scanning all sequential blocks for RamBlock primitives
+    fn initialize_ram_state(&mut self) {
+        for block in &self.sir.top_module.seq_blocks {
+            for op in &block.operations {
+                if let SirOperation::Primitive {
+                    id,
+                    ptype: PrimitiveType::RamBlock { addr_width, data_width },
+                    ..
+                } = op
+                {
+                    let depth = 1usize << *addr_width;
+                    let dw = *data_width as usize;
+                    // Initialize memory to all zeros
+                    self.ram_state.insert(id.0, vec![vec![false; dw]; depth]);
+                }
+            }
+        }
     }
 
     /// Calculate total FIT from all primitives
@@ -686,6 +709,12 @@ impl GateLevelSimulator {
                 outputs,
                 path,
             } => {
+                // RAM blocks need special handling with persistent state
+                if let PrimitiveType::RamBlock { addr_width, data_width } = ptype {
+                    self.evaluate_ram_block(*id, *addr_width, *data_width, inputs, outputs);
+                    return;
+                }
+
                 // Gather input values
                 let input_values: Vec<bool> = inputs
                     .iter()
@@ -735,6 +764,97 @@ impl GateLevelSimulator {
         }
     }
 
+    /// Evaluate a RAM block operation with persistent state
+    ///
+    /// RAM input layout: [raddr[0..aw], RCLK, RCLKE, RE, wdata[0..dw], waddr[0..aw], WCLK, WCLKE, WE, ...]
+    /// RAM output layout: [rdata[0..dw]]
+    fn evaluate_ram_block(
+        &mut self,
+        prim_id: PrimitiveId,
+        addr_width: u8,
+        data_width: u8,
+        inputs: &[SirSignalId],
+        outputs: &[SirSignalId],
+    ) {
+        let aw = addr_width as usize;
+        let dw = data_width as usize;
+
+        // Read all input signal values (each is a single-bit signal)
+        let input_values: Vec<bool> = inputs
+            .iter()
+            .map(|sig_id| {
+                self.state
+                    .signals
+                    .get(&sig_id.0)
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // Parse input layout
+        // raddr[0..aw], RCLK, RCLKE, RE, wdata[0..dw], waddr[0..aw], WCLK, WCLKE, WE
+        let raddr_bits = &input_values[..aw];
+        // RCLK at aw, RCLKE at aw+1, RE at aw+2
+        let re = input_values.get(aw + 2).copied().unwrap_or(true);
+
+        let wdata_start = aw + 3;
+        let wdata_bits = &input_values[wdata_start..wdata_start + dw];
+
+        let waddr_start = wdata_start + dw;
+        let waddr_bits = &input_values[waddr_start..waddr_start + aw];
+
+        // WCLK at waddr_start+aw, WCLKE at waddr_start+aw+1, WE at waddr_start+aw+2
+        let we = input_values
+            .get(waddr_start + aw + 2)
+            .copied()
+            .unwrap_or(false);
+
+        // Convert address bits to index (little-endian)
+        let raddr: usize = raddr_bits
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (i, &b)| acc | ((b as usize) << i));
+        let waddr: usize = waddr_bits
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (i, &b)| acc | ((b as usize) << i));
+
+        let depth = 1usize << aw;
+
+        // Write operation: if WE active, store wdata at waddr
+        if we {
+            if let Some(mem) = self.ram_state.get_mut(&prim_id.0) {
+                if waddr < depth {
+                    mem[waddr] = wdata_bits.to_vec();
+                }
+            }
+        }
+
+        // Read operation: read from raddr
+        let read_data = if re {
+            if let Some(mem) = self.ram_state.get(&prim_id.0) {
+                if raddr < depth {
+                    mem[raddr].clone()
+                } else {
+                    vec![false; dw]
+                }
+            } else {
+                vec![false; dw]
+            }
+        } else {
+            vec![false; dw]
+        };
+
+        // Set output signals (each output is a single-bit signal)
+        for (i, out_id) in outputs.iter().enumerate() {
+            let bit = read_data.get(i).copied().unwrap_or(false);
+            let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+            let mut bits = vec![false; width];
+            bits[0] = bit;
+            self.state.signals.insert(out_id.0, bits);
+        }
+    }
+
     /// Evaluate a behavioral expression (fallback)
     fn evaluate_expression(&self, expr: &crate::sir::SirExpression) -> Vec<bool> {
         use crate::sir::SirExpression;
@@ -746,7 +866,16 @@ impl GateLevelSimulator {
     }
 
     /// Update sequential logic on clock edge
+    ///
+    /// Uses two-phase evaluation to model simultaneous DFF capture:
+    /// Phase 1: Evaluate all DFF D-inputs from current state, collecting new Q values
+    /// Phase 2: Apply all new Q values to state at once
+    /// This prevents read-after-write hazards in pipeline designs where one DFF's
+    /// output feeds another DFF's input (e.g., writeback_data <= execute_result).
     fn update_sequential(&mut self, clock_id: SirSignalId, edge: EdgeType) {
+        // Collect all pending DFF updates: (signal_id, new_value)
+        let mut pending_updates: Vec<(u32, Vec<bool>)> = Vec::new();
+
         for block in &self.sir.top_module.seq_blocks.clone() {
             // Check if this block uses this clock with matching edge
             if block.clock == clock_id {
@@ -776,9 +905,61 @@ impl GateLevelSimulator {
                         false
                     };
 
-                    // Evaluate DFFs normally first (captures D input)
+                    // Phase 1: Evaluate each DFF's D-input from CURRENT state,
+                    // collecting new Q values without updating state yet.
                     for op in &block.operations {
-                        self.evaluate_operation(op);
+                        match op {
+                            SirOperation::Primitive {
+                                id,
+                                ptype,
+                                inputs,
+                                outputs,
+                                ..
+                            } => {
+                                // RAM blocks have side effects (persistent state) — evaluate immediately
+                                if let PrimitiveType::RamBlock { addr_width, data_width } = ptype {
+                                    self.evaluate_ram_block(*id, *addr_width, *data_width, inputs, outputs);
+                                    continue;
+                                }
+
+                                // Read D-inputs from current state
+                                let input_values: Vec<bool> = inputs
+                                    .iter()
+                                    .filter_map(|sig_id| {
+                                        self.state
+                                            .signals
+                                            .get(&sig_id.0)
+                                            .and_then(|v: &Vec<bool>| v.first().copied())
+                                    })
+                                    .collect();
+
+                                let output_values = if let Some(fault) = &self.active_fault {
+                                    if fault.target_primitive == *id {
+                                        evaluate_primitive_with_fault(
+                                            ptype,
+                                            &input_values,
+                                            Some(fault),
+                                            self.state.cycle,
+                                        )
+                                    } else {
+                                        evaluate_primitive(ptype, &input_values)
+                                    }
+                                } else {
+                                    evaluate_primitive(ptype, &input_values)
+                                };
+
+                                // Collect new Q values (don't update state yet)
+                                for (i, out_id) in outputs.iter().enumerate() {
+                                    if let Some(&value) = output_values.get(i) {
+                                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                                        let mut bits = vec![false; width];
+                                        bits[0] = value;
+                                        pending_updates.push((out_id.0, bits));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
 
                     // For DffSR (sync reset to 0) cells: override output to 0 when reset active.
@@ -790,13 +971,20 @@ impl GateLevelSimulator {
                             if let SirOperation::Primitive { ptype: PrimitiveType::DffSR, outputs, .. } = op {
                                 for out_id in outputs {
                                     let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                                    self.state.signals.insert(out_id.0, vec![false; width]);
+                                    // Override pending update for this DFF
+                                    pending_updates.retain(|(id, _)| *id != out_id.0);
+                                    pending_updates.push((out_id.0, vec![false; width]));
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Phase 2: Apply all DFF updates simultaneously
+        for (signal_id, value) in pending_updates {
+            self.state.signals.insert(signal_id, value);
         }
     }
 

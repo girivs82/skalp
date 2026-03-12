@@ -89,6 +89,7 @@ fn create_adder_lir() -> Lir {
         LirOp::Add {
             width: 2,
             has_carry: true,
+            const_b: None,
         },
         vec![a, b],
         sum,

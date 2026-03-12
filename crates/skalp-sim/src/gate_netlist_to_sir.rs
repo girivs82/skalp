@@ -212,6 +212,16 @@ impl GateNetlistToSirConverter {
                 } else {
                     PrimitiveType::Lut6 { init }
                 }
+            } else if cell.function.as_ref() == Some(&CellFunction::Ram) {
+                // RAM block: compute addr/data widths from pin counts
+                // Outputs = rdata[0..data_width]
+                let data_width = cell.outputs.len() as u8;
+                // Inputs: raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE + [wmask]
+                // Minimum inputs without mask = 2*aw + dw + 6
+                let total_inputs = cell.inputs.len();
+                // Try without mask first: total = 2*aw + dw + 6
+                let addr_width = ((total_inputs - data_width as usize - 6) / 2) as u8;
+                PrimitiveType::RamBlock { addr_width, data_width }
             } else if let Some(func) = &cell.function {
                 // Use the library-provided function for accurate mapping
                 self.cell_function_to_primitive(func)

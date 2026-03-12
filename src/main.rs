@@ -379,6 +379,10 @@ enum Commands {
         /// May take hours for designs with multipliers. Default uses conflict limits + simulation.
         #[arg(long)]
         thorough: bool,
+
+        /// Technology library for synthesis (e.g., generic_asic, ice40)
+        #[arg(long, default_value = "generic_asic")]
+        library: String,
     },
 
     /// ISO 26262 FI-driven safety analysis
@@ -785,6 +789,7 @@ fn main() -> Result<()> {
             verbose,
             coverage,
             thorough,
+            library,
         } => {
             run_equivalence_check(
                 &source,
@@ -799,6 +804,7 @@ fn main() -> Result<()> {
                 verbose,
                 coverage,
                 thorough,
+                &library,
             )?;
         }
 
@@ -2716,6 +2722,7 @@ fn run_equivalence_check(
     verbose: bool,
     coverage: bool,
     thorough: bool,
+    library_name: &str,
 ) -> Result<()> {
     use skalp_formal::equivalence::{
         check_non_equivalence_fast, check_sequential_equivalence_sat, inject_random_bugs,
@@ -2829,8 +2836,9 @@ fn run_equivalence_check(
     } else {
         println!();
         println!("🔧 Synthesizing gate-level netlist (hierarchical)...");
+        println!("   Library: {}", library_name);
         let library =
-            get_stdlib_library("generic_asic").context("Failed to load technology library")?;
+            get_stdlib_library(library_name).context("Failed to load technology library")?;
         let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
         let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
