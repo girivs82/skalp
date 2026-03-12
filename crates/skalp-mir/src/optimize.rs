@@ -275,7 +275,7 @@ impl OptimizationPass for DeadCodeElimination {
             self.used_variables.clear();
 
             // Mark used items in processes
-            for process in &module.processes {
+            for process in module.processes.iter() {
                 self.mark_used_in_block(&process.body);
             }
 

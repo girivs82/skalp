@@ -979,6 +979,7 @@ impl MirToLirTransform {
                     let target_name = self.get_signal_name(target_signal);
                     let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
 
+
                     if let Some(clk) = clock_signal {
                         self.lir.add_seq_node(
                             reg_op,
@@ -1034,6 +1035,10 @@ impl MirToLirTransform {
 
                 // Track which targets we handle at this level
                 let mut handled_targets: Vec<LValue> = Vec::new();
+                // Track LIR signal IDs to prevent duplicate register creation
+                // when multiple MIR signal IDs map to the same LIR signal
+                // (can happen with enum monomorphization shifting signal IDs)
+                let mut handled_lir_signals: Vec<LirSignalId> = Vec::new();
 
                 for target in &all_targets {
                     // Skip full-signal assignments to memory signals (e.g., `regs = 0` for reset).
@@ -1154,6 +1159,11 @@ impl MirToLirTransform {
                     }
 
                     let target_signal = self.get_lvalue_signal(target);
+                    // Skip if this LIR signal was already handled by a previous target
+                    // (can happen when monomorphization maps multiple MIR IDs to the same LIR signal)
+                    if handled_lir_signals.contains(&target_signal) {
+                        continue;
+                    }
                     let target_width = self.get_lvalue_width(target);
                     // Get then and else expressions (direct assignments only)
                     let then_expr = Self::find_assignment_expr(&then_assigns, target);
@@ -1186,6 +1196,7 @@ impl MirToLirTransform {
                     // Collect all conditional paths and build a combined mux chain
                     if in_sibling_nested && !directly_assigned {
                         handled_targets.push(target.clone());
+                        handled_lir_signals.push(target_signal);
 
                         // BUG FIX: Transform blocking assignments (let bindings) in both branches
                         // BEFORE collecting paths. This ensures variables are properly assigned.
@@ -1293,6 +1304,7 @@ impl MirToLirTransform {
 
                     if let Some(reset_value) = sdff_pattern {
                         handled_targets.push(target.clone());
+                        handled_lir_signals.push(target_signal);
 
                         // SDFF pattern detected: skip mux, use integrated sync reset
                         // For nested else ifs, we need to collect all paths from else branch
@@ -1401,6 +1413,7 @@ impl MirToLirTransform {
                         }
                     } else if directly_assigned {
                         handled_targets.push(target.clone());
+                        handled_lir_signals.push(target_signal);
 
                         // Standard pattern: create mux + register
                         let cond_signal = self.transform_expression(&if_stmt.condition, 1);

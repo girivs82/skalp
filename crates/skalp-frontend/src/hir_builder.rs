@@ -202,6 +202,10 @@ pub struct HirBuilderContext {
     /// Collected and applied to next entity with SEooC config
     pending_assumed_mechanisms: Vec<crate::hir::AssumedMechanismConfig>,
 
+    /// User-defined types found inside impl blocks (enums, structs, unions)
+    /// These are accumulated during build_implementation and drained by build()
+    pending_impl_udts: Vec<HirUserDefinedType>,
+
     /// Current entity's default power domain (set during impl block processing)
     /// Used for signal power domain inheritance when signal doesn't specify one
     current_default_power_domain: Option<String>,
@@ -338,6 +342,7 @@ impl HirBuilderContext {
             pending_power_domain_config: None,
             pending_seooc_config: None,
             pending_assumed_mechanisms: Vec::new(),
+            pending_impl_udts: Vec::new(),
             current_default_power_domain: None,
             intent_impl_styles: IndexMap::new(),
             pending_impl_style: None,
@@ -564,6 +569,8 @@ impl HirBuilderContext {
                     if let Some(implementation) = self.build_implementation(&child) {
                         hir.implementations.push(implementation);
                     }
+                    // Drain any type definitions found inside the impl block
+                    hir.user_defined_types.extend(self.pending_impl_udts.drain(..));
                 }
                 SyntaxKind::ProtocolDecl => {
                     if let Some(protocol) = self.build_protocol(&child) {
@@ -1341,6 +1348,37 @@ impl HirBuilderContext {
                 SyntaxKind::ConstantDecl => {
                     if let Some(constant) = self.build_constant(&child) {
                         constants.push(constant);
+                    }
+                }
+                SyntaxKind::EnumDecl => {
+                    // Handle enum declarations inside impl blocks (e.g., `enum State { Idle, Transfer(bit[3]) }`)
+                    // Register the enum type in the symbol table so it can be referenced by signals and expressions
+                    if let Some(enum_type) = self.build_enum_type(&child) {
+                        let name = enum_type.name.clone();
+                        let type_def = HirType::Enum(Box::new(enum_type));
+                        self.symbols
+                            .user_types
+                            .insert(name.clone(), type_def.clone());
+                        // Store in pending_impl_types to be added to hir.user_defined_types later
+                        self.pending_impl_udts.push(HirUserDefinedType {
+                            name,
+                            visibility: HirVisibility::Private,
+                            type_def,
+                        });
+                    }
+                }
+                SyntaxKind::StructDecl => {
+                    if let Some(struct_type) = self.build_struct_type(&child) {
+                        let name = struct_type.name.clone();
+                        let type_def = HirType::Struct(struct_type);
+                        self.symbols
+                            .user_types
+                            .insert(name.clone(), type_def.clone());
+                        self.pending_impl_udts.push(HirUserDefinedType {
+                            name,
+                            visibility: HirVisibility::Private,
+                            type_def,
+                        });
                     }
                 }
                 SyntaxKind::FunctionDecl => {
@@ -2421,12 +2459,10 @@ impl HirBuilderContext {
         self.symbols.variables.insert(name.clone(), id);
         self.symbols.add_to_scope(&name, SymbolId::Variable(id));
 
-        // For signals used as outputs in entity instantiations, we need a placeholder value.
-        // Use a literal zero since signals are essentially wire declarations that receive
-        // their values from entity outputs. The actual value will come from the entity connection.
-        // This creates: `let result: fp32 = 0;` which becomes a wire in Verilog.
-        // The zero is just a placeholder - the real value comes from entity instantiation.
-        let value = HirExpression::Literal(HirLiteral::Integer(0));
+        // Extract the actual initial value expression if present (e.g., `signal x: u64 = expr`).
+        // Falls back to zero for bare signal declarations without initializers.
+        let value = self.find_initial_value_expr(node)
+            .unwrap_or_else(|| HirExpression::Literal(HirLiteral::Integer(0)));
 
         Some(HirLetStatement {
             id,

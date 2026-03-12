@@ -1213,79 +1213,9 @@ impl<'hir> HirToMir<'hir> {
                         module.variables.push(variable);
                     }
 
-                    // Convert event blocks to processes
-                    for event_block in impl_block
-                        .event_blocks
-                        .iter()
-                        .chain(gen_event_blocks.iter())
-                    {
-                        let process = self.convert_event_block(event_block);
-                        module.processes.push(process);
-                    }
-
-                    // Add any dynamically created variables (from let bindings in event blocks)
-                    // Note: Duplicates are already handled at creation time - each unique name
-                    // only gets one variable ID, which is reused by all let bindings with that name
-                    let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
-
-                    // BUG #71 DEBUG: Check if var_148 is in dynamic_variables before adding
-                    if let Some((_, name, _)) = self
-                        .dynamic_variables
-                        .values()
-                        .find(|(id, _, _)| id.0 == 148)
-                    {
-                        trace!(
-                            "[BUG #71 BEFORE LOC2] var_148 IS in dynamic_variables with name: {}",
-                            name
-                        );
-                    } else {
-                        trace!(
-                            "[BUG #71 BEFORE LOC2] var_148 NOT in dynamic_variables (size={})",
-                            self.dynamic_variables.len()
-                        );
-                    }
-
-                    for (mir_var_id, name, hir_type) in dynamic_vars {
-                        trace!(
-                            "[DEBUG] Adding dynamic variable: name={}, hir_type={:?}",
-                            name,
-                            hir_type
-                        );
-                        let mir_type = self.convert_type(&hir_type);
-                        trace!("[DEBUG]   -> mir_type={:?}", mir_type);
-                        // BUG #71 DEBUG
-                        if name.contains("edge1")
-                            || name.contains("edge2")
-                            || name.contains("_h")
-                            || name.contains("_s")
-                        {
-                            trace!("[BUG #71 EVENT BLOCK VAR] Adding variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
-                                name, mir_var_id, hir_type, mir_type);
-                        }
-                        let variable = Variable {
-                            id: mir_var_id,
-                            name: name.clone(),
-                            var_type: mir_type,
-                            initial: None,
-                            span: None,
-                        };
-                        trace!(
-                            "[BUG #71 PUSH LOC2] Pushing dynamic variable: id={:?}, name={}",
-                            mir_var_id,
-                            name
-                        );
-                        module.variables.push(variable);
-                    }
-                    // Clear dynamic variables for next impl block
-                    self.dynamic_variables.clear();
-
-                    // BUG FIX #13-16, #21-23: Pre-process instances BEFORE assignments
-                    // This creates signals for instance output ports so FieldAccess can resolve them
-                    self.instance_outputs_by_name.clear();
-                    // BUG #85 FIX: Clear entity_instance_outputs per entity to prevent
-                    // VariableId collisions across entities (VariableIds are per-entity scoped)
-                    self.entity_instance_outputs.clear();
-                    self.entity_instance_info.clear();
+                    // Pre-process entity instances BEFORE event blocks, so that
+                    // entity_instance_outputs is populated when convert_field_access
+                    // resolves instance.port expressions inside on() blocks.
                     trace!(
                         "🔍 [INSTANCE_PRE] impl_block for module '{}' has {} instances",
                         module.name,
@@ -1514,6 +1444,33 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                     }
+
+                    // Convert event blocks to processes
+                    // (entity_instance_outputs is now populated from above)
+                    for event_block in impl_block
+                        .event_blocks
+                        .iter()
+                        .chain(gen_event_blocks.iter())
+                    {
+                        let process = self.convert_event_block(event_block);
+                        module.processes.push(process);
+                    }
+
+                    // Add any dynamically created variables (from let bindings in event blocks)
+                    let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
+                    for (mir_var_id, name, hir_type) in dynamic_vars {
+                        let mir_type = self.convert_type(&hir_type);
+                        let variable = Variable {
+                            id: mir_var_id,
+                            name: name.clone(),
+                            var_type: mir_type,
+                            initial: None,
+                            span: None,
+                        };
+                        module.variables.push(variable);
+                    }
+                    // Clear dynamic variables for next impl block
+                    self.dynamic_variables.clear();
 
                     // Convert continuous assignments (may expand to multiple for structs)
                     trace!(
@@ -18308,8 +18265,9 @@ impl<'hir> HirToMir<'hir> {
                     // Entity instances are created via let bindings like: let inner = Inner { data };
                     // Accessing inner.result should return the output port signal of the instance
                     trace!(
-                        "[FIELD_ACCESS] Checking if var {:?} is entity instance. entity_instance_outputs has {} entries",
-                        var_id, self.entity_instance_outputs.len()
+                        "[FIELD_ACCESS] var {:?} field '{}'. entity_instance_outputs has {} entries: {:?}",
+                        var_id, field_name, self.entity_instance_outputs.len(),
+                        self.entity_instance_outputs.keys().collect::<Vec<_>>()
                     );
 
                     if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
@@ -19377,7 +19335,7 @@ impl<'hir> HirToMir<'hir> {
     fn resolve_enum_variant_value(&self, enum_type: &str, variant: &str) -> Option<Expression> {
         // Find the enum type in the HIR
         if let Some(hir) = self.hir {
-            // BUG #174 FIX: First search in user_defined_types for top-level enum declarations
+            // Search in user_defined_types (includes enums from impl blocks via pending_impl_udts)
             for udt in &hir.user_defined_types {
                 if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
                     if enum_def.name == enum_type {
@@ -19456,12 +19414,6 @@ impl<'hir> HirToMir<'hir> {
 
     /// Find the value of a specific variant in an enum
     fn find_variant_value(&self, enum_def: &hir::HirEnumType, variant: &str) -> Option<Expression> {
-        trace!(
-            "[DEBUG] find_variant_value: looking for '{}' in enum '{}' with {} variants",
-            variant,
-            enum_def.name,
-            enum_def.variants.len()
-        );
         for (index, enum_variant) in enum_def.variants.iter().enumerate() {
             trace!(
                 "[DEBUG]   variant[{}]: name='{}', has_value={}",

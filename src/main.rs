@@ -2842,6 +2842,14 @@ fn run_equivalence_check(
     println!();
     println!("🔬 Running equivalence check...");
 
+    // Detect the reset port name from the MIR module (default: "rst")
+    let reset_port_name = target_entity
+        .ports
+        .iter()
+        .find(|p| matches!(p.port_type, skalp_mir::mir::DataType::Reset { .. }))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "rst".to_string());
+
     let mut overall_pass = true;
     let mut sim_found_bug = false;
     let mut sim_result_for_report: Option<skalp_formal::SimEquivalenceResult> = None;
@@ -2855,7 +2863,7 @@ fn run_equivalence_check(
         let smoke_cycles = if quick { bound as u64 } else { 100u64 };
         let checker = SimBasedEquivalenceChecker::new()
             .with_cycles(smoke_cycles)
-            .with_reset("rst", reset_cycles)
+            .with_reset(&reset_port_name, reset_cycles)
             .with_coverage(false);
 
         let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
@@ -3117,7 +3125,7 @@ fn run_equivalence_check(
 
         let cov_checker = SimBasedEquivalenceChecker::new()
             .with_cycles(500)
-            .with_reset("rst", reset_cycles)
+            .with_reset(&reset_port_name, reset_cycles)
             .with_coverage(true);
 
         let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
@@ -3885,7 +3893,7 @@ fn synthesize_design(
     pnr_preset: &str,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized};
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir_with_bram, synthesize_balanced};
 
     println!("🔧 Synthesizing design for device: {}", device);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -3931,12 +3939,12 @@ fn synthesize_design(
         find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
     println!("Module: {}", top_module.name);
 
-    // Lower to LIR
-    let lir_result = lower_mir_module_to_lir(top_module);
+    // Lower to LIR with BRAM inference for FPGA targets
+    let lir_result = lower_mir_module_to_lir_with_bram(top_module);
 
-    // Technology mapping
-    let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
-    let gate_netlist = tech_result.netlist;
+    // Full synthesis: tech mapping → AIG optimization → technology mapping
+    let synth_result = synthesize_balanced(&lir_result.lir, &library);
+    let gate_netlist = synth_result.netlist;
     println!("Cells: {}", gate_netlist.cells.len());
     println!("Nets: {}", gate_netlist.nets.len());
 

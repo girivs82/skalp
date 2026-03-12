@@ -2385,7 +2385,47 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
                     if assign_target == target {
-                        current_value = Some(self.create_expression_node(&assign.rhs));
+                        // Handle partial assignments (RangeSelect, BitSelect) by
+                        // inserting the new value into the correct bit positions
+                        // of the current signal value, rather than replacing it entirely.
+                        if let LValue::RangeSelect { high, low, .. } = &assign.lhs {
+                            let high_val = self.evaluate_constant_expression(high);
+                            let low_val = self.evaluate_constant_expression(low);
+                            if let (Some(h), Some(l)) = (high_val, low_val) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let base_value = current_value
+                                    .or(default_value)
+                                    .unwrap_or_else(|| self.create_signal_ref(target));
+                                let signal_width = self.get_signal_width(target);
+                                current_value = Some(self.create_range_insert_node(
+                                    base_value,
+                                    h,
+                                    l,
+                                    rhs_value,
+                                    signal_width,
+                                ));
+                            } else {
+                                current_value = Some(self.create_expression_node(&assign.rhs));
+                            }
+                        } else if let LValue::BitSelect { index, .. } = &assign.lhs {
+                            if let Some(bit_idx) = self.evaluate_constant_expression(index) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let base_value = current_value
+                                    .or(default_value)
+                                    .unwrap_or_else(|| self.create_signal_ref(target));
+                                let signal_width = self.get_signal_width(target);
+                                current_value = Some(self.create_bit_insert_node(
+                                    base_value,
+                                    bit_idx,
+                                    rhs_value,
+                                    signal_width,
+                                ));
+                            } else {
+                                current_value = Some(self.create_expression_node(&assign.rhs));
+                            }
+                        } else {
+                            current_value = Some(self.create_expression_node(&assign.rhs));
+                        }
                         found_target = true;
                         // DON'T return — later statements may override this
                     }
@@ -4306,55 +4346,44 @@ impl<'a> MirToSirConverter<'a> {
         new_range_value: usize,
         signal_width: usize,
     ) -> usize {
-        let range_width = high - low + 1;
+        // Use Slice+Concat instead of mask/shift/OR.
+        // The mask/shift approach breaks for wide signals (>32 bits) because
+        // the C++ backend does element-wise shifts on uint32_t arrays, which
+        // doesn't handle cross-word shifts correctly.
+        //
+        // Instead, we build: Concat(upper_slice, new_range_value, lower_slice)
+        // where Concat and Slice have correct wide-signal C++ codegen.
 
-        // range_mask_unshifted = (1 << range_width) - 1
-        let one = self.create_constant_node(1, signal_width);
-        let width_node = self.create_constant_node(range_width, signal_width);
-        let shifted_one =
-            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, width_node);
-        let one2 = self.create_constant_node(1, signal_width);
-        let range_mask_unshifted =
-            self.create_binary_op_node(&skalp_mir::BinaryOp::Sub, shifted_one, one2);
+        let low_usize = low as usize;
+        let high_usize = high as usize;
 
-        // mask = range_mask_unshifted << low
-        let low_node = self.create_constant_node(low, signal_width);
-        let mask = self.create_binary_op_node(
-            &skalp_mir::BinaryOp::LeftShift,
-            range_mask_unshifted,
-            low_node,
-        );
+        let has_lower = low_usize > 0;
+        let has_upper = high_usize + 1 < signal_width;
 
-        // inverted_mask = ~mask
-        let inverted_mask = self.create_unary_op_node(&skalp_mir::UnaryOp::BitwiseNot, mask);
-
-        // cleared = current_value & inverted_mask
-        let cleared = self.create_binary_op_node(
-            &skalp_mir::BinaryOp::BitwiseAnd,
-            current_value,
-            inverted_mask,
-        );
-
-        // shifted_value = (new_range_value & range_mask_unshifted) << low
-        let range_mask2 = {
-            let one = self.create_constant_node(1, signal_width);
-            let width_node = self.create_constant_node(range_width, signal_width);
-            let shifted =
-                self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, width_node);
-            let one2 = self.create_constant_node(1, signal_width);
-            self.create_binary_op_node(&skalp_mir::BinaryOp::Sub, shifted, one2)
-        };
-        let masked_value = self.create_binary_op_node(
-            &skalp_mir::BinaryOp::BitwiseAnd,
-            new_range_value,
-            range_mask2,
-        );
-        let low_node2 = self.create_constant_node(low, signal_width);
-        let shifted_value =
-            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, masked_value, low_node2);
-
-        // result = cleared | shifted_value
-        self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseOr, cleared, shifted_value)
+        match (has_lower, has_upper) {
+            (true, true) => {
+                // {current[signal_width-1 : high+1], new_value, current[low-1 : 0]}
+                let lower = self.create_slice_node(current_value, low_usize - 1, 0);
+                let upper =
+                    self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
+                self.create_concat_node(vec![upper, new_range_value, lower])
+            }
+            (true, false) => {
+                // {new_value, current[low-1 : 0]}
+                let lower = self.create_slice_node(current_value, low_usize - 1, 0);
+                self.create_concat_node(vec![new_range_value, lower])
+            }
+            (false, true) => {
+                // {current[signal_width-1 : high+1], new_value}
+                let upper =
+                    self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
+                self.create_concat_node(vec![upper, new_range_value])
+            }
+            (false, false) => {
+                // Full-width replacement, just return new_range_value
+                new_range_value
+            }
+        }
     }
 
     fn create_mux_node(&mut self, sel: usize, true_val: usize, false_val: usize) -> usize {
