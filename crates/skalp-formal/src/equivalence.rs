@@ -12223,6 +12223,7 @@ mod tests {
                 LirOp::Add {
                     width: 4,
                     has_carry: false,
+                    const_b: None,
                 },
                 vec![count, one],
                 next_count,

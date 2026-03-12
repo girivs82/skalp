@@ -583,7 +583,7 @@ impl Fraig {
         // Constant maps to itself
         old_to_new.insert(AigNodeId::FALSE, AigLit::false_lit());
 
-        // First pass: add inputs
+        // Phase 1a: Add inputs
         for (old_id, node) in aig.iter_nodes() {
             if let AigNode::Input { name, source_net } = node {
                 let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
@@ -595,7 +595,44 @@ impl Fraig {
         // Propagate clock/reset input metadata to new AIG
         new_aig.copy_clock_reset_metadata(aig, &old_to_new);
 
-        // Second pass: add other nodes
+        // Phase 1b: Pre-create latches/barriers with placeholder data
+        // In sequential circuits, latch data inputs reference AND nodes that may have
+        // higher IDs. We must process all AND nodes before resolving latch data.
+        let mut latch_ids: Vec<(AigNodeId, AigLit, Option<bool>, Option<AigNodeId>, Option<AigNodeId>)> = Vec::new();
+        let mut barrier_ids: Vec<(AigNodeId, BarrierType, AigLit, Option<AigLit>, Option<AigNodeId>, Option<AigNodeId>, Option<bool>)> = Vec::new();
+
+        for (old_id, node) in aig.iter_nodes() {
+            // Skip merged nodes
+            if node_map.contains_key(&old_id) {
+                continue;
+            }
+            match node {
+                AigNode::Latch { data, init, clock, reset } => {
+                    let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
+                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
+                    let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
+                    let new_id = new_aig.add_latch_with_safety(
+                        AigLit::false_lit(), *init, new_clock, new_reset, safety,
+                    );
+                    old_to_new.insert(old_id, AigLit::new(new_id));
+                    latch_ids.push((old_id, *data, *init, *clock, *reset));
+                }
+                AigNode::Barrier { barrier_type, data, enable, clock, reset, init } => {
+                    let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
+                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
+                    let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
+                    let new_id = new_aig.add_barrier_with_safety(
+                        barrier_type.clone(), AigLit::false_lit(), None,
+                        new_clock, new_reset, *init, safety,
+                    );
+                    old_to_new.insert(old_id, AigLit::new(new_id));
+                    barrier_ids.push((old_id, barrier_type.clone(), *data, *enable, *clock, *reset, *init));
+                }
+                _ => {}
+            }
+        }
+
+        // Phase 2: Process AND nodes and merged nodes
         for (old_id, node) in aig.iter_nodes() {
             // Check if this node was merged
             if let Some(&mapped_lit) = node_map.get(&old_id) {
@@ -612,8 +649,8 @@ impl Fraig {
             }
 
             match node {
-                AigNode::Const | AigNode::Input { .. } => {
-                    // Already handled
+                AigNode::Const | AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
+                    // Already handled in phases 1a/1b
                 }
                 AigNode::And { left, right } => {
                     let new_left = self.translate_lit(&old_to_new, *left);
@@ -622,45 +659,20 @@ impl Fraig {
                     let new_lit = new_aig.add_and_with_safety(new_left, new_right, safety);
                     old_to_new.insert(old_id, new_lit);
                 }
-                AigNode::Latch {
-                    data,
-                    init,
-                    clock,
-                    reset,
-                } => {
-                    let new_data = self.translate_lit(&old_to_new, *data);
-                    let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
-                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
-                    let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
-                    let new_id = new_aig
-                        .add_latch_with_safety(new_data, *init, new_clock, new_reset, safety);
-                    old_to_new.insert(old_id, AigLit::new(new_id));
-                }
-                AigNode::Barrier {
-                    barrier_type,
-                    data,
-                    enable,
-                    clock,
-                    reset,
-                    init,
-                } => {
-                    let new_data = self.translate_lit(&old_to_new, *data);
-                    let new_enable = enable.map(|e| self.translate_lit(&old_to_new, e));
-                    let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
-                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
-                    let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
-                    let new_id = new_aig.add_barrier_with_safety(
-                        barrier_type.clone(),
-                        new_data,
-                        new_enable,
-                        new_clock,
-                        new_reset,
-                        *init,
-                        safety,
-                    );
-                    old_to_new.insert(old_id, AigLit::new(new_id));
-                }
             }
+        }
+
+        // Phase 3: Update latch/barrier data with resolved values
+        for (old_id, data, _init, _clock, _reset) in latch_ids {
+            let new_node_id = old_to_new.get(&old_id).map(|lit| lit.node).unwrap();
+            let new_data = self.translate_lit(&old_to_new, data);
+            new_aig.update_latch_data(new_node_id, new_data);
+        }
+        for (old_id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+            let new_node_id = old_to_new.get(&old_id).map(|lit| lit.node).unwrap();
+            let new_data = self.translate_lit(&old_to_new, data);
+            let new_enable = enable.map(|e| self.translate_lit(&old_to_new, e));
+            new_aig.update_barrier_data(new_node_id, new_data, new_enable);
         }
 
         // Add outputs
