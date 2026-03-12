@@ -2303,12 +2303,27 @@ pub fn check_sequential_equivalence_sat(
     // Build a miter that compares both outputs AND next-state (latch D inputs)
     let (miter, matched_pairs) = build_sequential_miter(aig1, aig2)?;
 
-    // Build state_input_name → init_value map from AIG1 (MIR side) for k-induction base case
+    // Build state_input_name → init_value map from BOTH AIGs for k-induction base case.
+    // AIG1 (MIR) and AIG2 (gate) may use different naming for the same register
+    // (e.g., MIR: __reg_cur_memory[42], gate: __dff_cur_top.FIFO_16_8.memory.mem_e5_b2).
+    // When structural matching fails to unify these, the unmatched gate state inputs
+    // become unconstrained free variables — the SAT solver can set them to any value,
+    // finding spurious counterexamples in unreachable states.
     let mut state_init_map: BTreeMap<String, bool> = BTreeMap::new();
     for (&state_input_id, &latch_id) in &aig1.state_input_to_latch {
         if let AigNode::Input { name } = &aig1.nodes[state_input_id as usize] {
             if let AigNode::Latch { init, .. } = &aig1.nodes[latch_id as usize] {
                 state_init_map.insert(name.clone(), *init);
+            }
+        }
+    }
+    // Also add init values from AIG2 (gate side) for any state inputs not already covered
+    for (&state_input_id, &latch_id) in &aig2.state_input_to_latch {
+        if let AigNode::Input { name } = &aig2.nodes[state_input_id as usize] {
+            if let AigNode::Latch { init, .. } = &aig2.nodes[latch_id as usize] {
+                // Use the original name (not normalized) since the miter input node
+                // retains the AIG2 name when it wasn't matched to an AIG1 input
+                state_init_map.entry(name.clone()).or_insert(*init);
             }
         }
     }
@@ -2599,12 +2614,68 @@ pub fn check_sequential_equivalence_sat(
 
     if !output_gates.is_empty() {
         let output_conflict_limit = if thorough { 0 } else { 5_000_000 };
-        let (sat_result, proven, unresolved) =
-            run_parallel_sat(&output_gates, "outputs", output_conflict_limit);
-        if let Some((diff_name, model)) = sat_result {
-            print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
-            let counterexample =
-                extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
+        // Use exhaustive SAT so that ALL output gates are checked (not just first SAT).
+        // This is needed because counterexamples in unreachable states will be dismissed,
+        // and we need to know the status of every gate.
+        let (sat_results, proven, unresolved) =
+            run_parallel_sat_exhaustive(&output_gates, "outputs", output_conflict_limit);
+
+        if !sat_results.is_empty() && !init_constraints.is_empty() {
+            // Re-check each SAT result with init-state constraints.
+            // The unconstrained SAT may find counterexamples in unreachable states
+            // (e.g., count=31 in a 16-deep FIFO). If UNSAT with init constraints,
+            // the difference is only in unreachable states — not a real failure.
+            for (idx, diff_name, _model) in &sat_results {
+                let recheck_gate = output_gates.iter().find(|(i, _, _)| i == idx);
+                if let Some((_idx, _, sat_lit)) = recheck_gate {
+                    let mut solver = Solver::new();
+                    solver.add_formula(&formula);
+                    for &lit in &init_constraints {
+                        solver.add_clause(&[lit]);
+                    }
+                    solver.add_clause(&[*sat_lit]);
+                    solver.set_conflict_limit(5_000_000);
+                    match solver.solve() {
+                        Ok(false) => {
+                            // UNSAT with init constraints — counterexample is in unreachable state
+                            eprintln!(
+                                "  [SAT] Output {} differs in unreachable state only (init-constrained UNSAT) — OK",
+                                diff_name
+                            );
+                            all_proven.push(diff_name.clone());
+                        }
+                        Ok(true) => {
+                            // Still SAT even with init constraints — real failure
+                            let constrained_model = solver.model().unwrap().to_vec();
+                            print_counterexample_diagnosis(&miter, &var_map, &constrained_model, diff_name);
+                            let counterexample = extract_symbolic_counterexample(
+                                &miter, &var_map, &constrained_model, Some(diff_name.clone()),
+                            );
+                            return Ok(SymbolicEquivalenceResult {
+                                equivalent: false,
+                                counterexample: Some(counterexample),
+                                checked_outputs: true,
+                                checked_next_state: false,
+                                time_ms: start.elapsed().as_millis() as u64,
+                                proven_gates: Vec::new(),
+                                unresolved_gates: Vec::new(),
+                                algebraic_result: None,
+                            });
+                        }
+                        Err(_) => {
+                            // Conflict limit exceeded — demote to unresolved
+                            all_unresolved.push((*idx, diff_name.clone()));
+                        }
+                    }
+                }
+            }
+        } else if !sat_results.is_empty() {
+            // No init constraints available — original behavior: first SAT is a failure
+            let (_, diff_name, model) = &sat_results[0];
+            print_counterexample_diagnosis(&miter, &var_map, model, diff_name);
+            let counterexample = extract_symbolic_counterexample(
+                &miter, &var_map, model, Some(diff_name.clone()),
+            );
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
