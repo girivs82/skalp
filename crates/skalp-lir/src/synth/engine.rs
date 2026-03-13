@@ -306,8 +306,13 @@ impl SynthEngine {
         let mut optimized = writer.write(&aig);
 
         // Phase 5a: Absorb inverters into LUT truth tables (FPGA optimization)
+        // Two passes: (1) push INV backward into producing LUTs when all consumers
+        // use the inverted value, (2) absorb remaining INV into consuming LUTs.
         if library.is_fpga() {
+            super::aig_writer::push_inverters_into_producing_luts(&mut optimized);
             super::aig_writer::absorb_inverters_into_luts(&mut optimized);
+            // Run DCE after INV optimization to clean up disconnected cells
+            optimized.remove_dead_cells();
         }
 
         // Phase 5b: Merge physical cells back if we partitioned
@@ -630,7 +635,7 @@ impl SynthEngine {
                 "resub".to_string(),
                 "dce".to_string(),
             ],
-            // ABC's resyn2: strash; balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance
+            // Extended resyn2: ABC's resyn2 + dc2 and fraig for deeper optimization
             SynthPreset::Resyn2 => vec![
                 "strash".to_string(),
                 "balance".to_string(),
@@ -643,6 +648,8 @@ impl SynthEngine {
                 "refactor_z".to_string(), // zero-cost refactor
                 "rewrite_z".to_string(),  // zero-cost rewrite
                 "balance".to_string(),
+                "dc2".to_string(),   // don't-care based optimization
+                "fraig".to_string(), // SAT-based equivalence
                 "dce".to_string(),
             ],
             // ABC's compress2-style: aggressive area optimization with resubstitution

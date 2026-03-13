@@ -387,12 +387,16 @@ impl CutMapper {
                         let arrival = self.compute_arrival(&match_.cut, &node_delay);
                         node_delay.insert(node_id, arrival + match_.delay);
 
-                        // Area flow: (cell_area + sum of leaf area_flows) / max(fanout, 1)
+                        // ABC-style area flow: each leaf's contribution divided by its fanout
                         let leaf_area: f64 = match_
                             .cut
                             .leaves
                             .iter()
-                            .filter_map(|l| node_area_flow.get(l))
+                            .map(|l| {
+                                let af = node_area_flow.get(l).copied().unwrap_or(0.0);
+                                let leaf_fo = fanout_count.get(l).copied().unwrap_or(1).max(1);
+                                af / leaf_fo as f64
+                            })
                             .sum();
                         let fo = fanout_count.get(&node_id).copied().unwrap_or(1).max(1);
                         node_area_flow.insert(node_id, (match_.area + leaf_area) / fo as f64);
@@ -492,7 +496,7 @@ impl CutMapper {
                 }
             }
 
-            // Recompute area flow using reference counts from covering
+            // Recompute area flow using reference counts from covering (ABC-style)
             for &node_id in &topo_order {
                 if !required_nodes.contains(&node_id) {
                     continue;
@@ -503,7 +507,11 @@ impl CutMapper {
                             .cut
                             .leaves
                             .iter()
-                            .filter_map(|l| node_area_flow.get(l))
+                            .map(|l| {
+                                let af = node_area_flow.get(l).copied().unwrap_or(0.0);
+                                let leaf_refs = ref_counts.get(l).copied().unwrap_or(1).max(1);
+                                af / leaf_refs as f64
+                            })
                             .sum();
                         let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
                         node_area_flow
@@ -527,7 +535,7 @@ impl CutMapper {
                     continue;
                 };
 
-                let current_area_flow = node_area_flow.get(&node_id).copied().unwrap_or(f64::MAX);
+                let mut best_area_flow = node_area_flow.get(&node_id).copied().unwrap_or(f64::MAX);
 
                 for cut in &cut_set.cuts {
                     if cut.leaves.is_empty()
@@ -546,23 +554,28 @@ impl CutMapper {
                             continue;
                         }
 
-                        // Compute area flow for this cut
+                        // Compute area flow for this cut (ABC-style: leaf/fanout)
                         let leaf_area: f64 = cut
                             .leaves
                             .iter()
-                            .filter_map(|l| node_area_flow.get(l))
+                            .map(|l| {
+                                let af = node_area_flow.get(l).copied().unwrap_or(0.0);
+                                let leaf_refs = ref_counts.get(l).copied().unwrap_or(1).max(1);
+                                af / leaf_refs as f64
+                            })
                             .sum();
                         let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
                         let new_area_flow = (match_.area + leaf_area) / refs as f64;
 
-                        if new_area_flow < current_area_flow * 0.95 {
-                            // Better cut found — update
+                        // Track the BEST improvement across all cuts (not just the last)
+                        if new_area_flow < best_area_flow {
+                            best_area_flow = new_area_flow;
                             let mut new_match = match_.clone();
                             new_match.cut = cut.clone();
                             node_best_cut.insert(node_id, Some(new_match));
                             node_area_flow.insert(node_id, new_area_flow);
                             changed = true;
-                            break;
+                            break; // Best match for this cut found; try next cut
                         }
                     }
                 }
@@ -807,24 +820,29 @@ impl CutMapper {
                 let arrival = self.compute_arrival(cut, node_delay);
                 let total_delay = arrival + match_.delay;
 
-                // Area flow: (cell_area + sum of leaf area_flows / leaf_fanout)
+                // ABC-style area flow: divide each leaf's contribution by its fanout
+                // to avoid over-counting shared nodes. This properly incentivizes
+                // larger cuts that cover more internal logic.
                 let leaf_area: f64 = cut
                     .leaves
                     .iter()
                     .map(|l| {
                         let af = node_area_flow.get(l).copied().unwrap_or(0.0);
-                        af
+                        let leaf_fo = fanout_count.get(l).copied().unwrap_or(1).max(1);
+                        af / leaf_fo as f64
                     })
                     .sum();
                 let fo = fanout_count.get(&node_id).copied().unwrap_or(1).max(1);
                 let area_flow = (match_.area + leaf_area) / fo as f64;
 
-                // Selection: minimize delay, then area flow, then cut size
+                // Selection: minimize delay first, then area flow within delay band
+                // Within the same delay tier, accept ANY area improvement (no 5% threshold)
+                // and prefer larger cuts that cover more logic when area is similar
                 let is_better = total_delay < best_delay - 0.01
                     || (total_delay < best_delay + 0.01
-                        && (area_flow < best_area_flow * 0.95
-                            || (area_flow < best_area_flow * 1.05
-                                && cut.leaves.len() < best_num_leaves)));
+                        && (area_flow < best_area_flow - 0.001
+                            || ((area_flow - best_area_flow).abs() < 0.001
+                                && cut.leaves.len() > best_num_leaves)));
 
                 if is_better {
                     best_delay = total_delay;

@@ -111,6 +111,7 @@ impl<'a> AigWriter<'a> {
         // Phase 5: Create outputs
         state.create_outputs(aig);
 
+        // Debug: count cells by type before DCE
         // Phase 6: Remove dead cells (cells whose outputs have no fanout)
         // Iterate until fixed point — backward covering may leave chains of
         // unmapped intermediate cells that cascade when removed.
@@ -488,11 +489,12 @@ impl AigWriterState<'_> {
                     }
                 }
 
-                // Absorb output inversion into truth table
-                if mapped.output_inverted {
-                    let mask = (1u64 << (1u64 << num_inputs)) - 1;
-                    adjusted_tt = !adjusted_tt & mask;
-                }
+                // For FPGA LUTs, do NOT apply output inversion — the LUT can implement
+                // any function directly via its INIT value. Applying output inversion
+                // would flip the polarity (LUT computes !f) while lit_to_net stores
+                // it as (id, false), causing every consumer to see wrong polarity
+                // and create extra INV cells.
+                // (Output inversion is only needed for ASIC cells with fixed functions.)
 
                 let lut_init = expand_truth_table_to_lut4(adjusted_tt, num_inputs);
 
@@ -1604,6 +1606,181 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
     }
 
     removed
+}
+
+/// Post-processing pass: push INV cells backward into producing LUT truth tables.
+///
+/// Complements `absorb_inverters_into_luts` which absorbs INV→LUT (forward).
+/// This pass handles INV cells that feed non-LUT consumers (DFFs, outputs) by
+/// flipping the producing LUT's INIT value instead, eliminating the INV cell.
+///
+/// Only safe when ALL consumers of the producing LUT's output go through INV cells
+/// (i.e., nobody needs the non-inverted value directly).
+pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
+    // Build maps: net → driver cell, net → consumer cells
+    let mut net_driver: HashMap<GateNetId, usize> = HashMap::new();
+    let mut net_consumers: HashMap<GateNetId, Vec<(usize, usize)>> = HashMap::new(); // net → [(cell_idx, pin_idx)]
+
+    for (cell_idx, cell) in netlist.cells.iter().enumerate() {
+        for &out_net in &cell.outputs {
+            net_driver.insert(out_net, cell_idx);
+        }
+        for (pin_idx, &in_net) in cell.inputs.iter().enumerate() {
+            net_consumers
+                .entry(in_net)
+                .or_default()
+                .push((cell_idx, pin_idx));
+        }
+        if let Some(clk) = cell.clock {
+            net_consumers
+                .entry(clk)
+                .or_default()
+                .push((cell_idx, usize::MAX));
+        }
+    }
+
+    // Track output port nets
+    let output_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+
+    // Find INV cells whose producing LUT can absorb the inversion
+    let mut inv_to_remove: Vec<usize> = Vec::new();
+    // Track which LUTs to flip: producer_idx → [(inv_idx, inv_output_net, non-INV LUT consumers)]
+    let mut luts_to_flip: HashMap<usize, Vec<(usize, GateNetId, Vec<(usize, usize)>)>> =
+        HashMap::new();
+
+    for (cell_idx, cell) in netlist.cells.iter().enumerate() {
+        let is_inv = cell
+            .function
+            .as_ref()
+            .is_some_and(|f| matches!(f, CellFunction::Inv))
+            || (cell.cell_type.contains("INV")
+                && cell.inputs.len() == 1
+                && cell.outputs.len() == 1);
+
+        if !is_inv || cell.inputs.is_empty() || cell.outputs.is_empty() {
+            continue;
+        }
+
+        let inv_input_net = cell.inputs[0];
+        let inv_output_net = cell.outputs[0];
+
+        // Find the producing cell
+        let Some(&producer_idx) = net_driver.get(&inv_input_net) else {
+            continue;
+        };
+
+        // Producer must be a LUT4
+        if netlist.cells[producer_idx].lut_init.is_none() {
+            continue;
+        }
+
+        // Skip if the producer's output net is a primary output
+        if output_nets.contains(&inv_input_net) {
+            continue;
+        }
+
+        // Classify consumers of the producer's output:
+        // - INV cells: will be removed if we flip
+        // - LUT cells: can absorb polarity change via truth table complement (free)
+        // - Other cells (DFF, output): would need a new INV cell
+        let Some(consumers) = net_consumers.get(&inv_input_net) else {
+            continue;
+        };
+
+        let mut inv_consumers = Vec::new(); // (cell_idx, inv_output_net)
+        let mut lut_consumers = Vec::new(); // (cell_idx, pin_idx) — non-INV LUT consumers
+        let mut other_count = 0usize; // non-INV, non-LUT consumers
+
+        for &(ci, pin) in consumers {
+            let c = &netlist.cells[ci];
+            let is_inv = c
+                .function
+                .as_ref()
+                .is_some_and(|f| matches!(f, CellFunction::Inv))
+                || (c.cell_type.contains("INV")
+                    && c.inputs.len() == 1
+                    && c.outputs.len() == 1);
+
+            if is_inv {
+                inv_consumers.push(ci);
+            } else if pin != usize::MAX && c.lut_init.is_some() {
+                lut_consumers.push((ci, pin));
+            } else {
+                other_count += 1;
+            }
+        }
+
+        // Also check if the producer's output is a primary output
+        if output_nets.contains(&inv_input_net) {
+            other_count += 1;
+        }
+
+        // Flip if: removing INV cells saves more than adding INVs for 'other' consumers
+        // When other_count == 0, all non-INV consumers are LUTs that absorb for free
+        if !inv_consumers.is_empty() && inv_consumers.len() > other_count {
+            luts_to_flip
+                .entry(producer_idx)
+                .or_default()
+                .push((cell_idx, inv_output_net, lut_consumers.clone()));
+        }
+    }
+
+    // Apply: flip LUT INITs, remove INV cells, complement LUT consumers' truth tables
+    let mut total_removed = 0;
+    for (producer_idx, flip_info) in &luts_to_flip {
+        // Flip the LUT's INIT
+        if let Some(init) = netlist.cells[*producer_idx].lut_init {
+            netlist.cells[*producer_idx].lut_init = Some(!init & 0xFFFF);
+        }
+
+        let producer_output = netlist.cells[*producer_idx].outputs[0];
+
+        // Complement non-INV LUT consumers' truth tables at the affected input
+        // (they were consuming non-inverted; now the LUT produces inverted)
+        let mut complemented_luts: HashSet<(usize, usize)> = HashSet::new();
+        for &(_, _, ref lut_consumers) in flip_info {
+            for &(ci, pin_idx) in lut_consumers {
+                if complemented_luts.insert((ci, pin_idx)) {
+                    if let Some(init) = netlist.cells[ci].lut_init {
+                        netlist.cells[ci].lut_init =
+                            Some(complement_tt_input(init, pin_idx, 4));
+                    }
+                }
+            }
+        }
+
+        // Rewire: each INV cell's output consumers now connect to the (flipped) LUT output
+        for &(inv_idx, inv_output_net, _) in flip_info {
+            if let Some(consumers) = net_consumers.get(&inv_output_net) {
+                for &(ci, pin_idx) in consumers {
+                    if pin_idx == usize::MAX {
+                        netlist.cells[ci].clock = Some(producer_output);
+                    } else if pin_idx < netlist.cells[ci].inputs.len() {
+                        netlist.cells[ci].inputs[pin_idx] = producer_output;
+                    }
+                }
+            }
+
+            // Also rewire output ports
+            for out in &mut netlist.outputs {
+                if *out == inv_output_net {
+                    *out = producer_output;
+                }
+            }
+
+            inv_to_remove.push(inv_idx);
+            total_removed += 1;
+        }
+    }
+
+    // Remove INV cells (reverse order to preserve indices)
+    inv_to_remove.sort_unstable();
+    inv_to_remove.dedup();
+    for &idx in inv_to_remove.iter().rev() {
+        netlist.cells.remove(idx);
+    }
+
+    total_removed
 }
 
 #[cfg(test)]

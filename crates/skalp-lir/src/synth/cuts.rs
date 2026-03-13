@@ -102,15 +102,17 @@ impl Cut {
     /// Compute the priority score for this cut (lower is better)
     pub fn priority_score(&self, mode: CutPriority, delay_bound: f32) -> f32 {
         match mode {
-            CutPriority::Area => self.area_cost,
+            // Area: prefer cuts with lower area_flow (larger cuts = lower 1/N)
+            CutPriority::Area => self.area_flow,
             CutPriority::Delay => self.arrival_time,
-            CutPriority::AreaDelay => self.area_cost * self.arrival_time.max(1.0),
+            CutPriority::AreaDelay => self.area_flow * self.arrival_time.max(1.0),
             CutPriority::AreaWithDelayBound => {
                 if self.arrival_time <= delay_bound {
-                    self.area_cost
+                    // Within delay budget: prefer larger cuts (lower area_flow)
+                    self.area_flow
                 } else {
                     // Heavily penalize cuts that violate delay bound
-                    self.area_cost + 1000.0 * (self.arrival_time - delay_bound)
+                    self.area_flow + 1000.0 * (self.arrival_time - delay_bound)
                 }
             }
         }
@@ -157,15 +159,23 @@ impl Cut {
         }
         leaves.sort();
         let edge_count = leaves.len() as u32;
+        // Area cost = 1.0 for any non-trivial merged cut (represents one LUT cell).
+        // This ensures AreaWithDelayBound priority scoring can differentiate cuts
+        // within the delay bound. Without this, all merged cuts have area_cost=0
+        // (since trivial cuts have area_cost=0), making area-based scoring useless.
+        let num_leaves = leaves.len();
         Cut {
             leaves,
             truth_table: 0,
-            // Combined area is sum of both cut areas
-            area_cost: self.area_cost + other.area_cost,
+            area_cost: if num_leaves > 0 { 1.0 } else { 0.0 },
             // Arrival time is max (critical path through either fanin)
             arrival_time: self.arrival_time.max(other.arrival_time),
-            // Area flow is sum
-            area_flow: self.area_flow + other.area_flow,
+            // Area flow = 1/num_leaves: larger cuts are more area-efficient per leaf
+            area_flow: if num_leaves > 0 {
+                1.0 / num_leaves as f32
+            } else {
+                0.0
+            },
             edge_count,
         }
     }
@@ -1059,8 +1069,8 @@ mod tests {
         let cut2 = Cut::with_metrics(vec![AigNodeId(2)], 1.5, 3.0);
         let merged = cut1.merge(&cut2);
 
-        // Area should be summed
-        assert!((merged.area_cost - 2.5).abs() < 0.001);
+        // Area cost is 1.0 for any non-empty merged cut (represents one LUT)
+        assert!((merged.area_cost - 1.0).abs() < 0.001);
         // Arrival time should be max
         assert!((merged.arrival_time - 3.0).abs() < 0.001);
         // Edge count should be count of leaves
