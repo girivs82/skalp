@@ -3906,9 +3906,14 @@ impl<'a> MirToSirConverter<'a> {
 
         let (val, width) = match value {
             Value::Integer(i) => {
-                // BUG #76 FIX: Use target width for integer literals when provided
-                let inferred_width = target_width.unwrap_or(32);
-                (*i as u64, inferred_width)
+                // BUG #76 FIX: Use target width for integer literals when provided.
+                // When no target width, infer from value: use 64 bits if value
+                // exceeds 32-bit range (e.g., Ascon IV 0x00400c0000000100).
+                let val = *i as u64;
+                let inferred_width = target_width.unwrap_or_else(|| {
+                    if val > u32::MAX as u64 { 64 } else { 32 }
+                });
+                (val, inferred_width)
             }
             Value::BitVector { width, value } => (*value, *width),
             // BUG FIX: Handle float literals by converting to IEEE 754 bit representation
