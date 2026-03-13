@@ -27,7 +27,7 @@ mod balance;
 mod buffer_opt;
 mod const_prop;
 mod dc2;
-mod dce;
+pub mod dce;
 mod dchoice;
 mod fraig;
 mod pad_insert;

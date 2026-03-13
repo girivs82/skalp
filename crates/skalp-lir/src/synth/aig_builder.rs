@@ -441,12 +441,55 @@ impl<'a> AigBuilder<'a> {
                 self.aig.add_mux(sel, d1, d0)
             }
 
-            // Arithmetic primitives — partitioned out before AIG building
-            CellFunction::HalfAdder | CellFunction::FullAdder | CellFunction::Carry => {
-                panic!(
-                    "BUG: {:?} cell '{}' reached AigBuilder — should have been partitioned out",
-                    cell.function, cell.path
-                );
+            // Carry cell: CO = majority(I0, I1, CI) = (I0 & I1) | (I0 & CI) | (I1 & CI)
+            CellFunction::Carry => {
+                let i0 = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let i1 = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                let ci = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
+                let i0_and_i1 = self.aig.add_and(i0, i1);
+                let i0_and_ci = self.aig.add_and(i0, ci);
+                let i1_and_ci = self.aig.add_and(i1, ci);
+                let ab_or_ac = self.aig.add_or(i0_and_i1, i0_and_ci);
+                self.aig.add_or(ab_or_ac, i1_and_ci)
+            }
+
+            // HalfAdder: Sum = A ⊕ B, Cout = A & B (single output = Sum for AIG)
+            CellFunction::HalfAdder => {
+                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                // HalfAdder has 2 outputs: [Sum, Cout] — handle multi-output below
+                let sum = self.aig.add_xor(a, b);
+                let cout = self.aig.add_and(a, b);
+                // Map outputs individually
+                if cell.outputs.len() >= 2 {
+                    self.net_map[cell.outputs[0].0 as usize] = Some(sum);
+                    self.aig.register_net(cell.outputs[0], sum);
+                    self.net_map[cell.outputs[1].0 as usize] = Some(cout);
+                    self.aig.register_net(cell.outputs[1], cout);
+                    return; // Skip default output mapping
+                }
+                sum // Fallback: single output
+            }
+
+            // FullAdder: Sum = A ⊕ B ⊕ Cin, Cout = majority(A,B,Cin)
+            CellFunction::FullAdder => {
+                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                let cin = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
+                let a_xor_b = self.aig.add_xor(a, b);
+                let sum = self.aig.add_xor(a_xor_b, cin);
+                let ab = self.aig.add_and(a, b);
+                let axb_cin = self.aig.add_and(a_xor_b, cin);
+                let cout = self.aig.add_or(ab, axb_cin);
+                // Map outputs individually: [Sum, Cout]
+                if cell.outputs.len() >= 2 {
+                    self.net_map[cell.outputs[0].0 as usize] = Some(sum);
+                    self.aig.register_net(cell.outputs[0], sum);
+                    self.net_map[cell.outputs[1].0 as usize] = Some(cout);
+                    self.aig.register_net(cell.outputs[1], cout);
+                    return; // Skip default output mapping
+                }
+                sum // Fallback: single output
             }
 
             // Sequential elements

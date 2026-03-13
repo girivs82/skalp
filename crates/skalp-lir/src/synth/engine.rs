@@ -272,12 +272,10 @@ impl SynthEngine {
         // Phase 1: Build AIG (only from AIG-compatible cells)
         let builder = AigBuilder::new(aig_input);
         let mut aig = builder.build();
-
         let initial_stats = aig.compute_stats();
 
         // Phase 2: Run optimization passes
         self.run_optimization_passes(&mut aig);
-
         let final_stats = aig.compute_stats();
 
         // Phase 3: Run timing analysis if requested
@@ -287,6 +285,9 @@ impl SynthEngine {
 
         // Phase 3.5: DFF functional decomposition via cofactoring
         // Extract enable/reset signals from latch data cones AFTER ABC optimization.
+        // decompose_latches adds new AND nodes for enable/data sub-functions.
+        // No DCE after this — the mapper's backward covering only maps required nodes,
+        // naturally skipping dead cofactored nodes without needing a separate DCE pass.
         let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
 
         // Phase 4: Map to library cells using available primitives
@@ -303,6 +304,11 @@ impl SynthEngine {
             w
         };
         let mut optimized = writer.write(&aig);
+
+        // Phase 5a: Absorb inverters into LUT truth tables (FPGA optimization)
+        if library.is_fpga() {
+            super::aig_writer::absorb_inverters_into_luts(&mut optimized);
+        }
 
         // Phase 5b: Merge physical cells back if we partitioned
         if let Some(ref part) = partition {

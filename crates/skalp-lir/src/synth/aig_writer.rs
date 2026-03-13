@@ -54,6 +54,37 @@ impl<'a> AigWriter<'a> {
 
     /// Write AIG to gate netlist
     pub fn write(&self, aig: &Aig) -> GateNetlist {
+        // Pre-compute AND nodes needed by latch decompositions
+        // These need cells even when the technology mapper didn't map them.
+        let mut latch_decomp_nodes = HashSet::new();
+        if self.mapping_result.is_some() && !self.latch_decomps.is_empty() {
+            fn mark_decomp_fanin(aig: &Aig, node_id: AigNodeId, nodes: &mut HashSet<AigNodeId>) {
+                if nodes.contains(&node_id) || node_id == AigNodeId::FALSE {
+                    return;
+                }
+                if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
+                    nodes.insert(node_id);
+                    mark_decomp_fanin(aig, left.node, nodes);
+                    mark_decomp_fanin(aig, right.node, nodes);
+                }
+            }
+            for decomp in self.latch_decomps.values() {
+                mark_decomp_fanin(aig, decomp.data.node, &mut latch_decomp_nodes);
+                if let Some(e) = decomp.enable {
+                    mark_decomp_fanin(aig, e.node, &mut latch_decomp_nodes);
+                }
+                if let Some(r) = decomp.sync_reset {
+                    mark_decomp_fanin(aig, r.node, &mut latch_decomp_nodes);
+                }
+            }
+            // Remove nodes that are already mapped — those have proper LUT cells
+            if let Some(mapping) = self.mapping_result {
+                for id in mapping.mapped_nodes.keys() {
+                    latch_decomp_nodes.remove(id);
+                }
+            }
+        }
+
         let mut state = AigWriterState {
             library: self.library,
             mapping_result: self.mapping_result,
@@ -62,6 +93,7 @@ impl<'a> AigWriter<'a> {
             lit_to_net: IndexMap::new(),
             next_cell_id: 0,
             latch_decomps: &self.latch_decomps,
+            latch_decomp_nodes,
         };
 
         // Phase 1: Create nets for inputs
@@ -80,7 +112,14 @@ impl<'a> AigWriter<'a> {
         state.create_outputs(aig);
 
         // Phase 6: Remove dead cells (cells whose outputs have no fanout)
-        state.netlist.remove_dead_cells();
+        // Iterate until fixed point — backward covering may leave chains of
+        // unmapped intermediate cells that cascade when removed.
+        loop {
+            let removed = state.netlist.remove_dead_cells();
+            if removed == 0 {
+                break;
+            }
+        }
 
         // Phase 7: Compute lut_init for FPGA LUT cells that don't have it set.
         // The AIG writer creates cells via Cell::new_comb for inversions and
@@ -132,6 +171,10 @@ struct AigWriterState<'a> {
 
     /// Cofactor-based latch decompositions
     latch_decomps: &'a HashMap<AigNodeId, LatchDecomp>,
+
+    /// AND nodes needed by latch decompositions (their transitive fan-in)
+    /// When mapping is active, these nodes need AND2 cells even if not in mapped_nodes.
+    latch_decomp_nodes: HashSet<AigNodeId>,
 }
 
 impl AigWriterState<'_> {
@@ -287,12 +330,15 @@ impl AigWriterState<'_> {
     }
 
     /// Get topological order of nodes
+    ///
+    /// For latches with decompositions, also visits the decomposed data/enable
+    /// nodes before the latch so they're processed first.
     fn topological_order(&self, aig: &Aig) -> Vec<AigNodeId> {
         let mut result = Vec::new();
         let mut visited = vec![false; aig.node_count()];
 
         fn visit(aig: &Aig, id: AigNodeId, visited: &mut [bool], result: &mut Vec<AigNodeId>) {
-            if visited[id.0 as usize] {
+            if id.0 as usize >= visited.len() || visited[id.0 as usize] {
                 return;
             }
             visited[id.0 as usize] = true;
@@ -306,7 +352,20 @@ impl AigWriterState<'_> {
             result.push(id);
         }
 
-        for (id, _) in aig.iter_nodes() {
+        // First pass: visit all nodes normally
+        for (id, node) in aig.iter_nodes() {
+            // For latches with decompositions, visit decomp nodes first
+            if let AigNode::Latch { .. } = node {
+                if let Some(decomp) = self.latch_decomps.get(&id) {
+                    visit(aig, decomp.data.node, &mut visited, &mut result);
+                    if let Some(e) = decomp.enable {
+                        visit(aig, e.node, &mut visited, &mut result);
+                    }
+                    if let Some(r) = decomp.sync_reset {
+                        visit(aig, r.node, &mut visited, &mut result);
+                    }
+                }
+            }
             visit(aig, id, &mut visited, &mut result);
         }
 
@@ -321,6 +380,19 @@ impl AigWriterState<'_> {
                 self.emit_mapped_cell(aig, id, mapped);
                 return;
             }
+            // Non-required AND node (interior to a cut) — skip cell creation unless
+            // needed by latch decompositions. Creating AND2 cells for truly interior
+            // nodes would add false fanout on required LUT outputs, causing cascading
+            // DCE failures.
+            if !self.latch_decomp_nodes.contains(&id) {
+                let output_net = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
+                self.node_to_net.insert(id, output_net);
+                self.lit_to_net.insert((id, false), output_net);
+                return;
+            }
+            // Fall through to create AND2 cell — needed by latch decomposition
         }
 
         // Select the best cell based on input inversions and library availability.
@@ -375,20 +447,6 @@ impl AigWriterState<'_> {
             .netlist
             .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
 
-        // Get input nets from the mapped cell's inputs
-        // Each input is (AigNodeId, inverted) - we need to get or create the net
-        let input_nets: Vec<GateNetId> = mapped
-            .inputs
-            .iter()
-            .map(|(node, inverted)| {
-                let lit = AigLit {
-                    node: *node,
-                    inverted: *inverted,
-                };
-                self.get_or_create_lit_net(aig, lit)
-            })
-            .collect();
-
         // Get safety info
         let safety = aig
             .get_safety_info(id)
@@ -399,14 +457,44 @@ impl AigWriterState<'_> {
             })
             .unwrap_or(CellSafetyClassification::Functional);
 
+        // For FPGA LUT targets with truth tables, absorb input and output inversions
+        // into the truth table instead of creating physical inverter cells.
+        // A LUT4 can implement ANY 4-input boolean function, so inversions are free.
+        let is_fpga_lut = mapped.truth_table.is_some() && self.library.is_fpga();
+
+        // Get input nets — for FPGA LUTs, use non-inverted base nets
+        let input_nets: Vec<GateNetId> = mapped
+            .inputs
+            .iter()
+            .map(|(node, inverted)| {
+                let lit = AigLit {
+                    node: *node,
+                    inverted: if is_fpga_lut { false } else { *inverted },
+                };
+                self.get_or_create_lit_net(aig, lit)
+            })
+            .collect();
+
         // Create cell — use LUT cell when truth table is available (FPGA mapping)
         let cell = if let Some(tt) = mapped.truth_table {
-            // Check if this is an FPGA LUT cell type (SB_LUT4, LUT4, etc.)
             if self.library.is_fpga() {
-                // Expand K-input truth table to 16-bit LUT4 INIT
-                // For K<4 inputs, replicate the pattern to fill 16 bits
                 let num_inputs = mapped.inputs.len();
-                let lut_init = expand_truth_table_to_lut4(tt, num_inputs);
+
+                // Absorb input inversions into truth table
+                let mut adjusted_tt = tt;
+                for (i, &(_node, inverted)) in mapped.inputs.iter().enumerate() {
+                    if inverted {
+                        adjusted_tt = complement_tt_input(adjusted_tt, i, num_inputs);
+                    }
+                }
+
+                // Absorb output inversion into truth table
+                if mapped.output_inverted {
+                    let mask = (1u64 << (1u64 << num_inputs)) - 1;
+                    adjusted_tt = !adjusted_tt & mask;
+                }
+
+                let lut_init = expand_truth_table_to_lut4(adjusted_tt, num_inputs);
 
                 // Pad inputs to 4 for LUT4 (unused inputs connected to first input)
                 let mut padded_inputs = input_nets.clone();
@@ -454,9 +542,11 @@ impl AigWriterState<'_> {
         self.netlist.add_cell(cell);
 
         // Store mapping based on output polarity
-        // If output_inverted is true, the cell computes the inverse of the AIG function,
-        // so the cell's output represents the inverted literal
-        if mapped.output_inverted {
+        if is_fpga_lut {
+            // For FPGA LUTs, output inversion was absorbed into the truth table
+            self.node_to_net.insert(id, output_net);
+            self.lit_to_net.insert((id, false), output_net);
+        } else if mapped.output_inverted {
             // Cell output is inverted relative to the AIG node
             // (id, true) -> output_net means requesting inverted output gets the cell directly
             self.node_to_net.insert(id, output_net);
@@ -501,10 +591,25 @@ impl AigWriterState<'_> {
             .unwrap_or(CellSafetyClassification::Functional);
 
         // Use cofactor-based decomposition for enable detection (functional, depth-independent)
+        // When technology mapping is active, only use the decomposition if all referenced
+        // nodes have cells or nets (the decomposition creates AND nodes that the mapper's
+        // backward covering may not have reached).
         let enable_pattern = self
             .latch_decomps
             .get(&id)
-            .and_then(|decomp| decomp.enable.map(|e| (e, decomp.data)));
+            .and_then(|decomp| {
+                let enable = decomp.enable?;
+                // Check that the decomposed nodes have nets (mapped or pre-created)
+                let data_ok = decomp.data.node == AigNodeId::FALSE
+                    || self.node_to_net.contains_key(&decomp.data.node);
+                let enable_ok = enable.node == AigNodeId::FALSE
+                    || self.node_to_net.contains_key(&enable.node);
+                if data_ok && enable_ok {
+                    Some((enable, decomp.data))
+                } else {
+                    None // Decomposed nodes not available, fall back to raw data
+                }
+            });
 
         if let Some((enable_lit, new_data_lit)) = enable_pattern {
             let enable_net = self.get_or_create_lit_net(aig, enable_lit);
@@ -1383,6 +1488,122 @@ fn expand_truth_table_to_lut4(tt: u64, num_inputs: usize) -> u64 {
             base & 0xFFFF
         }
     }
+}
+
+/// Complement a truth table variable (absorb input inversion).
+///
+/// If input `k` is inverted, the LUT sees `!xk` instead of `xk`.
+/// We transform the truth table so that `tt'[...xk...] = tt[...!xk...]`,
+/// i.e., swap all pairs of bit positions that differ only in bit `k`.
+fn complement_tt_input(tt: u64, input: usize, num_inputs: usize) -> u64 {
+    let num_entries = 1usize << num_inputs;
+    let mut result = 0u64;
+    for i in 0..num_entries {
+        // For each truth table entry, read from the position with bit `input` flipped
+        let j = i ^ (1 << input);
+        if (tt >> j) & 1 == 1 {
+            result |= 1u64 << i;
+        }
+    }
+    result
+}
+
+/// Post-processing pass: absorb INV cells into downstream LUT truth tables.
+///
+/// On FPGA, every INV cell wastes a full LUT4. This pass finds INV cells
+/// whose output feeds only into LUT4 cells, and absorbs the inversion by
+/// complementing the appropriate truth table variable. The INV cell is then
+/// removed and the LUT input is connected directly to the INV's source.
+pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
+    // Step 1: Build consumer map: output_net → [(cell_index, input_pin_index)]
+    let mut consumers: HashMap<GateNetId, Vec<(usize, usize)>> = HashMap::new();
+    for (cell_idx, cell) in netlist.cells.iter().enumerate() {
+        for (pin_idx, &net_id) in cell.inputs.iter().enumerate() {
+            consumers.entry(net_id).or_default().push((cell_idx, pin_idx));
+        }
+        // Also check clock nets — these should NOT absorb inversions
+        if let Some(clk_net) = cell.clock {
+            consumers
+                .entry(clk_net)
+                .or_default()
+                .push((cell_idx, usize::MAX)); // sentinel: non-absorbable
+        }
+    }
+
+    // Also track output port nets — can't remove INVs driving output ports
+    let output_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+
+    // Step 2: Find INV cells whose output feeds only LUT4 cells
+    let mut inv_removals: Vec<(usize, GateNetId, GateNetId)> = Vec::new(); // (cell_idx, inv_input_net, inv_output_net)
+
+    for (cell_idx, cell) in netlist.cells.iter().enumerate() {
+        // Detect INV cells: function is Inv, or cell_type contains "INV" and has 1 input, 1 output
+        let is_inv = cell
+            .function
+            .as_ref()
+            .is_some_and(|f| matches!(f, CellFunction::Inv))
+            || (cell.cell_type.contains("INV")
+                && cell.inputs.len() == 1
+                && cell.outputs.len() == 1);
+
+        if !is_inv || cell.inputs.is_empty() || cell.outputs.is_empty() {
+            continue;
+        }
+
+        let inv_input = cell.inputs[0];
+        let inv_output = cell.outputs[0];
+
+        // Skip if the INV output is a primary output
+        if output_nets.contains(&inv_output) {
+            continue;
+        }
+
+        // Check all consumers of the INV output
+        let consumer_list = match consumers.get(&inv_output) {
+            Some(list) if !list.is_empty() => list,
+            _ => continue, // No consumers or dead — skip (DCE will handle dead)
+        };
+
+        // ALL consumers must be LUT cells (have lut_init)
+        let all_consumers_are_luts = consumer_list.iter().all(|&(ci, pin)| {
+            pin != usize::MAX && netlist.cells[ci].lut_init.is_some()
+        });
+
+        if all_consumers_are_luts {
+            inv_removals.push((cell_idx, inv_input, inv_output));
+        }
+    }
+
+    let removed = inv_removals.len();
+
+    // Step 3: Apply absorption — complement LUT truth tables and rewire
+    let inv_cell_indices: HashSet<usize> = inv_removals.iter().map(|&(idx, _, _)| idx).collect();
+
+    for &(_cell_idx, inv_input, inv_output) in &inv_removals {
+        if let Some(consumer_list) = consumers.get(&inv_output) {
+            for &(ci, pin_idx) in consumer_list {
+                if pin_idx == usize::MAX {
+                    continue;
+                }
+                // Complement the truth table at this input position
+                if let Some(init) = netlist.cells[ci].lut_init {
+                    let new_init = complement_tt_input(init, pin_idx, 4);
+                    netlist.cells[ci].lut_init = Some(new_init);
+                }
+                // Rewire: connect the LUT input directly to the INV's source
+                netlist.cells[ci].inputs[pin_idx] = inv_input;
+            }
+        }
+    }
+
+    // Step 4: Remove INV cells (in reverse order to preserve indices)
+    let mut indices: Vec<usize> = inv_cell_indices.into_iter().collect();
+    indices.sort_unstable();
+    for &idx in indices.iter().rev() {
+        netlist.cells.remove(idx);
+    }
+
+    removed
 }
 
 #[cfg(test)]

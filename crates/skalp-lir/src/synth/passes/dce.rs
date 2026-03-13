@@ -18,6 +18,8 @@ use std::collections::HashSet;
 pub struct Dce {
     /// Number of nodes removed
     removed_count: usize,
+    /// Node mapping from old to new IDs (populated after run)
+    node_map: Option<IndexMap<AigNodeId, AigLit>>,
 }
 
 /// Mark a node and its fanin cone as live
@@ -37,7 +39,15 @@ fn mark_live(aig: &Aig, node_id: AigNodeId, live: &mut HashSet<AigNodeId>) {
 impl Dce {
     /// Create a new DCE pass
     pub fn new() -> Self {
-        Self { removed_count: 0 }
+        Self {
+            removed_count: 0,
+            node_map: None,
+        }
+    }
+
+    /// Get the node mapping from old to new IDs (available after `run`)
+    pub fn node_map(&self) -> Option<&IndexMap<AigNodeId, AigLit>> {
+        self.node_map.as_ref()
     }
 }
 
@@ -114,8 +124,14 @@ impl Pass for Dce {
         let live_nodes = live.len();
         self.removed_count = total_nodes.saturating_sub(live_nodes);
 
-        // If no dead nodes, return early
+        // If no dead nodes, return early with identity map
         if self.removed_count == 0 {
+            let mut identity_map = IndexMap::new();
+            for (id, _) in aig.iter_nodes() {
+                identity_map.insert(id, AigLit::new(id));
+            }
+            identity_map.insert(AigNodeId::FALSE, AigLit::false_lit());
+            self.node_map = Some(identity_map);
             result.record_after(aig);
             return result;
         }
@@ -262,6 +278,9 @@ impl Pass for Dce {
             new_aig.add_output(name.clone(), new_lit);
         }
 
+        // Store the node mapping for external use (e.g., remapping latch decompositions)
+        self.node_map = Some(node_map);
+
         // Replace the AIG
         *aig = new_aig;
 
@@ -269,6 +288,16 @@ impl Pass for Dce {
         result.add_extra("removed", &self.removed_count.to_string());
         result
     }
+}
+
+/// Resolve a literal through the node mapping, returning None if the node was removed.
+pub fn try_resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> Option<AigLit> {
+    if lit.node == AigNodeId::FALSE {
+        return Some(lit);
+    }
+    map.get(&lit.node).map(|&mapped| {
+        if lit.inverted { mapped.invert() } else { mapped }
+    })
 }
 
 /// Resolve a literal through the node mapping

@@ -327,17 +327,41 @@ impl CutMapper {
         self.map_internal(aig, &cuts)
     }
 
-    /// Internal mapping implementation
+    /// Internal mapping implementation — ABC's `if` algorithm.
+    ///
+    /// Three phases:
+    /// 1. **Forward pass**: Compute delay-optimal mapping for each node
+    /// 2. **Backward covering**: Select which nodes need cells (from outputs back)
+    /// 3. **Area recovery**: Re-select cuts to minimize area within delay budget
+    ///
+    /// Reference: Mishchenko, Chatterjee, Brayton. "Combinational and sequential
+    /// mapping with priority cuts." DAC 2007.
     fn map_internal(&self, aig: &Aig, cuts: &CutEnumeration) -> MappingResult {
-        let mut result = MappingResult::new();
-
-        // Step 2: Compute best match for each node
-        let mut best_match: IndexMap<AigNodeId, Option<CutMatch>> = IndexMap::new();
-        let mut node_delay: IndexMap<AigNodeId, f64> = IndexMap::new();
-        let mut node_area: IndexMap<AigNodeId, f64> = IndexMap::new();
-
-        // Process nodes in topological order
         let topo_order = self.topological_sort(aig);
+
+        // ──────────────────────────────────────────────────────────────
+        // Phase 1: Forward pass — compute best cut for each AND node
+        // ──────────────────────────────────────────────────────────────
+        // For each node, store: (best_cut, delay, area_flow)
+        let mut node_delay: IndexMap<AigNodeId, f64> = IndexMap::new();
+        let mut node_area_flow: IndexMap<AigNodeId, f64> = IndexMap::new();
+        let mut node_best_cut: IndexMap<AigNodeId, Option<CutMatch>> = IndexMap::new();
+
+        // Compute fanout counts for area flow
+        let mut fanout_count: IndexMap<AigNodeId, usize> = IndexMap::new();
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::And { left, right } = node {
+                *fanout_count.entry(left.node).or_insert(0) += 1;
+                *fanout_count.entry(right.node).or_insert(0) += 1;
+            }
+            if let AigNode::Latch { data, .. } = node {
+                *fanout_count.entry(data.node).or_insert(0) += 1;
+            }
+        }
+        // Output consumers
+        for (_, lit) in aig.outputs() {
+            *fanout_count.entry(lit.node).or_insert(0) += 1;
+        }
 
         for &node_id in &topo_order {
             let Some(node) = aig.get_node(node_id) else {
@@ -346,73 +370,302 @@ impl CutMapper {
 
             match node {
                 AigNode::Input { .. } | AigNode::Const => {
-                    // Inputs and constants have zero cost
                     node_delay.insert(node_id, 0.0);
-                    node_area.insert(node_id, 0.0);
-                    best_match.insert(node_id, None);
+                    node_area_flow.insert(node_id, 0.0);
+                    node_best_cut.insert(node_id, None);
+                }
+                AigNode::Latch { .. } | AigNode::Barrier { .. } => {
+                    node_delay.insert(node_id, 0.0); // Latch output starts a new timing path
+                    node_area_flow.insert(node_id, 0.0);
+                    node_best_cut.insert(node_id, None);
+                }
+                AigNode::And { left, right } => {
+                    let best =
+                        self.find_best_match_if(aig, node_id, cuts, &node_delay, &node_area_flow, &fanout_count);
+
+                    if let Some(ref match_) = best {
+                        let arrival = self.compute_arrival(&match_.cut, &node_delay);
+                        node_delay.insert(node_id, arrival + match_.delay);
+
+                        // Area flow: (cell_area + sum of leaf area_flows) / max(fanout, 1)
+                        let leaf_area: f64 = match_
+                            .cut
+                            .leaves
+                            .iter()
+                            .filter_map(|l| node_area_flow.get(l))
+                            .sum();
+                        let fo = fanout_count.get(&node_id).copied().unwrap_or(1).max(1);
+                        node_area_flow.insert(node_id, (match_.area + leaf_area) / fo as f64);
+                    } else {
+                        // AND2 fallback
+                        let left_d = node_delay.get(&left.node).copied().unwrap_or(0.0);
+                        let right_d = node_delay.get(&right.node).copied().unwrap_or(0.0);
+                        node_delay.insert(node_id, left_d.max(right_d) + 25.0);
+                        node_area_flow.insert(node_id, 2.0);
+                    }
+
+                    node_best_cut.insert(node_id, best);
+                }
+            }
+        }
+
+        let global_required = node_delay.values().copied().fold(0.0f64, f64::max);
+
+        // ──────────────────────────────────────────────────────────────
+        // Phase 2: Backward covering — determine which nodes need cells
+        // ──────────────────────────────────────────────────────────────
+        // Start from outputs and latch data inputs, walk backward through
+        // selected cuts. Only cut roots become mapped cells.
+        let mut required_nodes: HashSet<AigNodeId> = HashSet::new();
+        let mut worklist: Vec<AigNodeId> = Vec::new();
+
+        // Seed with output drivers and latch data inputs
+        for (_, lit) in aig.outputs() {
+            if lit.node != AigNodeId::FALSE {
+                worklist.push(lit.node);
+            }
+        }
+        for (id, node) in aig.iter_nodes() {
+            match node {
+                AigNode::Latch { data, clock, reset, .. } => {
+                    worklist.push(data.node);
+                    if let Some(c) = clock {
+                        worklist.push(*c);
+                    }
+                    if let Some(r) = reset {
+                        worklist.push(*r);
+                    }
+                }
+                AigNode::Barrier { data, enable, clock, reset, .. } => {
+                    worklist.push(data.node);
+                    if let Some(e) = enable {
+                        worklist.push(e.node);
+                    }
+                    if let Some(c) = clock {
+                        worklist.push(*c);
+                    }
+                    if let Some(r) = reset {
+                        worklist.push(*r);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        while let Some(node_id) = worklist.pop() {
+            if required_nodes.contains(&node_id) {
+                continue;
+            }
+            required_nodes.insert(node_id);
+
+            // If this node has a cut, its leaves become the next required nodes
+            if let Some(Some(match_)) = node_best_cut.get(&node_id) {
+                for &leaf in &match_.cut.leaves {
+                    worklist.push(leaf);
+                }
+            } else if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
+                // No cut — AND2 fallback, both children are required
+                worklist.push(left.node);
+                worklist.push(right.node);
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        // Phase 3: Area recovery iterations
+        // ──────────────────────────────────────────────────────────────
+        // For each required AND node, try to find a cut with less area
+        // that still meets the delay bound. Update area flow and re-cover.
+        let delay_bound = global_required * 1.05;
+        let recovery_iters = self.config.recovery_iterations.min(8);
+
+        for _iter in 0..recovery_iters {
+            // Recompute area flow with exact local references (fanout-weighted)
+            let mut ref_counts: IndexMap<AigNodeId, usize> = IndexMap::new();
+            for &nid in &required_nodes {
+                if let Some(Some(m)) = node_best_cut.get(&nid) {
+                    for &leaf in &m.cut.leaves {
+                        *ref_counts.entry(leaf).or_insert(0) += 1;
+                    }
+                } else if let Some(AigNode::And { left, right }) = aig.get_node(nid) {
+                    *ref_counts.entry(left.node).or_insert(0) += 1;
+                    *ref_counts.entry(right.node).or_insert(0) += 1;
+                }
+            }
+
+            // Recompute area flow using reference counts from covering
+            for &node_id in &topo_order {
+                if !required_nodes.contains(&node_id) {
+                    continue;
+                }
+                if let Some(AigNode::And { .. }) = aig.get_node(node_id) {
+                    if let Some(Some(match_)) = node_best_cut.get(&node_id) {
+                        let leaf_area: f64 = match_
+                            .cut
+                            .leaves
+                            .iter()
+                            .filter_map(|l| node_area_flow.get(l))
+                            .sum();
+                        let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
+                        node_area_flow
+                            .insert(node_id, (match_.area + leaf_area) / refs as f64);
+                    }
+                }
+            }
+
+            let mut changed = false;
+
+            // Try to find better (smaller area) cuts for each required AND node
+            for &node_id in &topo_order {
+                if !required_nodes.contains(&node_id) {
+                    continue;
+                }
+                if !matches!(aig.get_node(node_id), Some(AigNode::And { .. })) {
+                    continue;
                 }
 
+                let Some(cut_set) = cuts.get_cuts(node_id) else {
+                    continue;
+                };
+
+                let current_area_flow = node_area_flow.get(&node_id).copied().unwrap_or(f64::MAX);
+
+                for cut in &cut_set.cuts {
+                    if cut.leaves.is_empty()
+                        || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
+                    {
+                        continue;
+                    }
+
+                    // Check delay feasibility
+                    let arrival = self.compute_arrival(cut, &node_delay);
+                    let matches = self.matcher.find_matches(cut.truth_table, cut.leaves.len());
+
+                    for match_ in matches {
+                        let total_delay = arrival + match_.delay;
+                        if total_delay > delay_bound {
+                            continue;
+                        }
+
+                        // Compute area flow for this cut
+                        let leaf_area: f64 = cut
+                            .leaves
+                            .iter()
+                            .filter_map(|l| node_area_flow.get(l))
+                            .sum();
+                        let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
+                        let new_area_flow = (match_.area + leaf_area) / refs as f64;
+
+                        if new_area_flow < current_area_flow * 0.95 {
+                            // Better cut found — update
+                            let mut new_match = match_.clone();
+                            new_match.cut = cut.clone();
+                            node_best_cut.insert(node_id, Some(new_match));
+                            node_area_flow.insert(node_id, new_area_flow);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
+
+            // Re-cover: recompute required_nodes with updated cuts
+            required_nodes.clear();
+            worklist.clear();
+            for (_, lit) in aig.outputs() {
+                if lit.node != AigNodeId::FALSE {
+                    worklist.push(lit.node);
+                }
+            }
+            for (_, node) in aig.iter_nodes() {
+                match node {
+                    AigNode::Latch { data, clock, reset, .. } => {
+                        worklist.push(data.node);
+                        if let Some(c) = clock {
+                            worklist.push(*c);
+                        }
+                        if let Some(r) = reset {
+                            worklist.push(*r);
+                        }
+                    }
+                    AigNode::Barrier { data, enable, clock, reset, .. } => {
+                        worklist.push(data.node);
+                        if let Some(e) = enable {
+                            worklist.push(e.node);
+                        }
+                        if let Some(c) = clock {
+                            worklist.push(*c);
+                        }
+                        if let Some(r) = reset {
+                            worklist.push(*r);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            while let Some(node_id) = worklist.pop() {
+                if required_nodes.contains(&node_id) {
+                    continue;
+                }
+                required_nodes.insert(node_id);
+                if let Some(Some(match_)) = node_best_cut.get(&node_id) {
+                    for &leaf in &match_.cut.leaves {
+                        worklist.push(leaf);
+                    }
+                } else if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
+                    worklist.push(left.node);
+                    worklist.push(right.node);
+                }
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        // Phase 4: Build result — only map required AND nodes
+        // ──────────────────────────────────────────────────────────────
+        let mut result = MappingResult::new();
+
+        for &node_id in &topo_order {
+            if !required_nodes.contains(&node_id) {
+                continue;
+            }
+            let Some(node) = aig.get_node(node_id) else {
+                continue;
+            };
+
+            match node {
                 AigNode::Latch { data, .. } => {
-                    // Latches are mapped to DFF
-                    let dff_delay = 50.0; // Clock-to-Q
-                    let dff_area = 4.0;
-
-                    node_delay.insert(node_id, dff_delay);
-                    node_area.insert(node_id, dff_area);
-
-                    result.stats.record_cell("DFF_X1", dff_area);
+                    result.stats.record_cell("DFF_X1", 4.0);
                     result.mapped_nodes.insert(
                         node_id,
                         MappedNode {
                             cell_type: "DFF_X1".to_string(),
                             inputs: vec![(data.node, data.inverted)],
-                            area: dff_area,
-                            delay: dff_delay,
+                            area: 4.0,
+                            delay: 50.0,
                             output_inverted: false,
                             truth_table: None,
                         },
                     );
-                    best_match.insert(node_id, None);
                 }
-
                 AigNode::Barrier { data, .. } => {
-                    // Barriers are power domain boundaries - treat as optimization barriers
-                    // with a fixed mapping (they'll be preserved in the final netlist)
-                    let barrier_delay = 30.0; // Level shifter/isolation cell delay
-                    let barrier_area = 2.0;
-
-                    node_delay.insert(node_id, barrier_delay);
-                    node_area.insert(node_id, barrier_area);
-
-                    result.stats.record_cell("BARRIER_X1", barrier_area);
+                    result.stats.record_cell("BARRIER_X1", 2.0);
                     result.mapped_nodes.insert(
                         node_id,
                         MappedNode {
                             cell_type: "BARRIER_X1".to_string(),
                             inputs: vec![(data.node, data.inverted)],
-                            area: barrier_area,
-                            delay: barrier_delay,
+                            area: 2.0,
+                            delay: 30.0,
                             output_inverted: false,
                             truth_table: None,
                         },
                     );
-                    best_match.insert(node_id, None);
                 }
-
                 AigNode::And { left, right } => {
-                    // Find best cut and cell match
-                    let best = self.find_best_match(aig, node_id, cuts, &node_delay, &node_area);
-
-                    if let Some(match_) = &best {
-                        let arrival = self.compute_arrival(&match_.cut, &node_delay);
-                        let total_delay = arrival + match_.delay;
-                        let total_area =
-                            self.compute_cut_area(&match_.cut, &node_area) + match_.area;
-
-                        node_delay.insert(node_id, total_delay);
-                        node_area.insert(node_id, total_area);
-
-                        // Create mapped node
+                    if let Some(Some(match_)) = node_best_cut.get(&node_id) {
                         let inputs: Vec<(AigNodeId, bool)> = match_
                             .cut
                             .leaves
@@ -434,18 +687,8 @@ impl CutMapper {
                             },
                         );
                     } else {
-                        // Fallback: map AND gate directly
-                        let and_delay = 25.0;
-                        let and_area = 2.0;
-
-                        let left_delay = node_delay.get(&left.node).copied().unwrap_or(0.0);
-                        let right_delay = node_delay.get(&right.node).copied().unwrap_or(0.0);
-                        let arrival = left_delay.max(right_delay);
-
-                        node_delay.insert(node_id, arrival + and_delay);
-                        node_area.insert(node_id, and_area);
-
-                        result.stats.record_cell("AND2_X1", and_area);
+                        // AND2 fallback
+                        result.stats.record_cell("AND2_X1", 2.0);
                         result.mapped_nodes.insert(
                             node_id,
                             MappedNode {
@@ -454,16 +697,15 @@ impl CutMapper {
                                     (left.node, left.inverted),
                                     (right.node, right.inverted),
                                 ],
-                                area: and_area,
-                                delay: and_delay,
+                                area: 2.0,
+                                delay: 25.0,
                                 output_inverted: false,
-                                truth_table: Some(0x8), // AND2 truth table
+                                truth_table: Some(0x8),
                             },
                         );
                     }
-
-                    best_match.insert(node_id, best);
                 }
+                _ => {}
             }
         }
 
@@ -521,6 +763,73 @@ impl CutMapper {
 
                 if cost < best_cost {
                     best_cost = cost;
+                    best = Some(match_);
+                }
+            }
+        }
+
+        best
+    }
+
+    /// Find the best cut match for a node using ABC's `if` cost function.
+    ///
+    /// Uses delay as primary criterion, then area flow as tie-breaker.
+    /// This ensures delay-optimal mapping in the forward pass.
+    fn find_best_match_if(
+        &self,
+        aig: &Aig,
+        node_id: AigNodeId,
+        cuts: &CutEnumeration,
+        node_delay: &IndexMap<AigNodeId, f64>,
+        node_area_flow: &IndexMap<AigNodeId, f64>,
+        fanout_count: &IndexMap<AigNodeId, usize>,
+    ) -> Option<CutMatch> {
+        let cut_set = cuts.get_cuts(node_id)?;
+
+        let mut best: Option<CutMatch> = None;
+        let mut best_delay = f64::MAX;
+        let mut best_area_flow = f64::MAX;
+        let mut best_num_leaves = usize::MAX;
+
+        for cut in &cut_set.cuts {
+            if cut.leaves.is_empty() {
+                continue;
+            }
+            if cut.leaves.len() == 1 && cut.leaves[0] == node_id {
+                continue;
+            }
+
+            let matches = self.matcher.find_matches(cut.truth_table, cut.leaves.len());
+
+            for mut match_ in matches {
+                match_.cut = cut.clone();
+
+                let arrival = self.compute_arrival(cut, node_delay);
+                let total_delay = arrival + match_.delay;
+
+                // Area flow: (cell_area + sum of leaf area_flows / leaf_fanout)
+                let leaf_area: f64 = cut
+                    .leaves
+                    .iter()
+                    .map(|l| {
+                        let af = node_area_flow.get(l).copied().unwrap_or(0.0);
+                        af
+                    })
+                    .sum();
+                let fo = fanout_count.get(&node_id).copied().unwrap_or(1).max(1);
+                let area_flow = (match_.area + leaf_area) / fo as f64;
+
+                // Selection: minimize delay, then area flow, then cut size
+                let is_better = total_delay < best_delay - 0.01
+                    || (total_delay < best_delay + 0.01
+                        && (area_flow < best_area_flow * 0.95
+                            || (area_flow < best_area_flow * 1.05
+                                && cut.leaves.len() < best_num_leaves)));
+
+                if is_better {
+                    best_delay = total_delay;
+                    best_area_flow = area_flow;
+                    best_num_leaves = cut.leaves.len();
                     best = Some(match_);
                 }
             }
