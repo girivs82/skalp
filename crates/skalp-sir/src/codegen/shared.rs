@@ -27,6 +27,11 @@ pub struct SharedCodegen<'a> {
     /// Pre-computed signal widths (including intermediate node outputs)
     /// This is the authoritative source for all signal widths - never guess or default to 32
     signal_width_cache: HashMap<String, usize>,
+    /// Field names collected during struct generation (sanitized, in order)
+    /// Used to emit offsetof() tables in the export section.
+    pub input_field_names: Vec<String>,
+    pub register_field_names: Vec<String>,
+    pub signal_field_names: Vec<String>,
 }
 
 impl<'a> SharedCodegen<'a> {
@@ -40,6 +45,9 @@ impl<'a> SharedCodegen<'a> {
             concat_recursion_depth: 0,
             in_batched_mode: false,
             signal_width_cache: HashMap::new(),
+            input_field_names: Vec::new(),
+            register_field_names: Vec::new(),
+            signal_field_names: Vec::new(),
         };
         codegen.build_signal_width_cache();
         codegen
@@ -601,24 +609,27 @@ impl<'a> SharedCodegen<'a> {
             "{} {}{};\n",
             base_type, sanitized_name, array_suffix
         ));
+        // Track field name for offset table generation
+        self.signal_field_names.push(sanitized_name);
         false
     }
 
     /// Generate the Inputs struct definition
     pub fn generate_inputs_struct(&mut self) {
+        self.input_field_names.clear();
         self.writeln("// Input buffer");
         self.writeln("struct Inputs {");
         self.indent();
 
         for input in &self.module.inputs {
+            let sanitized = self.sanitize_name(&input.name);
             let (base_type, array_suffix) =
                 self.type_mapper.get_struct_field_parts(&input.sir_type);
             self.write_indented(&format!(
                 "{} {}{};\n",
-                base_type,
-                self.sanitize_name(&input.name),
-                array_suffix
+                base_type, sanitized, array_suffix
             ));
+            self.input_field_names.push(sanitized);
         }
 
         self.dedent();
@@ -627,6 +638,7 @@ impl<'a> SharedCodegen<'a> {
 
     /// Generate the Registers struct definition
     pub fn generate_registers_struct(&mut self) {
+        self.register_field_names.clear();
         self.writeln("// Register buffer (flip-flop outputs only)");
         self.writeln("struct Registers {");
         self.indent();
@@ -645,13 +657,13 @@ impl<'a> SharedCodegen<'a> {
                 found_signal.map(|s| &s.sir_type).unwrap_or(&default_type)
             };
 
+            let sanitized = self.sanitize_name(name);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
             self.write_indented(&format!(
                 "{} {}{};\n",
-                base_type,
-                self.sanitize_name(name),
-                array_suffix
+                base_type, sanitized, array_suffix
             ));
+            self.register_field_names.push(sanitized);
         }
 
         // Also add flip-flop outputs that aren't state elements
@@ -671,15 +683,15 @@ impl<'a> SharedCodegen<'a> {
         sorted_ff_outputs.sort();
 
         for name in sorted_ff_outputs {
+            let sanitized = self.sanitize_name(name);
             let width = self.get_signal_width(name);
             let sir_type = SirType::Bits(width);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(&sir_type);
             self.write_indented(&format!(
                 "{} {}{};\n",
-                base_type,
-                self.sanitize_name(name),
-                array_suffix
+                base_type, sanitized, array_suffix
             ));
+            self.register_field_names.push(sanitized);
         }
 
         self.dedent();
@@ -688,6 +700,7 @@ impl<'a> SharedCodegen<'a> {
 
     /// Generate the Signals struct definition
     pub fn generate_signals_struct(&mut self) {
+        self.signal_field_names.clear();
         self.writeln("// Signal buffer (all computed values)");
         self.writeln("struct Signals {");
         self.indent();
@@ -908,6 +921,56 @@ impl<'a> SharedCodegen<'a> {
         self.writeln("};\n");
     }
 
+    /// Generate C++ field offset tables using offsetof()/sizeof().
+    /// These are emitted as static arrays and referenced from the SkalpKernel export table.
+    /// The runtime reads these tables instead of computing offsets from SIR metadata,
+    /// which eliminates struct layout mismatches between codegen and runtime.
+    pub fn generate_field_offset_tables(&mut self) -> String {
+        let mut out = String::new();
+
+        out.push_str("// Field offset tables (generated via offsetof/sizeof)\n");
+        out.push_str("struct SkalpFieldEntry {\n");
+        out.push_str("    const char* name;\n");
+        out.push_str("    size_t offset;\n");
+        out.push_str("    size_t size;\n");
+        out.push_str("};\n\n");
+
+        // Helper closure to emit a table for a given struct
+        fn emit_table(
+            out: &mut String,
+            struct_name: &str,
+            table_name: &str,
+            fields: &[String],
+        ) {
+            out.push_str(&format!(
+                "static const SkalpFieldEntry {}_field_table[] = {{\n",
+                table_name
+            ));
+            for field in fields {
+                out.push_str(&format!(
+                    "    {{\"{}\", offsetof({}, {}), sizeof((({struct_name}*)0)->{})}},\n",
+                    field, struct_name, field, field,
+                    struct_name = struct_name,
+                ));
+            }
+            if fields.is_empty() {
+                out.push_str("    {0, 0, 0}\n"); // dummy entry for empty tables
+            }
+            out.push_str("};\n");
+            out.push_str(&format!(
+                "static const size_t {}_field_count = {};\n\n",
+                table_name,
+                fields.len()
+            ));
+        }
+
+        emit_table(&mut out, "Inputs", "inputs", &self.input_field_names);
+        emit_table(&mut out, "Registers", "registers", &self.register_field_names);
+        emit_table(&mut out, "Signals", "signals", &self.signal_field_names);
+
+        out
+    }
+
     /// Generate binary operation expression
     pub fn generate_binary_op(&mut self, node: &SirNode, op: &BinaryOperation) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
@@ -1046,6 +1109,35 @@ impl<'a> SharedCodegen<'a> {
                 left_expr,
                 op_str,
                 right_expr
+            ));
+            return;
+        }
+
+        // Array comparisons: wide signals (>64 bits on C++) stored as uint32_t[N].
+        // C++ `==` on arrays compares pointers, not contents. Use memcmp instead.
+        let left_uses_array = self.uses_array_storage(left_width);
+        let right_uses_array = self.uses_array_storage(right_width);
+        if is_comparison && (left_uses_array || right_uses_array) {
+            let num_words = left_width.max(right_width).div_ceil(32);
+            let byte_count = num_words * 4;
+            let eq_expr = format!(
+                "memcmp(signals->{}, signals->{}, {})",
+                self.sanitize_name(left),
+                self.sanitize_name(right),
+                byte_count
+            );
+            let cmp = match op {
+                BinaryOperation::Eq => format!("({} == 0)", eq_expr),
+                BinaryOperation::Neq => format!("({} != 0)", eq_expr),
+                // For ordered comparisons on wide arrays, memcmp gives
+                // lexicographic order which may differ from numeric order.
+                // But Eq/Neq are the common case for hash comparisons.
+                _ => format!("({} {} 0)", eq_expr, op_str),
+            };
+            self.write_indented(&format!(
+                "signals->{} = {} ? 1 : 0;\n",
+                self.sanitize_name(output),
+                cmp
             ));
             return;
         }

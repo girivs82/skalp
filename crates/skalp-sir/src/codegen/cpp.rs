@@ -45,6 +45,7 @@ impl<'a> CppBackend<'a> {
 // This file is auto-generated. Do not edit.
 
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include <math.h>
 
@@ -391,7 +392,12 @@ extern "C" void batched_simulation(
 
     /// Generate the export table for dynamic loading
     fn generate_export_table(&mut self) -> String {
-        r#"// Export table for dynamic loading
+        let mut out = String::new();
+
+        // Emit field offset tables (uses offsetof/sizeof for authoritative layout)
+        out.push_str(&self.shared.generate_field_offset_tables());
+
+        out.push_str(r#"// Export table for dynamic loading
 struct SkalpKernel {
     void (*combinational_eval)(const Inputs*, const Registers*, Signals*);
     void (*sequential_update)(const Inputs*, const Registers*, const Signals*, Registers*);
@@ -399,6 +405,12 @@ struct SkalpKernel {
     size_t inputs_size;
     size_t registers_size;
     size_t signals_size;
+    const SkalpFieldEntry* inputs_fields;
+    size_t inputs_field_count;
+    const SkalpFieldEntry* registers_fields;
+    size_t registers_field_count;
+    const SkalpFieldEntry* signals_fields;
+    size_t signals_field_count;
 };
 
 extern "C" const SkalpKernel SKALP_KERNEL = {
@@ -407,10 +419,16 @@ extern "C" const SkalpKernel SKALP_KERNEL = {
     batched_simulation,
     sizeof(Inputs),
     sizeof(Registers),
-    sizeof(Signals)
+    sizeof(Signals),
+    inputs_field_table,
+    inputs_field_count,
+    registers_field_table,
+    registers_field_count,
+    signals_field_table,
+    signals_field_count
 };
-"#
-        .to_string()
+"#);
+        out
     }
 }
 

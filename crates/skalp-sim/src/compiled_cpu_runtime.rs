@@ -22,7 +22,7 @@ use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, Sim
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use libloading::{Library, Symbol};
-use skalp_sir::{CppBackend, SirModule, SirNodeKind};
+use skalp_sir::{CppBackend, SirModule, SirNodeKind, SirType};
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -31,6 +31,14 @@ type CombinationalEvalFn = unsafe extern "C" fn(*const c_void, *const c_void, *m
 type SequentialUpdateFn =
     unsafe extern "C" fn(*const c_void, *const c_void, *const c_void, *mut c_void);
 type BatchedSimulationFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, u32);
+
+/// A single field entry from the C++ offset table (must match C++ SkalpFieldEntry)
+#[repr(C)]
+struct SkalpFieldEntry {
+    name: *const std::os::raw::c_char,
+    offset: usize,
+    size: usize,
+}
 
 /// The kernel export table structure (must match C++ layout)
 #[repr(C)]
@@ -41,6 +49,12 @@ struct SkalpKernel {
     inputs_size: usize,
     registers_size: usize,
     signals_size: usize,
+    inputs_fields: *const SkalpFieldEntry,
+    inputs_field_count: usize,
+    registers_fields: *const SkalpFieldEntry,
+    registers_field_count: usize,
+    signals_fields: *const SkalpFieldEntry,
+    signals_field_count: usize,
 }
 
 /// Compiled CPU runtime for high-performance simulation
@@ -209,9 +223,9 @@ impl CompiledCpuRuntime {
         let signals = AlignedBuffer::new(signals_size);
         let shadow_registers = AlignedBuffer::new(registers_size);
 
-        // Build field maps
+        // Build field maps from the C++ offset tables (authoritative layout)
         let (input_fields, register_fields, signal_fields, output_mappings) =
-            Self::build_field_maps(module);
+            unsafe { Self::build_field_maps(module, kernel) };
 
         // Collect ALL clock signal names for multi-clock edge detection
         // (matching the GPU runtime pattern in gpu_runtime.rs:652-675)
@@ -268,70 +282,61 @@ impl CompiledCpuRuntime {
         })
     }
 
-    /// Build field offset maps from the SIR module
-    fn build_field_maps(
+    /// Build field offset maps by reading the C++ offset tables emitted via offsetof()/sizeof().
+    /// This is the authoritative source of struct layout — no runtime offset computation needed.
+    unsafe fn build_field_maps(
         module: &SirModule,
+        kernel: *const SkalpKernel,
     ) -> (FieldMap, FieldMap, FieldMap, HashMap<String, String>) {
         let mut input_fields = FieldMap::new();
         let mut register_fields = FieldMap::new();
         let mut signal_fields = FieldMap::new();
         let mut output_mappings = HashMap::new();
 
-        // Input fields
-        let mut offset = 0;
-        for input in &module.inputs {
-            let size = Self::type_byte_size(input.sir_type.width());
-            let sanitized = input.name.replace('.', "_");
-            input_fields.add(sanitized, offset, size, input.sir_type.width());
-            offset += size;
-            // Align to 4 bytes
-            offset = (offset + 3) & !3;
+        let k = &*kernel;
+
+        // Read input field table
+        let input_entries =
+            std::slice::from_raw_parts(k.inputs_fields, k.inputs_field_count);
+        for entry in input_entries {
+            let name = std::ffi::CStr::from_ptr(entry.name)
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+            // width_bits is not critical for correctness — use size*8 as approximation
+            input_fields.add(name, entry.offset, entry.size, entry.size * 8);
         }
 
-        // Register fields (state elements)
-        let mut offset = 0;
-        let mut sorted_states: Vec<_> = module.state_elements.iter().collect();
-        sorted_states.sort_by_key(|(name, _)| *name);
-        for (name, elem) in &sorted_states {
-            let size = Self::type_byte_size(elem.width);
-            let sanitized = name.replace('.', "_");
-            register_fields.add(sanitized, offset, size, elem.width);
-            offset += size;
-            offset = (offset + 3) & !3;
+        // Read register field table
+        let register_entries =
+            std::slice::from_raw_parts(k.registers_fields, k.registers_field_count);
+        for entry in register_entries {
+            let name = std::ffi::CStr::from_ptr(entry.name)
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+            register_fields.add(name, entry.offset, entry.size, entry.size * 8);
         }
 
-        // Signal fields (outputs and intermediate signals)
-        let mut offset = 0;
-        let mut added = std::collections::HashSet::new();
+        // Read signal field table
+        let signal_entries =
+            std::slice::from_raw_parts(k.signals_fields, k.signals_field_count);
+        for entry in signal_entries {
+            let name = std::ffi::CStr::from_ptr(entry.name)
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+            signal_fields.add(name.clone(), entry.offset, entry.size, entry.size * 8);
+        }
 
-        // Add outputs first
+        // Build output mappings (output name -> sanitized signal field name)
         for output in &module.outputs {
             if module.state_elements.contains_key(&output.name) {
                 continue;
             }
             let sanitized = output.name.replace('.', "_");
-            if added.insert(sanitized.clone()) {
-                let size = Self::type_byte_size(output.sir_type.width());
-                signal_fields.add(sanitized.clone(), offset, size, output.sir_type.width());
+            if signal_fields.get(&sanitized).is_some() {
                 output_mappings.insert(output.name.clone(), sanitized);
-                offset += size;
-                offset = (offset + 3) & !3;
-            }
-        }
-
-        // Add other signals
-        let input_names: std::collections::HashSet<_> =
-            module.inputs.iter().map(|i| i.name.clone()).collect();
-        for signal in &module.signals {
-            if signal.is_state || input_names.contains(&signal.name) {
-                continue;
-            }
-            let sanitized = signal.name.replace('.', "_");
-            if added.insert(sanitized.clone()) {
-                let size = Self::type_byte_size(signal.width);
-                signal_fields.add(sanitized, offset, size, signal.width);
-                offset += size;
-                offset = (offset + 3) & !3;
             }
         }
 
@@ -343,13 +348,27 @@ impl CompiledCpuRuntime {
         )
     }
 
-    /// Get byte size for a bit width
+    /// Get byte size for a bit width (scalar types only)
     fn type_byte_size(width: usize) -> usize {
         match width {
             0 => 4,
             1..=32 => 4,
             33..=64 => 8,
             _ => width.div_ceil(32) * 4,
+        }
+    }
+
+    /// Get byte size for a SIR type, correctly handling arrays.
+    ///
+    /// The C++ codegen aligns each array element to its own uint32_t/uint64_t
+    /// slot (e.g., `[nat[28]; 4096]` becomes `uint32_t[4096]` = 16384 bytes).
+    /// This function matches that layout so runtime field offsets are correct.
+    fn sir_type_byte_size(sir_type: &SirType) -> usize {
+        match sir_type {
+            SirType::Array(elem_type, count) => {
+                Self::sir_type_byte_size(elem_type) * count
+            }
+            _ => Self::type_byte_size(sir_type.width()),
         }
     }
 

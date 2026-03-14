@@ -1784,9 +1784,66 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                 }
+                Statement::Case(case_stmt) => {
+                    // Recurse into case/match arms to find array writes
+                    for item in &case_stmt.items {
+                        self.scan_block_for_array_writes(&item.block.statements, array_writes);
+                    }
+                    if let Some(default_block) = &case_stmt.default {
+                        self.scan_block_for_array_writes(
+                            &default_block.statements,
+                            array_writes,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
+    }
+
+    /// Search a list of statements for an array write, returning (index, value, write_enable).
+    /// Handles Assignment, If, and Case statements recursively.
+    fn find_array_write_in_statements(
+        &mut self,
+        statements: &[Statement],
+        array_base: &LValue,
+    ) -> (usize, usize, usize) {
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        if self.lvalues_match(base, array_base) {
+                            let idx = self.create_expression_node(index);
+                            let val = self.create_expression_node(&assign.rhs);
+                            return (idx, val, 0); // 0 = unconditional
+                        }
+                    }
+                }
+                Statement::If(nested_if) => {
+                    let (idx, val, we) =
+                        self.synthesize_array_write_in_if(nested_if, array_base);
+                    if idx != 0 && val != 0 {
+                        return (idx, val, we);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    let (idx, val, we) =
+                        self.synthesize_array_write_in_case(case_stmt, array_base);
+                    if idx != 0 && val != 0 {
+                        return (idx, val, we);
+                    }
+                }
+                Statement::Block(block) => {
+                    let (idx, val, we) =
+                        self.find_array_write_in_statements(&block.statements, array_base);
+                    if idx != 0 && val != 0 {
+                        return (idx, val, we);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (0, 0, 0) // Not found
     }
 
     /// Synthesize array write from an if statement, returning (index, value, write_enable).
@@ -1797,70 +1854,16 @@ impl<'a> MirToSirConverter<'a> {
         if_stmt: &IfStatement,
         array_base: &LValue,
     ) -> (usize, usize, usize) {
-        // Find array write in then branch (recursively search nested ifs)
-        let mut then_index = 0;
-        let mut then_value = 0;
-        let mut then_write_enable: usize = 0; // 0 = unconditional (direct assignment found)
-        for stmt in &if_stmt.then_block.statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    if let LValue::BitSelect { base, index } = &assign.lhs {
-                        if self.lvalues_match(base, array_base) {
-                            then_index = self.create_expression_node(index);
-                            then_value = self.create_expression_node(&assign.rhs);
-                            // Direct assignment — unconditional within this branch
-                            then_write_enable = 0;
-                            break;
-                        }
-                    }
-                }
-                Statement::If(nested_if) => {
-                    // Recursively search nested if statements
-                    let (nested_index, nested_value, nested_we) =
-                        self.synthesize_array_write_in_if(nested_if, array_base);
-                    if nested_index != 0 && nested_value != 0 {
-                        then_index = nested_index;
-                        then_value = nested_value;
-                        then_write_enable = nested_we;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Find array write in then branch
+        let (then_index, then_value, then_write_enable) =
+            self.find_array_write_in_statements(&if_stmt.then_block.statements, array_base);
 
-        // Find array write in else branch (if any, recursively search nested ifs)
-        let mut else_index = 0;
-        let mut else_value = 0;
-        let mut else_write_enable: usize = 0;
-        if let Some(else_block) = &if_stmt.else_block {
-            for stmt in &else_block.statements {
-                match stmt {
-                    Statement::Assignment(assign) => {
-                        if let LValue::BitSelect { base, index } = &assign.lhs {
-                            if self.lvalues_match(base, array_base) {
-                                else_index = self.create_expression_node(index);
-                                else_value = self.create_expression_node(&assign.rhs);
-                                else_write_enable = 0;
-                                break;
-                            }
-                        }
-                    }
-                    Statement::If(nested_if) => {
-                        // Recursively search nested if statements
-                        let (nested_index, nested_value, nested_we) =
-                            self.synthesize_array_write_in_if(nested_if, array_base);
-                        if nested_index != 0 && nested_value != 0 {
-                            else_index = nested_index;
-                            else_value = nested_value;
-                            else_write_enable = nested_we;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Find array write in else branch
+        let (else_index, else_value, else_write_enable) = if let Some(else_block) = &if_stmt.else_block {
+            self.find_array_write_in_statements(&else_block.statements, array_base)
+        } else {
+            (0, 0, 0)
+        };
 
         // Build conditional mux for both index and value
         let condition = self.create_expression_node(&if_stmt.condition);
@@ -1929,6 +1932,103 @@ impl<'a> MirToSirConverter<'a> {
             // No writes found
             (0, 0, 0)
         }
+    }
+
+    /// Synthesize array write from a case/match statement.
+    /// Builds a mux tree across all case arms that contain array writes.
+    fn synthesize_array_write_in_case(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        array_base: &LValue,
+    ) -> (usize, usize, usize) {
+        let case_expr = self.create_expression_node(&case_stmt.expr);
+
+        // Collect (guard, index, value, write_enable) for each arm that writes
+        let mut arm_writes: Vec<(usize, usize, usize, usize)> = Vec::new();
+
+        for item in &case_stmt.items {
+            let (idx, val, we) =
+                self.find_array_write_in_statements(&item.block.statements, array_base);
+            if idx != 0 && val != 0 {
+                // Build case guard: case_expr == arm_value(s)
+                let guard = if item.values.len() == 1 {
+                    let val_node = self.create_expression_node(&item.values[0]);
+                    self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::Equal,
+                        case_expr,
+                        val_node,
+                    )
+                } else {
+                    let mut or_node = {
+                        let val_node = self.create_expression_node(&item.values[0]);
+                        self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr,
+                            val_node,
+                        )
+                    };
+                    for value in &item.values[1..] {
+                        let val_node = self.create_expression_node(value);
+                        let eq_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr,
+                            val_node,
+                        );
+                        or_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Or,
+                            or_node,
+                            eq_node,
+                        );
+                    }
+                    or_node
+                };
+
+                // Combine guard with nested write_enable
+                let full_we = if we != 0 {
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::And, guard, we)
+                } else {
+                    guard
+                };
+                arm_writes.push((full_we, idx, val, 0));
+            }
+        }
+
+        // Also check default arm
+        if let Some(default_block) = &case_stmt.default {
+            let (idx, val, we) =
+                self.find_array_write_in_statements(&default_block.statements, array_base);
+            if idx != 0 && val != 0 {
+                arm_writes.push((we, idx, val, 0));
+            }
+        }
+
+        if arm_writes.is_empty() {
+            return (0, 0, 0);
+        }
+
+        if arm_writes.len() == 1 {
+            let (we, idx, val, _) = arm_writes[0];
+            return (idx, val, we);
+        }
+
+        // Multiple arms write — chain muxes: last arm has highest priority
+        let (first_we, mut result_idx, mut result_val, _) = arm_writes[0];
+        let mut result_we = first_we;
+
+        for &(arm_we, arm_idx, arm_val, _) in &arm_writes[1..] {
+            // MUX: arm_we ? (arm_idx, arm_val) : (result_idx, result_val)
+            result_idx = self.create_mux_node(arm_we, arm_idx, result_idx);
+            result_val = self.create_mux_node(arm_we, arm_val, result_val);
+            // Combined write_enable = arm_we OR result_we
+            if result_we != 0 {
+                result_we =
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Or, arm_we, result_we);
+            } else {
+                result_we = arm_we;
+            }
+        }
+
+        (result_idx, result_val, result_we)
     }
 
     fn lvalues_match(&self, lv1: &LValue, lv2: &LValue) -> bool {
