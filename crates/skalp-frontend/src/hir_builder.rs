@@ -3249,6 +3249,11 @@ impl HirBuilderContext {
                         statements.push(HirStatement::For(for_stmt));
                     }
                 }
+                SyntaxKind::WhileStmt => {
+                    if let Some(while_stmt) = self.build_while_statement(&child) {
+                        statements.push(HirStatement::While(while_stmt));
+                    }
+                }
                 SyntaxKind::MatchStmt => {
                     if let Some(match_stmt) = self.build_match_statement(&child) {
                         statements.push(HirStatement::Match(match_stmt));
@@ -3395,6 +3400,7 @@ impl HirBuilderContext {
             }
             SyntaxKind::IfStmt => self.build_if_statement(node).map(HirStatement::If),
             SyntaxKind::ForStmt => self.build_for_statement(node).map(HirStatement::For),
+            SyntaxKind::WhileStmt => self.build_while_statement(node).map(HirStatement::While),
             SyntaxKind::MatchStmt => self.build_match_statement(node).map(HirStatement::Match),
             SyntaxKind::FlowStmt => self.build_flow_statement(node).map(HirStatement::Flow),
             SyntaxKind::AssertStmt => self.build_assert_statement(node).map(HirStatement::Assert),
@@ -4466,6 +4472,42 @@ impl HirBuilderContext {
             body,
             unroll,
         })
+    }
+
+    /// Build a while loop statement from a WhileStmt node
+    /// Parser creates: WhileStmt -> WhileKw -> condition_expr -> LBrace -> [body] -> RBrace
+    fn build_while_statement(
+        &mut self,
+        node: &SyntaxNode,
+    ) -> Option<HirWhileStatement> {
+        // The condition is the first expression child (before LBrace)
+        let mut condition = None;
+        let mut body = Vec::new();
+        let mut in_body = false;
+
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    in_body = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    in_body = false;
+                }
+                rowan::NodeOrToken::Node(n) if !in_body && condition.is_none() => {
+                    // First expression node before body = condition
+                    condition = self.build_expression(n);
+                }
+                rowan::NodeOrToken::Node(n) if in_body => {
+                    if let Some(stmt) = self.build_statement(n) {
+                        body.push(stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let condition = condition?;
+        Some(HirWhileStatement { condition, body })
     }
 
     /// Build a range expression from a RangeExpr node
@@ -6081,10 +6123,10 @@ impl HirBuilderContext {
 
     /// Build match arm
     fn build_match_arm(&mut self, node: &SyntaxNode) -> Option<HirMatchArm> {
-        // Find pattern
-        let pattern = node
+        // Find pattern — check for enum variant with payload (IdentPattern followed by TuplePattern)
+        let pattern_nodes: Vec<_> = node
             .children()
-            .find(|n| {
+            .filter(|n| {
                 matches!(
                     n.kind(),
                     SyntaxKind::LiteralPattern
@@ -6093,7 +6135,47 @@ impl HirBuilderContext {
                         | SyntaxKind::TuplePattern
                 )
             })
-            .and_then(|n| self.build_pattern(&n))?;
+            .collect();
+
+        let pattern = if pattern_nodes.len() >= 2
+            && pattern_nodes[0].kind() == SyntaxKind::IdentPattern
+            && pattern_nodes[1].kind() == SyntaxKind::TuplePattern
+        {
+            // Enum variant with payload: State::Transfer(count)
+            // IdentPattern has the path (State::Transfer), TuplePattern has bindings (count)
+            let path_pattern = self.build_pattern(&pattern_nodes[0])?;
+            if let HirPattern::Path(enum_name, variant_name) = path_pattern {
+                // Build payload bindings from TuplePattern — extract variable names
+                // and allocate VariableIds for them
+                let mut bindings = Vec::new();
+                for child in pattern_nodes[1].children() {
+                    if child.kind() == SyntaxKind::IdentPattern {
+                        // Extract the identifier name directly
+                        let name = child
+                            .children_with_tokens()
+                            .filter_map(|e| {
+                                e.as_token()
+                                    .filter(|t| t.kind() == SyntaxKind::Ident)
+                                    .map(|t| t.text().to_string())
+                            })
+                            .next();
+                        if let Some(name) = name {
+                            if name != "_" {
+                                let var_id = self.next_variable_id();
+                                bindings.push((name, var_id));
+                            }
+                        }
+                    }
+                }
+                Some(HirPattern::TupleVariant(enum_name, variant_name, bindings))
+            } else {
+                Some(path_pattern)
+            }
+        } else if let Some(first) = pattern_nodes.first() {
+            self.build_pattern(first)
+        } else {
+            None
+        }?;
 
         // Find optional guard
         let guard = node
@@ -6122,6 +6204,23 @@ impl HirBuilderContext {
                     })
                     .and_then(|n| self.build_expression(&n))
             });
+
+        // Register payload variable bindings from TupleVariant patterns
+        // so they can be referenced in the arm body
+        let has_payload_bindings;
+        if let HirPattern::TupleVariant(_, _, ref bindings) = pattern {
+            has_payload_bindings = !bindings.is_empty();
+            if has_payload_bindings {
+                self.symbols.enter_scope();
+                for (name, var_id) in bindings {
+                    self.symbols.variables.insert(name.clone(), *var_id);
+                    self.symbols
+                        .add_to_scope(name, SymbolId::Variable(*var_id));
+                }
+            }
+        } else {
+            has_payload_bindings = false;
+        }
 
         // Find statements or expression (after the arrow)
         // BUG FIX #147: Match arms can have either:
@@ -6160,6 +6259,11 @@ impl HirBuilderContext {
                 }
                 _ => {}
             }
+        }
+
+        // Pop payload variable scope if we pushed one
+        if has_payload_bindings {
+            self.symbols.exit_scope();
         }
 
         Some(HirMatchArm {
@@ -9256,6 +9360,11 @@ impl HirBuilderContext {
                 SyntaxKind::ForStmt => {
                     if let Some(for_stmt) = self.build_for_statement(&child) {
                         statements.push(HirStatement::For(for_stmt));
+                    }
+                }
+                SyntaxKind::WhileStmt => {
+                    if let Some(while_stmt) = self.build_while_statement(&child) {
+                        statements.push(HirStatement::While(while_stmt));
                     }
                 }
                 SyntaxKind::MatchStmt => {
@@ -13823,7 +13932,11 @@ impl HirBuilderContext {
         // Check for associated data types (tuple variant syntax)
         // Look for TypeAnnotation nodes between LParen and RParen
         // BUG #184 FIX: Use extract_hir_type for proper type resolution
-        let associated_data = if node.children().any(|n| n.kind() == SyntaxKind::LParen) {
+        // Note: LParen is a TOKEN, not a node, so use children_with_tokens()
+        let associated_data = if node
+            .children_with_tokens()
+            .any(|n| n.kind() == SyntaxKind::LParen)
+        {
             let types: Vec<HirType> = node
                 .children()
                 .filter(|n| n.kind() == SyntaxKind::TypeAnnotation)

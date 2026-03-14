@@ -765,6 +765,10 @@ fn emit_pattern(pat: &HirPattern) -> String {
             format!("({})", inner.join(", "))
         }
         HirPattern::Path(enum_name, variant) => format!("{enum_name}::{variant}"),
+        HirPattern::TupleVariant(enum_name, variant, bindings) => {
+            let binding_names: Vec<_> = bindings.iter().map(|(name, _)| name.clone()).collect();
+            format!("{enum_name}::{variant}({})", binding_names.join(", "))
+        }
     }
 }
 

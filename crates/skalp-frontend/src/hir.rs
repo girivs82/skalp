@@ -596,6 +596,7 @@ pub enum HirStatement {
     Return(Option<HirExpression>),
     Expression(HirExpression),
     For(HirForStatement),
+    While(HirWhileStatement),
     GenerateFor(HirGenerateFor),
     GenerateIf(HirGenerateIf),
     GenerateMatch(HirGenerateMatch),
@@ -632,6 +633,16 @@ pub struct HirForStatement {
     pub body: Vec<HirStatement>,
     /// Unroll configuration (None = sequential loop)
     pub unroll: Option<UnrollConfig>,
+}
+
+/// While loop statement in HIR
+/// Desugared to unrolled assignments at HIR→MIR when bounds are constant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirWhileStatement {
+    /// Condition expression
+    pub condition: HirExpression,
+    /// Loop body statements
+    pub body: Vec<HirStatement>,
 }
 
 /// Range expression in HIR (for `start..end` or `start..=end`)
@@ -1906,6 +1917,9 @@ pub enum HirPattern {
     Wildcard,
     Tuple(Vec<HirPattern>),
     Path(String, String), // enum_name, variant_name for enum matching
+    /// Enum variant with payload bindings: State::Transfer(count)
+    /// Stores (enum_name, variant_name, [(binding_name, variable_id)])
+    TupleVariant(String, String, Vec<(String, VariableId)>),
 }
 
 /// Generic parameter in HIR

@@ -144,6 +144,9 @@ pub struct HirToMir<'hir> {
     /// Track dynamically created variables (from let bindings in event blocks)
     /// Maps HIR VariableId to (MIR VariableId, name, type)
     dynamic_variables: IndexMap<hir::VariableId, (VariableId, String, hir::HirType)>,
+    /// Enum payload variable expressions: HIR VariableId → extraction expression
+    /// Used for match arms that bind payload data (e.g., State::Transfer(count))
+    payload_var_expressions: IndexMap<hir::VariableId, Expression>,
     /// Track RHS expressions for dynamic variables (for module instance argument expansion)
     /// Maps MIR VariableId to the converted RHS expression
     /// This allows expanding variable references to their actual values when used as module args
@@ -365,6 +368,7 @@ impl<'hir> HirToMir<'hir> {
             const_evaluator: ConstEvaluator::new(),
             dynamic_variables: IndexMap::new(),
             dynamic_variable_rhs: IndexMap::new(),
+            payload_var_expressions: IndexMap::new(),
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
             match_arm_prefix: None,
@@ -2066,9 +2070,18 @@ impl<'hir> HirToMir<'hir> {
                     self.convert_if_statement(if_stmt).map(Statement::If)
                 }
             }
-            hir::HirStatement::Match(match_stmt) => self
-                .convert_match_statement(match_stmt)
-                .map(Statement::Case),
+            hir::HirStatement::Match(match_stmt) => {
+                // Check if any arm has a TupleVariant pattern (enum with payload)
+                let has_payload = match_stmt.arms.iter().any(|arm| {
+                    matches!(arm.pattern, hir::HirPattern::TupleVariant(..))
+                });
+                if has_payload {
+                    self.convert_match_with_payloads(match_stmt)
+                } else {
+                    self.convert_match_statement(match_stmt)
+                        .map(Statement::Case)
+                }
+            }
             hir::HirStatement::Block(stmts) => {
                 // Recursively apply synthesis resolution within blocks
                 Some(Statement::Block(self.convert_statements(stmts)))
@@ -3193,6 +3206,11 @@ impl<'hir> HirToMir<'hir> {
                 }
                 // Normal for loop - convert to sequential loop
                 self.convert_for_statement(for_stmt)
+            }
+            hir::HirStatement::While(while_stmt) => {
+                // While loops in hardware must be unrolled at compile time.
+                // Detect the common pattern: while var < CONST { ...; var = var + 1 }
+                self.unroll_while_loop(while_stmt)
             }
             hir::HirStatement::Return(_return_expr) => {
                 // Return statements are function constructs
@@ -5487,6 +5505,296 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Unroll a while loop at compile time.
+    ///
+    /// While loops in hardware must be statically unrolled — there is no sequential
+    /// execution within a clock edge. This function:
+    ///
+    /// 1. Analyzes the condition to extract the loop variable and bound
+    /// 2. Finds the update expression in the body (e.g. `i = i + 1`)
+    /// 3. Determines the initial value (from the condition pattern or defaults to 0)
+    /// 4. Unrolls by substituting the loop variable with each concrete iteration value
+    ///
+    /// The body can contain arbitrary statements: if/else, match, nested loops,
+    /// signal declarations, etc. — all are handled via `substitute_hir_variable_in_stmt`.
+    fn unroll_while_loop(
+        &mut self,
+        while_stmt: &hir::HirWhileStatement,
+    ) -> Option<Statement> {
+        // Step 1: Analyze condition to extract (var_name, var_id, comparison_op, bound)
+        let (var_name, var_id, bound, is_strict_lt) =
+            match self.analyze_while_condition(&while_stmt.condition) {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "[skalp] warning: while loop condition could not be analyzed for \
+                         compile-time unrolling — loop body will be dropped. \
+                         Use `for var in start..end` instead."
+                    );
+                    return None;
+                }
+            };
+
+        // Step 2: Find the update statement and extract the step value.
+        // Look for patterns like `var = var + STEP` or `var = var - STEP`.
+        let (step, update_indices) =
+            self.find_while_update(&while_stmt.body, &var_name, var_id);
+
+        // Step 3: Determine initial value.
+        // Check if the while loop's preceding context set the variable. For now,
+        // we use the most common pattern: init = 0 (from `signal var: type = 0`).
+        // The actual initial value is already emitted as a separate MIR statement
+        // by the signal declaration; here we just need to know it for unrolling.
+        let init = self.find_while_init_value(&var_name, var_id);
+
+        // Step 4: Unroll
+        let max_iterations: i64 = 100_000; // safety limit
+        let mut all_statements = Vec::new();
+        let mut current = init;
+        let mut iter_count: i64 = 0;
+
+        loop {
+            // Evaluate termination condition
+            let should_continue = if is_strict_lt {
+                current < bound
+            } else {
+                current <= bound
+            };
+            if !should_continue || iter_count >= max_iterations {
+                if iter_count >= max_iterations {
+                    eprintln!(
+                        "[skalp] error: while loop exceeded {} iterations during unrolling \
+                         (var={}, init={}, bound={}, step={}). Possible infinite loop.",
+                        max_iterations, var_name, init, bound, step
+                    );
+                }
+                break;
+            }
+
+            // Substitute loop variable with current value in each body statement,
+            // skipping the update statement(s) (e.g. `i = i + 1`).
+            for (idx, body_stmt) in while_stmt.body.iter().enumerate() {
+                if update_indices.contains(&idx) {
+                    continue; // skip the counter update
+                }
+
+                let substituted = Self::substitute_hir_variable_in_stmt(
+                    body_stmt,
+                    var_id,
+                    &var_name,
+                    current,
+                );
+
+                // Convert substituted HIR statement to MIR
+                if let Some(mir_stmt) = self.convert_statement(&substituted) {
+                    all_statements.push(mir_stmt);
+                }
+            }
+
+            current += step;
+            iter_count += 1;
+        }
+
+        if all_statements.is_empty() {
+            None
+        } else {
+            Some(Statement::Block(Block {
+                statements: all_statements,
+            }))
+        }
+    }
+
+    /// Analyze a while loop condition to extract the loop variable and bound.
+    /// Handles patterns like:
+    ///   - `var < CONST`  → (var_name, var_id, CONST, true)
+    ///   - `var <= CONST` → (var_name, var_id, CONST, false)
+    ///   - `var >= CONST` with step < 0 is also supported
+    /// Returns (var_name, var_id, bound, is_strict_lt)
+    fn analyze_while_condition(
+        &self,
+        condition: &hir::HirExpression,
+    ) -> Option<(String, hir::VariableId, i64, bool)> {
+        if let hir::HirExpression::Binary(bin) = condition {
+            // Check for var < const or var <= const
+            match bin.op {
+                hir::HirBinaryOp::Less => {
+                    let var_info = self.extract_variable_info(&bin.left)?;
+                    let bound = self.eval_const_hir_expression(&bin.right)?;
+                    Some((var_info.0, var_info.1, bound, true))
+                }
+                hir::HirBinaryOp::LessEqual => {
+                    let var_info = self.extract_variable_info(&bin.left)?;
+                    let bound = self.eval_const_hir_expression(&bin.right)?;
+                    Some((var_info.0, var_info.1, bound, false))
+                }
+                hir::HirBinaryOp::Greater => {
+                    // var > const → iterate downward
+                    let var_info = self.extract_variable_info(&bin.left)?;
+                    let bound = self.eval_const_hir_expression(&bin.right)?;
+                    Some((var_info.0, var_info.1, bound, true))
+                }
+                hir::HirBinaryOp::GreaterEqual => {
+                    let var_info = self.extract_variable_info(&bin.left)?;
+                    let bound = self.eval_const_hir_expression(&bin.right)?;
+                    Some((var_info.0, var_info.1, bound, false))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Extract (name, VariableId) from an HIR expression that is a compile-time variable reference.
+    /// While loop variables must be declared with `let`, not `signal` — they are compile-time
+    /// iteration counters, not hardware signals.
+    fn extract_variable_info(
+        &self,
+        expr: &hir::HirExpression,
+    ) -> Option<(String, hir::VariableId)> {
+        match expr {
+            hir::HirExpression::Variable(var_id) => {
+                // Look up the variable name from let declarations
+                if let Some(hir) = self.hir {
+                    for imp in &hir.implementations {
+                        for variable in &imp.variables {
+                            if variable.id == *var_id {
+                                return Some((variable.name.clone(), *var_id));
+                            }
+                        }
+                    }
+                    // Also check event block bodies for let statements
+                    for imp in &hir.implementations {
+                        for event_block in &imp.event_blocks {
+                            if let Some(name) = Self::find_variable_name_in_stmts(&event_block.statements, *var_id) {
+                                return Some((name, *var_id));
+                            }
+                        }
+                    }
+                }
+                // Fall back to using the var_id as a name
+                Some((format!("_var{}", var_id.0), *var_id))
+            }
+            _ => None,
+        }
+    }
+
+    /// Search a statement list for a Let statement that declares the given VariableId.
+    fn find_variable_name_in_stmts(stmts: &[hir::HirStatement], var_id: hir::VariableId) -> Option<String> {
+        for stmt in stmts {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) if let_stmt.id == var_id => {
+                    return Some(let_stmt.name.clone());
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    if let Some(name) = Self::find_variable_name_in_stmts(&if_stmt.then_statements, var_id) {
+                        return Some(name);
+                    }
+                    if let Some(ref else_stmts) = if_stmt.else_statements {
+                        if let Some(name) = Self::find_variable_name_in_stmts(else_stmts, var_id) {
+                            return Some(name);
+                        }
+                    }
+                }
+                hir::HirStatement::Block(stmts) => {
+                    if let Some(name) = Self::find_variable_name_in_stmts(stmts, var_id) {
+                        return Some(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Find the update statement in a while loop body and return (step, indices_of_update_stmts).
+    /// Looks for patterns like `var = var + 1` or `var = var + STEP`.
+    /// The loop variable must be a compile-time `let` variable, not a signal.
+    fn find_while_update(
+        &self,
+        body: &[hir::HirStatement],
+        _var_name: &str,
+        var_id: hir::VariableId,
+    ) -> (i64, Vec<usize>) {
+        let mut update_indices = Vec::new();
+        let mut step = 1i64; // default step
+
+        for (idx, stmt) in body.iter().enumerate() {
+            if let hir::HirStatement::Assignment(assign) = stmt {
+                // Check if LHS is the loop variable (must be Variable, not Signal)
+                let lhs_is_var = matches!(&assign.lhs, hir::HirLValue::Variable(id) if *id == var_id);
+
+                if lhs_is_var {
+                    // Check RHS for var + STEP pattern
+                    if let hir::HirExpression::Binary(bin) = &assign.rhs {
+                        let rhs_refs_var = matches!(&*bin.left,
+                            hir::HirExpression::Variable(id) if *id == var_id);
+
+                        if rhs_refs_var {
+                            if let Some(const_val) = self.eval_const_hir_expression(&bin.right) {
+                                match bin.op {
+                                    hir::HirBinaryOp::Add => step = const_val,
+                                    hir::HirBinaryOp::Sub => step = -const_val,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    update_indices.push(idx);
+                }
+            }
+        }
+
+        (step, update_indices)
+    }
+
+    /// Find the initial value for a while loop variable from its `let` declaration.
+    /// The loop variable must be declared with `let var = INIT`, not `signal`.
+    /// Searches the HIR for a Let statement with matching VariableId.
+    /// Falls back to 0 if not found.
+    fn find_while_init_value(&self, _var_name: &str, var_id: hir::VariableId) -> i64 {
+        if let Some(hir) = self.hir {
+            for imp in &hir.implementations {
+                // Check event block bodies for let statements
+                for event_block in &imp.event_blocks {
+                    if let Some(val) = self.find_let_init_in_stmts(&event_block.statements, var_id) {
+                        return val;
+                    }
+                }
+            }
+        }
+        0 // default
+    }
+
+    /// Recursively search statements for a Let declaration with the given VariableId
+    /// and return its compile-time initial value.
+    fn find_let_init_in_stmts(&self, stmts: &[hir::HirStatement], var_id: hir::VariableId) -> Option<i64> {
+        for stmt in stmts {
+            match stmt {
+                hir::HirStatement::Let(let_stmt) if let_stmt.id == var_id => {
+                    return self.eval_const_hir_expression(&let_stmt.value);
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    if let Some(val) = self.find_let_init_in_stmts(&if_stmt.then_statements, var_id) {
+                        return Some(val);
+                    }
+                    if let Some(ref else_stmts) = if_stmt.else_statements {
+                        if let Some(val) = self.find_let_init_in_stmts(else_stmts, var_id) {
+                            return Some(val);
+                        }
+                    }
+                }
+                hir::HirStatement::Block(stmts) => {
+                    if let Some(val) = self.find_let_init_in_stmts(stmts, var_id) {
+                        return Some(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Evaluate a HIR expression to a constant i64 at compile time
     #[allow(clippy::only_used_in_recursion)]
     fn eval_const_hir_expression(&self, expr: &hir::HirExpression) -> Option<i64> {
@@ -5942,6 +6250,21 @@ impl<'hir> HirToMir<'hir> {
                     .collect(),
                 unroll: for_stmt.unroll.clone(),
             }),
+            hir::HirStatement::While(while_stmt) => {
+                hir::HirStatement::While(hir::HirWhileStatement {
+                    condition: Self::substitute_hir_variable_in_expr_named(
+                        &while_stmt.condition,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
+                    body: while_stmt
+                        .body
+                        .iter()
+                        .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                        .collect(),
+                })
+            }
             hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
                 stmts
                     .iter()
@@ -5996,6 +6319,81 @@ impl<'hir> HirToMir<'hir> {
                     } else {
                         // Non-const bounds: leave as-is (will fail later, as before)
                         result.push(stmt);
+                    }
+                }
+                hir::HirStatement::While(while_stmt) => {
+                    // Unroll while loop: find init from preceding Let, extract bound/step from condition/body
+                    if let Some((var_name, var_id, bound, is_strict_lt)) =
+                        self.analyze_while_condition(&while_stmt.condition)
+                    {
+                        let (step, update_indices) =
+                            self.find_while_update(&while_stmt.body, &var_name, var_id);
+
+                        // Find init value from preceding Let statement in result
+                        let init = result
+                            .iter()
+                            .rev()
+                            .find_map(|s| {
+                                if let hir::HirStatement::Let(let_stmt) = s {
+                                    if let_stmt.id == var_id {
+                                        return self.eval_const_hir_expression(&let_stmt.value);
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or(0);
+
+                        let max_iterations: i64 = 100_000;
+                        let mut current = init;
+                        let mut iter_count: i64 = 0;
+
+                        loop {
+                            let should_continue = if is_strict_lt {
+                                current < bound
+                            } else {
+                                current <= bound
+                            };
+                            if !should_continue || iter_count >= max_iterations {
+                                if iter_count >= max_iterations {
+                                    eprintln!(
+                                        "[skalp] error: while loop exceeded {} iterations during unrolling \
+                                         (var={}, init={}, bound={}, step={}). Possible infinite loop.",
+                                        max_iterations, var_name, init, bound, step
+                                    );
+                                }
+                                break;
+                            }
+
+                            for (idx, body_stmt) in while_stmt.body.iter().enumerate() {
+                                if update_indices.contains(&idx) {
+                                    continue;
+                                }
+                                let substituted = Self::substitute_hir_variable_in_stmt(
+                                    body_stmt,
+                                    var_id,
+                                    &var_name,
+                                    current,
+                                );
+                                // Recursively unroll nested loops
+                                match substituted {
+                                    hir::HirStatement::For(_) | hir::HirStatement::While(_) => {
+                                        result.extend(
+                                            self.unroll_const_for_loops_in_body(vec![substituted]),
+                                        );
+                                    }
+                                    other => result.push(other),
+                                }
+                            }
+
+                            current += step;
+                            iter_count += 1;
+                        }
+                    } else {
+                        eprintln!(
+                            "[skalp] warning: while loop condition could not be analyzed for \
+                             compile-time unrolling — loop will be dropped. \
+                             Use `for var in start..end` or `let var = init; while var < bound {{ ... }}` instead."
+                        );
                     }
                 }
                 _ => result.push(stmt),
@@ -6075,6 +6473,167 @@ impl<'hir> HirToMir<'hir> {
         })
     }
 
+    /// Convert a match statement on an enum with payload variants to if-else chain.
+    /// For each arm, we compare the tag bits and extract payload bindings.
+    fn convert_match_with_payloads(
+        &mut self,
+        match_stmt: &hir::HirMatchStatement,
+    ) -> Option<Statement> {
+        let scrutinee = self.convert_expression(&match_stmt.expr, 0)?;
+
+        // Find the enum definition from the first TupleVariant or Path pattern
+        let enum_def = match_stmt
+            .arms
+            .iter()
+            .find_map(|arm| match &arm.pattern {
+                hir::HirPattern::TupleVariant(enum_name, _, _)
+                | hir::HirPattern::Path(enum_name, _) => self.find_enum_def(enum_name),
+                _ => None,
+            })?;
+
+        let tag_bits = Self::enum_tag_bits(enum_def.variants.len());
+        let tag_mask = (1u64 << tag_bits) - 1;
+
+        // Build a tag extraction expression: scrutinee & tag_mask
+        let tag_expr = Expression::with_unknown_type(ExpressionKind::Binary {
+            op: BinaryOp::BitwiseAnd,
+            left: Box::new(scrutinee.clone()),
+            right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                Value::Integer(tag_mask as i64),
+            ))),
+        });
+
+        // Build if-else chain from arms (in reverse order to nest properly)
+        let mut result: Option<Statement> = None;
+
+        for arm in match_stmt.arms.iter().rev() {
+            let arm_block = match &arm.pattern {
+                hir::HirPattern::TupleVariant(_enum_name, variant_name, bindings) => {
+                    // Find the variant's discriminant
+                    let discriminant = enum_def
+                        .variants
+                        .iter()
+                        .position(|v| v.name == *variant_name)
+                        .unwrap_or(0) as i64;
+
+                    // Register payload extraction expressions for each binding
+                    // so that Variable references in the arm body resolve to the extraction
+                    for (i, (_name, hir_var_id)) in bindings.iter().enumerate() {
+                        let variant = enum_def
+                            .variants
+                            .iter()
+                            .find(|v| v.name == *variant_name);
+                        let payload_width = variant
+                            .and_then(|v| v.associated_data.as_ref())
+                            .and_then(|data| data.get(i))
+                            .map(|t| self.get_hir_type_width(t) as u32)
+                            .unwrap_or(8);
+
+                        let payload_mask = (1u64 << payload_width) - 1;
+
+                        // Payload extraction: (scrutinee >> tag_bits) & payload_mask
+                        let extraction = Expression::with_unknown_type(
+                            ExpressionKind::Binary {
+                                op: BinaryOp::BitwiseAnd,
+                                left: Box::new(Expression::with_unknown_type(
+                                    ExpressionKind::Binary {
+                                        op: BinaryOp::RightShift,
+                                        left: Box::new(scrutinee.clone()),
+                                        right: Box::new(Expression::with_unknown_type(
+                                            ExpressionKind::Literal(Value::Integer(
+                                                tag_bits as i64,
+                                            )),
+                                        )),
+                                    },
+                                )),
+                                right: Box::new(Expression::with_unknown_type(
+                                    ExpressionKind::Literal(Value::Integer(
+                                        payload_mask as i64,
+                                    )),
+                                )),
+                            },
+                        );
+
+                        self.payload_var_expressions
+                            .insert(*hir_var_id, extraction);
+                    }
+
+                    // Build the arm condition: tag_expr == discriminant
+                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(tag_expr.clone()),
+                        right: Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::Integer(discriminant)),
+                        )),
+                    });
+
+                    // Convert arm body statements
+                    let arm_body = self.convert_statements(&arm.statements);
+
+                    // Clean up payload bindings after converting this arm
+                    for (_name, hir_var_id) in bindings {
+                        self.payload_var_expressions.shift_remove(hir_var_id);
+                    }
+
+                    let else_block = result.take().map(|s| Block {
+                        statements: vec![s],
+                    });
+
+                    Some(Statement::If(IfStatement {
+                        condition,
+                        then_block: arm_body,
+                        else_block,
+                        span: None,
+                    }))
+                }
+                hir::HirPattern::Path(_enum_name, variant_name) => {
+                    // Simple enum variant (no payload) — tag comparison
+                    let discriminant = enum_def
+                        .variants
+                        .iter()
+                        .position(|v| v.name == *variant_name)
+                        .unwrap_or(0) as i64;
+
+                    let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(tag_expr.clone()),
+                        right: Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::Integer(discriminant)),
+                        )),
+                    });
+
+                    let arm_body = self.convert_statements(&arm.statements);
+
+                    let else_block = result.take().map(|s| Block {
+                        statements: vec![s],
+                    });
+
+                    Some(Statement::If(IfStatement {
+                        condition,
+                        then_block: arm_body,
+                        else_block,
+                        span: None,
+                    }))
+                }
+                hir::HirPattern::Wildcard => {
+                    // Wildcard — becomes the else fallthrough
+                    let arm_body = self.convert_statements(&arm.statements);
+                    Some(Statement::Block(arm_body))
+                }
+                _ => {
+                    let arm_body = self.convert_statements(&arm.statements);
+                    Some(Statement::Block(arm_body))
+                }
+            };
+
+            if let Some(stmt) = arm_block {
+                result = Some(stmt);
+            }
+        }
+
+        result
+    }
+
     /// Convert pattern to expression (for case values)
     fn convert_pattern_to_expr(&mut self, pattern: &hir::HirPattern) -> Option<Expression> {
         match pattern {
@@ -6131,6 +6690,10 @@ impl<'hir> HirToMir<'hir> {
                 // Tuple patterns are complex - for now, treat as wildcard
                 // TODO: Implement proper tuple pattern handling
                 None
+            }
+            hir::HirPattern::TupleVariant(enum_name, variant_name, _bindings) => {
+                // For case matching, return the tag discriminant value
+                self.resolve_enum_variant_value(enum_name, variant_name)
             }
         }
     }
@@ -6867,6 +7430,11 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Variable(id) => {
+                // Enum payload variable: return the extraction expression directly
+                if let Some(expr) = self.payload_var_expressions.get(id) {
+                    return Some(expr.clone());
+                }
+
                 // BUG #167 FIX: Check if this variable is a placeholder connected to an entity output
                 // If so, return a reference to the entity output wire instead
                 // BUG #209 FIX: Use (prefix, id) as key for context-aware lookup
@@ -7433,6 +8001,61 @@ impl<'hir> HirToMir<'hir> {
                         )));
                     }
                     _ => {} // Not an intent helper or intrinsic, continue to regular function handling
+                }
+
+                // Enum variant constructor with payload: State::Transfer(0)
+                // call.function = "State::Transfer", call.args = [0]
+                if call.function.contains("::") {
+                    let parts: Vec<&str> = call.function.splitn(2, "::").collect();
+                    if parts.len() == 2 {
+                        let enum_name = parts[0];
+                        let variant_name = parts[1];
+                        if let Some(enum_def) = self.find_enum_def(enum_name) {
+                            if let Some((idx, variant)) = enum_def
+                                .variants
+                                .iter()
+                                .enumerate()
+                                .find(|(_, v)| v.name == variant_name)
+                            {
+                                if variant.associated_data.is_some() && !call.args.is_empty() {
+                                    let tag_bits =
+                                        Self::enum_tag_bits(enum_def.variants.len());
+                                    let tag = idx as u64;
+
+                                    // Convert the payload argument
+                                    let payload_expr =
+                                        self.convert_expression(&call.args[0], depth + 1)?;
+
+                                    // Encode: tag | (payload << tag_bits)
+                                    let tag_expr = Expression::with_unknown_type(
+                                        ExpressionKind::Literal(Value::Integer(tag as i64)),
+                                    );
+                                    let shift_expr = Expression::with_unknown_type(
+                                        ExpressionKind::Binary {
+                                            op: BinaryOp::LeftShift,
+                                            left: Box::new(payload_expr),
+                                            right: Box::new(Expression::with_unknown_type(
+                                                ExpressionKind::Literal(Value::Integer(
+                                                    tag_bits as i64,
+                                                )),
+                                            )),
+                                        },
+                                    );
+                                    return Some(Expression::with_unknown_type(
+                                        ExpressionKind::Binary {
+                                            op: BinaryOp::BitwiseOr,
+                                            left: Box::new(tag_expr),
+                                            right: Box::new(shift_expr),
+                                        },
+                                    ));
+                                } else if variant.associated_data.is_none() {
+                                    // Simple enum variant constructor: State::Idle
+                                    return self
+                                        .resolve_enum_variant_value(enum_name, variant_name);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // BUG #184 FIX: Check if this call is to an entity (from trait method inlining)
@@ -9239,6 +9862,86 @@ impl<'hir> HirToMir<'hir> {
                         } else {
                             None
                         }
+                    }
+                }
+                hir::HirPattern::TupleVariant(_enum_name, variant_name, bindings) => {
+                    // Enum variant with payload in match expression context
+                    // Compare tag bits and bind payload variables
+                    if let Some(enum_def) = arms.iter().find_map(|a| {
+                        match &a.pattern {
+                            hir::HirPattern::TupleVariant(en, _, _)
+                            | hir::HirPattern::Path(en, _) => self.find_enum_def(en.as_str()),
+                            _ => None,
+                        }
+                    }) {
+                        let tag_bits = Self::enum_tag_bits(enum_def.variants.len());
+                        let tag_mask = (1u64 << tag_bits) - 1;
+                        let discriminant = enum_def
+                            .variants
+                            .iter()
+                            .position(|v| v.name == *variant_name)
+                            .unwrap_or(0) as i64;
+
+                        // Register payload extraction expressions
+                        for (i, (_name, hir_var_id)) in bindings.iter().enumerate() {
+                            let variant = enum_def
+                                .variants
+                                .iter()
+                                .find(|v| v.name == *variant_name);
+                            let payload_width = variant
+                                .and_then(|v| v.associated_data.as_ref())
+                                .and_then(|data| data.get(i))
+                                .map(|t| self.get_hir_type_width(t) as u32)
+                                .unwrap_or(8);
+                            let payload_mask = (1u64 << payload_width) - 1;
+
+                            let extraction = Expression::with_unknown_type(
+                                ExpressionKind::Binary {
+                                    op: BinaryOp::BitwiseAnd,
+                                    left: Box::new(Expression::with_unknown_type(
+                                        ExpressionKind::Binary {
+                                            op: BinaryOp::RightShift,
+                                            left: Box::new(match_value_expr.clone()),
+                                            right: Box::new(
+                                                Expression::with_unknown_type(
+                                                    ExpressionKind::Literal(Value::Integer(
+                                                        tag_bits as i64,
+                                                    )),
+                                                ),
+                                            ),
+                                        },
+                                    )),
+                                    right: Box::new(Expression::with_unknown_type(
+                                        ExpressionKind::Literal(Value::Integer(
+                                            payload_mask as i64,
+                                        )),
+                                    )),
+                                },
+                            );
+                            self.payload_var_expressions
+                                .insert(*hir_var_id, extraction);
+                        }
+
+                        // Tag comparison: (scrutinee & tag_mask) == discriminant
+                        let left = Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Binary {
+                                op: BinaryOp::BitwiseAnd,
+                                left: Box::new(match_value_expr.clone()),
+                                right: Box::new(Expression::with_unknown_type(
+                                    ExpressionKind::Literal(Value::Integer(tag_mask as i64)),
+                                )),
+                            },
+                        ));
+                        let right = Box::new(Expression::with_unknown_type(
+                            ExpressionKind::Literal(Value::Integer(discriminant)),
+                        ));
+                        Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::Equal,
+                            left,
+                            right,
+                        }))
+                    } else {
+                        None
                     }
                 }
                 _ => {
@@ -19507,6 +20210,72 @@ impl<'hir> HirToMir<'hir> {
         Some(Expression::with_unknown_type(ExpressionKind::Literal(
             Value::Integer(0),
         )))
+    }
+
+    /// Find an enum definition by name in the current HIR
+    fn find_enum_def(&self, enum_name: &str) -> Option<hir::HirEnumType> {
+        if let Some(hir) = self.hir {
+            for udt in &hir.user_defined_types {
+                if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
+                    if enum_def.name == enum_name {
+                        return Some((**enum_def).clone());
+                    }
+                }
+            }
+            for impl_block in &hir.implementations {
+                for signal in &impl_block.signals {
+                    if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
+                        if enum_def.name == enum_name {
+                            return Some((**enum_def).clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Compute the number of tag bits needed for an enum (ceil_log2 of variant count)
+    fn enum_tag_bits(num_variants: usize) -> u32 {
+        if num_variants <= 1 {
+            1
+        } else {
+            (num_variants as f64).log2().ceil() as u32
+        }
+    }
+
+    /// Check if an enum has any variants with associated data (payloads)
+    fn enum_has_payloads(enum_def: &hir::HirEnumType) -> bool {
+        enum_def
+            .variants
+            .iter()
+            .any(|v| v.associated_data.is_some())
+    }
+
+    /// Get width of a HIR type (static version, no &mut self needed)
+    fn hir_type_width_static(ty: &hir::HirType) -> u32 {
+        match ty {
+            hir::HirType::Bit(w) => *w,
+            hir::HirType::Logic(w) => *w,
+            hir::HirType::Int(w) => *w,
+            hir::HirType::Nat(w) => *w,
+            hir::HirType::Bool => 1,
+            hir::HirType::Clock(_) => 1,
+            hir::HirType::Reset { .. } => 1,
+            _ => 32, // fallback
+        }
+    }
+
+    /// Get the total payload width in bits for a specific enum variant
+    fn variant_payload_width(variant: &hir::HirEnumVariant) -> u32 {
+        if let Some(ref data_types) = variant.associated_data {
+            data_types
+                .iter()
+                .map(|t| Self::hir_type_width_static(t))
+                .sum()
+        } else {
+            0
+        }
     }
 
     /// Convert literal expression (immutable version)

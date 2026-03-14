@@ -1157,6 +1157,7 @@ fn emit_sv_pattern(pat: &HirPattern) -> String {
         HirPattern::Wildcard => "default".to_string(),
         HirPattern::Tuple(_) => "default".to_string(),
         HirPattern::Path(_, variant) => variant.clone(),
+        HirPattern::TupleVariant(_, variant, _) => variant.clone(),
     }
 }
 
