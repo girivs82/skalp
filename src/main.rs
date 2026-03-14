@@ -1461,56 +1461,31 @@ fn build_design(
                     lir_result.lir
                 };
 
-                // Map to gate netlist with configurable optimization level
-                let tech_result = skalp_lir::map_lir_to_gates_with_opt_level(
-                    &final_lir,
-                    &library,
-                    optimization_options.gate_opt_level,
-                );
-                let mut gate_netlist = tech_result.netlist;
+                // Parse optimization preset
+                let preset = match optimization_options.preset.as_deref() {
+                    Some("quick") => skalp_lir::synth::SynthPreset::Quick,
+                    Some("balanced") | None => skalp_lir::synth::SynthPreset::Balanced,
+                    Some("full") => skalp_lir::synth::SynthPreset::Full,
+                    Some("timing") => skalp_lir::synth::SynthPreset::Timing,
+                    Some("area") => skalp_lir::synth::SynthPreset::Area,
+                    Some("resyn2") => skalp_lir::synth::SynthPreset::Resyn2,
+                    Some("compress2") => skalp_lir::synth::SynthPreset::Compress2,
+                    Some("auto") => skalp_lir::synth::SynthPreset::Auto,
+                    Some(other) => anyhow::bail!("Unknown optimization preset: '{}'", other),
+                };
 
-                if top_module.is_async {
-                    info!(
-                        "   Gate netlist: {} cells (internal logic stays single-rail)",
-                        gate_netlist.cells.len()
-                    );
+                // Direct LIR → AIG → optimize → map path
+                let synth_result = skalp_lir::synthesize(&final_lir, &library, preset);
+
+                // Output pipeline annotations if retiming was performed
+                if let Some(ref annotations) = synth_result.pipeline_annotations {
+                    let annotations_path = output_dir.join("pipeline_annotations.toml");
+                    annotations.write_toml(&annotations_path)?;
+                    info!("Pipeline annotations written to {:?}", annotations_path);
+                    info!("  {}", annotations.summary());
                 }
 
-                // Apply synthesis optimization if requested
-                // For async: this optimizes the single-rail internal logic (AIG/ABC passes)
-                if optimization_options.preset.is_some()
-                    || optimization_options.passes.is_some()
-                    || optimization_options.ml_guided
-                {
-                    let cells_before = gate_netlist.cells.len();
-                    info!("Running synthesis optimization...");
-                    let synth_result = apply_synthesis_optimization(
-                        &gate_netlist,
-                        &library,
-                        &optimization_options,
-                    )?;
-
-                    // Output pipeline annotations if retiming was performed
-                    if let Some(ref annotations) = synth_result.pipeline_annotations {
-                        let annotations_path = output_dir.join("pipeline_annotations.toml");
-                        annotations.write_toml(&annotations_path)?;
-                        info!("Pipeline annotations written to {:?}", annotations_path);
-                        info!("  {}", annotations.summary());
-                    }
-
-                    gate_netlist = synth_result.netlist;
-
-                    if top_module.is_async {
-                        info!(
-                            "   Optimized: {} -> {} cells ({:.1}% reduction)",
-                            cells_before,
-                            gate_netlist.cells.len(),
-                            (1.0 - gate_netlist.cells.len() as f64 / cells_before as f64) * 100.0
-                        );
-                    }
-                }
-
-                gate_netlist
+                synth_result.netlist
             };
 
             // Run async STA for NCL circuits (detected by tech_mapper via is_ncl flag)
