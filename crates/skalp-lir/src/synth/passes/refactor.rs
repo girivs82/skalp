@@ -527,12 +527,16 @@ impl Refactor {
             return self.build_single_minterm(minterms[0], num_inputs, use_complement);
         }
 
-        // Build product terms and OR them
+        // Combine adjacent minterms (Quine-McCluskey style) to reduce product terms
+        let implicants = combine_minterms(&minterms, num_inputs);
+
+        // Build product terms from combined implicants and OR them
         let mut gates: Vec<(u16, u16)> = Vec::new();
         let mut product_lits: Vec<u16> = Vec::new();
 
-        for &minterm in &minterms {
-            let product_lit = self.build_product_term(&mut gates, minterm, num_inputs);
+        for &(value, dc_mask) in &implicants {
+            let product_lit =
+                self.build_combined_product_term(&mut gates, value, dc_mask, num_inputs);
             product_lits.push(product_lit);
         }
 
@@ -599,6 +603,33 @@ impl Refactor {
             // If bit is 1, use variable; if 0, use complement
             let lit = (i as u16) * 2 + if bit == 0 { 1 } else { 0 };
             lits.push(lit);
+        }
+
+        self.and_lits(gates, &lits, num_inputs)
+    }
+
+    /// Build a product term from a combined implicant (value, dc_mask).
+    /// Variables where dc_mask bit is set are don't-care (omitted from product).
+    fn build_combined_product_term(
+        &self,
+        gates: &mut Vec<(u16, u16)>,
+        value: usize,
+        dc_mask: usize,
+        num_inputs: usize,
+    ) -> u16 {
+        let mut lits: Vec<u16> = Vec::new();
+
+        for i in 0..num_inputs {
+            if (dc_mask >> i) & 1 == 1 {
+                continue; // Don't-care variable, skip
+            }
+            let bit = (value >> i) & 1;
+            let lit = (i as u16) * 2 + if bit == 0 { 1 } else { 0 };
+            lits.push(lit);
+        }
+
+        if lits.is_empty() {
+            return 1; // Tautology (all don't-care) = constant 1
         }
 
         self.and_lits(gates, &lits, num_inputs)
@@ -826,6 +857,114 @@ struct FactoredForm {
     result_lit: u16,
     /// If Some(true), result is constant 1; if Some(false), constant 0
     is_constant: Option<bool>,
+}
+
+/// Quine-McCluskey style minterm combining.
+/// Returns a list of (value, dc_mask) implicants that cover all minterms.
+fn combine_minterms(minterms: &[usize], num_inputs: usize) -> Vec<(usize, usize)> {
+    let _ = num_inputs; // Used for documentation clarity
+
+    // Start with each minterm as (value, mask=0)
+    let mut current: Vec<(usize, usize)> = minterms.iter().map(|&m| (m, 0usize)).collect();
+    let mut all_prime: Vec<(usize, usize)> = Vec::new();
+
+    // Iteratively combine pairs that differ in exactly one non-masked bit
+    loop {
+        let mut combined = Vec::new();
+        let mut was_combined = vec![false; current.len()];
+
+        for i in 0..current.len() {
+            for j in (i + 1)..current.len() {
+                let (val_i, mask_i) = current[i];
+                let (val_j, mask_j) = current[j];
+
+                // Can only combine if masks match
+                if mask_i != mask_j {
+                    continue;
+                }
+
+                // Check if values differ in exactly one non-masked bit
+                let diff = val_i ^ val_j;
+                if diff.count_ones() == 1 && (diff & mask_i) == 0 {
+                    let new_mask = mask_i | diff;
+                    let new_val = val_i & !diff;
+                    let new_impl = (new_val, new_mask);
+                    if !combined.contains(&new_impl) {
+                        combined.push(new_impl);
+                    }
+                    was_combined[i] = true;
+                    was_combined[j] = true;
+                }
+            }
+        }
+
+        // Uncombined implicants are prime implicants
+        for (idx, &was) in was_combined.iter().enumerate() {
+            if !was && !all_prime.contains(&current[idx]) {
+                all_prime.push(current[idx]);
+            }
+        }
+
+        if combined.is_empty() {
+            break;
+        }
+
+        current = combined;
+    }
+
+    if all_prime.is_empty() {
+        return minterms.iter().map(|&m| (m, 0)).collect();
+    }
+
+    // Greedy essential prime implicant covering
+    let mut uncovered: HashSet<usize> = minterms.iter().copied().collect();
+    let mut selected: Vec<(usize, usize)> = Vec::new();
+
+    // First: find essential primes (only implicant covering some minterm)
+    for &minterm in minterms {
+        if !uncovered.contains(&minterm) {
+            continue;
+        }
+        let covering: Vec<usize> = all_prime
+            .iter()
+            .enumerate()
+            .filter(|(_, &(val, mask))| (minterm & !mask) == (val & !mask))
+            .map(|(i, _)| i)
+            .collect();
+        if covering.len() == 1 {
+            let prime = all_prime[covering[0]];
+            if !selected.contains(&prime) {
+                selected.push(prime);
+                let (val, mask) = prime;
+                uncovered.retain(|&m| (m & !mask) != (val & !mask));
+            }
+        }
+    }
+
+    // Second: greedily cover remaining minterms
+    while !uncovered.is_empty() {
+        let mut best_idx = 0;
+        let mut best_count = 0;
+        for (idx, &(val, mask)) in all_prime.iter().enumerate() {
+            let count = uncovered
+                .iter()
+                .filter(|&&m| (m & !mask) == (val & !mask))
+                .count();
+            if count > best_count {
+                best_count = count;
+                best_idx = idx;
+            }
+        }
+        if best_count == 0 {
+            break;
+        }
+        let prime = all_prime[best_idx];
+        selected.push(prime);
+        let (val, mask) = prime;
+        uncovered.retain(|&m| (m & !mask) != (val & !mask));
+    }
+
+    selected
 }
 
 /// Compute fanout counts for all nodes

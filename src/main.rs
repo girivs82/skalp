@@ -113,9 +113,9 @@ enum Commands {
 
         // === Logic Synthesis Optimization Options ===
         /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2, auto)
-        /// Default: "auto" (runs multiple strategies and picks the best result)
+        /// Default: "compress2" (aggressive area optimization with resubstitution)
         /// Use --no-synth-opt to disable synthesis optimization entirely
-        #[arg(long, value_name = "PRESET", default_value = "auto")]
+        #[arg(long, value_name = "PRESET", default_value = "compress2")]
         optimize: String,
 
         /// Disable synthesis optimization (AIG/ABC passes)
@@ -229,7 +229,7 @@ enum Commands {
         output: PathBuf,
 
         /// Synthesis optimization preset (quick, balanced, full, area, resyn2, compress2, auto)
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value = "compress2")]
         optimize: String,
 
         /// P&R quality preset (fast, default, high_quality)
