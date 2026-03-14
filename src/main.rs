@@ -228,6 +228,10 @@ enum Commands {
         #[arg(short, long, default_value = "build")]
         output: PathBuf,
 
+        /// Synthesis optimization preset (quick, balanced, full, area, resyn2, compress2, auto)
+        #[arg(long, default_value = "auto")]
+        optimize: String,
+
         /// P&R quality preset (fast, default, high_quality)
         #[arg(long, default_value = "default")]
         pnr_preset: String,
@@ -730,9 +734,10 @@ fn main() -> Result<()> {
             device,
             full_flow,
             output,
+            optimize,
             pnr_preset,
         } => {
-            synthesize_design(&source, &device, full_flow, &output, &pnr_preset)?;
+            synthesize_design(&source, &device, full_flow, &output, &optimize, &pnr_preset)?;
         }
 
         Commands::Pnr {
@@ -3909,10 +3914,11 @@ fn synthesize_design(
     device: &str,
     full_flow: bool,
     output_dir: &PathBuf,
+    optimize: &str,
     pnr_preset: &str,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir_with_bram, synthesize_balanced};
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir_with_bram};
 
     println!("🔧 Synthesizing design for device: {}", device);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -3961,8 +3967,24 @@ fn synthesize_design(
     // Lower to LIR with BRAM inference for FPGA targets
     let lir_result = lower_mir_module_to_lir_with_bram(top_module);
 
+    // Parse optimization preset
+    let preset = match optimize {
+        "quick" => skalp_lir::synth::SynthPreset::Quick,
+        "balanced" => skalp_lir::synth::SynthPreset::Balanced,
+        "full" => skalp_lir::synth::SynthPreset::Full,
+        "area" => skalp_lir::synth::SynthPreset::Area,
+        "resyn2" => skalp_lir::synth::SynthPreset::Resyn2,
+        "compress2" => skalp_lir::synth::SynthPreset::Compress2,
+        "auto" => skalp_lir::synth::SynthPreset::Auto,
+        _ => anyhow::bail!(
+            "Unknown optimization preset: '{}'. Options: quick, balanced, full, area, resyn2, compress2, auto",
+            optimize
+        ),
+    };
+    println!("Optimize: {}", optimize);
+
     // Full synthesis: tech mapping → AIG optimization → technology mapping
-    let synth_result = synthesize_balanced(&lir_result.lir, &library);
+    let synth_result = skalp_lir::synthesize(&lir_result.lir, &library, preset);
     let gate_netlist = synth_result.netlist;
     println!("Cells: {}", gate_netlist.cells.len());
     println!("Nets: {}", gate_netlist.nets.len());

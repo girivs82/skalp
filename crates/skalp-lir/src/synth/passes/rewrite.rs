@@ -5,11 +5,16 @@
 //!
 //! # Algorithm
 //!
-//! For each AND node:
+//! For each AND node in topological order:
 //! 1. Enumerate K-feasible cuts
 //! 2. Compute truth table for each cut
 //! 3. Look up optimal implementation in NPN database
-//! 4. If a smaller implementation exists, replace the subgraph
+//! 4. Compute MFFC gain using reference counting
+//! 5. If a smaller implementation exists, apply the rewrite immediately
+//!
+//! Processing in topological order with incremental reference count updates
+//! enables cascading optimizations: earlier rewrites reduce reference counts,
+//! exposing larger MFFCs for later nodes.
 //!
 //! # References
 //!
@@ -83,59 +88,12 @@ impl Rewrite {
         }
     }
 
-    /// Evaluate the potential gain from rewriting a node with a given cut
-    fn evaluate_rewrite(
-        &self,
-        aig: &Aig,
-        node: AigNodeId,
-        cut: &crate::synth::cuts::Cut,
-        fanout_counts: &IndexMap<AigNodeId, usize>,
-    ) -> Option<RewriteCandidate> {
-        // Skip trivial cuts
-        if cut.size() <= 1 {
-            return None;
-        }
-
-        // Look up the optimal implementation
-        let (impl_, canonical) = self.npn_db.lookup(cut.truth_table, cut.size())?;
-
-        // Count current nodes in the cone
-        let current_nodes = count_cone_nodes(aig, node, &cut.leaves, fanout_counts);
-
-        // Calculate gain (positive means improvement)
-        // Note: current_nodes only counts nodes with single fanout that can be removed
-        // impl_.and_count is the number of new gates we'll add
-        let gain = current_nodes as i32 - impl_.and_count as i32;
-
-        // IMPORTANT: Only accept if we're actually reducing gates
-        // The gain must be > 0 (strictly positive) to guarantee improvement
-        // Zero-cost mode accepts gain >= 0 for depth optimization without area increase
-        let accept = if self.zero_cost { gain >= 0 } else { gain > 0 };
-
-        if accept {
-            Some(RewriteCandidate {
-                node,
-                cut: cut.clone(),
-                canonical,
-                implementation: impl_,
-                gain,
-            })
-        } else {
-            None
-        }
-    }
-
     /// Apply a rewrite by building the new implementation in the AIG
     /// Returns the new literal that should replace the original node
     fn apply_rewrite(&self, aig: &mut Aig, candidate: &RewriteCandidate) -> Option<AigLit> {
-        // For now, we use a simple approach:
-        // If the implementation has fewer gates than the current cone,
-        // we rebuild using basic boolean algebra
-
-        // Get the leaves as literals, applying the NPN transformation
         let num_leaves = candidate.cut.leaves.len();
         if num_leaves > 6 {
-            return None; // Too many inputs
+            return None;
         }
 
         // Build input literals with NPN transformations applied
@@ -150,15 +108,12 @@ impl Rewrite {
                     inverted: negated,
                 });
             } else {
-                // Invalid permutation index
                 return None;
             }
         }
 
         // Build the implementation using the gates from NPN database
         let result_lit = if candidate.implementation.gates.is_empty() {
-            // No gates needed - the result is a direct input or constant
-            // Decode the result_lit from the implementation
             let impl_result = candidate.implementation.result_lit;
             let idx = (impl_result / 2) as usize;
             let inv = impl_result & 1 == 1;
@@ -170,11 +125,9 @@ impl Rewrite {
                 }
                 lit
             } else {
-                // Invalid - shouldn't happen for empty gates
                 return None;
             }
         } else {
-            // Build using the gate list
             self.build_from_gates(
                 aig,
                 &input_lits,
@@ -215,7 +168,6 @@ impl Rewrite {
             let right_idx = (right_encoded / 2) as usize;
             let right_inv = right_encoded & 1 == 1;
 
-            // Get literals for left and right inputs
             let left_lit = if left_idx < node_lits.len() {
                 let mut lit = node_lits[left_idx];
                 if left_inv {
@@ -223,7 +175,7 @@ impl Rewrite {
                 }
                 lit
             } else {
-                return None; // Invalid index
+                return None;
             };
 
             let right_lit = if right_idx < node_lits.len() {
@@ -233,15 +185,13 @@ impl Rewrite {
                 }
                 lit
             } else {
-                return None; // Invalid index
+                return None;
             };
 
-            // Create the AND node
             let new_lit = aig.add_and(left_lit, right_lit);
             node_lits.push(new_lit);
         }
 
-        // Use the result_lit to get the correct output
         let result_idx = (result_lit / 2) as usize;
         let result_inv = result_lit & 1 == 1;
 
@@ -266,36 +216,79 @@ struct RewriteCandidate {
     gain: i32,
 }
 
-/// Count nodes in a cone that are not shared (single fanout)
-fn count_cone_nodes(
+/// Count MFFC nodes by decrementing reference counts (ABC-style).
+///
+/// Returns the number of AND nodes in the Maximum Fanout-Free Cone that would
+/// become dead if `root` were removed. Stops at `leaves` (cut boundary).
+///
+/// **WARNING**: This mutates `ref_counts`. Call `mffc_ref` to restore them.
+fn mffc_deref(
     aig: &Aig,
     root: AigNodeId,
     leaves: &[AigNodeId],
-    fanout_counts: &IndexMap<AigNodeId, usize>,
+    ref_counts: &mut IndexMap<AigNodeId, usize>,
 ) -> usize {
-    let mut count = 0;
-    let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![root];
+    if leaves.contains(&root) {
+        return 0;
+    }
+    let (left, right) = match aig.get_node(root) {
+        Some(AigNode::And { left, right }) => (*left, *right),
+        _ => return 0,
+    };
 
-    while let Some(node) = stack.pop() {
-        if visited.contains(&node) {
-            continue;
-        }
-        if leaves.contains(&node) {
-            continue;
-        }
-        visited.insert(node);
+    let mut count = 1; // Count this node
 
-        if let Some(AigNode::And { left, right }) = aig.get_node(node) {
-            // Only count if single fanout or if it's the root
-            let fanouts = fanout_counts.get(&node).copied().unwrap_or(0);
-            if fanouts <= 1 || node == root {
-                count += 1;
-            }
-            stack.push(left.node);
-            stack.push(right.node);
+    // Deref left child
+    let left_rc = ref_counts.get(&left.node).copied().unwrap_or(0);
+    if left_rc > 0 {
+        *ref_counts.entry(left.node).or_insert(0) = left_rc - 1;
+        if left_rc == 1 {
+            count += mffc_deref(aig, left.node, leaves, ref_counts);
         }
     }
+
+    // Deref right child (handle self-loop case where left.node == right.node)
+    let right_rc = ref_counts.get(&right.node).copied().unwrap_or(0);
+    if right_rc > 0 {
+        *ref_counts.entry(right.node).or_insert(0) = right_rc - 1;
+        if right_rc == 1 {
+            count += mffc_deref(aig, right.node, leaves, ref_counts);
+        }
+    }
+
+    count
+}
+
+/// Restore reference counts after `mffc_deref` (symmetric undo operation).
+fn mffc_ref(
+    aig: &Aig,
+    root: AigNodeId,
+    leaves: &[AigNodeId],
+    ref_counts: &mut IndexMap<AigNodeId, usize>,
+) -> usize {
+    if leaves.contains(&root) {
+        return 0;
+    }
+    let (left, right) = match aig.get_node(root) {
+        Some(AigNode::And { left, right }) => (*left, *right),
+        _ => return 0,
+    };
+
+    let mut count = 1;
+
+    // Ref left child (must ref before incrementing so we detect the 0→1 transition)
+    let left_rc = ref_counts.get(&left.node).copied().unwrap_or(0);
+    if left_rc == 0 {
+        count += mffc_ref(aig, left.node, leaves, ref_counts);
+    }
+    *ref_counts.entry(left.node).or_insert(0) = left_rc + 1;
+
+    // Ref right child
+    let right_rc = ref_counts.get(&right.node).copied().unwrap_or(0);
+    if right_rc == 0 {
+        count += mffc_ref(aig, right.node, leaves, ref_counts);
+    }
+    *ref_counts.entry(right.node).or_insert(0) = right_rc + 1;
 
     count
 }
@@ -645,9 +638,11 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
         }
     } else {
         panic!(
-            "resolve_lit: node {:?} not found in map — likely forward reference \
-             from apply_substitutions without topological rebuild",
-            lit.node
+            "resolve_lit: node {:?} not found in map (map has {} entries, max id {:?}) — \
+             likely forward reference from apply_substitutions without topological rebuild",
+            lit.node,
+            map.len(),
+            map.keys().max_by_key(|k| k.0),
         );
     }
 }
@@ -687,87 +682,97 @@ impl Pass for Rewrite {
         self.rewritten_count = 0;
         self.total_gain = 0;
 
-        // Enumerate cuts
+        // Enumerate cuts for all nodes
         let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
 
-        // Compute fanout counts
-        let fanout_counts = compute_fanout_counts(aig);
+        // Compute mutable reference counts (updated after each rewrite)
+        let mut ref_counts = compute_fanout_counts(aig);
 
-        // Find all rewrite candidates
-        let mut candidates: Vec<RewriteCandidate> = Vec::new();
-
-        for (id, node) in aig.iter_nodes() {
-            if let AigNode::And { .. } = node {
-                if let Some(cut_set) = cuts.get_cuts(id) {
-                    for cut in &cut_set.cuts {
-                        if let Some(candidate) = self.evaluate_rewrite(aig, id, cut, &fanout_counts)
-                        {
-                            candidates.push(candidate);
-                        }
-                    }
+        // Collect AND nodes in topological order
+        // (AIG nodes are already stored in topological order)
+        let topo_nodes: Vec<AigNodeId> = aig
+            .iter_nodes()
+            .filter_map(|(id, node)| {
+                if matches!(node, AigNode::And { .. }) {
+                    Some(id)
+                } else {
+                    None
                 }
-            }
-        }
-
-        // Sort by gain (highest first)
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.gain));
-
-        // Track which nodes have been rewritten (to avoid conflicts)
-        let mut rewritten_nodes: std::collections::HashSet<AigNodeId> =
-            std::collections::HashSet::new();
+            })
+            .collect();
 
         // Build substitution map: old_node -> new_lit
         let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
-        // Apply rewrites greedily
-        for candidate in &candidates {
-            // Skip if this node or any of its leaves have been modified
-            if rewritten_nodes.contains(&candidate.node) {
+        // Process each AND node in topological order (ABC-style incremental rewriting)
+        for &node_id in &topo_nodes {
+            // Skip nodes already substituted by an earlier rewrite
+            if subst_map.contains_key(&node_id) {
                 continue;
             }
-            let mut conflict = false;
-            for leaf in &candidate.cut.leaves {
-                if rewritten_nodes.contains(leaf) {
-                    conflict = true;
-                    break;
+
+            let cut_set = match cuts.get_cuts(node_id) {
+                Some(cs) => cs,
+                None => continue,
+            };
+
+            // Find the best rewrite across all cuts for this node
+            let mut best_gain = if self.zero_cost { 0 } else { 1 };
+            let mut best_candidate: Option<RewriteCandidate> = None;
+
+            for cut in &cut_set.cuts {
+                if cut.size() <= 1 {
+                    continue;
+                }
+
+                // Skip cuts with leaves that have been substituted
+                if cut.leaves.iter().any(|l| subst_map.contains_key(l)) {
+                    continue;
+                }
+
+                // Look up NPN implementation
+                let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
+                    Some(x) => x,
+                    None => continue,
+                };
+
+                // Compute MFFC size using reference counting (G2)
+                let mffc_size = mffc_deref(aig, node_id, &cut.leaves, &mut ref_counts);
+                mffc_ref(aig, node_id, &cut.leaves, &mut ref_counts);
+
+                let gain = mffc_size as i32 - impl_.and_count as i32;
+
+                if gain >= best_gain {
+                    best_gain = gain;
+                    best_candidate = Some(RewriteCandidate {
+                        node: node_id,
+                        cut: cut.clone(),
+                        canonical,
+                        implementation: impl_,
+                        gain,
+                    });
                 }
             }
-            if conflict {
-                continue;
+
+            // Apply the best rewrite
+            if let Some(candidate) = best_candidate {
+                if let Some(new_lit) = self.apply_rewrite(aig, &candidate) {
+                    subst_map.insert(node_id, new_lit);
+                    self.rewritten_count += 1;
+                    self.total_gain += candidate.gain;
+                }
             }
 
-            // Apply the rewrite by building a new implementation
-            let gates_before = aig.and_count();
-            if let Some(new_lit) = self.apply_rewrite(aig, candidate) {
-                let gates_added = aig.and_count() - gates_before;
-                // Sanity check: we should add at most impl_.and_count gates
-                // (could be fewer due to structural hashing)
-                // Register the substitution
-                subst_map.insert(candidate.node, new_lit);
-
-                // Mark this node as rewritten
-                rewritten_nodes.insert(candidate.node);
-
-                self.rewritten_count += 1;
-                self.total_gain += candidate.gain;
-            }
-
-            // Limit the number of rewrites per pass (500 allows more aggressive optimization)
-            if self.rewritten_count >= 500 {
-                break;
-            }
+            // No artificial limit (G3) — process every AND node
         }
 
-        // Apply all substitutions to update the AIG
+        // Apply all substitutions and rebuild
         if !subst_map.is_empty() {
             aig.apply_substitutions(&subst_map);
-
-            // Rebuild AIG to compact and ensure topological order
             rebuild_aig_topological(aig);
         }
 
         result.record_after(aig);
-        result.add_extra("candidates", &candidates.len().to_string());
         result.add_extra("rewrites_applied", &self.rewritten_count.to_string());
         result.add_extra("total_gain", &self.total_gain.to_string());
         result
@@ -800,7 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn test_count_cone_nodes() {
+    fn test_mffc_deref_ref_roundtrip() {
+        // Create a simple AIG: y = (a & b) & c
         let mut aig = Aig::new("test".to_string());
         let a = aig.add_input("a".to_string(), None);
         let b = aig.add_input("b".to_string(), None);
@@ -810,11 +816,39 @@ mod tests {
         let abc = aig.add_and(ab, AigLit::new(c));
         aig.add_output("y".to_string(), abc);
 
-        let fanout_counts = compute_fanout_counts(&aig);
+        let mut ref_counts = compute_fanout_counts(&aig);
+        let ref_counts_before = ref_counts.clone();
 
-        // Count nodes in cone from abc to {a, b, c}
-        let count = count_cone_nodes(&aig, abc.node, &[a, b, c], &fanout_counts);
-        assert_eq!(count, 2); // ab and abc
+        // Deref from abc with leaves {a, b, c}
+        let mffc = mffc_deref(&aig, abc.node, &[a, b, c], &mut ref_counts);
+        assert_eq!(mffc, 2); // ab and abc are both in the MFFC
+
+        // Ref to restore
+        mffc_ref(&aig, abc.node, &[a, b, c], &mut ref_counts);
+        assert_eq!(ref_counts, ref_counts_before);
+    }
+
+    #[test]
+    fn test_mffc_shared_node() {
+        // Create AIG where ab is shared: y1 = (a & b) & c, y2 = (a & b) & d
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let c = aig.add_input("c".to_string(), None);
+        let d = aig.add_input("d".to_string(), None);
+
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        let abc = aig.add_and(ab, AigLit::new(c));
+        let abd = aig.add_and(ab, AigLit::new(d));
+        aig.add_output("y1".to_string(), abc);
+        aig.add_output("y2".to_string(), abd);
+
+        let mut ref_counts = compute_fanout_counts(&aig);
+
+        // MFFC of abc with leaves {a, b, c}: only abc itself (ab is shared, fanout=2)
+        let mffc = mffc_deref(&aig, abc.node, &[a, b, c], &mut ref_counts);
+        mffc_ref(&aig, abc.node, &[a, b, c], &mut ref_counts);
+        assert_eq!(mffc, 1); // Only abc, not ab (ab has fanout 2)
     }
 
     #[test]
