@@ -311,7 +311,9 @@ impl SynthEngine {
         if library.is_fpga() {
             super::aig_writer::push_inverters_into_producing_luts(&mut optimized);
             super::aig_writer::absorb_inverters_into_luts(&mut optimized);
-            // Run DCE after INV optimization to clean up disconnected cells
+            // Merge adjacent small LUTs (INV→LUT, AND2→LUT, etc.) into single LUT4s
+            super::aig_writer::merge_adjacent_luts(&mut optimized);
+            // Run DCE after LUT optimization to clean up disconnected cells
             optimized.remove_dead_cells();
         }
 
@@ -334,6 +336,82 @@ impl SynthEngine {
             }
             if let Some(ref timing) = self.timing_result {
                 // Use wns (worst negative slack) - more negative means longer critical path
+                annotations.metadata.original_critical_path_ps = -timing.wns;
+                annotations.metadata.timing_met = timing.is_timing_met();
+            }
+            Some(annotations)
+        } else {
+            None
+        };
+
+        SynthResult {
+            netlist: optimized,
+            initial_and_count: initial_stats.and_count,
+            final_and_count: final_stats.and_count,
+            initial_levels: initial_stats.max_level as usize,
+            final_levels: final_stats.max_level as usize,
+            pass_results: self.pass_results.clone(),
+            timing_result: self.timing_result.clone(),
+            mapping_result: self.mapping_result.clone(),
+            pipeline_annotations: annotations,
+            total_time_ms: self.total_time_ms,
+        }
+    }
+
+    /// Optimize a pre-built AIG (from LIR-to-AIG direct conversion)
+    ///
+    /// This is the main synthesis path: LIR → AIG → optimize → technology map → GateNetlist.
+    /// Skips the GateNetlist→AIG→GateNetlist round-trip of the old flow.
+    pub fn optimize_from_aig(&mut self, mut aig: Aig, library: &TechLibrary) -> SynthResult {
+        let start = Instant::now();
+        self.pass_results.clear();
+
+        let initial_stats = aig.compute_stats();
+
+        // Run optimization passes
+        self.run_optimization_passes(&mut aig);
+        let final_stats = aig.compute_stats();
+
+        // Timing analysis
+        if self.config.run_timing_analysis {
+            self.run_timing_analysis(&aig);
+        }
+
+        // DFF functional decomposition
+        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+
+        // Technology mapping
+        self.run_technology_mapping(&aig, library);
+
+        // Convert to GateNetlist
+        let writer = if let Some(ref mapping) = self.mapping_result {
+            let mut w = AigWriter::with_mapping(library, mapping);
+            w.set_latch_decompositions(latch_decomps);
+            w
+        } else {
+            let mut w = AigWriter::new(library);
+            w.set_latch_decompositions(latch_decomps);
+            w
+        };
+        let mut optimized = writer.write(&aig);
+
+        // FPGA post-mapping optimizations
+        if library.is_fpga() {
+            super::aig_writer::push_inverters_into_producing_luts(&mut optimized);
+            super::aig_writer::absorb_inverters_into_luts(&mut optimized);
+            super::aig_writer::merge_adjacent_luts(&mut optimized);
+            optimized.remove_dead_cells();
+        }
+
+        self.total_time_ms = start.elapsed().as_millis() as u64;
+
+        // Build pipeline annotations
+        let annotations = if self.pipeline_annotations.has_retiming() {
+            let mut annotations = std::mem::take(&mut self.pipeline_annotations);
+            if let Some(period) = self.config.target_period {
+                annotations.metadata.target_frequency_mhz = 1_000_000.0 / period;
+            }
+            if let Some(ref timing) = self.timing_result {
                 annotations.metadata.original_critical_path_ps = -timing.wns;
                 annotations.metadata.timing_met = timing.is_timing_met();
             }

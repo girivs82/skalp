@@ -167,6 +167,10 @@ enum Commands {
         /// Select a specific VHDL architecture by name (default: last defined)
         #[arg(long, value_name = "NAME")]
         architecture: Option<String>,
+
+        /// Dump an intermediate representation and exit (hir, mir, lir)
+        #[arg(long, value_name = "STAGE")]
+        emit: Option<String>,
     },
 
     /// Simulate the design
@@ -235,6 +239,10 @@ enum Commands {
         /// P&R quality preset (fast, default, high_quality)
         #[arg(long, default_value = "default")]
         pnr_preset: String,
+
+        /// Dump an intermediate representation and exit (hir, mir, lir, aig)
+        #[arg(long, value_name = "STAGE")]
+        emit: Option<String>,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -662,6 +670,7 @@ fn main() -> Result<()> {
             library,
             gate_opt_level,
             architecture,
+            emit,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -698,6 +707,7 @@ fn main() -> Result<()> {
                 library.as_ref(),
                 no_async_sta,
                 architecture.as_deref(),
+                emit.as_deref(),
             )?;
         }
 
@@ -736,8 +746,9 @@ fn main() -> Result<()> {
             output,
             optimize,
             pnr_preset,
+            emit,
         } => {
-            synthesize_design(&source, &device, full_flow, &output, &optimize, &pnr_preset)?;
+            synthesize_design(&source, &device, full_flow, &output, &optimize, &pnr_preset, emit.as_deref())?;
         }
 
         Commands::Pnr {
@@ -1148,6 +1159,7 @@ fn build_design(
     library_path: Option<&PathBuf>,
     skip_async_sta: bool,
     architecture: Option<&str>,
+    emit: Option<&str>,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::{
         generate_constraints_toml, generate_systemverilog_from_mir,
@@ -1175,6 +1187,12 @@ fn build_design(
     // Filter VHDL architectures if --architecture was specified
     if is_vhdl {
         filter_vhdl_architectures(&mut hir, architecture)?;
+    }
+
+    // --emit hir: dump HIR and exit
+    if emit == Some("hir") {
+        println!("{}", serde_json::to_string_pretty(&hir)?);
+        return Ok(());
     }
 
     // Run safety analysis if enabled
@@ -1237,6 +1255,25 @@ fn build_design(
     let mir = compiler
         .compile_to_mir_with_modules(&hir, &module_hirs)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
+
+    // --emit mir: dump MIR and exit
+    if emit == Some("mir") {
+        println!("{}", serde_json::to_string_pretty(&mir)?);
+        return Ok(());
+    }
+
+    // --emit lir: lower to LIR, dump, and exit
+    if emit == Some("lir") {
+        let top_module = find_top_level_module(&mir)
+            .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+        let lir = skalp_lir::lower_mir_module_to_lir(top_module);
+        println!("{}", serde_json::to_string_pretty(&lir)?);
+        return Ok(());
+    }
+
+    if let Some(stage) = emit {
+        anyhow::bail!("Unknown --emit stage: '{}'. Options: hir, mir, lir", stage);
+    }
 
     // Create output directory
     fs::create_dir_all(output_dir)?;
@@ -2734,9 +2771,8 @@ fn run_equivalence_check(
         GateNetlistToAig, MirToAig,
     };
     use skalp_frontend::parse_and_build_compilation_context;
-    use skalp_lir::{
-        get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates,
-    };
+    use skalp_lir::get_stdlib_library;
+    use skalp_lir::lower_mir_hierarchical_with_top;
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -2840,12 +2876,14 @@ fn run_equivalence_check(
             .context("Failed to parse gate-level netlist JSON")?
     } else {
         println!();
-        println!("🔧 Synthesizing gate-level netlist (hierarchical)...");
+        println!("🔧 Synthesizing gate-level netlist...");
         println!("   Library: {}", library_name);
         let library =
             get_stdlib_library(library_name).context("Failed to load technology library")?;
-        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
-        let netlist = hier_netlist.flatten();
+        // Use the full synthesis pipeline (LIR→AIG→optimize→map) so EC
+        // verifies the actual optimized netlist, not an unoptimized mapping.
+        let synth_result = skalp_lir::synthesize(&lir, &library, skalp_lir::SynthPreset::Compress2);
+        let netlist = synth_result.netlist;
         println!("   Cells: {}", netlist.cells.len());
         println!("   Nets: {}", netlist.nets.len());
         netlist
@@ -3916,6 +3954,7 @@ fn synthesize_design(
     output_dir: &PathBuf,
     optimize: &str,
     pnr_preset: &str,
+    emit: Option<&str>,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir_with_bram};
@@ -3952,12 +3991,24 @@ fn synthesize_design(
     // Parse and build HIR
     let hir = parse_and_build_hir_from_file(source).context("Failed to parse source")?;
 
+    // --emit hir: dump HIR and exit
+    if emit == Some("hir") {
+        println!("{}", serde_json::to_string_pretty(&hir)?);
+        return Ok(());
+    }
+
     // Lower to MIR
     let compiler =
         skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
     let mir = compiler
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    // --emit mir: dump MIR and exit
+    if emit == Some("mir") {
+        println!("{}", serde_json::to_string_pretty(&mir)?);
+        return Ok(());
+    }
 
     // Get top module
     let top_module =
@@ -3966,6 +4017,24 @@ fn synthesize_design(
 
     // Lower to LIR with BRAM inference for FPGA targets
     let lir_result = lower_mir_module_to_lir_with_bram(top_module);
+
+    // --emit lir: dump LIR and exit
+    if emit == Some("lir") {
+        println!("{}", serde_json::to_string_pretty(&lir_result.lir)?);
+        return Ok(());
+    }
+
+    // --emit aig: build AIG from LIR, dump stats and structure, and exit
+    if emit == Some("aig") {
+        let converter = skalp_lir::synth::LirToSynthAig::new(&lir_result.lir);
+        let result = converter.build();
+        println!("{:#?}", result.aig);
+        return Ok(());
+    }
+
+    if let Some(stage) = emit {
+        anyhow::bail!("Unknown --emit stage: '{}'. Options: hir, mir, lir, aig", stage);
+    }
 
     // Parse optimization preset
     let preset = match optimize {

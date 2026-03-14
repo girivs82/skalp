@@ -1783,6 +1783,235 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
     total_removed
 }
 
+/// Post-mapping LUT merging pass: combine adjacent small LUTs into one.
+///
+/// When a producer LUT has a single fanout into a consumer LUT, and the
+/// combined input count fits in a LUT4 (≤4 unique inputs), compose the truth
+/// tables and merge into a single LUT cell. This eliminates under-utilized
+/// LUTs (e.g., INV→AND2 → single LUT4, AND2→AND2 → single LUT4).
+///
+/// Returns the number of LUT cells removed.
+pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
+    let max_lut_inputs = 4usize;
+    let mut total_merged = 0;
+
+    // Iterate until no more merges are found (merging can create new opportunities)
+    loop {
+        // Build net→driver and net→consumer maps
+        let mut net_driver: HashMap<GateNetId, usize> = HashMap::new();
+        let mut net_consumers: HashMap<GateNetId, Vec<(usize, usize)>> = HashMap::new();
+
+        for (cell_idx, cell) in netlist.cells.iter().enumerate() {
+            for &out_net in &cell.outputs {
+                net_driver.insert(out_net, cell_idx);
+            }
+            for (pin_idx, &in_net) in cell.inputs.iter().enumerate() {
+                net_consumers
+                    .entry(in_net)
+                    .or_default()
+                    .push((cell_idx, pin_idx));
+            }
+            if let Some(clk) = cell.clock {
+                net_consumers
+                    .entry(clk)
+                    .or_default()
+                    .push((cell_idx, usize::MAX));
+            }
+        }
+
+        // Track output port nets — can't remove LUTs driving primary outputs
+        let output_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+
+        // Find merge candidates: producer LUT → consumer LUT (single fanout)
+        let mut merges: Vec<(usize, usize, usize)> = Vec::new(); // (producer_idx, consumer_idx, pin_in_consumer)
+        let mut consumed_producers: HashSet<usize> = HashSet::new();
+        let mut consumed_consumers: HashSet<usize> = HashSet::new();
+
+        for (prod_idx, cell) in netlist.cells.iter().enumerate() {
+            // Must be a LUT cell
+            if cell.lut_init.is_none() || cell.outputs.is_empty() {
+                continue;
+            }
+
+            let prod_output = cell.outputs[0];
+
+            // Skip if output is a primary output
+            if output_nets.contains(&prod_output) {
+                continue;
+            }
+
+            // Must have exactly one consumer (single fanout)
+            let consumers = match net_consumers.get(&prod_output) {
+                Some(list) => list,
+                None => continue,
+            };
+            if consumers.len() != 1 {
+                continue;
+            }
+
+            let (cons_idx, pin_idx) = consumers[0];
+            if pin_idx == usize::MAX {
+                continue; // Clock pin, not data
+            }
+
+            let consumer = &netlist.cells[cons_idx];
+            if consumer.lut_init.is_none() {
+                continue; // Consumer must also be a LUT
+            }
+
+            // Count unique combined inputs
+            let prod_inputs = &cell.inputs;
+            let cons_inputs = &consumer.inputs;
+
+            // Collect unique nets: consumer inputs (except the merged pin) + producer inputs
+            let mut combined: Vec<GateNetId> = Vec::new();
+            for (i, &net) in cons_inputs.iter().enumerate() {
+                if i == pin_idx {
+                    continue; // Skip the internal wire
+                }
+                if !combined.contains(&net) {
+                    combined.push(net);
+                }
+            }
+            for &net in prod_inputs {
+                if !combined.contains(&net) {
+                    combined.push(net);
+                }
+            }
+
+            if combined.len() <= max_lut_inputs
+                && !consumed_producers.contains(&prod_idx)
+                && !consumed_consumers.contains(&cons_idx)
+                && prod_idx != cons_idx
+            {
+                merges.push((prod_idx, cons_idx, pin_idx));
+                consumed_producers.insert(prod_idx);
+                consumed_consumers.insert(cons_idx);
+                // Also prevent consumer from being used as a producer in the same round
+                consumed_producers.insert(cons_idx);
+            }
+        }
+
+        if merges.is_empty() {
+            break;
+        }
+
+        // Apply merges
+        let mut cells_to_remove: HashSet<usize> = HashSet::new();
+
+        for &(prod_idx, cons_idx, pin_idx) in &merges {
+            let prod_init = netlist.cells[prod_idx].lut_init.unwrap();
+            let cons_init = netlist.cells[cons_idx].lut_init.unwrap();
+            let prod_inputs = netlist.cells[prod_idx].inputs.clone();
+            let cons_inputs = netlist.cells[cons_idx].inputs.clone();
+
+            // Build the combined input list and mapping
+            let mut combined_inputs: Vec<GateNetId> = Vec::new();
+
+            // Map: for each original consumer input, what index in combined_inputs?
+            let mut cons_input_map: Vec<usize> = Vec::new();
+            for (i, &net) in cons_inputs.iter().enumerate() {
+                if i == pin_idx {
+                    cons_input_map.push(usize::MAX); // placeholder for producer output
+                    continue;
+                }
+                let pos = combined_inputs.iter().position(|&n| n == net).unwrap_or_else(|| {
+                    combined_inputs.push(net);
+                    combined_inputs.len() - 1
+                });
+                cons_input_map.push(pos);
+            }
+
+            // Map: for each producer input, what index in combined_inputs?
+            let mut prod_input_map: Vec<usize> = Vec::new();
+            for &net in &prod_inputs {
+                let pos = combined_inputs.iter().position(|&n| n == net).unwrap_or_else(|| {
+                    combined_inputs.push(net);
+                    combined_inputs.len() - 1
+                });
+                prod_input_map.push(pos);
+            }
+
+            let num_combined = combined_inputs.len();
+            if num_combined > max_lut_inputs {
+                continue; // Safety check (shouldn't happen due to earlier check)
+            }
+
+            // Compute composed truth table
+            let num_prod_inputs = prod_inputs.len();
+            let num_cons_inputs = cons_inputs.len();
+            let mut new_tt = 0u64;
+
+            for row in 0..(1u64 << num_combined) {
+                // Evaluate producer: extract producer input bits from the combined row
+                let mut prod_row = 0usize;
+                for (pi, &ci) in prod_input_map.iter().enumerate() {
+                    if (row >> ci) & 1 == 1 {
+                        prod_row |= 1 << pi;
+                    }
+                }
+                let prod_out = (prod_init >> prod_row) & 1;
+
+                // Evaluate consumer: extract consumer input bits, substituting producer output
+                let mut cons_row = 0usize;
+                for (ci_pin, &mapped) in cons_input_map.iter().enumerate() {
+                    if ci_pin == pin_idx {
+                        // This is the pin fed by the producer
+                        if prod_out == 1 {
+                            cons_row |= 1 << ci_pin;
+                        }
+                    } else {
+                        if (row >> mapped) & 1 == 1 {
+                            cons_row |= 1 << ci_pin;
+                        }
+                    }
+                }
+                let cons_out = (cons_init >> cons_row) & 1;
+
+                if cons_out == 1 {
+                    new_tt |= 1u64 << row;
+                }
+            }
+
+            // Expand to LUT4 (pad if fewer than 4 inputs)
+            let lut4_init = expand_truth_table_to_lut4(new_tt, num_combined);
+
+            // Pad inputs to 4
+            let mut padded = combined_inputs.clone();
+            while padded.len() < 4 {
+                if padded.is_empty() {
+                    // Constant — use any net (won't matter)
+                    if let Some(&net) = netlist.inputs.first() {
+                        padded.push(net);
+                    } else {
+                        break;
+                    }
+                } else {
+                    padded.push(padded[0]);
+                }
+            }
+
+            // Update consumer cell in-place with merged LUT
+            netlist.cells[cons_idx].inputs = padded;
+            netlist.cells[cons_idx].lut_init = Some(lut4_init);
+
+            // Mark producer for removal
+            cells_to_remove.insert(prod_idx);
+        }
+
+        // Remove merged producer cells (reverse order to preserve indices)
+        let mut indices: Vec<usize> = cells_to_remove.into_iter().collect();
+        indices.sort_unstable();
+        for &idx in indices.iter().rev() {
+            netlist.cells.remove(idx);
+        }
+
+        total_merged += merges.len();
+    }
+
+    total_merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

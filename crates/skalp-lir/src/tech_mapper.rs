@@ -7860,26 +7860,36 @@ pub fn synthesize(
     library: &TechLibrary,
     preset: crate::synth::SynthPreset,
 ) -> crate::synth::SynthResult {
-    use crate::synth::SynthEngine;
+    use crate::synth::{LirToSynthAig, SynthEngine};
 
-    // Step 1: Initial tech mapping
-    let initial_result = map_lir_to_gates(lir, library);
+    // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist)
+    let converter = LirToSynthAig::new(lir);
+    let lir_to_aig_result = converter.build();
 
-    // Note: Pre-AIG buffer removal was removed because it breaks the AIG partition
-    // merge. The reverse net replacement rewires cell outputs to use output port net
-    // IDs, but the AIG round-trip creates new nets and relies on name-based matching.
-    // The output port nets end up disconnected in combinational designs (e.g., ALU).
-
-    // Step 2: Run synthesis engine with AIG optimization
+    // Step 2: Run synthesis engine on the AIG
     let mut engine = SynthEngine::with_preset(preset);
-    let mut result = engine.optimize(&initial_result.netlist, library);
+    let mut result = engine.optimize_from_aig(lir_to_aig_result.aig, library);
 
-    // Step 3: LUT post-mapping optimization for FPGA targets
+    // Step 3: Handle physical nodes (BRAM, NCL, etc.) that couldn't go through AIG
+    if !lir_to_aig_result.physical_node_indices.is_empty() {
+        // Map physical nodes through the old tech mapper path
+        let physical_netlist = map_physical_lir_nodes(lir, library, &lir_to_aig_result.physical_node_indices);
+        // TODO: merge physical_netlist cells into result.netlist
+        // For now, physical nodes (BRAM, NCL) are not yet supported in the new path
+        if !physical_netlist.cells.is_empty() {
+            eprintln!(
+                "warning: {} physical cells (BRAM/NCL) not yet merged in new synthesis path",
+                physical_netlist.cells.len()
+            );
+        }
+    }
+
+    // Step 4: LUT post-mapping optimization for FPGA targets
     if library.is_fpga() {
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
     }
 
-    // Step 4: Buffer removal and cleanup
+    // Step 5: Buffer removal and cleanup
     {
         let mut gate_opt = crate::gate_optimizer::GateOptimizer::new();
         gate_opt.set_enable_constant_folding(false);
@@ -7890,7 +7900,21 @@ pub fn synthesize(
         gate_opt.optimize(&mut result.netlist);
     }
 
+    // Preserve NCL flag
+    result.netlist.is_ncl = lir.is_ncl;
+
     result
+}
+
+/// Map physical LIR nodes (BRAM, NCL) through the old tech mapper to GateNetlist cells
+fn map_physical_lir_nodes(
+    lir: &Lir,
+    library: &TechLibrary,
+    _physical_indices: &[usize],
+) -> crate::gate_netlist::GateNetlist {
+    // For now, return empty netlist. Full BRAM/NCL support will be added
+    // by extracting map_memory_block() and map_ncl_*() from TechMapper.
+    crate::gate_netlist::GateNetlist::new(lir.name.clone(), library.name.clone())
 }
 
 /// Full synthesis with default balanced preset
