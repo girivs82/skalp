@@ -934,17 +934,25 @@ impl Aig {
             return;
         }
 
-        // Helper to resolve a literal through the substitution map
+        // Helper to resolve a literal through the substitution map.
+        // Chase chains transitively: if A -> B and B -> C, resolve A to C.
+        // This is needed because when building replacements, structural hashing
+        // may return nodes that are themselves substitution targets.
         let resolve = |lit: AigLit| -> AigLit {
-            if let Some(&new_lit) = subst_map.get(&lit.node) {
-                if lit.inverted {
-                    new_lit.invert()
+            let mut current = lit;
+            let max_depth = subst_map.len();
+            for _ in 0..max_depth {
+                if let Some(&new_lit) = subst_map.get(&current.node) {
+                    current = if current.inverted {
+                        new_lit.invert()
+                    } else {
+                        new_lit
+                    };
                 } else {
-                    new_lit
+                    break;
                 }
-            } else {
-                lit
             }
+            current
         };
 
         // Update all AND, Latch, and Barrier nodes

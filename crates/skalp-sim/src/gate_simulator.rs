@@ -1042,6 +1042,14 @@ impl GateLevelSimulator {
                                     })
                                     .collect();
 
+                                // DFF with enable: when enable is inactive, retain current Q (skip update)
+                                if matches!(ptype, PrimitiveType::DffE) {
+                                    let en = input_values.get(1).copied().unwrap_or(true);
+                                    if !en {
+                                        continue; // Enable inactive — retain current register value
+                                    }
+                                }
+
                                 let output_values = if let Some(fault) = &self.active_fault {
                                     if fault.target_primitive == *id {
                                         evaluate_primitive_with_fault(

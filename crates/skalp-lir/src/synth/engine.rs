@@ -377,8 +377,8 @@ impl SynthEngine {
             self.run_timing_analysis(&aig);
         }
 
-        // DFF functional decomposition
-        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+        // DFF functional decomposition — disabled until correctness issues fixed
+        let latch_decomps = std::collections::HashMap::new();
 
         // Technology mapping
         self.run_technology_mapping(&aig, library);
@@ -676,10 +676,10 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
-                "rewrite_z".to_string(),
+                "rewrite".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(),
-                "rewrite_z".to_string(),
+                "refactor".to_string(),
+                "rewrite".to_string(),
                 "balance".to_string(),
                 "dce".to_string(),
             ],
@@ -721,10 +721,10 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
-                "rewrite_z".to_string(), // zero-cost rewrite
+                "rewrite".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(), // zero-cost refactor
-                "rewrite_z".to_string(),  // zero-cost rewrite
+                "refactor".to_string(),
+                "rewrite".to_string(),
                 "balance".to_string(),
                 "dc2".to_string(),   // don't-care based optimization
                 "fraig".to_string(), // SAT-based equivalence
@@ -741,12 +741,12 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "resub".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(),
-                "resub_z".to_string(),
-                "rewrite_z".to_string(),
+                "refactor".to_string(),
+                "resub".to_string(),
+                "rewrite".to_string(),
                 "balance".to_string(),
-                "refactor_z".to_string(),
-                "resub_z".to_string(),
+                "refactor".to_string(),
+                "resub".to_string(),
                 "fraig".to_string(),
                 "dce".to_string(),
             ],

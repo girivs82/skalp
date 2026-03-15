@@ -1221,9 +1221,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "should have been partitioned out")]
-    fn test_half_adder_panics_in_aig_builder() {
-        // HalfAdder cells must be partitioned out before AIG building
+    fn test_half_adder_in_aig_builder() {
+        // HalfAdder cells are now handled by inferred function (no longer panic)
         let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
 
         let a = netlist.add_input("a".to_string());
@@ -1243,13 +1242,12 @@ mod tests {
         netlist.add_cell(ha_cell);
 
         let builder = AigBuilder::new(&netlist);
-        let _aig = builder.build(); // Should panic
+        let _aig = builder.build(); // Should succeed (inferred HalfAdder)
     }
 
     #[test]
-    #[should_panic(expected = "should have been partitioned out")]
-    fn test_full_adder_panics_in_aig_builder() {
-        // FullAdder cells must be partitioned out before AIG building
+    fn test_full_adder_in_aig_builder() {
+        // FullAdder cells are now handled by inferred function (no longer panic)
         let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
 
         let a = netlist.add_input("a".to_string());
@@ -1270,6 +1268,6 @@ mod tests {
         netlist.add_cell(fa_cell);
 
         let builder = AigBuilder::new(&netlist);
-        let _aig = builder.build(); // Should panic
+        let _aig = builder.build(); // Should succeed (inferred FullAdder)
     }
 }

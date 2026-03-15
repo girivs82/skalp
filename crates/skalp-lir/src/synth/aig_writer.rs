@@ -54,36 +54,63 @@ impl<'a> AigWriter<'a> {
 
     /// Write AIG to gate netlist
     pub fn write(&self, aig: &Aig) -> GateNetlist {
-        // Pre-compute AND nodes needed by latch decompositions
-        // These need cells even when the technology mapper didn't map them.
-        let mut latch_decomp_nodes = HashSet::new();
-        if self.mapping_result.is_some() && !self.latch_decomps.is_empty() {
-            fn mark_decomp_fanin(aig: &Aig, node_id: AigNodeId, nodes: &mut HashSet<AigNodeId>) {
+        // Pre-compute AND nodes that need cells even when the technology mapper
+        // considers them interior to a cut (unmapped). An unmapped AND node needs
+        // a cell if it's used as:
+        // - A cut leaf of any mapped node
+        // - A latch data/enable/reset input
+        // - A primary output
+        let mut required_unmapped = HashSet::new();
+        if let Some(mapping) = self.mapping_result {
+            // Collect all cut leaves from mapped nodes
+            for mapped in mapping.mapped_nodes.values() {
+                for &(leaf_id, _inverted) in &mapped.inputs {
+                    if matches!(aig.get_node(leaf_id), Some(AigNode::And { .. }))
+                        && !mapping.mapped_nodes.contains_key(&leaf_id)
+                    {
+                        required_unmapped.insert(leaf_id);
+                    }
+                }
+            }
+
+            // Also mark AND nodes referenced by latch data inputs
+            for (_id, node) in aig.iter_nodes() {
+                if let AigNode::Latch { data, .. } = node {
+                    if matches!(aig.get_node(data.node), Some(AigNode::And { .. }))
+                        && !mapping.mapped_nodes.contains_key(&data.node)
+                    {
+                        required_unmapped.insert(data.node);
+                    }
+                }
+            }
+
+            // Mark AND nodes in latch decomposition fanin cones
+            fn mark_and_fanin(aig: &Aig, node_id: AigNodeId, nodes: &mut HashSet<AigNodeId>) {
                 if nodes.contains(&node_id) || node_id == AigNodeId::FALSE {
                     return;
                 }
                 if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
                     nodes.insert(node_id);
-                    mark_decomp_fanin(aig, left.node, nodes);
-                    mark_decomp_fanin(aig, right.node, nodes);
+                    mark_and_fanin(aig, left.node, nodes);
+                    mark_and_fanin(aig, right.node, nodes);
                 }
             }
             for decomp in self.latch_decomps.values() {
-                mark_decomp_fanin(aig, decomp.data.node, &mut latch_decomp_nodes);
+                mark_and_fanin(aig, decomp.data.node, &mut required_unmapped);
                 if let Some(e) = decomp.enable {
-                    mark_decomp_fanin(aig, e.node, &mut latch_decomp_nodes);
+                    mark_and_fanin(aig, e.node, &mut required_unmapped);
                 }
                 if let Some(r) = decomp.sync_reset {
-                    mark_decomp_fanin(aig, r.node, &mut latch_decomp_nodes);
+                    mark_and_fanin(aig, r.node, &mut required_unmapped);
                 }
             }
-            // Remove nodes that are already mapped — those have proper LUT cells
-            if let Some(mapping) = self.mapping_result {
-                for id in mapping.mapped_nodes.keys() {
-                    latch_decomp_nodes.remove(id);
-                }
+
+            // Remove nodes that ARE mapped — those get proper cells from emit_mapped_cell
+            for id in mapping.mapped_nodes.keys() {
+                required_unmapped.remove(id);
             }
         }
+        let latch_decomp_nodes = required_unmapped;
 
         let mut state = AigWriterState {
             library: self.library,
@@ -107,6 +134,8 @@ impl<'a> AigWriter<'a> {
 
         // Phase 4: Process nodes in topological order
         state.process_nodes(aig);
+
+
 
         // Phase 5: Create outputs
         state.create_outputs(aig);
@@ -381,19 +410,11 @@ impl AigWriterState<'_> {
                 self.emit_mapped_cell(aig, id, mapped);
                 return;
             }
-            // Non-required AND node (interior to a cut) — skip cell creation unless
-            // needed by latch decompositions. Creating AND2 cells for truly interior
-            // nodes would add false fanout on required LUT outputs, causing cascading
-            // DCE failures.
-            if !self.latch_decomp_nodes.contains(&id) {
-                let output_net = self
-                    .netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));
-                self.node_to_net.insert(id, output_net);
-                self.lit_to_net.insert((id, false), output_net);
-                return;
-            }
-            // Fall through to create AND2 cell — needed by latch decomposition
+            // Unmapped AND node — might be interior to a cut, or might be needed
+            // as a cut leaf by another mapped node. Create an AND2 cell for it;
+            // DCE will remove truly unused cells afterward.
+            // (Previously we skipped cell creation, but that left undriven nets
+            // when this node was used as a cut leaf by another mapped cell.)
         }
 
         // Select the best cell based on input inversions and library availability.
@@ -708,9 +729,18 @@ impl AigWriterState<'_> {
             }
         }
 
-        // Need to create an inverter
+        // Need to create an inverter (or the base net is missing)
         let base_net = self.node_to_net.get(&lit.node).copied().unwrap_or_else(|| {
-            // Create a placeholder net
+            // Create a placeholder net — this node has no cell driving it
+            let node_info = aig.get_node(lit.node).map(|n| match n {
+                AigNode::Const => "Const",
+                AigNode::Input { .. } => "Input",
+                AigNode::And { .. } => "And",
+                AigNode::Latch { .. } => "Latch",
+                AigNode::Barrier { .. } => "Barrier",
+            }).unwrap_or("MISSING");
+            // Placeholder net for unmapped AIG node — happens when mapping
+            // doesn't cover all transitive fanin nodes
             self.netlist
                 .add_net(GateNet::new(GateNetId(0), format!("n{}", lit.node.0)))
         });

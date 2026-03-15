@@ -66,47 +66,74 @@ impl Default for Resub {
     }
 }
 
-/// 64-bit simulation signatures for all nodes
+/// Number of independent 64-bit simulation rounds.
+/// Deep AND chains (e.g., carry chains) can produce zero signatures with probability
+/// (1 - 2^-N)^64 per round. With 8 rounds, false positive probability drops to
+/// ~10^-9 even for wide carry chains.
+const SIM_ROUNDS: usize = 8;
+
+/// Multi-round 64-bit simulation signatures for all nodes.
+/// Uses multiple independent random seeds to avoid false positives from
+/// deep AND chains producing all-zero signatures.
 struct SimSignatures {
-    sigs: IndexMap<AigNodeId, u64>,
+    rounds: Vec<IndexMap<AigNodeId, u64>>,
 }
 
 impl SimSignatures {
     /// Compute simulation signatures bottom-up using random input patterns
     fn compute(aig: &Aig) -> Self {
-        let mut sigs = IndexMap::new();
+        let seeds: [u64; SIM_ROUNDS] = [
+            0x12345678_DEADBEEF,
+            0xA5A5A5A5_5A5A5A5A,
+            0x0F0F0F0F_F0F0F0F0,
+            0x13579BDF_2468ACE0,
+            0xFEDCBA98_76543210,
+            0x0123CDEF_89AB4567,
+            0xDEADBEEF_CAFEBABE,
+            0x8BADF00D_DEADC0DE,
+        ];
 
-        // Constant false
-        sigs.insert(AigNodeId::FALSE, 0u64);
+        let mut rounds = Vec::with_capacity(SIM_ROUNDS);
 
-        // Assign random signatures to inputs using a simple LCG
-        let mut rng_state: u64 = 0x12345678_DEADBEEF;
-        for (id, node) in aig.iter_nodes() {
-            match node {
-                AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
-                    rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    sigs.insert(id, rng_state);
+        for &seed in &seeds[..SIM_ROUNDS] {
+            let mut sigs = IndexMap::new();
+            sigs.insert(AigNodeId::FALSE, 0u64);
+
+            let mut rng_state: u64 = seed;
+            for (id, node) in aig.iter_nodes() {
+                match node {
+                    AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
+                        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        sigs.insert(id, rng_state);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+
+            for (id, node) in aig.iter_nodes() {
+                if let AigNode::And { left, right } = node {
+                    let left_sig = sigs.get(&left.node).copied().unwrap_or(0);
+                    let left_sig = if left.inverted { !left_sig } else { left_sig };
+                    let right_sig = sigs.get(&right.node).copied().unwrap_or(0);
+                    let right_sig = if right.inverted { !right_sig } else { right_sig };
+                    sigs.insert(id, left_sig & right_sig);
+                }
+            }
+
+            rounds.push(sigs);
         }
 
-        // Propagate through AND nodes (topological order — iter_nodes is topo-sorted)
-        for (id, node) in aig.iter_nodes() {
-            if let AigNode::And { left, right } = node {
-                let left_sig = sigs.get(&left.node).copied().unwrap_or(0);
-                let left_sig = if left.inverted { !left_sig } else { left_sig };
-                let right_sig = sigs.get(&right.node).copied().unwrap_or(0);
-                let right_sig = if right.inverted { !right_sig } else { right_sig };
-                sigs.insert(id, left_sig & right_sig);
-            }
-        }
-
-        Self { sigs }
+        Self { rounds }
     }
 
+    /// Get signature for round 0 (used for primary matching)
     fn get(&self, node: AigNodeId) -> u64 {
-        self.sigs.get(&node).copied().unwrap_or(0)
+        self.rounds[0].get(&node).copied().unwrap_or(0)
+    }
+
+    /// Get signature for a specific round
+    fn get_round(&self, round: usize, node: AigNodeId) -> u64 {
+        self.rounds[round].get(&node).copied().unwrap_or(0)
     }
 }
 
@@ -357,6 +384,62 @@ impl ResubMatch {
     }
 }
 
+/// Verify a candidate resub match against additional simulation rounds.
+/// Returns true if the match holds for ALL rounds (not just round 0).
+fn verify_resub_multi_round(
+    sigs: &SimSignatures,
+    target: AigNodeId,
+    resub: &ResubMatch,
+) -> bool {
+    for round in 1..SIM_ROUNDS {
+        let target_sig = sigs.get_round(round, target);
+        let ok = match resub {
+            ResubMatch::Equal(a) => {
+                let sa = sigs.get_round(round, a.node);
+                let sa = if a.inverted { !sa } else { sa };
+                target_sig == sa
+            }
+            ResubMatch::And2(a, b) => {
+                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
+                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                target_sig == (sa & sb)
+            }
+            ResubMatch::Or2(a, b) => {
+                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
+                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                target_sig == (sa | sb)
+            }
+            ResubMatch::Xor2(a, b) => {
+                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
+                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                target_sig == (sa ^ sb)
+            }
+            ResubMatch::AndOr(a, b, c) => {
+                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
+                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                let sc = if c.inverted { !sigs.get_round(round, c.node) } else { sigs.get_round(round, c.node) };
+                target_sig == ((sa & sb) | sc)
+            }
+            ResubMatch::OrAnd(a, b, c) => {
+                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
+                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                let sc = if c.inverted { !sigs.get_round(round, c.node) } else { sigs.get_round(round, c.node) };
+                target_sig == ((sa | sb) & sc)
+            }
+            ResubMatch::Mux(sel, d1, d0) => {
+                let ss = if sel.inverted { !sigs.get_round(round, sel.node) } else { sigs.get_round(round, sel.node) };
+                let s1 = if d1.inverted { !sigs.get_round(round, d1.node) } else { sigs.get_round(round, d1.node) };
+                let s0 = if d0.inverted { !sigs.get_round(round, d0.node) } else { sigs.get_round(round, d0.node) };
+                target_sig == ((ss & s1) | (!ss & s0))
+            }
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 /// Try to find a resubstitution for target using simulation signatures.
 /// Returns the best match (lowest cost) if any.
 fn try_resub_sim(
@@ -569,7 +652,9 @@ impl Pass for Resub {
                 let gain = mffc_size as i32 - resub_match.cost() as i32;
                 let accept = if self.zero_cost { gain >= 0 } else { gain > 0 };
 
-                if accept {
+                // Verify against additional simulation rounds to catch false positives
+                // (e.g., deep AND chains producing all-zero signatures)
+                if accept && verify_resub_multi_round(&sigs, *target, &resub_match) {
                     // Extract divisor info from the match (without building)
                     let (kind, divs) = match &resub_match {
                         ResubMatch::Equal(a) => (0u8, vec![(a.node, a.inverted)]),
