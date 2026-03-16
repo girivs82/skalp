@@ -303,6 +303,57 @@ fn mffc_ref(
 /// added at higher IDs (e.g., by rewrite/refactor) — `apply_substitutions`
 /// can create forward references that cause downstream passes (DCE, strash)
 /// to encounter unresolved node IDs.
+/// Compute truth table for a node given specific leaves (inputs).
+/// Evaluates all 2^n input combinations.
+fn compute_truth_table_for_node(aig: &Aig, node: AigNodeId, leaves: &[AigNodeId]) -> u64 {
+    compute_truth_table_for_lit(aig, AigLit::new(node), leaves)
+}
+
+/// Compute truth table for a literal given specific leaves.
+fn compute_truth_table_for_lit(aig: &Aig, lit: AigLit, leaves: &[AigNodeId]) -> u64 {
+    let n = leaves.len();
+    if n > 6 { return 0; }
+    let num_rows = 1u64 << n;
+    let mut tt = 0u64;
+
+    for row in 0..num_rows {
+        // Set leaf values
+        let mut vals: std::collections::HashMap<AigNodeId, bool> = std::collections::HashMap::new();
+        vals.insert(AigNodeId::FALSE, false);
+        for (i, &leaf) in leaves.iter().enumerate() {
+            vals.insert(leaf, (row >> i) & 1 == 1);
+        }
+        // Evaluate
+        let result = eval_lit(aig, lit, &mut vals);
+        if result {
+            tt |= 1u64 << row;
+        }
+    }
+    tt
+}
+
+fn eval_lit(aig: &Aig, lit: AigLit, vals: &mut std::collections::HashMap<AigNodeId, bool>) -> bool {
+    let val = eval_node(aig, lit.node, vals);
+    if lit.inverted { !val } else { val }
+}
+
+fn eval_node(aig: &Aig, node: AigNodeId, vals: &mut std::collections::HashMap<AigNodeId, bool>) -> bool {
+    if let Some(&v) = vals.get(&node) {
+        return v;
+    }
+    let result = match aig.get_node(node) {
+        Some(AigNode::And { left, right }) => {
+            let l = eval_lit(aig, *left, vals);
+            let r = eval_lit(aig, *right, vals);
+            l && r
+        }
+        Some(AigNode::Const) => false,
+        _ => false, // Inputs/latches not in leaves — treat as false
+    };
+    vals.insert(node, result);
+    result
+}
+
 pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
     use std::collections::HashSet;
 
@@ -670,6 +721,175 @@ impl Default for Rewrite {
     }
 }
 
+impl Rewrite {
+    /// Regular rewrite: pre-compute cuts once, collect rewrites, batch apply.
+    fn run_regular(&mut self, aig: &mut Aig) {
+        let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
+        let mut ref_counts = compute_fanout_counts(aig);
+
+        let topo_nodes: Vec<AigNodeId> = aig
+            .iter_nodes()
+            .filter_map(|(id, node)| {
+                if matches!(node, AigNode::And { .. }) { Some(id) } else { None }
+            })
+            .collect();
+
+        let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
+
+        for &node_id in &topo_nodes {
+            if subst_map.contains_key(&node_id) {
+                continue;
+            }
+
+            let cut_set = match cuts.get_cuts(node_id) {
+                Some(cs) => cs,
+                None => continue,
+            };
+
+            let mut best_gain = 1i32;
+            let mut best_candidate: Option<RewriteCandidate> = None;
+
+            for cut in &cut_set.cuts {
+                if cut.size() <= 1 { continue; }
+                if cut.leaves.iter().any(|l| subst_map.contains_key(l)) { continue; }
+
+                let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
+                    Some(x) => x,
+                    None => continue,
+                };
+
+                let mffc_size = mffc_deref(aig, node_id, &cut.leaves, &mut ref_counts);
+                mffc_ref(aig, node_id, &cut.leaves, &mut ref_counts);
+                let gain = mffc_size as i32 - impl_.and_count as i32;
+
+                if gain >= best_gain {
+                    best_gain = gain;
+                    best_candidate = Some(RewriteCandidate {
+                        node: node_id, cut: cut.clone(), canonical, implementation: impl_, gain,
+                    });
+                }
+            }
+
+            if let Some(candidate) = best_candidate {
+                if let Some(new_lit) = self.apply_rewrite(aig, &candidate) {
+                    subst_map.insert(node_id, new_lit);
+                    self.rewritten_count += 1;
+                    self.total_gain += candidate.gain;
+                }
+            }
+        }
+
+        if !subst_map.is_empty() {
+            aig.apply_substitutions(&subst_map);
+            rebuild_aig_topological(aig);
+        }
+    }
+
+    /// Zero-cost rewrite: apply each rewrite immediately and re-enumerate cuts
+    /// after each substitution to keep truth tables consistent.
+    fn run_zero_cost(&mut self, aig: &mut Aig) {
+        let mut any_rewrites = false;
+
+        // Iterate: each pass re-enumerates cuts on the current AIG state.
+        // We do a single pass over all AND nodes.
+        let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
+        let mut ref_counts = compute_fanout_counts(aig);
+
+        let topo_nodes: Vec<AigNodeId> = aig
+            .iter_nodes()
+            .filter_map(|(id, node)| {
+                if matches!(node, AigNode::And { .. }) { Some(id) } else { None }
+            })
+            .collect();
+
+        let mut rewritten: std::collections::HashSet<AigNodeId> = std::collections::HashSet::new();
+        // Collect all _z rewrites first (scan phase), then apply one at a time.
+        // This ensures cuts are evaluated on a consistent AIG state.
+        struct ZRewriteEntry {
+            node: AigNodeId,
+            cut: crate::synth::cuts::Cut,
+            canonical: crate::synth::npn::NpnCanonical,
+            implementation: crate::synth::npn::NpnImplementation,
+            gain: i32,
+        }
+        let mut entries: Vec<ZRewriteEntry> = Vec::new();
+
+        for &node_id in &topo_nodes {
+            if rewritten.contains(&node_id) { continue; }
+
+            let cut_set = match cuts.get_cuts(node_id) {
+                Some(cs) => cs,
+                None => continue,
+            };
+
+            let mut best_gain = 0i32;
+            let mut best_candidate: Option<ZRewriteEntry> = None;
+
+            for cut in &cut_set.cuts {
+                if cut.size() <= 1 { continue; }
+                if cut.leaves.iter().any(|l| rewritten.contains(l)) { continue; }
+
+                let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
+                    Some(x) => x,
+                    None => continue,
+                };
+
+                let mffc_size = mffc_deref(aig, node_id, &cut.leaves, &mut ref_counts);
+                mffc_ref(aig, node_id, &cut.leaves, &mut ref_counts);
+                let gain = mffc_size as i32 - impl_.and_count as i32;
+
+                if gain >= best_gain {
+                    best_gain = gain;
+                    best_candidate = Some(ZRewriteEntry {
+                        node: node_id, cut: cut.clone(), canonical, implementation: impl_, gain,
+                    });
+                }
+            }
+
+            if let Some(entry) = best_candidate {
+                rewritten.insert(node_id);
+                entries.push(entry);
+            }
+        }
+
+        // Apply each rewrite individually with strash rebuild between each.
+        // Verify truth tables before applying: previous substitutions may change
+        // the AIG structure, making the pre-computed truth table stale. Only apply
+        // rewrites that are verified correct on the current AIG state.
+        for entry in &entries {
+            let candidate = RewriteCandidate {
+                node: entry.node,
+                cut: entry.cut.clone(),
+                canonical: entry.canonical.clone(),
+                implementation: entry.implementation.clone(),
+                gain: entry.gain,
+            };
+            if let Some(new_lit) = self.apply_rewrite(aig, &candidate) {
+                if new_lit.node != entry.node {
+                    // Verify truth tables match on the current AIG state
+                    let old_tt = compute_truth_table_for_node(aig, entry.node, &entry.cut.leaves);
+                    let new_tt = compute_truth_table_for_lit(aig, new_lit, &entry.cut.leaves);
+                    if old_tt != new_tt {
+                        continue; // Stale cut — skip
+                    }
+
+                    let mut single = IndexMap::new();
+                    single.insert(entry.node, new_lit);
+                    aig.apply_substitutions(&single);
+                    aig.rebuild_strash();
+                    any_rewrites = true;
+                    self.rewritten_count += 1;
+                    self.total_gain += entry.gain;
+                }
+            }
+        }
+
+        if any_rewrites {
+            rebuild_aig_topological(aig);
+        }
+    }
+}
+
 impl Pass for Rewrite {
     fn name(&self) -> &str {
         "rewrite"
@@ -682,94 +902,10 @@ impl Pass for Rewrite {
         self.rewritten_count = 0;
         self.total_gain = 0;
 
-        // Enumerate cuts for all nodes
-        let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
-
-        // Compute mutable reference counts (updated after each rewrite)
-        let mut ref_counts = compute_fanout_counts(aig);
-
-        // Collect AND nodes in topological order
-        // (AIG nodes are already stored in topological order)
-        let topo_nodes: Vec<AigNodeId> = aig
-            .iter_nodes()
-            .filter_map(|(id, node)| {
-                if matches!(node, AigNode::And { .. }) {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Build substitution map: old_node -> new_lit
-        let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
-
-        // Process each AND node in topological order (ABC-style incremental rewriting)
-        for &node_id in &topo_nodes {
-            // Skip nodes already substituted by an earlier rewrite
-            if subst_map.contains_key(&node_id) {
-                continue;
-            }
-
-            let cut_set = match cuts.get_cuts(node_id) {
-                Some(cs) => cs,
-                None => continue,
-            };
-
-            // Find the best rewrite across all cuts for this node
-            let mut best_gain = if self.zero_cost { 0 } else { 1 };
-            let mut best_candidate: Option<RewriteCandidate> = None;
-
-            for cut in &cut_set.cuts {
-                if cut.size() <= 1 {
-                    continue;
-                }
-
-                // Skip cuts with leaves that have been substituted
-                if cut.leaves.iter().any(|l| subst_map.contains_key(l)) {
-                    continue;
-                }
-
-                // Look up NPN implementation
-                let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
-                    Some(x) => x,
-                    None => continue,
-                };
-
-                // Compute MFFC size using reference counting (G2)
-                let mffc_size = mffc_deref(aig, node_id, &cut.leaves, &mut ref_counts);
-                mffc_ref(aig, node_id, &cut.leaves, &mut ref_counts);
-
-                let gain = mffc_size as i32 - impl_.and_count as i32;
-
-                if gain >= best_gain {
-                    best_gain = gain;
-                    best_candidate = Some(RewriteCandidate {
-                        node: node_id,
-                        cut: cut.clone(),
-                        canonical,
-                        implementation: impl_,
-                        gain,
-                    });
-                }
-            }
-
-            // Apply the best rewrite
-            if let Some(candidate) = best_candidate {
-                if let Some(new_lit) = self.apply_rewrite(aig, &candidate) {
-                    subst_map.insert(node_id, new_lit);
-                    self.rewritten_count += 1;
-                    self.total_gain += candidate.gain;
-                }
-            }
-
-            // No artificial limit (G3) — process every AND node
-        }
-
-        // Apply all substitutions and rebuild
-        if !subst_map.is_empty() {
-            aig.apply_substitutions(&subst_map);
-            rebuild_aig_topological(aig);
+        if self.zero_cost {
+            self.run_zero_cost(aig);
+        } else {
+            self.run_regular(aig);
         }
 
         result.record_after(aig);

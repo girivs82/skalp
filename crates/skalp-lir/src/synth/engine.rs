@@ -377,11 +377,36 @@ impl SynthEngine {
             self.run_timing_analysis(&aig);
         }
 
-        // DFF functional decomposition — disabled until correctness issues fixed
-        let latch_decomps = std::collections::HashMap::new();
+        // DFF functional decomposition — run BEFORE tech mapping so cofactor-created
+        // nodes are covered by the mapper's cut enumeration.
+        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+        let has_decomps = !latch_decomps.is_empty();
 
-        // Technology mapping
-        self.run_technology_mapping(&aig, library);
+        if has_decomps {
+            // Add decomp signals as temporary outputs so the mapper covers
+            // the decomposed data/enable cones. Do NOT modify the latch data
+            // field — the writer handles decomposition via latch_decomps.
+            let orig_output_count = aig.output_count();
+            for (_latch_id, decomp) in &latch_decomps {
+                // Decomposed data cone (may differ from original latch data)
+                aig.add_output(format!("__decomp_d_{}", _latch_id.0), decomp.data);
+                if let Some(enable) = decomp.enable {
+                    aig.add_output(format!("__decomp_en_{}", _latch_id.0), enable);
+                }
+                if let Some(sr) = decomp.sync_reset {
+                    aig.add_output(format!("__decomp_sr_{}", _latch_id.0), sr);
+                }
+            }
+
+            // Technology mapping
+            self.run_technology_mapping(&aig, library);
+
+            // Remove temporary decomp outputs
+            aig.truncate_outputs(orig_output_count);
+        } else {
+            // No decomposition — standard mapping
+            self.run_technology_mapping(&aig, library);
+        }
 
         // Convert to GateNetlist
         let writer = if let Some(ref mapping) = self.mapping_result {
@@ -676,10 +701,10 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
-                "rewrite".to_string(),
+                "rewrite_z".to_string(),
                 "balance".to_string(),
-                "refactor".to_string(),
-                "rewrite".to_string(),
+                "refactor_z".to_string(),
+                "rewrite_z".to_string(),
                 "balance".to_string(),
                 "dce".to_string(),
             ],
@@ -721,10 +746,10 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "balance".to_string(),
                 "rewrite".to_string(),
-                "rewrite".to_string(),
+                "rewrite_z".to_string(),
                 "balance".to_string(),
-                "refactor".to_string(),
-                "rewrite".to_string(),
+                "refactor_z".to_string(),
+                "rewrite_z".to_string(),
                 "balance".to_string(),
                 "dc2".to_string(),   // don't-care based optimization
                 "fraig".to_string(), // SAT-based equivalence
@@ -741,12 +766,12 @@ impl SynthEngine {
                 "refactor".to_string(),
                 "resub".to_string(),
                 "balance".to_string(),
-                "refactor".to_string(),
-                "resub".to_string(),
-                "rewrite".to_string(),
+                "refactor_z".to_string(),
+                "resub_z".to_string(),
+                "rewrite_z".to_string(),
                 "balance".to_string(),
-                "refactor".to_string(),
-                "resub".to_string(),
+                "refactor_z".to_string(),
+                "resub_z".to_string(),
                 "fraig".to_string(),
                 "dce".to_string(),
             ],

@@ -679,6 +679,11 @@ impl Aig {
         self.outputs.push((name, lit));
     }
 
+    /// Truncate outputs to the given count (removes trailing entries)
+    pub fn truncate_outputs(&mut self, count: usize) {
+        self.outputs.truncate(count);
+    }
+
     /// Register a net mapping (used during building)
     pub fn register_net(&mut self, net_id: GateNetId, lit: AigLit) {
         self.net_to_lit.insert(net_id, lit);

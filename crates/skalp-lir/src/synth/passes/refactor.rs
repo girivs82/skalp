@@ -1083,47 +1083,80 @@ impl Pass for Refactor {
             })
             .collect();
 
-        // Find refactoring opportunities
-        let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
+        // Scan phase: find refactoring opportunities on consistent AIG state.
+        // Collect entries (node + factored form) without modifying the AIG.
+        struct RefactorEntry {
+            node: AigNodeId,
+            cone: ConeInfo,
+            form: FactoredForm,
+            savings: i32,
+        }
+        let mut entries: Vec<RefactorEntry> = Vec::new();
+        let mut refactored: std::collections::HashSet<AigNodeId> = std::collections::HashSet::new();
 
         for node_id in nodes {
-            // Skip if already substituted
-            if substitutions.contains_key(&node_id) {
+            if refactored.contains(&node_id) {
                 continue;
             }
 
             let cone = self.collect_cone(aig, node_id, &fanout_counts);
 
-            // Skip cones with too many leaves for truth table
             if cone.leaves.len() > MAX_TT_LEAVES {
                 continue;
             }
 
-            // Try to refactor
             if let Some((form, savings)) = self.try_refactor_cone(aig, &cone) {
-                // Build the new structure
-                if let Some(new_lit) = self.build_factored_form(aig, &cone, &form) {
-                    // Only substitute if we got a different node
-                    if new_lit.node != node_id {
-                        substitutions.insert(node_id, new_lit);
-                        self.refactored_count += 1;
-                        self.total_savings += savings;
-                    }
+                // Mark cone internals as refactored to skip overlapping cones
+                for &internal in &cone.internal_nodes {
+                    refactored.insert(internal);
                 }
+                refactored.insert(node_id);
+                entries.push(RefactorEntry { node: node_id, cone, form, savings });
             }
         }
 
-        // Apply substitutions
-        if !substitutions.is_empty() {
-            aig.apply_substitutions(&substitutions);
-
-            // Rebuild in topological order to resolve forward references
-            // created by apply_substitutions before DCE iterates nodes
-            super::rebuild_aig_topological(aig);
-
-            // Run DCE to clean up
-            let mut dce = super::Dce::new();
-            dce.run(aig);
+        // Apply phase: build and substitute.
+        // For zero-cost: apply each individually with strash rebuild.
+        // For regular: batch apply.
+        if !entries.is_empty() {
+            if self.zero_cost {
+                let mut any_applied = false;
+                for entry in &entries {
+                    if let Some(new_lit) = self.build_factored_form(aig, &entry.cone, &entry.form) {
+                        if new_lit.node != entry.node {
+                            let mut single = IndexMap::new();
+                            single.insert(entry.node, new_lit);
+                            aig.apply_substitutions(&single);
+                            aig.rebuild_strash();
+                            any_applied = true;
+                            self.refactored_count += 1;
+                            self.total_savings += entry.savings;
+                        }
+                    }
+                }
+                if any_applied {
+                    super::rebuild_aig_topological(aig);
+                    let mut dce = super::Dce::new();
+                    dce.run(aig);
+                }
+            } else {
+                let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
+                for entry in &entries {
+                    if let Some(new_lit) = self.build_factored_form(aig, &entry.cone, &entry.form) {
+                        if new_lit.node != entry.node {
+                            subst_map.insert(entry.node, new_lit);
+                            self.refactored_count += 1;
+                            self.total_savings += entry.savings;
+                        }
+                    }
+                }
+                if !subst_map.is_empty() {
+                    aig.apply_substitutions(&subst_map);
+                    super::rebuild_aig_topological(aig);
+                    let mut dce = super::Dce::new();
+                    dce.run(aig);
+                }
+            }
         }
 
         result.record_after(aig);

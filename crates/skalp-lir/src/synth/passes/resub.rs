@@ -58,6 +58,55 @@ impl Resub {
     pub fn with_params(_max_divisors: usize, _max_inputs: usize) -> Self {
         Self::new()
     }
+
+    /// Build a resub replacement pattern from divisor literals
+    fn build_resub_pattern(aig: &mut Aig, pattern_kind: u8, lits: &[AigLit]) -> AigLit {
+        match pattern_kind {
+            0 => lits[0], // Equal
+            1 => aig.add_and(lits[0], lits[1]), // And2
+            2 => { // Or2
+                let nand = aig.add_and(lits[0].invert(), lits[1].invert());
+                nand.invert()
+            }
+            3 => { // Xor2
+                let a_nb = aig.add_and(lits[0], lits[1].invert());
+                let na_b = aig.add_and(lits[0].invert(), lits[1]);
+                let nand = aig.add_and(a_nb.invert(), na_b.invert());
+                nand.invert()
+            }
+            4 => { // AndOr
+                let ab = aig.add_and(lits[0], lits[1]);
+                let nand = aig.add_and(ab.invert(), lits[2].invert());
+                nand.invert()
+            }
+            5 => { // OrAnd
+                let nor = aig.add_and(lits[0].invert(), lits[1].invert());
+                aig.add_and(nor.invert(), lits[2])
+            }
+            6 => { // Mux
+                let sel_d1 = aig.add_and(lits[0], lits[1]);
+                let nsel_d0 = aig.add_and(lits[0].invert(), lits[2]);
+                let nand = aig.add_and(sel_d1.invert(), nsel_d0.invert());
+                nand.invert()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Check if new_node transitively references target (would create a cycle)
+    fn creates_cycle(aig: &Aig, new_node: AigNodeId, target: AigNodeId) -> bool {
+        let mut stack = vec![new_node];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == target { return true; }
+            if !visited.insert(n) { continue; }
+            if let Some(AigNode::And { left, right }) = aig.get_node(n) {
+                stack.push(left.node);
+                stack.push(right.node);
+            }
+        }
+        false
+    }
 }
 
 impl Default for Resub {
@@ -681,79 +730,51 @@ impl Pass for Resub {
             }
         }
 
-        // Build and apply all substitutions in a single batch.
-        // Clear strash before building to prevent structural hashing from returning
-        // existing nodes that contain targets as children (which would create
-        // self-referencing cycles after apply_substitutions).
+        // Build and apply substitutions.
+        // For zero-cost (_z) mode: apply each individually (incremental) to prevent
+        // structural hashing from returning nodes that are also substitution targets.
+        // For regular mode: batch build and apply (faster, safe when gain > 0).
         if !entries.is_empty() {
-            aig.clear_strash();
-            let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
-
-            for entry in &entries {
-                let lits: Vec<AigLit> = entry.divisors.iter()
-                    .map(|&(node, inv)| AigLit { node, inverted: inv })
-                    .collect();
-
-                let new_lit = match entry.pattern_kind {
-                    0 => lits[0], // Equal
-                    1 => aig.add_and(lits[0], lits[1]), // And2
-                    2 => { // Or2
-                        let nand = aig.add_and(lits[0].invert(), lits[1].invert());
-                        nand.invert()
+            if self.zero_cost {
+                // Incremental mode for zero-cost
+                let mut any_applied = false;
+                for entry in &entries {
+                    let lits: Vec<AigLit> = entry.divisors.iter()
+                        .map(|&(node, inv)| AigLit { node, inverted: inv })
+                        .collect();
+                    let new_lit = Self::build_resub_pattern(aig, entry.pattern_kind, &lits);
+                    if new_lit.node != entry.target && !Self::creates_cycle(aig, new_lit.node, entry.target) {
+                        let mut single = IndexMap::new();
+                        single.insert(entry.target, new_lit);
+                        aig.apply_substitutions(&single);
+                        aig.rebuild_strash();
+                        any_applied = true;
+                        self.resub_count += 1;
+                        self.total_savings += entry.gain;
                     }
-                    3 => { // Xor2
-                        let a_nb = aig.add_and(lits[0], lits[1].invert());
-                        let na_b = aig.add_and(lits[0].invert(), lits[1]);
-                        let nand = aig.add_and(a_nb.invert(), na_b.invert());
-                        nand.invert()
-                    }
-                    4 => { // AndOr
-                        let ab = aig.add_and(lits[0], lits[1]);
-                        let nand = aig.add_and(ab.invert(), lits[2].invert());
-                        nand.invert()
-                    }
-                    5 => { // OrAnd
-                        let nor = aig.add_and(lits[0].invert(), lits[1].invert());
-                        aig.add_and(nor.invert(), lits[2])
-                    }
-                    6 => { // Mux
-                        let sel_d1 = aig.add_and(lits[0], lits[1]);
-                        let nsel_d0 = aig.add_and(lits[0].invert(), lits[2]);
-                        let nand = aig.add_and(sel_d1.invert(), nsel_d0.invert());
-                        nand.invert()
-                    }
-                    _ => unreachable!(),
-                };
-
-                if new_lit.node != entry.target {
-                    // Safety check: verify the replacement doesn't transitively
-                    // reference the target (would create a cycle after substitution)
-                    let creates_cycle = {
-                        let mut stack = vec![new_lit.node];
-                        let mut visited = std::collections::HashSet::new();
-                        let mut found = false;
-                        while let Some(n) = stack.pop() {
-                            if n == entry.target { found = true; break; }
-                            if !visited.insert(n) { continue; }
-                            if let Some(AigNode::And { left, right }) = aig.get_node(n) {
-                                stack.push(left.node);
-                                stack.push(right.node);
-                            }
-                        }
-                        found
-                    };
-                    if creates_cycle {
-                        continue;
-                    }
-                    subst_map.insert(entry.target, new_lit);
-                    self.resub_count += 1;
-                    self.total_savings += entry.gain;
                 }
-            }
-
-            if !subst_map.is_empty() {
-                aig.apply_substitutions(&subst_map);
-                super::rebuild_aig_topological(aig);
+                if any_applied {
+                    super::rebuild_aig_topological(aig);
+                }
+            } else {
+                // Batch mode for regular resub
+                aig.clear_strash();
+                let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
+                for entry in &entries {
+                    let lits: Vec<AigLit> = entry.divisors.iter()
+                        .map(|&(node, inv)| AigLit { node, inverted: inv })
+                        .collect();
+                    let new_lit = Self::build_resub_pattern(aig, entry.pattern_kind, &lits);
+                    if new_lit.node != entry.target && !Self::creates_cycle(aig, new_lit.node, entry.target) {
+                        subst_map.insert(entry.target, new_lit);
+                        self.resub_count += 1;
+                        self.total_savings += entry.gain;
+                    }
+                }
+                if !subst_map.is_empty() {
+                    aig.apply_substitutions(&subst_map);
+                    super::rebuild_aig_topological(aig);
+                }
             }
         }
 
