@@ -165,6 +165,10 @@ impl DeadCodeElimination {
             match s {
                 Statement::Assignment(assign) => {
                     self.mark_used_in_expression(&assign.rhs);
+                    // BUG FIX: Also mark LHS as used — for indexed assignments like
+                    // data[store_target] = value, the index expression (store_target)
+                    // must be marked as used or DCE will remove it.
+                    self.mark_used_in_lvalue(&assign.lhs);
                 }
                 Statement::If(if_stmt) => {
                     self.mark_used_in_expression(&if_stmt.condition);

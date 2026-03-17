@@ -531,6 +531,59 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_logic(&mut self) {
+        // Multi-driver detection: error if an OUTPUT PORT has both a continuous assignment
+        // (module-body default) AND is assigned in a sequential block (on(clk.rise)).
+        // These are two different processes driving the same net — a synthesis error.
+        // The correct pattern is to place defaults inside the sequential block.
+        // NOTE: Internal signals with initial values (signal x: T = val) that are also
+        // assigned sequentially are fine — the init value is a reset/initial value, not
+        // a continuous driver.
+        {
+            let output_ports: std::collections::HashSet<String> = self
+                .mir
+                .ports
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p.direction,
+                        skalp_mir::PortDirection::Output | skalp_mir::PortDirection::InOut
+                    )
+                })
+                .map(|p| p.name.clone())
+                .collect();
+
+            let mut continuous_targets: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for assign in &self.mir.assignments {
+                let target = self.lvalue_to_string(&assign.lhs);
+                if output_ports.contains(&target) {
+                    continuous_targets.insert(target);
+                }
+            }
+
+            let mut sequential_targets: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for process in &self.mir.processes {
+                if !matches!(process.kind, ProcessKind::Combinational) {
+                    self.collect_all_targets_from_statements(
+                        &process.body.statements,
+                        &mut sequential_targets,
+                    );
+                }
+            }
+
+            for target in &continuous_targets {
+                if sequential_targets.contains(target) {
+                    panic!(
+                        "[skalp] Multi-driver error in module '{}': output '{}' has both a \
+                         continuous assignment (module body) and a sequential assignment \
+                         (on(clk.rise)). Move the default inside the on(clk.rise) block.",
+                        self.mir.name, target
+                    );
+                }
+            }
+        }
+
         // CRITICAL FIX: Convert continuous assignments BEFORE processes
         // This ensures that when sequential processes reference combinational signals,
         // those signals already exist with their driver nodes
@@ -539,12 +592,25 @@ impl<'a> MirToSirConverter<'a> {
             self.convert_continuous_assign(&target, &assign.rhs);
         }
 
-        // Convert processes
-        for process in self.mir.processes.iter() {
+        // CRITICAL FIX: Process combinational blocks BEFORE sequential blocks.
+        // Sequential processes may reference combinational signals (e.g., `if lookup_found`),
+        // and those signals need their driver nodes fully built before the sequential
+        // process tries to read them via get_or_create_signal_driver().
+        // Without this ordering, the sequential process sees driver=0 (initial constant)
+        // instead of the final mux chain from the combinational logic.
+        let combinational_processes: Vec<_> = self.mir.processes.iter()
+            .filter(|p| matches!(p.kind, ProcessKind::Combinational))
+            .collect();
+        let sequential_processes: Vec<_> = self.mir.processes.iter()
+            .filter(|p| !matches!(p.kind, ProcessKind::Combinational))
+            .collect();
+
+        for process in combinational_processes {
+            self.convert_combinational_block(&process.body.statements);
+        }
+
+        for process in sequential_processes {
             match &process.kind {
-                ProcessKind::Combinational => {
-                    self.convert_combinational_block(&process.body.statements);
-                }
                 ProcessKind::Sequential => {
                     if let SensitivityList::Edge(edges) = &process.sensitivity {
                         // Find the clock edge (Rising/Falling), skipping Active/Inactive reset edges
@@ -663,11 +729,14 @@ impl<'a> MirToSirConverter<'a> {
         for stmt in statements.iter() {
             match stmt {
                 Statement::Assignment(assign) => {
-                    // Check if this is an array write (BitSelect with non-constant index)
+                    // Check if this is an array write (BitSelect)
                     if let LValue::BitSelect { base, index } = &assign.lhs {
                         let is_const = self.evaluate_constant_expression(index);
-                        if is_const.is_none() {
-                            // Dynamic array write: array[index] <= value
+                        let is_typed_array = self.is_lvalue_typed_array(base);
+
+                        if is_typed_array || is_const.is_none() {
+                            // Array element write (typed array with any index, or dynamic index):
+                            // array[index] <= value
                             let array_name = self.lvalue_to_string(base);
 
                             // Create nodes for the array write
@@ -685,7 +754,7 @@ impl<'a> MirToSirConverter<'a> {
                                 self.create_flipflop_with_input(array_write, clock, edge.clone());
                             self.connect_node_to_signal(ff_node, &array_name);
                         } else {
-                            // Static bit select - treat as normal assignment
+                            // Static bit select on bit-vector - treat as normal assignment
                             let target = self.lvalue_to_string(&assign.lhs);
                             // BUG FIX: Pass target signal width to expression creation
                             let target_width = self.get_signal_width(&target);
@@ -724,9 +793,9 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
-                    // Check if this is an array write (BitSelect with non-constant index)
+                    // Check if this is an array write (typed array or dynamic index)
                     if let LValue::BitSelect { base, index } = &resolved.target {
-                        if self.evaluate_constant_expression(index).is_none() {
+                        if self.is_lvalue_typed_array(base) || self.evaluate_constant_expression(index).is_none() {
                             // Dynamic array write with conditional: array[index] <= mux(conds, values)
                             let array_name = self.lvalue_to_string(base);
 
@@ -1757,9 +1826,10 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Assignment(assign) => {
                     if let LValue::BitSelect { base, index } = &assign.lhs {
                         let is_const = self.evaluate_constant_expression(index);
+                        let is_typed_array = self.is_lvalue_typed_array(base);
                         let base_name = self.lvalue_to_string(base);
-                        if is_const.is_none() {
-                            // Dynamic array write
+                        if is_typed_array || is_const.is_none() {
+                            // Array element write (typed array or dynamic index)
                             // Only add if not already present
                             if !array_writes.iter().any(|(_, name)| name == &base_name) {
                                 array_writes.push(((**base).clone(), base_name));
@@ -1776,8 +1846,9 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::ResolvedConditional(resolved) => {
                     if let LValue::BitSelect { base, index } = &resolved.target {
                         let is_const = self.evaluate_constant_expression(index);
+                        let is_typed_array = self.is_lvalue_typed_array(base);
                         let base_name = self.lvalue_to_string(base);
-                        if is_const.is_none()
+                        if (is_typed_array || is_const.is_none())
                             && !array_writes.iter().any(|(_, name)| name == &base_name)
                         {
                             array_writes.push(((**base).clone(), base_name));
@@ -2243,6 +2314,8 @@ impl<'a> MirToSirConverter<'a> {
             None
         };
 
+
+
         // BUG #222 FIX: Use provided default when neither branch assigns
         let keep_value = match default_value {
             Some(default) => default,
@@ -2276,11 +2349,12 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Build priority-encoded mux tree
-        if cases.is_empty() {
+        let result = if cases.is_empty() {
             keep_value
         } else {
             self.build_priority_mux(&cases, target)
-        }
+        };
+        result
     }
 
     /// Synthesize a mux tree for a specific target within a case statement
@@ -3402,6 +3476,46 @@ impl<'a> MirToSirConverter<'a> {
             .unwrap_or_else(|| mir_name.to_string())
     }
 
+    /// Check if an LValue refers to a typed array (element width > 1 bit).
+    /// Used to distinguish `array[idx]` (element access) from `bitvec[idx]` (bit select).
+    fn is_lvalue_typed_array(&self, lvalue: &LValue) -> bool {
+        match lvalue {
+            LValue::Signal(sig_id) => {
+                if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                    matches!(&signal.signal_type, DataType::Array(elem, _) if Self::data_type_width(elem) > 1)
+                } else {
+                    false
+                }
+            }
+            LValue::Port(port_id) => {
+                if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                    matches!(&port.port_type, DataType::Array(elem, _) if Self::data_type_width(elem) > 1)
+                } else {
+                    false
+                }
+            }
+            LValue::Variable(var_id) => {
+                if let Some(var) = self.mir.variables.iter().find(|v| v.id == *var_id) {
+                    matches!(&var.var_type, DataType::Array(elem, _) if Self::data_type_width(elem) > 1)
+                } else {
+                    false
+                }
+            }
+            // Nested BitSelect/RangeSelect: the inner result is no longer an array
+            _ => false,
+        }
+    }
+
+    /// Get the bit width of a MIR DataType.
+    fn data_type_width(dt: &DataType) -> usize {
+        match dt {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
+            DataType::Bool => 1,
+            DataType::Array(elem, size) => Self::data_type_width(elem) * size,
+            _ => 1,
+        }
+    }
+
     fn lvalue_to_string(&self, lvalue: &LValue) -> String {
         match lvalue {
             LValue::Port(port_id) => {
@@ -4192,13 +4306,22 @@ impl<'a> MirToSirConverter<'a> {
                 self.get_or_create_signal_driver(&var_name)
             }
             LValue::BitSelect { base, index } => {
-                // Try to evaluate index as constant first
-                if let Some(index_val) = self.evaluate_constant_expression(index) {
-                    // Static bit select - create a slice node
+                // Check if base is a typed array (element width > 1 bit).
+                // If so, this is an array element access, not a bit select.
+                let is_typed_array = self.is_lvalue_typed_array(base);
+
+                if is_typed_array {
+                    // Typed array element access: always use ArrayRead
+                    // regardless of whether the index is constant or dynamic.
+                    let base_node = self.create_lvalue_ref_node(base);
+                    let index_node = self.create_expression_node(index);
+                    self.create_array_read_node(base_node, index_node)
+                } else if let Some(index_val) = self.evaluate_constant_expression(index) {
+                    // Static bit select on bit-vector - create a slice node
                     let base_node = self.create_lvalue_ref_node(base);
                     self.create_slice_node(base_node, index_val as usize, index_val as usize)
                 } else {
-                    // Dynamic array indexing - create ArrayRead node
+                    // Dynamic bit indexing on bit-vector - create ArrayRead node
                     let base_node = self.create_lvalue_ref_node(base);
                     let index_node = self.create_expression_node(index);
                     self.create_array_read_node(base_node, index_node)
@@ -5461,16 +5584,18 @@ impl<'a> MirToSirConverter<'a> {
                     n.id == existing_driver && matches!(n.kind, SirNodeKind::Constant { .. })
                 });
 
+                // Check if existing driver is also a combinational (non-flip-flop) node
+                let existing_is_combinational = self.sir.combinational_nodes.iter().any(|n| {
+                    n.id == existing_driver
+                });
+
                 if new_node_is_flipflop && signal.is_state {
-                    // Remember to remove the signal from the old driver's outputs
                     old_driver_to_update = Some(existing_driver);
-                    // Continue to set the flip-flop as driver
                 } else if existing_is_constant {
-                    // Constant drivers are default values that can be overwritten
                     old_driver_to_update = Some(existing_driver);
-                    // Continue to set the new driver
+                } else if !new_node_is_flipflop && existing_is_combinational {
+                    old_driver_to_update = Some(existing_driver);
                 } else {
-                    // Don't overwrite - keep the first driver
                     return;
                 }
             }

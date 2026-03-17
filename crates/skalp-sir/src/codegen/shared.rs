@@ -2383,6 +2383,44 @@ impl<'a> SharedCodegen<'a> {
                     ));
                 }
             } else {
+                // BUG FIX: Check if input is an element-based array (e.g., [bit; 128]
+                // stored as uint32_t[128] where each element is a separate uint32_t).
+                // In this case, use element indexing (arr[idx]) instead of packed-bit
+                // indexing (arr[idx/32] >> (idx%32)).
+                let is_element_array = {
+                    // Check SIR type of the source signal or state element
+                    let resolved = self.resolve_to_array_source(input)
+                        .unwrap_or_else(|| input.to_string());
+                    let sir_type = if let Some(elem) = self.module.state_elements.get(&resolved) {
+                        elem.sir_type.clone()
+                    } else {
+                        self.get_signal_type(&resolved)
+                    };
+                    match sir_type {
+                        Some(SirType::Array(ref elem_type, _size)) => {
+                            // Element-based if each element is < 32 bits
+                            elem_type.width() < 32
+                        }
+                        _ => false,
+                    }
+                };
+
+                if is_element_array {
+                    // Element-based array: each element is a separate uint32_t
+                    // Use direct element indexing
+                    let elem_mask = if width >= 32 {
+                        0xFFFFFFFF
+                    } else {
+                        (1u32 << width) - 1
+                    };
+                    self.write_indented(&format!(
+                        "signals->{} = ({}[{}] >> 0) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        low,
+                        elem_mask
+                    ));
+                } else {
                 // Regular array with 32-bit elements (C++ or Metal with >128-bit elements)
                 let element_idx = low / 32;
                 let bit_in_element = low % 32;
@@ -2441,6 +2479,7 @@ impl<'a> SharedCodegen<'a> {
                         element_idx
                     ));
                 }
+            } // end !is_element_array
             }
         } else if self.uses_vector_storage(input_width) {
             // Input is a Metal vector type (uint2/uint4), output is scalar

@@ -157,6 +157,56 @@ impl SsaConverter {
         }
     }
 
+    /// Collect all variable IDs assigned (directly) in a block, recursing into sub-statements.
+    /// Used by the reassignment counter to treat mutually-exclusive branches as one assignment.
+    fn collect_assigned_vars_in_block(
+        block: &Block,
+        out: &mut std::collections::HashSet<VariableId>,
+    ) {
+        for stmt in &block.statements {
+            Self::collect_assigned_vars_in_stmt(stmt, out);
+        }
+    }
+
+    fn collect_assigned_vars_in_stmt(
+        stmt: &Statement,
+        out: &mut std::collections::HashSet<VariableId>,
+    ) {
+        match stmt {
+            Statement::Assignment(assign) => {
+                if let LValue::Variable(var_id) = &assign.lhs {
+                    out.insert(*var_id);
+                }
+            }
+            Statement::If(if_stmt) => {
+                Self::collect_assigned_vars_in_block(&if_stmt.then_block, out);
+                if let Some(else_block) = &if_stmt.else_block {
+                    Self::collect_assigned_vars_in_block(else_block, out);
+                }
+            }
+            Statement::Case(case_stmt) => {
+                for item in &case_stmt.items {
+                    Self::collect_assigned_vars_in_block(&item.block, out);
+                }
+                if let Some(default) = &case_stmt.default {
+                    Self::collect_assigned_vars_in_block(default, out);
+                }
+            }
+            Statement::Block(block) => {
+                Self::collect_assigned_vars_in_block(block, out);
+            }
+            Statement::Loop(loop_stmt) => match loop_stmt {
+                LoopStatement::For { body, .. } => {
+                    Self::collect_assigned_vars_in_block(body, out);
+                }
+                LoopStatement::While { body, .. } => {
+                    Self::collect_assigned_vars_in_block(body, out);
+                }
+            },
+            _ => {}
+        }
+    }
+
     /// Count variable reassignments in a block
     fn count_reassignments_in_block(&mut self, block: &Block) {
         for stmt in &block.statements {
@@ -172,17 +222,32 @@ impl SsaConverter {
                 }
             }
             Statement::If(if_stmt) => {
-                self.count_reassignments_in_block(&if_stmt.then_block);
+                // BUG FIX: Assignments in mutually exclusive branches (then/else)
+                // should count as ONE logical assignment per variable, not one per branch.
+                // Otherwise SSA creates divergent versions that break mux-tree synthesis.
+                let mut branch_vars: std::collections::HashSet<VariableId> =
+                    std::collections::HashSet::new();
+                Self::collect_assigned_vars_in_block(&if_stmt.then_block, &mut branch_vars);
                 if let Some(else_block) = &if_stmt.else_block {
-                    self.count_reassignments_in_block(else_block);
+                    Self::collect_assigned_vars_in_block(else_block, &mut branch_vars);
+                }
+                for var_id in branch_vars {
+                    *self.reassignment_count.entry(var_id).or_insert(0) += 1;
                 }
             }
             Statement::Case(case_stmt) => {
+                // BUG FIX: Same as If — assignments in different case arms are
+                // mutually exclusive and should count as ONE per variable.
+                let mut branch_vars: std::collections::HashSet<VariableId> =
+                    std::collections::HashSet::new();
                 for item in &case_stmt.items {
-                    self.count_reassignments_in_block(&item.block);
+                    Self::collect_assigned_vars_in_block(&item.block, &mut branch_vars);
                 }
                 if let Some(default) = &case_stmt.default {
-                    self.count_reassignments_in_block(default);
+                    Self::collect_assigned_vars_in_block(default, &mut branch_vars);
+                }
+                for var_id in branch_vars {
+                    *self.reassignment_count.entry(var_id).or_insert(0) += 1;
                 }
             }
             Statement::Block(block) => {
@@ -270,15 +335,38 @@ impl SsaConverter {
             Statement::Case(case_stmt) => {
                 self.update_expr_refs(&mut case_stmt.expr);
 
+                // BUG FIX: Save/restore versions between case arms, matching the
+                // If handler's approach. Each arm is mutually exclusive, so they
+                // should all start from the same baseline version. Without this,
+                // sequential arms see each other's SSA versions, creating divergent
+                // variable names that break mux-tree synthesis downstream.
+                let saved_versions = self.current_version.clone();
+
                 for item in &mut case_stmt.items {
-                    // Update value expressions
+                    // Restore to pre-case versions for each arm
+                    self.current_version = saved_versions.clone();
                     for val_expr in &mut item.values {
                         self.update_expr_refs(val_expr);
                     }
                     self.convert_block(&mut item.block, original_vars);
                 }
+
                 if let Some(default) = &mut case_stmt.default {
+                    self.current_version = saved_versions.clone();
                     self.convert_block(default, original_vars);
+                }
+
+                // Merge: use the then-branch convention from the If handler —
+                // pick the last arm's versions for variables that diverged.
+                // The SIR mux-tree handles actual selection.
+                let after_versions = self.current_version.clone();
+                self.current_version = saved_versions;
+                for (var_id, arm_ver) in &after_versions {
+                    if let Some(saved_ver) = self.current_version.get(var_id) {
+                        if arm_ver != saved_ver {
+                            self.current_version.insert(*var_id, *arm_ver);
+                        }
+                    }
                 }
             }
             Statement::Block(block) => {
