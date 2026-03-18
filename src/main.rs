@@ -1553,6 +1553,38 @@ fn build_design(
                     let report_path = output_dir.join("async_sta_report.txt");
                     fs::write(&report_path, sta_result.summary())?;
                     info!("Async STA report saved to {:?}", report_path);
+
+                    // Generate routing constraints for PnR
+                    let constraint_config = skalp_lir::NclConstraintConfig::default();
+                    let ncl_constraints = skalp_lir::generate_ncl_constraints(
+                        &optimized_netlist,
+                        &sta_result,
+                        &constraint_config,
+                    );
+
+                    if !ncl_constraints.is_empty() {
+                        // Skalp PnR native format
+                        let skcf_path = output_dir.join("ncl_constraints.skcf");
+                        fs::write(&skcf_path, ncl_constraints.to_skalp_constraints())?;
+
+                        // nextpnr PDC format
+                        let pdc_path = output_dir.join("ncl_constraints.pdc");
+                        fs::write(&pdc_path, ncl_constraints.to_nextpnr_pdc())?;
+
+                        // JSON (machine-readable, for both skalp PnR and nextpnr)
+                        let json_path = output_dir.join("ncl_constraints.json");
+                        fs::write(&json_path, ncl_constraints.to_skalp_json())?;
+
+                        println!(
+                            "📐 NCL constraints: {} matched-delay groups, {} proximity groups",
+                            ncl_constraints.matched_delay_groups.len(),
+                            ncl_constraints.proximity_groups.len()
+                        );
+                        info!(
+                            "NCL constraints written to {:?}, {:?}, {:?}",
+                            skcf_path, pdc_path, json_path
+                        );
+                    }
                 }
             }
 
@@ -2857,7 +2889,7 @@ fn run_equivalence_check(
             get_stdlib_library(library_name).context("Failed to load technology library")?;
         // Use the full synthesis pipeline (LIR→AIG→optimize→map) so EC
         // verifies the actual optimized netlist, not an unoptimized mapping.
-        let synth_result = skalp_lir::synthesize(&lir, &library, skalp_lir::SynthPreset::Compress2);
+        let synth_result = skalp_lir::synthesize(&lir, &library, skalp_lir::SynthPreset::Quick);
         let netlist = synth_result.netlist;
         println!("   Cells: {}", netlist.cells.len());
         println!("   Nets: {}", netlist.nets.len());

@@ -151,3 +151,9 @@ pub use async_sta_fix::{
     AsyncStaFixConfig, AsyncStaFixResult, FixStrategy, ForkFix, IterationResult,
     IterativeStaResult,
 };
+
+// NCL routing constraints (isochronic fork enforcement)
+pub use ncl_constraints::{
+    generate_ncl_constraints, CompletionGuard, MatchedDelayGroup, NclConstraintConfig,
+    NclRoutingConstraints, ProximityGroup,
+};
