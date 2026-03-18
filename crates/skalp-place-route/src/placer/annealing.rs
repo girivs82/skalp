@@ -15,6 +15,120 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// NCL proximity group for placement co-location enforcement.
+/// Tracks which cells must be placed close together and the tile distance limit.
+struct ProximityGroupInfo {
+    cells: Vec<CellId>,
+    max_distance_tiles: u32,
+}
+
+/// Tracks proximity cost for NCL cell groups.
+/// Cost = sum over groups of max(0, actual_max_distance - allowed_distance)².
+/// Quadratic penalty drives cells within the allowed distance.
+struct ProximityCostTracker {
+    groups: Vec<ProximityGroupInfo>,
+    /// Cell → which groups it belongs to (indices into `groups`)
+    cell_to_groups: HashMap<CellId, Vec<usize>>,
+    /// Per-group cost
+    group_costs: Vec<f64>,
+    /// Total proximity cost
+    total_cost: f64,
+}
+
+impl ProximityCostTracker {
+    fn build(netlist: &GateNetlist, placement: &PlacementResult) -> Self {
+        let constraints = netlist.ncl_constraints.as_ref();
+        let groups: Vec<ProximityGroupInfo> = constraints
+            .map(|c| {
+                c.proximity_groups
+                    .iter()
+                    .map(|pg| ProximityGroupInfo {
+                        cells: pg.cells.clone(),
+                        max_distance_tiles: pg.max_distance_tiles,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut cell_to_groups: HashMap<CellId, Vec<usize>> = HashMap::new();
+        for (i, group) in groups.iter().enumerate() {
+            for &cell in &group.cells {
+                cell_to_groups.entry(cell).or_default().push(i);
+            }
+        }
+
+        let group_costs: Vec<f64> = groups
+            .iter()
+            .map(|g| Self::compute_group_cost(g, placement))
+            .collect();
+        let total_cost = group_costs.iter().sum();
+
+        Self {
+            groups,
+            cell_to_groups,
+            group_costs,
+            total_cost,
+        }
+    }
+
+    fn compute_group_cost(group: &ProximityGroupInfo, placement: &PlacementResult) -> f64 {
+        // Max Manhattan distance between any two placed cells in the group
+        let locs: Vec<(i32, i32)> = group
+            .cells
+            .iter()
+            .filter_map(|c| {
+                placement
+                    .placements
+                    .get(c)
+                    .map(|loc| (loc.tile_x as i32, loc.tile_y as i32))
+            })
+            .collect();
+
+        if locs.len() < 2 {
+            return 0.0;
+        }
+
+        let mut max_dist: i32 = 0;
+        for i in 0..locs.len() {
+            for j in (i + 1)..locs.len() {
+                let d = (locs[i].0 - locs[j].0).abs() + (locs[i].1 - locs[j].1).abs();
+                max_dist = max_dist.max(d);
+            }
+        }
+
+        let excess = (max_dist - group.max_distance_tiles as i32).max(0) as f64;
+        excess * excess // quadratic penalty
+    }
+
+    /// Compute the delta in proximity cost for a new placement.
+    /// Only recomputes groups that contain moved cells.
+    fn compute_delta(&self, moved_cells: &[CellId], new_placement: &PlacementResult) -> (f64, Vec<(usize, f64)>) {
+        let mut affected_groups: HashSet<usize> = HashSet::new();
+        for cell in moved_cells {
+            if let Some(gids) = self.cell_to_groups.get(cell) {
+                affected_groups.extend(gids);
+            }
+        }
+
+        let mut delta = 0.0;
+        let mut updates = Vec::new();
+        for &gid in &affected_groups {
+            let new_cost = Self::compute_group_cost(&self.groups[gid], new_placement);
+            delta += new_cost - self.group_costs[gid];
+            updates.push((gid, new_cost));
+        }
+
+        (delta, updates)
+    }
+
+    fn apply_updates(&mut self, updates: &[(usize, f64)]) {
+        for &(gid, new_cost) in updates {
+            self.total_cost += new_cost - self.group_costs[gid];
+            self.group_costs[gid] = new_cost;
+        }
+    }
+}
+
 /// Incremental cost cache for O(affected_nets) cost updates instead of O(all_nets).
 ///
 /// Pre-computes per-net HPWL and timing costs, and maintains a cell→nets index
@@ -30,6 +144,8 @@ struct NetCostCache {
     total_timing_cost: f64,
     /// Cell → list of net indices that the cell participates in
     cell_to_nets: HashMap<CellId, Vec<usize>>,
+    /// NCL proximity cost tracker
+    proximity: ProximityCostTracker,
 }
 
 impl NetCostCache {
@@ -75,6 +191,7 @@ impl NetCostCache {
 
         let total_wl_cost = net_wl_cost.iter().sum();
         let total_timing_cost = net_timing_cost.iter().sum();
+        let proximity = ProximityCostTracker::build(netlist, placement);
 
         Self {
             net_wl_cost,
@@ -82,17 +199,23 @@ impl NetCostCache {
             total_wl_cost,
             total_timing_cost,
             cell_to_nets,
+            proximity,
         }
     }
 
     /// Get the combined cost using the same formula as calculate_combined_cost.
+    /// Proximity cost is added with a fixed weight — it's a hard constraint penalty,
+    /// not a soft trade-off like timing vs wirelength.
     fn combined_cost(&self, timing_weight: f64) -> f64 {
-        if timing_weight == 0.0 {
+        let base = if timing_weight == 0.0 {
             self.total_wl_cost
         } else {
             (1.0 - timing_weight) * self.total_wl_cost
                 + timing_weight * self.total_timing_cost
-        }
+        };
+        // Proximity penalty scaled to be comparable to wirelength cost.
+        // Weight of 10.0 makes 1-tile excess equivalent to 10 HPWL units.
+        base + 10.0 * self.proximity.total_cost
     }
 
     /// Collect the unique set of net indices affected by moving the given cells.
@@ -107,16 +230,17 @@ impl NetCostCache {
     }
 
     /// Compute the cost delta for a new placement, updating only affected nets.
-    /// Returns (delta, affected net indices with their new costs) for later commit.
+    /// Returns (delta, net updates, proximity updates) for later commit.
     fn compute_delta(
         &self,
         affected: &[usize],
+        moved_cells: &[CellId],
         new_placement: &PlacementResult,
         netlist: &GateNetlist,
         net_criticalities: &HashMap<GateNetId, f64>,
         delay_model: &DelayModel,
         timing_weight: f64,
-    ) -> (f64, Vec<(usize, f64, f64)>) {
+    ) -> (f64, Vec<(usize, f64, f64)>, Vec<(usize, f64)>) {
         let mut wl_delta = 0.0;
         let mut timing_delta = 0.0;
         let mut updates = Vec::with_capacity(affected.len());
@@ -136,23 +260,33 @@ impl NetCostCache {
             updates.push((net_idx, new_wl, new_timing));
         }
 
-        let delta = if timing_weight == 0.0 {
+        let base_delta = if timing_weight == 0.0 {
             wl_delta
         } else {
             (1.0 - timing_weight) * wl_delta + timing_weight * timing_delta
         };
 
-        (delta, updates)
+        // Proximity cost delta (only recomputes affected groups)
+        let (prox_delta, prox_updates) =
+            self.proximity.compute_delta(moved_cells, new_placement);
+        let delta = base_delta + 10.0 * prox_delta;
+
+        (delta, updates, prox_updates)
     }
 
     /// Apply cached updates after a move is accepted.
-    fn apply_updates(&mut self, updates: &[(usize, f64, f64)]) {
-        for &(net_idx, new_wl, new_timing) in updates {
+    fn apply_updates(
+        &mut self,
+        net_updates: &[(usize, f64, f64)],
+        prox_updates: &[(usize, f64)],
+    ) {
+        for &(net_idx, new_wl, new_timing) in net_updates {
             self.total_wl_cost += new_wl - self.net_wl_cost[net_idx];
             self.total_timing_cost += new_timing - self.net_timing_cost[net_idx];
             self.net_wl_cost[net_idx] = new_wl;
             self.net_timing_cost[net_idx] = new_timing;
         }
+        self.proximity.apply_updates(prox_updates);
     }
 
     /// Compute HPWL and timing cost for a net in a single pass over its cells.
@@ -407,8 +541,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     &move_op,
                 );
                 let affected_nets = cost_cache.affected_nets(&affected);
-                let (delta, _) = cost_cache.compute_delta(
+                let (delta, _, _) = cost_cache.compute_delta(
                     &affected_nets,
+                    &affected,
                     &cal_placement,
                     netlist,
                     &net_criticalities,
@@ -482,8 +617,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
                 // Incremental cost delta: only recompute nets connected to moved cells
                 let affected_nets = cost_cache.affected_nets(&affected);
-                let (delta, updates) = cost_cache.compute_delta(
+                let (delta, net_updates, prox_updates) = cost_cache.compute_delta(
                     &affected_nets,
+                    &affected,
                     &current,
                     netlist,
                     &net_criticalities,
@@ -502,7 +638,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 total_moves += 1;
                 if accept {
                     accepted_moves += 1;
-                    cost_cache.apply_updates(&updates);
+                    cost_cache.apply_updates(&net_updates, &prox_updates);
                     current_cost = cost_cache.combined_cost(self.timing_weight);
 
                     if current_cost < best_cost {
@@ -622,6 +758,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     HashMap<(u32, u32, usize), CellId>,
                     f64,
                     Vec<(usize, f64, f64)>,
+                    Vec<(usize, f64)>,
                 )> = moves
                     .into_par_iter()
                     .map(|move_op| {
@@ -633,15 +770,16 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             &location_to_cell,
                         );
                         let affected_nets = cost_cache.affected_nets(&affected);
-                        let (delta, updates) = cost_cache.compute_delta(
+                        let (delta, net_updates, prox_updates) = cost_cache.compute_delta(
                             &affected_nets,
+                            &affected,
                             &new_placement,
                             netlist,
                             &net_criticalities,
                             &self.delay_model,
                             self.timing_weight,
                         );
-                        (move_op, new_placement, new_loc_map, delta, updates)
+                        (move_op, new_placement, new_loc_map, delta, net_updates, prox_updates)
                     })
                     .collect();
 
@@ -650,7 +788,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 let mut best_delta = f64::MAX;
                 let mut rng = rand::rngs::StdRng::seed_from_u64(42 + _iteration as u64);
 
-                for (idx, (_, _, _, delta, _)) in evaluated.iter().enumerate() {
+                for (idx, (_, _, _, delta, _, _)) in evaluated.iter().enumerate() {
                     // Check acceptance
                     let accept = if *delta <= 0.0 {
                         true
@@ -667,11 +805,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
                 // Apply the best accepted move
                 if let Some(idx) = best_move_idx {
-                    let (_, new_placement, new_loc_map, _, updates) =
+                    let (_, new_placement, new_loc_map, _, net_updates, prox_updates) =
                         evaluated.into_iter().nth(idx).unwrap();
                     current = new_placement;
                     location_to_cell = new_loc_map;
-                    cost_cache.apply_updates(&updates);
+                    cost_cache.apply_updates(&net_updates, &prox_updates);
                     current_cost = cost_cache.combined_cost(self.timing_weight);
                     accepted_count.fetch_add(1, Ordering::Relaxed);
 
