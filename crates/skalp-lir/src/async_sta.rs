@@ -281,6 +281,10 @@ pub struct AsyncSta<'a> {
     /// Used for fork analysis to calculate differential oscillation:
     /// differential_osc = cell_osc - fork_net_osc (common-mode cancellation)
     net_oscillation_counts: IndexMap<GateNetId, u32>,
+    /// Post-PnR per-net wire delays (ps). When provided, these replace the flat
+    /// `wire_delay_per_fanout_ps` estimate with actual routing delays from PnR.
+    /// Key: net ID, Value: wire delay in picoseconds.
+    wire_delays: IndexMap<GateNetId, f64>,
 }
 
 impl<'a> AsyncSta<'a> {
@@ -293,6 +297,7 @@ impl<'a> AsyncSta<'a> {
             cell_delays: IndexMap::new(),
             oscillation_counts: IndexMap::new(),
             net_oscillation_counts: IndexMap::new(),
+            wire_delays: IndexMap::new(),
         }
     }
 
@@ -328,6 +333,21 @@ impl<'a> AsyncSta<'a> {
     /// the true skew-affecting oscillation.
     pub fn with_net_oscillation_counts(mut self, counts: IndexMap<GateNetId, u32>) -> Self {
         self.net_oscillation_counts = counts;
+        self
+    }
+
+    /// Set post-PnR wire delays from routing results.
+    ///
+    /// When provided, these actual routing delays replace the flat estimated
+    /// `wire_delay_per_fanout_ps` in fork skew analysis. This is the key input
+    /// for the iterative timing closure loop:
+    ///
+    /// 1. First pass: no wire delays → uses estimated delays
+    /// 2. Run PnR → get actual per-net delays from routing
+    /// 3. Second pass: with_wire_delays(actual) → accurate skew analysis
+    /// 4. If violations remain, adjust buffers and re-route
+    pub fn with_wire_delays(mut self, delays: IndexMap<GateNetId, f64>) -> Self {
+        self.wire_delays = delays;
         self
     }
 
@@ -519,8 +539,12 @@ impl<'a> AsyncSta<'a> {
             let delay =
                 self.trace_path_delay_differential(*dest_cell_id, &mut visited, 0, fork_net_osc);
 
-            // Add wire delay estimate
-            let wire_delay = self.config.wire_delay_per_fanout_ps;
+            // Use post-PnR wire delay if available, otherwise estimate
+            let wire_delay = self
+                .wire_delays
+                .get(&net_id)
+                .copied()
+                .unwrap_or(self.config.wire_delay_per_fanout_ps);
             let total_delay = delay + wire_delay;
 
             let cell_type = self

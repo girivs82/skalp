@@ -37,6 +37,7 @@ pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_constraints;
 pub mod ncl_expand;
+pub mod ncl_timing_closure;
 pub mod ncl_optimizer;
 pub mod netlist;
 pub mod pattern_detector;
@@ -156,4 +157,10 @@ pub use async_sta_fix::{
 pub use ncl_constraints::{
     generate_ncl_constraints, CompletionGuard, MatchedDelayGroup, NclConstraintConfig,
     NclRoutingConstraints, ProximityGroup,
+};
+
+// NCL iterative timing closure (STA → PnR → STA loop)
+pub use ncl_timing_closure::{
+    post_pnr_iteration, pre_pnr_analysis, run_timing_closure, wire_delays_from_route_map,
+    ClosureIteration, ConvergenceReason, TimingClosureConfig, TimingClosureResult,
 };
