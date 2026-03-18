@@ -35,6 +35,7 @@ pub mod gate_optimizer;
 pub mod hierarchical_netlist;
 pub mod lir;
 pub mod mir_to_lir;
+pub mod ncl_constraints;
 pub mod ncl_expand;
 pub mod ncl_optimizer;
 pub mod netlist;
