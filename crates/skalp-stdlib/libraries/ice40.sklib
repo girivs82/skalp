@@ -667,6 +667,7 @@ mechanism = "via_failure"
 [[cells]]
 name = "SB_LUT4_INV"
 function = "inv"
+lut_init = "0x5555"
 fit = 0.15
 inputs = ["I0"]
 outputs = ["O"]
@@ -698,6 +699,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_BUF"
 function = "buf"
+lut_init = "0xAAAA"
 fit = 0.15
 inputs = ["I0"]
 outputs = ["O"]
@@ -729,6 +731,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_AND2"
 function = "and2"
+lut_init = "0x8888"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -760,6 +763,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_OR2"
 function = "or2"
+lut_init = "0xEEEE"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -791,6 +795,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_XOR2"
 function = "xor2"
+lut_init = "0x6666"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -822,6 +827,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_NAND2"
 function = "nand2"
+lut_init = "0x7777"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -853,6 +859,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_NOR2"
 function = "nor2"
+lut_init = "0x1111"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -884,6 +891,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_XNOR2"
 function = "xnor2"
+lut_init = "0x9999"
 fit = 0.15
 inputs = ["I0", "I1"]
 outputs = ["O"]
@@ -915,6 +923,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_MUX2"
 function = "mux2"
+lut_init = "0xCACA"
 fit = 0.15
 inputs = ["I0", "I1", "I2"]
 outputs = ["O"]
@@ -946,6 +955,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_AND3"
 function = "and3"
+lut_init = "0x8080"
 fit = 0.15
 inputs = ["I0", "I1", "I2"]
 outputs = ["O"]
@@ -977,6 +987,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_OR3"
 function = "or3"
+lut_init = "0xFEFE"
 fit = 0.15
 inputs = ["I0", "I1", "I2"]
 outputs = ["O"]
@@ -1008,6 +1019,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_AND4"
 function = "and4"
+lut_init = "0x8000"
 fit = 0.15
 inputs = ["I0", "I1", "I2", "I3"]
 outputs = ["O"]
@@ -1039,6 +1051,7 @@ mechanism = "electromigration"
 [[cells]]
 name = "SB_LUT4_OR4"
 function = "or4"
+lut_init = "0xFFFE"
 fit = 0.15
 inputs = ["I0", "I1", "I2", "I3"]
 outputs = ["O"]
@@ -1065,6 +1078,57 @@ name = "stuck_at_1"
 fit = 0.035
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
+
+# =============================================================================
+# NCL-specific: C-element (Muller gate) as SB_LUT4 + feedback
+# INIT = 0xEE88: Q = (A&B) | (Q_fb & (A|B))
+# where I0=input_a, I1=input_b, I3=Q_fb (feedback from output)
+# I2 tied low (unused). Implements NCL dual-rail threshold gate.
+# =============================================================================
+
+[[cells]]
+name = "SB_LUT4_CELEMENT"
+function = "c_element"
+lut_init = "0xEE88"
+feedback_input = 3
+fit = 0.15
+inputs = ["I0", "I1", "I2", "I3"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "feedback_open"
+fit = 0.012
+fault_type = "open"
+mechanism = "feedback_routing_failure"
+
+[[cells.failure_modes]]
+name = "hysteresis_loss"
+fit = 0.010
+fault_type = "transient"
+mechanism = "lut_init_corruption"
 
 # =============================================================================
 # Arithmetic cells using SB_LUT4 + SB_CARRY

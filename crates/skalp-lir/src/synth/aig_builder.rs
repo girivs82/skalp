@@ -790,7 +790,8 @@ impl<'a> AigBuilder<'a> {
 
             // NCL Threshold Gates - These are stateful (hysteresis) and should not be
             // optimized through AIG. NCL circuits bypass the AIG optimization pass.
-            CellFunction::Th12
+            CellFunction::CElement
+            | CellFunction::Th12
             | CellFunction::Th22
             | CellFunction::Th13
             | CellFunction::Th23

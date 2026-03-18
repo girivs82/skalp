@@ -1,0 +1,1320 @@
+# Lattice CertusPro-NX (Nexus) FPGA Library
+#
+# This library targets the Lattice CertusPro-NX family (LFCPNX-100)
+# using the actual Lattice Nexus primitive names compatible with
+# Yosys/nextpnr-nexus (via Project Oxide / prjoxide).
+#
+# References:
+# - Lattice CertusPro-NX Family Data Sheet (DS1013)
+# - Lattice Nexus Platform Design Guide (FPGA-TN-02207)
+# - Lattice FPGA Libraries Reference Guide (Nexus primitives)
+# - Project Oxide (prjoxide) documentation
+# - Yosys nexus cell library (techlibs/nexus/)
+#
+# Target device: LFCPNX-100 (LFCPNX-VERSA-EVN board)
+# - ~95K LUT4 (OXIDE_COMB)
+# - 320 DP16K BRAM blocks (5.12 Mbit EBR)
+# - 56 MULT18X18 DSP slices (in 28 MULT36X36 blocks)
+# - 4 PLL + 4 DLL
+# - Hard PCIe Gen3 x4
+# - Hard LPDDR4 controller
+# - 28nm FD-SOI process (Nexus platform)
+
+[library]
+name = "nexus"
+version = "1.0.0"
+vendor = "Lattice"
+family = "CertusPro-NX"
+reference_temperature_c = 85.0
+reference_voltage_v = 0.9
+lut_size = 4
+
+# =============================================================================
+# OXIDE_COMB - 4-input Look-Up Table with optional carry
+# The fundamental logic element in Nexus. Can implement any 4-input function.
+# INIT parameter contains 16-bit truth table.
+# Each OXIDE_COMB can optionally participate in a carry chain.
+# =============================================================================
+
+[[cells]]
+name = "OXIDE_COMB"
+function = "lut4"
+fit = 0.10
+inputs = ["A", "B", "C", "D"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+timing_margin_voltage_mv = 855
+voltage_delay_coefficient = 0.14
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.015
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "routing_open"
+fit = 0.005
+fault_type = "open"
+mechanism = "interconnect_failure"
+
+[[cells.failure_modes]]
+name = "routing_bridge"
+fit = 0.004
+fault_type = "bridge"
+mechanism = "interconnect_bridge"
+
+# =============================================================================
+# CCU2 - Dual Carry Chain Cell (Nexus carry primitive)
+# Two LUT2 blocks with cascaded carry logic.
+# S0 = A0 XOR B0 XOR CIN, S1 = A1 XOR B1 XOR COUT0
+# COUT = (A1 & B1) | ((A1 | B1) & COUT0)
+# =============================================================================
+
+[[cells]]
+name = "CCU2"
+function = "carry"
+fit = 0.08
+inputs = ["A0", "B0", "C0", "D0", "A1", "B1", "C1", "D1", "CIN"]
+outputs = ["S0", "S1", "COUT"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+timing_margin_voltage_mv = 855
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 4
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.008
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.008
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.006
+fault_type = "delay"
+mechanism = "carry_chain_delay"
+
+# =============================================================================
+# Flip-Flops - OXIDE_FF family
+# Nexus FFs are positive-edge triggered by default.
+# Variants: plain, with sync reset, with enable, with both.
+# =============================================================================
+
+# OXIDE_FF - Basic D Flip-Flop
+[[cells]]
+name = "OXIDE_FF"
+function = "dff"
+fit = 0.14
+inputs = ["DI"]
+outputs = ["Q"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+timing_margin_voltage_mv = 855
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 150
+hold_ps = 0
+clk_to_q_ps = 350
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.05
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.03
+fault_type = "data_retention"
+mechanism = "nbti_degradation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "clock_domain"
+fit = 0.010
+fault_type = "transient"
+mechanism = "setup_violation"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.010
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# OXIDE_FF with synchronous reset
+[[cells]]
+name = "OXIDE_FF_RST"
+function = "dff_r"
+fit = 0.16
+inputs = ["DI", "LSR"]
+outputs = ["Q"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 150
+hold_ps = 0
+clk_to_q_ps = 380
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.06
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.018
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.018
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# OXIDE_FF with clock enable
+[[cells]]
+name = "OXIDE_FF_EN"
+function = "dff_e"
+fit = 0.16
+inputs = ["DI", "CE"]
+outputs = ["Q"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 150
+hold_ps = 0
+clk_to_q_ps = 380
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.06
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.018
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.018
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.012
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# OXIDE_FF with reset and enable
+[[cells]]
+name = "OXIDE_FF_RSTE"
+function = "dff_re"
+fit = 0.18
+inputs = ["DI", "LSR", "CE"]
+outputs = ["Q"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 150
+hold_ps = 0
+clk_to_q_ps = 400
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.06
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.020
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.020
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.014
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# =============================================================================
+# DP16K - 16Kbit True Dual-Port Block RAM (EBR)
+# The Nexus EBR primitive. 320 blocks on LFCPNX-100 = 5.12 Mbit total.
+# Each block: 16Kbit data + 2Kbit parity = 18Kbit.
+# Supports various aspect ratios and byte-write enable.
+# =============================================================================
+
+[[cells]]
+name = "DP16K"
+function = "ram"
+fit = 1.00
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 250
+hold_ps = 80
+clk_to_q_ps = 650
+
+[cells.ram_info]
+block_bits = 18432
+aspect_ratios = [[512, 36], [1024, 18], [2048, 9], [4096, 4], [8192, 2]]
+true_dual_port = true
+has_write_mask = true
+write_mask_granularity = 9
+has_output_register = true
+
+[cells.ram_info.pin_map]
+read_data = "DOB"
+read_addr = "ADB"
+read_clk = "CLKB"
+read_en = "CSB"
+read_clk_en = "CEB"
+write_data = "DIA"
+write_addr = "ADA"
+write_clk = "CLKA"
+write_en = "WEA"
+write_clk_en = "CEA"
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.30
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.25
+fault_type = "data_retention"
+mechanism = "nbti_degradation"
+
+[[cells.failure_modes]]
+name = "stuck_row"
+fit = 0.15
+fault_type = "stuck_at_0"
+mechanism = "address_decoder_failure"
+
+[[cells.failure_modes]]
+name = "stuck_column"
+fit = 0.12
+fault_type = "stuck_at_1"
+mechanism = "bitline_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.10
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.08
+fault_type = "delay"
+mechanism = "sense_amplifier_degradation"
+
+# =============================================================================
+# MULT18X18 - 18x18 Signed/Unsigned Multiplier (DSP Block)
+# 56 slices on LFCPNX-100 (in 28 MULT36X36 blocks).
+# Each slice: 18x18 → 36-bit product, optional pipeline registers.
+# =============================================================================
+
+[[cells]]
+name = "MULT18X18"
+function = "dsp"
+fit = 0.40
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[cells.dsp_info]
+a_width = 18
+b_width = 18
+p_width = 36
+supports_signed = true
+has_input_register = true
+has_pipeline_register = true
+has_output_register = true
+
+[cells.dsp_info.pin_map]
+a_input = "A"
+b_input = "B"
+product = "Z"
+signed_a = "SIGNEDA"
+signed_b = "SIGNEDB"
+clock = "CLK"
+clock_enable = "CE"
+reset = "RST"
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.10
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "computation"
+fit = 0.12
+fault_type = "stuck_at_0"
+mechanism = "multiplier_array_failure"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.08
+fault_type = "delay"
+mechanism = "critical_path_degradation"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.10
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# =============================================================================
+# PLLA - Phase-Locked Loop (Nexus PLL)
+# 4 PLLs on LFCPNX-100.
+# Wide frequency range, 4 output clocks, fractional divider.
+# =============================================================================
+
+[[cells]]
+name = "PLLA"
+function = "pll"
+fit = 0.12
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[cells.pll_info]
+min_input_freq_mhz = 10.0
+max_input_freq_mhz = 500.0
+min_output_freq_mhz = 6.25
+max_output_freq_mhz = 1000.0
+num_outputs = 4
+supports_feedback = true
+
+[cells.pll_info.pin_map]
+ref_clk = "CLKI"
+out_clk = "CLKOP"
+lock = "LOCK"
+reset = "RST"
+feedback = "CLKFB"
+secondary_outputs = ["CLKOS", "CLKOS2", "CLKOS3"]
+
+[[cells.failure_modes]]
+name = "lock_loss"
+fit = 0.04
+fault_type = "transient"
+mechanism = "pll_lock_instability"
+
+[[cells.failure_modes]]
+name = "jitter"
+fit = 0.03
+fault_type = "delay"
+mechanism = "vco_degradation"
+
+[[cells.failure_modes]]
+name = "stuck"
+fit = 0.02
+fault_type = "stuck_at_0"
+mechanism = "charge_pump_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.03
+fault_type = "transient"
+mechanism = "supply_noise_coupling"
+
+# =============================================================================
+# DCC - Dynamic Clock Control (Clock Buffer)
+# Global clock network buffer with optional enable.
+# =============================================================================
+
+[[cells]]
+name = "DCC"
+function = "clk_buf"
+fit = 0.06
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+timing_margin_voltage_mv = 855
+voltage_delay_coefficient = 0.05
+voltage_sensitivity = 2
+
+[cells.clk_buf_info]
+input = "CLKI"
+output = "CLKO"
+has_enable = true
+enable = "CE"
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.02
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.010
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# =============================================================================
+# OSC_CORE - On-chip Oscillator
+# Internal oscillator for startup or low-speed clocking.
+# =============================================================================
+
+[[cells]]
+name = "OSC_CORE"
+function = "clk_buf"
+fit = 0.10
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[cells.clk_buf_info]
+input = "HFOUTEN"
+output = "HFCLKOUT"
+has_enable = true
+enable = "HFOUTEN"
+
+[[cells.failure_modes]]
+name = "frequency_drift"
+fit = 0.04
+fault_type = "delay"
+mechanism = "oscillator_aging"
+
+[[cells.failure_modes]]
+name = "stuck"
+fit = 0.03
+fault_type = "stuck_at_0"
+mechanism = "oscillator_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.03
+fault_type = "transient"
+mechanism = "supply_noise"
+
+# =============================================================================
+# I/O Cells - SEIO18 and SEIO33 (Single-Ended IO)
+# SEIO18: 1.0V-1.8V I/O (LVCMOS, SSTL, HSUL)
+# SEIO33: 1.2V-3.3V I/O (LVCMOS, LVTTL)
+# =============================================================================
+
+# SEIO33 - Bidirectional 3.3V IO
+[[cells]]
+name = "SEIO33"
+function = "bidir_pad"
+fit = 0.25
+nominal_voltage_mv = 3300
+min_voltage_mv = 1200
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS15", "LVCMOS12", "LVTTL33"]
+max_drive_strength_ma = 16
+supports_tristate = true
+supports_differential = false
+has_input_register = true
+has_output_register = true
+
+[cells.io_info.pin_map]
+data_in = "O"
+data_out = "I"
+output_enable = "T"
+pad = "B"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.08
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.05
+fault_type = "stuck_at_1"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.04
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.03
+fault_type = "delay"
+mechanism = "pad_degradation"
+
+# SEIO18 - Bidirectional 1.8V IO (high-speed)
+[[cells]]
+name = "SEIO18"
+function = "bidir_pad"
+fit = 0.22
+nominal_voltage_mv = 1800
+min_voltage_mv = 1000
+
+[cells.io_info]
+supported_standards = ["LVCMOS18", "LVCMOS15", "LVCMOS12", "LVCMOS10", "SSTL18_I", "SSTL18_II", "HSUL12"]
+max_drive_strength_ma = 12
+supports_tristate = true
+supports_differential = false
+has_input_register = true
+has_output_register = true
+
+[cells.io_info.pin_map]
+data_in = "O"
+data_out = "I"
+output_enable = "T"
+pad = "B"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.05
+fault_type = "stuck_at_1"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.03
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.03
+fault_type = "delay"
+mechanism = "pad_degradation"
+
+# SEIO18 Input-only
+[[cells]]
+name = "SEIO18_IB"
+function = "input_pad"
+fit = 0.15
+nominal_voltage_mv = 1800
+min_voltage_mv = 1000
+
+[cells.io_info]
+supported_standards = ["LVCMOS18", "LVCMOS15", "LVCMOS12", "LVCMOS10", "SSTL18_I", "HSUL12"]
+
+[cells.io_info.pin_map]
+data_in = "O"
+pad = "I"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.04
+fault_type = "stuck_at_0"
+mechanism = "receiver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.03
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# SEIO33 Input-only
+[[cells]]
+name = "SEIO33_IB"
+function = "input_pad"
+fit = 0.18
+nominal_voltage_mv = 3300
+min_voltage_mv = 1200
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12", "LVTTL33"]
+
+[cells.io_info.pin_map]
+data_in = "O"
+pad = "I"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "receiver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.04
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# SEIO18 Output-only
+[[cells]]
+name = "SEIO18_OB"
+function = "output_pad"
+fit = 0.15
+nominal_voltage_mv = 1800
+min_voltage_mv = 1000
+
+[cells.io_info]
+supported_standards = ["LVCMOS18", "LVCMOS15", "LVCMOS12", "LVCMOS10"]
+max_drive_strength_ma = 12
+
+[cells.io_info.pin_map]
+data_out = "I"
+pad = "O"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.04
+fault_type = "stuck_at_0"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.03
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# SEIO33 Output-only
+[[cells]]
+name = "SEIO33_OB"
+function = "output_pad"
+fit = 0.18
+nominal_voltage_mv = 3300
+min_voltage_mv = 1200
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12", "LVTTL33"]
+max_drive_strength_ma = 16
+
+[cells.io_info.pin_map]
+data_out = "I"
+pad = "O"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "driver_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.04
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# =============================================================================
+# DIFFIO18 - Differential I/O (LVDS, SLVS)
+# For high-speed differential signaling.
+# =============================================================================
+
+[[cells]]
+name = "DIFFIO18"
+function = "bidir_pad"
+fit = 0.30
+nominal_voltage_mv = 1800
+min_voltage_mv = 1000
+
+[cells.io_info]
+supported_standards = ["LVDS", "SLVS", "SUBLVDS", "MLVDS"]
+max_drive_strength_ma = 8
+supports_tristate = true
+supports_differential = true
+has_input_register = true
+has_output_register = true
+
+[cells.io_info.pin_map]
+data_in = "O"
+data_out = "I"
+output_enable = "T"
+pad = "PADP"
+pad_n = "PADN"
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.08
+fault_type = "stuck_at_0"
+mechanism = "esd_latchup"
+
+[[cells.failure_modes]]
+name = "common_mode"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "common_mode_failure"
+
+[[cells.failure_modes]]
+name = "skew"
+fit = 0.05
+fault_type = "delay"
+mechanism = "differential_skew"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.05
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+# =============================================================================
+# VCC / GND - Constant drivers
+# =============================================================================
+
+[[cells]]
+name = "VCC"
+function = "tie_high"
+fit = 0.01
+inputs = []
+outputs = ["V"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.005
+fault_type = "stuck_at_0"
+mechanism = "routing_open"
+
+[[cells]]
+name = "GND"
+function = "tie_low"
+fit = 0.01
+inputs = []
+outputs = ["G"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.005
+fault_type = "stuck_at_1"
+mechanism = "routing_short"
+
+# =============================================================================
+# Named LUT4 variants for tech mapping convenience
+# These are OXIDE_COMB cells with specific INIT values pre-calculated.
+# The tech mapper will set lut_init on the Cell when instantiating.
+# =============================================================================
+
+# Inverter (INIT = 0x5555: ~I0)
+[[cells]]
+name = "OXIDE_COMB_INV"
+function = "inv"
+lut_init = "0x5555"
+fit = 0.10
+inputs = ["A"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# Buffer (INIT = 0xAAAA: I0)
+[[cells]]
+name = "OXIDE_COMB_BUF"
+function = "buf"
+lut_init = "0xAAAA"
+fit = 0.10
+inputs = ["A"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+# AND2 (INIT = 0x8888: I0 & I1)
+[[cells]]
+name = "OXIDE_COMB_AND2"
+function = "and2"
+lut_init = "0x8888"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR2 (INIT = 0xEEEE: I0 | I1)
+[[cells]]
+name = "OXIDE_COMB_OR2"
+function = "or2"
+lut_init = "0xEEEE"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# XOR2 (INIT = 0x6666: I0 ^ I1)
+[[cells]]
+name = "OXIDE_COMB_XOR2"
+function = "xor2"
+lut_init = "0x6666"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# NAND2 (INIT = 0x7777: ~(I0 & I1))
+[[cells]]
+name = "OXIDE_COMB_NAND2"
+function = "nand2"
+lut_init = "0x7777"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# NOR2 (INIT = 0x1111: ~(I0 | I1))
+[[cells]]
+name = "OXIDE_COMB_NOR2"
+function = "nor2"
+lut_init = "0x1111"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# XNOR2 (INIT = 0x9999: ~(I0 ^ I1))
+[[cells]]
+name = "OXIDE_COMB_XNOR2"
+function = "xnor2"
+lut_init = "0x9999"
+fit = 0.10
+inputs = ["A", "B"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# MUX2 (INIT = 0xCACA: sel ? I1 : I0)
+[[cells]]
+name = "OXIDE_COMB_MUX2"
+function = "mux2"
+lut_init = "0xCACA"
+fit = 0.10
+inputs = ["A", "B", "S"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# AND3 (INIT = 0x8080: I0 & I1 & I2)
+[[cells]]
+name = "OXIDE_COMB_AND3"
+function = "and3"
+lut_init = "0x8080"
+fit = 0.10
+inputs = ["A", "B", "C"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR3 (INIT = 0xFEFE: I0 | I1 | I2)
+[[cells]]
+name = "OXIDE_COMB_OR3"
+function = "or3"
+lut_init = "0xFEFE"
+fit = 0.10
+inputs = ["A", "B", "C"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# AND4 (INIT = 0x8000: I0 & I1 & I2 & I3)
+[[cells]]
+name = "OXIDE_COMB_AND4"
+function = "and4"
+lut_init = "0x8000"
+fit = 0.10
+inputs = ["A", "B", "C", "D"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR4 (INIT = 0xFFFE: I0 | I1 | I2 | I3)
+[[cells]]
+name = "OXIDE_COMB_OR4"
+function = "or4"
+lut_init = "0xFFFE"
+fit = 0.10
+inputs = ["A", "B", "C", "D"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.04
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# =============================================================================
+# NCL-specific: C-element as LUT4 + feedback
+# INIT = 0x00E8: Q = (A&B) | (Q_fb & (A|B))
+# where A=input0, B=input1, D=Q_fb (feedback from output)
+# This implements the Muller C-element for NCL dual-rail encoding.
+# =============================================================================
+
+[[cells]]
+name = "OXIDE_COMB_CELEMENT"
+function = "c_element"
+lut_init = "0xEE88"
+feedback_input = 3
+fit = 0.12
+inputs = ["A", "B", "C", "D"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.05
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "feedback_open"
+fit = 0.010
+fault_type = "open"
+mechanism = "feedback_routing_failure"
+
+[[cells.failure_modes]]
+name = "hysteresis_loss"
+fit = 0.008
+fault_type = "transient"
+mechanism = "lut_init_corruption"

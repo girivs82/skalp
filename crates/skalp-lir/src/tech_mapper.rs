@@ -30,6 +30,10 @@ struct LibraryCellInfo {
     function: CellFunction,
     fit: f64,
     failure_modes: Vec<CellFailureMode>,
+    /// LUT initialization value from the library (technology-specific encoding).
+    /// Set when the library cell has a `lut_init` field — the mapper uses this
+    /// instead of hardcoding INIT values.
+    lut_init: Option<u64>,
 }
 
 impl LibraryCellInfo {
@@ -44,15 +48,21 @@ impl LibraryCellInfo {
                 .iter()
                 .map(convert_failure_mode)
                 .collect(),
+            lut_init: cell.lut_init,
         }
     }
 
-    /// Apply library cell metadata to a gate cell
+    /// Apply library cell metadata to a gate cell.
     ///
-    /// Sets function and failure_modes from library info.
+    /// Sets function, failure_modes, and lut_init from library info.
     fn apply_to_cell(&self, cell: &mut Cell) {
         cell.function = Some(self.function.clone());
         cell.failure_modes = self.failure_modes.clone();
+        // Propagate lut_init from library — only if the cell doesn't already have one
+        // (explicit overrides from the mapper take precedence)
+        if cell.lut_init.is_none() {
+            cell.lut_init = self.lut_init;
+        }
     }
 }
 
@@ -3124,11 +3134,92 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
+        if self.library.is_fpga() {
+            self.map_c_element_fpga(width, inputs, outputs, path);
+        } else {
+            self.map_c_element_asic(width, inputs, outputs, path);
+        }
+    }
+
+    /// Map C-element to a single LUT with output-to-input feedback.
+    ///
+    /// The library's CElement cell defines:
+    /// - `lut_init`: the truth table encoding Q = (A&B) | (Q_fb & (A|B))
+    /// - `feedback_input`: which input pin receives the output feedback
+    /// - `inputs`: pin names (unused pins are tied low)
+    ///
+    /// Falls back to the generic LUT4 cell with hardcoded INIT if no
+    /// CElement cell is defined in the library.
+    fn map_c_element_fpga(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        // Try to get a dedicated C-element cell from the library
+        let (cell_info, lut_init, feedback_idx) =
+            if let Some(ce_cell) = self.library.find_best_cell(&CellFunction::CElement) {
+                let info = LibraryCellInfo::from_library_cell(ce_cell);
+                let init = ce_cell.lut_init.unwrap_or(0xEE88);
+                let fb = ce_cell.feedback_input.unwrap_or(3);
+                (info, init, fb)
+            } else {
+                // Fallback: use generic LUT4 with default C-element encoding
+                let info = self.get_cell_info(&CellFunction::Lut4);
+                (info, 0xEE88, 3)
+            };
+
+        let c_elem_id = self.c_elem_counter;
+        self.c_elem_counter += 1;
+        let tie_low = self.get_tie_low();
+        let num_inputs = self.library.get_lut_size();
+
+        for bit in 0..width as usize {
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
+            let q = outputs.get(bit).copied().unwrap_or(GateNetId(0));
+
+            // Build input vector: data inputs + tie_low for unused + feedback at feedback_idx
+            let mut lut_inputs = vec![tie_low; num_inputs];
+            lut_inputs[0] = a;
+            lut_inputs[1] = b;
+            // feedback_idx gets the output fed back
+            if feedback_idx < num_inputs {
+                lut_inputs[feedback_idx] = q;
+            }
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                cell_info.name.clone(),
+                self.library.name.clone(),
+                cell_info.fit,
+                format!("{}.c_elem{}_{}", path, c_elem_id, bit),
+                lut_inputs,
+                vec![q],
+            );
+            cell.lut_init = Some(lut_init);
+            cell.source_op = Some("C-element_LUT4_feedback".to_string());
+            cell_info.apply_to_cell(&mut cell);
+            self.add_cell(cell);
+
+            self.stats.cells_created += 1;
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map C-element using discrete ASIC gates: 2 AND + 2 OR = 4 gates per bit.
+    fn map_c_element_asic(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
         let and_info = self.get_cell_info(&CellFunction::And2);
         let or_info = self.get_cell_info(&CellFunction::Or2);
 
-        // Use a unique counter to ensure C-element internal nets have unique names
-        // This is needed because multiple NCL operations can have the same path
         let c_elem_id = self.c_elem_counter;
         self.c_elem_counter += 1;
         let tie_low = self.get_tie_low();
@@ -3138,7 +3229,6 @@ impl<'a> TechMapper<'a> {
             let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
             let q = outputs.get(bit).copied().unwrap_or(GateNetId(0));
 
-            // Create intermediate nets with unique naming: path.c_elem_{id}_{bit}
             let ab_and_net = self.alloc_net_id();
             self.netlist.add_net(GateNet::new(
                 ab_and_net,
@@ -3184,7 +3274,6 @@ impl<'a> TechMapper<'a> {
             self.add_cell(cell2);
 
             // Gate 3: q_and_or = Q AND (a OR b) - feedback from output
-            // Note: Q is the output net, creating a combinational feedback loop
             let mut cell3 = Cell::new_comb(
                 CellId(0),
                 and_info.name.clone(),
@@ -6479,6 +6568,7 @@ impl<'a> TechMapper<'a> {
                     function: function.clone(),
                     fit: 0.5 + 0.1 * (*n as f64),
                     failure_modes: vec![],
+                    lut_init: None,
                 };
             }
             CellFunction::NclCompletion { width } => {
@@ -6487,6 +6577,7 @@ impl<'a> TechMapper<'a> {
                     function: function.clone(),
                     fit: 0.1 * (*width as f64),
                     failure_modes: vec![],
+                    lut_init: None,
                 };
             }
             _ => ("NCL_GENERIC", 0.5),
@@ -6497,6 +6588,7 @@ impl<'a> TechMapper<'a> {
             function: function.clone(),
             fit,
             failure_modes: vec![],
+            lut_init: None,
         }
     }
 
@@ -8527,5 +8619,105 @@ mod tests {
             result.stats.cells_created, 22,
             "Should have 22 cells total (9 logic + 12 SB_IO + 1 SB_VCC)"
         );
+    }
+
+    #[test]
+    fn test_nexus_c_element_uses_single_lut4() {
+        use crate::lir::NclRail;
+
+        let lib =
+            crate::tech_library::get_stdlib_library("nexus").expect("Failed to load nexus library");
+
+        // Create a C-element (AND with NCL-annotated output signal)
+        let mut lir = Lir::new("test_c_element".to_string());
+        let a = lir.add_input("a".to_string(), 4);
+        let b = lir.add_input("b".to_string(), 4);
+        // Output signal must have NCL rail annotation to trigger C-element path
+        let q = lir.add_output("q_t".to_string(), 4); // _t suffix marks true rail
+        lir.signals[q.0 as usize].ncl_rail = Some(NclRail::True);
+
+        lir.add_node(
+            LirOp::And {
+                width: 4,
+            },
+            vec![a, b],
+            q,
+            "test.c_elem".to_string(),
+        );
+
+        let result = map_word_lir_to_gates(&lir, &lib);
+
+        // Count C-element LUT4 cells
+        let celement_cells: Vec<_> = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| {
+                c.source_op
+                    .as_ref()
+                    .is_some_and(|s| s.contains("C-element_LUT4_feedback"))
+            })
+            .collect();
+
+        // Should be 4 LUT4 cells (one per bit), not 16 gates (4 per bit ASIC)
+        assert_eq!(
+            celement_cells.len(),
+            4,
+            "FPGA C-element should use 1 LUT4 per bit, got {} cells",
+            celement_cells.len()
+        );
+
+        // Verify each has the correct INIT value from the library (not hardcoded)
+        for cell in &celement_cells {
+            assert_eq!(
+                cell.lut_init,
+                Some(0xEE88),
+                "C-element LUT4 should have INIT=0xEE88 from library"
+            );
+            // Verify the cell name comes from the library's CElement cell
+            assert_eq!(
+                cell.cell_type, "OXIDE_COMB_CELEMENT",
+                "C-element should use the library's OXIDE_COMB_CELEMENT cell"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lut_init_from_library_not_hardcoded() {
+        // Verify that gate cells get lut_init from the library, not hardcoded
+        let lib =
+            crate::tech_library::get_stdlib_library("nexus").expect("Failed to load nexus library");
+
+        // Map a simple AND gate
+        let mut lir = Lir::new("test_lut_init".to_string());
+        let a = lir.add_input("a".to_string(), 1);
+        let b = lir.add_input("b".to_string(), 1);
+        let y = lir.add_output("y".to_string(), 1);
+        lir.add_node(
+            LirOp::And { width: 1 },
+            vec![a, b],
+            y,
+            "test.and".to_string(),
+        );
+
+        let result = map_word_lir_to_gates(&lir, &lib);
+
+        // Find the AND cell
+        let and_cell = result
+            .netlist
+            .cells
+            .iter()
+            .find(|c| c.cell_type.contains("AND2"))
+            .expect("Should have an AND2 cell");
+
+        // lut_init should come from the library's OXIDE_COMB_AND2 cell
+        assert_eq!(
+            and_cell.lut_init,
+            Some(0x8888),
+            "AND2 cell should get lut_init=0x8888 from library"
+        );
+
+        // Verify the library cell name is used
+        assert_eq!(and_cell.cell_type, "OXIDE_COMB_AND2");
     }
 }

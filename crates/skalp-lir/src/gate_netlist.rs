@@ -1364,11 +1364,18 @@ impl GateNetlist {
 
             // Build parameters (for LUTs, include the INIT parameter)
             let mut parameters = Map::new();
-            if cell.cell_type.contains("LUT4") {
+            if let Some(init) = cell.lut_init {
+                // Use explicitly set LUT init (e.g., C-element FPGA mapping)
+                parameters.insert("INIT".to_string(), json!(format!("{:04X}", init)));
+            } else if cell.cell_type.contains("LUT4") {
                 // Extract LUT function from cell type and compute INIT value
                 if let Some(init) = self.compute_lut4_init(&cell.cell_type) {
                     parameters.insert("INIT".to_string(), json!(format!("{:04X}", init)));
                 }
+            }
+            // Include vendor-specific parameters
+            for (key, value) in &cell.parameters {
+                parameters.insert(key.clone(), json!(value));
             }
 
             // Build cell object
@@ -1437,15 +1444,13 @@ impl GateNetlist {
         serde_json::to_string_pretty(&top_obj).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Compute LUT4 INIT value from cell type name
+    /// Legacy fallback: compute LUT4 INIT value from cell type name.
     ///
-    /// Returns the 16-bit INIT value that programs the LUT4 to implement
-    /// the function specified in the cell type name.
+    /// Prefer `cell.lut_init` (set from the library's `lut_init` field via
+    /// `LibraryCellInfo::apply_to_cell`). This function is only used as a
+    /// fallback when `cell.lut_init` is not set — e.g., for netlists created
+    /// before the library carried INIT values.
     pub(crate) fn compute_lut4_init(&self, cell_type: &str) -> Option<u16> {
-        // Map common functions to LUT4 INIT values
-        // For a 4-input LUT: output = INIT[{I3,I2,I1,I0}]
-        // NOTE: Order matters! More specific patterns must come before less specific ones
-        // e.g., XNOR2 before NOR2 before OR2, NAND2 before AND2, XOR2 before OR2
         match cell_type {
             // Inverter: Y = ~I0
             s if s.contains("INV") => Some(0x5555), // NOT pattern
@@ -1884,6 +1889,23 @@ fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&
         return format!("I{}", index);
     }
 
+    // Nexus FPGA primitives (OXIDE_COMB, OXIDE_FF, etc.)
+    if cell_type.starts_with("OXIDE_COMB") {
+        return match index {
+            0 => "A".to_string(),
+            1 => "B".to_string(),
+            2 => "C".to_string(),
+            _ => "D".to_string(),
+        };
+    }
+    if cell_type.starts_with("OXIDE_FF") {
+        return match index {
+            0 => "DI".to_string(),
+            1 => if cell_type.contains("RST") { "LSR".to_string() } else { "CE".to_string() },
+            _ => "CE".to_string(),
+        };
+    }
+
     // Common naming conventions for standard cells
     let base = cell_type.split('_').next().unwrap_or(cell_type);
 
@@ -1971,6 +1993,14 @@ fn get_output_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<
         } else {
             return format!("Y{}", index);
         }
+    }
+
+    // Nexus FPGA primitives
+    if cell_type.starts_with("OXIDE_COMB") {
+        return "F".to_string();
+    }
+    if cell_type.starts_with("OXIDE_FF") {
+        return "Q".to_string();
     }
 
     let base = cell_type.split('_').next().unwrap_or(cell_type);

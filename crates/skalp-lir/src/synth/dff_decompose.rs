@@ -58,6 +58,7 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
 
         // Check if Q is in the transitive fanin of D
         if !is_in_fanin(aig, data_lit.node, *latch_id) {
+            eprintln!("[DFF_DECOMP] latch {:?}: Q not in fanin, skipping", latch_id);
             continue; // Q doesn't feed back — no enable possible
         }
 
@@ -88,17 +89,23 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         let f_q1 = cofactor(aig, data_after_reset, q_lit, true);
         let bool_diff = build_xor(aig, f_q0, f_q1);
 
+        eprintln!("[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
+            latch_id, f_q0, f_q1, bool_diff, bool_diff.const_value());
+
         let enable = if bool_diff.const_value() == Some(false) {
             // dF/dQ = 0: F doesn't depend on Q (after reset peeling).
             // Q dropped out — no enable pattern.
+            eprintln!("[DFF_DECOMP] latch {:?}: dF/dQ=0, no enable", latch_id);
             None
         } else if bool_diff.const_value() == Some(true) {
             // dF/dQ = 1: F always depends on Q. This means F = Q or F = ~Q,
             // not a MUX enable pattern.
+            eprintln!("[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q", latch_id);
             None
         } else {
             // Non-trivial enable: E = ~bool_diff
             let e_lit = bool_diff.invert();
+            eprintln!("[DFF_DECOMP] latch {:?}: enable={:?}", latch_id, e_lit);
             Some(e_lit)
         };
 
@@ -116,21 +123,24 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         };
 
         // Verify decomposition by simulation before accepting it.
-        // Build the reconstructed function and check it matches the original.
+        // Compare against data_after_reset (not data_lit) since E/D_new
+        // are computed from the reset-stripped function.
         let decomp_ok = if let Some(e_lit) = enable {
             // Reconstructed: F_recon = mux(E, D_new, Q)
             let f_recon = build_mux(aig, e_lit, new_data, q_lit);
-            verify_equivalence(aig, *data_lit, f_recon, *latch_id)
+            verify_equivalence(aig, data_after_reset, f_recon, *latch_id)
         } else if sync_reset.is_some() {
-            // Reset-only decomposition: verify data_after_reset with reset=0
             true // Reset peeling is straightforward, trust it
         } else {
             true
         };
 
         if !decomp_ok {
+            eprintln!("[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping", latch_id);
             continue; // Decomposition incorrect, skip this latch
         }
+        eprintln!("[DFF_DECOMP] latch {:?}: decomposition accepted (enable={:?}, data={:?}, sync_reset={:?})",
+            latch_id, enable, new_data, sync_reset);
 
         results.insert(
             *latch_id,
@@ -150,15 +160,26 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
 /// Checks 256 random input patterns (4 rounds of 64-bit parallel sim).
 fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_id: AigNodeId) -> bool {
     // Collect all input nodes (PIs and latches) in the transitive fanin of both functions
-    let mut inputs = HashSet::new();
-    collect_inputs(aig, original.node, &mut inputs, &mut HashSet::new());
-    collect_inputs(aig, reconstructed.node, &mut inputs, &mut HashSet::new());
-    let inputs: Vec<AigNodeId> = inputs.into_iter().collect();
+    let mut inputs_orig = HashSet::new();
+    let mut inputs_recon = HashSet::new();
+    collect_inputs(aig, original.node, &mut inputs_orig, &mut HashSet::new());
+    collect_inputs(aig, reconstructed.node, &mut inputs_recon, &mut HashSet::new());
+    let mut all_inputs = inputs_orig.clone();
+    all_inputs.extend(&inputs_recon);
+    let inputs: Vec<AigNodeId> = all_inputs.into_iter().collect();
+
+    // Debug: show inputs unique to each side
+    let only_orig: Vec<_> = inputs_orig.difference(&inputs_recon).collect();
+    let only_recon: Vec<_> = inputs_recon.difference(&inputs_orig).collect();
+    if !only_orig.is_empty() || !only_recon.is_empty() {
+        eprintln!("[DFF_VERIFY] latch {:?}: orig_only_inputs={:?}, recon_only_inputs={:?}",
+            latch_id, only_orig, only_recon);
+    }
 
     // Use a simple PRNG (xorshift64) for reproducibility
     let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64 ^ (latch_id.0 as u64);
 
-    for _round in 0..4 {
+    for round in 0..4 {
         // Assign random 64-bit values to each input (64 patterns in parallel)
         let mut values: HashMap<AigNodeId, u64> = HashMap::new();
         values.insert(AigNodeId::FALSE, 0); // Constant false = all zeros
@@ -173,6 +194,11 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
         let recon_val = eval_lit(aig, reconstructed, &mut values);
 
         if orig_val != recon_val {
+            if round == 0 {
+                eprintln!("[DFF_VERIFY] latch {:?}: MISMATCH round {} orig={:016x} recon={:016x} xor={:016x}",
+                    latch_id, round, orig_val, recon_val, orig_val ^ recon_val);
+                eprintln!("[DFF_VERIFY]   original={:?} reconstructed={:?}", original, reconstructed);
+            }
             return false;
         }
     }

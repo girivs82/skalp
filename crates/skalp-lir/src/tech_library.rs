@@ -135,6 +135,20 @@ pub struct LibraryCell {
     /// IO cell capability metadata (only for cells with IO pad functions)
     #[serde(default)]
     pub io_info: Option<IoCellInfo>,
+
+    /// LUT initialization value for FPGA cells.
+    /// For LUT4: 16-bit truth table. For LUT6: 64-bit truth table.
+    /// This is the technology-specific encoding of the cell's Boolean function.
+    /// The synthesizer reads this from the library rather than hardcoding INIT values.
+    #[serde(default)]
+    pub lut_init: Option<u64>,
+
+    /// Index of the feedback input pin (for cells with combinational feedback loops).
+    /// For example, a C-element implemented as LUT4 with output→input feedback
+    /// uses this to indicate which input pin receives the feedback connection.
+    /// `None` means no feedback (normal combinational cell).
+    #[serde(default)]
+    pub feedback_input: Option<usize>,
 }
 
 /// RAM cell capabilities — technology-specific, queried by tech mapper
@@ -636,6 +650,8 @@ impl LibraryCell {
             clk_buf_info: None,
             clk_div_info: None,
             io_info: None,
+            lut_init: None,
+            feedback_input: None,
         }
     }
 
@@ -940,7 +956,14 @@ pub enum CellFunction {
     /// Power pad with integrated Low Dropout Regulator
     PowerPadLdo,
 
-    // === NCL (Null Convention Logic) Threshold Gates ===
+    // === NCL (Null Convention Logic) ===
+    /// C-element (Muller gate): Q = (A&B) | (Q & (A|B))
+    /// On FPGA, implemented as a LUT with output-to-input feedback.
+    /// The library cell carries the lut_init and feedback_input fields
+    /// so the mapper doesn't need to know the LUT encoding.
+    CElement,
+
+    // NCL Threshold Gates
     /// TH12: 1-of-2 threshold gate (OR with hysteresis)
     Th12,
     /// TH22: 2-of-2 threshold gate (C-element/Muller gate)
@@ -1004,7 +1027,8 @@ impl CellFunction {
             | CellFunction::Blackbox { .. } => false,
 
             // NCL threshold gates — stateful (hysteresis), not representable in AIG
-            CellFunction::Th12
+            CellFunction::CElement
+            | CellFunction::Th12
             | CellFunction::Th22
             | CellFunction::Th13
             | CellFunction::Th23
@@ -1259,6 +1283,7 @@ impl CellFunction {
             }
             // NCL Threshold Gates
             CellFunction::Th12 => (vec!["a".into(), "b".into()], vec!["y".into()]),
+            CellFunction::CElement => (vec!["a".into(), "b".into()], vec!["q".into()]),
             CellFunction::Th22 => (vec!["a".into(), "b".into()], vec!["y".into()]),
             CellFunction::Th13 => (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()]),
             CellFunction::Th23 => (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()]),
@@ -2372,6 +2397,7 @@ const FPGA_LUT4_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lu
 const FPGA_LUT6_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut6.sklib");
 const ICE40_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/ice40.sklib");
 const ECP5_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/ecp5.sklib");
+const NEXUS_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/nexus.sklib");
 
 /// List all available standard library names
 pub fn list_stdlib_libraries() -> Vec<&'static str> {
@@ -2383,6 +2409,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
         "fpga_lut6",
         "ice40",
         "ecp5",
+        "nexus",
     ]
 }
 
@@ -2400,6 +2427,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
 /// - `fpga_lut6` - FPGA with 6-input LUTs
 /// - `ice40` (aliases: `lattice`, `lattice_ice40`) - Lattice iCE40 FPGA
 /// - `ecp5` (alias: `lattice_ecp5`) - Lattice ECP5 FPGA (with DSP blocks)
+/// - `nexus` (aliases: `certuspro_nx`, `lattice_nexus`, `certuspro`) - Lattice CertusPro-NX FPGA
 pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
     // Normalize name to canonical form
     let canonical_name = match name {
@@ -2410,6 +2438,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "fpga_lut6" => "fpga_lut6",
         "ice40" | "lattice" | "lattice_ice40" => "ice40",
         "ecp5" | "lattice_ecp5" => "ecp5",
+        "nexus" | "certuspro_nx" | "lattice_nexus" | "certuspro" => "nexus",
         _ => {
             return Err(LibraryLoadError::NotFound(format!(
                 "Unknown library '{}'. Available: {}",
@@ -2439,6 +2468,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "fpga_lut6" => FPGA_LUT6_SKLIB,
         "ice40" => ICE40_SKLIB,
         "ecp5" => ECP5_SKLIB,
+        "nexus" => NEXUS_SKLIB,
         _ => unreachable!(), // Already validated above
     };
 
@@ -2533,6 +2563,12 @@ struct TomlCell {
     // Failure modes
     #[serde(default)]
     failure_modes: Vec<TomlFailureMode>,
+    // LUT initialization value (hex string, e.g. "0xEE88")
+    #[serde(default)]
+    lut_init: Option<String>,
+    // Feedback input pin index (for C-elements / LUTs with combinational feedback)
+    #[serde(default)]
+    feedback_input: Option<usize>,
 }
 
 /// Timing information in TOML format
@@ -3032,6 +3068,15 @@ impl TomlCell {
                     latch_input: ii.pin_map.latch_input,
                 },
             }),
+            lut_init: self.lut_init.and_then(|s| {
+                let s = s.trim();
+                if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    s.parse::<u64>().ok()
+                }
+            }),
+            feedback_input: self.feedback_input,
         })
     }
 
@@ -3209,6 +3254,8 @@ impl TomlCell {
                 },
             }),
             failure_modes,
+            lut_init: cell.lut_init.map(|v| format!("0x{:X}", v)),
+            feedback_input: cell.feedback_input,
         }
     }
 }
@@ -3270,7 +3317,8 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "always_on_buf" | "aob" => Ok(CellFunction::AlwaysOnBuf),
         "tie_high" | "tieh" => Ok(CellFunction::TieHigh),
         "tie_low" | "tiel" => Ok(CellFunction::TieLow),
-        // NCL Threshold gates
+        // NCL
+        "c_element" | "celement" | "muller" => Ok(CellFunction::CElement),
         "th12" => Ok(CellFunction::Th12),
         "th22" => Ok(CellFunction::Th22),
         "th13" => Ok(CellFunction::Th13),
@@ -3384,6 +3432,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::FpGe32 => "fp_ge32".to_string(),
         // NCL Threshold Gates
         CellFunction::Th12 => "th12".to_string(),
+        CellFunction::CElement => "c_element".to_string(),
         CellFunction::Th22 => "th22".to_string(),
         CellFunction::Th13 => "th13".to_string(),
         CellFunction::Th23 => "th23".to_string(),
@@ -4100,5 +4149,117 @@ mod tests {
 
         assert_eq!(ice40.name, lattice.name);
         assert_eq!(ice40.name, lattice_ice40.name);
+    }
+
+    #[test]
+    fn test_nexus_library_loads() {
+        let lib = get_stdlib_library("nexus").expect("Failed to load nexus library");
+        assert_eq!(lib.name, "nexus");
+
+        // Verify basic gates (OXIDE_COMB variants)
+        let inv = lib.find_best_cell(&CellFunction::Inv);
+        assert!(inv.is_some(), "INV cell should be present in nexus library");
+        assert!(
+            inv.unwrap().name.starts_with("OXIDE_COMB"),
+            "nexus INV should be an OXIDE_COMB variant"
+        );
+
+        let and2 = lib.find_best_cell(&CellFunction::And2);
+        assert!(and2.is_some(), "AND2 cell should be present in nexus library");
+
+        let or2 = lib.find_best_cell(&CellFunction::Or2);
+        assert!(or2.is_some(), "OR2 cell should be present in nexus library");
+
+        let xor2 = lib.find_best_cell(&CellFunction::Xor2);
+        assert!(xor2.is_some(), "XOR2 cell should be present in nexus library");
+
+        // Verify LUT4 primitive
+        let lut4 = lib.find_best_cell(&CellFunction::Lut4);
+        assert!(lut4.is_some(), "LUT4 cell should be present in nexus library");
+        assert_eq!(lut4.unwrap().name, "OXIDE_COMB");
+    }
+
+    #[test]
+    fn test_nexus_has_sequential_cells() {
+        let lib = get_stdlib_library("nexus").expect("Failed to load nexus library");
+
+        let dff = lib.find_best_cell(&CellFunction::Dff);
+        assert!(dff.is_some(), "DFF cell should be present in nexus library");
+        assert_eq!(dff.unwrap().name, "OXIDE_FF");
+
+        let dff_r = lib.find_best_cell(&CellFunction::DffR);
+        assert!(dff_r.is_some(), "DFF with reset should be present in nexus library");
+
+        let dff_e = lib.find_best_cell(&CellFunction::DffE);
+        assert!(dff_e.is_some(), "DFF with enable should be present in nexus library");
+
+        let dff_re = lib.find_best_cell(&CellFunction::DffRE);
+        assert!(dff_re.is_some(), "DFF with reset+enable should be present in nexus library");
+    }
+
+    #[test]
+    fn test_nexus_has_hard_blocks() {
+        let lib = get_stdlib_library("nexus").expect("Failed to load nexus library");
+
+        // BRAM
+        let ram = lib.find_best_cell(&CellFunction::Ram);
+        assert!(ram.is_some(), "RAM cell should be present in nexus library");
+        let ram = ram.unwrap();
+        assert_eq!(ram.name, "DP16K");
+        assert!(ram.ram_info.is_some());
+        let ram_info = ram.ram_info.as_ref().unwrap();
+        assert_eq!(ram_info.block_bits, 18432);
+        assert!(ram_info.true_dual_port);
+
+        // DSP
+        let dsp = lib.find_best_cell(&CellFunction::Dsp);
+        assert!(dsp.is_some(), "DSP cell should be present in nexus library");
+        let dsp = dsp.unwrap();
+        assert_eq!(dsp.name, "MULT18X18");
+        assert!(dsp.dsp_info.is_some());
+
+        // PLL
+        let pll = lib.find_best_cell(&CellFunction::Pll);
+        assert!(pll.is_some(), "PLL cell should be present in nexus library");
+        assert_eq!(pll.unwrap().name, "PLLA");
+
+        // Clock buffer
+        let clk = lib.find_best_cell(&CellFunction::ClkBuf);
+        assert!(clk.is_some(), "ClkBuf cell should be present in nexus library");
+        assert_eq!(clk.unwrap().name, "DCC");
+    }
+
+    #[test]
+    fn test_nexus_aliases() {
+        let nexus = get_stdlib_library("nexus").expect("Failed to load nexus");
+        let certuspro = get_stdlib_library("certuspro").expect("Failed to load certuspro alias");
+        let certuspro_nx = get_stdlib_library("certuspro_nx").expect("Failed to load certuspro_nx alias");
+        let lattice_nexus = get_stdlib_library("lattice_nexus").expect("Failed to load lattice_nexus alias");
+
+        assert_eq!(nexus.name, certuspro.name);
+        assert_eq!(nexus.name, certuspro_nx.name);
+        assert_eq!(nexus.name, lattice_nexus.name);
+    }
+
+    #[test]
+    fn test_nexus_has_io_cells() {
+        let lib = get_stdlib_library("nexus").expect("Failed to load nexus library");
+
+        // Should have bidirectional IO
+        let bidir_cells: Vec<_> = lib.cells.iter()
+            .filter(|(_, c)| matches!(c.function, CellFunction::BidirPad))
+            .collect();
+        assert!(bidir_cells.len() >= 2, "nexus should have SEIO18 and SEIO33 bidirectional pads");
+
+        // Should have input-only and output-only
+        let input_cells: Vec<_> = lib.cells.iter()
+            .filter(|(_, c)| matches!(c.function, CellFunction::InputPad))
+            .collect();
+        assert!(input_cells.len() >= 2, "nexus should have input-only pads");
+
+        let output_cells: Vec<_> = lib.cells.iter()
+            .filter(|(_, c)| matches!(c.function, CellFunction::OutputPad))
+            .collect();
+        assert!(output_cells.len() >= 2, "nexus should have output-only pads");
     }
 }
