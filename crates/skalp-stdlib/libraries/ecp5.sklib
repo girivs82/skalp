@@ -72,6 +72,21 @@ fit = 0.005
 fault_type = "bridge"
 mechanism = "interconnect_bridge"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "D->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "D->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "D->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # =============================================================================
 # CCU2C - Carry Chain Cell
 # Dual carry chain unit for fast arithmetic. Contains two LUT2 blocks and
@@ -120,6 +135,21 @@ fit = 0.008
 fault_type = "delay"
 mechanism = "carry_chain_delay"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "B0->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "C0->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "D0->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "A1->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "B1->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "C1->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "D1->S0", rise_base_ps = 250, rise_slope_ps_per_ff = 0.3, fall_base_ps = 250, fall_slope_ps_per_ff = 0.3 }, { arc = "CIN->S0", rise_base_ps = 80, rise_slope_ps_per_ff = 0.3, fall_base_ps = 80, fall_slope_ps_per_ff = 0.3 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "B0->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "C0->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "D0->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "A1->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "B1->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "C1->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "D1->S0", rise_base_ps = 375, rise_slope_ps_per_ff = 0.45, fall_base_ps = 375, fall_slope_ps_per_ff = 0.45 }, { arc = "CIN->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.45, fall_base_ps = 120, fall_slope_ps_per_ff = 0.45 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "B0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "C0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "D0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "A1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "B1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "C1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "D1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "CIN->S0", rise_base_ps = 48, rise_slope_ps_per_ff = 0.18, fall_base_ps = 48, fall_slope_ps_per_ff = 0.18 },
+]
 # =============================================================================
 # Flip-Flops - TRELLIS_FF family
 # All DFFs are positive-edge triggered.
@@ -392,6 +422,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # Buffer via TRELLIS_LUT4 (INIT = 0xAAAA)
 [[cells]]
 name = "TRELLIS_LUT4_BUF"
@@ -418,6 +463,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # AND2 via TRELLIS_LUT4 (INIT = 0x8888)
 [[cells]]
 name = "TRELLIS_LUT4_AND2"
@@ -444,6 +504,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # OR2 via TRELLIS_LUT4 (INIT = 0xEEEE)
 [[cells]]
 name = "TRELLIS_LUT4_OR2"
@@ -470,6 +545,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # XOR2 via TRELLIS_LUT4 (INIT = 0x6666)
 [[cells]]
 name = "TRELLIS_LUT4_XOR2"
@@ -496,6 +586,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # NAND2 via TRELLIS_LUT4 (INIT = 0x7777)
 [[cells]]
 name = "TRELLIS_LUT4_NAND2"
@@ -522,6 +627,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # NOR2 via TRELLIS_LUT4 (INIT = 0x1111)
 [[cells]]
 name = "TRELLIS_LUT4_NOR2"
@@ -548,6 +668,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # XNOR2 via TRELLIS_LUT4 (INIT = 0x9999)
 [[cells]]
 name = "TRELLIS_LUT4_XNOR2"
@@ -574,6 +709,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # MUX2 via TRELLIS_LUT4 (INIT = 0xCACA: sel ? b : a)
 [[cells]]
 name = "TRELLIS_LUT4_MUX2"
@@ -600,6 +750,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # AND3 via TRELLIS_LUT4 (INIT = 0x8080)
 [[cells]]
 name = "TRELLIS_LUT4_AND3"
@@ -626,6 +791,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # OR3 via TRELLIS_LUT4 (INIT = 0xFEFE)
 [[cells]]
 name = "TRELLIS_LUT4_OR3"
@@ -652,6 +832,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # AND4 via TRELLIS_LUT4 (INIT = 0x8000)
 [[cells]]
 name = "TRELLIS_LUT4_AND4"
@@ -678,6 +873,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "D->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "D->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "D->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # OR4 via TRELLIS_LUT4 (INIT = 0xFFFE)
 [[cells]]
 name = "TRELLIS_LUT4_OR4"
@@ -704,6 +914,21 @@ fit = 0.03
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "D->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "D->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "D->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # =============================================================================
 # NCL-specific: C-element (Muller gate) as TRELLIS_LUT4 + feedback
 # INIT = 0xEE88: Q = (A&B) | (Q_fb & (A|B))
@@ -755,6 +980,21 @@ fit = 0.008
 fault_type = "transient"
 mechanism = "lut_init_corruption"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "C->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "D->Z", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "C->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "D->Z", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "C->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "D->Z", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # =============================================================================
 # Arithmetic cells using TRELLIS_LUT4 + CCU2C
 # =============================================================================
@@ -796,6 +1036,21 @@ fit = 0.02
 fault_type = "delay"
 mechanism = "carry_path_delay"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->SUM", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->SUM", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->SUM", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # Full Adder: Sum via LUT4 XOR3, Carry via CCU2C
 [[cells]]
 name = "ECP5_FA_FULL"
@@ -833,6 +1088,21 @@ fit = 0.025
 fault_type = "delay"
 mechanism = "carry_path_delay"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "B->SUM", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 }, { arc = "CIN->SUM", rise_base_ps = 450, rise_slope_ps_per_ff = 1.0, fall_base_ps = 450, fall_slope_ps_per_ff = 1.0 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "B->SUM", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 }, { arc = "CIN->SUM", rise_base_ps = 675, rise_slope_ps_per_ff = 1.5, fall_base_ps = 675, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->SUM", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "B->SUM", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 }, { arc = "CIN->SUM", rise_base_ps = 270, rise_slope_ps_per_ff = 0.6, fall_base_ps = 270, fall_slope_ps_per_ff = 0.6 },
+]
 # =============================================================================
 # DP16KD - 16Kbit True Dual-Port Block RAM
 # Configurable as 512x36, 1024x18, 2048x9, 4096x4, or 8192x2.

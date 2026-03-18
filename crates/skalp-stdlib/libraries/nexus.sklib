@@ -84,6 +84,21 @@ fit = 0.004
 fault_type = "bridge"
 mechanism = "interconnect_bridge"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "D->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "D->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # =============================================================================
 # CCU2 - Dual Carry Chain Cell (Nexus carry primitive)
 # Two LUT2 blocks with cascaded carry logic.
@@ -133,6 +148,21 @@ fit = 0.006
 fault_type = "delay"
 mechanism = "carry_chain_delay"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "B0->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "C0->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "D0->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "A1->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "B1->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "C1->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "D1->S0", rise_base_ps = 200, rise_slope_ps_per_ff = 0.25, fall_base_ps = 200, fall_slope_ps_per_ff = 0.25 }, { arc = "CIN->S0", rise_base_ps = 60, rise_slope_ps_per_ff = 0.25, fall_base_ps = 60, fall_slope_ps_per_ff = 0.25 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "B0->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "C0->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "D0->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "A1->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "B1->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "C1->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "D1->S0", rise_base_ps = 300, rise_slope_ps_per_ff = 0.38, fall_base_ps = 300, fall_slope_ps_per_ff = 0.38 }, { arc = "CIN->S0", rise_base_ps = 90, rise_slope_ps_per_ff = 0.38, fall_base_ps = 90, fall_slope_ps_per_ff = 0.38 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A0->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "B0->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "C0->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "D0->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "A1->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "B1->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "C1->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "D1->S0", rise_base_ps = 120, rise_slope_ps_per_ff = 0.15, fall_base_ps = 120, fall_slope_ps_per_ff = 0.15 }, { arc = "CIN->S0", rise_base_ps = 36, rise_slope_ps_per_ff = 0.15, fall_base_ps = 36, fall_slope_ps_per_ff = 0.15 },
+]
 # =============================================================================
 # Flip-Flops - OXIDE_FF family
 # Nexus FFs are positive-edge triggered by default.
@@ -929,6 +959,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # Buffer (INIT = 0xAAAA: I0)
 [[cells]]
 name = "OXIDE_COMB_BUF"
@@ -952,6 +997,21 @@ fit = 0.012
 fault_type = "stuck_at_0"
 mechanism = "oxide_breakdown"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # AND2 (INIT = 0x8888: I0 & I1)
 [[cells]]
 name = "OXIDE_COMB_AND2"
@@ -981,6 +1041,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # OR2 (INIT = 0xEEEE: I0 | I1)
 [[cells]]
 name = "OXIDE_COMB_OR2"
@@ -1010,6 +1085,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # XOR2 (INIT = 0x6666: I0 ^ I1)
 [[cells]]
 name = "OXIDE_COMB_XOR2"
@@ -1039,6 +1129,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # NAND2 (INIT = 0x7777: ~(I0 & I1))
 [[cells]]
 name = "OXIDE_COMB_NAND2"
@@ -1068,6 +1173,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # NOR2 (INIT = 0x1111: ~(I0 | I1))
 [[cells]]
 name = "OXIDE_COMB_NOR2"
@@ -1097,6 +1217,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # XNOR2 (INIT = 0x9999: ~(I0 ^ I1))
 [[cells]]
 name = "OXIDE_COMB_XNOR2"
@@ -1126,6 +1261,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # MUX2 (INIT = 0xCACA: sel ? I1 : I0)
 [[cells]]
 name = "OXIDE_COMB_MUX2"
@@ -1155,6 +1305,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "S->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "S->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "S->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # AND3 (INIT = 0x8080: I0 & I1 & I2)
 [[cells]]
 name = "OXIDE_COMB_AND3"
@@ -1184,6 +1349,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # OR3 (INIT = 0xFEFE: I0 | I1 | I2)
 [[cells]]
 name = "OXIDE_COMB_OR3"
@@ -1213,6 +1393,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # AND4 (INIT = 0x8000: I0 & I1 & I2 & I3)
 [[cells]]
 name = "OXIDE_COMB_AND4"
@@ -1242,6 +1437,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "D->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "D->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # OR4 (INIT = 0xFFFE: I0 | I1 | I2 | I3)
 [[cells]]
 name = "OXIDE_COMB_OR4"
@@ -1271,6 +1481,21 @@ fit = 0.012
 fault_type = "stuck_at_1"
 mechanism = "electromigration"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "D->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "D->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 # =============================================================================
 # NCL-specific: C-element as LUT4 + feedback
 # INIT = 0x00E8: Q = (A&B) | (Q_fb & (A|B))
@@ -1313,6 +1538,21 @@ fit = 0.010
 fault_type = "open"
 mechanism = "feedback_routing_failure"
 
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 }, { arc = "D->F", rise_base_ps = 350, rise_slope_ps_per_ff = 0.8, fall_base_ps = 350, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 }, { arc = "D->F", rise_base_ps = 525, rise_slope_ps_per_ff = 1.2, fall_base_ps = 525, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
+]
 [[cells.failure_modes]]
 name = "hysteresis_loss"
 fit = 0.008

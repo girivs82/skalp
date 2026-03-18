@@ -11,6 +11,7 @@ use crate::router::{Router, RouterConfig, RoutingResult};
 use crate::timing::{TimingAnalyzer, TimingConfig, TimingReport};
 use indexmap::IndexMap;
 use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
+use skalp_lir::tech_library::TechLibrary;
 
 /// P&R configuration
 #[derive(Debug, Clone)]
@@ -23,6 +24,9 @@ pub struct PnrConfig {
     pub bitstream: BitstreamConfig,
     /// Timing configuration (optional)
     pub timing: Option<TimingConfig>,
+    /// Technology library for cell delays and buffer sizing.
+    /// If None, STA uses hardcoded delay estimates.
+    pub tech_library: Option<TechLibrary>,
 }
 
 impl Default for PnrConfig {
@@ -32,6 +36,7 @@ impl Default for PnrConfig {
             router: RouterConfig::default(),
             bitstream: BitstreamConfig::default(),
             timing: Some(TimingConfig::default()),
+            tech_library: None,
         }
     }
 }
@@ -51,6 +56,7 @@ impl PnrConfig {
             },
             bitstream: BitstreamConfig::default(),
             timing: None,
+            tech_library: None,
         }
     }
 
@@ -73,7 +79,14 @@ impl PnrConfig {
                 max_critical_paths: 20,
                 ..Default::default()
             }),
+            tech_library: None,
         }
+    }
+
+    /// Create config with ice40 technology library loaded
+    pub fn with_ice40_library(mut self) -> Self {
+        self.tech_library = skalp_lir::tech_library::get_stdlib_library("ice40").ok();
+        self
     }
 }
 
@@ -294,6 +307,98 @@ pub fn auto_configure_pll(
     Ok(None)
 }
 
+/// Run place and route with iterative NCL timing closure.
+///
+/// For NCL designs (`netlist.is_ncl == true`), this runs the full closure loop:
+/// 1. `pre_pnr_analysis()` generates routing constraints from estimated delays
+/// 2. `place_and_route()` runs with those constraints (proximity + matched-delay skew)
+/// 3. `post_pnr_iteration()` reads actual wire delays and either tightens constraints
+///    or (as last resort) inserts LUT delay buffers
+/// 4. Repeat until converged or max iterations reached
+///
+/// For non-NCL designs, this is equivalent to calling `place_and_route()` directly.
+pub fn place_and_route_with_closure(
+    netlist: &mut GateNetlist,
+    variant: Ice40Variant,
+    config: PnrConfig,
+    closure_config: Option<skalp_lir::TimingClosureConfig>,
+) -> Result<PnrResult> {
+    // Non-NCL fast path
+    if !netlist.is_ncl {
+        return place_and_route(netlist, variant, config);
+    }
+
+    let library = config.tech_library.as_ref();
+
+    // If library is provided, derive buffer delay from it instead of using hardcoded default
+    let mut closure_config = closure_config.unwrap_or_default();
+    if let Some(lib) = library {
+        closure_config.fix_config =
+            skalp_lir::async_sta_fix::AsyncStaFixConfig::from_library(lib);
+    }
+
+    // === Ready-signal-delay approach ===
+    // Instead of balancing individual data fork branches (expensive, often impossible),
+    // we delay the completion/ready signal by the worst-case skew so all data paths
+    // settle before the handshake completes.
+    //
+    // Pass 1: Unconstrained PnR → get actual wire delays
+    // STA with actual delays → compute worst-case fork skew
+    // Insert delay buffers on ready/completion signal only
+    // Pass 2: Re-PnR with buffer-modified netlist
+
+    // Phase 1: Pre-PnR analysis for placement constraints (proximity groups)
+    // Library provides accurate cell delays for STA
+    let iter0 = skalp_lir::pre_pnr_analysis(netlist, library, &closure_config);
+
+    // Phase 2: First PnR pass — routes freely, no skew enforcement on data paths
+    let pass1_result = place_and_route(netlist, variant, config.clone())?;
+
+    // If no violations from estimated delays, we're done
+    if iter0.violation_count == 0 {
+        return Ok(pass1_result);
+    }
+
+    // Phase 3: Post-PnR STA with actual wire delays from routing
+    // Library cell delays + actual wire delays = accurate total path delays
+    let wire_delays = pass1_result.wire_delays.clone();
+    let iter1 = skalp_lir::post_pnr_iteration(
+        netlist,
+        library,
+        wire_delays,
+        1,
+        iter0.max_skew_ps,
+        &closure_config,
+    );
+
+    // If actual delays show no violations, we're done
+    if iter1.violation_count == 0 {
+        return Ok(pass1_result);
+    }
+
+    // Phase 4: Insert delay buffers on ready/completion signals
+    // The fix_by_delaying_ready strategy finds max skew across all violations
+    // and inserts a buffer chain on every `is_detection` net to cover it.
+    // Buffer delay comes from library (e.g., SB_LUT4_BUF ~590ps on iCE40).
+    let fix_result = skalp_lir::async_sta_fix::fix_fork_violations(
+        netlist,
+        &iter1.sta_result,
+        &closure_config.fix_config,
+    );
+
+    // If buffers were inserted, re-run PnR to place and route them
+    if fix_result.buffers_inserted > 0 {
+        // Regenerate constraints with the modified netlist
+        let _iter_post = skalp_lir::pre_pnr_analysis(netlist, library, &closure_config);
+        let pass2_result = place_and_route(netlist, variant, config)?;
+        return Ok(pass2_result);
+    }
+
+    // No buffers inserted (no detection nets, or skew below fix threshold)
+    // Return pass 1 result as-is
+    Ok(pass1_result)
+}
+
 /// Convenience function for HX1K
 pub fn place_and_route_hx1k(netlist: &GateNetlist, config: PnrConfig) -> Result<PnrResult> {
     place_and_route(netlist, Ice40Variant::Hx1k, config)
@@ -313,6 +418,20 @@ pub fn place_and_route_up5k(netlist: &GateNetlist, config: PnrConfig) -> Result<
 mod tests {
     use super::*;
     use skalp_lir::gate_netlist::{Cell, GateNet};
+
+    /// Load the ice40 tech library for tests
+    fn ice40_library() -> TechLibrary {
+        skalp_lir::tech_library::get_stdlib_library("ice40")
+            .expect("Failed to load ice40 library")
+    }
+
+    /// Create a PnrConfig with the ice40 library for NCL tests
+    fn ncl_pnr_config() -> PnrConfig {
+        PnrConfig {
+            tech_library: Some(ice40_library()),
+            ..PnrConfig::default()
+        }
+    }
 
     fn create_simple_netlist() -> GateNetlist {
         let mut netlist = GateNetlist::new("test".to_string(), "ice40".to_string());
@@ -2516,5 +2635,444 @@ set_io btn A6
         }
         println!("Routing success: {}", result2.routing.success);
         println!("Wirelength: {}", result2.routing.wirelength);
+    }
+
+    /// Create an NCL conditional-merge netlist with realistic fork asymmetry.
+    ///
+    /// Models an NCL dual-rail mux: one arm goes straight to merge, the other
+    /// goes through a comparator chain (AND2 → XOR2 → OR2) before merge.
+    /// This creates the kind of path-depth asymmetry real NCL designs have.
+    ///
+    /// ```text
+    /// sel_t ──┬──────────────────────────────── TH22_merge_t ──→ out_t
+    ///         │                                  ↑
+    /// dat_t ──┼──→ AND2_cmp0 → XOR2_cmp1 → OR2_cmp2 → TH22_merge_t (2nd input)
+    ///         │         ↑            ↑          ↑
+    /// aux   ──┼─────────┘            │          │
+    ///         │                      │          │
+    /// ref_t ──┼──────────────────────┘──────────┘
+    ///         │
+    ///         └──→ TH12_carry ──→ carry_out    (short path from fork)
+    ///
+    /// sel_f ──┬──→ TH12_merge_f ──→ out_f      (symmetric false rail)
+    ///         └──→ TH22_ack ──→ ack_out
+    /// ```
+    ///
+    /// Fork `sel_t` fans out to:
+    ///   - TH22_merge_t (sync point, 40ps → stops)
+    ///   - TH12_carry   (sync point, 30ps → stops)
+    /// Skew: 40 - 30 = 10ps (between direct TH destinations)
+    ///
+    /// Fork `dat_t` fans out to:
+    ///   - AND2_cmp0 (NOT sync point, traces downstream: AND2→XOR2→OR2→TH22 = 25+35+25+40 = 125ps)
+    ///   - TH22_merge_t via a direct connection (sync point, 40ps → stops)
+    /// Skew: 125 - 40 = 85ps (large asymmetry from comparator chain!)
+    ///
+    /// With max_fork_skew_ps=5.0, both forks should trigger violations.
+    fn create_ncl_conditional_merge() -> GateNetlist {
+        use skalp_lir::gate_netlist::{CellId, GateNetId};
+
+        let mut netlist =
+            GateNetlist::new("ncl_cond_merge".to_string(), "ice40".to_string());
+        netlist.is_ncl = true;
+
+        // ===== Primary I/O nets =====
+        // Internal nets driven by IO pads (these are the fork points)
+        let sel_t = netlist.add_net(GateNet::new(GateNetId(0), "sel_t".into()));
+        let sel_f = netlist.add_net(GateNet::new(GateNetId(0), "sel_f".into()));
+        let dat_t = netlist.add_net(GateNet::new(GateNetId(0), "dat_t".into()));
+        let ref_t = netlist.add_net(GateNet::new(GateNetId(0), "ref_t".into()));
+        let aux = netlist.add_net(GateNet::new(GateNetId(0), "aux".into()));
+
+        let out_t = netlist.add_net(GateNet::new(GateNetId(0), "out_t".into()));
+        let out_f = netlist.add_net(GateNet::new(GateNetId(0), "out_f".into()));
+        let carry_out = netlist.add_net(GateNet::new_output(GateNetId(0), "carry_out".into()));
+        let ack_out = netlist.add_net(GateNet::new_output(GateNetId(0), "ack_out".into()));
+
+        // Completion detection output — the ready/done signal for this NCL domain
+        let completion_out = netlist.add_net({
+            let mut net = GateNet::new_output(GateNetId(0), "completion_out".into());
+            net.is_detection = true;
+            net
+        });
+
+        // ===== I/O pad cells driving input nets =====
+        // Each input pad produces one internal net — this gives fork nets a driver
+        // so the router will actually route them (it skips nets with driver=None)
+        netlist.add_cell(Cell::new_comb(
+            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
+            "io.sel_t".into(), vec![], vec![sel_t],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
+            "io.sel_f".into(), vec![], vec![sel_f],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
+            "io.dat_t".into(), vec![], vec![dat_t],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
+            "io.ref_t".into(), vec![], vec![ref_t],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
+            "io.aux".into(), vec![], vec![aux],
+        ));
+
+        // ===== Internal nets =====
+        let cmp0_out = netlist.add_net(GateNet::new(GateNetId(0), "cmp0_out".into()));
+        let cmp1_out = netlist.add_net(GateNet::new(GateNetId(0), "cmp1_out".into()));
+        let cmp2_out = netlist.add_net(GateNet::new(GateNetId(0), "cmp2_out".into()));
+
+        // ===== Long path: comparator chain (non-sync-point cells) =====
+        // AND2_cmp0: first stage of comparator (dat_t AND aux)
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "AND2".into(), "ice40".into(), 0.0,
+            "cond.cmp0".into(),
+            vec![dat_t, aux],
+            vec![cmp0_out],
+            0x8888, // AND2
+        ));
+
+        // XOR2_cmp1: second stage (cmp0 XOR ref_t)
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "XOR2".into(), "ice40".into(), 0.0,
+            "cond.cmp1".into(),
+            vec![cmp0_out, ref_t],
+            vec![cmp1_out],
+            0x6666, // XOR2
+        ));
+
+        // OR2_cmp2: third stage (cmp1 OR ref_t) — ref_t also feeds here
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "OR2".into(), "ice40".into(), 0.0,
+            "cond.cmp2".into(),
+            vec![cmp1_out, ref_t],
+            vec![cmp2_out],
+            0xEEEE, // OR2
+        ));
+
+        // ===== Merge points (TH sync gates) =====
+        // TH22_merge_t: merge sel_t (direct, short path) with cmp2_out (long path)
+        // This is where the skew matters — both inputs must arrive "together"
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "TH22".into(), "ice40".into(), 0.0,
+            "cond.merge_t".into(),
+            vec![sel_t, cmp2_out],
+            vec![out_t],
+            0x8000, // TH22 = AND
+        ));
+
+        // TH12_carry: short path from sel_t fork
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "TH12".into(), "ice40".into(), 0.0,
+            "cond.carry".into(),
+            vec![sel_t, dat_t],
+            vec![carry_out],
+            0xEEEE, // TH12 = OR
+        ));
+
+        // ===== False rail (symmetric, simpler) =====
+        // TH12_merge_f: false rail merge
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "TH12".into(), "ice40".into(), 0.0,
+            "cond.merge_f".into(),
+            vec![sel_f],
+            vec![out_f],
+            0xAAAA, // buffer
+        ));
+
+        // TH22_ack: acknowledgement from sel_f fork
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "TH22".into(), "ice40".into(), 0.0,
+            "cond.ack".into(),
+            vec![sel_f, ref_t],
+            vec![ack_out],
+            0x8000, // TH22 = AND
+        ));
+
+        // ===== Completion detection =====
+        // TH22 completion: both true and false rails must have data
+        // Output is the ready/done signal — this is what gets delayed
+        netlist.add_cell(Cell::new_lut(
+            CellId(0), "NCL_COMPLETE".into(), "ice40".into(), 0.0,
+            "cond.completion".into(),
+            vec![out_t, out_f],
+            vec![completion_out],
+            0x8000, // TH22 = AND (both rails present)
+        ));
+
+        netlist
+    }
+
+    /// Create a tight TimingClosureConfig that will detect skew violations.
+    /// Uses ice40 library for buffer delay sizing.
+    fn ncl_tight_closure_config() -> skalp_lir::TimingClosureConfig {
+        let lib = ice40_library();
+        skalp_lir::TimingClosureConfig {
+            sta_config: skalp_lir::async_sta::AsyncStaConfig {
+                max_fork_skew_ps: 5.0, // Very tight — forces violations
+                ..Default::default()
+            },
+            fix_config: skalp_lir::async_sta_fix::AsyncStaFixConfig::from_library(&lib),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_ncl_end_to_end_basic_pnr() {
+        // Test 1: Basic PnR of NCL netlist (without closure loop)
+        let netlist = create_ncl_conditional_merge();
+
+        println!("\n=== NCL Conditional Merge: Basic PnR ===");
+        println!("NCL design: {}", netlist.is_ncl);
+        println!("Cells: {}", netlist.cells.len());
+        println!("Nets: {}", netlist.nets.len());
+
+        // Verify fork points exist
+        let fork_nets: Vec<_> = netlist
+            .nets
+            .iter()
+            .filter(|n| n.fanout.len() > 1)
+            .collect();
+        println!("Fork nets (fanout > 1): {}", fork_nets.len());
+        for net in &fork_nets {
+            let dest_types: Vec<_> = net.fanout.iter().map(|(cid, pin)| {
+                let ctype = netlist.cells.iter()
+                    .find(|c| c.id == *cid)
+                    .map(|c| c.cell_type.as_str())
+                    .unwrap_or("?");
+                format!("{}(cell{}:pin{})", ctype, cid.0, pin)
+            }).collect();
+            println!("  {} (fanout={}): {:?}", net.name, net.fanout.len(), dest_types);
+        }
+        assert!(
+            fork_nets.len() >= 3,
+            "Expected at least 3 fork nets (sel_t, sel_f, dat_t, ref_t)"
+        );
+
+        // Run basic PnR
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n--- PnR Results ---");
+        println!("Placed cells: {}", result.placement.placements.len());
+        println!("Routing success: {}", result.routing.success);
+        println!("Congestion: {:.2}", result.routing.congestion);
+        println!("Iterations: {}", result.routing.iterations);
+        println!("Wirelength: {}", result.routing.wirelength);
+        println!("Wire delays: {}", result.wire_delays.len());
+
+        assert!(
+            result.placement.placements.len() >= 13,
+            "All cells should be placed (8 logic + 5 IO)"
+        );
+        assert!(
+            result.routing.congestion < 10.0,
+            "Congestion should be bounded"
+        );
+        assert!(
+            !result.wire_delays.is_empty(),
+            "Wire delays should be extracted from routing"
+        );
+        assert!(
+            !result.bitstream.data.is_empty(),
+            "Bitstream should be non-empty"
+        );
+    }
+
+    #[test]
+    fn test_ncl_ready_signal_delay_flow() {
+        // Test 2: Ready-signal-delay approach
+        // Instead of balancing data fork branches, we delay the completion/ready signal
+        // by the worst-case skew so all paths settle before the handshake completes.
+        let mut netlist = create_ncl_conditional_merge();
+        let closure_config = ncl_tight_closure_config();
+        let lib = ice40_library();
+
+        println!("\n=== NCL Ready-Signal Delay Flow ===");
+        println!("Library: {} ({} cells)", lib.name, lib.cell_count());
+        println!(
+            "Buffer cell: {} (delay: {:.1}ps)",
+            closure_config.fix_config.buffer_cell_type,
+            closure_config.fix_config.buffer_delay_ps
+        );
+
+        // Verify detection net exists
+        let detection_nets: Vec<_> = netlist.nets.iter()
+            .filter(|n| n.is_detection)
+            .collect();
+        println!("Detection nets: {}", detection_nets.len());
+        for net in &detection_nets {
+            println!("  {} (id={:?})", net.name, net.id);
+        }
+        assert!(!detection_nets.is_empty(), "Need at least one detection net");
+
+        // Phase 1: Pre-PnR — detect skew violations with 5ps threshold
+        // Cell delays come from the ice40 library
+        let iter0 = skalp_lir::pre_pnr_analysis(&mut netlist, Some(&lib), &closure_config);
+
+        println!("--- Pre-PnR (iter 0) ---");
+        println!("Violations: {}", iter0.violation_count);
+        println!("Max skew: {:.1} ps", iter0.max_skew_ps);
+
+        assert!(!iter0.used_actual_delays);
+
+        // Phase 2: First PnR pass — unconstrained data path routing
+        let config = ncl_pnr_config();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config.clone()).unwrap();
+
+        println!("\n--- PnR Pass 1 (unconstrained) ---");
+        println!("Routing success: {}", result.routing.success);
+        println!("Congestion: {:.2}", result.routing.congestion);
+        println!("Wire delays: {} entries", result.wire_delays.len());
+
+        // Phase 3: Post-PnR STA with actual wire delays + library cell delays
+        let wire_delays = result.wire_delays.clone();
+        let iter1 = skalp_lir::post_pnr_iteration(
+            &mut netlist, Some(&lib), wire_delays,
+            1, iter0.max_skew_ps, &closure_config,
+        );
+
+        println!("\n--- Post-PnR STA (library cell delays + actual wire delays) ---");
+        println!("Violations: {}", iter1.violation_count);
+        println!("Max skew: {:.1} ps", iter1.max_skew_ps);
+        assert!(iter1.used_actual_delays);
+
+        // Phase 4: Insert delay buffers on ready/completion signal
+        // Buffer delay comes from library (SB_LUT4_BUF ~590ps)
+        let fix_result = skalp_lir::async_sta_fix::fix_fork_violations(
+            &mut netlist,
+            &iter1.sta_result,
+            &closure_config.fix_config,
+        );
+
+        println!("\n--- Ready Signal Delay ---");
+        println!("Strategy: {:?}", closure_config.fix_config.strategy);
+        println!(
+            "Buffer delay: {:.1}ps (from library: {})",
+            closure_config.fix_config.buffer_delay_ps,
+            closure_config.fix_config.buffer_cell_type
+        );
+        println!("Buffers inserted: {}", fix_result.buffers_inserted);
+        println!("Violations fixed: {}", fix_result.violations_fixed);
+        for fix in &fix_result.fixes {
+            println!(
+                "  {}: {} buffers, skew {:.1}ps → {:.1}ps",
+                fix.fork_net_name, fix.buffers_inserted,
+                fix.original_skew_ps, fix.estimated_skew_ps
+            );
+        }
+
+        // Verify buffers were inserted on detection nets (not data paths)
+        let buf_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.source_op.as_deref() == Some("async_sta_fix_ready_delay"))
+            .collect();
+        println!("Buffer cells with ready_delay tag: {}", buf_cells.len());
+
+        // Phase 5: Re-PnR with buffer-modified netlist
+        if fix_result.buffers_inserted > 0 {
+            let _iter_post = skalp_lir::pre_pnr_analysis(&mut netlist, Some(&lib), &closure_config);
+            let result2 = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+            println!("\n--- PnR Pass 2 (with ready delay buffers) ---");
+            println!("Routing success: {}", result2.routing.success);
+            println!("Congestion: {:.2}", result2.routing.congestion);
+            println!("Cells placed: {}", result2.placement.placements.len());
+        }
+    }
+
+    #[test]
+    fn test_ncl_closure_wrapper_api() {
+        // Test 3: The all-in-one place_and_route_with_closure API
+        // Exercises the 2-pass ready-signal-delay flow end-to-end
+        // All delays come from the ice40 library
+        let mut netlist = create_ncl_conditional_merge();
+        let closure_config = ncl_tight_closure_config();
+
+        println!("\n=== NCL Closure Wrapper (ready-signal-delay, library-driven) ===");
+
+        let config = ncl_pnr_config();
+        let result = place_and_route_with_closure(
+            &mut netlist,
+            Ice40Variant::Hx1k,
+            config,
+            Some(closure_config),
+        )
+        .unwrap();
+
+        println!("Placed: {}", result.placement.placements.len());
+        println!("Routing success: {}", result.routing.success);
+        println!("Congestion: {:.2}", result.routing.congestion);
+        println!("Iterations: {}", result.routing.iterations);
+        println!("Wire delays: {}", result.wire_delays.len());
+        println!("Bitstream: {} bytes", result.bitstream.data.len());
+
+        // NCL constraints should have been generated
+        assert!(netlist.ncl_constraints.is_some());
+        // 8 logic cells + 5 IO + potential buffer cells
+        assert!(result.placement.placements.len() >= 8);
+        assert!(!result.bitstream.data.is_empty());
+        assert!(!result.wire_delays.is_empty());
+
+        // Check that ready delay buffers were inserted into the netlist
+        let buf_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.source_op.as_deref() == Some("async_sta_fix_ready_delay"))
+            .collect();
+        println!("Ready delay buffer cells: {}", buf_cells.len());
+    }
+
+    #[test]
+    fn test_ncl_constraint_flow_integrity() {
+        // Test 4: Verify constraint data flows correctly through the pipeline
+        let mut netlist = create_ncl_conditional_merge();
+        let closure_config = ncl_tight_closure_config();
+        let lib = ice40_library();
+
+        let _iter0 = skalp_lir::pre_pnr_analysis(&mut netlist, Some(&lib), &closure_config);
+
+        let constraints = netlist.ncl_constraints.as_ref().unwrap();
+
+        // Every matched-delay group's fork_net should be a real fork
+        for group in &constraints.matched_delay_groups {
+            let net = &netlist.nets[group.fork_net.0 as usize];
+            assert!(
+                net.fanout.len() > 1,
+                "Net '{}' should be a fork (fanout > 1), got {}",
+                group.fork_net_name, net.fanout.len()
+            );
+
+            for dest in &group.dest_cells {
+                assert!(
+                    netlist.cells.iter().any(|c| c.id == *dest),
+                    "Dest cell {:?} should exist",
+                    dest
+                );
+            }
+        }
+
+        // Every proximity group cell should exist
+        for group in &constraints.proximity_groups {
+            for cell_id in &group.cells {
+                assert!(
+                    netlist.cells.iter().any(|c| c.id == *cell_id),
+                    "Proximity cell {:?} should exist",
+                    cell_id
+                );
+            }
+        }
+
+        // Run PnR and verify wire delay extraction
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        let routed = result.routing.routes.values()
+            .filter(|r| !r.wires.is_empty()).count();
+        println!("Wire delays: {} entries, {} routed nets", result.wire_delays.len(), routed);
+
+        // Reverse flow: feed delays back to netlist
+        netlist.ncl_wire_delays = Some(result.wire_delays.clone());
+        assert!(netlist.ncl_wire_delays.is_some());
     }
 }

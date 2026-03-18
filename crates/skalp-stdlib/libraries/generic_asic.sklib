@@ -26,6 +26,21 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 1.5, fall_base_ps = 15, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 22, rise_slope_ps_per_ff = 2.2, fall_base_ps = 22, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 9, rise_slope_ps_per_ff = 0.9, fall_base_ps = 9, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.015
@@ -125,6 +140,21 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -229,6 +259,24 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 20, rise_slope_ps_per_ff = 1.5, fall_base_ps = 20, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 20, rise_slope_ps_per_ff = 1.5, fall_base_ps = 20, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 2.2, fall_base_ps = 30, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 2.2, fall_base_ps = 30, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 12, rise_slope_ps_per_ff = 0.9, fall_base_ps = 12, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 12, rise_slope_ps_per_ff = 0.9, fall_base_ps = 12, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -384,6 +432,24 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.03
@@ -537,6 +603,24 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 1.5, fall_base_ps = 30, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 1.5, fall_base_ps = 30, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 45, rise_slope_ps_per_ff = 2.2, fall_base_ps = 45, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 45, rise_slope_ps_per_ff = 2.2, fall_base_ps = 45, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 18, rise_slope_ps_per_ff = 0.9, fall_base_ps = 18, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 18, rise_slope_ps_per_ff = 0.9, fall_base_ps = 18, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -692,6 +776,24 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 1.5, fall_base_ps = 30, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 30, rise_slope_ps_per_ff = 1.5, fall_base_ps = 30, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 45, rise_slope_ps_per_ff = 2.2, fall_base_ps = 45, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 45, rise_slope_ps_per_ff = 2.2, fall_base_ps = 45, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 18, rise_slope_ps_per_ff = 0.9, fall_base_ps = 18, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 18, rise_slope_ps_per_ff = 0.9, fall_base_ps = 18, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.036
@@ -846,6 +948,24 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.045
@@ -895,6 +1015,24 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -946,6 +1084,24 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.03
@@ -995,6 +1151,24 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 25, rise_slope_ps_per_ff = 1.5, fall_base_ps = 25, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 37, rise_slope_ps_per_ff = 2.2, fall_base_ps = 37, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 15, rise_slope_ps_per_ff = 0.9, fall_base_ps = 15, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -1360,6 +1534,27 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 35, rise_slope_ps_per_ff = 1.5, fall_base_ps = 35, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->Y", rise_base_ps = 35, rise_slope_ps_per_ff = 1.5, fall_base_ps = 35, fall_slope_ps_per_ff = 1.5 },
+    { arc = "S->Y", rise_base_ps = 35, rise_slope_ps_per_ff = 1.5, fall_base_ps = 35, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 52, rise_slope_ps_per_ff = 2.2, fall_base_ps = 52, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->Y", rise_base_ps = 52, rise_slope_ps_per_ff = 2.2, fall_base_ps = 52, fall_slope_ps_per_ff = 2.2 },
+    { arc = "S->Y", rise_base_ps = 52, rise_slope_ps_per_ff = 2.2, fall_base_ps = 52, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->Y", rise_base_ps = 21, rise_slope_ps_per_ff = 0.9, fall_base_ps = 21, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->Y", rise_base_ps = 21, rise_slope_ps_per_ff = 0.9, fall_base_ps = 21, fall_slope_ps_per_ff = 0.9 },
+    { arc = "S->Y", rise_base_ps = 21, rise_slope_ps_per_ff = 0.9, fall_base_ps = 21, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.054
@@ -1464,6 +1659,30 @@ timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
 
+[cells.timing]
+arcs = [
+    { arc = "A->S", rise_base_ps = 45, rise_slope_ps_per_ff = 1.5, fall_base_ps = 45, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->S", rise_base_ps = 45, rise_slope_ps_per_ff = 1.5, fall_base_ps = 45, fall_slope_ps_per_ff = 1.5 },
+    { arc = "A->CO", rise_base_ps = 45, rise_slope_ps_per_ff = 1.5, fall_base_ps = 45, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->CO", rise_base_ps = 45, rise_slope_ps_per_ff = 1.5, fall_base_ps = 45, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->S", rise_base_ps = 67, rise_slope_ps_per_ff = 2.2, fall_base_ps = 67, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->S", rise_base_ps = 67, rise_slope_ps_per_ff = 2.2, fall_base_ps = 67, fall_slope_ps_per_ff = 2.2 },
+    { arc = "A->CO", rise_base_ps = 67, rise_slope_ps_per_ff = 2.2, fall_base_ps = 67, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->CO", rise_base_ps = 67, rise_slope_ps_per_ff = 2.2, fall_base_ps = 67, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->S", rise_base_ps = 27, rise_slope_ps_per_ff = 0.9, fall_base_ps = 27, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->S", rise_base_ps = 27, rise_slope_ps_per_ff = 0.9, fall_base_ps = 27, fall_slope_ps_per_ff = 0.9 },
+    { arc = "A->CO", rise_base_ps = 27, rise_slope_ps_per_ff = 0.9, fall_base_ps = 27, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->CO", rise_base_ps = 27, rise_slope_ps_per_ff = 0.9, fall_base_ps = 27, fall_slope_ps_per_ff = 0.9 },
+]
+
 [[cells.failure_modes]]
 name = "stuck_at_0"
 fit = 0.06
@@ -1513,6 +1732,36 @@ min_voltage_mv = 700
 timing_margin_voltage_mv = 850
 voltage_delay_coefficient = 0.12
 voltage_sensitivity = 6
+
+[cells.timing]
+arcs = [
+    { arc = "A->S", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->S", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+    { arc = "CI->S", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+    { arc = "A->CO", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+    { arc = "B->CO", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+    { arc = "CI->CO", rise_base_ps = 50, rise_slope_ps_per_ff = 1.5, fall_base_ps = 50, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->S", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->S", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+    { arc = "CI->S", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+    { arc = "A->CO", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+    { arc = "B->CO", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+    { arc = "CI->CO", rise_base_ps = 75, rise_slope_ps_per_ff = 2.2, fall_base_ps = 75, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->S", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->S", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+    { arc = "CI->S", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+    { arc = "A->CO", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+    { arc = "B->CO", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+    { arc = "CI->CO", rise_base_ps = 30, rise_slope_ps_per_ff = 0.9, fall_base_ps = 30, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -1567,6 +1816,24 @@ min_voltage_mv = 750
 timing_margin_voltage_mv = 900
 voltage_delay_coefficient = 0.18
 voltage_sensitivity = 3
+
+[cells.timing]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 60, rise_slope_ps_per_ff = 1.5, fall_base_ps = 60, fall_slope_ps_per_ff = 1.5 },
+    { arc = "CLK->Q", rise_base_ps = 60, rise_slope_ps_per_ff = 1.5, fall_base_ps = 60, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 90, rise_slope_ps_per_ff = 2.2, fall_base_ps = 90, fall_slope_ps_per_ff = 2.2 },
+    { arc = "CLK->Q", rise_base_ps = 90, rise_slope_ps_per_ff = 2.2, fall_base_ps = 90, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 36, rise_slope_ps_per_ff = 0.9, fall_base_ps = 36, fall_slope_ps_per_ff = 0.9 },
+    { arc = "CLK->Q", rise_base_ps = 36, rise_slope_ps_per_ff = 0.9, fall_base_ps = 36, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -1629,6 +1896,27 @@ min_voltage_mv = 750
 timing_margin_voltage_mv = 900
 voltage_delay_coefficient = 0.18
 voltage_sensitivity = 3
+
+[cells.timing]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 65, rise_slope_ps_per_ff = 1.5, fall_base_ps = 65, fall_slope_ps_per_ff = 1.5 },
+    { arc = "CLK->Q", rise_base_ps = 65, rise_slope_ps_per_ff = 1.5, fall_base_ps = 65, fall_slope_ps_per_ff = 1.5 },
+    { arc = "R->Q", rise_base_ps = 65, rise_slope_ps_per_ff = 1.5, fall_base_ps = 65, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 97, rise_slope_ps_per_ff = 2.2, fall_base_ps = 97, fall_slope_ps_per_ff = 2.2 },
+    { arc = "CLK->Q", rise_base_ps = 97, rise_slope_ps_per_ff = 2.2, fall_base_ps = 97, fall_slope_ps_per_ff = 2.2 },
+    { arc = "R->Q", rise_base_ps = 97, rise_slope_ps_per_ff = 2.2, fall_base_ps = 97, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 39, rise_slope_ps_per_ff = 0.9, fall_base_ps = 39, fall_slope_ps_per_ff = 0.9 },
+    { arc = "CLK->Q", rise_base_ps = 39, rise_slope_ps_per_ff = 0.9, fall_base_ps = 39, fall_slope_ps_per_ff = 0.9 },
+    { arc = "R->Q", rise_base_ps = 39, rise_slope_ps_per_ff = 0.9, fall_base_ps = 39, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"
@@ -1815,6 +2103,24 @@ min_voltage_mv = 750
 timing_margin_voltage_mv = 900
 voltage_delay_coefficient = 0.18
 voltage_sensitivity = 3
+
+[cells.timing]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+    { arc = "EN->Q", rise_base_ps = 40, rise_slope_ps_per_ff = 1.5, fall_base_ps = 40, fall_slope_ps_per_ff = 1.5 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+    { arc = "EN->Q", rise_base_ps = 60, rise_slope_ps_per_ff = 2.2, fall_base_ps = 60, fall_slope_ps_per_ff = 2.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "D->Q", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+    { arc = "EN->Q", rise_base_ps = 24, rise_slope_ps_per_ff = 0.9, fall_base_ps = 24, fall_slope_ps_per_ff = 0.9 },
+]
 
 [[cells.failure_modes]]
 name = "stuck_at_0"

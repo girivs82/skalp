@@ -1,40 +1,41 @@
 //! Iterative NCL Timing Closure (FPGA-correct)
 //!
 //! Implements the STA → PnR → STA feedback loop for NCL async circuits.
-//! Uses a constraint-first approach appropriate for FPGA targets.
 //!
-//! # FPGA Delay Balancing Hierarchy
+//! # Ready-Signal-Delay Approach
 //!
-//! Three mechanisms, in preference order:
+//! Instead of balancing individual data fork branches (expensive, often impossible),
+//! we delay the completion/ready signal by the worst-case skew. This ensures all
+//! data paths settle before the handshake completes.
 //!
-//! 1. **Routing constraints (MAXSKEW)** — zero area cost, router picks wire paths
-//! 2. **Placement proximity** — zero area cost, co-locate fork destinations
-//! 3. **LUT buffer chains** — last resort, each LUT4-as-BUF adds ~500-700ps
+//! Two mechanisms:
 //!
-//! # Iterative Flow
+//! 1. **Placement proximity** — zero area cost, co-locate fork destinations
+//! 2. **Ready signal delay** — LUT buffer chain on completion/detection nets only
+//!
+//! # 2-Pass Flow
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────┐
 //! │  1. Pre-PnR STA (estimated delays)                   │
-//! │     → Generate routing/placement constraints ONLY     │
+//! │     → Generate placement constraints (proximity)      │
 //! │     → NO buffer insertion at this stage               │
 //! │                                                       │
-//! │  2. Run PnR (placement + routing) with constraints    │
+//! │  2. Run PnR (placement + routing) unconstrained       │
 //! │     → Extract actual per-net wire delays               │
 //! │                                                       │
 //! │  3. Post-PnR STA (actual wire delays)                 │
-//! │     → Check: all forks within skew budget?            │
+//! │     → Compute worst-case fork skew                    │
 //! │     │                                                 │
-//! │     ├─ YES → Done (timing closed)                     │
+//! │     ├─ No violations → Done (timing closed)           │
 //! │     │                                                 │
-//! │     └─ NO  → Tighten constraints, re-route            │
-//! │              (routing is always fresh from placement)  │
+//! │     └─ Violations → Insert ready-signal delay buffer  │
+//! │        chain on completion/detection nets              │
 //! │                                                       │
-//! │  4. If constraints alone can't close timing after     │
-//! │     multiple iterations → insert LUT buffers on       │
-//! │     specific fast paths as last resort                 │
+//! │  4. Re-PnR with buffer-modified netlist               │
+//! │     → Buffers are placed and routed normally           │
 //! │                                                       │
-//! │  Max iterations: 3-5 (typically converges in 2)       │
+//! │  Typically 2 passes (1 without buffers, 1 with)       │
 //! └──────────────────────────────────────────────────────┘
 //! ```
 //!

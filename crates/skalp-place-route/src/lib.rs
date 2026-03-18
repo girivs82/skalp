@@ -78,9 +78,9 @@ pub use placer::{
 };
 pub use pnr::{
     auto_configure_pll, place_and_route, place_and_route_hx1k, place_and_route_hx8k,
-    place_and_route_up5k, PnrConfig, PnrResult,
+    place_and_route_up5k, place_and_route_with_closure, PnrConfig, PnrResult,
 };
-pub use router::{Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
+pub use router::{BranchInfo, Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};
 
 // Packing and utilities

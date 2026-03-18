@@ -23,7 +23,7 @@ use crate::device::{Device, PipId, WireId};
 use crate::error::Result;
 use crate::placer::PlacementResult;
 use serde::{Deserialize, Serialize};
-use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::HashMap;
 
 /// Routing algorithm selection
@@ -98,6 +98,21 @@ impl RouterConfig {
     }
 }
 
+/// Per-sink branch information for skew analysis on matched-delay (NCL fork) nets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchInfo {
+    /// The sink wire this branch routes to
+    pub sink: WireId,
+    /// The destination cell ID
+    pub dest_cell: Option<CellId>,
+    /// Wires used by this branch (may overlap with shared trunk wires)
+    pub wires: Vec<WireId>,
+    /// PIPs used by this branch
+    pub pips: Vec<PipId>,
+    /// Delay of this branch in picoseconds (sum of PIP delays)
+    pub delay_ps: u32,
+}
+
 /// A routed net
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
@@ -113,6 +128,10 @@ pub struct Route {
     pub pips: Vec<PipId>,
     /// Total delay (ps)
     pub delay: u32,
+    /// Per-sink branch info (populated for NCL matched-delay nets).
+    /// Empty for regular nets (zero overhead).
+    #[serde(default)]
+    pub branches: Vec<BranchInfo>,
 }
 
 impl Route {
@@ -125,12 +144,24 @@ impl Route {
             wires: Vec::new(),
             pips: Vec::new(),
             delay: 0,
+            branches: Vec::new(),
         }
     }
 
     /// Get the wirelength of this route
     pub fn wirelength(&self) -> usize {
         self.wires.len()
+    }
+
+    /// Compute skew between branches in picoseconds.
+    /// Returns 0 if fewer than 2 branches.
+    pub fn branch_skew_ps(&self) -> u32 {
+        if self.branches.len() < 2 {
+            return 0;
+        }
+        let max = self.branches.iter().map(|b| b.delay_ps).max().unwrap_or(0);
+        let min = self.branches.iter().map(|b| b.delay_ps).min().unwrap_or(0);
+        max - min
     }
 }
 
@@ -160,6 +191,12 @@ pub struct RoutingResult {
     pub success: bool,
     /// Extra bits to set (e.g., padin_glb_netwk for GBUF routing)
     pub extra_bits: Vec<ExtraBitConfig>,
+    /// Number of unresolved NCL skew violations (0 for non-NCL designs)
+    #[serde(default)]
+    pub skew_violations: usize,
+    /// Maximum skew violation in ps (0 if none)
+    #[serde(default)]
+    pub max_skew_violation_ps: f64,
 }
 
 impl RoutingResult {
@@ -172,6 +209,8 @@ impl RoutingResult {
             iterations: 0,
             success: true,
             extra_bits: Vec::new(),
+            skew_violations: 0,
+            max_skew_violation_ps: 0.0,
         }
     }
 }
@@ -303,6 +342,8 @@ impl<D: Device + Clone> Router<D> {
 
         result.congestion = pathfinder_result.congestion;
         result.iterations = pathfinder_result.iterations;
+        result.skew_violations = pathfinder_result.skew_violations;
+        result.max_skew_violation_ps = pathfinder_result.max_skew_violation_ps;
         // In strict mode, require congestion <= 1.0; in relaxed mode, accept <= 4.0
         if self.config.strict_congestion {
             result.success = pathfinder_result.success;

@@ -25,6 +25,22 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -77,6 +93,22 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -131,6 +163,25 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -183,6 +234,25 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -237,6 +307,25 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -289,6 +378,25 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -343,6 +451,25 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -395,6 +522,25 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -449,6 +595,28 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -501,6 +669,37 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I3->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I4->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I5->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I3->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I4->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I5->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I3->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I4->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I5->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -555,6 +754,28 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -607,6 +828,28 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -661,6 +904,31 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I3->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I3->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I3->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.125
@@ -713,6 +981,31 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I1->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I2->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "I3->O", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I1->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I2->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "I3->O", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "I0->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I1->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I2->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "I3->O", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -771,6 +1064,34 @@ timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
 
+[cells.timing]
+arcs = [
+    { arc = "A->S", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "B->S", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "A->CO", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "B->CO", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "CI->CO", rise_base_ps = 60, rise_slope_ps_per_ff = 0.8, fall_base_ps = 60, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->S", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "B->S", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "A->CO", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "B->CO", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "CI->CO", rise_base_ps = 90, rise_slope_ps_per_ff = 1.2, fall_base_ps = 90, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->S", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "B->S", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "A->CO", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "B->CO", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "CI->CO", rise_base_ps = 36, rise_slope_ps_per_ff = 0.5, fall_base_ps = 36, fall_slope_ps_per_ff = 0.5 },
+]
+
+
 [[cells.failure_modes]]
 name = "config_upset"
 fit = 0.15
@@ -823,6 +1144,40 @@ min_voltage_mv = 1050
 timing_margin_voltage_mv = 1100
 voltage_delay_coefficient = 0.10
 voltage_sensitivity = 5
+
+[cells.timing]
+arcs = [
+    { arc = "A->S", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "B->S", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "CI->S", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "A->CO", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "B->CO", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "CI->CO", rise_base_ps = 400, rise_slope_ps_per_ff = 0.8, fall_base_ps = 400, fall_slope_ps_per_ff = 0.8 },
+    { arc = "CI->CO", rise_base_ps = 60, rise_slope_ps_per_ff = 0.8, fall_base_ps = 60, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->S", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "B->S", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "CI->S", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "A->CO", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "B->CO", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "CI->CO", rise_base_ps = 600, rise_slope_ps_per_ff = 1.2, fall_base_ps = 600, fall_slope_ps_per_ff = 1.2 },
+    { arc = "CI->CO", rise_base_ps = 90, rise_slope_ps_per_ff = 1.2, fall_base_ps = 90, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->S", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "B->S", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "CI->S", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "A->CO", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "B->CO", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "CI->CO", rise_base_ps = 240, rise_slope_ps_per_ff = 0.5, fall_base_ps = 240, fall_slope_ps_per_ff = 0.5 },
+    { arc = "CI->CO", rise_base_ps = 36, rise_slope_ps_per_ff = 0.5, fall_base_ps = 36, fall_slope_ps_per_ff = 0.5 },
+]
+
 
 [[cells.failure_modes]]
 name = "config_upset"

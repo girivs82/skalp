@@ -635,6 +635,11 @@ impl GateLevelSimulator {
 
     /// Step simulation by one cycle
     pub fn step(&mut self) -> GateSimulationState {
+        if std::env::var("EC_DEBUG").is_ok() && self.state.cycle < 3 {
+            eprintln!("[STEP_DEBUG] step() called at cycle {}, comb_blocks={} seq_blocks={} signals={}",
+                self.state.cycle, self.sir.top_module.comb_blocks.len(), self.sir.top_module.seq_blocks.len(),
+                self.state.signals.len());
+        }
         // Phase 1: Detect clock edges
         let clock_edges = self.detect_clock_edges();
 
@@ -704,6 +709,31 @@ impl GateLevelSimulator {
     /// Gate-level netlists may have operations in arbitrary order
     /// (not topologically sorted), so a single pass can read stale values.
     fn evaluate_combinational(&mut self) {
+        if std::env::var("EC_DEBUG").is_ok() && self.state.cycle == 0 {
+            eprintln!("[BLOCK_DEBUG] comb_blocks={} seq_blocks={}",
+                self.sir.top_module.comb_blocks.len(),
+                self.sir.top_module.seq_blocks.len());
+            for (i, block) in self.sir.top_module.comb_blocks.iter().enumerate() {
+                eprintln!("[BLOCK_DEBUG] comb_block[{}]: {} ops, {} inputs, {} outputs",
+                    i, block.operations.len(), block.inputs.len(), block.outputs.len());
+                if let Some(info) = &block.structural_info {
+                    eprintln!("[BLOCK_DEBUG]   structural={} eval_order={}",
+                        info.is_structural, info.eval_order.as_ref().map_or(0, |o| o.len()));
+                }
+                // Print first few ops
+                for (j, op) in block.operations.iter().take(3).enumerate() {
+                    if let SirOperation::Primitive { ptype, inputs, outputs, path, .. } = op {
+                        eprintln!("[BLOCK_DEBUG]   op[{}]: {:?} path={} inputs={:?} outputs={:?}",
+                            j, ptype, path, inputs.iter().map(|s| s.0).collect::<Vec<_>>(),
+                            outputs.iter().map(|s| s.0).collect::<Vec<_>>());
+                    }
+                }
+            }
+            for (i, block) in self.sir.top_module.seq_blocks.iter().enumerate() {
+                eprintln!("[BLOCK_DEBUG] seq_block[{}]: {} ops, clock={}, regs={}",
+                    i, block.operations.len(), block.clock.0, block.registers.len());
+            }
+        }
         // Multiple passes for convergence (handles non-topological operation order)
         for _ in 0..3 {
             for block in &self.sir.top_module.comb_blocks.clone() {
@@ -783,6 +813,11 @@ impl GateLevelSimulator {
                         let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
                         let mut bits = vec![false; width];
                         bits[0] = value;
+                        if std::env::var("EC_DEBUG").is_ok() && ((46..=53).contains(&out_id.0) || [230,237,244,251,258,265,272,279,223].contains(&out_id.0)) {
+                            eprintln!("[COMB_DEBUG] cycle={} cell {} ({:?}) writes sig {} = {} (inputs={:?} vals={:?})",
+                                self.state.cycle, path, ptype, out_id.0, value,
+                                inputs.iter().map(|s| s.0).collect::<Vec<_>>(), input_values);
+                        }
                         self.state.signals.insert(out_id.0, bits);
                     }
                 }
@@ -1025,7 +1060,7 @@ impl GateLevelSimulator {
                                 ptype,
                                 inputs,
                                 outputs,
-                                ..
+                                path: cell_path,
                             } => {
                                 // RAM blocks have side effects (persistent state) — evaluate immediately
                                 if let PrimitiveType::RamBlock { addr_width, data_width } = ptype {
@@ -1037,12 +1072,27 @@ impl GateLevelSimulator {
                                 let input_values: Vec<bool> = inputs
                                     .iter()
                                     .filter_map(|sig_id| {
-                                        self.state
+                                        let val = self.state
                                             .signals
                                             .get(&sig_id.0)
-                                            .and_then(|v: &Vec<bool>| v.first().copied())
+                                            .and_then(|v: &Vec<bool>| v.first().copied());
+                                        if val.is_none() && std::env::var("EC_DEBUG").is_ok() {
+                                            eprintln!("[SEQ_DEBUG] cycle={} DFF {} input sig {} NOT FOUND in state",
+                                                self.state.cycle, cell_path, sig_id.0);
+                                        }
+                                        val
                                     })
                                     .collect();
+                                if std::env::var("EC_DEBUG").is_ok() && cell_path.contains("latch") {
+                                    let current_q: Vec<bool> = outputs.iter().filter_map(|o| {
+                                        self.state.signals.get(&o.0).and_then(|v| v.first().copied())
+                                    }).collect();
+                                    eprintln!("[SEQ_DEBUG] cycle={} {} ({:?}) inputs={:?} D={:?} Q={:?} -> outputs={:?}",
+                                        self.state.cycle, cell_path, ptype,
+                                        inputs.iter().map(|s| s.0).collect::<Vec<_>>(),
+                                        input_values, current_q,
+                                        outputs.iter().map(|s| s.0).collect::<Vec<_>>());
+                                }
 
                                 // DFF with enable: when enable is inactive, retain current Q (skip update)
                                 if matches!(ptype, PrimitiveType::DffE) {

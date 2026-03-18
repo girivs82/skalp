@@ -87,6 +87,40 @@ impl Default for AsyncStaFixConfig {
     }
 }
 
+impl AsyncStaFixConfig {
+    /// Create a fix config with buffer delay derived from a technology library.
+    ///
+    /// Looks up the buffer cell in the library and uses its timing arc delay.
+    /// For FPGA targets (iCE40), the buffer is implemented as an SB_LUT4 with
+    /// INIT=0xAAAA, so the delay is the LUT4 propagation delay (~590ps).
+    pub fn from_library(lib: &crate::tech_library::TechLibrary) -> Self {
+        let mut config = Self::default();
+        config.library_name = lib.name.clone();
+
+        // Try to find a buffer cell and its delay
+        // Search order: SB_LUT4_BUF (ice40), BUF_X1 (ASIC), then any buf-function cell
+        let buf_cell = lib.get_cell("SB_LUT4_BUF")
+            .or_else(|| lib.get_cell("BUF_X1"))
+            .or_else(|| {
+                lib.find_best_cell(&crate::tech_library::CellFunction::Buf)
+            });
+
+        if let Some(cell) = buf_cell {
+            config.buffer_cell_type = cell.name.clone();
+
+            // Get delay from timing arcs (nominal load ~5fF)
+            if let Some(timing) = &cell.timing {
+                // Use first arc (any input→output)
+                if let Some((_name, arc)) = timing.arcs.iter().next() {
+                    config.buffer_delay_ps = arc.avg_delay_ps(5.0);
+                }
+            }
+        }
+
+        config
+    }
+}
+
 /// Result of the fix pass
 #[derive(Debug, Clone)]
 pub struct AsyncStaFixResult {

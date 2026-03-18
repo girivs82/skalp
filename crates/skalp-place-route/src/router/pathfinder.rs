@@ -8,11 +8,12 @@
 //! 4. Iterate until no congestion
 
 use super::astar::AStarRouter;
-use super::{Route, RoutingResult};
+use super::{BranchInfo, Route, RoutingResult};
 use crate::device::{BelType, Device, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::{PlacementLoc, PlacementResult};
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
+use skalp_lir::ncl_constraints::MatchedDelayGroup;
 use std::collections::{HashMap, HashSet};
 
 /// Wire congestion tracking
@@ -195,8 +196,27 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             crate::timing::DelayModel::ice40_default(),
         );
 
+        // Build matched-delay lookup from NCL constraints (empty for non-NCL designs)
+        let matched_delay_lookup: HashMap<GateNetId, &MatchedDelayGroup> = netlist
+            .ncl_constraints
+            .as_ref()
+            .map(|c| {
+                c.matched_delay_groups
+                    .iter()
+                    .map(|g| (g.fork_net, g))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Calculate net criticality for timing-driven routing
-        let net_criticalities = self.calculate_net_criticalities(netlist, placement);
+        let mut net_criticalities = self.calculate_net_criticalities(netlist, placement);
+
+        // Boost criticality of NCL matched-delay nets for routing priority
+        for crit in &mut net_criticalities {
+            if matched_delay_lookup.contains_key(&crit.net_id) {
+                crit.criticality = crit.criticality.max(0.8);
+            }
+        }
 
         // Collect nets to route with their criticality score
         // Clock/reset nets are routed here when GBUF routing is unavailable
@@ -246,15 +266,19 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         for &net_id in &nets_to_route {
             // Get criticality for this net
             let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
+            let is_matched = matched_delay_lookup.contains_key(&net_id);
 
             // Use route_net_with_costs even for initial routing to consider existing usage
-            let route = self.route_net_with_costs(
+            let route = self.route_net_with_costs_internal(
                 net_id,
                 netlist,
                 placement,
                 &congestion,
                 &astar,
                 net_criticality,
+                self.present_factor,
+                self.history_factor,
+                is_matched,
             )?;
 
             // Track wire usage for intermediate routing wires only
@@ -277,6 +301,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let base_history_factor = self.history_factor;
 
         for iteration in 0..self.max_iterations {
+            // Check convergence: no congestion
             if !congestion.has_overuse() {
                 result.iterations = iteration;
                 break;
@@ -310,19 +335,21 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             // Update history costs BEFORE rip-up so we capture the actual congestion
             congestion.update_history();
 
-            // Find nets using congested wires
+            // Find nets needing reroute: congested wires OR skew violations
             let overused = congestion.overused_wires();
             let overused_set: HashSet<_> = overused.iter().copied().collect();
 
-            let congested_nets: Vec<_> = result
+            let reroute_nets: HashSet<GateNetId> = result
                 .routes
                 .iter()
                 .filter(|(_, route)| route.wires.iter().any(|w| overused_set.contains(w)))
                 .map(|(&id, _)| id)
                 .collect();
 
-            // Rip up congested nets (only intermediate wires tracked)
-            for &net_id in &congested_nets {
+            let reroute_list: Vec<GateNetId> = reroute_nets.into_iter().collect();
+
+            // Rip up (only intermediate wires tracked)
+            for &net_id in &reroute_list {
                 if let Some(route) = result.routes.get(&net_id) {
                     for &wire in &route.wires {
                         if wire != route.source && !route.sinks.contains(&wire) {
@@ -333,10 +360,11 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             }
 
             // Reroute with escalated costs
-            for &net_id in &congested_nets {
+            for &net_id in &reroute_list {
                 let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
+                let is_matched = matched_delay_lookup.contains_key(&net_id);
 
-                let route = self.route_net_with_costs_escalated(
+                let route = self.route_net_with_costs_internal(
                     net_id,
                     netlist,
                     placement,
@@ -345,6 +373,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     net_criticality,
                     iter_present_factor,
                     iter_history_factor,
+                    is_matched,
                 )?;
 
                 // Track wire usage (intermediate wires only)
@@ -364,10 +393,83 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         result.congestion = congestion.max_congestion();
         result.wirelength = result.routes.values().map(|r| r.wires.len() as u64).sum();
 
-        // Success requires no wire overuse (congestion <= 1.0)
+        // Report final skew violations (total: cell + wire delay)
+        for (&net_id, group) in &matched_delay_lookup {
+            if let Some(route) = result.routes.get(&net_id) {
+                let skew = Self::total_branch_skew(route, group);
+                if skew > group.max_skew_ps {
+                    result.skew_violations += 1;
+                    result.max_skew_violation_ps = result.max_skew_violation_ps.max(skew);
+                }
+            }
+        }
+
+        // Success requires no wire overuse.
+        // Skew is handled by delaying the ready/completion signal, not by the router.
+        // Skew metrics are reported for diagnostics only.
         result.success = result.congestion <= 1.0;
 
         Ok(result)
+    }
+
+    /// Compute total skew (cell_delay + wire_delay) across branches.
+    ///
+    /// If `group.branch_cell_delays_ps` is populated (parallel to `group.dest_cells`),
+    /// each branch's total delay = cell_delay + wire_delay. The skew is max - min
+    /// across total delays. Falls back to wire-only skew when cell delays are absent.
+    fn total_branch_skew(route: &Route, group: &MatchedDelayGroup) -> f64 {
+        if route.branches.len() < 2 {
+            return 0.0;
+        }
+
+        let has_cell_delays = group.branch_cell_delays_ps.len() == group.dest_cells.len()
+            && !group.branch_cell_delays_ps.is_empty();
+
+        if !has_cell_delays {
+            // Fallback: wire-only skew
+            return route.branch_skew_ps() as f64;
+        }
+
+        // Map dest_cell → cell_delay for O(1) lookup
+        let cell_delay_map: HashMap<CellId, f64> = group
+            .dest_cells
+            .iter()
+            .zip(group.branch_cell_delays_ps.iter())
+            .map(|(&cell, &delay)| (cell, delay))
+            .collect();
+
+        let total_delays: Vec<f64> = route
+            .branches
+            .iter()
+            .map(|b| {
+                let cell_delay = b
+                    .dest_cell
+                    .and_then(|c| cell_delay_map.get(&c).copied())
+                    .unwrap_or(0.0);
+                cell_delay + b.delay_ps as f64
+            })
+            .collect();
+
+        let max = total_delays.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = total_delays.iter().cloned().fold(f64::INFINITY, f64::min);
+        (max - min).max(0.0)
+    }
+
+    /// Check if any matched-delay net has a skew violation (total: cell + wire)
+    /// Retained for diagnostics; not used in routing loop (ready-signal-delay handles skew).
+    #[allow(dead_code)]
+    fn has_skew_violations(
+        &self,
+        result: &RoutingResult,
+        matched_delay_lookup: &HashMap<GateNetId, &MatchedDelayGroup>,
+    ) -> bool {
+        matched_delay_lookup.iter().any(|(&net_id, group)| {
+            result
+                .routes
+                .get(&net_id)
+                .map(|r| Self::total_branch_skew(r, group) > group.max_skew_ps)
+                .unwrap_or(false)
+        })
     }
 
     /// Route a single net (without congestion costs)
@@ -451,6 +553,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     }
 
     /// Route a net with congestion costs and optional timing awareness
+    #[allow(dead_code)]
     fn route_net_with_costs(
         &self,
         net_id: GateNetId,
@@ -460,7 +563,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         astar: &AStarRouter<D>,
         net_criticality: f64,
     ) -> Result<Route> {
-        self.route_net_with_costs_escalated(
+        self.route_net_with_costs_internal(
             net_id,
             netlist,
             placement,
@@ -469,11 +572,17 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             net_criticality,
             self.present_factor,
             self.history_factor,
+            false,
         )
     }
 
-    /// Route a net with escalated congestion costs (used during rip-up/reroute iterations)
-    fn route_net_with_costs_escalated(
+    /// Route a net with congestion costs, optional timing awareness, and optional
+    /// per-branch delay tracking for matched-delay (NCL fork) nets.
+    ///
+    /// When `is_matched` is true, populates `route.branches` with a `BranchInfo`
+    /// per sink, tracking per-branch wires, PIPs, and delay for skew analysis.
+    #[allow(clippy::too_many_arguments)]
+    fn route_net_with_costs_internal(
         &self,
         net_id: GateNetId,
         netlist: &GateNetlist,
@@ -483,6 +592,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         net_criticality: f64,
         present_factor: f64,
         history_factor: f64,
+        is_matched: bool,
     ) -> Result<Route> {
         let net = &netlist.nets[net_id.0 as usize];
         let mut route = Route::new(net_id);
@@ -512,8 +622,6 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         route.source = source_wire;
 
         // Build wire cost map from congestion, with timing awareness for critical nets
-        // For critical nets: reduce congestion penalty, increase delay penalty
-        // For non-critical nets: normal congestion-based routing
         let timing_factor = net_criticality * self.timing_weight;
         let adjusted_present_factor = present_factor * (1.0 - timing_factor * 0.5);
         let adjusted_history_factor = history_factor * (1.0 - timing_factor * 0.3);
@@ -525,12 +633,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 let congestion_cost =
                     congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor);
 
-                // For critical nets, add delay-based cost component
                 let delay_cost = if timing_factor > 0.0 {
-                    // Estimate wire delay based on wire type (rough approximation)
-                    // In a real implementation, this would use actual timing data
                     if let Some(wire_info) = self.device.wire(wire) {
-                        let base_delay = wire_info.delay as f64 / 100.0; // Normalize
+                        let base_delay = wire_info.delay as f64 / 100.0;
                         timing_factor * base_delay
                     } else {
                         0.0
@@ -543,7 +648,6 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             })
             .collect();
 
-        // Route to each sink with LUT input permutation support
         let timing_weight = net_criticality * self.timing_weight;
 
         for (sink_id, pin_idx) in &net.fanout {
@@ -552,7 +656,6 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 None => continue,
             };
 
-            // Get sink wire using proper BEL pin lookup
             let sink_wire = match self.get_sink_wire(*sink_id, sink_loc, *pin_idx, netlist) {
                 Some(w) => w,
                 None => continue,
@@ -571,18 +674,32 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
             match path_result {
                 Ok((wires, pips)) => {
-                    // Primary path succeeded
-                    for wire in wires {
-                        if !route.wires.contains(&wire) {
-                            route.wires.push(wire);
+                    // Compute delay for THIS branch only (not cumulative over all branches)
+                    let branch_delay: u32 = pips
+                        .iter()
+                        .map(|&pip_id| {
+                            self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0)
+                        })
+                        .sum();
+
+                    // Add wires/PIPs to the route-level aggregates
+                    for wire in &wires {
+                        if !route.wires.contains(wire) {
+                            route.wires.push(*wire);
                         }
                     }
-                    route.pips.extend(pips);
+                    route.pips.extend(&pips);
+                    route.delay += branch_delay;
 
-                    for &pip_id in &route.pips {
-                        if let Some(pip) = self.device.pip(pip_id) {
-                            route.delay += pip.delay;
-                        }
+                    // Record per-branch info for matched-delay nets
+                    if is_matched {
+                        route.branches.push(BranchInfo {
+                            sink: sink_wire,
+                            dest_cell: Some(*sink_id),
+                            wires,
+                            pips,
+                            delay_ps: branch_delay,
+                        });
                     }
                 }
                 Err(_) => {
@@ -599,26 +716,206 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                                 netlist,
                             )
                         {
-                            // Found alternate route through different LUT input
+                            let branch_delay: u32 = alt_pips
+                                .iter()
+                                .map(|&pip_id| {
+                                    self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0)
+                                })
+                                .sum();
+
                             if route.sinks.last() == Some(&sink_wire) {
                                 route.sinks.pop();
                             }
                             route.sinks.push(alt_wire);
 
-                            for wire in alt_wires {
-                                if !route.wires.contains(&wire) {
-                                    route.wires.push(wire);
+                            for wire in &alt_wires {
+                                if !route.wires.contains(wire) {
+                                    route.wires.push(*wire);
                                 }
                             }
-                            route.pips.extend(alt_pips);
+                            route.pips.extend(&alt_pips);
+                            route.delay += branch_delay;
 
-                            for &pip_id in &route.pips {
-                                if let Some(pip) = self.device.pip(pip_id) {
-                                    route.delay += pip.delay;
-                                }
+                            if is_matched {
+                                route.branches.push(BranchInfo {
+                                    sink: alt_wire,
+                                    dest_cell: Some(*sink_id),
+                                    wires: alt_wires,
+                                    pips: alt_pips,
+                                    delay_ps: branch_delay,
+                                });
                             }
                         }
                     }
+                }
+            }
+        }
+
+        Ok(route)
+    }
+
+    /// Enforce MAXSKEW constraint on a matched-delay net by ripping up fast
+    /// branches and rerouting them through longer wire paths.
+    ///
+    /// Uses **total delay** (cell_delay + wire_delay) per branch to identify the
+    /// fastest branch. This handles the common case where cell-path asymmetry
+    /// (e.g. one branch through a comparator chain, another direct to a TH gate)
+    /// causes skew that the router must compensate with wire-delay imbalance.
+    ///
+    /// Algorithm:
+    /// 1. Compute total skew = max(cell+wire) - min(cell+wire) across branches
+    /// 2. If skew <= max_skew_ps, return route unchanged
+    /// 3. Identify branch with lowest total delay (fastest arrival)
+    /// 4. Rip up that branch's wires/PIPs
+    /// 5. Block its wires so A* finds a longer alternate path
+    /// 6. Repeat up to `max_attempts`
+    #[allow(clippy::too_many_arguments)]
+    /// Retained for potential future use; not called in current ready-signal-delay flow.
+    #[allow(dead_code)]
+    fn enforce_skew_constraint(
+        &self,
+        mut route: Route,
+        group: &MatchedDelayGroup,
+        _netlist: &GateNetlist,
+        _placement: &PlacementResult,
+        _congestion: &CongestionTracker,
+        astar: &AStarRouter<D>,
+        _net_criticality: f64,
+        _present_factor: f64,
+        _history_factor: f64,
+    ) -> Result<Route> {
+        let max_attempts = 5;
+
+        // Build cell delay lookup from constraint group
+        let cell_delay_map: HashMap<CellId, f64> = group
+            .dest_cells
+            .iter()
+            .zip(group.branch_cell_delays_ps.iter())
+            .map(|(&cell, &delay)| (cell, delay))
+            .collect();
+
+        let has_cell_delays = !cell_delay_map.is_empty();
+
+        for _attempt in 0..max_attempts {
+            if route.branches.len() < 2 {
+                return Ok(route);
+            }
+
+            // Compute total skew (cell + wire)
+            let total_skew = Self::total_branch_skew(&route, group);
+            if total_skew <= group.max_skew_ps {
+                return Ok(route);
+            }
+
+            // Find branch with minimum total delay (fastest arrival — needs more wire)
+            let fast_idx = if has_cell_delays {
+                route
+                    .branches
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let a_total = a.dest_cell
+                            .and_then(|c| cell_delay_map.get(&c).copied())
+                            .unwrap_or(0.0)
+                            + a.delay_ps as f64;
+                        let b_total = b.dest_cell
+                            .and_then(|c| cell_delay_map.get(&c).copied())
+                            .unwrap_or(0.0)
+                            + b.delay_ps as f64;
+                        a_total.partial_cmp(&b_total).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap()
+            } else {
+                // Fallback: wire-only (minimum wire delay)
+                route
+                    .branches
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, b)| b.delay_ps)
+                    .map(|(i, _)| i)
+                    .unwrap()
+            };
+
+            // Remove the fast branch from the route
+            let fast_branch = route.branches.remove(fast_idx);
+
+            // Remove fast branch's PIPs from route-level aggregates
+            for pip in &fast_branch.pips {
+                if let Some(pos) = route.pips.iter().position(|p| p == pip) {
+                    route.pips.remove(pos);
+                }
+            }
+            // Remove fast branch's wires that aren't used by other branches or source
+            let other_wires: HashSet<WireId> = route
+                .branches
+                .iter()
+                .flat_map(|b| b.wires.iter().copied())
+                .chain(std::iter::once(route.source))
+                .collect();
+            route.wires.retain(|w| other_wires.contains(w));
+            route.delay = route.delay.saturating_sub(fast_branch.delay_ps);
+
+            // Remove the fast branch's sink from route.sinks
+            if let Some(pos) = route.sinks.iter().position(|s| *s == fast_branch.sink) {
+                route.sinks.remove(pos);
+            }
+
+            // Block the fast branch's wires to force A* to find an alternate (longer) path
+            let blocked: Vec<WireId> = fast_branch
+                .wires
+                .iter()
+                .copied()
+                .filter(|w| *w != route.source && *w != fast_branch.sink)
+                .collect();
+
+            // Reroute the fast branch with blocked wires
+            let wire_costs: HashMap<WireId, f64> = HashMap::new();
+            match astar.find_path_timing_aware(
+                route.source,
+                fast_branch.sink,
+                &blocked,
+                &wire_costs,
+                0.0, // No timing weight — we want A* to find *any* alternate path
+            ) {
+                Ok((new_wires, new_pips)) => {
+                    let new_delay: u32 = new_pips
+                        .iter()
+                        .map(|&pip_id| {
+                            self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0)
+                        })
+                        .sum();
+
+                    // Add the rerouted branch back
+                    route.sinks.push(fast_branch.sink);
+                    for wire in &new_wires {
+                        if !route.wires.contains(wire) {
+                            route.wires.push(*wire);
+                        }
+                    }
+                    route.pips.extend(&new_pips);
+                    route.delay += new_delay;
+
+                    route.branches.push(BranchInfo {
+                        sink: fast_branch.sink,
+                        dest_cell: fast_branch.dest_cell,
+                        wires: new_wires,
+                        pips: new_pips,
+                        delay_ps: new_delay,
+                    });
+                }
+                Err(_) => {
+                    // Reroute failed — put the original branch back and stop trying
+                    route.sinks.push(fast_branch.sink);
+                    for wire in &fast_branch.wires {
+                        if !route.wires.contains(wire) {
+                            route.wires.push(*wire);
+                        }
+                    }
+                    route.pips.extend(&fast_branch.pips);
+                    route.delay += fast_branch.delay_ps;
+                    route.branches.push(fast_branch);
+                    break;
                 }
             }
         }

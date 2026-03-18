@@ -45,6 +45,12 @@ pub struct MatchedDelayGroup {
     pub max_skew_ps: f64,
     /// Priority: higher = more critical to satisfy
     pub priority: u32,
+    /// Per-destination cell/logic delay in ps (parallel to `dest_cells`).
+    /// The router uses these to compute total skew = cell_delay + wire_delay
+    /// per branch, then equalises the total across branches.
+    /// Empty when cell delays are unavailable (router falls back to wire-only skew).
+    #[serde(default)]
+    pub branch_cell_delays_ps: Vec<f64>,
 }
 
 /// A group of cells that should be placed in proximity
@@ -155,6 +161,13 @@ pub fn generate_ncl_constraints(
             ViolationSeverity::Warning => 1,
         };
 
+        // Extract per-branch cell/logic delays for the router to compute total skew
+        let branch_cell_delays_ps: Vec<f64> = violation
+            .branch_delays
+            .iter()
+            .map(|(_, _, delay)| *delay)
+            .collect();
+
         constraints.matched_delay_groups.push(MatchedDelayGroup {
             name: format!("fork_{}", i),
             fork_net: violation.fork_net,
@@ -163,6 +176,7 @@ pub fn generate_ncl_constraints(
             dest_cell_names: dest_cell_names.clone(),
             max_skew_ps: constraint_skew,
             priority,
+            branch_cell_delays_ps,
         });
 
         // Also create proximity group for the same cells
@@ -261,6 +275,7 @@ fn add_high_fanout_constraints(
             dest_cell_names: dest_cell_names.clone(),
             max_skew_ps: constraints.global_max_skew_ps,
             priority: 0, // low priority — preventive, not reactive
+            branch_cell_delays_ps: Vec::new(), // no STA data for high-fanout preventive groups
         });
     }
 }

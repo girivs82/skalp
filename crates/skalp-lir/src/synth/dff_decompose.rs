@@ -39,6 +39,10 @@ pub struct LatchDecomp {
 /// Returns a map from latch AigNodeId to its decomposition. Latches that
 /// can't be decomposed (no enable, no reset) are omitted.
 pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
+    // TEMPORARILY DISABLED for debugging — return empty to use plain DFFs
+    return HashMap::new();
+
+    #[allow(unreachable_code)]
     let mut results = HashMap::new();
 
     // Collect latch info to avoid borrow issues
