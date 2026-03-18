@@ -540,6 +540,14 @@ pub struct GateNetlist {
     /// Set by tech_mapper when dual-rail signals are detected.
     #[serde(default)]
     pub is_ncl: bool,
+    /// NCL routing constraints (flows forward into PnR).
+    /// Attached by `generate_ncl_constraints` / timing closure; consumed by placer/router.
+    #[serde(skip, default)]
+    pub ncl_constraints: Option<crate::ncl_constraints::NclRoutingConstraints>,
+    /// Per-net wire delays from PnR (flows back from router for iterative timing closure).
+    /// Map: net_id → delay in picoseconds. Populated by PnR, consumed by `post_pnr_iteration`.
+    #[serde(skip, default)]
+    pub ncl_wire_delays: Option<IndexMap<GateNetId, f64>>,
     /// Net name to ID mapping (skipped during serialization - rebuilt from nets)
     #[serde(skip, default)]
     net_map: IndexMap<String, GateNetId>,
@@ -574,6 +582,8 @@ impl GateNetlist {
             clocks: Vec::new(),
             resets: Vec::new(),
             is_ncl: false,
+            ncl_constraints: None,
+            ncl_wire_delays: None,
             net_map: IndexMap::new(),
             stats: GateNetlistStats::default(),
             bit_index: HashMap::new(),

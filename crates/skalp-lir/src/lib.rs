@@ -162,5 +162,5 @@ pub use ncl_constraints::{
 // NCL iterative timing closure (STA → PnR → STA loop)
 pub use ncl_timing_closure::{
     post_pnr_iteration, pre_pnr_analysis, run_timing_closure, wire_delays_from_route_map,
-    ClosureIteration, ConvergenceReason, TimingClosureConfig, TimingClosureResult,
+    ClosureAction, ClosureIteration, ConvergenceReason, TimingClosureConfig, TimingClosureResult,
 };

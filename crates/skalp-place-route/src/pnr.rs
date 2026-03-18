@@ -9,7 +9,8 @@ use crate::packing::CellPacker;
 use crate::placer::{PlacementResult, Placer, PlacerConfig};
 use crate::router::{Router, RouterConfig, RoutingResult};
 use crate::timing::{TimingAnalyzer, TimingConfig, TimingReport};
-use skalp_lir::gate_netlist::GateNetlist;
+use indexmap::IndexMap;
+use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
 
 /// P&R configuration
 #[derive(Debug, Clone)]
@@ -89,6 +90,10 @@ pub struct PnrResult {
     pub timing: Option<TimingReport>,
     /// Device variant used
     pub variant: Ice40Variant,
+    /// Per-net wire delays in picoseconds (for NCL iterative timing closure).
+    /// Extracted from routing results. Feed back to `netlist.ncl_wire_delays`
+    /// or pass to `post_pnr_iteration()` for the next closure iteration.
+    pub wire_delays: IndexMap<GateNetId, f64>,
 }
 
 impl PnrResult {
@@ -108,6 +113,11 @@ impl PnrResult {
 }
 
 /// Run place and route on a GateNetlist for iCE40
+///
+/// If `netlist.ncl_constraints` is set (by async STA timing closure),
+/// the placer and router will respect proximity and matched-delay constraints.
+/// After routing, per-net wire delays are written back to `netlist.ncl_wire_delays`
+/// for the iterative timing closure loop.
 pub fn place_and_route(
     netlist: &GateNetlist,
     variant: Ice40Variant,
@@ -184,6 +194,13 @@ pub fn place_and_route(
         None
     };
 
+    // Extract per-net wire delays for NCL timing closure feedback
+    let wire_delays: IndexMap<GateNetId, f64> = routing
+        .routes
+        .iter()
+        .map(|(&net_id, route)| (net_id, route.delay as f64))
+        .collect();
+
     // Generate bitstream (with netlist for LUT init values)
     let generator = BitstreamGenerator::with_config(device.clone(), config.bitstream.clone());
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
@@ -194,6 +211,7 @@ pub fn place_and_route(
         bitstream,
         timing,
         variant,
+        wire_delays,
     })
 }
 

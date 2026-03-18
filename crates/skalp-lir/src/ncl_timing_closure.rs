@@ -1,58 +1,60 @@
-//! Iterative NCL Timing Closure
+//! Iterative NCL Timing Closure (FPGA-correct)
 //!
 //! Implements the STA → PnR → STA feedback loop for NCL async circuits.
+//! Uses a constraint-first approach appropriate for FPGA targets.
 //!
-//! # Problem
+//! # FPGA Delay Balancing Hierarchy
 //!
-//! Pre-PnR async STA uses estimated wire delays (flat per-fanout guess).
-//! After PnR, actual routing delays may differ significantly, making the
-//! initial buffer insertion under- or over-compensating.
+//! Three mechanisms, in preference order:
 //!
-//! # Solution: Iterative Closure
+//! 1. **Routing constraints (MAXSKEW)** — zero area cost, router picks wire paths
+//! 2. **Placement proximity** — zero area cost, co-locate fork destinations
+//! 3. **LUT buffer chains** — last resort, each LUT4-as-BUF adds ~500-700ps
+//!
+//! # Iterative Flow
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────┐
-//! │  1. Pre-PnR STA (estimated delays)                  │
-//! │     → Insert conservative buffers                   │
-//! │     → Generate initial constraints                  │
-//! │                                                     │
-//! │  2. Run PnR (placement + routing)                   │
-//! │     → Extract actual per-net wire delays             │
-//! │                                                     │
-//! │  3. Post-PnR STA (actual wire delays)               │
-//! │     → Check: all forks within skew budget?          │
-//! │     │                                               │
-//! │     ├─ YES → Done (timing closed)                   │
-//! │     │                                               │
-//! │     └─ NO  → Adjust buffers, update constraints     │
-//! │              → Go to step 2 (re-route)              │
-//! │                                                     │
-//! │  Max iterations: 3-5 (typically converges in 2)     │
-//! └─────────────────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────┐
+//! │  1. Pre-PnR STA (estimated delays)                   │
+//! │     → Generate routing/placement constraints ONLY     │
+//! │     → NO buffer insertion at this stage               │
+//! │                                                       │
+//! │  2. Run PnR (placement + routing) with constraints    │
+//! │     → Extract actual per-net wire delays               │
+//! │                                                       │
+//! │  3. Post-PnR STA (actual wire delays)                 │
+//! │     → Check: all forks within skew budget?            │
+//! │     │                                                 │
+//! │     ├─ YES → Done (timing closed)                     │
+//! │     │                                                 │
+//! │     └─ NO  → Tighten constraints, re-route            │
+//! │              (routing is always fresh from placement)  │
+//! │                                                       │
+//! │  4. If constraints alone can't close timing after     │
+//! │     multiple iterations → insert LUT buffers on       │
+//! │     specific fast paths as last resort                 │
+//! │                                                       │
+//! │  Max iterations: 3-5 (typically converges in 2)       │
+//! └──────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Usage
 //!
 //! ```ignore
-//! let mut closure = NclTimingClosure::new(netlist, library, config);
+//! // Manual iteration (for external PnR like nextpnr)
+//! let pre = pre_pnr_analysis(&mut netlist, None, &config);
+//! let constraints = &pre.constraints;
+//! // ... run PnR with constraints, extract wire delays ...
+//! let post = post_pnr_iteration(&mut netlist, None, wire_delays, 1, pre.max_skew_ps, &config);
 //!
-//! // Iteration 1: pre-PnR
-//! let pre_result = closure.pre_pnr_analysis();
-//! let constraints = pre_result.constraints;
-//! // ... run PnR with constraints ...
-//! let wire_delays = extract_wire_delays(&routing_result);
-//!
-//! // Iteration 2: post-PnR with actual delays
-//! let post_result = closure.post_pnr_iteration(wire_delays);
-//! if post_result.converged {
-//!     println!("Timing closed in {} iterations", post_result.iteration);
-//! }
+//! // Automatic loop (for in-process skalp PnR)
+//! let result = run_timing_closure(&mut netlist, None, &config, |n, c| run_pnr(n, c));
 //! ```
 
 use crate::async_sta::{
     analyze_async_timing, AsyncStaConfig, AsyncStaResult, ViolationSeverity,
 };
-use crate::async_sta_fix::{fix_fork_violations, AsyncStaFixConfig, AsyncStaFixResult, FixStrategy};
+use crate::async_sta_fix::{fix_fork_violations, AsyncStaFixConfig, AsyncStaFixResult};
 use crate::gate_netlist::{GateNetId, GateNetlist};
 use crate::ncl_constraints::{
     generate_ncl_constraints, NclConstraintConfig, NclRoutingConstraints,
@@ -67,13 +69,19 @@ pub struct TimingClosureConfig {
     pub max_iterations: usize,
     /// Async STA configuration
     pub sta_config: AsyncStaConfig,
-    /// Buffer insertion configuration
+    /// Buffer insertion configuration (used only as last resort)
     pub fix_config: AsyncStaFixConfig,
     /// Constraint generation configuration
     pub constraint_config: NclConstraintConfig,
     /// Convergence threshold: if max skew improvement between iterations
     /// is less than this (ps), consider converged even with remaining violations
     pub convergence_threshold_ps: f64,
+    /// How many constraint-only iterations to try before allowing LUT buffers.
+    /// Default: 2 — try routing constraints twice before resorting to buffers.
+    pub constraint_only_iterations: usize,
+    /// Factor to tighten constraints by on each re-route iteration.
+    /// E.g., 0.8 means each iteration requests 80% of the previous max_skew target.
+    pub constraint_tightening_factor: f64,
 }
 
 impl Default for TimingClosureConfig {
@@ -81,13 +89,11 @@ impl Default for TimingClosureConfig {
         Self {
             max_iterations: 4,
             sta_config: AsyncStaConfig::default(),
-            fix_config: AsyncStaFixConfig {
-                strategy: FixStrategy::DelayReadySignal,
-                ready_delay_margin_ps: 10.0,
-                ..Default::default()
-            },
+            fix_config: AsyncStaFixConfig::default(),
             constraint_config: NclConstraintConfig::default(),
             convergence_threshold_ps: 5.0,
+            constraint_only_iterations: 2,
+            constraint_tightening_factor: 0.8,
         }
     }
 }
@@ -99,7 +105,7 @@ pub struct ClosureIteration {
     pub iteration: usize,
     /// STA results for this iteration
     pub sta_result: AsyncStaResult,
-    /// Fix results (buffers inserted, if any)
+    /// Fix results (LUT buffers inserted — only on later iterations as last resort)
     pub fix_result: Option<AsyncStaFixResult>,
     /// Updated routing constraints
     pub constraints: NclRoutingConstraints,
@@ -109,6 +115,19 @@ pub struct ClosureIteration {
     pub max_skew_ps: f64,
     /// Number of fork violations
     pub violation_count: usize,
+    /// What action was taken
+    pub action: ClosureAction,
+}
+
+/// What action the closure iteration took
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClosureAction {
+    /// Generated initial constraints from estimated delays (pre-PnR)
+    InitialConstraints,
+    /// Tightened existing constraints based on actual delays
+    TightenedConstraints,
+    /// Inserted LUT buffer chains as last resort
+    InsertedBuffers,
 }
 
 /// Result of the complete timing closure process
@@ -122,7 +141,7 @@ pub struct TimingClosureResult {
     pub history: Vec<ClosureIteration>,
     /// Final routing constraints
     pub final_constraints: NclRoutingConstraints,
-    /// Total buffers inserted across all iterations
+    /// Total LUT buffers inserted (ideally 0)
     pub total_buffers_inserted: usize,
     /// Max skew in final iteration
     pub final_max_skew_ps: f64,
@@ -153,7 +172,7 @@ impl TimingClosureResult {
         ));
         s.push_str(&format!("  Iterations: {}\n", self.iterations_performed));
         s.push_str(&format!(
-            "  Total buffers inserted: {}\n",
+            "  LUT buffers inserted: {}\n",
             self.total_buffers_inserted
         ));
         s.push_str(&format!(
@@ -164,10 +183,11 @@ impl TimingClosureResult {
         if self.history.len() > 1 {
             s.push_str("  Skew progression:");
             for iter in &self.history {
-                let tag = if iter.used_actual_delays {
-                    "post-PnR"
-                } else {
-                    "estimated"
+                let tag = match (&iter.action, iter.used_actual_delays) {
+                    (ClosureAction::InitialConstraints, _) => "estimated",
+                    (ClosureAction::TightenedConstraints, true) => "post-PnR",
+                    (ClosureAction::InsertedBuffers, _) => "post-PnR+buf",
+                    _ => "unknown",
                 };
                 s.push_str(&format!(
                     " {:.1}ps({})",
@@ -187,6 +207,10 @@ impl TimingClosureResult {
 /// Run pre-PnR timing analysis (iteration 0)
 ///
 /// Uses estimated wire delays. Returns initial constraints for PnR.
+/// **No buffer insertion** — only routing and placement constraints.
+/// Constraints are also attached to `netlist.ncl_constraints` so the PnR
+/// engine can read them directly without a separate file.
+///
 /// After running PnR with these constraints, call `post_pnr_iteration`
 /// with the actual wire delays from routing.
 pub fn pre_pnr_analysis(
@@ -197,25 +221,21 @@ pub fn pre_pnr_analysis(
     // Run STA with estimated delays
     let sta_result = analyze_async_timing(netlist, library, &config.sta_config);
 
-    // Apply initial fix (conservative — uses estimated delays)
-    let fix_result = if sta_result.has_violations() {
-        let fr = fix_fork_violations(netlist, &sta_result, &config.fix_config);
-        Some(fr)
-    } else {
-        None
-    };
-
-    // Generate initial constraints
+    // Generate initial constraints — NO buffer insertion
     let constraints = generate_ncl_constraints(netlist, &sta_result, &config.constraint_config);
+
+    // Attach constraints to netlist for PnR to consume
+    netlist.ncl_constraints = Some(constraints.clone());
 
     ClosureIteration {
         iteration: 0,
         max_skew_ps: sta_result.stats.max_skew_ps,
         violation_count: sta_result.stats.fork_violations,
         sta_result,
-        fix_result,
+        fix_result: None,
         constraints,
         used_actual_delays: false,
+        action: ClosureAction::InitialConstraints,
     }
 }
 
@@ -224,9 +244,14 @@ pub fn pre_pnr_analysis(
 /// This is the core of the iterative loop. Call this after each PnR run
 /// with the actual per-net wire delays extracted from routing results.
 ///
-/// Returns updated constraints. If `converged` is false in the result,
-/// the caller should re-run PnR with the updated constraints and call
-/// this again.
+/// Wire delays can be passed explicitly via `wire_delays`, or if `None`,
+/// they are read from `netlist.ncl_wire_delays` (populated by PnR).
+///
+/// The `iteration` parameter controls whether LUT buffers are allowed:
+/// - `iteration <= config.constraint_only_iterations`: tighten constraints only
+/// - `iteration > config.constraint_only_iterations`: allow LUT buffer insertion
+///
+/// Updated constraints are attached to `netlist.ncl_constraints`.
 pub fn post_pnr_iteration(
     netlist: &mut GateNetlist,
     library: Option<&TechLibrary>,
@@ -235,24 +260,48 @@ pub fn post_pnr_iteration(
     prev_max_skew: f64,
     config: &TimingClosureConfig,
 ) -> ClosureIteration {
+    // Use provided delays, or fall back to netlist-attached delays from PnR
+    let delays = if wire_delays.is_empty() {
+        netlist.ncl_wire_delays.clone().unwrap_or_default()
+    } else {
+        wire_delays
+    };
+
     // Run STA with actual wire delays from PnR
     let mut sta = crate::async_sta::AsyncSta::new(netlist, config.sta_config.clone());
     if let Some(lib) = library {
         sta = sta.with_library(lib);
     }
-    sta = sta.with_wire_delays(wire_delays);
+    sta = sta.with_wire_delays(delays);
     let sta_result = sta.analyze();
 
-    // Apply fix if still violating
-    let fix_result = if sta_result.has_violations() && sta_result.error_count() > 0 {
+    let has_errors = sta_result.fork_violations.iter().any(|v| {
+        v.severity == ViolationSeverity::Error || v.severity == ViolationSeverity::Critical
+    });
+
+    // Decide action: tighten constraints or insert buffers as last resort
+    let allow_buffers = iteration > config.constraint_only_iterations && has_errors;
+
+    let (fix_result, action) = if allow_buffers {
+        // Last resort: insert LUT buffers on specific fast paths
         let fr = fix_fork_violations(netlist, &sta_result, &config.fix_config);
-        Some(fr)
+        (Some(fr), ClosureAction::InsertedBuffers)
     } else {
-        None
+        (None, ClosureAction::TightenedConstraints)
     };
 
-    // Generate updated constraints
-    let constraints = generate_ncl_constraints(netlist, &sta_result, &config.constraint_config);
+    // Generate updated constraints (tighter if routing couldn't meet previous)
+    let mut tightened_config = config.constraint_config.clone();
+    if iteration > 1 {
+        // Tighten the skew margin on each re-route iteration
+        tightened_config.skew_margin_ps +=
+            config.constraint_config.skew_margin_ps * (1.0 - config.constraint_tightening_factor)
+                * iteration as f64;
+    }
+    let constraints = generate_ncl_constraints(netlist, &sta_result, &tightened_config);
+
+    // Attach updated constraints to netlist for next PnR iteration
+    netlist.ncl_constraints = Some(constraints.clone());
 
     ClosureIteration {
         iteration,
@@ -262,6 +311,7 @@ pub fn post_pnr_iteration(
         fix_result,
         constraints,
         used_actual_delays: true,
+        action,
     }
 }
 
@@ -284,22 +334,19 @@ where
     let mut history = Vec::new();
     let mut total_buffers = 0;
 
-    // Iteration 0: pre-PnR with estimated delays
+    // Iteration 0: pre-PnR with estimated delays — constraints only
     let iter0 = pre_pnr_analysis(netlist, library, config);
-    if let Some(ref fix) = iter0.fix_result {
-        total_buffers += fix.buffers_inserted;
-    }
     let mut prev_max_skew = iter0.max_skew_ps;
     let mut last_constraints = iter0.constraints.clone();
     history.push(iter0);
 
-    // Check if already clean
+    // Check if already clean (no violations from estimation)
     if history[0].violation_count == 0 {
         return TimingClosureResult {
             converged: true,
             iterations_performed: 1,
             final_constraints: last_constraints,
-            total_buffers_inserted: total_buffers,
+            total_buffers_inserted: 0,
             final_max_skew_ps: prev_max_skew,
             reason: ConvergenceReason::AllForksClean,
             history,
@@ -308,7 +355,7 @@ where
 
     // Iterative loop
     for i in 1..=config.max_iterations {
-        // Run PnR with current constraints
+        // Run PnR with current constraints — routing is always fresh from placement
         let wire_delays = run_pnr(netlist, &last_constraints);
 
         // Post-PnR STA with actual delays
@@ -361,7 +408,7 @@ where
             };
         }
 
-        // 3. Skew stopped improving
+        // 3. Skew stopped improving (only check after first post-PnR iteration)
         let improvement = prev_max_skew - current_skew;
         if improvement.abs() < config.convergence_threshold_ps && i > 1 {
             return TimingClosureResult {
@@ -410,7 +457,6 @@ pub fn wire_delays_from_route_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::async_sta::{AsyncStaConfig, AsyncStaResult, AsyncStaStats, ForkViolation};
 
     fn make_ncl_netlist() -> GateNetlist {
         let mut netlist = GateNetlist::new("test_ncl".to_string(), "test_lib".to_string());
@@ -427,6 +473,9 @@ mod tests {
         assert_eq!(result.iteration, 0);
         assert!(!result.used_actual_delays);
         assert_eq!(result.violation_count, 0);
+        assert_eq!(result.action, ClosureAction::InitialConstraints);
+        // No buffers should be inserted in pre-PnR
+        assert!(result.fix_result.is_none());
     }
 
     #[test]
@@ -440,6 +489,7 @@ mod tests {
         assert!(result.converged);
         assert_eq!(result.reason, ConvergenceReason::AllForksClean);
         assert_eq!(result.iterations_performed, 1); // Only pre-PnR needed
+        assert_eq!(result.total_buffers_inserted, 0);
     }
 
     #[test]
@@ -461,7 +511,7 @@ mod tests {
             iterations_performed: 2,
             history: vec![],
             final_constraints: NclRoutingConstraints::default(),
-            total_buffers_inserted: 3,
+            total_buffers_inserted: 0,
             final_max_skew_ps: 12.5,
             reason: ConvergenceReason::OnlyWarningsRemain,
         };
@@ -470,5 +520,24 @@ mod tests {
         assert!(summary.contains("Converged: true"));
         assert!(summary.contains("Iterations: 2"));
         assert!(summary.contains("12.5ps"));
+        assert!(summary.contains("LUT buffers inserted: 0"));
+    }
+
+    #[test]
+    fn test_constraint_only_iterations_config() {
+        let config = TimingClosureConfig::default();
+        // Default: 2 constraint-only iterations before allowing buffers
+        assert_eq!(config.constraint_only_iterations, 2);
+        assert_eq!(config.max_iterations, 4);
+        // So: iter 0 = pre-PnR (constraints), iter 1-2 = post-PnR (constraints only),
+        // iter 3-4 = post-PnR (constraints + buffers if needed)
+    }
+
+    #[test]
+    fn test_closure_action_progression() {
+        // Verify the action types are what we expect
+        assert_eq!(ClosureAction::InitialConstraints, ClosureAction::InitialConstraints);
+        assert_ne!(ClosureAction::InitialConstraints, ClosureAction::TightenedConstraints);
+        assert_ne!(ClosureAction::TightenedConstraints, ClosureAction::InsertedBuffers);
     }
 }
