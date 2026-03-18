@@ -83,6 +83,54 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![!a]
         }
 
+        PrimitiveType::AndNot => {
+            // a & ~b
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            vec![a & !b]
+        }
+
+        PrimitiveType::OrNot => {
+            // a | ~b
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            vec![a | !b]
+        }
+
+        PrimitiveType::Aoi21 => {
+            // ~((a & b) | c)
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            let c = inputs.get(2).copied().unwrap_or(false);
+            vec![!((a & b) | c)]
+        }
+
+        PrimitiveType::Aoi22 => {
+            // ~((a & b) | (c & d))
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            let c = inputs.get(2).copied().unwrap_or(false);
+            let d = inputs.get(3).copied().unwrap_or(false);
+            vec![!((a & b) | (c & d))]
+        }
+
+        PrimitiveType::Oai21 => {
+            // ~((a | b) & c)
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            let c = inputs.get(2).copied().unwrap_or(false);
+            vec![!((a | b) & c)]
+        }
+
+        PrimitiveType::Oai22 => {
+            // ~((a | b) & (c | d))
+            let a = inputs.first().copied().unwrap_or(false);
+            let b = inputs.get(1).copied().unwrap_or(false);
+            let c = inputs.get(2).copied().unwrap_or(false);
+            let d = inputs.get(3).copied().unwrap_or(false);
+            vec![!((a | b) & (c | d))]
+        }
+
         PrimitiveType::Buf => {
             let a = inputs.first().copied().unwrap_or(false);
             vec![a]

@@ -101,11 +101,13 @@ pub enum Token {
     #[token("inactive")]
     Inactive,
 
-    // Control Flow (4)
+    // Control Flow (5)
     #[token("match")]
     Match,
     #[token("for")]
     For,
+    #[token("while")]
+    While,
     #[token("generate")]
     Generate,
     #[token("step")]

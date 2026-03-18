@@ -772,6 +772,17 @@ impl Rewrite {
 
             if let Some(candidate) = best_candidate {
                 if let Some(new_lit) = self.apply_rewrite(aig, &candidate) {
+                    // Verify truth tables match before committing this rewrite.
+                    // The cut truth table was computed during enumeration, but
+                    // intermediate rewrites may have changed the AIG structure
+                    // (new AND nodes added by prior apply_rewrite calls).
+                    if new_lit.node != node_id {
+                        let old_tt = compute_truth_table_for_node(aig, node_id, &candidate.cut.leaves);
+                        let new_tt = compute_truth_table_for_lit(aig, new_lit, &candidate.cut.leaves);
+                        if old_tt != new_tt {
+                            continue; // Truth tables diverged — skip this rewrite
+                        }
+                    }
                     subst_map.insert(node_id, new_lit);
                     self.rewritten_count += 1;
                     self.total_gain += candidate.gain;

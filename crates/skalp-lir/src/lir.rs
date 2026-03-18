@@ -64,6 +64,18 @@ pub enum PrimitiveType {
         /// Enable is active high if true
         enable_active_high: bool,
     },
+    /// AND-NOT gate (inputs: [a, b], output: a & ~b)
+    AndNot,
+    /// OR-NOT gate (inputs: [a, b], output: a | ~b)
+    OrNot,
+    /// AND-OR-Invert 2-1 (inputs: [a, b, c], output: ~((a & b) | c))
+    Aoi21,
+    /// AND-OR-Invert 2-2 (inputs: [a, b, c, d], output: ~((a & b) | (c & d)))
+    Aoi22,
+    /// OR-AND-Invert 2-1 (inputs: [a, b, c], output: ~((a | b) & c))
+    Oai21,
+    /// OR-AND-Invert 2-2 (inputs: [a, b, c, d], output: ~((a | b) & (c | d)))
+    Oai22,
     /// 2:1 Multiplexer (inputs: [sel, d0, d1], output: sel ? d1 : d0)
     Mux2,
     /// 4:1 Multiplexer (inputs: [sel0, sel1, d0, d1, d2, d3])
@@ -299,6 +311,10 @@ impl PrimitiveType {
             PrimitiveType::Nor { inputs } => *inputs,
             PrimitiveType::Xor => 2,
             PrimitiveType::Xnor => 2,
+            PrimitiveType::AndNot => 2,
+            PrimitiveType::OrNot => 2,
+            PrimitiveType::Aoi21 | PrimitiveType::Oai21 => 3,
+            PrimitiveType::Aoi22 | PrimitiveType::Oai22 => 4,
             PrimitiveType::Inv => 1,
             PrimitiveType::Buf => 1,
             PrimitiveType::Tribuf { .. } => 2,
@@ -391,6 +407,9 @@ impl PrimitiveType {
             | PrimitiveType::Nand { .. }
             | PrimitiveType::Nor { .. } => 0.1,
             PrimitiveType::Xor | PrimitiveType::Xnor => 0.15,
+            PrimitiveType::AndNot | PrimitiveType::OrNot => 0.12,
+            PrimitiveType::Aoi21 | PrimitiveType::Oai21 => 0.2,
+            PrimitiveType::Aoi22 | PrimitiveType::Oai22 => 0.25,
             PrimitiveType::Inv | PrimitiveType::Buf => 0.05,
             PrimitiveType::Tribuf { .. } => 0.2,
             PrimitiveType::Mux2 => 0.2,
@@ -463,6 +482,12 @@ impl PrimitiveType {
             PrimitiveType::Nor { .. } => "NOR",
             PrimitiveType::Xor => "XOR",
             PrimitiveType::Xnor => "XNOR",
+            PrimitiveType::AndNot => "ANDNOT",
+            PrimitiveType::OrNot => "ORNOT",
+            PrimitiveType::Aoi21 => "AOI21",
+            PrimitiveType::Aoi22 => "AOI22",
+            PrimitiveType::Oai21 => "OAI21",
+            PrimitiveType::Oai22 => "OAI22",
             PrimitiveType::Inv => "INV",
             PrimitiveType::Buf => "BUF",
             PrimitiveType::Tribuf { .. } => "TRIBUF",

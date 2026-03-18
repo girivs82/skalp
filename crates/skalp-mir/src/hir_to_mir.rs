@@ -931,6 +931,7 @@ impl<'hir> HirToMir<'hir> {
 
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
+                        let pre_id = self.next_signal_id;
                         let signal_type = self.convert_type(&hir_signal.signal_type);
                         let initial = hir_signal
                             .initial_value
@@ -976,7 +977,6 @@ impl<'hir> HirToMir<'hir> {
                             hir_signal.span.clone(),
                             is_memory,
                         );
-
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
                         // Even single-field structs need mapping because field name != signal name
                         // (e.g., signal "data: SimpleData" → flattened signal "data_value")
@@ -1897,6 +1897,23 @@ impl<'hir> HirToMir<'hir> {
                                 // convert_statement handles entity instantiation detection internally
                                 // and pushes to pending_entity_instances if it's an entity struct literal
                                 let _ = self.convert_statement(stmt);
+                            }
+                            hir::HirStatement::While(_) | hir::HirStatement::If(_) => {
+                                // While/If in impl blocks are combinational logic.
+                                // While loops get unrolled at compile time, then the
+                                // resulting statements form a combinational process.
+                                if let Some(mir_stmt) = self.convert_statement(stmt) {
+                                    let proc_id = self.next_process_id();
+                                    module.processes.push(Process {
+                                        id: proc_id,
+                                        kind: ProcessKind::Combinational,
+                                        sensitivity: SensitivityList::Always,
+                                        body: Block {
+                                            statements: vec![mir_stmt],
+                                        },
+                                        span: None,
+                                    });
+                                }
                             }
                             _ => {} // Ignore other statement types (handled elsewhere or not applicable)
                         }
@@ -3522,8 +3539,13 @@ impl<'hir> HirToMir<'hir> {
             "[CONVERT_ASSIGNMENT] Converting assignment: lhs={:?}",
             assign.lhs
         );
+        trace!(
+            "[CONVERT_ASSIGNMENT] Converting assignment: lhs={:?}",
+            assign.lhs
+        );
         let lhs = match self.convert_lvalue(&assign.lhs) {
             Some(l) => {
+                trace!("[CONVERT_ASSIGNMENT] ✓ convert_lvalue succeeded");
                 trace!("[CONVERT_ASSIGNMENT] ✓ convert_lvalue succeeded");
                 l
             }
@@ -3540,6 +3562,7 @@ impl<'hir> HirToMir<'hir> {
         );
         let rhs = match self.convert_expression(&assign.rhs, 0) {
             Some(r) => {
+                trace!("[CONVERT_ASSIGNMENT] ✓ convert_expression succeeded");
                 trace!("[CONVERT_ASSIGNMENT] ✓ convert_expression succeeded");
                 r
             }
@@ -7277,6 +7300,7 @@ impl<'hir> HirToMir<'hir> {
                     let base = result_stack.pop().flatten();
                     if let (Some(base), Some(high), Some(low)) = (base, high, low) {
                         if let ExpressionKind::Ref(lvalue) = base.kind {
+                            // Base is an LValue — create a RangeSelect reference
                             result_stack.push(Some(Expression::with_unknown_type(
                                 ExpressionKind::Ref(LValue::RangeSelect {
                                     base: Box::new(lvalue),
@@ -7285,7 +7309,58 @@ impl<'hir> HirToMir<'hir> {
                                 }),
                             )));
                         } else {
-                            result_stack.push(None);
+                            // BUG FIX: Base is not an LValue (e.g., a literal after while
+                            // loop unrolling where `m[6:0]` becomes `Literal(42)[6:0]`).
+                            // Try constant evaluation, otherwise use shift/mask.
+                            let base_const = match &base.kind {
+                                ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                _ => None,
+                            };
+                            let high_const = match &high.kind {
+                                ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                _ => None,
+                            };
+                            let low_const = match &low.kind {
+                                ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                _ => None,
+                            };
+
+                            if let (Some(base_val), Some(high_val), Some(low_val)) = (base_const, high_const, low_const) {
+                                // All constants — evaluate at compile time
+                                let width = (high_val - low_val + 1) as usize;
+                                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                let result = (base_val >> low_val) & mask;
+                                result_stack.push(Some(Expression::with_unknown_type(
+                                    ExpressionKind::Literal(Value::BitVector { width, value: result }),
+                                )));
+                            } else {
+                                // Dynamic base — use shift/mask: (base >> low) & mask
+                                let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                                    op: BinaryOp::RightShift,
+                                    left: Box::new(base),
+                                    right: Box::new(low.clone()),
+                                });
+                                if let (Some(h), Some(l)) = (high_const, low_const) {
+                                    let width = (h - l + 1) as usize;
+                                    let mask_val = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                    let mask = Expression::with_unknown_type(
+                                        ExpressionKind::Literal(Value::BitVector { width, value: mask_val }),
+                                    );
+                                    result_stack.push(Some(Expression::with_unknown_type(
+                                        ExpressionKind::Binary {
+                                            op: BinaryOp::And,
+                                            left: Box::new(shifted),
+                                            right: Box::new(mask),
+                                        },
+                                    )));
+                                } else {
+                                    // Fully dynamic — can't compute mask statically
+                                    result_stack.push(None);
+                                }
+                            }
                         }
                     } else {
                         result_stack.push(None);

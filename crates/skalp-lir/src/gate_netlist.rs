@@ -901,6 +901,26 @@ impl GateNetlist {
         removed_count
     }
 
+    /// Ensure `is_output` flags on individual nets are consistent with `self.outputs`.
+    ///
+    /// Post-processing passes (buffer elimination, LUT merging, DCE) update
+    /// `self.outputs` when rewiring nets but may forget to transfer the
+    /// `is_output` flag.  This method clears stale flags and sets the correct
+    /// ones, preventing orphan output nets that confuse gate-level simulation
+    /// and equivalence checking.
+    pub fn sync_output_flags(&mut self) {
+        // Clear all is_output flags
+        for net in &mut self.nets {
+            net.is_output = false;
+        }
+        // Set is_output on nets that are actually in self.outputs
+        for &out_id in &self.outputs {
+            if let Some(net) = self.nets.get_mut(out_id.0 as usize) {
+                net.is_output = true;
+            }
+        }
+    }
+
     /// Update statistics
     pub fn update_stats(&mut self) {
         self.stats = GateNetlistStats::from_netlist(self);

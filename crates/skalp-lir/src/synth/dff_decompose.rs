@@ -15,7 +15,7 @@
 //!   `F = S ? 1 : (R ? 0 : (E ? D : Q))`
 
 use super::aig::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Result of decomposing a latch's data function.
 #[derive(Debug, Clone)]
@@ -115,6 +115,23 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
             data_after_reset
         };
 
+        // Verify decomposition by simulation before accepting it.
+        // Build the reconstructed function and check it matches the original.
+        let decomp_ok = if let Some(e_lit) = enable {
+            // Reconstructed: F_recon = mux(E, D_new, Q)
+            let f_recon = build_mux(aig, e_lit, new_data, q_lit);
+            verify_equivalence(aig, *data_lit, f_recon, *latch_id)
+        } else if sync_reset.is_some() {
+            // Reset-only decomposition: verify data_after_reset with reset=0
+            true // Reset peeling is straightforward, trust it
+        } else {
+            true
+        };
+
+        if !decomp_ok {
+            continue; // Decomposition incorrect, skip this latch
+        }
+
         results.insert(
             *latch_id,
             LatchDecomp {
@@ -127,6 +144,81 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
     }
 
     results
+}
+
+/// Verify that two AIG literals are functionally equivalent using random simulation.
+/// Checks 256 random input patterns (4 rounds of 64-bit parallel sim).
+fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_id: AigNodeId) -> bool {
+    // Collect all input nodes (PIs and latches) in the transitive fanin of both functions
+    let mut inputs = HashSet::new();
+    collect_inputs(aig, original.node, &mut inputs, &mut HashSet::new());
+    collect_inputs(aig, reconstructed.node, &mut inputs, &mut HashSet::new());
+    let inputs: Vec<AigNodeId> = inputs.into_iter().collect();
+
+    // Use a simple PRNG (xorshift64) for reproducibility
+    let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64 ^ (latch_id.0 as u64);
+
+    for _round in 0..4 {
+        // Assign random 64-bit values to each input (64 patterns in parallel)
+        let mut values: HashMap<AigNodeId, u64> = HashMap::new();
+        values.insert(AigNodeId::FALSE, 0); // Constant false = all zeros
+        for &input in &inputs {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            values.insert(input, rng_state);
+        }
+
+        let orig_val = eval_lit(aig, original, &mut values);
+        let recon_val = eval_lit(aig, reconstructed, &mut values);
+
+        if orig_val != recon_val {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Collect all primary input and latch nodes in the transitive fanin of a node.
+fn collect_inputs(aig: &Aig, node: AigNodeId, inputs: &mut HashSet<AigNodeId>, visited: &mut HashSet<AigNodeId>) {
+    if node == AigNodeId::FALSE || !visited.insert(node) {
+        return;
+    }
+    match aig.get_node(node) {
+        Some(AigNode::And { left, right }) => {
+            collect_inputs(aig, left.node, inputs, visited);
+            collect_inputs(aig, right.node, inputs, visited);
+        }
+        _ => {
+            // Input, Latch, or Barrier — treat as primary input for simulation
+            inputs.insert(node);
+        }
+    }
+}
+
+/// Evaluate an AIG literal using 64-bit parallel simulation.
+fn eval_lit(aig: &Aig, lit: AigLit, values: &mut HashMap<AigNodeId, u64>) -> u64 {
+    let val = eval_node(aig, lit.node, values);
+    if lit.inverted { !val } else { val }
+}
+
+fn eval_node(aig: &Aig, node: AigNodeId, values: &mut HashMap<AigNodeId, u64>) -> u64 {
+    if let Some(&val) = values.get(&node) {
+        return val;
+    }
+    let val = match aig.get_node(node) {
+        Some(AigNode::And { left, right }) => {
+            let left = *left;
+            let right = *right;
+            let l = eval_lit(aig, left, values);
+            let r = eval_lit(aig, right, values);
+            l & r
+        }
+        _ => 0, // Unknown node, treat as 0
+    };
+    values.insert(node, val);
+    val
 }
 
 /// Check if `target` is in the transitive fanin of `node`.

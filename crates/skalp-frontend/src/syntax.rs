@@ -59,9 +59,10 @@ pub enum SyntaxKind {
     ActiveKw,
     InactiveKw,
 
-    // Control Flow (4)
+    // Control Flow (5)
     MatchKw,
     ForKw,
+    WhileKw,
     GenerateKw,
     StepKw,
 
@@ -353,6 +354,7 @@ pub enum SyntaxKind {
     IfStmt,
     MatchStmt,
     ForStmt,
+    WhileStmt,
     BlockStmt,
     LetStmt,
     FlowStmt,
@@ -965,9 +967,10 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Active => ActiveKw,
             Token::Inactive => InactiveKw,
 
-            // Control Flow (4)
+            // Control Flow (5)
             Token::Match => MatchKw,
             Token::For => ForKw,
+            Token::While => WhileKw,
             Token::Generate => GenerateKw,
             Token::Step => StepKw,
 

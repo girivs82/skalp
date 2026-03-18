@@ -478,6 +478,8 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
+                Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 // with intent::name { ... } block statement
@@ -959,6 +961,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 // Support signal declarations in function bodies for entity instantiation
@@ -1419,6 +1422,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(), // Nested for loops
+                Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
@@ -1481,6 +1485,44 @@ impl<'a> ParseState<'a> {
                 _ => {
                     self.error("unexpected token in for loop body");
                     self.bump(); // Consume the unexpected token to avoid infinite loop
+                }
+            }
+        }
+
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse while statement: while condition { body }
+    /// Desugars to the same tree shape as ForStmt (WhileStmt node with condition + body)
+    fn parse_while_stmt(&mut self) {
+        self.start_node(SyntaxKind::WhileStmt);
+
+        self.expect(SyntaxKind::WhileKw);
+
+        // Parse condition expression (everything before the opening brace)
+        self.parse_expression();
+
+        // Parse body
+        self.expect(SyntaxKind::LBrace);
+
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            self.skip_trivia();
+            if self.at(SyntaxKind::RBrace) {
+                break;
+            }
+
+            match self.current_kind() {
+                Some(SyntaxKind::IfKw) => self.parse_if_statement(),
+                Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
+                Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
+                Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
+                Some(SyntaxKind::ReturnKw) => self.parse_return_statement(),
+                Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
+                _ => {
+                    self.error("unexpected token in while loop body");
+                    self.bump();
                 }
             }
         }
@@ -1714,6 +1756,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::OnKw) => self.parse_event_block(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
+                Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(), // Nested generate
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
@@ -4942,6 +4985,7 @@ impl<'a> ParseState<'a> {
                             | SyntaxKind::ElseKw
                             | SyntaxKind::ReturnKw
                             | SyntaxKind::ForKw
+                            | SyntaxKind::WhileKw
                     ) =>
             {
                 self.parse_identifier_expression();

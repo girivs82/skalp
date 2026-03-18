@@ -1521,6 +1521,16 @@ impl HirBuilderContext {
                         &mut statements,
                     );
                 }
+                SyntaxKind::WhileStmt => {
+                    if let Some(while_stmt) = self.build_while_statement(&child) {
+                        statements.push(HirStatement::While(while_stmt));
+                    }
+                }
+                SyntaxKind::IfStmt => {
+                    if let Some(if_stmt) = self.build_if_statement(&child) {
+                        statements.push(HirStatement::If(if_stmt));
+                    }
+                }
                 _ => {}
             }
         }
@@ -3710,7 +3720,7 @@ impl HirBuilderContext {
         // Track where RHS starts (will be updated by LHS parsing)
         let mut rhs_start_idx = 1;
 
-        let lhs = if exprs.len() == 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
+        let lhs = if exprs.len() >= 3 && exprs[1].kind() == SyntaxKind::IndexExpr {
             // Combine base and index/range to form indexed lvalue
             rhs_start_idx = 2; // RHS starts after IndexExpr
 
@@ -3907,7 +3917,7 @@ impl HirBuilderContext {
         } else {
             // For 4+ expressions, we have a chain like: LHS = BASE FIELD BINARY or LHS = BASE INDEX FIELD BINARY
             // Build the RHS by chaining the expressions left-to-right
-            self.build_chained_rhs_expression(&exprs[1..])?
+            self.build_chained_rhs_expression(&exprs[rhs_start_idx..])?
         };
 
         Some(HirAssignment {

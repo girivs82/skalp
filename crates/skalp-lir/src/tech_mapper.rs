@@ -7903,6 +7903,10 @@ pub fn synthesize(
     // Preserve NCL flag
     result.netlist.is_ncl = lir.is_ncl;
 
+    // Sync is_output flags with netlist.outputs — post-processing passes may
+    // have moved output references without updating the per-net flag.
+    result.netlist.sync_output_flags();
+
     result
 }
 

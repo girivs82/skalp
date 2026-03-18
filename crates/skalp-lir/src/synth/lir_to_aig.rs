@@ -51,6 +51,17 @@ impl<'a> LirToSynthAig<'a> {
 
     /// Build the AIG from LIR
     pub fn build(mut self) -> LirToAigResult {
+        // Debug: dump all signals
+        for (idx, sig) in self.lir.signals.iter().enumerate() {
+            if sig.width > 1 || !sig.name.is_empty() {
+                eprintln!("[LIR_DEBUG] signal[{}]: name='{}' width={}", idx, sig.name, sig.width);
+            }
+        }
+        // Debug: dump all nodes
+        for (idx, node) in self.lir.nodes.iter().enumerate() {
+            eprintln!("[LIR_DEBUG] node[{}]: op={:?} output=signal_{} inputs={:?}", idx, std::mem::discriminant(&node.op), node.output.0, node.inputs.iter().map(|i| i.0).collect::<Vec<_>>());
+        }
+
         // Phase 1: Find register and physical nodes
         let mut register_indices: Vec<usize> = Vec::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
@@ -114,6 +125,13 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
+        // Collect register output signals so we can skip combinational nodes
+        // that would overwrite latch outputs (e.g., initial-value Buffers).
+        let register_outputs: HashSet<u32> = register_indices
+            .iter()
+            .map(|&idx| self.lir.nodes[idx].output.0)
+            .collect();
+
         // Phase 4: Topologically sort and process combinational nodes
         let sorted = self.topological_sort();
         for idx in sorted {
@@ -123,6 +141,12 @@ impl<'a> LirToSynthAig<'a> {
             }
             if self.is_physical_op(&node.op) {
                 continue; // Handled by physical partition
+            }
+            // Skip combinational nodes that output to a register signal —
+            // these are initial-value assignments (e.g., Buffer of constant)
+            // that would overwrite the latch output created in Phase 3.
+            if register_outputs.contains(&node.output.0) {
+                continue;
             }
             self.convert_node(node);
         }
@@ -256,9 +280,12 @@ impl<'a> LirToSynthAig<'a> {
             .get(&(signal_id.0, bit))
             .copied()
             .unwrap_or_else(|| {
+                let sig_name = self.lir.signals.get(signal_id.0 as usize)
+                    .map(|s| s.name.as_str()).unwrap_or("???");
                 eprintln!(
-                    "[LIR_SYNTH_AIG] Missing signal lookup: signal_id={}, bit={}",
-                    signal_id.0, bit
+                    "[LIR_SYNTH_AIG] Missing signal lookup: signal_id={} ({}), bit={}, signal_width={}",
+                    signal_id.0, sig_name, bit,
+                    self.lir.signals.get(signal_id.0 as usize).map(|s| s.width).unwrap_or(0)
                 );
                 AigLit::false_lit()
             })

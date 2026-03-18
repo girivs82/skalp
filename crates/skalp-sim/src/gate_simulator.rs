@@ -751,13 +751,15 @@ impl GateLevelSimulator {
                 // Gather input values
                 let input_values: Vec<bool> = inputs
                     .iter()
-                    .filter_map(|sig_id| {
+                    .map(|sig_id| {
                         self.state
                             .signals
                             .get(&sig_id.0)
                             .and_then(|v: &Vec<bool>| v.first().copied())
+                            .unwrap_or(false)
                     })
                     .collect();
+
 
                 // Evaluate primitive with potential fault injection
                 let output_values = if let Some(fault) = &self.active_fault {

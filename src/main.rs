@@ -2915,6 +2915,21 @@ fn run_equivalence_check(
             if let Some(ref output) = sim_result.mismatch_output {
                 println!("     Output: {}", output);
             }
+            if let (Some(v1), Some(v2)) = (sim_result.value_1, sim_result.value_2) {
+                println!("     MIR value: {} (0x{:x})", v1, v1);
+                println!("     Gate value: {} (0x{:x})", v2, v2);
+            }
+            if let Some(ref diag) = sim_result.diagnostics {
+                for entry in &diag.cycle_trace {
+                    println!("     --- Cycle {} ({}) ---", entry.cycle, entry.phase);
+                    for (name, val) in &entry.inputs {
+                        println!("       input {}: {} (0x{:x})", name, val, val);
+                    }
+                    for (user, internal, mir_v, gate_v, m) in &entry.signals {
+                        println!("       {} ({}): mir={:?} gate={:?} match={}", user, internal, mir_v, gate_v, m);
+                    }
+                }
+            }
             sim_found_bug = true;
             overall_pass = false;
         }

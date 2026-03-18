@@ -213,15 +213,19 @@ impl<'a> SharedCodegen<'a> {
             SirNodeKind::FlipFlop { .. } | SirNodeKind::Latch { .. } => get_input_width(1),
             SirNodeKind::Memory { width, .. } => *width,
             SirNodeKind::ArrayRead => {
-                // ArrayRead output is the ELEMENT width, not the total array width
-                // Get the array signal from input 0
+                // ArrayRead output is the ELEMENT width, not the total array width.
+                // Two cases:
+                //   1. Source is an Array type → element width
+                //   2. Source is a wide Bits type (dynamic bit-slice) → 32 (one storage word)
                 if !node.inputs.is_empty() {
                     let array_signal = &node.inputs[0].signal_id;
-                    // Check if this is an array state element
+                    // Check if this is an array state element (direct)
                     if let Some(state_elem) = self.module.state_elements.get(array_signal) {
                         if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
                             return elem_type.width();
                         }
+                        // Not an Array — dynamic bit-slice on a wide register
+                        return 32;
                     }
                     // Check if the signal comes from a SignalRef to an array state element
                     for comb_node in &self.module.combinational_nodes {
@@ -236,13 +240,25 @@ impl<'a> SharedCodegen<'a> {
                                     {
                                         return elem_type.width();
                                     }
+                                    // Not an Array — dynamic bit-slice on a wide register
+                                    return 32;
                                 }
                             }
                         }
                     }
+                    // Also check SIR signals (non-state elements)
+                    for sir_signal in &self.module.signals {
+                        if sir_signal.name == *array_signal {
+                            if let SirType::Array(elem_type, _) = &sir_signal.sir_type {
+                                return elem_type.width();
+                            }
+                            // Non-array signal — dynamic bit-slice
+                            return 32;
+                        }
+                    }
                 }
-                // Fallback to input width (may be incorrect for arrays)
-                get_input_width(0)
+                // Final fallback: assume single storage word
+                32
             }
             SirNodeKind::ArrayWrite => get_input_width(0),
             SirNodeKind::ClockGate | SirNodeKind::Reset => 1,
@@ -553,6 +569,16 @@ impl<'a> SharedCodegen<'a> {
 
     /// Check if a signal is used as the array source (first input) for any ArrayRead node
     fn is_array_read_source(&self, signal: &str) -> bool {
+        // Narrow signals (width <= 32) are scalar — dynamic bit extraction uses
+        // shift+mask, not array subscript, so they are NOT array sources.
+        let width = self
+            .signal_width_cache
+            .get(signal)
+            .copied()
+            .unwrap_or_else(|| self.type_mapper.get_signal_width(self.module, signal));
+        if width <= 32 {
+            return false;
+        }
         for node in &self.module.combinational_nodes {
             if matches!(node.kind, SirNodeKind::ArrayRead)
                 && !node.inputs.is_empty()
@@ -735,7 +761,20 @@ impl<'a> SharedCodegen<'a> {
                 if !self.module.state_elements.contains_key(array_signal)
                     && !input_names.contains(array_signal)
                 {
-                    array_source_signals.insert(array_signal.clone());
+                    // Only force array type if the source needs array storage (width > 32).
+                    // Narrow signals (width <= 32) are scalars; dynamic bit extraction on them
+                    // uses shift+mask, not array subscript.
+                    let source_width = self
+                        .signal_width_cache
+                        .get(array_signal)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.type_mapper
+                                .get_signal_width(self.module, array_signal)
+                        });
+                    if source_width > 32 {
+                        array_source_signals.insert(array_signal.clone());
+                    }
                 }
             }
         }
@@ -3122,6 +3161,11 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Generate array read operation
+    ///
+    /// Handles three cases depending on the source type:
+    /// 1. True array ([T; N]): element access → result is T
+    /// 2. Wide scalar (bit[N], N>32): word extraction → result is uint32_t
+    /// 3. Narrow scalar (bit[N], N<=32): bit extraction → result is (source >> idx) & 1
     pub fn generate_array_read(&mut self, node: &SirNode) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
             return;
@@ -3130,6 +3174,24 @@ impl<'a> SharedCodegen<'a> {
         let array_signal = &node.inputs[0].signal_id;
         let index_signal = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
+
+        // Check if the source is a narrow scalar (bit extraction, not array access)
+        let source_width = self.get_signal_width(array_signal);
+        if source_width <= 32 && !self.uses_array_storage(source_width) {
+            // Bit extraction from a scalar: (source >> index) & 1
+            let source_loc = if self.module.state_elements.contains_key(array_signal) {
+                self.get_register_accessor(array_signal)
+            } else {
+                format!("signals->{}", self.sanitize_name(array_signal))
+            };
+            self.write_indented(&format!(
+                "signals->{} = ({} >> signals->{}) & 1;\n",
+                self.sanitize_name(output),
+                source_loc,
+                self.sanitize_name(index_signal)
+            ));
+            return;
+        }
 
         let output_width = self.get_signal_width(output);
         let (_, output_array_size) = self.type_mapper.get_type_for_width(output_width);

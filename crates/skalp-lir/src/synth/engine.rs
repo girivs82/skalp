@@ -422,7 +422,10 @@ impl SynthEngine {
 
         // FPGA post-mapping optimizations
         if library.is_fpga() {
-            super::aig_writer::push_inverters_into_producing_luts(&mut optimized);
+            // push_inverters is disabled: it has a correctness bug where flipping
+            // a LUT's truth table breaks downstream simulation (tracked separately).
+            // absorb_inverters_into_luts handles the INV absorption safely instead.
+            // super::aig_writer::push_inverters_into_producing_luts(&mut optimized);
             super::aig_writer::absorb_inverters_into_luts(&mut optimized);
             super::aig_writer::merge_adjacent_luts(&mut optimized);
             optimized.remove_dead_cells();

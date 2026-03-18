@@ -2613,8 +2613,7 @@ impl MirToLirTransform {
 
                     if then_has_target || else_has_target {
                         // Synthesize the conditional assignment as a mux
-                        let cond_width = self.infer_expression_width(&if_stmt.condition);
-                        let cond_signal = self.transform_expression(&if_stmt.condition, cond_width);
+                        let cond_signal = self.transform_expression(&if_stmt.condition, 1);
 
                         // Get then value (recursively handle nested conditionals)
                         let then_signal = if then_has_target {
@@ -3110,41 +3109,45 @@ impl MirToLirTransform {
                 )
             }
 
-            // Bitwise logic - use inferred operand width
+            // Bitwise logic - use expected_width when wider than operands
+            // (e.g., enum constructor `tag | (payload << tag_bits)` may need wider result)
             BinaryOp::And | BinaryOp::BitwiseAnd | BinaryOp::LogicalAnd => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
+                let bitwise_width = expected_width.max(operand_width);
+                let left_sig = self.transform_expression(left, bitwise_width);
+                let right_sig = self.transform_expression(right, bitwise_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::And {
-                        width: operand_width,
+                        width: bitwise_width,
                     },
-                    operand_width,
+                    bitwise_width,
                 )
             }
             BinaryOp::Or | BinaryOp::BitwiseOr | BinaryOp::LogicalOr => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
+                let bitwise_width = expected_width.max(operand_width);
+                let left_sig = self.transform_expression(left, bitwise_width);
+                let right_sig = self.transform_expression(right, bitwise_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::Or {
-                        width: operand_width,
+                        width: bitwise_width,
                     },
-                    operand_width,
+                    bitwise_width,
                 )
             }
             BinaryOp::Xor | BinaryOp::BitwiseXor => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
+                let bitwise_width = expected_width.max(operand_width);
+                let left_sig = self.transform_expression(left, bitwise_width);
+                let right_sig = self.transform_expression(right, bitwise_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::Xor {
-                        width: operand_width,
+                        width: bitwise_width,
                     },
-                    operand_width,
+                    bitwise_width,
                 )
             }
 
@@ -3286,34 +3289,37 @@ impl MirToLirTransform {
                 (left_sig, right_sig, op, 1)
             }
 
-            // Shifts
+            // Shifts — propagate expected_width for the value operand (left),
+            // keep natural width for the shift amount (right)
             BinaryOp::LeftShift => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
+                let shift_width = expected_width.max(operand_width);
+                let left_sig = self.transform_expression(left, shift_width);
+                let right_sig = self.transform_expression(right, shift_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::Shl {
-                        width: operand_width,
+                        width: shift_width,
                     },
-                    operand_width,
+                    shift_width,
                 )
             }
             BinaryOp::RightShift => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
+                let shift_width = expected_width.max(operand_width);
+                let left_sig = self.transform_expression(left, shift_width);
+                let right_sig = self.transform_expression(right, shift_width);
                 // BUG FIX #247: Use arithmetic right shift (Sar) for signed operands
                 let is_signed = self.infer_expression_is_signed(left);
                 let op = if is_signed {
                     LirOp::Sar {
-                        width: operand_width,
+                        width: shift_width,
                     }
                 } else {
                     LirOp::Shr {
-                        width: operand_width,
+                        width: shift_width,
                     }
                 };
-                (left_sig, right_sig, op, operand_width)
+                (left_sig, right_sig, op, shift_width)
             }
 
             // BUG #245: Implement integer division

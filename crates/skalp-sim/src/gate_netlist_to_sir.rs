@@ -246,23 +246,43 @@ impl GateNetlistToSirConverter {
             // Buffer removal creates alias chains (output net -> input net).
             // Without alias resolution, cells point to undriven nets.
 
+            let expected_inputs = cell.inputs.len();
             let inputs: Vec<SirSignalId> = cell
                 .inputs
                 .iter()
                 .filter_map(|net_id| {
                     let resolved_id = netlist.resolve_alias(*net_id);
-                    self.net_to_signal.get(&resolved_id).copied()
+                    let result = self.net_to_signal.get(&resolved_id).copied();
+                    if result.is_none() {
+                        eprintln!("[WARN] Cell {} ({}): input net {:?} (resolved {:?}) not found in signal map",
+                            cell.path, cell.cell_type, net_id, resolved_id);
+                    }
+                    result
                 })
                 .collect();
+            if inputs.len() != expected_inputs {
+                eprintln!("[WARN] Cell {} ({}): expected {} inputs, got {} (dropped {})",
+                    cell.path, cell.cell_type, expected_inputs, inputs.len(), expected_inputs - inputs.len());
+            }
 
+            let expected_outputs = cell.outputs.len();
             let outputs: Vec<SirSignalId> = cell
                 .outputs
                 .iter()
                 .filter_map(|net_id| {
                     let resolved_id = netlist.resolve_alias(*net_id);
-                    self.net_to_signal.get(&resolved_id).copied()
+                    let result = self.net_to_signal.get(&resolved_id).copied();
+                    if result.is_none() {
+                        eprintln!("[WARN] Cell {} ({}): output net {:?} (resolved {:?}) not found in signal map",
+                            cell.path, cell.cell_type, net_id, resolved_id);
+                    }
+                    result
                 })
                 .collect();
+            if outputs.len() != expected_outputs {
+                eprintln!("[WARN] Cell {} ({}): expected {} outputs, got {} (dropped {})",
+                    cell.path, cell.cell_type, expected_outputs, outputs.len(), expected_outputs - outputs.len());
+            }
 
             let op = SirOperation::Primitive {
                 id: primitive_id,
@@ -415,12 +435,14 @@ impl GateNetlistToSirConverter {
             CellFunction::Xor2 => PrimitiveType::Xor,
             CellFunction::Xnor2 => PrimitiveType::Xnor,
             CellFunction::Buf => PrimitiveType::Buf,
-            CellFunction::AndNot => PrimitiveType::And { inputs: 2 }, // Approximation
-            CellFunction::OrNot => PrimitiveType::Or { inputs: 2 },   // Approximation
+            CellFunction::AndNot => PrimitiveType::AndNot,
+            CellFunction::OrNot => PrimitiveType::OrNot,
 
-            // Complex gates (approximations)
-            CellFunction::Aoi21 | CellFunction::Aoi22 => PrimitiveType::Nand { inputs: 2 },
-            CellFunction::Oai21 | CellFunction::Oai22 => PrimitiveType::Nor { inputs: 2 },
+            // Complex gates
+            CellFunction::Aoi21 => PrimitiveType::Aoi21,
+            CellFunction::Aoi22 => PrimitiveType::Aoi22,
+            CellFunction::Oai21 => PrimitiveType::Oai21,
+            CellFunction::Oai22 => PrimitiveType::Oai22,
 
             // Multiplexers
             CellFunction::Mux2 => PrimitiveType::Mux2,
@@ -672,11 +694,11 @@ impl GateNetlistToSirConverter {
             "MUX" | "MUX2" => PrimitiveType::Mux2,
             "MUX4" => PrimitiveType::Mux4,
 
-            // Complex gates - map to equivalent primitive gates
-            // AOI21 = ~(A & (B | C)) - map to NAND as approximation
-            "AOI21" | "AOI22" => PrimitiveType::Nand { inputs: 2 },
-            // OAI21 = ~(A | (B & C)) - map to NOR as approximation
-            "OAI21" | "OAI22" => PrimitiveType::Nor { inputs: 2 },
+            // Complex gates
+            "AOI21" => PrimitiveType::Aoi21,
+            "AOI22" => PrimitiveType::Aoi22,
+            "OAI21" => PrimitiveType::Oai21,
+            "OAI22" => PrimitiveType::Oai22,
 
             // Arithmetic
             "HA" | "HALFADDER" => PrimitiveType::HalfAdder,
@@ -794,6 +816,16 @@ impl GateNetlistToSirConverter {
 
         // If we didn't process all operations, there's a cycle
         if result.len() != n {
+            eprintln!("[TOPO SORT WARNING] Cycle detected! Only sorted {}/{} operations. Falling back to original order.", result.len(), n);
+            // Debug: show which operations have remaining in-degree
+            for (idx, &deg) in in_degree.iter().enumerate() {
+                if deg > 0 {
+                    if let SirOperation::Primitive { ptype, inputs, outputs, path, .. } = &ops[idx] {
+                        eprintln!("[TOPO SORT]   stuck op[{}]: {:?} path={} in_degree={} inputs={:?} outputs={:?}",
+                            idx, ptype, path, deg, inputs, outputs);
+                    }
+                }
+            }
             // Fall back to original order (shouldn't happen for well-formed combinational logic)
             return (0..n).collect();
         }
@@ -840,7 +872,6 @@ impl GateNetlistToSirConverter {
 
             // Compute topological order for correct evaluation
             let eval_order = Self::compute_topological_order(&comb_ops);
-
             let comb_block = CombinationalBlock {
                 id: CombBlockId(0),
                 inputs,

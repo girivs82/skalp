@@ -73,14 +73,10 @@ impl<'a> AigWriter<'a> {
                 }
             }
 
-            // Also mark AND nodes referenced by latch data inputs
+            // Also mark AND nodes in the transitive fanin of latch data inputs
             for (_id, node) in aig.iter_nodes() {
                 if let AigNode::Latch { data, .. } = node {
-                    if matches!(aig.get_node(data.node), Some(AigNode::And { .. }))
-                        && !mapping.mapped_nodes.contains_key(&data.node)
-                    {
-                        required_unmapped.insert(data.node);
-                    }
+                    mark_and_fanin_unmapped(aig, data.node, &mapping.mapped_nodes, &mut required_unmapped);
                 }
             }
 
@@ -93,6 +89,25 @@ impl<'a> AigWriter<'a> {
                     nodes.insert(node_id);
                     mark_and_fanin(aig, left.node, nodes);
                     mark_and_fanin(aig, right.node, nodes);
+                }
+            }
+            // Mark unmapped AND nodes in the transitive fanin, stopping at mapped nodes
+            fn mark_and_fanin_unmapped(
+                aig: &Aig,
+                node_id: AigNodeId,
+                mapped: &IndexMap<AigNodeId, MappedNode>,
+                nodes: &mut HashSet<AigNodeId>,
+            ) {
+                if nodes.contains(&node_id) || node_id == AigNodeId::FALSE {
+                    return;
+                }
+                if mapped.contains_key(&node_id) {
+                    return; // Mapped nodes get proper cells
+                }
+                if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
+                    nodes.insert(node_id);
+                    mark_and_fanin_unmapped(aig, left.node, mapped, nodes);
+                    mark_and_fanin_unmapped(aig, right.node, mapped, nodes);
                 }
             }
             for decomp in self.latch_decomps.values() {
@@ -140,7 +155,6 @@ impl<'a> AigWriter<'a> {
         // Phase 5: Create outputs
         state.create_outputs(aig);
 
-        // Debug: count cells by type before DCE
         // Phase 6: Remove dead cells (cells whose outputs have no fanout)
         // Iterate until fixed point — backward covering may leave chains of
         // unmapped intermediate cells that cascade when removed.
@@ -730,20 +744,22 @@ impl AigWriterState<'_> {
         }
 
         // Need to create an inverter (or the base net is missing)
-        let base_net = self.node_to_net.get(&lit.node).copied().unwrap_or_else(|| {
-            // Create a placeholder net — this node has no cell driving it
-            let node_info = aig.get_node(lit.node).map(|n| match n {
-                AigNode::Const => "Const",
-                AigNode::Input { .. } => "Input",
-                AigNode::And { .. } => "And",
-                AigNode::Latch { .. } => "Latch",
-                AigNode::Barrier { .. } => "Barrier",
-            }).unwrap_or("MISSING");
-            // Placeholder net for unmapped AIG node — happens when mapping
-            // doesn't cover all transitive fanin nodes
+        let base_net = if let Some(&net) = self.node_to_net.get(&lit.node) {
+            net
+        } else if let Some(AigNode::And { left, right }) = aig.get_node(lit.node).cloned() {
+            // AND node not yet processed — create an AND2 cell on-the-fly.
+            // This can happen when the topological sort or tech mapper misses
+            // AND nodes in the transitive fanin of latch data inputs.
+            self.process_and_node(aig, lit.node, left, right);
+            self.node_to_net.get(&lit.node).copied().unwrap_or_else(|| {
+                self.netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("n{}", lit.node.0)))
+            })
+        } else {
+            // Non-AND node without a net — create placeholder
             self.netlist
                 .add_net(GateNet::new(GateNetId(0), format!("n{}", lit.node.0)))
-        });
+        };
 
         if lit.inverted {
             // Create inverter
@@ -1667,6 +1683,12 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
                 .or_default()
                 .push((cell_idx, usize::MAX));
         }
+        if let Some(rst) = cell.reset {
+            net_consumers
+                .entry(rst)
+                .or_default()
+                .push((cell_idx, usize::MAX));
+        }
     }
 
     // Track output port nets
@@ -1758,12 +1780,11 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
     // Apply: flip LUT INITs, remove INV cells, complement LUT consumers' truth tables
     let mut total_removed = 0;
     for (producer_idx, flip_info) in &luts_to_flip {
+        let producer_output = netlist.cells[*producer_idx].outputs[0];
         // Flip the LUT's INIT
         if let Some(init) = netlist.cells[*producer_idx].lut_init {
             netlist.cells[*producer_idx].lut_init = Some(!init & 0xFFFF);
         }
-
-        let producer_output = netlist.cells[*producer_idx].outputs[0];
 
         // Complement non-INV LUT consumers' truth tables at the affected input
         // (they were consuming non-inverted; now the LUT produces inverted)
@@ -1791,10 +1812,26 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
                 }
             }
 
-            // Also rewire output ports
+            // Also rewire output ports, transferring is_output flag and name
+            let mut was_output = false;
             for out in &mut netlist.outputs {
                 if *out == inv_output_net {
                     *out = producer_output;
+                    was_output = true;
+                }
+            }
+            if was_output {
+                let output_name = netlist.nets.get(inv_output_net.0 as usize)
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default();
+                if let Some(old_net) = netlist.nets.get_mut(inv_output_net.0 as usize) {
+                    old_net.is_output = false;
+                }
+                if let Some(new_net) = netlist.nets.get_mut(producer_output.0 as usize) {
+                    new_net.is_output = true;
+                    if !output_name.is_empty() {
+                        new_net.name = output_name;
+                    }
                 }
             }
 
