@@ -4,7 +4,7 @@
 //! Word-level and gate-level representations for hardware designs. The compilation flow is:
 //!
 //! ```text
-//! HIR → MIR → Lir → TechMapper → GateNetlist → SIR (for simulation)
+//! HIR → MIR → Lir → synthesize() → GateNetlist → SIR (for simulation)
 //! ```
 //!
 //! Key types:
@@ -17,13 +17,13 @@
 //! # Example
 //!
 //! ```ignore
-//! use skalp_lir::{lower_mir_module_to_lir, map_lir_to_gates, get_stdlib_library};
+//! use skalp_lir::{lower_mir_module_to_lir, synthesize, get_stdlib_library, SynthPreset};
 //!
 //! let mir = compile_to_mir(source)?;
 //! let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
 //! let library = get_stdlib_library("generic_asic")?;
-//! let gate_netlist = map_lir_to_gates(&lir_result.lir, &library)?;
-//! println!("Cells: {}", gate_netlist.netlist.cells.len());
+//! let result = synthesize(&lir_result.lir, &library, SynthPreset::Balanced);
+//! println!("Cells: {}", result.netlist.cells.len());
 //! ```
 
 pub mod async_sta;
@@ -90,14 +90,10 @@ pub use tech_library::{
     PllPinMap, ProcessCorner, TechLibrary, TimingCorner,
 };
 
-// Technology mapper
+// Synthesis
 pub use tech_mapper::{
-    map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized,
-    map_lir_to_gates_with_constraints, map_lir_to_gates_with_constraints_optimized,
-    map_lir_to_gates_with_opt_level, map_word_lir_to_gates, synthesize, synthesize_balanced,
+    insert_clock_buffers, insert_io_buffers, synthesize, synthesize_balanced,
     synthesize_for_area, synthesize_for_timing, synthesize_hierarchical,
-    insert_clock_buffers, insert_io_buffers, TechMapResult,
-    TechMapStats, TechMapper,
 };
 
 // Structural pattern detection for safety mechanisms
