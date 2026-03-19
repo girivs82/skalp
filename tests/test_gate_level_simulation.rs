@@ -651,7 +651,7 @@ fn test_4bit_adder_functional() {
         }
     "#;
 
-    let mut sim = compile_and_simulate_with_debug(source, true);
+    let mut sim = compile_and_simulate(source);
 
     // Test cases: (a, b) -> expected sum (mod 16)
     let test_cases = [
@@ -758,7 +758,7 @@ fn test_comparator_functional() {
         }
     "#;
 
-    let mut sim = compile_and_simulate_with_debug(source, true);
+    let mut sim = compile_and_simulate(source);
 
     // Test cases: (a, b) -> (lt, eq, gt)
     let test_cases = [

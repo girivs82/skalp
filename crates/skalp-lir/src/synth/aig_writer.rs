@@ -612,7 +612,6 @@ impl AigWriterState<'_> {
         let cell = if let Some(func) = self.lookup_cell_function(&mapped.cell_type) {
             cell.with_function(func)
         } else {
-            eprintln!("WARN: no library cell function for '{}'", mapped.cell_type);
             cell
         };
 
