@@ -7775,7 +7775,33 @@ impl<'a> TechMapper<'a> {
     }
 }
 
+/// Convert a SynthResult into the legacy TechMapResult format.
+///
+/// This allows callers still using the old API to benefit from the new
+/// AIG-based synthesis engine without changing their call sites.
+fn synth_result_to_tech_map_result(result: crate::synth::SynthResult) -> TechMapResult {
+    let cells_created = result.netlist.cells.len();
+    let nets_created = result.netlist.nets.len();
+    TechMapResult {
+        netlist: result.netlist,
+        stats: TechMapStats {
+            nodes_processed: result.initial_and_count,
+            cells_created,
+            nets_created,
+            direct_mappings: 0,
+            decomposed_mappings: 0,
+            clock_buffers_inserted: 0,
+            io_buffers_inserted: 0,
+        },
+        warnings: vec![],
+    }
+}
+
 /// Map a Lir to GateNetlist using the given library
+///
+/// Still uses the old TechMapper for IO buffers, clock buffers, BRAM, and DSP features
+/// that aren't yet available in synthesize(). Production builds should use synthesize()
+/// directly for designs that don't need these features.
 pub fn map_lir_to_gates(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     let mut mapper = TechMapper::new(library);
     mapper.map(lir)
@@ -7829,26 +7855,24 @@ pub fn map_lir_to_gates_with_constraints_optimized(
 }
 
 /// Map a Lir to GateNetlist and run gate-level optimizations
+///
+/// Still uses the old TechMapper for IO buffers, clock buffers, BRAM, and DSP features.
 pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     use crate::gate_optimizer::GateOptimizer;
 
     let mut mapper = TechMapper::new(library);
     let mut result = mapper.map(lir);
 
-    // Run gate-level optimizations
     let mut optimizer = GateOptimizer::new();
     let opt_stats = optimizer.optimize(&mut result.netlist);
 
-    // LUT post-mapping optimization for FPGA targets
     if library.is_fpga() {
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
     }
 
-    // Update stats with optimization info
     result.stats.cells_created = result.netlist.cells.len();
     result.stats.nets_created = result.netlist.nets.len();
 
-    // Add optimization summary to warnings (as info)
     if opt_stats.cells_removed > 0 {
         result.warnings.push(format!(
             "Optimization: removed {} cells ({} → {}), FIT {} → {}",
@@ -7880,30 +7904,24 @@ pub fn map_lir_to_gates_with_opt_level(
     let mut result = mapper.map(lir);
 
     if opt_level == 0 {
-        // No optimization - return raw tech mapping output
         return result;
     }
 
-    // Run gate-level optimizations
     let mut optimizer = GateOptimizer::new();
 
     if opt_level == 1 {
-        // Basic optimization only
         optimizer.set_enable_constant_folding(true);
         optimizer.set_enable_buffer_removal(true);
         optimizer.set_enable_dce(true);
         optimizer.set_enable_double_inverter_removal(true);
         optimizer.set_enable_identity_removal(true);
     }
-    // opt_level >= 2 uses all optimizations (default)
 
     let opt_stats = optimizer.optimize(&mut result.netlist);
 
-    // Update stats with optimization info
     result.stats.cells_created = result.netlist.cells.len();
     result.stats.nets_created = result.netlist.nets.len();
 
-    // Add optimization summary to warnings (as info)
     if opt_stats.cells_removed > 0 {
         result.warnings.push(format!(
             "Optimization (level {}): removed {} cells ({} → {}), FIT {} → {}",
@@ -7919,7 +7937,7 @@ pub fn map_lir_to_gates_with_opt_level(
     result
 }
 
-/// Backward-compatible alias
+/// Backward-compatible alias for map_lir_to_gates
 pub fn map_word_lir_to_gates(word_lir: &Lir, library: &TechLibrary) -> TechMapResult {
     map_lir_to_gates(word_lir, library)
 }
@@ -8751,7 +8769,7 @@ pub fn map_hierarchical_to_gates(
             // This is a blackbox/vendor IP - create a netlist with a single blackbox cell
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
         } else {
-            // Normal synthesis path - use non-optimized mapping for now
+            // Normal synthesis path
             // The gate optimizer can break NCL circuits by removing cells that
             // appear "dead" but are actually essential for dual-rail signaling
             // TODO: Add NCL-aware optimization that understands dual-rail semantics
@@ -8790,6 +8808,82 @@ pub fn map_hierarchical_to_gates(
         }
 
         // Add child instance references
+        for child in &inst_lir.children {
+            inst_netlist.add_child(child.clone());
+        }
+
+        result.add_instance(path.clone(), inst_netlist);
+    }
+
+    result
+}
+
+/// Synthesize a hierarchical design using the new AIG-based engine.
+///
+/// Like `map_hierarchical_to_gates` but uses `synthesize()` per instance
+/// instead of the old TechMapper. Compiled IPs and blackboxes are handled
+/// the same way (loaded directly / stub netlist).
+///
+/// This replaces the two-step `map_hierarchical_to_gates` + `engine.optimize_hierarchical()`
+/// pattern — each instance is fully optimized in a single pass.
+pub fn synthesize_hierarchical(
+    hier_lir: &crate::mir_to_lir::HierarchicalMirToLirResult,
+    library: &TechLibrary,
+    preset: crate::synth::SynthPreset,
+) -> crate::hierarchical_netlist::HierarchicalNetlist {
+    use crate::compiled_ip::CompiledIp;
+    use crate::hierarchical_netlist::{HierarchicalNetlist, InstanceNetlist, PortConnection};
+    use crate::mir_to_lir::PortConnectionInfo;
+
+    let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
+
+    let mut sorted_paths: Vec<_> = hier_lir.instances.keys().collect();
+    sorted_paths.sort();
+
+    for path in sorted_paths {
+        let inst_lir = hier_lir.instances.get(path).unwrap();
+
+        let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
+            match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
+                Ok(compiled_ip) => compiled_ip.netlist.clone(),
+                Err(_e) => {
+                    synthesize(&inst_lir.lir_result.lir, library, preset).netlist
+                }
+            }
+        } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
+            create_blackbox_netlist(blackbox_info, &inst_lir.module_name).netlist
+        } else {
+            synthesize(&inst_lir.lir_result.lir, library, preset).netlist
+        };
+
+        let mut inst_netlist = InstanceNetlist::new(inst_lir.module_name.clone(), netlist);
+
+        let mut sorted_port_names: Vec<_> = inst_lir.port_connections.keys().collect();
+        sorted_port_names.sort();
+
+        for port_name in sorted_port_names {
+            let conn_info = inst_lir.port_connections.get(port_name).unwrap();
+            let port_conn = match conn_info {
+                PortConnectionInfo::Signal(signal_name) => {
+                    PortConnection::ParentNet(signal_name.clone())
+                }
+                PortConnectionInfo::Constant(value) => {
+                    inst_netlist.record_constant_input(port_name, *value);
+                    PortConnection::Constant(*value)
+                }
+                PortConnectionInfo::InstancePort(inst_path, inst_port) => {
+                    PortConnection::ChildPort(inst_path.clone(), inst_port.clone())
+                }
+                PortConnectionInfo::Range(signal_name, high, low) => {
+                    PortConnection::ParentRange(signal_name.clone(), *high, *low)
+                }
+                PortConnectionInfo::BitSelect(signal_name, bit_idx) => {
+                    PortConnection::ParentBit(signal_name.clone(), *bit_idx)
+                }
+            };
+            inst_netlist.add_port_connection(port_name.clone(), port_conn);
+        }
+
         for child in &inst_lir.children {
             inst_netlist.add_child(child.clone());
         }

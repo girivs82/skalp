@@ -459,7 +459,7 @@ impl Testbench {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
             get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
-            map_hierarchical_to_gates, map_lir_to_gates_optimized,
+            synthesize, synthesize_hierarchical,
         };
         let path = Path::new(source_path);
 
@@ -481,13 +481,15 @@ impl Testbench {
             )
         })?;
 
-        // Lower to GateNetlist
+        // Lower to GateNetlist using AIG-based synthesis engine
         let has_hierarchy =
             mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
 
         let netlist = if has_hierarchy || top_module_name.is_some() {
             let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
-            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+            let hier_netlist = synthesize_hierarchical(
+                &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+            );
             hier_netlist.flatten()
         } else {
             let top_module = mir
@@ -495,8 +497,10 @@ impl Testbench {
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
             let lir_result = lower_mir_module_to_lir(top_module);
-            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
-            tech_result.netlist
+            let synth_result = synthesize(
+                &lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+            );
+            synth_result.netlist
         };
 
         // Convert to SIR
@@ -638,7 +642,7 @@ impl Testbench {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
             get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
-            map_hierarchical_to_gates, map_lir_to_gates_optimized,
+            synthesize, synthesize_hierarchical,
         };
 
         let path = Path::new(source_path);
@@ -661,13 +665,15 @@ impl Testbench {
             )
         })?;
 
-        // Lower to GateNetlist
+        // Lower to GateNetlist using AIG-based synthesis engine
         let has_hierarchy =
             mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
 
         let netlist = if has_hierarchy || top_module_name.is_some() {
             let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
-            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+            let hier_netlist = synthesize_hierarchical(
+                &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+            );
             hier_netlist.flatten()
         } else {
             let top_module = mir
@@ -675,8 +681,10 @@ impl Testbench {
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
             let lir_result = lower_mir_module_to_lir(top_module);
-            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
-            tech_result.netlist
+            let synth_result = synthesize(
+                &lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+            );
+            synth_result.netlist
         };
 
         // Convert to SIR and load
@@ -727,7 +735,7 @@ impl Testbench {
         config: UnifiedSimConfig,
         top_module: Option<&str>,
     ) -> Result<Self> {
-        use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+        use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, synthesize_hierarchical};
 
         let path = Path::new(source_path);
 
@@ -754,12 +762,14 @@ impl Testbench {
             }
         }
 
-        // Load technology library and synthesize
+        // Load technology library and synthesize using AIG-based engine
         let library = get_stdlib_library("generic_asic")
             .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
 
         let hier_lir = lower_mir_hierarchical(&mir);
-        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+        let hier_netlist = synthesize_hierarchical(
+            &hier_lir, &library, skalp_lir::synth::SynthPreset::Quick,
+        );
         let netlist = hier_netlist.flatten();
 
         // Load as NCL

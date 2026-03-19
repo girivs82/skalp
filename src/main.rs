@@ -1373,54 +1373,30 @@ fn build_design(
                     hier_lir.top_module,
                 );
 
-                // Map to hierarchical gate netlist
-                let hier_netlist = skalp_lir::map_hierarchical_to_gates(&hier_lir, &library);
+                // Parse optimization preset for hierarchical synthesis
+                let preset = match optimization_options.preset.as_deref() {
+                    None => skalp_lir::synth::SynthPreset::Quick,
+                    Some("quick") => skalp_lir::synth::SynthPreset::Quick,
+                    Some("balanced") => skalp_lir::synth::SynthPreset::Balanced,
+                    Some("full") => skalp_lir::synth::SynthPreset::Full,
+                    Some("timing") => skalp_lir::synth::SynthPreset::Timing,
+                    Some("area") => skalp_lir::synth::SynthPreset::Area,
+                    Some("resyn2") => skalp_lir::synth::SynthPreset::Resyn2,
+                    Some("compress2") => skalp_lir::synth::SynthPreset::Compress2,
+                    Some("auto") => skalp_lir::synth::SynthPreset::Auto,
+                    Some(other) => anyhow::bail!("Unknown optimization preset: '{}'", other),
+                };
+
+                // Single-pass hierarchical synthesis using AIG-based engine
+                let hier_netlist =
+                    skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
                 info!(
-                    "Mapped to {} cells across {} instances",
+                    "Synthesized {} cells across {} instances",
                     hier_netlist.total_cell_count(),
                     hier_netlist.instance_count()
                 );
 
-                // Parallel per-instance synthesis optimization
-                // For async: this optimizes the single-rail internal logic (AIG/ABC passes)
-                if optimization_options.preset.is_some()
-                    || optimization_options.passes.is_some()
-                    || optimization_options.ml_guided
-                {
-                    let cells_before = hier_netlist.total_cell_count();
-                    info!("Running parallel hierarchical synthesis optimization...");
-                    let synth_config = build_synth_config(&optimization_options);
-                    let mut engine = skalp_lir::synth::SynthEngine::with_config(synth_config);
-                    let hier_result = engine.optimize_hierarchical(&hier_netlist, &library);
-
-                    info!(
-                        "Hierarchical optimization complete in {}ms",
-                        hier_result.total_time_ms
-                    );
-                    for (path, result) in &hier_result.instance_results {
-                        info!(
-                            "  {}: {} -> {} cells ({:.1}% reduction)",
-                            path,
-                            result.initial_and_count,
-                            result.netlist.cell_count(),
-                            result.gate_reduction() * 100.0
-                        );
-                    }
-
-                    let flattened = hier_result.netlist.flatten();
-                    if has_async {
-                        info!(
-                            "   Total: {} -> {} cells ({:.1}% reduction)",
-                            cells_before,
-                            flattened.cells.len(),
-                            (1.0 - flattened.cells.len() as f64 / cells_before as f64) * 100.0
-                        );
-                    }
-                    flattened
-                } else {
-                    // No optimization, just flatten
-                    hier_netlist.flatten()
-                }
+                hier_netlist.flatten()
             } else {
                 // Flat synthesis for single-module designs
                 let top_module = mir
@@ -1994,7 +1970,7 @@ fn compile_to_ip(
     use skalp_frontend::parse;
     use skalp_lir::{
         compiled_ip::{generate_header, CompiledIp},
-        get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized,
+        get_stdlib_library, lower_mir_module_to_lir, synthesize,
     };
     use skalp_mir::hir_to_mir::HirToMir;
 
@@ -2070,9 +2046,9 @@ fn compile_to_ip(
         .map_err(|e| anyhow::anyhow!("Failed to load library '{}': {}", library_name, e))?;
     println!("   Library: {}", library_name);
 
-    // Technology mapping
-    let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
-    let mut netlist = tech_result.netlist;
+    // Synthesize using AIG-based engine
+    let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced);
+    let mut netlist = synth_result.netlist;
     println!("   Cells: {} gates", netlist.cells.len());
 
     // Apply optimization if requested
@@ -2355,16 +2331,20 @@ fn simulate_gate_level(
             hier_lir.top_module
         );
 
-        // Map to hierarchical gate netlist
-        let hier_netlist = skalp_lir::map_hierarchical_to_gates(&hier_lir, &library);
+        // Synthesize hierarchical design using AIG-based engine
+        let preset = if gate_opt_level == 0 {
+            skalp_lir::synth::SynthPreset::Quick
+        } else {
+            skalp_lir::synth::SynthPreset::Balanced
+        };
+        let hier_netlist =
+            skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
         println!(
-            "   Mapped {} cells across {} instances",
+            "   Synthesized {} cells across {} instances",
             hier_netlist.total_cell_count(),
             hier_netlist.instance_count()
         );
 
-        // Flatten to single netlist with proper stitching
-        // Note: flatten() now automatically runs buffer removal for NCL circuits
         hier_netlist.flatten()
     } else {
         println!("   Using flat synthesis (single module)");
@@ -2375,11 +2355,17 @@ fn simulate_gate_level(
             .first()
             .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
 
-        // Lower to LIR and tech-map with configurable optimization
+        // Synthesize using AIG-based engine
         let lir_result = skalp_lir::lower_mir_module_to_lir(top_module);
-        let tech_result =
-            skalp_lir::map_lir_to_gates_with_opt_level(&lir_result.lir, &library, gate_opt_level);
-        tech_result.netlist
+        let preset = if gate_opt_level == 0 {
+            skalp_lir::synth::SynthPreset::Quick
+        } else if gate_opt_level == 1 {
+            skalp_lir::synth::SynthPreset::Balanced
+        } else {
+            skalp_lir::synth::SynthPreset::Full
+        };
+        let synth_result = skalp_lir::synthesize(&lir_result.lir, &library, preset);
+        synth_result.netlist
     };
 
     println!("\n📊 Gate-Level Design Statistics:");
@@ -2499,7 +2485,7 @@ fn simulate_ncl(
     gate_opt_level: u8,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_with_opt_level};
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, synthesize};
     use skalp_sim::{CircuitMode, HwAccel, UnifiedSimConfig, UnifiedSimulator};
 
     println!("🔬 NCL (Async) Gate-Level Simulation");
@@ -2532,14 +2518,19 @@ fn simulate_ncl(
     let lir_result = lower_mir_module_to_lir(module);
     println!("   LIR nodes: {}", lir_result.lir.nodes.len());
 
-    // Get tech library and map to gates
-    println!("🔧 Technology mapping...");
+    // Synthesize using AIG-based engine
+    println!("🔧 Synthesizing...");
     let library =
         get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
-    let tech_result = map_lir_to_gates_with_opt_level(&lir_result.lir, &library, gate_opt_level);
+    let preset = if gate_opt_level == 0 {
+        skalp_lir::synth::SynthPreset::Quick
+    } else {
+        skalp_lir::synth::SynthPreset::Balanced
+    };
+    let synth_result = synthesize(&lir_result.lir, &library, preset);
 
-    let gate_netlist = tech_result.netlist;
+    let gate_netlist = synth_result.netlist;
     println!(
         "   Gate netlist: {} cells, {} nets",
         gate_netlist.cells.len(),
@@ -5226,16 +5217,9 @@ fn run_fi_driven_safety(
     let library =
         get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
-    // Use optimized tech mapper (constant folding, DCE, boolean simp, buffer removal)
-    let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
-    let netlist = &tech_result.netlist;
-
-    // Report optimization results if any
-    for warning in &tech_result.warnings {
-        if warning.starts_with("Optimization:") {
-            println!("   ⚡ {}", warning);
-        }
-    }
+    // Synthesize using AIG-based engine
+    let synth_result = skalp_lir::synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced);
+    let netlist = &synth_result.netlist;
 
     let total_cells = netlist.cells.len();
     let total_fit = netlist.total_fit();
@@ -6856,7 +6840,7 @@ fn run_signal_trace(
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::signal_trace::{SignalTracer, TraceDirection};
     use skalp_lir::{
-        get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates,
+        get_stdlib_library, lower_mir_hierarchical_with_top, synthesize_hierarchical,
     };
 
     println!("🔍 Signal Trace");
@@ -6922,7 +6906,9 @@ fn run_signal_trace(
         println!("🔧 Synthesizing gate-level netlist...");
         let library =
             get_stdlib_library("generic_asic").context("Failed to load technology library")?;
-        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+        let hier_netlist = synthesize_hierarchical(
+            &hier_lir, &library, skalp_lir::synth::SynthPreset::Quick,
+        );
         let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
         println!("   Nets: {}", netlist.nets.len());

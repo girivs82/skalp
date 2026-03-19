@@ -95,7 +95,8 @@ pub use tech_mapper::{
     map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized,
     map_lir_to_gates_with_constraints, map_lir_to_gates_with_constraints_optimized,
     map_lir_to_gates_with_opt_level, map_word_lir_to_gates, synthesize, synthesize_balanced,
-    synthesize_for_area, synthesize_for_timing, TechMapResult, TechMapStats, TechMapper,
+    synthesize_for_area, synthesize_for_timing, synthesize_hierarchical, TechMapResult,
+    TechMapStats, TechMapper,
 };
 
 // Structural pattern detection for safety mechanisms
