@@ -9,7 +9,7 @@ use skalp_frontend::parse_and_build_hir;
 use skalp_lir::ncl_expand::NclConfig;
 use skalp_lir::{
     apply_boundary_ncl_to_hierarchy, get_stdlib_library, lower_mir_hierarchical_for_optimize_first,
-    map_hierarchical_to_gates, HierarchicalMirToLirResult,
+    synthesize_hierarchical, HierarchicalMirToLirResult,
 };
 
 /// Helper function to lower MIR with proper NCL boundary handling for async entities
@@ -102,7 +102,7 @@ async fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -218,7 +218,7 @@ async fn test_func_in_match() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -336,7 +336,7 @@ async fn test_cle_like_popcount() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -409,7 +409,7 @@ async fn test_cle_like_bitreverse() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -471,7 +471,7 @@ async fn test_cle_like_signals_debug() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -600,7 +600,7 @@ async fn test_cle_like_swapped() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -686,7 +686,7 @@ async fn test_popcount_direct() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -756,7 +756,7 @@ async fn test_popcount_nat() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -847,7 +847,7 @@ async fn test_debug_input_check() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -944,7 +944,7 @@ async fn test_concat_only() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1022,7 +1022,7 @@ async fn test_constant_256() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1068,7 +1068,7 @@ async fn test_constant_concat_64() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1168,7 +1168,7 @@ async fn test_parallel_mux_popcount() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1217,7 +1217,7 @@ async fn test_parallel_mux_bitreverse() {
 
     let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(

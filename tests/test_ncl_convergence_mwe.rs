@@ -5,7 +5,7 @@
 
 use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, synthesize_hierarchical};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 
@@ -76,7 +76,7 @@ async fn test_ncl_convergence_mwe() {
     // Use hierarchical compilation like dispatch unit
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -202,7 +202,7 @@ async fn test_simple_ncl_mux() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -291,7 +291,7 @@ async fn test_simple_ncl_lt() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -377,7 +377,7 @@ async fn test_simple_eq() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -471,7 +471,7 @@ async fn test_simple_if_else() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -567,7 +567,7 @@ async fn test_lt_gt_only() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -682,7 +682,7 @@ async fn test_combined_cmp() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -791,7 +791,7 @@ async fn test_simple_ncl_gt() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -877,7 +877,7 @@ async fn test_simple_ncl_add() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -948,7 +948,7 @@ async fn test_simple_ncl_mul() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1015,7 +1015,7 @@ async fn test_simple_ncl_shl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1095,7 +1095,7 @@ async fn test_simple_ncl_shr() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1186,7 +1186,7 @@ async fn test_nested_func_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1284,7 +1284,7 @@ async fn test_wide_ops_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1375,7 +1375,7 @@ async fn test_multi_cmp_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1493,7 +1493,7 @@ async fn test_bitwise_ops_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1599,7 +1599,7 @@ async fn test_match_opcode_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1736,7 +1736,7 @@ async fn test_sra_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1827,7 +1827,7 @@ async fn test_min_max_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -1920,7 +1920,7 @@ async fn test_ge_ne_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2108,7 +2108,7 @@ async fn test_multi_level_ncl() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2263,7 +2263,7 @@ async fn test_mul_via_function() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2329,7 +2329,7 @@ async fn test_multi_level_l1_first() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2431,7 +2431,7 @@ async fn test_mul_in_else_branch() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2534,7 +2534,7 @@ async fn test_direct_mul_xor_mux() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2634,7 +2634,7 @@ async fn test_mul_with_mux_only() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2734,7 +2734,7 @@ async fn test_add_with_mux() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -2815,7 +2815,7 @@ async fn test_mul_mux_debug() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -3159,7 +3159,7 @@ async fn test_mul_mux_cpu_vs_gpu() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -3510,7 +3510,7 @@ async fn test_dump_c_element_netlist() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     // Find C-element cells and their connections
@@ -3725,7 +3725,7 @@ async fn test_c_element_iteration_trace() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     let config = UnifiedSimConfig {
@@ -3894,7 +3894,7 @@ async fn test_mul_in_match_oscillation() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4012,7 +4012,7 @@ async fn test_mul_in_match_4way() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4116,7 +4116,7 @@ async fn test_mul_in_match_8way() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4220,7 +4220,7 @@ async fn test_mul_in_match_10way() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4328,7 +4328,7 @@ async fn test_mul_in_match_8way_4bit() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4416,7 +4416,7 @@ async fn test_mul_in_match_9way() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4527,7 +4527,7 @@ async fn test_nested_if_in_match() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(
@@ -4646,7 +4646,7 @@ async fn test_sub_width_mismatch() {
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(

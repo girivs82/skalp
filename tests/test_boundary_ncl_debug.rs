@@ -4,7 +4,7 @@
 use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    expand_to_ncl, get_stdlib_library, lower_mir_module_to_lir_skip_ncl, map_lir_to_gates,
+    expand_to_ncl, get_stdlib_library, lower_mir_module_to_lir_skip_ncl, synthesize,
     NclConfig,
 };
 use skalp_mir::MirCompiler;
@@ -155,7 +155,7 @@ async fn test_boundary_ncl_gate_level() {
     // Map to gates
     println!("\nStep 2: Tech mapping to gates...");
     let library = get_stdlib_library("generic_asic").expect("Failed to get library");
-    let result = map_lir_to_gates(&ncl_result.lir, &library);
+    let result = synthesize(&ncl_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = result.netlist;
     println!(
         "  Gate netlist: {} cells, {} nets",

@@ -184,7 +184,7 @@ mod async_reset_tests {
 mod async_reset_pipeline_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::{
-        get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates, CellFunction, LirOp,
+        get_stdlib_library, lower_mir_module_to_lir, synthesize, CellFunction, LirOp,
     };
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
@@ -313,8 +313,8 @@ mod async_reset_pipeline_tests {
         let mir = compile_to_mir(source);
         let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-        let tech_result = map_lir_to_gates(&lir_result.lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         println!(
             "Gate netlist: {} cells, {} nets",
@@ -379,8 +379,8 @@ mod async_reset_pipeline_tests {
         let mir = compile_to_mir(source);
         let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-        let tech_result = map_lir_to_gates(&lir_result.lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         // Sync reset should use plain Dff cells with ResetMux
         let mut dffr_count = 0;
@@ -434,7 +434,7 @@ mod async_reset_pipeline_tests {
         let mir = compile_to_mir(source);
         let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-        let tech_result = map_lir_to_gates(&lir_result.lir, &library);
+        let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
         println!(
             "LIR: {} signals, {} nodes",
@@ -443,13 +443,13 @@ mod async_reset_pipeline_tests {
         );
         println!(
             "Gate: {} cells, {} nets",
-            tech_result.netlist.cells.len(),
-            tech_result.netlist.nets.len()
+            synth_result.netlist.cells.len(),
+            synth_result.netlist.nets.len()
         );
 
         // Build AIGs for both representations
         let lir_aig = LirToAig::new().convert_sequential(&lir_result.lir);
-        let gate_aig = GateNetlistToAig::new().convert_sequential(&tech_result.netlist);
+        let gate_aig = GateNetlistToAig::new().convert_sequential(&synth_result.netlist);
 
         println!(
             "LIR AIG: {} nodes, {} inputs, {} outputs, {} latches",
@@ -514,8 +514,8 @@ mod async_reset_pipeline_tests {
         let mir = compile_to_mir(source);
         let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-        let tech_result = map_lir_to_gates(&lir_result.lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         // Should have DffR cells and inverters for the reset-to-1 bits (5 = 0b0101)
         let mut dffr_count = 0;
@@ -572,10 +572,10 @@ mod async_reset_pipeline_tests {
         let mir = compile_to_mir(source);
         let lir_result = lower_mir_module_to_lir(&mir.modules[0]);
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-        let tech_result = map_lir_to_gates(&lir_result.lir, &library);
+        let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
         let lir_aig = LirToAig::new().convert_sequential(&lir_result.lir);
-        let gate_aig = GateNetlistToAig::new().convert_sequential(&tech_result.netlist);
+        let gate_aig = GateNetlistToAig::new().convert_sequential(&synth_result.netlist);
 
         let result = check_sequential_equivalence_sat(&lir_aig, &gate_aig, false)
             .expect("EC should not error");

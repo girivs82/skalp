@@ -4,8 +4,8 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir, map_hierarchical_to_gates,
-    map_lir_to_gates,
+    get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir, synthesize_hierarchical,
+    synthesize,
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
@@ -58,7 +58,7 @@ async fn test_hierarchical_ncl_async() {
     // Use hierarchical compilation
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let netlist = hier_result.flatten();
 
@@ -123,8 +123,8 @@ async fn test_direct_ncl_async() {
     // Use direct (non-hierarchical) compilation
     let lir_result = lower_mir_module_to_lir(module);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let tech_result = map_lir_to_gates(&lir_result.lir, &library);
-    let netlist = tech_result.netlist;
+    let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let netlist = synth_result.netlist;
 
     println!(
         "Direct compiled: {} cells, {} nets",

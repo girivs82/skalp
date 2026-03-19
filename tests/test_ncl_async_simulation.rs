@@ -9,7 +9,7 @@
 //! NCL circuits use dual-rail encoding and THmn threshold gates.
 
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, synthesize};
 use skalp_mir::MirCompiler;
 #[cfg(target_os = "macos")]
 use skalp_sim::{CircuitMode, HwAccel, UnifiedSimConfig, UnifiedSimulator};
@@ -28,9 +28,9 @@ fn compile_async_to_netlist(source: &str) -> skalp_lir::gate_netlist::GateNetlis
 
     let lir_result = lower_mir_module_to_lir(module);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let tech_result = map_lir_to_gates(&lir_result.lir, &library);
+    let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    tech_result.netlist
+    synth_result.netlist
 }
 
 /// Test NCL simulation with CPU backend

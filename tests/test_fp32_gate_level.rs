@@ -2,7 +2,7 @@
 // This isolates the FP32 logic from a full design
 
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, synthesize_hierarchical};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 
@@ -58,7 +58,7 @@ fn compile_and_simulate(source: &str, name: &str) -> Option<skalp_lir::GateNetli
 
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_result.flatten();
 
     println!(

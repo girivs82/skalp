@@ -3092,7 +3092,7 @@ mod tests {
     #[test]
     fn test_ncl_boundary_end_to_end_and_gate() {
 
-        use crate::tech_mapper::map_lir_to_gates;
+        use crate::tech_mapper::synthesize;
 
         // Step 1: Build a simple 1-bit AND gate in single-rail LIR
         let mut lir = crate::lir::Lir::new("test_and".to_string());
@@ -3139,11 +3139,11 @@ mod tests {
 
         // Step 3: Tech-map to nexus library
         let library = crate::tech_library::get_stdlib_library("nexus").expect("nexus library should load");
-        let tech_result = map_lir_to_gates(ncl_lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         // Verify: netlist has cells
-        assert!(!netlist.cells.is_empty(), "netlist should have cells after tech mapping");
+        assert!(!netlist.cells.is_empty(), "netlist should have cells after synthesis");
 
         // Verify: netlist is marked as NCL
         assert!(netlist.is_ncl, "netlist should be marked as NCL");
@@ -3167,7 +3167,7 @@ mod tests {
     #[test]
     fn test_ncl_boundary_end_to_end_xor_gate() {
 
-        use crate::tech_mapper::map_lir_to_gates;
+        use crate::tech_mapper::synthesize;
 
         let mut lir = crate::lir::Lir::new("test_xor".to_string());
         let a = lir.add_input("a".to_string(), 1);
@@ -3181,8 +3181,8 @@ mod tests {
 
         // Tech-map to ice40 to verify cross-library support
         let library = crate::tech_library::get_stdlib_library("ice40").expect("ice40 library should load");
-        let tech_result = map_lir_to_gates(ncl_lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         assert!(!netlist.cells.is_empty(), "netlist should have cells");
         assert!(netlist.is_ncl, "netlist should be NCL");
@@ -3195,7 +3195,7 @@ mod tests {
     #[test]
     fn test_ncl_boundary_end_to_end_4bit_adder() {
 
-        use crate::tech_mapper::map_lir_to_gates;
+        use crate::tech_mapper::synthesize;
 
         let mut lir = crate::lir::Lir::new("test_add4".to_string());
         let a = lir.add_input("a".to_string(), 4);
@@ -3215,8 +3215,8 @@ mod tests {
 
         // Tech-map to ecp5
         let library = crate::tech_library::get_stdlib_library("ecp5").expect("ecp5 library should load");
-        let tech_result = map_lir_to_gates(ncl_lir, &library);
-        let netlist = &tech_result.netlist;
+        let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
+        let netlist = &synth_result.netlist;
 
         assert!(!netlist.cells.is_empty(), "netlist should have cells");
         assert!(netlist.is_ncl, "netlist should be NCL");

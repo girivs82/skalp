@@ -6,7 +6,7 @@ use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::ncl_expand::NclConfig;
 use skalp_lir::{
     apply_boundary_ncl_to_hierarchy, get_stdlib_library, lower_mir_hierarchical_for_optimize_first,
-    map_hierarchical_to_gates,
+    synthesize_hierarchical,
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
@@ -43,7 +43,7 @@ fn compile_to_gates(fixture_name: &str) -> GateNetlist {
     };
 
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     hier_result.flatten()
 }
 

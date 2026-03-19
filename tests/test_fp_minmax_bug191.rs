@@ -4,7 +4,7 @@
 //! when compiled to NCL gate-level simulation.
 
 use skalp_frontend::parse_and_build_compilation_context;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, synthesize_hierarchical};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 use std::io::Write;
@@ -83,7 +83,7 @@ impl FpMinMaxTest {{
     // Lower to gate netlist
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_result = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     hier_result.flatten()
 }
 

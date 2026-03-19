@@ -5,7 +5,7 @@
 
 use skalp_formal::{BoundedModelChecker, GateNetlistToAig, LirToAig};
 use skalp_frontend::parse_and_build_hir_from_file;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, synthesize_hierarchical};
 use skalp_mir::MirCompiler;
 use std::path::Path;
 
@@ -60,7 +60,7 @@ fn test_mwe_gate_compilation() {
     let library = get_stdlib_library("generic_asic").expect("Library load failed");
 
     let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
-    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_netlist = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_netlist.flatten();
 
     println!("=== Gate Netlist Statistics ===");
@@ -115,7 +115,7 @@ fn test_mwe_gate_to_aig() {
     let library = get_stdlib_library("generic_asic").expect("Library load failed");
 
     let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
-    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_netlist = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let netlist = hier_netlist.flatten();
 
     let aig = GateNetlistToAig::new().convert(&netlist);
@@ -148,7 +148,7 @@ fn test_mwe_lir_gate_equivalence() {
 
     // Get flattened LIR and gate netlist
     let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
-    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let hier_netlist = synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
     let flat_lir = hier_lir.flatten();
     let netlist = hier_netlist.flatten();
 
