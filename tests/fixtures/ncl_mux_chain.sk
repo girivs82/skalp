@@ -1,0 +1,16 @@
+// NCL mux chain — tests cascaded mux selection (from CLE operand routing)
+
+async entity NclMuxChain {
+    in sel0: bit
+    in sel1: bit
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out y: bit[8]
+}
+
+impl NclMuxChain {
+    // Two-level mux: sel1 selects between c and (sel0 selects a/b)
+    signal ab_sel: bit[8] = if sel0 { b } else { a }
+    y = if sel1 { c } else { ab_sel }
+}

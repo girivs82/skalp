@@ -1,0 +1,18 @@
+// NCL Priority Encoder — from Karythra CLE V2 multi-outstanding request tracker
+// Finds the first zero in a 4-bit pending bitmap (first available request slot).
+// This is the next_tag logic that assigns tags to cache requests.
+
+async entity NclPriorityEncoder4 {
+    in pending: bit[4]
+    out tag: bit[2]
+    out can_issue: bit
+}
+
+impl NclPriorityEncoder4 {
+    tag = if !pending[0] { 2'b00 }
+          else if !pending[1] { 2'b01 }
+          else if !pending[2] { 2'b10 }
+          else { 2'b11 }
+
+    can_issue = !pending[tag]
+}

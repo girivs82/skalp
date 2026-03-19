@@ -1,0 +1,19 @@
+// NCL Systolic Forwarding — from Karythra CLE V2 systolic path
+// Conditional forwarding: when systolic mode is active, passes data through
+// with accumulation. When inactive, outputs zero. Exercises: conditional
+// forwarding, accumulator add, dual-rail zero generation.
+
+async entity NclSystolicForward {
+    in enable: bit          // systolic mode active
+    in north_in: bit[8]    // data from north neighbor
+    in west_in: bit[8]     // data from west neighbor
+    out south_out: bit[8]  // forward north->south
+    out east_out: bit[8]   // forward west->east
+    out accum: bit[8]      // accumulated: north + west
+}
+
+impl NclSystolicForward {
+    south_out = if enable { north_in } else { 8'b0 }
+    east_out = if enable { west_in } else { 8'b0 }
+    accum = if enable { north_in + west_in } else { 8'b0 }
+}

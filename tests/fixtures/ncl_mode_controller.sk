@@ -1,0 +1,34 @@
+// NCL Mode Controller — from Karythra CLE V2 mode selection
+// Dual-rail mode decode with completion detection, then mode-dependent
+// output generation. Exercises: completion detect, comparators, muxing.
+
+async entity NclModeController {
+    in mode_t: bit[2]       // mode true rails
+    in mode_f: bit[2]       // mode false rails
+    in data_a: bit[8]       // data input A
+    in data_b: bit[8]       // data input B
+    out result: bit[8]      // mode-dependent result
+    out mode_valid: bit     // completion detection
+}
+
+impl NclModeController {
+    // Completion detection: both mode bits must have exactly one rail high
+    mode_valid = (mode_t[0] ^ mode_f[0]) & (mode_t[1] ^ mode_f[1])
+
+    // Decode mode from true rails
+    signal mode_decoded: bit[2] = mode_t
+
+    // Mode 0: AND
+    // Mode 1: OR
+    // Mode 2: XOR
+    // Mode 3: ADD
+    result = if mode_decoded == 2'b00 {
+        data_a & data_b
+    } else if mode_decoded == 2'b01 {
+        data_a | data_b
+    } else if mode_decoded == 2'b10 {
+        data_a ^ data_b
+    } else {
+        data_a + data_b
+    }
+}

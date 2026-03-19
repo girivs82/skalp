@@ -1,0 +1,18 @@
+// NCL Dual-Rail Mux — from Karythra CLE V2 operand selection
+// Mode-selected dual-rail mux: chooses between two 8-bit dual-rail sources
+// based on a single-bit decoded mode selector.
+
+async entity NclDualRailMux8 {
+    in sel: bit
+    in a_t: bit[8]     // source A, true rails
+    in a_f: bit[8]     // source A, false rails
+    in b_t: bit[8]     // source B, true rails
+    in b_f: bit[8]     // source B, false rails
+    out y_t: bit[8]    // selected output, true rails
+    out y_f: bit[8]    // selected output, false rails
+}
+
+impl NclDualRailMux8 {
+    y_t = if sel { b_t } else { a_t }
+    y_f = if sel { b_f } else { a_f }
+}

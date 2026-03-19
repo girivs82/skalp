@@ -1,0 +1,20 @@
+// NCL Completion Detection — from Karythra CLE V2 async
+// XOR detects where dual-rail signals differ (one rail high, other low).
+// AND reduction checks all positions are valid.
+// Uses bulk XOR (not per-bit for-loop) for reliable synthesis.
+
+async entity NclCompletionDetect8 {
+    in t: bit[8]    // true rails
+    in f: bit[8]    // false rails
+    out complete: bit
+    out xor_result: bit[8]  // per-bit validity (XOR)
+}
+
+impl NclCompletionDetect8 {
+    // Bulk XOR: bits where exactly one rail is high
+    xor_result = t ^ f
+
+    // AND reduction: complete when all 8 XOR bits are 1
+    complete = xor_result[0] & xor_result[1] & xor_result[2] & xor_result[3] &
+               xor_result[4] & xor_result[5] & xor_result[6] & xor_result[7]
+}

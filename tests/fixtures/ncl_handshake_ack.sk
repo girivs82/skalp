@@ -1,0 +1,22 @@
+// NCL Handshake Acknowledgment — from Karythra CLE V2 ack generation
+// Generates acknowledge signals based on pipeline completion and mode.
+// Exercises: multi-input AND for pipeline_complete, mode-gated acks,
+// XOR-based response detection.
+
+async entity NclHandshakeAck {
+    in input_valid: bit         // completion detection says input ready
+    in config_valid: bit        // config has settled
+    in exec_enable: bit         // execute enabled
+    in use_normal: bit          // in normal mode
+    in hit_t: bit               // cache hit response, true rail
+    in hit_f: bit               // cache hit response, false rail
+    out pipeline_complete: bit  // all inputs valid and enabled
+    out data_read_ack: bit      // acknowledge data consumed
+    out hash_lookup_ack: bit    // acknowledge hash response
+}
+
+impl NclHandshakeAck {
+    pipeline_complete = input_valid & config_valid & exec_enable
+    data_read_ack = pipeline_complete & use_normal
+    hash_lookup_ack = hit_t ^ hit_f  // ack on any valid response
+}

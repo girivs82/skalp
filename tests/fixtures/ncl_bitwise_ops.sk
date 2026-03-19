@@ -1,0 +1,20 @@
+// NCL multi-output bitwise operations — from Karythra CLE function unit L0
+// Tests multiple outputs from a single async entity.
+
+async entity NclBitwiseOps8 {
+    in a: bit[8]
+    in b: bit[8]
+    out y_and: bit[8]
+    out y_or: bit[8]
+    out y_xor: bit[8]
+    out y_nand: bit[8]
+    out y_nor: bit[8]
+}
+
+impl NclBitwiseOps8 {
+    y_and = a & b
+    y_or = a | b
+    y_xor = a ^ b
+    y_nand = !(a & b)
+    y_nor = !(a | b)
+}
