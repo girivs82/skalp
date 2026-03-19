@@ -1,0 +1,10 @@
+
+async entity NclAnd8 {
+    in a: bit[8]
+    in b: bit[8]
+    out y: bit[8]
+}
+
+impl NclAnd8 {
+    y = a & b
+}

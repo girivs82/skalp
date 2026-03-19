@@ -7954,7 +7954,9 @@ pub fn synthesize(
 ) -> crate::synth::SynthResult {
     use crate::synth::{LirToSynthAig, SynthEngine};
 
-    // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist)
+    // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist).
+    // Physical ops (NCL, BRAM) become pseudo-inputs in the AIG so that
+    // combinational logic referencing their outputs is preserved.
     let converter = LirToSynthAig::new(lir);
     let lir_to_aig_result = converter.build();
 
@@ -7962,18 +7964,19 @@ pub fn synthesize(
     let mut engine = SynthEngine::with_preset(preset);
     let mut result = engine.optimize_from_aig(lir_to_aig_result.aig, library);
 
-    // Step 3: Handle physical nodes (BRAM, NCL, etc.) that couldn't go through AIG
+    // Step 3: Merge physical LIR nodes (NCL, BRAM) into the AIG-derived netlist.
+    // Must happen BEFORE buffer removal so that __phys_* pseudo-input nets are
+    // properly driven by physical cells before the optimizer merges nets.
+    // Rebuild net_map first: the AIG writer renames output nets in create_outputs()
+    // without updating net_map, leaving stale name→ID mappings.
+    result.netlist.rebuild_cache();
     if !lir_to_aig_result.physical_node_indices.is_empty() {
-        // Map physical nodes through the old tech mapper path
-        let physical_netlist = map_physical_lir_nodes(lir, library, &lir_to_aig_result.physical_node_indices);
-        // TODO: merge physical_netlist cells into result.netlist
-        // For now, physical nodes (BRAM, NCL) are not yet supported in the new path
-        if !physical_netlist.cells.is_empty() {
-            eprintln!(
-                "warning: {} physical cells (BRAM/NCL) not yet merged in new synthesis path",
-                physical_netlist.cells.len()
-            );
-        }
+        merge_physical_nodes_into_netlist(
+            &mut result.netlist,
+            lir,
+            &lir_to_aig_result.physical_node_indices,
+            library,
+        );
     }
 
     // Step 4: LUT post-mapping optimization for FPGA targets
@@ -7999,18 +8002,675 @@ pub fn synthesize(
     // have moved output references without updating the per-net flag.
     result.netlist.sync_output_flags();
 
+    // For NCL designs: buffer removal may have merged __phys_* pseudo-input nets
+    // with output nets, leaving nets marked as both input and output. Remove
+    // output nets from the input list — they're driven by physical cells, not external.
+    if lir.is_ncl {
+        let output_set: std::collections::HashSet<GateNetId> =
+            result.netlist.outputs.iter().copied().collect();
+        result.netlist.inputs.retain(|id| !output_set.contains(id));
+        // Also remove any remaining __phys_* pseudo-inputs that weren't cleaned up
+        result.netlist.inputs.retain(|&id| {
+            if let Some(net) = result.netlist.nets.get(id.0 as usize) {
+                !net.name.starts_with("__phys_")
+            } else {
+                true
+            }
+        });
+        // Clear is_input on output nets that were removed from inputs
+        for net in &mut result.netlist.nets {
+            if net.is_output && net.is_input {
+                net.is_input = false;
+            }
+        }
+    }
+
     result
 }
 
-/// Map physical LIR nodes (BRAM, NCL) through the old tech mapper to GateNetlist cells
-fn map_physical_lir_nodes(
+/// Merge physical LIR nodes (NCL, BRAM) into an AIG-derived GateNetlist.
+///
+/// Physical ops were represented as pseudo-inputs (`__phys_*`) during
+/// LIR→AIG conversion. This function creates the actual gate cells for
+/// those ops and wires them into the existing netlist:
+///
+/// 1. Physical cell outputs drive `__phys_*` nets (removing them from inputs)
+/// 2. Physical cell inputs connect to existing LIR primary input nets or
+///    other physical node output nets
+/// 3. For NCL ops without native THmn gates, C-element macros are used
+fn merge_physical_nodes_into_netlist(
+    netlist: &mut GateNetlist,
     lir: &Lir,
+    physical_indices: &[usize],
     library: &TechLibrary,
-    _physical_indices: &[usize],
-) -> crate::gate_netlist::GateNetlist {
-    // For now, return empty netlist. Full BRAM/NCL support will be added
-    // by extracting map_memory_block() and map_ncl_*() from TechMapper.
-    crate::gate_netlist::GateNetlist::new(lir.name.clone(), library.name.clone())
+) {
+    use std::collections::HashSet;
+
+    // Build set of signal IDs that are physical node outputs
+    let phys_output_signals: HashSet<u32> = physical_indices
+        .iter()
+        .map(|&idx| lir.nodes[idx].output.0)
+        .collect();
+
+    // Build set of LIR input signal IDs
+    let lir_input_signals: HashSet<u32> = lir.inputs.iter().map(|s| s.0).collect();
+
+    // Resolve a LIR signal to a vector of GateNetIds in the netlist.
+    // Creates missing input nets on the fly (module inputs consumed only by
+    // physical nodes aren't in the AIG-derived netlist).
+    let resolve_signal = |netlist: &mut GateNetlist, sig_id: LirSignalId| -> Vec<GateNetId> {
+        let sig = &lir.signals[sig_id.0 as usize];
+        let is_phys = phys_output_signals.contains(&sig_id.0);
+        let is_lir_input = lir_input_signals.contains(&sig_id.0);
+        (0..sig.width)
+            .map(|bit| {
+                let name = if sig.width == 1 {
+                    if is_phys {
+                        format!("__phys_{}", sig.name)
+                    } else {
+                        sig.name.clone()
+                    }
+                } else if is_phys {
+                    format!("__phys_{}[{}]", sig.name, bit)
+                } else {
+                    format!("{}[{}]", sig.name, bit)
+                };
+                if let Some(id) = netlist.get_net_id(&name) {
+                    id
+                } else if is_phys {
+                    // The AIG writer renames __phys_* nets to output names when
+                    // they are direct pass-through outputs. Try without prefix.
+                    let alt_name = if sig.width == 1 {
+                        sig.name.clone()
+                    } else {
+                        format!("{}[{}]", sig.name, bit)
+                    };
+                    if let Some(id) = netlist.get_net_id(&alt_name) {
+                        id
+                    } else {
+                        GateNetId(0)
+                    }
+                } else if is_lir_input {
+                    // Module input not in AIG netlist (only consumed by physical nodes).
+                    // Create it as a primary input.
+                    netlist.add_input(name)
+                } else {
+                    // Internal signal — create as internal net
+                    netlist.add_net(GateNet::new(GateNetId(0), name))
+                }
+            })
+            .collect()
+    };
+
+    // Look up library cells
+    let has_th22 = library.find_best_cell(&CellFunction::Th22).is_some();
+    let has_th12 = library.find_best_cell(&CellFunction::Th12).is_some();
+
+    let buf_cell = library
+        .find_best_cell(&CellFunction::Buf)
+        .map(|c| (c.name.clone(), c.fit))
+        .unwrap_or(("BUF".to_string(), 0.1));
+    let and2_cell = library
+        .find_best_cell(&CellFunction::And2)
+        .map(|c| (c.name.clone(), c.fit))
+        .unwrap_or(("AND2".to_string(), 0.2));
+    let or2_cell = library
+        .find_best_cell(&CellFunction::Or2)
+        .map(|c| (c.name.clone(), c.fit))
+        .unwrap_or(("OR2".to_string(), 0.2));
+    let th22_cell = library
+        .find_best_cell(&CellFunction::Th22)
+        .map(|c| (c.name.clone(), c.fit))
+        .unwrap_or(("TH22".to_string(), 0.6));
+    let th12_cell = library
+        .find_best_cell(&CellFunction::Th12)
+        .map(|c| (c.name.clone(), c.fit))
+        .unwrap_or(("TH12".to_string(), 0.5));
+
+    // Helper: get or create tie-low net
+    let get_tie_low = |netlist: &mut GateNetlist| -> GateNetId {
+        if let Some(id) = netlist.get_net_id("tie_low") {
+            return id;
+        }
+        if let Some(id) = netlist.get_net_id("gnd") {
+            return id;
+        }
+        let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
+        let tie_info = library
+            .find_best_cell(&CellFunction::TieLow)
+            .map(|c| (c.name.clone(), c.fit))
+            .unwrap_or(("TIE_LOW".to_string(), 0.01));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            tie_info.0,
+            library.name.clone(),
+            tie_info.1,
+            "tie_low".to_string(),
+            vec![],
+            vec![id],
+        ));
+        id
+    };
+
+    let get_tie_high = |netlist: &mut GateNetlist| -> GateNetId {
+        if let Some(id) = netlist.get_net_id("tie_high") {
+            return id;
+        }
+        if let Some(id) = netlist.get_net_id("vdd") {
+            return id;
+        }
+        let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_high".to_string()));
+        let tie_info = library
+            .find_best_cell(&CellFunction::TieHigh)
+            .map(|c| (c.name.clone(), c.fit))
+            .unwrap_or(("TIE_HIGH".to_string(), 0.01));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            tie_info.0,
+            library.name.clone(),
+            tie_info.1,
+            "tie_high".to_string(),
+            vec![],
+            vec![id],
+        ));
+        id
+    };
+
+    // Helper: create a TH22 or C-element macro
+    // C-element: Q = (A & B) | (Q & (A | B))
+    let make_th22_or_celement =
+        |netlist: &mut GateNetlist, a: GateNetId, b: GateNetId, q: GateNetId, path: &str| {
+            if has_th22 {
+                netlist.add_cell(Cell::new_comb(
+                    CellId(0),
+                    th22_cell.0.clone(),
+                    library.name.clone(),
+                    th22_cell.1,
+                    path.to_string(),
+                    vec![a, b],
+                    vec![q],
+                ));
+            } else {
+                // C-element macro: 2 AND2 + 2 OR2
+                let ab_and = netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("{}.ab_and", path)));
+                let ab_or = netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("{}.ab_or", path)));
+                let q_and_or = netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("{}.q_and_or", path)));
+
+                // ab_and = A & B
+                let mut c1 = Cell::new_comb(
+                    CellId(0),
+                    and2_cell.0.clone(),
+                    library.name.clone(),
+                    and2_cell.1,
+                    format!("{}.and1", path),
+                    vec![a, b],
+                    vec![ab_and],
+                );
+                c1.source_op = Some("C-element_AND_AB".to_string());
+                netlist.add_cell(c1);
+
+                // ab_or = A | B
+                let mut c2 = Cell::new_comb(
+                    CellId(0),
+                    or2_cell.0.clone(),
+                    library.name.clone(),
+                    or2_cell.1,
+                    format!("{}.or1", path),
+                    vec![a, b],
+                    vec![ab_or],
+                );
+                c2.source_op = Some("C-element_OR_AB".to_string());
+                netlist.add_cell(c2);
+
+                // q_and_or = Q & (A | B) — feedback from output
+                let mut c3 = Cell::new_comb(
+                    CellId(0),
+                    and2_cell.0.clone(),
+                    library.name.clone(),
+                    and2_cell.1,
+                    format!("{}.and2", path),
+                    vec![q, ab_or],
+                    vec![q_and_or],
+                );
+                c3.source_op = Some("C-element_AND_Q_OR".to_string());
+                netlist.add_cell(c3);
+
+                // Q = (A & B) | (Q & (A | B))
+                let mut c4 = Cell::new_comb(
+                    CellId(0),
+                    or2_cell.0.clone(),
+                    library.name.clone(),
+                    or2_cell.1,
+                    format!("{}.or2", path),
+                    vec![ab_and, q_and_or],
+                    vec![q],
+                );
+                c4.source_op = Some("C-element_OUTPUT".to_string());
+                netlist.add_cell(c4);
+            }
+        };
+
+    // Helper: create a TH12 or OR2 (TH12 = 1-of-2 threshold = OR in combinational)
+    let make_th12_or_or2 =
+        |netlist: &mut GateNetlist, a: GateNetId, b: GateNetId, q: GateNetId, path: &str| {
+            if has_th12 {
+                netlist.add_cell(Cell::new_comb(
+                    CellId(0),
+                    th12_cell.0.clone(),
+                    library.name.clone(),
+                    th12_cell.1,
+                    path.to_string(),
+                    vec![a, b],
+                    vec![q],
+                ));
+            } else {
+                netlist.add_cell(Cell::new_comb(
+                    CellId(0),
+                    or2_cell.0.clone(),
+                    library.name.clone(),
+                    or2_cell.1,
+                    path.to_string(),
+                    vec![a, b],
+                    vec![q],
+                ));
+            }
+        };
+
+    // Process each physical node
+    for &idx in physical_indices {
+        let node = &lir.nodes[idx];
+        let path = &node.path;
+
+        // Resolve input signals to net ID vectors
+        let input_nets: Vec<Vec<GateNetId>> = node
+            .inputs
+            .iter()
+            .map(|&sig_id| resolve_signal(netlist, sig_id))
+            .collect();
+
+        // Resolve output signal to net ID vector (__phys_* nets)
+        let output_nets = resolve_signal(netlist, node.output);
+
+        match &node.op {
+            LirOp::NclDecode { width } => {
+                // Dual-rail → single-rail: take t-rail (first half of input)
+                for i in 0..*width as usize {
+                    let in_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        buf_cell.0.clone(),
+                        library.name.clone(),
+                        buf_cell.1,
+                        format!("{}.dec{}", path, i),
+                        vec![in_t],
+                        vec![out],
+                    );
+                    cell.source_op = Some("NclDecode".to_string());
+                    netlist.add_cell(cell);
+                }
+            }
+
+            LirOp::NclEncode { width } => {
+                // Boundary NCL: t-rail = value, f-rail = NOT(value).
+                // The AIG already produces y_f[i] = NOT(value). The AIG may fuse
+                // the NOT with preceding logic (e.g., AND+NOT → NAND), so the
+                // intermediate single-rail net may not exist. Instead, we derive
+                // the t-rail as: y_t[i] = INV(y_f[i]).
+                let out_sig = &lir.signals[node.output.0 as usize];
+                let f_signal_base = if out_sig.name.ends_with("_t") {
+                    format!("{}_f", &out_sig.name[..out_sig.name.len() - 2])
+                } else {
+                    format!("{}_f", out_sig.name)
+                };
+
+                let inv_cell = library
+                    .find_best_cell(&CellFunction::Inv)
+                    .map(|c| (c.name.clone(), c.fit))
+                    .unwrap_or(("INV_X1".to_string(), 0.1));
+
+                for i in 0..*width as usize {
+                    let out_t = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    if out_t.0 == 0 {
+                        continue;
+                    }
+
+                    let f_net_name = if *width == 1 {
+                        f_signal_base.clone()
+                    } else {
+                        format!("{}[{}]", f_signal_base, i)
+                    };
+
+                    if let Some(f_net_id) = netlist.get_net_id(&f_net_name) {
+                        // y_t[i] = INV(y_f[i])
+                        let mut cell = Cell::new_comb(
+                            CellId(0),
+                            inv_cell.0.clone(),
+                            library.name.clone(),
+                            inv_cell.1,
+                            format!("{}.enc_t{}", path, i),
+                            vec![f_net_id],
+                            vec![out_t],
+                        );
+                        cell.source_op = Some("NclEncode_T".to_string());
+                        netlist.add_cell(cell);
+                    }
+                }
+            }
+
+            LirOp::NclAnd { width } => {
+                // inputs[0], inputs[1] are dual-rail: [t0,f0,t1,f1,...] each
+                for i in 0..*width as usize {
+                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
+                    let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+                    // True rail: TH22(a_t, b_t)
+                    make_th22_or_celement(netlist, a_t, b_t, out_t, &format!("{}.and_t{}", path, i));
+                    // False rail: TH12(a_f, b_f)
+                    make_th12_or_or2(netlist, a_f, b_f, out_f, &format!("{}.and_f{}", path, i));
+                }
+            }
+
+            LirOp::NclOr { width } => {
+                for i in 0..*width as usize {
+                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
+                    let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+                    // True rail: TH12(a_t, b_t) — either true rail
+                    make_th12_or_or2(netlist, a_t, b_t, out_t, &format!("{}.or_t{}", path, i));
+                    // False rail: TH22(a_f, b_f) — both false rails
+                    make_th22_or_celement(netlist, a_f, b_f, out_f, &format!("{}.or_f{}", path, i));
+                }
+            }
+
+            LirOp::NclXor { width } => {
+                // XOR(a,b)_t = TH22(TH12(a_t, b_f), TH12(a_f, b_t))
+                // XOR(a,b)_f = TH22(TH12(a_t, b_t), TH12(a_f, b_f))
+                for i in 0..*width as usize {
+                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
+                    let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+                    // Intermediate nets
+                    let at_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_at_bf{}", path, i)));
+                    let af_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_af_bt{}", path, i)));
+                    let at_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_at_bt{}", path, i)));
+                    let af_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_af_bf{}", path, i)));
+
+                    // TH12(a_t, b_f) → at_bf
+                    make_th12_or_or2(netlist, a_t, b_f, at_bf, &format!("{}.xor_th12_1_{}", path, i));
+                    // TH12(a_f, b_t) → af_bt
+                    make_th12_or_or2(netlist, a_f, b_t, af_bt, &format!("{}.xor_th12_2_{}", path, i));
+                    // TH22(at_bf, af_bt) → out_t
+                    make_th22_or_celement(netlist, at_bf, af_bt, out_t, &format!("{}.xor_t{}", path, i));
+
+                    // TH12(a_t, b_t) → at_bt
+                    make_th12_or_or2(netlist, a_t, b_t, at_bt, &format!("{}.xor_th12_3_{}", path, i));
+                    // TH12(a_f, b_f) → af_bf
+                    make_th12_or_or2(netlist, a_f, b_f, af_bf, &format!("{}.xor_th12_4_{}", path, i));
+                    // TH22(at_bt, af_bf) → out_f
+                    make_th22_or_celement(netlist, at_bt, af_bf, out_f, &format!("{}.xor_f{}", path, i));
+                }
+            }
+
+            LirOp::NclNot { width } => {
+                // NOT swaps t and f rails
+                for i in 0..*width as usize {
+                    let in_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let in_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
+                    let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+                    // out_t = in_f, out_f = in_t (swap rails)
+                    let mut ct = Cell::new_comb(
+                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        format!("{}.not_t{}", path, i), vec![in_f], vec![out_t],
+                    );
+                    ct.source_op = Some("NclNot_T".to_string());
+                    netlist.add_cell(ct);
+
+                    let mut cf = Cell::new_comb(
+                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        format!("{}.not_f{}", path, i), vec![in_t], vec![out_f],
+                    );
+                    cf.source_op = Some("NclNot_F".to_string());
+                    netlist.add_cell(cf);
+                }
+            }
+
+            LirOp::NclAdd { width } => {
+                // NCL ripple-carry adder
+                // inputs: [a_t, a_f, b_t, b_f] as 4 separate signals each of `width` bits
+                let tie_low = get_tie_low(netlist);
+                let tie_high = get_tie_high(netlist);
+                let mut carry_t = tie_low;
+                let mut carry_f = tie_high;
+
+                for i in 0..*width as usize {
+                    let a_t = input_nets.get(0).and_then(|v| v.get(i)).copied().unwrap_or(tie_low);
+                    let a_f = input_nets.get(1).and_then(|v| v.get(i)).copied().unwrap_or(tie_high);
+                    let b_t = input_nets.get(2).and_then(|v| v.get(i)).copied().unwrap_or(tie_low);
+                    let b_f = input_nets.get(3).and_then(|v| v.get(i)).copied().unwrap_or(tie_high);
+
+                    let sum_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
+                    let sum_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+                    // XOR(a, b) — intermediate dual-rail
+                    let xor_ab_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xor_ab_t{}", path, i)));
+                    let xor_ab_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xor_ab_f{}", path, i)));
+
+                    // Build XOR(a,b) inline
+                    let at_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_at_bf{}", path, i)));
+                    let af_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_af_bt{}", path, i)));
+                    let at_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_at_bt{}", path, i)));
+                    let af_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_af_bf{}", path, i)));
+
+                    make_th12_or_or2(netlist, a_t, b_f, at_bf, &format!("{}.add_xor1_{}", path, i));
+                    make_th12_or_or2(netlist, a_f, b_t, af_bt, &format!("{}.add_xor2_{}", path, i));
+                    make_th22_or_celement(netlist, at_bf, af_bt, xor_ab_t, &format!("{}.add_xorab_t{}", path, i));
+                    make_th12_or_or2(netlist, a_t, b_t, at_bt, &format!("{}.add_xor3_{}", path, i));
+                    make_th12_or_or2(netlist, a_f, b_f, af_bf, &format!("{}.add_xor4_{}", path, i));
+                    make_th22_or_celement(netlist, at_bt, af_bf, xor_ab_f, &format!("{}.add_xorab_f{}", path, i));
+
+                    // XOR(xor_ab, carry) → sum
+                    let xc_t_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_t_bf{}", path, i)));
+                    let xc_f_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_f_bt{}", path, i)));
+                    let xc_t_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_t_bt{}", path, i)));
+                    let xc_f_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_f_bf{}", path, i)));
+
+                    make_th12_or_or2(netlist, xor_ab_t, carry_f, xc_t_bf, &format!("{}.add_sxor1_{}", path, i));
+                    make_th12_or_or2(netlist, xor_ab_f, carry_t, xc_f_bt, &format!("{}.add_sxor2_{}", path, i));
+                    make_th22_or_celement(netlist, xc_t_bf, xc_f_bt, sum_t, &format!("{}.add_sum_t{}", path, i));
+                    make_th12_or_or2(netlist, xor_ab_t, carry_t, xc_t_bt, &format!("{}.add_sxor3_{}", path, i));
+                    make_th12_or_or2(netlist, xor_ab_f, carry_f, xc_f_bf, &format!("{}.add_sxor4_{}", path, i));
+                    make_th22_or_celement(netlist, xc_t_bt, xc_f_bf, sum_f, &format!("{}.add_sum_f{}", path, i));
+
+                    // Carry: majority(a, b, cin) in dual-rail
+                    // cout_t = TH22(a_t,b_t) | TH22(a_t,cin_t) | TH22(b_t,cin_t)
+                    // cout_f = TH22(a_f,b_f) | TH22(a_f,cin_f) | TH22(b_f,cin_f)
+                    if i < (*width as usize) - 1 {
+                        let new_carry_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_carry_t{}", path, i)));
+                        let new_carry_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_carry_f{}", path, i)));
+
+                        let ab_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ab_t{}", path, i)));
+                        let ac_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ac_t{}", path, i)));
+                        let bc_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_bc_t{}", path, i)));
+                        make_th22_or_celement(netlist, a_t, b_t, ab_t, &format!("{}.add_maj_ab_t{}", path, i));
+                        make_th22_or_celement(netlist, a_t, carry_t, ac_t, &format!("{}.add_maj_ac_t{}", path, i));
+                        make_th22_or_celement(netlist, b_t, carry_t, bc_t, &format!("{}.add_maj_bc_t{}", path, i));
+                        // OR3 via two OR2: (ab | ac) | bc
+                        let ab_ac_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_abac_t{}", path, i)));
+                        make_th12_or_or2(netlist, ab_t, ac_t, ab_ac_t, &format!("{}.add_maj_or1_t{}", path, i));
+                        make_th12_or_or2(netlist, ab_ac_t, bc_t, new_carry_t, &format!("{}.add_maj_or2_t{}", path, i));
+
+                        let ab_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ab_f{}", path, i)));
+                        let ac_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ac_f{}", path, i)));
+                        let bc_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_bc_f{}", path, i)));
+                        make_th22_or_celement(netlist, a_f, b_f, ab_f, &format!("{}.add_maj_ab_f{}", path, i));
+                        make_th22_or_celement(netlist, a_f, carry_f, ac_f, &format!("{}.add_maj_ac_f{}", path, i));
+                        make_th22_or_celement(netlist, b_f, carry_f, bc_f, &format!("{}.add_maj_bc_f{}", path, i));
+                        let ab_ac_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_abac_f{}", path, i)));
+                        make_th12_or_or2(netlist, ab_f, ac_f, ab_ac_f, &format!("{}.add_maj_or1_f{}", path, i));
+                        make_th12_or_or2(netlist, ab_ac_f, bc_f, new_carry_f, &format!("{}.add_maj_or2_f{}", path, i));
+
+                        carry_t = new_carry_t;
+                        carry_f = new_carry_f;
+                    }
+                }
+            }
+
+            LirOp::NclComplete { width } => {
+                // Completion detection: all bit positions must be non-NULL
+                // For each bit: OR(t, f) → bit_valid. Then AND all bit_valids.
+                let mut valid_nets: Vec<GateNetId> = Vec::new();
+                for i in 0..*width as usize {
+                    let in_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
+                    let in_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let valid = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.valid{}", path, i)));
+                    netlist.add_cell(Cell::new_comb(
+                        CellId(0), or2_cell.0.clone(), library.name.clone(), or2_cell.1,
+                        format!("{}.or_valid{}", path, i), vec![in_t, in_f], vec![valid],
+                    ));
+                    valid_nets.push(valid);
+                }
+                // AND-reduce: tree reduction
+                let out = output_nets.first().copied().unwrap_or(GateNetId(0));
+                let mut current = valid_nets;
+                while current.len() > 1 {
+                    let mut next = Vec::new();
+                    for pair in current.chunks(2) {
+                        if pair.len() == 2 {
+                            let intermediate = if next.is_empty() && current.len() == 2 {
+                                out
+                            } else {
+                                netlist.add_net(GateNet::new(GateNetId(0), format!("{}.and_tree_{}", path, next.len())))
+                            };
+                            netlist.add_cell(Cell::new_comb(
+                                CellId(0), and2_cell.0.clone(), library.name.clone(), and2_cell.1,
+                                format!("{}.and_tree_{}", path, next.len()), vec![pair[0], pair[1]], vec![intermediate],
+                            ));
+                            next.push(intermediate);
+                        } else {
+                            next.push(pair[0]);
+                        }
+                    }
+                    current = next;
+                }
+                if current.len() == 1 && current[0] != out {
+                    // Single valid bit → buffer to output
+                    netlist.add_cell(Cell::new_comb(
+                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        format!("{}.buf_out", path), vec![current[0]], vec![out],
+                    ));
+                }
+            }
+
+            LirOp::NclNull { width } => {
+                // NULL generator: output all-zeros (both rails low)
+                let tie_low = get_tie_low(netlist);
+                for i in 0..(*width * 2) as usize {
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    netlist.add_cell(Cell::new_comb(
+                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        format!("{}.null{}", path, i), vec![tie_low], vec![out],
+                    ));
+                }
+            }
+
+            LirOp::Th12 { .. } => {
+                let a = input_nets.get(0).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let b = input_nets.get(1).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let q = output_nets.first().copied().unwrap_or(GateNetId(0));
+                make_th12_or_or2(netlist, a, b, q, &format!("{}.th12", path));
+            }
+
+            LirOp::Th22 { .. } => {
+                let a = input_nets.get(0).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let b = input_nets.get(1).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let q = output_nets.first().copied().unwrap_or(GateNetId(0));
+                make_th22_or_celement(netlist, a, b, q, &format!("{}.th22", path));
+            }
+
+            LirOp::NclSub { width } => {
+                // NCL subtractor: a - b = a + (~b) + 1
+                // For now, fall back to old TechMapper for complex ops
+                eprintln!(
+                    "warning: NclSub not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
+            }
+
+            LirOp::NclMul { input_width, result_width } => {
+                eprintln!(
+                    "warning: NclMul not yet supported in new synth path, {}→{} bits at {}",
+                    input_width, result_width, path
+                );
+            }
+
+            LirOp::NclLt { width } => {
+                eprintln!("warning: NclLt not yet supported in new synth path, {} bits at {}", width, path);
+            }
+
+            LirOp::NclEq { width } => {
+                eprintln!("warning: NclEq not yet supported in new synth path, {} bits at {}", width, path);
+            }
+
+            LirOp::NclShl { width } | LirOp::NclShr { width } => {
+                eprintln!("warning: NclShift not yet supported in new synth path, {} bits at {}", width, path);
+            }
+
+            LirOp::NclMux2 { width } => {
+                eprintln!("warning: NclMux2 not yet supported in new synth path, {} bits at {}", width, path);
+            }
+
+            LirOp::NclReg { width } => {
+                eprintln!("warning: NclReg not yet supported in new synth path, {} bits at {}", width, path);
+            }
+
+            LirOp::MemBlock { .. } | LirOp::MemRead { .. } | LirOp::MemWrite { .. } => {
+                eprintln!("warning: BRAM not yet supported in new synth path at {}", path);
+            }
+
+            _ => {
+                eprintln!("warning: unexpected physical op {:?} at {}", node.op, path);
+            }
+        }
+    }
+
+    // Remove __phys_* nets from the netlist's primary input list.
+    // These nets are now driven by the physical cells we just created.
+    netlist.inputs.retain(|&net_id| {
+        if let Some(net) = netlist.nets.get(net_id.0 as usize) {
+            !net.name.starts_with("__phys_")
+        } else {
+            true
+        }
+    });
+
+    // Also clear the is_input flag on these nets
+    for net in &mut netlist.nets {
+        if net.name.starts_with("__phys_") {
+            net.is_input = false;
+        }
+    }
 }
 
 /// Full synthesis with default balanced preset

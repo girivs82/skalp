@@ -1064,13 +1064,24 @@ impl GateOptimizer {
         // the internal net is replaced by the output port net (reverse replacement).
         for cell in &mut netlist.cells {
             for input in &mut cell.inputs {
+                // Follow replacement chain with cycle protection
+                let mut depth = 0;
                 while let Some(&replacement) = self.net_replacements.get(input) {
+                    if replacement == *input || depth > 100 {
+                        break; // Self-loop or cycle — stop
+                    }
                     *input = replacement;
+                    depth += 1;
                 }
             }
             for output in &mut cell.outputs {
+                let mut depth = 0;
                 while let Some(&replacement) = self.net_replacements.get(output) {
+                    if replacement == *output || depth > 100 {
+                        break;
+                    }
                     *output = replacement;
+                    depth += 1;
                 }
             }
         }
@@ -1090,11 +1101,13 @@ impl GateOptimizer {
 
             // Follow the replacement chain to find the final net
             let mut final_net = new_net;
+            let mut depth = 0;
             while let Some(&next) = self.net_replacements.get(&final_net) {
-                if next == final_net {
+                if next == final_net || depth > 100 {
                     break;
                 }
                 final_net = next;
+                depth += 1;
             }
 
             // Set alias_of on the old net to point to the final net

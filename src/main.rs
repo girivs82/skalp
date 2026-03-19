@@ -1463,8 +1463,9 @@ fn build_design(
 
                 // Parse optimization preset
                 let preset = match optimization_options.preset.as_deref() {
+                    None => skalp_lir::synth::SynthPreset::Quick, // --no-synth-opt: minimal passes
                     Some("quick") => skalp_lir::synth::SynthPreset::Quick,
-                    Some("balanced") | None => skalp_lir::synth::SynthPreset::Balanced,
+                    Some("balanced") => skalp_lir::synth::SynthPreset::Balanced,
                     Some("full") => skalp_lir::synth::SynthPreset::Full,
                     Some("timing") => skalp_lir::synth::SynthPreset::Timing,
                     Some("area") => skalp_lir::synth::SynthPreset::Area,

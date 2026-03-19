@@ -51,17 +51,6 @@ impl<'a> LirToSynthAig<'a> {
 
     /// Build the AIG from LIR
     pub fn build(mut self) -> LirToAigResult {
-        // Debug: dump all signals
-        for (idx, sig) in self.lir.signals.iter().enumerate() {
-            if sig.width > 1 || !sig.name.is_empty() {
-                eprintln!("[LIR_DEBUG] signal[{}]: name='{}' width={}", idx, sig.name, sig.width);
-            }
-        }
-        // Debug: dump all nodes
-        for (idx, node) in self.lir.nodes.iter().enumerate() {
-            eprintln!("[LIR_DEBUG] node[{}]: op={:?} output=signal_{} inputs={:?}", idx, std::mem::discriminant(&node.op), node.output.0, node.inputs.iter().map(|i| i.0).collect::<Vec<_>>());
-        }
-
         // Phase 1: Find register and physical nodes
         let mut register_indices: Vec<usize> = Vec::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
@@ -69,6 +58,27 @@ impl<'a> LirToSynthAig<'a> {
                 register_indices.push(idx);
             } else if self.is_physical_op(&node.op) {
                 self.physical_nodes.push(idx);
+            }
+        }
+
+        // Phase 1.5: Register physical node outputs as AIG pseudo-inputs.
+        // Physical ops (NCL, memory, etc.) are tech-mapped directly from LIR,
+        // but combinational AIG nodes may depend on their outputs (e.g., an Add
+        // that reads from NclDecode). Without this, get_input_bit() can't find
+        // these signals and collapses them to false → all downstream logic becomes
+        // constant tie cells.
+        for &phys_idx in &self.physical_nodes {
+            let node = &self.lir.nodes[phys_idx];
+            let signal = &self.lir.signals[node.output.0 as usize];
+            for bit in 0..signal.width {
+                let name = if signal.width == 1 {
+                    format!("__phys_{}", signal.name)
+                } else {
+                    format!("__phys_{}[{}]", signal.name, bit)
+                };
+                let node_id = self.aig.add_input(name, None);
+                let lit = AigLit::new(node_id);
+                self.signal_map.insert((node.output.0, bit), lit);
             }
         }
 
@@ -384,7 +394,8 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Not { width } => {
                 let input = node.inputs[0];
                 for bit in 0..*width {
-                    let lit = self.get_input_bit(input, bit).invert();
+                    let input_lit = self.get_input_bit(input, bit);
+                    let lit = input_lit.invert();
                     self.set_output_bit(node.output, bit, lit);
                 }
             }

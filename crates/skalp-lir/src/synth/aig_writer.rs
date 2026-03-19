@@ -716,11 +716,47 @@ impl AigWriterState<'_> {
             return net;
         }
 
-        // If not inverted, try to get the base net
+        // If not inverted, try to get the base net — but only if the cell output
+        // is NOT the inverted form. When output_inverted=true was used during
+        // tech mapping, node_to_net stores the inverted output (e.g., XOR2 for
+        // an XNOR node). In that case, we need to create an INV on top to get
+        // the non-inverted form.
         if !lit.inverted {
             if let Some(&net) = self.node_to_net.get(&lit.node) {
-                self.lit_to_net.insert((lit.node, false), net);
-                return net;
+                if self.lit_to_net.contains_key(&(lit.node, true)) {
+                    // output_inverted case: node_to_net holds the inverted form.
+                    // Create an inverter to get the non-inverted form.
+                    let inv_net = self
+                        .netlist
+                        .add_net(GateNet::new(GateNetId(0), format!("n{}_noninv", lit.node.0)));
+                    let (cell_type, cell_fit) = self.find_inv_cell();
+                    let safety = aig
+                        .get_safety_info(lit.node)
+                        .map(|s| {
+                            s.classification
+                                .clone()
+                                .unwrap_or(CellSafetyClassification::Functional)
+                        })
+                        .unwrap_or(CellSafetyClassification::Functional);
+                    let cell = Cell::new_comb(
+                        CellId(self.next_cell_id),
+                        cell_type,
+                        self.library.name.clone(),
+                        cell_fit,
+                        format!("aig.noninv{}", lit.node.0),
+                        vec![net],
+                        vec![inv_net],
+                    )
+                    .with_safety_classification(safety);
+                    self.next_cell_id += 1;
+                    self.netlist.add_cell(cell);
+                    self.lit_to_net.insert((lit.node, false), inv_net);
+                    return inv_net;
+                } else {
+                    // Normal case: node_to_net holds the non-inverted form
+                    self.lit_to_net.insert((lit.node, false), net);
+                    return net;
+                }
             }
         }
 
