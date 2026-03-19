@@ -29,6 +29,9 @@ pub struct LirToSynthAig<'a> {
     signal_map: BTreeMap<(u32, u32), AigLit>,
     /// LIR node indices that cannot be represented in AIG (MemBlock, NCL, etc.)
     physical_nodes: Vec<usize>,
+    /// Max operand width for DSP inference (0 = no DSP). Mul ops with
+    /// width ≤ 2×dsp_max_width become physical; wider ones stay in AIG.
+    dsp_max_width: u32,
 }
 
 /// Result of LIR-to-AIG conversion
@@ -46,7 +49,15 @@ impl<'a> LirToSynthAig<'a> {
             aig: Aig::new(lir.name.clone()),
             signal_map: BTreeMap::new(),
             physical_nodes: Vec::new(),
+            dsp_max_width: 0,
         }
+    }
+
+    /// Enable DSP inference with the given max operand width per block.
+    /// Mul ops with width ≤ 2×max_width will use DSP; wider ones go through AIG.
+    pub fn with_dsp_max_width(mut self, max_width: u32) -> Self {
+        self.dsp_max_width = max_width;
+        self
     }
 
     /// Build the AIG from LIR
@@ -244,7 +255,10 @@ impl<'a> LirToSynthAig<'a> {
 
     /// Check if a LIR operation cannot be represented in AIG
     fn is_physical_op(&self, op: &LirOp) -> bool {
-        matches!(op,
+        match op {
+            // Mul is physical only when DSP hard blocks are available and width fits
+            LirOp::Mul { width, .. } if self.dsp_max_width > 0
+                && *width <= self.dsp_max_width * 2 => true,
             LirOp::MemBlock { .. } |
             LirOp::MemRead { .. } |
             LirOp::MemWrite { .. } |
@@ -267,8 +281,9 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::NclReg { .. } |
             LirOp::NclComplete { .. } |
             LirOp::NclNull { .. } |
-            LirOp::Tristate { .. }
-        )
+            LirOp::Tristate { .. } => true,
+            _ => false,
+        }
     }
 
     /// Find the AIG clock node for a register
@@ -644,7 +659,8 @@ impl<'a> LirToSynthAig<'a> {
                 self.build_barrel_shifter(node, *width, ShiftDir::Right, true);
             }
 
-            LirOp::Mul { width, result_width, signed } => {
+            LirOp::Mul { width, result_width, signed }
+                if self.dsp_max_width == 0 || *width > self.dsp_max_width * 2 => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 

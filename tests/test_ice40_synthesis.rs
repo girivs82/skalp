@@ -9,10 +9,9 @@
 //! - nextpnr JSON and Verilog output
 
 use skalp_lir::{
-    get_stdlib_library, list_stdlib_libraries, lower_mir_module_to_lir,
-    lower_mir_module_to_lir_with_bram, map_lir_to_gates, map_lir_to_gates_optimized,
-    map_lir_to_gates_with_constraints, synthesize_for_area, synthesize_for_timing, CellFunction,
-    Lir, LirOp,
+    get_stdlib_library, insert_clock_buffers, insert_io_buffers, list_stdlib_libraries,
+    lower_mir_module_to_lir, lower_mir_module_to_lir_with_bram,
+    synthesize_for_area, synthesize_for_timing, CellFunction, Lir, LirOp,
 };
 use skalp_mir::MirCompiler;
 use skalp_testing::testbench::*;
@@ -128,9 +127,9 @@ impl AndGate {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    assert!(result.stats.cells_created > 0, "Should create cells");
+    assert!(!result.netlist.cells.is_empty(), "Should create cells");
 
     // Check that cells use SB_LUT4 naming
     let has_lut4_cells = result
@@ -167,9 +166,9 @@ impl Mux2 {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    assert!(result.stats.cells_created > 0, "Should create cells");
+    assert!(!result.netlist.cells.is_empty(), "Should create cells");
     println!("Mux2 synthesized to {} cells", result.netlist.cells.len());
 }
 
@@ -189,7 +188,7 @@ impl Adder8 {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     println!(
         "8-bit adder: {} cells, {} nets",
@@ -227,7 +226,7 @@ impl Register8 {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     // Should have 8 DFFs for 8-bit register
     let dff_count = result
@@ -269,8 +268,7 @@ impl Complex {
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
 
-    // Use map_lir_to_gates for a concrete test
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
     println!(
         "Complex logic synthesized: {} cells",
         result.netlist.cells.len()
@@ -332,8 +330,6 @@ impl TimingOpt {
 
 #[test]
 fn test_ice40_synthesis_presets() {
-    // Use map_lir_to_gates instead of synthesize for this test
-    // since synthesize can optimize away simple designs
     let source = r#"
 entity TestDesign {
     in a: bit[8]
@@ -349,23 +345,23 @@ impl TestDesign {
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
 
-    // Test that basic tech mapping works with ice40
-    let result = map_lir_to_gates(&lir, &library);
-    println!("Basic tech map: {} cells", result.netlist.cells.len());
+    // Test Quick preset
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    println!("Quick preset: {} cells", result.netlist.cells.len());
     assert!(
         !result.netlist.cells.is_empty(),
-        "Basic tech mapping should produce cells"
+        "Quick synthesis should produce cells"
     );
 
-    // Test optimized tech mapping
-    let optimized = map_lir_to_gates_optimized(&lir, &library);
+    // Test Balanced preset
+    let balanced = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Balanced);
     println!(
-        "Optimized tech map: {} cells",
-        optimized.netlist.cells.len()
+        "Balanced preset: {} cells",
+        balanced.netlist.cells.len()
     );
     assert!(
-        !optimized.netlist.cells.is_empty(),
-        "Optimized tech mapping should produce cells"
+        !balanced.netlist.cells.is_empty(),
+        "Balanced synthesis should produce cells"
     );
 }
 
@@ -395,7 +391,7 @@ impl Counter4 {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates_optimized(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Balanced);
 
     let json = result.netlist.to_nextpnr_json();
 
@@ -430,7 +426,7 @@ impl AndOr {
 
     let lir = compile_inline_to_lir(source);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates_optimized(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Balanced);
 
     let verilog = result.netlist.to_ice40_verilog();
 
@@ -824,8 +820,8 @@ impl CompareDesign {
     let ice40 = get_stdlib_library("ice40").expect("ice40");
     let asic = get_stdlib_library("generic_asic").expect("asic");
 
-    let ice40_result = map_lir_to_gates_optimized(&lir, &ice40);
-    let asic_result = map_lir_to_gates_optimized(&lir, &asic);
+    let ice40_result = skalp_lir::synthesize(&lir, &ice40, skalp_lir::synth::SynthPreset::Balanced);
+    let asic_result = skalp_lir::synthesize(&lir, &asic, skalp_lir::synth::SynthPreset::Balanced);
 
     println!("Cell count comparison:");
     println!("  iCE40: {} cells", ice40_result.netlist.cells.len());
@@ -978,7 +974,7 @@ fn test_bram_inference_single_block_256x8() {
     // A 256x8 memory fits in a single SB_RAM40_4K (256x16 mode)
     let lir = build_memblock_lir(8, 8, 256);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     // Should have exactly 1 RAM cell
     let ram_cells: Vec<_> = result
@@ -1013,7 +1009,7 @@ fn test_bram_inference_single_block_512x4() {
     // A 512x4 memory fits in a single SB_RAM40_4K (512x8 mode)
     let lir = build_memblock_lir(4, 9, 512);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let ram_cells: Vec<_> = result
         .netlist
@@ -1034,7 +1030,7 @@ fn test_bram_width_tiling() {
     // A 256x32 memory needs width tiling: 32/16 = 2 blocks in parallel
     let lir = build_memblock_lir(32, 8, 256);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let ram_count = result
         .netlist
@@ -1055,7 +1051,7 @@ fn test_bram_depth_tiling() {
     // A 4096x4 memory needs depth tiling: 4096/1024 = 4 blocks deep
     let lir = build_memblock_lir(4, 12, 4096);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let ram_count = result
         .netlist
@@ -1077,7 +1073,7 @@ fn test_bram_width_and_depth_tiling() {
     // With 256x16 aspect ratio: width_blocks = 32/16 = 2, depth_blocks = 1024/256 = 4
     let lir = build_memblock_lir(32, 10, 1024);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let ram_count = result
         .netlist
@@ -1119,7 +1115,7 @@ fn test_bram_rom_inference() {
     );
 
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let ram_count = result
         .netlist
@@ -1242,26 +1238,11 @@ fn build_multiply_lir(width: u32, result_width: u32, signed: bool) -> Lir {
 }
 
 /// Count MULT18X18D cells in a gate netlist
-fn count_dsp_cells(result: &skalp_lir::TechMapResult) -> usize {
-    result
-        .netlist
+fn count_dsp_cells_in(netlist: &skalp_lir::GateNetlist) -> usize {
+    netlist
         .cells
         .iter()
         .filter(|c| c.cell_type == "MULT18X18D")
-        .count()
-}
-
-/// Count partial product AND gates (used in gate-level multiply)
-fn count_partial_product_cells(result: &skalp_lir::TechMapResult) -> usize {
-    result
-        .netlist
-        .cells
-        .iter()
-        .filter(|c| {
-            c.source_op
-                .as_ref()
-                .is_some_and(|op| op == "PartialProduct")
-        })
         .count()
 }
 
@@ -1269,16 +1250,10 @@ fn count_partial_product_cells(result: &skalp_lir::TechMapResult) -> usize {
 fn test_ecp5_dsp_multiply_8x8() {
     let lir = build_multiply_lir(8, 16, false);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = count_dsp_cells(&result);
-    let pp_count = count_partial_product_cells(&result);
-
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(dsp_count, 1, "8x8 multiply should use exactly 1 MULT18X18D");
-    assert_eq!(
-        pp_count, 0,
-        "Should not use partial products when DSP is available"
-    );
 
     // Verify the DSP cell has correct parameters
     let dsp_cell = result
@@ -1305,9 +1280,9 @@ fn test_ecp5_dsp_multiply_8x8() {
 fn test_ecp5_dsp_multiply_18x18() {
     let lir = build_multiply_lir(18, 36, false);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = count_dsp_cells(&result);
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
         dsp_count, 1,
         "18x18 multiply should use exactly 1 MULT18X18D (max single block)"
@@ -1318,9 +1293,9 @@ fn test_ecp5_dsp_multiply_18x18() {
 fn test_ecp5_dsp_multiply_signed() {
     let lir = build_multiply_lir(16, 32, true);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = count_dsp_cells(&result);
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
         dsp_count, 1,
         "16x16 signed multiply should use 1 MULT18X18D with native signed mode"
@@ -1343,9 +1318,9 @@ fn test_ecp5_dsp_multiply_signed() {
 fn test_ecp5_dsp_wide_multiply() {
     let lir = build_multiply_lir(32, 64, false);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = count_dsp_cells(&result);
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
         dsp_count, 4,
         "32x32 multiply should use 4 MULT18X18D blocks (tiled decomposition)"
@@ -1362,18 +1337,18 @@ fn test_ecp5_dsp_wide_multiply() {
 fn test_ecp5_dsp_too_wide_fallback() {
     let lir = build_multiply_lir(64, 128, false);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = count_dsp_cells(&result);
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
         dsp_count, 0,
         "64x64 multiply should fall back to gate-level (too wide for DSP tiling)"
     );
 
-    let pp_count = count_partial_product_cells(&result);
+    // Gate-level multiply should produce cells (LUTs for the multiplier logic)
     assert!(
-        pp_count > 0,
-        "Should use partial product decomposition for 64x64"
+        !result.netlist.cells.is_empty(),
+        "Should produce gate-level cells for 64x64 multiply"
     );
 }
 
@@ -1382,23 +1357,18 @@ fn test_ice40_no_dsp_fallback() {
     // Regression: iCE40 has no DSP blocks, should use gate-level multiply
     let lir = build_multiply_lir(8, 16, false);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
-    let dsp_count = result
-        .netlist
-        .cells
-        .iter()
-        .filter(|c| c.cell_type == "MULT18X18D")
-        .count();
+    let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
         dsp_count, 0,
         "iCE40 should not use DSP blocks (none available)"
     );
 
-    let pp_count = count_partial_product_cells(&result);
+    // Gate-level multiply should produce LUT cells
     assert!(
-        pp_count > 0,
-        "iCE40 should use partial products for multiply"
+        !result.netlist.cells.is_empty(),
+        "iCE40 should produce gate-level cells for multiply"
     );
 }
 
@@ -1559,7 +1529,8 @@ fn build_register_lir(width: u32) -> Lir {
 fn test_clock_buffer_insertion_ice40() {
     let lir = build_register_lir(4);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    insert_clock_buffers(&mut result.netlist, &library);
 
     // Should have exactly 1 SB_GB cell
     let gb_cells: Vec<_> = result
@@ -1606,7 +1577,8 @@ fn test_clock_buffer_insertion_ice40() {
 fn test_clock_buffer_insertion_ecp5() {
     let lir = build_register_lir(4);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    insert_clock_buffers(&mut result.netlist, &library);
 
     // Should have exactly 1 DCCA cell
     let dcca_cells: Vec<_> = result
@@ -1668,7 +1640,8 @@ fn test_no_clock_buffer_generic_asic() {
     );
 
     // Should still synthesize without panic
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    insert_clock_buffers(&mut result.netlist, &library);
 
     // No clock buffer cells should be inserted
     let clk_buf_count = result
@@ -1796,7 +1769,9 @@ fn test_ecp5_has_io_cells() {
 fn test_io_buffer_insertion_ice40() {
     let lir = build_register_lir(4);
     let library = get_stdlib_library("ice40").expect("Failed to load ice40");
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let empty_constraints = indexmap::IndexMap::new();
+    insert_io_buffers(&mut result.netlist, &library, &empty_constraints);
 
     // Should have SB_IO cells inserted for input (d) and output (q) ports
     let io_cells: Vec<_> = result
@@ -1819,19 +1794,15 @@ fn test_io_buffer_insertion_ice40() {
             cell.path
         );
     }
-
-    // Stats should report IO buffers inserted
-    assert!(
-        result.stats.io_buffers_inserted > 0,
-        "Should report IO buffers inserted in stats"
-    );
 }
 
 #[test]
 fn test_io_buffer_insertion_ecp5() {
     let lir = build_register_lir(4);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let empty_constraints = indexmap::IndexMap::new();
+    insert_io_buffers(&mut result.netlist, &library, &empty_constraints);
 
     // ECP5 should use IB for input pads and OB for output pads
     let ib_cells: Vec<_> = result
@@ -1873,7 +1844,9 @@ fn test_no_io_buffer_generic_asic() {
     let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
 
     // generic_asic has ASIC pads (via CellFunction) but no io_info → no IO buffer insertion
-    let result = map_lir_to_gates(&lir, &library);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let empty_constraints = indexmap::IndexMap::new();
+    insert_io_buffers(&mut result.netlist, &library, &empty_constraints);
 
     let io_buffer_cells: Vec<_> = result
         .netlist
@@ -1885,10 +1858,6 @@ fn test_no_io_buffer_generic_asic() {
         io_buffer_cells.len(),
         0,
         "generic_asic should not insert IO buffer cells (no io_info)"
-    );
-    assert_eq!(
-        result.stats.io_buffers_inserted, 0,
-        "generic_asic should report 0 IO buffers inserted"
     );
 }
 
@@ -1983,7 +1952,8 @@ fn test_io_constraint_propagation() {
         },
     );
 
-    let result = map_lir_to_gates_with_constraints(&lir, &library, port_constraints);
+    let mut result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    insert_io_buffers(&mut result.netlist, &library, &port_constraints);
 
     // Find IO cells and check their parameters
     let io_cells: Vec<_> = result
