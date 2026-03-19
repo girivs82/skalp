@@ -13,8 +13,8 @@
 use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_word_lir,
-    tech_mapper::TechMapper,
+    gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_word_lir, synthesize,
+    SynthPreset,
 };
 use skalp_mir::MirCompiler;
 use skalp_safety::{
@@ -45,8 +45,7 @@ fn compile_to_gate_netlist(source: &str) -> Vec<GateNetlist> {
         .iter()
         .map(|module| {
             let word_lir_result = lower_mir_module_to_word_lir(module);
-            let mut mapper = TechMapper::new(&library);
-            mapper.map(&word_lir_result.lir).netlist
+            synthesize(&word_lir_result.lir, &library, SynthPreset::Quick).netlist
         })
         .collect()
 }

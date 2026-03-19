@@ -11030,8 +11030,7 @@ impl SimBasedEquivalenceChecker {
         library: &skalp_lir::TechLibrary,
     ) -> FormalResult<SimEquivalenceResult> {
         // Tech-map LIR to gate netlist
-        let mut mapper = skalp_lir::TechMapper::new(library);
-        let lir_netlist = mapper.map(lir).netlist;
+        let lir_netlist = skalp_lir::synthesize(lir, library, skalp_lir::SynthPreset::Quick).netlist;
 
         self.check_gate_equivalence(&lir_netlist, netlist)
     }

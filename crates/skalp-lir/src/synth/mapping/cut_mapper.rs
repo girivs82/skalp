@@ -660,6 +660,7 @@ impl CutMapper {
                             delay: 50.0,
                             output_inverted: false,
                             truth_table: None,
+                            pin_mapping: None,
                         },
                     );
                 }
@@ -674,6 +675,7 @@ impl CutMapper {
                             delay: 30.0,
                             output_inverted: false,
                             truth_table: None,
+                            pin_mapping: None,
                         },
                     );
                 }
@@ -697,6 +699,7 @@ impl CutMapper {
                                 delay: match_.delay,
                                 output_inverted: match_.output_inverted,
                                 truth_table: Some(match_.cut.truth_table),
+                                pin_mapping: Some(match_.pin_mapping.clone()),
                             },
                         );
                     } else {
@@ -714,6 +717,7 @@ impl CutMapper {
                                 delay: 25.0,
                                 output_inverted: false,
                                 truth_table: Some(0x8),
+                                pin_mapping: None,
                             },
                         );
                     }

@@ -31,6 +31,48 @@ use super::{Aig, AigNodeId, Cut};
 use crate::tech_library::{CellFunction, TechLibrary};
 use indexmap::IndexMap;
 
+/// Returns the canonical pin evaluation order for a cell function.
+///
+/// This defines the order gate_eval expects inputs in, using the same
+/// abstract pin names (A, B, C, S, D) as `function_to_truth_tables`.
+/// The pin_mapping on each CutMatch/MappedNode tells us which leaf
+/// maps to which functional pin; this function tells us where each
+/// functional pin goes in the eval input vector.
+///
+/// For most cells this is just alphabetical (A, B, C, D).
+/// For MUX2, gate_eval expects [sel, d0, d1] = [S, A, B].
+pub fn eval_pin_order(function: &CellFunction) -> Option<&'static [&'static str]> {
+    match function {
+        // 1-input
+        CellFunction::Inv | CellFunction::Buf => Some(&["A"]),
+        // 2-input symmetric — order doesn't matter, but canonical is [A, B]
+        CellFunction::And2
+        | CellFunction::Or2
+        | CellFunction::Nand2
+        | CellFunction::Nor2
+        | CellFunction::Xor2
+        | CellFunction::Xnor2 => Some(&["A", "B"]),
+        // 2-input asymmetric
+        CellFunction::AndNot | CellFunction::OrNot => Some(&["A", "B"]),
+        // 3-input symmetric
+        CellFunction::And3 | CellFunction::Or3 | CellFunction::Nand3 | CellFunction::Nor3 => {
+            Some(&["A", "B", "C"])
+        }
+        // 3-input asymmetric — gate_eval expects [a, b, c] = [A, B, C]
+        CellFunction::Aoi21 | CellFunction::Oai21 => Some(&["A", "B", "C"]),
+        // 4-input symmetric
+        CellFunction::And4
+        | CellFunction::Or4
+        | CellFunction::Nand4
+        | CellFunction::Nor4 => Some(&["A", "B", "C", "D"]),
+        // 4-input asymmetric — gate_eval expects [a, b, c, d] = [A, B, C, D]
+        CellFunction::Aoi22 | CellFunction::Oai22 => Some(&["A", "B", "C", "D"]),
+        // MUX2: gate_eval expects [sel, d0, d1] = [S, A, B]
+        CellFunction::Mux2 => Some(&["S", "A", "B"]),
+        _ => None,
+    }
+}
+
 /// Mapping objective
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MappingObjective {
@@ -60,6 +102,10 @@ pub struct MappedNode {
     pub output_inverted: bool,
     /// Truth table for LUT cells (used by AIG writer to emit LUT INIT values)
     pub truth_table: Option<u64>,
+    /// Pin mapping: cut leaf i maps to cell pin pin_mapping[i].
+    /// For asymmetric gates with permuted truth tables (e.g. OAI21),
+    /// the AIG writer uses this to reorder input nets to match cell pin order.
+    pub pin_mapping: Option<Vec<String>>,
 }
 
 /// Mapping statistics

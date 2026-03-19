@@ -5,7 +5,7 @@
 
 use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, tech_mapper::TechMapper};
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, synthesize, SynthPreset};
 use skalp_mir::MirCompiler;
 use skalp_sim::convert_gate_netlist_to_sir;
 use std::fs;
@@ -55,8 +55,7 @@ fn test_mcu_v11_full_flow() {
     // Tech map to GateNetlist
     println!("⚙️  Technology mapping to GateNetlist...");
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let mut mapper = TechMapper::new(&library);
-    let tech_result = mapper.map(&lir_result.lir);
+    let tech_result = synthesize(&lir_result.lir, &library, SynthPreset::Quick);
     let netlist = &tech_result.netlist;
 
     println!("   Gate cells: {}", netlist.cells.len());

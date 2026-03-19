@@ -10,7 +10,7 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
-    gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_lir, tech_mapper::TechMapper,
+    gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_lir, synthesize, SynthPreset,
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::convert_gate_netlist_to_sir;
@@ -37,8 +37,7 @@ fn tech_map_source(source: &str) -> Vec<GateNetlist> {
         .iter()
         .map(|module| {
             let lir_result = lower_mir_module_to_lir(module);
-            let mut mapper = TechMapper::new(&library);
-            mapper.map(&lir_result.lir).netlist
+            synthesize(&lir_result.lir, &library, SynthPreset::Quick).netlist
         })
         .collect()
 }

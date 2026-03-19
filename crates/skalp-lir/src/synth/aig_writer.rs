@@ -10,7 +10,7 @@ use crate::tech_library::{CellFunction, TechLibrary};
 
 use super::aig::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
 use super::dff_decompose::LatchDecomp;
-use super::mapping::{MappedNode, MappingResult};
+use super::mapping::{eval_pin_order, MappedNode, MappingResult};
 
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -457,9 +457,9 @@ impl AigWriterState<'_> {
             .unwrap_or(CellSafetyClassification::Functional);
 
         // Create cell
-        let cell = Cell::new_comb(
+        let mut cell = Cell::new_comb(
             CellId(self.next_cell_id),
-            cell_type,
+            cell_type.clone(),
             self.library.name.clone(),
             cell_fit,
             format!("aig.n{}", id.0),
@@ -467,6 +467,9 @@ impl AigWriterState<'_> {
             vec![output_net],
         )
         .with_safety_classification(safety);
+        if let Some(func) = self.lookup_cell_function(&cell_type) {
+            cell = cell.with_function(func);
+        }
 
         self.next_cell_id += 1;
         self.netlist.add_cell(cell);
@@ -499,7 +502,7 @@ impl AigWriterState<'_> {
         let is_fpga_lut = mapped.truth_table.is_some() && self.library.is_fpga();
 
         // Get input nets — for FPGA LUTs, use non-inverted base nets
-        let input_nets: Vec<GateNetId> = mapped
+        let raw_input_nets: Vec<GateNetId> = mapped
             .inputs
             .iter()
             .map(|(node, inverted)| {
@@ -510,6 +513,36 @@ impl AigWriterState<'_> {
                 self.get_or_create_lit_net(aig, lit)
             })
             .collect();
+
+        // Reorder inputs based on pin_mapping and the cell function's eval pin order.
+        // pin_mapping[i] = "X" means cut leaf i maps to functional pin X.
+        // eval_pin_order tells us what order gate_eval expects those pins in.
+        // We place each leaf's net at the position its functional pin occupies
+        // in the eval order — driven by pin function, not alphabetical sorting.
+        let input_nets: Vec<GateNetId> = if let Some(ref pm) = mapped.pin_mapping {
+            let eval_order = self
+                .lookup_cell_function(&mapped.cell_type)
+                .as_ref()
+                .and_then(|f| eval_pin_order(f));
+            if let Some(order) = eval_order {
+                if order.len() == raw_input_nets.len() && pm.len() == raw_input_nets.len() {
+                    let mut reordered = vec![raw_input_nets[0]; order.len()];
+                    for (leaf_idx, pin_name) in pm.iter().enumerate() {
+                        // Find where this pin goes in eval order
+                        if let Some(eval_pos) = order.iter().position(|&p| p == pin_name) {
+                            reordered[eval_pos] = raw_input_nets[leaf_idx];
+                        }
+                    }
+                    reordered
+                } else {
+                    raw_input_nets
+                }
+            } else {
+                raw_input_nets
+            }
+        } else {
+            raw_input_nets
+        };
 
         // Create cell — use LUT cell when truth table is available (FPGA mapping)
         let cell = if let Some(tt) = mapped.truth_table {
@@ -573,6 +606,14 @@ impl AigWriterState<'_> {
                 vec![output_net],
             )
             .with_safety_classification(safety)
+        };
+
+        // Attach library cell function for reliable simulation dispatch
+        let cell = if let Some(func) = self.lookup_cell_function(&mapped.cell_type) {
+            cell.with_function(func)
+        } else {
+            eprintln!("WARN: no library cell function for '{}'", mapped.cell_type);
+            cell
         };
 
         self.next_cell_id += 1;
@@ -738,9 +779,9 @@ impl AigWriterState<'_> {
                                 .unwrap_or(CellSafetyClassification::Functional)
                         })
                         .unwrap_or(CellSafetyClassification::Functional);
-                    let cell = Cell::new_comb(
+                    let mut cell = Cell::new_comb(
                         CellId(self.next_cell_id),
-                        cell_type,
+                        cell_type.clone(),
                         self.library.name.clone(),
                         cell_fit,
                         format!("aig.noninv{}", lit.node.0),
@@ -748,6 +789,9 @@ impl AigWriterState<'_> {
                         vec![inv_net],
                     )
                     .with_safety_classification(safety);
+                    if let Some(func) = self.lookup_cell_function(&cell_type) {
+                        cell = cell.with_function(func);
+                    }
                     self.next_cell_id += 1;
                     self.netlist.add_cell(cell);
                     self.lit_to_net.insert((lit.node, false), inv_net);
@@ -815,9 +859,9 @@ impl AigWriterState<'_> {
                 })
                 .unwrap_or(CellSafetyClassification::Functional);
 
-            let cell = Cell::new_comb(
+            let mut cell = Cell::new_comb(
                 CellId(self.next_cell_id),
-                cell_type,
+                cell_type.clone(),
                 self.library.name.clone(),
                 cell_fit,
                 format!("aig.inv{}", lit.node.0),
@@ -825,6 +869,9 @@ impl AigWriterState<'_> {
                 vec![inv_net],
             )
             .with_safety_classification(safety);
+            if let Some(func) = self.lookup_cell_function(&cell_type) {
+                cell = cell.with_function(func);
+            }
 
             self.next_cell_id += 1;
             self.netlist.add_cell(cell);
@@ -878,6 +925,12 @@ impl AigWriterState<'_> {
                 }
             }
         }
+    }
+
+    /// Look up the CellFunction for a cell type name from the library.
+    /// Returns None if the cell is not in the library.
+    fn lookup_cell_function(&self, cell_type: &str) -> Option<CellFunction> {
+        self.library.get_cell(cell_type).map(|c| c.function.clone())
     }
 
     /// Find an AND2 cell in the library
