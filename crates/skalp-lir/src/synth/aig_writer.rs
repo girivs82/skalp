@@ -277,7 +277,7 @@ impl AigWriterState<'_> {
 
         // If the library has a TIE_LOW cell, instantiate it to drive const_0
         if let Some((tie_low_name, tie_low_fit)) = self.try_find_tie_low_cell() {
-            let cell = Cell::new_comb(
+            let mut cell = Cell::new_comb(
                 CellId(self.next_cell_id),
                 tie_low_name,
                 self.library.name.clone(),
@@ -286,6 +286,7 @@ impl AigWriterState<'_> {
                 vec![], // No inputs
                 vec![const0],
             );
+            cell.function = Some(CellFunction::TieLow);
             self.next_cell_id += 1;
             self.netlist.add_cell(cell);
         }
@@ -297,7 +298,7 @@ impl AigWriterState<'_> {
         self.lit_to_net.insert((AigNodeId::FALSE, true), const1);
 
         if let Some((tie_high_name, tie_high_fit)) = self.try_find_tie_high_cell() {
-            let cell = Cell::new_comb(
+            let mut cell = Cell::new_comb(
                 CellId(self.next_cell_id),
                 tie_high_name,
                 self.library.name.clone(),
@@ -306,6 +307,7 @@ impl AigWriterState<'_> {
                 vec![], // No inputs
                 vec![const1],
             );
+            cell.function = Some(CellFunction::TieHigh);
             self.next_cell_id += 1;
             self.netlist.add_cell(cell);
         }
@@ -906,21 +908,52 @@ impl AigWriterState<'_> {
                 self.netlist.outputs.push(output_net);
             } else {
                 // Non-constant output - use the existing logic
-                let net = self.get_or_create_lit_net(aig, *lit);
+                let source_net = self.get_or_create_lit_net(aig, *lit);
+
+                // Check if this net is already used as another output.
+                // This happens when two outputs share the same AIG literal
+                // (e.g., shift: stage2_out[0] = stage1_out[1], so their
+                // inverted forms share the same AIG node). Each output needs
+                // its own dedicated net to avoid rename conflicts.
+                let is_already_output = self.netlist.get_net_mut(source_net)
+                    .map(|n| n.is_output)
+                    .unwrap_or(false);
+
+                let output_net = if is_already_output {
+                    // Create a dedicated net and a BUF to drive it
+                    let new_net = self.netlist.add_net(
+                        GateNet::new(GateNetId(0), name.clone()),
+                    );
+                    let (buf_type, buf_fit) = self.find_buf_cell();
+                    let mut cell = Cell::new_comb(
+                        CellId(self.next_cell_id),
+                        buf_type.clone(),
+                        self.library.name.clone(),
+                        buf_fit,
+                        format!("aig.out_buf_{}", name),
+                        vec![source_net],
+                        vec![new_net],
+                    );
+                    if let Some(func) = self.lookup_cell_function(&buf_type) {
+                        cell = cell.with_function(func);
+                    }
+                    self.next_cell_id += 1;
+                    self.netlist.add_cell(cell);
+                    new_net
+                } else {
+                    // First use of this net as output — rename in place
+                    self.netlist.rename_net(source_net, name.clone());
+                    source_net
+                };
 
                 // Mark this net as output
-                if let Some(gate_net) = self.netlist.get_net_mut(net) {
+                if let Some(gate_net) = self.netlist.get_net_mut(output_net) {
                     gate_net.is_output = true;
                 }
 
                 // Add to outputs list if not already there
-                if !self.netlist.outputs.contains(&net) {
-                    self.netlist.outputs.push(net);
-                }
-
-                // Rename net to match output name
-                if let Some(gate_net) = self.netlist.get_net_mut(net) {
-                    gate_net.name = name.clone();
+                if !self.netlist.outputs.contains(&output_net) {
+                    self.netlist.outputs.push(output_net);
                 }
             }
         }
@@ -1076,6 +1109,18 @@ impl AigWriterState<'_> {
              Cannot synthesize without an inverter primitive.",
             self.library.name
         )
+    }
+
+    /// Find a BUF cell in the library
+    fn find_buf_cell(&self) -> (String, f64) {
+        let buf_cells = self.library.find_cells_by_function(&CellFunction::Buf);
+        if let Some(cell) = buf_cells.first() {
+            return (cell.name.clone(), cell.fit);
+        }
+        // Fallback: use two inverters conceptually, but just use INV name
+        // since we only need a buffer for output isolation
+        let inv = self.find_inv_cell();
+        (format!("BUF_from_{}", inv.0), inv.1 * 2.0)
     }
 
     /// Find a DFF cell in the library

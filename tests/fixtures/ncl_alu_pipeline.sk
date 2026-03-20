@@ -1,0 +1,23 @@
+// NCL ALU Pipeline — multi-stage combinational datapath
+// Tests boundary NCL with chained operations:
+//   Stage 1: add (a + b)
+//   Stage 2: shift right by 1
+//   Stage 3: mask upper nibble (& 0xF0)
+//   Stage 4: XOR with original input a
+// No clock — data flows through via NCL handshake protocol.
+
+async entity NclAluPipeline {
+    in a: bit[8]
+    in b: bit[8]
+    out stage1_out: bit[8]   // a + b
+    out stage2_out: bit[8]   // (a + b) >> 1
+    out stage3_out: bit[8]   // ((a + b) >> 1) & 0xF0
+    out result: bit[8]       // (((a + b) >> 1) & 0xF0) ^ a
+}
+
+impl NclAluPipeline {
+    stage1_out = a + b
+    stage2_out = stage1_out >> 8'd1
+    stage3_out = stage2_out & 8'hF0
+    result = stage3_out ^ a
+}

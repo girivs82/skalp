@@ -765,6 +765,18 @@ impl GateNetlist {
         self.net_map.get(name).copied()
     }
 
+    /// Rename a net, updating both the net struct and the lookup map.
+    pub fn rename_net(&mut self, net_id: GateNetId, new_name: String) {
+        if let Some(net) = self.nets.get_mut(net_id.0 as usize) {
+            // Remove old name from map (best-effort: only if it still points to this net)
+            if self.net_map.get(&net.name) == Some(&net_id) {
+                self.net_map.swap_remove(&net.name);
+            }
+            net.name = new_name.clone();
+        }
+        self.net_map.insert(new_name, net_id);
+    }
+
     /// Rebuild driver and fanout information from cells
     /// Useful after net merging to ensure connectivity is accurate
     pub fn rebuild_net_connectivity(&mut self) {
@@ -1794,14 +1806,14 @@ impl GateNetlist {
             None => self.add_net_with_name(net_name.to_string()),
         };
 
-        let cell_type = if value == 0 {
-            "TIE0_X1".to_string()
+        let (cell_type, func) = if value == 0 {
+            ("TIE0_X1".to_string(), CellFunction::TieLow)
         } else {
-            "TIE1_X1".to_string()
+            ("TIE1_X1".to_string(), CellFunction::TieHigh)
         };
 
         let cell_id = CellId(self.cells.len() as u32);
-        let cell = Cell::new_comb(
+        let mut cell = Cell::new_comb(
             cell_id,
             cell_type,
             self.library_name.clone(),
@@ -1810,6 +1822,7 @@ impl GateNetlist {
             vec![],
             vec![net_id],
         );
+        cell.function = Some(func);
         self.cells.push(cell);
 
         // Update net driver

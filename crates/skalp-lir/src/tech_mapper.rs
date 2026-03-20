@@ -63,6 +63,20 @@ impl LibraryCellInfo {
     }
 }
 
+/// Look up a library cell by function, falling back to a default if not found.
+fn lookup_cell(library: &TechLibrary, func: CellFunction, fallback_name: &str, fallback_fit: f64) -> LibraryCellInfo {
+    match library.find_best_cell(&func) {
+        Some(cell) => LibraryCellInfo::from_library_cell(cell),
+        None => LibraryCellInfo {
+            name: fallback_name.to_string(),
+            function: func,
+            fit: fallback_fit,
+            failure_modes: vec![],
+            lut_init: None,
+        },
+    }
+}
+
 /// Convert a library failure mode to a cell failure mode
 fn convert_failure_mode(fm: &LibraryFailureMode) -> CellFailureMode {
     CellFailureMode {
@@ -393,16 +407,19 @@ fn get_or_create_tie_high(netlist: &mut GateNetlist, library: &TechLibrary) -> G
 
     // Add tie cell if library has one
     let tie_cells = library.find_cells_by_function(&CellFunction::TieHigh);
-    if let Some(cell) = tie_cells.first() {
-        netlist.add_cell(Cell::new_comb(
+    if let Some(lib_cell) = tie_cells.first() {
+        let cell_info = LibraryCellInfo::from_library_cell(lib_cell);
+        let mut cell = Cell::new_comb(
             CellId(0),
-            cell.name.clone(),
+            lib_cell.name.clone(),
             library.name.clone(),
-            cell.fit,
+            lib_cell.fit,
             "tie_high".to_string(),
             vec![],
             vec![id],
-        ));
+        );
+        cell_info.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
     }
 
     id
@@ -503,13 +520,13 @@ fn map_dsp_standalone(
             id
         } else {
             let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
-            let tie_info = library.find_best_cell(&CellFunction::TieLow)
-                .map(|c| (c.name.clone(), c.fit))
-                .unwrap_or(("TIE_LOW".to_string(), 0.01));
-            netlist.add_cell(Cell::new_comb(
-                CellId(0), tie_info.0, library.name.clone(), tie_info.1,
+            let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
+            let mut cell = Cell::new_comb(
+                CellId(0), tie_info.name, library.name.clone(), tie_info.fit,
                 "tie_low".to_string(), vec![], vec![id],
-            ));
+            );
+            cell.function = Some(CellFunction::TieLow);
+            netlist.add_cell(cell);
             id
         }
     };
@@ -684,9 +701,7 @@ fn map_dsp_standalone(
         // (not functional correctness of the adder tree), wire outputs [half..] with
         // placeholder XOR gates to combine partial products.
         // A proper implementation would use a carry-chain adder here.
-        let xor_info = library.find_best_cell(&CellFunction::Xor2)
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or(("XOR2".to_string(), 0.2));
+        let xor_info = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
 
         for i in half as usize..result_width.min(result_width) as usize {
             if i >= outputs.len() { break; }
@@ -698,11 +713,13 @@ fn map_dsp_standalone(
             let combined = netlist.add_net(GateNet::new(
                 GateNetId(0), format!("{}.dsp_combine_{}", path, i),
             ));
-            netlist.add_cell(Cell::new_comb(
-                CellId(0), xor_info.0.clone(), library.name.clone(), xor_info.1,
+            let mut xc1 = Cell::new_comb(
+                CellId(0), xor_info.name.clone(), library.name.clone(), xor_info.fit,
                 format!("{}.dsp_xor_{}", path, i),
                 vec![lh_bit, hl_bit], vec![combined],
-            ));
+            );
+            xor_info.apply_to_cell(&mut xc1);
+            netlist.add_cell(xc1);
 
             // XOR with hh contribution if applicable
             let hh_bit = if i >= 2 * half as usize {
@@ -710,11 +727,13 @@ fn map_dsp_standalone(
             } else {
                 tie_low
             };
-            netlist.add_cell(Cell::new_comb(
-                CellId(0), xor_info.0.clone(), library.name.clone(), xor_info.1,
+            let mut xc2 = Cell::new_comb(
+                CellId(0), xor_info.name.clone(), library.name.clone(), xor_info.fit,
                 format!("{}.dsp_xor2_{}", path, i),
                 vec![combined, hh_bit], vec![outputs[i]],
-            ));
+            );
+            xor_info.apply_to_cell(&mut xc2);
+            netlist.add_cell(xc2);
         }
     } else {
         // Too wide for DSP — should not happen since the AIG path would handle it,
@@ -769,14 +788,13 @@ fn map_memblock_standalone(
             id
         } else {
             let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
-            let tie_info = library
-                .find_best_cell(&CellFunction::TieLow)
-                .map(|c| (c.name.clone(), c.fit))
-                .unwrap_or(("TIE_LOW".to_string(), 0.01));
-            netlist.add_cell(Cell::new_comb(
-                CellId(0), tie_info.0, library.name.clone(), tie_info.1,
+            let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
+            let mut cell = Cell::new_comb(
+                CellId(0), tie_info.name, library.name.clone(), tie_info.fit,
                 "tie_low".to_string(), vec![], vec![id],
-            ));
+            );
+            cell.function = Some(CellFunction::TieLow);
+            netlist.add_cell(cell);
             id
         }
     };
@@ -903,38 +921,38 @@ fn map_memblock_standalone(
 
                 if expected == 0 {
                     // Need INV
-                    let inv_cell_info = library.find_best_cell(&CellFunction::Inv)
-                        .map(|c| (c.name.clone(), c.fit))
-                        .unwrap_or(("INV".to_string(), 0.1));
-                    netlist.add_cell(Cell::new_comb(
-                        CellId(0), inv_cell_info.0, library.name.clone(), inv_cell_info.1,
+                    let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
+                    let mut cell = Cell::new_comb(
+                        CellId(0), inv_ci.name, library.name.clone(), inv_ci.fit,
                         format!("{}_d{}_addr_inv_{}", path, db, bit),
                         vec![addr_bit], vec![match_net],
-                    ));
+                    );
+                    cell.function = Some(CellFunction::Inv);
+                    netlist.add_cell(cell);
                 } else {
                     // Buffer/pass through
-                    let buf_info = library.find_best_cell(&CellFunction::Buf)
-                        .map(|c| (c.name.clone(), c.fit))
-                        .unwrap_or(("BUF".to_string(), 0.1));
-                    netlist.add_cell(Cell::new_comb(
-                        CellId(0), buf_info.0, library.name.clone(), buf_info.1,
+                    let buf_ci = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+                    let mut cell = Cell::new_comb(
+                        CellId(0), buf_ci.name, library.name.clone(), buf_ci.fit,
                         format!("{}_d{}_addr_buf_{}", path, db, bit),
                         vec![addr_bit], vec![match_net],
-                    ));
+                    );
+                    cell.function = Some(CellFunction::Buf);
+                    netlist.add_cell(cell);
                 }
 
                 // AND with running bank_sel
                 let new_sel = netlist.add_net(GateNet::new(
                     GateNetId(0), format!("{}_d{}_bank_sel_{}", path, db, bit),
                 ));
-                let and_info = library.find_best_cell(&CellFunction::And2)
-                    .map(|c| (c.name.clone(), c.fit))
-                    .unwrap_or(("AND2".to_string(), 0.2));
-                netlist.add_cell(Cell::new_comb(
-                    CellId(0), and_info.0, library.name.clone(), and_info.1,
+                let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+                let mut cell = Cell::new_comb(
+                    CellId(0), and_ci.name, library.name.clone(), and_ci.fit,
                     format!("{}_d{}_bank_and_{}", path, db, bit),
                     vec![bank_sel, match_net], vec![new_sel],
-                ));
+                );
+                cell.function = Some(CellFunction::And2);
+                netlist.add_cell(cell);
                 bank_sel = new_sel;
             }
 
@@ -942,14 +960,14 @@ fn map_memblock_standalone(
             let bank_we = netlist.add_net(GateNet::new(
                 GateNetId(0), format!("{}_d{}_bank_we", path, db),
             ));
-            let and_info = library.find_best_cell(&CellFunction::And2)
-                .map(|c| (c.name.clone(), c.fit))
-                .unwrap_or(("AND2".to_string(), 0.2));
-            netlist.add_cell(Cell::new_comb(
-                CellId(0), and_info.0, library.name.clone(), and_info.1,
+            let we_and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+            let mut cell = Cell::new_comb(
+                CellId(0), we_and_ci.name, library.name.clone(), we_and_ci.fit,
                 format!("{}_d{}_we_and", path, db),
                 vec![we_net, bank_sel], vec![bank_we],
-            ));
+            );
+            cell.function = Some(CellFunction::And2);
+            netlist.add_cell(cell);
 
             // For each width block in this depth slice
             for wb in 0..width_blocks {
@@ -978,6 +996,7 @@ fn map_memblock_standalone(
                 // MUX read data: if bank_sel, use this block's output, else keep previous
                 // For first depth block, output is block_out directly; for subsequent,
                 // MUX with previous result
+                let mux_ci = lookup_cell(library, CellFunction::Mux2, "MUX2", 0.3);
                 if db == 0 {
                     // First bank: wire block outputs to intermediate "result" nets
                     for i in bit_lo..bit_hi {
@@ -985,16 +1004,14 @@ fn map_memblock_standalone(
                             GateNetId(0), format!("{}_w{}_result{}", path, wb, i - bit_lo),
                         ));
                         // MUX: bank_sel ? block_out : tie_low
-                        let mux_info = library.find_best_cell(&CellFunction::Mux2)
-                            .map(|c| (c.name.clone(), c.fit))
-                            .unwrap_or(("MUX2".to_string(), 0.3));
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_info.0, library.name.clone(), mux_info.1,
+                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
                             format!("{}_d0_w{}_rmux{}", path, wb, i - bit_lo),
                             vec![bank_sel, tie_low, block_out[i - bit_lo]],
                             vec![result_net],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
+                        mux_ci.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
                     }
                 } else if db == depth_blocks - 1 {
@@ -1005,16 +1022,14 @@ fn map_memblock_standalone(
                         ).unwrap_or(tie_low);
                         let final_out = outputs.get(i).copied().unwrap_or(outputs[0]);
                         // MUX: bank_sel ? block_out : prev_result → final output
-                        let mux_info = library.find_best_cell(&CellFunction::Mux2)
-                            .map(|c| (c.name.clone(), c.fit))
-                            .unwrap_or(("MUX2".to_string(), 0.3));
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_info.0, library.name.clone(), mux_info.1,
+                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
                             vec![bank_sel, prev_result, block_out[i - bit_lo]],
                             vec![final_out],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
+                        mux_ci.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
                     }
                 } else {
@@ -1025,16 +1040,14 @@ fn map_memblock_standalone(
                         let new_result = netlist.add_net(GateNet::new(
                             GateNetId(0), format!("{}_d{}_w{}_result{}", path, db, wb, i - bit_lo),
                         ));
-                        let mux_info = library.find_best_cell(&CellFunction::Mux2)
-                            .map(|c| (c.name.clone(), c.fit))
-                            .unwrap_or(("MUX2".to_string(), 0.3));
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_info.0, library.name.clone(), mux_info.1,
+                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
                             vec![bank_sel, prev_result, block_out[i - bit_lo]],
                             vec![new_result],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
+                        mux_ci.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
                         // Update the result name for next iteration
                         // (we rename the new_result to the canonical name)
@@ -1126,28 +1139,16 @@ fn merge_physical_nodes_into_netlist(
     let has_th22 = library.find_best_cell(&CellFunction::Th22).is_some();
     let has_th12 = library.find_best_cell(&CellFunction::Th12).is_some();
 
-    let buf_cell = library
-        .find_best_cell(&CellFunction::Buf)
-        .map(|c| (c.name.clone(), c.fit))
-        .unwrap_or(("BUF".to_string(), 0.1));
-    let and2_cell = library
-        .find_best_cell(&CellFunction::And2)
-        .map(|c| (c.name.clone(), c.fit))
-        .unwrap_or(("AND2".to_string(), 0.2));
-    let or2_cell = library
-        .find_best_cell(&CellFunction::Or2)
-        .map(|c| (c.name.clone(), c.fit))
-        .unwrap_or(("OR2".to_string(), 0.2));
-    let th22_cell = library
-        .find_best_cell(&CellFunction::Th22)
-        .map(|c| (c.name.clone(), c.fit))
-        .unwrap_or(("TH22".to_string(), 0.6));
-    let th12_cell = library
-        .find_best_cell(&CellFunction::Th12)
-        .map(|c| (c.name.clone(), c.fit))
-        .unwrap_or(("TH12".to_string(), 0.5));
+    let buf_cell = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+    let and2_cell = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let or2_cell = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+    let th22_cell = lookup_cell(library, CellFunction::Th22, "TH22", 0.6);
+    let th12_cell = lookup_cell(library, CellFunction::Th12, "TH12", 0.5);
 
     // Helper: get or create tie-low net
+    let tie_low_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
+    let tie_high_info = lookup_cell(library, CellFunction::TieHigh, "TIE_HIGH", 0.01);
+
     let get_tie_low = |netlist: &mut GateNetlist| -> GateNetId {
         if let Some(id) = netlist.get_net_id("tie_low") {
             return id;
@@ -1156,19 +1157,17 @@ fn merge_physical_nodes_into_netlist(
             return id;
         }
         let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
-        let tie_info = library
-            .find_best_cell(&CellFunction::TieLow)
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or(("TIE_LOW".to_string(), 0.01));
-        netlist.add_cell(Cell::new_comb(
+        let mut cell = Cell::new_comb(
             CellId(0),
-            tie_info.0,
+            tie_low_info.name.clone(),
             library.name.clone(),
-            tie_info.1,
+            tie_low_info.fit,
             "tie_low".to_string(),
             vec![],
             vec![id],
-        ));
+        );
+        tie_low_info.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
         id
     };
 
@@ -1180,19 +1179,17 @@ fn merge_physical_nodes_into_netlist(
             return id;
         }
         let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_high".to_string()));
-        let tie_info = library
-            .find_best_cell(&CellFunction::TieHigh)
-            .map(|c| (c.name.clone(), c.fit))
-            .unwrap_or(("TIE_HIGH".to_string(), 0.01));
-        netlist.add_cell(Cell::new_comb(
+        let mut cell = Cell::new_comb(
             CellId(0),
-            tie_info.0,
+            tie_high_info.name.clone(),
             library.name.clone(),
-            tie_info.1,
+            tie_high_info.fit,
             "tie_high".to_string(),
             vec![],
             vec![id],
-        ));
+        );
+        tie_high_info.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
         id
     };
 
@@ -1201,15 +1198,17 @@ fn merge_physical_nodes_into_netlist(
     let make_th22_or_celement =
         |netlist: &mut GateNetlist, a: GateNetId, b: GateNetId, q: GateNetId, path: &str| {
             if has_th22 {
-                netlist.add_cell(Cell::new_comb(
+                let mut cell = Cell::new_comb(
                     CellId(0),
-                    th22_cell.0.clone(),
+                    th22_cell.name.clone(),
                     library.name.clone(),
-                    th22_cell.1,
+                    th22_cell.fit,
                     path.to_string(),
                     vec![a, b],
                     vec![q],
-                ));
+                );
+                th22_cell.apply_to_cell(&mut cell);
+                netlist.add_cell(cell);
             } else {
                 // C-element macro: 2 AND2 + 2 OR2
                 let ab_and = netlist
@@ -1222,53 +1221,57 @@ fn merge_physical_nodes_into_netlist(
                 // ab_and = A & B
                 let mut c1 = Cell::new_comb(
                     CellId(0),
-                    and2_cell.0.clone(),
+                    and2_cell.name.clone(),
                     library.name.clone(),
-                    and2_cell.1,
+                    and2_cell.fit,
                     format!("{}.and1", path),
                     vec![a, b],
                     vec![ab_and],
                 );
                 c1.source_op = Some("C-element_AND_AB".to_string());
+                and2_cell.apply_to_cell(&mut c1);
                 netlist.add_cell(c1);
 
                 // ab_or = A | B
                 let mut c2 = Cell::new_comb(
                     CellId(0),
-                    or2_cell.0.clone(),
+                    or2_cell.name.clone(),
                     library.name.clone(),
-                    or2_cell.1,
+                    or2_cell.fit,
                     format!("{}.or1", path),
                     vec![a, b],
                     vec![ab_or],
                 );
                 c2.source_op = Some("C-element_OR_AB".to_string());
+                or2_cell.apply_to_cell(&mut c2);
                 netlist.add_cell(c2);
 
                 // q_and_or = Q & (A | B) — feedback from output
                 let mut c3 = Cell::new_comb(
                     CellId(0),
-                    and2_cell.0.clone(),
+                    and2_cell.name.clone(),
                     library.name.clone(),
-                    and2_cell.1,
+                    and2_cell.fit,
                     format!("{}.and2", path),
                     vec![q, ab_or],
                     vec![q_and_or],
                 );
                 c3.source_op = Some("C-element_AND_Q_OR".to_string());
+                and2_cell.apply_to_cell(&mut c3);
                 netlist.add_cell(c3);
 
                 // Q = (A & B) | (Q & (A | B))
                 let mut c4 = Cell::new_comb(
                     CellId(0),
-                    or2_cell.0.clone(),
+                    or2_cell.name.clone(),
                     library.name.clone(),
-                    or2_cell.1,
+                    or2_cell.fit,
                     format!("{}.or2", path),
                     vec![ab_and, q_and_or],
                     vec![q],
                 );
                 c4.source_op = Some("C-element_OUTPUT".to_string());
+                or2_cell.apply_to_cell(&mut c4);
                 netlist.add_cell(c4);
             }
         };
@@ -1277,25 +1280,29 @@ fn merge_physical_nodes_into_netlist(
     let make_th12_or_or2 =
         |netlist: &mut GateNetlist, a: GateNetId, b: GateNetId, q: GateNetId, path: &str| {
             if has_th12 {
-                netlist.add_cell(Cell::new_comb(
+                let mut cell = Cell::new_comb(
                     CellId(0),
-                    th12_cell.0.clone(),
+                    th12_cell.name.clone(),
                     library.name.clone(),
-                    th12_cell.1,
+                    th12_cell.fit,
                     path.to_string(),
                     vec![a, b],
                     vec![q],
-                ));
+                );
+                th12_cell.apply_to_cell(&mut cell);
+                netlist.add_cell(cell);
             } else {
-                netlist.add_cell(Cell::new_comb(
+                let mut cell = Cell::new_comb(
                     CellId(0),
-                    or2_cell.0.clone(),
+                    or2_cell.name.clone(),
                     library.name.clone(),
-                    or2_cell.1,
+                    or2_cell.fit,
                     path.to_string(),
                     vec![a, b],
                     vec![q],
-                ));
+                );
+                or2_cell.apply_to_cell(&mut cell);
+                netlist.add_cell(cell);
             }
         };
 
@@ -1326,24 +1333,23 @@ fn merge_physical_nodes_into_netlist(
                     let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
                     let mut cell = Cell::new_comb(
                         CellId(0),
-                        buf_cell.0.clone(),
+                        buf_cell.name.clone(),
                         library.name.clone(),
-                        buf_cell.1,
+                        buf_cell.fit,
                         format!("{}.dec{}", path, i),
                         vec![in_t],
                         vec![out],
                     );
                     cell.source_op = Some("NclDecode".to_string());
+                    buf_cell.apply_to_cell(&mut cell);
                     netlist.add_cell(cell);
                 }
             }
 
             LirOp::NclEncode { width } => {
                 // Boundary NCL: t-rail = value, f-rail = NOT(value).
-                // The AIG already produces y_f[i] = NOT(value). The AIG may fuse
-                // the NOT with preceding logic (e.g., AND+NOT → NAND), so the
-                // intermediate single-rail net may not exist. Instead, we derive
-                // the t-rail as: y_t[i] = INV(y_f[i]).
+                // The AIG already produces y_f[i] = NOT(value) as a module output.
+                // We derive the t-rail as: y_t[i] = INV(y_f[i]).
                 let out_sig = &lir.signals[node.output.0 as usize];
                 let f_signal_base = if out_sig.name.ends_with("_t") {
                     format!("{}_f", &out_sig.name[..out_sig.name.len() - 2])
@@ -1351,10 +1357,7 @@ fn merge_physical_nodes_into_netlist(
                     format!("{}_f", out_sig.name)
                 };
 
-                let inv_cell = library
-                    .find_best_cell(&CellFunction::Inv)
-                    .map(|c| (c.name.clone(), c.fit))
-                    .unwrap_or(("INV_X1".to_string(), 0.1));
+                let inv_cell = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
 
                 for i in 0..*width as usize {
                     let out_t = output_nets.get(i).copied().unwrap_or(GateNetId(0));
@@ -1372,14 +1375,15 @@ fn merge_physical_nodes_into_netlist(
                         // y_t[i] = INV(y_f[i])
                         let mut cell = Cell::new_comb(
                             CellId(0),
-                            inv_cell.0.clone(),
+                            inv_cell.name.clone(),
                             library.name.clone(),
-                            inv_cell.1,
+                            inv_cell.fit,
                             format!("{}.enc_t{}", path, i),
                             vec![f_net_id],
                             vec![out_t],
                         );
                         cell.source_op = Some("NclEncode_T".to_string());
+                        inv_cell.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
                     }
                 }
@@ -1461,17 +1465,19 @@ fn merge_physical_nodes_into_netlist(
 
                     // out_t = in_f, out_f = in_t (swap rails)
                     let mut ct = Cell::new_comb(
-                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
                         format!("{}.not_t{}", path, i), vec![in_f], vec![out_t],
                     );
                     ct.source_op = Some("NclNot_T".to_string());
+                    buf_cell.apply_to_cell(&mut ct);
                     netlist.add_cell(ct);
 
                     let mut cf = Cell::new_comb(
-                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
                         format!("{}.not_f{}", path, i), vec![in_t], vec![out_f],
                     );
                     cf.source_op = Some("NclNot_F".to_string());
+                    buf_cell.apply_to_cell(&mut cf);
                     netlist.add_cell(cf);
                 }
             }
@@ -1565,10 +1571,12 @@ fn merge_physical_nodes_into_netlist(
                     let in_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
                     let in_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
                     let valid = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.valid{}", path, i)));
-                    netlist.add_cell(Cell::new_comb(
-                        CellId(0), or2_cell.0.clone(), library.name.clone(), or2_cell.1,
+                    let mut vc = Cell::new_comb(
+                        CellId(0), or2_cell.name.clone(), library.name.clone(), or2_cell.fit,
                         format!("{}.or_valid{}", path, i), vec![in_t, in_f], vec![valid],
-                    ));
+                    );
+                    or2_cell.apply_to_cell(&mut vc);
+                    netlist.add_cell(vc);
                     valid_nets.push(valid);
                 }
                 // AND-reduce: tree reduction
@@ -1583,10 +1591,12 @@ fn merge_physical_nodes_into_netlist(
                             } else {
                                 netlist.add_net(GateNet::new(GateNetId(0), format!("{}.and_tree_{}", path, next.len())))
                             };
-                            netlist.add_cell(Cell::new_comb(
-                                CellId(0), and2_cell.0.clone(), library.name.clone(), and2_cell.1,
+                            let mut ac = Cell::new_comb(
+                                CellId(0), and2_cell.name.clone(), library.name.clone(), and2_cell.fit,
                                 format!("{}.and_tree_{}", path, next.len()), vec![pair[0], pair[1]], vec![intermediate],
-                            ));
+                            );
+                            and2_cell.apply_to_cell(&mut ac);
+                            netlist.add_cell(ac);
                             next.push(intermediate);
                         } else {
                             next.push(pair[0]);
@@ -1596,10 +1606,12 @@ fn merge_physical_nodes_into_netlist(
                 }
                 if current.len() == 1 && current[0] != out {
                     // Single valid bit → buffer to output
-                    netlist.add_cell(Cell::new_comb(
-                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                    let mut bc = Cell::new_comb(
+                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
                         format!("{}.buf_out", path), vec![current[0]], vec![out],
-                    ));
+                    );
+                    buf_cell.apply_to_cell(&mut bc);
+                    netlist.add_cell(bc);
                 }
             }
 
@@ -1608,10 +1620,12 @@ fn merge_physical_nodes_into_netlist(
                 let tie_low = get_tie_low(netlist);
                 for i in 0..(*width * 2) as usize {
                     let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
-                    netlist.add_cell(Cell::new_comb(
-                        CellId(0), buf_cell.0.clone(), library.name.clone(), buf_cell.1,
+                    let mut nc = Cell::new_comb(
+                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
                         format!("{}.null{}", path, i), vec![tie_low], vec![out],
-                    ));
+                    );
+                    buf_cell.apply_to_cell(&mut nc);
+                    netlist.add_cell(nc);
                 }
             }
 

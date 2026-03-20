@@ -27,7 +27,8 @@
 //! ```
 
 use indexmap::IndexMap;
-use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
+use skalp_lir::CellFunction;
 
 #[cfg(target_os = "macos")]
 use metal::{
@@ -101,6 +102,8 @@ struct NclCellInfo {
     outputs: Vec<usize>,
     /// State index (for THmn gates, -1 if stateless)
     state_index: i32,
+    /// LUT initialization value (for Lut4)
+    lut_init: Option<u64>,
 }
 
 /// NCL primitive types for GPU encoding
@@ -128,8 +131,17 @@ enum NclPrimitiveType {
     Aoi22 = 15, // AND-OR-Invert: ~((A1 & A2) | (B1 & B2))
     Oai22 = 16, // OR-AND-Invert: ~((A1 | A2) & (B1 | B2))
     Nand2 = 17,
+    Nand3 = 31,
+    Nand4 = 32,
     Nor2 = 18,
+    Nor3 = 33,
+    Nor4 = 34,
     Xnor = 19,
+    Aoi21 = 35,
+    Oai21 = 36,
+    Lut4 = 37,
+    AndNot = 38,  // A & ~B
+    OrNot = 39,   // A | ~B
 
     // NCL threshold gates (stateful - need hysteresis)
     Th12 = 20,
@@ -255,7 +267,7 @@ impl GpuNclRuntime {
         // Build cell info and count stateful gates
         let mut state_index = 0i32;
         for cell in &self.netlist.cells {
-            let ptype = self.classify_cell(&cell.cell_type);
+            let ptype = self.classify_cell(cell);
             let is_stateful = self.is_stateful_gate(ptype);
 
             let inputs: Vec<usize> = cell
@@ -285,6 +297,7 @@ impl GpuNclRuntime {
                 inputs,
                 outputs,
                 state_index: cell_state_index,
+                lut_init: cell.lut_init,
             });
         }
 
@@ -328,132 +341,64 @@ impl GpuNclRuntime {
         Ok(())
     }
 
-    /// Classify a cell type string to NclPrimitiveType
-    fn classify_cell(&self, cell_type: &str) -> NclPrimitiveType {
-        let upper = cell_type.to_uppercase();
-
-        // Check for THmn patterns first (handles TH22, TH22_X1, etc.)
-        if upper.starts_with("TH") {
-            if let Some(rest) = upper.strip_prefix("TH") {
-                // Extract digits - handle suffixes like "_X1"
-                let mut chars = rest.chars();
-                let m = chars.next().and_then(|c| c.to_digit(10));
-                let n = chars.next().and_then(|c| c.to_digit(10));
-                if let (Some(m), Some(n)) = (m, n) {
-                    return match (m, n) {
-                        (1, 2) => NclPrimitiveType::Th12,
-                        (2, 2) => NclPrimitiveType::Th22,
-                        (1, 3) => NclPrimitiveType::Th13,
-                        (2, 3) => NclPrimitiveType::Th23,
-                        (3, 3) => NclPrimitiveType::Th33,
-                        (1, 4) => NclPrimitiveType::Th14,
-                        (2, 4) => NclPrimitiveType::Th24,
-                        (3, 4) => NclPrimitiveType::Th34,
-                        (4, 4) => NclPrimitiveType::Th44,
-                        _ => NclPrimitiveType::Thmn,
-                    };
-                }
-            }
-        }
-
-        // NCL completion
-        if upper.starts_with("NCL_COMPLETE") {
-            return NclPrimitiveType::NclCompletion;
-        }
-
-        // FP32 soft macros (check before stripping suffix as underscore is part of name)
-        // Note: fp_add32 -> FP_ADD32 (from tech_library.rs), FP32_ADD (from old code)
-        if upper.starts_with("FP32_ADD")
-            || upper.starts_with("FPADD32")
-            || upper.starts_with("FP_ADD32")
-        {
-            return NclPrimitiveType::Fp32Add;
-        }
-        if upper.starts_with("FP32_SUB")
-            || upper.starts_with("FPSUB32")
-            || upper.starts_with("FP_SUB32")
-        {
-            return NclPrimitiveType::Fp32Sub;
-        }
-        if upper.starts_with("FP32_MUL")
-            || upper.starts_with("FPMUL32")
-            || upper.starts_with("FP_MUL32")
-        {
-            return NclPrimitiveType::Fp32Mul;
-        }
-        if upper.starts_with("FP32_DIV")
-            || upper.starts_with("FPDIV32")
-            || upper.starts_with("FP_DIV32")
-        {
-            return NclPrimitiveType::Fp32Div;
-        }
-        // FP32 comparison operations (BUG #191 FIX)
-        if upper.starts_with("FP32_LT")
-            || upper.starts_with("FPLT32")
-            || upper.starts_with("FP_LT32")
-        {
-            return NclPrimitiveType::Fp32Lt;
-        }
-        if upper.starts_with("FP32_GT")
-            || upper.starts_with("FPGT32")
-            || upper.starts_with("FP_GT32")
-        {
-            return NclPrimitiveType::Fp32Gt;
-        }
-        if upper.starts_with("FP32_LE")
-            || upper.starts_with("FPLE32")
-            || upper.starts_with("FP_LE32")
-        {
-            return NclPrimitiveType::Fp32Le;
-        }
-        if upper.starts_with("FP32_GE")
-            || upper.starts_with("FPGE32")
-            || upper.starts_with("FP_GE32")
-        {
-            return NclPrimitiveType::Fp32Ge;
-        }
-
-        // Strip library suffix (e.g., "AND2_X1" -> "AND2")
-        let base_type = upper.split('_').next().unwrap_or(&upper).to_string();
-
-        // Standard gates
-        match base_type.as_str() {
-            "AND2" => NclPrimitiveType::And2,
-            "AND3" => NclPrimitiveType::And3,
-            "AND4" => NclPrimitiveType::And4,
-            "OR2" => NclPrimitiveType::Or2,
-            "OR3" => NclPrimitiveType::Or3,
-            "OR4" => NclPrimitiveType::Or4,
-            "XOR" | "XOR2" => NclPrimitiveType::Xor,
-            "XNOR" | "XNOR2" => NclPrimitiveType::Xnor,
-            "INV" | "NOT" => NclPrimitiveType::Inv,
-            "BUF" | "BUFFER" => NclPrimitiveType::Buf,
-            "MUX2" => NclPrimitiveType::Mux2,
-            "TIE" | "TIEH" | "VDD" if upper.contains("HIGH") => NclPrimitiveType::Const1,
-            "TIE" | "TIEL" | "GND" | "VSS" if !upper.contains("HIGH") => NclPrimitiveType::Const0,
-            // Arithmetic cells
-            "HA" | "HALFADDER" | "HALF" => NclPrimitiveType::HalfAdder,
-            "FA" | "FULLADDER" | "FULL" => NclPrimitiveType::FullAdder,
-            // Compound gates (for C-element macros)
-            "AO22" => NclPrimitiveType::Ao22,
-            "AOI22" => NclPrimitiveType::Aoi22,
-            "OAI22" => NclPrimitiveType::Oai22,
-            "NAND2" => NclPrimitiveType::Nand2,
-            "NOR2" => NclPrimitiveType::Nor2,
-            _ => {
-                // Check for full name match for tie cells
-                if upper.starts_with("TIE_HIGH") || upper == "TIEH" || upper == "VDD" {
-                    NclPrimitiveType::Const1
-                } else if upper.starts_with("TIE_LOW")
-                    || upper == "TIEL"
-                    || upper == "GND"
-                    || upper == "VSS"
-                {
-                    NclPrimitiveType::Const0
-                } else {
-                    NclPrimitiveType::Buf // Default
-                }
-            }
+    /// Classify a cell by its CellFunction to NclPrimitiveType
+    fn classify_cell(&self, cell: &Cell) -> NclPrimitiveType {
+        match &cell.function {
+            Some(f) => match f {
+                CellFunction::And2 => NclPrimitiveType::And2,
+                CellFunction::And3 => NclPrimitiveType::And3,
+                CellFunction::And4 => NclPrimitiveType::And4,
+                CellFunction::Or2 => NclPrimitiveType::Or2,
+                CellFunction::Or3 => NclPrimitiveType::Or3,
+                CellFunction::Or4 => NclPrimitiveType::Or4,
+                CellFunction::Xor2 => NclPrimitiveType::Xor,
+                CellFunction::Xnor2 => NclPrimitiveType::Xnor,
+                CellFunction::Inv => NclPrimitiveType::Inv,
+                CellFunction::Buf => NclPrimitiveType::Buf,
+                CellFunction::Nand2 => NclPrimitiveType::Nand2,
+                CellFunction::Nand3 => NclPrimitiveType::Nand3,
+                CellFunction::Nand4 => NclPrimitiveType::Nand4,
+                CellFunction::Nor2 => NclPrimitiveType::Nor2,
+                CellFunction::Nor3 => NclPrimitiveType::Nor3,
+                CellFunction::Nor4 => NclPrimitiveType::Nor4,
+                CellFunction::Mux2 => NclPrimitiveType::Mux2,
+                CellFunction::TieHigh => NclPrimitiveType::Const1,
+                CellFunction::TieLow => NclPrimitiveType::Const0,
+                CellFunction::HalfAdder => NclPrimitiveType::HalfAdder,
+                CellFunction::FullAdder => NclPrimitiveType::FullAdder,
+                CellFunction::Aoi22 => NclPrimitiveType::Aoi22,
+                CellFunction::Aoi21 => NclPrimitiveType::Aoi21,
+                CellFunction::Oai22 => NclPrimitiveType::Oai22,
+                CellFunction::Oai21 => NclPrimitiveType::Oai21,
+                CellFunction::Th12 => NclPrimitiveType::Th12,
+                CellFunction::Th22 | CellFunction::CElement => NclPrimitiveType::Th22,
+                CellFunction::Th13 => NclPrimitiveType::Th13,
+                CellFunction::Th23 => NclPrimitiveType::Th23,
+                CellFunction::Th33 => NclPrimitiveType::Th33,
+                CellFunction::Th14 => NclPrimitiveType::Th14,
+                CellFunction::Th24 => NclPrimitiveType::Th24,
+                CellFunction::Th34 => NclPrimitiveType::Th34,
+                CellFunction::Th44 => NclPrimitiveType::Th44,
+                CellFunction::FpAdd32 => NclPrimitiveType::Fp32Add,
+                CellFunction::FpSub32 => NclPrimitiveType::Fp32Sub,
+                CellFunction::FpMul32 => NclPrimitiveType::Fp32Mul,
+                CellFunction::FpDiv32 => NclPrimitiveType::Fp32Div,
+                CellFunction::FpLt32 => NclPrimitiveType::Fp32Lt,
+                CellFunction::FpGt32 => NclPrimitiveType::Fp32Gt,
+                CellFunction::FpLe32 => NclPrimitiveType::Fp32Le,
+                CellFunction::FpGe32 => NclPrimitiveType::Fp32Ge,
+                CellFunction::Lut4 => NclPrimitiveType::Lut4,
+                CellFunction::AndNot => NclPrimitiveType::AndNot,
+                CellFunction::OrNot => NclPrimitiveType::OrNot,
+                _ => panic!(
+                    "unsupported CellFunction {:?} for cell '{}' (type '{}')",
+                    f, cell.path, cell.cell_type
+                ),
+            },
+            None => panic!(
+                "cell '{}' (type '{}') has no CellFunction — all cells must have function set",
+                cell.path, cell.cell_type
+            ),
         }
     }
 
@@ -1337,6 +1282,47 @@ kernel void eval_ncl(
                     let b2 = inputs.get(3).copied().unwrap_or(false);
                     !((a1 || a2) && (b1 || b2))
                 }
+                NclPrimitiveType::Nand3 => !inputs.iter().take(3).all(|&x| x),
+                NclPrimitiveType::Nand4 => !inputs.iter().take(4).all(|&x| x),
+                NclPrimitiveType::Nor3 => !inputs.iter().take(3).any(|&x| x),
+                NclPrimitiveType::Nor4 => !inputs.iter().take(4).any(|&x| x),
+                NclPrimitiveType::Aoi21 => {
+                    // AOI21: ~((a & b) | c)
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    let c = inputs.get(2).copied().unwrap_or(false);
+                    !((a && b) || c)
+                }
+                NclPrimitiveType::Oai21 => {
+                    // OAI21: ~((a | b) & c)
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    let c = inputs.get(2).copied().unwrap_or(false);
+                    !((a || b) && c)
+                }
+                NclPrimitiveType::Lut4 => {
+                    // LUT4: 4-input lookup table
+                    let mut addr: usize = 0;
+                    for i in 0..4 {
+                        if inputs.get(i).copied().unwrap_or(false) {
+                            addr |= 1 << i;
+                        }
+                    }
+                    let init = cell.lut_init.unwrap_or(0);
+                    (init >> addr) & 1 == 1
+                }
+                NclPrimitiveType::AndNot => {
+                    // ANDNOT: a & ~b
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    a && !b
+                }
+                NclPrimitiveType::OrNot => {
+                    // ORNOT: a | ~b
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    a || !b
+                }
                 NclPrimitiveType::Th12
                 | NclPrimitiveType::Th22
                 | NclPrimitiveType::Th13
@@ -1835,10 +1821,28 @@ kernel void eval_ncl(
                 let b = inputs.get(1).copied().unwrap_or(false);
                 (!(a && b), false)
             }
+            NclPrimitiveType::Nand3 => (!inputs.iter().take(3).all(|&x| x), false),
+            NclPrimitiveType::Nand4 => (!inputs.iter().take(4).all(|&x| x), false),
             NclPrimitiveType::Nor2 => {
                 let a = inputs.first().copied().unwrap_or(false);
                 let b = inputs.get(1).copied().unwrap_or(false);
                 (!(a || b), false)
+            }
+            NclPrimitiveType::Nor3 => (!inputs.iter().take(3).any(|&x| x), false),
+            NclPrimitiveType::Nor4 => (!inputs.iter().take(4).any(|&x| x), false),
+            NclPrimitiveType::Aoi21 => {
+                // AOI21: ~((a & b) | c)
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                let c = inputs.get(2).copied().unwrap_or(false);
+                (!((a && b) || c), false)
+            }
+            NclPrimitiveType::Oai21 => {
+                // OAI21: ~((a | b) & c)
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                let c = inputs.get(2).copied().unwrap_or(false);
+                (!((a || b) && c), false)
             }
             NclPrimitiveType::Ao22 => {
                 // AO22: (A1 & A2) | (B1 & B2)
@@ -1864,7 +1868,32 @@ kernel void eval_ncl(
                 let b2 = inputs.get(3).copied().unwrap_or(false);
                 (!((a1 || a2) && (b1 || b2)), false)
             }
-            _ => (inputs.first().copied().unwrap_or(false), false),
+            NclPrimitiveType::Lut4 => {
+                // 4-input LUT: truth table lookup from lut_init
+                let init = cell.lut_init.unwrap_or(0);
+                let mut addr: u32 = 0;
+                for (i, &v) in inputs.iter().take(4).enumerate() {
+                    if v {
+                        addr |= 1 << i;
+                    }
+                }
+                let result = (init >> addr) & 1 != 0;
+                (result, false)
+            }
+            NclPrimitiveType::AndNot => {
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                (a && !b, false)
+            }
+            NclPrimitiveType::OrNot => {
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                (a || !b, false)
+            }
+            _ => panic!(
+                "unsupported NclPrimitiveType {:?} in evaluate_cell_with_state",
+                cell.ptype
+            ),
         }
     }
 

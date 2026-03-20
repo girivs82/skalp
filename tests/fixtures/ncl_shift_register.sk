@@ -1,0 +1,23 @@
+// NCL Shift Register Step — one clock cycle of a 4-stage shift register
+// Takes current register state (s0..s3) and a new data input.
+// Produces next state: data_in → s0, s0 → s1, s1 → s2, s2 → s3 (s3 drops out).
+// No clock — the test drives DATA/NULL phases to simulate clock edges.
+// Each "clock cycle" is: feed DATA → wait stable → read outputs → feed NULL → wait stable.
+
+async entity NclShiftRegStep {
+    in data_in: bit[8]
+    in s0: bit[8]
+    in s1: bit[8]
+    in s2: bit[8]
+    out s0_next: bit[8]
+    out s1_next: bit[8]
+    out s2_next: bit[8]
+    out s3_next: bit[8]
+}
+
+impl NclShiftRegStep {
+    s0_next = data_in
+    s1_next = s0
+    s2_next = s1
+    s3_next = s2
+}

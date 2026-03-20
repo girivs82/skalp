@@ -1,0 +1,30 @@
+// NCL Finite State Machine Step — traffic light controller
+// Combinational next-state logic + output decode for a 3-state FSM.
+// States: 0=RED, 1=GREEN, 2=YELLOW
+// Transitions: RED→GREEN (when trigger), GREEN→YELLOW (always), YELLOW→RED (always)
+// No clock — the test feeds next_state back as state across DATA/NULL phases.
+
+async entity NclFsmStep {
+    in state: bit[2]
+    in trigger: bit
+    out next_state: bit[2]
+    out led_red: bit
+    out led_green: bit
+    out led_yellow: bit
+}
+
+impl NclFsmStep {
+    // Next-state logic
+    next_state = if state == 2'b00 {
+        if trigger { 2'b01 } else { 2'b00 }
+    } else if state == 2'b01 {
+        2'b10
+    } else {
+        2'b00
+    }
+
+    // Output decode
+    led_red = state == 2'b00
+    led_green = state == 2'b01
+    led_yellow = state == 2'b10
+}

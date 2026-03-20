@@ -2,14 +2,12 @@
 //!
 //! These test the NCL boundary synthesis path with realistic patterns
 //! extracted from the async CLE: completion detection, dual-rail muxing,
-//! multi-output bitwise ops, subtraction, comparators, and mux chains.
+//! multi-output bitwise ops, subtraction, comparators, mux chains,
+//! priority encoding, mode control, systolic forwarding, and handshake ack.
 //!
-//! Additional tests (priority encoder, mode controller, systolic forwarding,
-//! handshake ack) are marked #[ignore] pending synthesis fixes for:
-//! - Chained multi-bit comparisons (if x == 2'b10 { ... })
-//! - Addition inside conditionals (if en { a + b } else { 0 })
-//! - Dynamic array indexing (arr[computed_idx])
-//! - Multi-input single-bit AND chains
+//! Also includes sequential-style tests (ALU pipeline, shift register step,
+//! FSM step) that demonstrate NCL replacing the clock — each "clock cycle"
+//! is a DATA/NULL phase pair, with outputs fed back as inputs.
 #![cfg(target_os = "macos")]
 
 use skalp_lir::gate_netlist::GateNetlist;
@@ -226,7 +224,6 @@ fn test_ncl_bitwise_ops_multi_output() {
 // ============================================================================
 
 #[test]
-#[ignore]
 fn test_ncl_sub_8bit() {
     println!("\n=== NCL 8-bit Subtraction ===");
     let cases: Vec<(u64, u64, u64)> = vec![
@@ -259,7 +256,6 @@ fn test_ncl_sub_8bit() {
 // ============================================================================
 
 #[test]
-#[ignore]
 fn test_ncl_comparator_8bit() {
     println!("\n=== NCL 8-bit Comparator ===");
     let cases: Vec<(u64, u64, u64, u64, u64)> = vec![
@@ -326,14 +322,13 @@ fn test_ncl_mux_chain() {
 }
 
 // ============================================================================
-// Tests below are #[ignore] pending synthesis fixes.
+// Tests below exercise more complex NCL patterns.
 // They expose real bugs in the NCL boundary synthesis path.
 // ============================================================================
 
 /// Priority encoder: chained if-else with bit indexing and dynamic array access.
 /// BUG: Dynamic array indexing `pending[tag]` and comparison chains fail.
 #[test]
-#[ignore]
 fn test_ncl_priority_encoder() {
     println!("\n=== NCL Priority Encoder (multi-outstanding request tracker) ===");
     let cases: Vec<(u64, u64, u64)> = vec![
@@ -363,7 +358,6 @@ fn test_ncl_priority_encoder() {
 /// Mode controller: chained 2-bit comparisons with mode-dependent operations.
 /// BUG: Modes 2+ return wrong results (chained multi-bit == comparison issue).
 #[test]
-#[ignore]
 fn test_ncl_mode_controller() {
     println!("\n=== NCL Mode Controller ===");
     let cases: Vec<(u64, u64, u64, u64, u64, u64)> = vec![
@@ -395,7 +389,6 @@ fn test_ncl_mode_controller() {
 /// Systolic forwarding: conditional addition.
 /// BUG: `if enable { a + b } else { 0 }` returns 0xFF when enable=1.
 #[test]
-#[ignore]
 fn test_ncl_systolic_forward() {
     println!("\n=== NCL Systolic Forwarding ===");
     let cases: Vec<(u64, u64, u64, u64, u64, u64)> = vec![
@@ -425,7 +418,6 @@ fn test_ncl_systolic_forward() {
 /// Handshake acknowledgment: multi-input single-bit AND.
 /// BUG: `a & b & c` for single-bit signals gives wrong results.
 #[test]
-#[ignore]
 fn test_ncl_handshake_ack() {
     println!("\n=== NCL Handshake Acknowledgment ===");
     let cases: Vec<(u64, u64, u64, u64, u64, u64, u64, u64, u64)> = vec![
@@ -458,4 +450,215 @@ fn test_ncl_handshake_ack() {
         all_pass = all_pass && pass;
     }
     assert!(all_pass, "Handshake ack tests failed");
+}
+
+// ============================================================================
+// Boundary NCL with complex sequential-style patterns
+//
+// These demonstrate that NCL replaces the clock: data flows through
+// combinational logic gated by the NULL/DATA handshake protocol.
+// Each "clock cycle" is: drive DATA → wait stable → read outputs →
+// drive NULL → wait stable → (feed outputs back as inputs for next cycle).
+// ============================================================================
+
+/// ALU pipeline: 4-stage chained computation (add → shr → mask → xor).
+/// Tests boundary NCL with deep combinational chains.
+#[test]
+fn test_ncl_alu_pipeline() {
+    println!("\n=== NCL ALU Pipeline (4-stage) ===");
+    // (a, b, expected_stage1, expected_stage2, expected_stage3, expected_result)
+    let cases: Vec<(u64, u64, u64, u64, u64, u64)> = vec![
+        // a=0x10, b=0x20 → add=0x30, shr1=0x18, mask=0x10, xor_a=0x00
+        (0x10, 0x20, 0x30, 0x18, 0x10, 0x00),
+        // a=0xFF, b=0x01 → add=0x00(overflow), shr1=0x00, mask=0x00, xor_a=0xFF
+        (0xFF, 0x01, 0x00, 0x00, 0x00, 0xFF),
+        // a=0xAA, b=0x55 → add=0xFF, shr1=0x7F, mask=0x70, xor_a=0xDA
+        (0xAA, 0x55, 0xFF, 0x7F, 0x70, 0xDA),
+        // a=0x00, b=0x00 → add=0x00, shr1=0x00, mask=0x00, xor_a=0x00
+        (0x00, 0x00, 0x00, 0x00, 0x00, 0x00),
+    ];
+
+    let mut all_pass = true;
+    for (a, b, exp_s1, exp_s2, exp_s3, exp_result) in cases {
+        let netlist = compile_ncl_fixture("ncl_alu_pipeline.sk");
+        let pass = run_ncl_test(
+            netlist,
+            &[("a", a, 8), ("b", b, 8)],
+            &[
+                ("stage1_out", exp_s1, 8),
+                ("stage2_out", exp_s2, 8),
+                ("stage3_out", exp_s3, 8),
+                ("result", exp_result, 8),
+            ],
+            &format!("a=0x{:02X} b=0x{:02X}", a, b),
+        );
+        all_pass = all_pass && pass;
+    }
+    assert!(all_pass, "ALU pipeline tests failed");
+}
+
+/// Shift register step: one "clock cycle" of a 4-stage shift register.
+/// Demonstrates that NCL can implement shift register behavior without a clock.
+/// Each test case simulates one shift step; multi-step tests feed outputs
+/// back as inputs to simulate successive clock edges.
+#[test]
+fn test_ncl_shift_register_step() {
+    println!("\n=== NCL Shift Register (multi-step) ===");
+
+    // Simulate 4 shift steps pushing data through the pipeline.
+    // Initial state: all stages = 0x00
+    let mut s0: u64 = 0x00;
+    let mut s1: u64 = 0x00;
+    let mut s2: u64 = 0x00;
+
+    let data_sequence: Vec<u64> = vec![0xAA, 0xBB, 0xCC, 0xDD];
+    let mut all_pass = true;
+
+    for (cycle, &data_in) in data_sequence.iter().enumerate() {
+        // Expected: data_in → s0, old_s0 → s1, old_s1 → s2, old_s2 → s3
+        let exp_s0 = data_in;
+        let exp_s1 = s0;
+        let exp_s2 = s1;
+        let exp_s3 = s2;
+
+        let netlist = compile_ncl_fixture("ncl_shift_register.sk");
+        let pass = run_ncl_test(
+            netlist,
+            &[
+                ("data_in", data_in, 8),
+                ("s0", s0, 8),
+                ("s1", s1, 8),
+                ("s2", s2, 8),
+            ],
+            &[
+                ("s0_next", exp_s0, 8),
+                ("s1_next", exp_s1, 8),
+                ("s2_next", exp_s2, 8),
+                ("s3_next", exp_s3, 8),
+            ],
+            &format!("cycle {} (in=0x{:02X}, s=[0x{:02X},0x{:02X},0x{:02X}])",
+                     cycle, data_in, s0, s1, s2),
+        );
+        all_pass = all_pass && pass;
+
+        // Feed outputs back as inputs for next cycle
+        s2 = s1;
+        s1 = s0;
+        s0 = data_in;
+    }
+
+    // After 4 cycles, s3 should be the first value pushed (0xAA)
+    // Verify by doing one more step
+    let netlist = compile_ncl_fixture("ncl_shift_register.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[
+            ("data_in", 0xEE, 8),
+            ("s0", s0, 8),
+            ("s1", s1, 8),
+            ("s2", s2, 8),
+        ],
+        &[
+            ("s0_next", 0xEE, 8),
+            ("s1_next", 0xDD, 8),
+            ("s2_next", 0xCC, 8),
+            ("s3_next", 0xBB, 8),
+        ],
+        "cycle 4 — verify pipeline contents",
+    );
+    all_pass = all_pass && pass;
+
+    assert!(all_pass, "Shift register step tests failed");
+}
+
+/// FSM step: traffic light controller simulated across multiple NCL phases.
+/// Demonstrates state machine behavior without a clock.
+/// Each step feeds next_state back as state to simulate a clock edge.
+#[test]
+fn test_ncl_fsm_step() {
+    println!("\n=== NCL FSM (Traffic Light) ===");
+
+    let mut all_pass = true;
+    let mut state: u64 = 0; // Start in RED
+
+    // Step 1: RED + no trigger → stay RED
+    let netlist = compile_ncl_fixture("ncl_fsm_step.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[("state", state, 2), ("trigger", 0, 1)],
+        &[
+            ("next_state", 0, 2), // stay RED
+            ("led_red", 1, 1),
+            ("led_green", 0, 1),
+            ("led_yellow", 0, 1),
+        ],
+        &format!("state={} trigger=0 (RED, no trigger → RED)", state),
+    );
+    all_pass = all_pass && pass;
+    // state stays 0 (RED)
+
+    // Step 2: RED + trigger → go GREEN
+    let netlist = compile_ncl_fixture("ncl_fsm_step.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[("state", state, 2), ("trigger", 1, 1)],
+        &[
+            ("next_state", 1, 2), // → GREEN
+            ("led_red", 1, 1),    // currently RED
+            ("led_green", 0, 1),
+            ("led_yellow", 0, 1),
+        ],
+        &format!("state={} trigger=1 (RED + trigger → GREEN)", state),
+    );
+    all_pass = all_pass && pass;
+    state = 1; // GREEN
+
+    // Step 3: GREEN → YELLOW (always)
+    let netlist = compile_ncl_fixture("ncl_fsm_step.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[("state", state, 2), ("trigger", 0, 1)],
+        &[
+            ("next_state", 2, 2), // → YELLOW
+            ("led_red", 0, 1),
+            ("led_green", 1, 1),  // currently GREEN
+            ("led_yellow", 0, 1),
+        ],
+        &format!("state={} (GREEN → YELLOW)", state),
+    );
+    all_pass = all_pass && pass;
+    state = 2; // YELLOW
+
+    // Step 4: YELLOW → RED (always)
+    let netlist = compile_ncl_fixture("ncl_fsm_step.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[("state", state, 2), ("trigger", 0, 1)],
+        &[
+            ("next_state", 0, 2), // → RED
+            ("led_red", 0, 1),
+            ("led_green", 0, 1),
+            ("led_yellow", 1, 1), // currently YELLOW
+        ],
+        &format!("state={} (YELLOW → RED)", state),
+    );
+    all_pass = all_pass && pass;
+    state = 0; // RED
+
+    // Step 5: RED again, verify full cycle completed
+    let netlist = compile_ncl_fixture("ncl_fsm_step.sk");
+    let pass = run_ncl_test(
+        netlist,
+        &[("state", state, 2), ("trigger", 1, 1)],
+        &[
+            ("next_state", 1, 2), // → GREEN again
+            ("led_red", 1, 1),
+            ("led_green", 0, 1),
+            ("led_yellow", 0, 1),
+        ],
+        &format!("state={} trigger=1 (RED → GREEN, cycle complete)", state),
+    );
+    all_pass = all_pass && pass;
+
+    assert!(all_pass, "FSM step tests failed");
 }
