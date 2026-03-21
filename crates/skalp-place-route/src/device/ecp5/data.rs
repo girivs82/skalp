@@ -300,16 +300,56 @@ pub const DSP_COLUMN_SPACING: u32 = 16;
 // Bitstream constants (from prjtrellis)
 // ---------------------------------------------------------------------------
 
-/// Trellis bitstream file magic / header
-pub const BITSTREAM_MAGIC: &[u8] = b"TRELLIS_ECP5\n";
-/// Section headers in Trellis bitstream
-pub const BITSTREAM_SECTION_TILES: &[u8] = b"TILES\n";
-pub const BITSTREAM_SECTION_IOCONF: &[u8] = b"IOCONF\n";
-/// JTAG command: LSC_INIT_ADDRESS (start of config frame write)
-pub const JTAG_CMD_INIT_ADDR: u8 = 0x46;
-/// JTAG command: LSC_PROG_INCR_NV (write one frame, auto-increment)
-pub const JTAG_CMD_PROG_INCR: u8 = 0x70;
-/// JTAG command: ISC_PROGRAM_DONE (finish configuration)
-pub const JTAG_CMD_DONE: u8 = 0x5E;
-/// CRC polynomial for ECP5 bitstream (CRC-16 CCITT)
+/// ECP5 SPI bitstream format (from prjtrellis ecppack):
+///
+/// Structure: [dummy] [preamble] [commands...] [frame data...] [postamble]
+///
+/// Each command is 4 bytes: opcode + 3 operand/padding bytes.
+/// Frame data follows LSC_PROG_INCR_NV, one frame at a time.
+///
+/// Sources: prjtrellis/libtrellis/src/Bitstream.cpp, Lattice TN1260
+
+/// Trellis text format magic (for .config / FASM-like output)
+pub const TEXT_FORMAT_MAGIC: &[u8] = b"TRELLIS_ECP5\n";
+/// Section headers in Trellis text format
+pub const TEXT_SECTION_TILES: &[u8] = b"TILES\n";
+pub const TEXT_SECTION_IOCONF: &[u8] = b"IOCONF\n";
+
+/// Dummy byte for SPI preamble
+pub const BITSTREAM_DUMMY: u8 = 0xFF;
+/// Number of dummy bytes before preamble
+pub const BITSTREAM_DUMMY_COUNT: usize = 8;
+/// Preamble / sync word (big-endian u32: 0xFFFFBDB3)
+pub const BITSTREAM_PREAMBLE: [u8; 4] = [0xFF, 0xFF, 0xBD, 0xB3];
+
+/// SPI command: VERIFY_ID — checks IDCODE (4-byte operand: IDCODE)
+pub const CMD_VERIFY_ID: u8 = 0xE2;
+/// SPI command: LSC_RESET_CRC — reset CRC accumulator
+pub const CMD_RESET_CRC: u8 = 0x3B;
+/// SPI command: LSC_PROG_CNTRL0 — set control register 0 (4-byte operand)
+pub const CMD_PROG_CNTRL0: u8 = 0x22;
+/// SPI command: LSC_INIT_ADDRESS — reset frame address to 0
+pub const CMD_INIT_ADDR: u8 = 0x46;
+/// SPI command: LSC_PROG_INCR_NV — write one frame, auto-increment address
+/// Operand byte 2 bit 7: CRC_CHECK flag (1 = include 16-bit CRC after frame)
+pub const CMD_PROG_INCR: u8 = 0x70;
+/// SPI command: ISC_PROGRAM_DONE — release from config mode
+pub const CMD_PROGRAM_DONE: u8 = 0x5E;
+/// SPI command: ISC_DISABLE — exit ISC mode
+pub const CMD_ISC_DISABLE: u8 = 0x26;
+/// SPI command: DUMMY — padding / NOP
+pub const CMD_DUMMY: u8 = 0xFF;
+
+/// PROG_INCR_NV operand with CRC check enabled (bit 7 of byte 2)
+pub const PROG_INCR_CRC_FLAG: u8 = 0x80;
+
+/// Bytes per frame = bits_per_frame / 8 (varies by die, see Ecp5DieData)
+/// Use `die.bits_per_frame / 8` at runtime.
+
+/// CRC polynomial for ECP5 bitstream (CRC-16/AUG-CCITT)
 pub const CRC_POLYNOMIAL: u16 = 0x8005;
+/// CRC initial value
+pub const CRC_INIT: u16 = 0x0000;
+
+/// Postamble trailing bytes
+pub const POSTAMBLE_BYTES: usize = 4;

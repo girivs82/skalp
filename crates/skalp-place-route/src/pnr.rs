@@ -486,7 +486,7 @@ pub fn place_and_route_nexus(
     // Generate Oxide bitstream
     let mut bs_config = config.bitstream.clone();
     bs_config.format = crate::bitstream::BitstreamFormat::OxideBitstream;
-    let generator = BitstreamGenerator::for_nexus(device.variant.name(), bs_config);
+    let generator = BitstreamGenerator::for_nexus(device.variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
     Ok(PnrResult {
@@ -561,7 +561,7 @@ pub fn place_and_route_ecp5(
     // Trellis bitstream
     let mut bs_config = config.bitstream.clone();
     bs_config.format = crate::bitstream::BitstreamFormat::TrellisBinary;
-    let generator = BitstreamGenerator::for_nexus(variant.name(), bs_config);
+    let generator = BitstreamGenerator::for_ecp5(variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
     Ok(PnrResult {

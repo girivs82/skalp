@@ -221,13 +221,47 @@ pub const DSP_COLUMN_SPACING: u32 = 20;
 // Bitstream constants (from prjoxide)
 // ---------------------------------------------------------------------------
 
-/// Oxide bitstream file magic / header prefix
-pub const BITSTREAM_MAGIC: &[u8] = b"OXIDE_NEXUS\n";
-/// LSC_INIT_ADDRESS equivalent for Nexus (start config)
-pub const JTAG_CMD_INIT_ADDR: u8 = 0x46;
-/// LSC_PROG_INCR_NV equivalent (write one frame)
-pub const JTAG_CMD_PROG_INCR: u8 = 0x70;
-/// ISC_PROGRAM_DONE equivalent (finish config)
-pub const JTAG_CMD_DONE: u8 = 0x5E;
+/// Nexus SPI bitstream format (from prjoxide nxpack):
+///
+/// Structure is similar to ECP5: [dummy] [preamble] [commands] [frames] [postamble]
+/// Nexus uses the same Lattice SPI command set but with different preamble.
+///
+/// Sources: prjoxide/libprjoxide/src/bitstream.rs, Lattice TN1313
+
+/// Oxide text format magic (for FASM-like output)
+pub const TEXT_FORMAT_MAGIC: &[u8] = b"OXIDE_NEXUS\n";
+
+/// Dummy byte for SPI preamble
+pub const BITSTREAM_DUMMY: u8 = 0xFF;
+/// Number of dummy bytes before preamble
+pub const BITSTREAM_DUMMY_COUNT: usize = 8;
+/// Preamble / sync word for Nexus (big-endian: 0xFFFFBDB3, same as ECP5)
+pub const BITSTREAM_PREAMBLE: [u8; 4] = [0xFF, 0xFF, 0xBD, 0xB3];
+
+/// SPI command: LSC_DEVICE_CTRL — device control (Nexus-specific, replaces VERIFY_ID)
+pub const CMD_DEVICE_CTRL: u8 = 0xE2;
+/// SPI command: LSC_RESET_CRC
+pub const CMD_RESET_CRC: u8 = 0x3B;
+/// SPI command: LSC_PROG_CNTRL0
+pub const CMD_PROG_CNTRL0: u8 = 0x22;
+/// SPI command: LSC_INIT_ADDRESS
+pub const CMD_INIT_ADDR: u8 = 0x46;
+/// SPI command: LSC_PROG_INCR_NV — write one frame, auto-increment
+pub const CMD_PROG_INCR: u8 = 0x70;
+/// SPI command: ISC_PROGRAM_DONE
+pub const CMD_PROGRAM_DONE: u8 = 0x5E;
+/// SPI command: ISC_DISABLE
+pub const CMD_ISC_DISABLE: u8 = 0x26;
+/// SPI command: DUMMY / NOP
+pub const CMD_DUMMY: u8 = 0xFF;
+
+/// PROG_INCR_NV operand with CRC check enabled
+pub const PROG_INCR_CRC_FLAG: u8 = 0x80;
+
 /// CRC polynomial for Nexus bitstream
 pub const CRC_POLYNOMIAL: u16 = 0x8005;
+/// CRC initial value
+pub const CRC_INIT: u16 = 0x0000;
+
+/// Postamble trailing bytes
+pub const POSTAMBLE_BYTES: usize = 4;
