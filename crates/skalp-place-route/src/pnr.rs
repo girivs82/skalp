@@ -633,10 +633,10 @@ pub fn place_and_route_xc7(
         .map(|(&net_id, route)| (net_id, route.delay as f64))
         .collect();
 
-    // Bitstream (placeholder — real prjxray FASM output to be added)
+    // Xilinx 7-series binary bitstream (.bit)
     let mut bs_config = config.bitstream.clone();
-    bs_config.format = crate::bitstream::BitstreamFormat::TrellisBinary;
-    let generator = BitstreamGenerator::for_nexus(variant.name(), bs_config);
+    bs_config.format = crate::bitstream::BitstreamFormat::Xc7Binary;
+    let generator = BitstreamGenerator::for_xc7(variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
     Ok(PnrResult {

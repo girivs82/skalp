@@ -17,8 +17,7 @@ use crate::error::Result;
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 
-/// iCE40 binary bitstream constants
-const PREAMBLE: [u8; 4] = [0x7E, 0xAA, 0x99, 0x7E];
+use crate::device::ice40::data as ice40_data;
 
 /// IceStorm binary format generator
 pub struct IceStormBinary<'a> {
@@ -52,7 +51,7 @@ impl<'a> IceStormBinary<'a> {
         let mut data = Vec::new();
 
         // Preamble
-        data.extend_from_slice(&PREAMBLE);
+        data.extend_from_slice(&ice40_data::BITSTREAM_PREAMBLE);
 
         // Parse ASCII format and build CRAM
         // Use device grid_size() which comes from chipdb dimensions
@@ -142,8 +141,8 @@ impl<'a> IceStormBinary<'a> {
 
     /// Calculate CRC-16 for bitstream (iCE40 CRC algorithm)
     fn calculate_crc(&self, data: &[u8]) -> u16 {
-        let mut crc: u16 = 0xFFFF;
-        let polynomial: u16 = 0x8005;
+        let mut crc: u16 = ice40_data::CRC_INIT;
+        let polynomial: u16 = ice40_data::CRC_POLYNOMIAL;
 
         for &byte in data {
             crc ^= (byte as u16) << 8;

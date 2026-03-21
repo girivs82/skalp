@@ -514,3 +514,168 @@ pub const IO_DIFF_PAIRS: bool = true;
 pub const BRAM_COLUMN_SPACING: u32 = 10;
 /// DSP column spacing
 pub const DSP_COLUMN_SPACING: u32 = 14;
+
+// ---------------------------------------------------------------------------
+// Bitstream constants (from UG470 + prjxray-db)
+// ---------------------------------------------------------------------------
+
+/// Xilinx 7-series bitstream structure (UG470):
+///   [Dummy words] [Bus width detect] [Sync word] [Register writes] [Frame data] [DESYNC]
+///
+/// Frame addressing: Type(3) | Top/Bottom(1) | Row(5) | Column(8) | Minor(7)
+/// All 7-series use 101-word (3232-bit) frames.
+
+/// Dummy word (32-bit, sent before sync)
+pub const BITSTREAM_DUMMY_WORD: u32 = 0xFFFF_FFFF;
+/// Bus width auto-detect pattern (UG470 Table 5-1)
+pub const BITSTREAM_BUS_WIDTH_DETECT: [u32; 2] = [0x0000_00BB, 0x1122_0044];
+/// Sync word — marks start of valid bitstream commands
+pub const BITSTREAM_SYNC_WORD: u32 = 0xAA99_5566;
+/// NOOP command (Type 1, NOP)
+pub const CMD_NOOP: u32 = 0x2000_0000;
+/// Write to CMD register (Type 1, write, reg=0x04, word count=1)
+pub const CMD_WRITE_CMD: u32 = 0x3000_8001;
+/// Write to FAR register (Type 1, write, reg=0x01, word count=1)
+pub const CMD_WRITE_FAR: u32 = 0x3000_2001;
+/// Write to FDRI register header (Type 1, write, reg=0x02, word count follows as Type 2)
+pub const CMD_WRITE_FDRI_HDR: u32 = 0x3000_4000;
+/// Type 2 packet header (word count in lower 27 bits)
+pub const CMD_TYPE2_HDR: u32 = 0x4800_0000;
+/// Write to IDCODE register (Type 1, write, reg=0x0C, word count=1)
+pub const CMD_WRITE_IDCODE: u32 = 0x3001_8001;
+/// RCRC command value (reset CRC)
+pub const CMD_RCRC: u32 = 0x0000_0007;
+/// WCFG command value (write configuration)
+pub const CMD_WCFG: u32 = 0x0000_0001;
+/// DESYNC command value (end of configuration)
+pub const CMD_DESYNC: u32 = 0x0000_000D;
+/// GRESTORE command value
+pub const CMD_GRESTORE: u32 = 0x0000_000A;
+/// GTS command value (release I/Os)
+pub const CMD_GTS: u32 = 0x0000_0004;
+/// START command value
+pub const CMD_START: u32 = 0x0000_0005;
+
+/// Words per configuration frame (all 7-series)
+pub const FRAME_WORDS: u32 = 101;
+/// Bits per configuration frame
+pub const FRAME_BITS: u32 = FRAME_WORDS * 32;
+
+/// Frame address encoding helpers
+pub const FAR_BLOCK_TYPE_SHIFT: u32 = 23;
+pub const FAR_TOP_BOTTOM_SHIFT: u32 = 22;
+pub const FAR_ROW_SHIFT: u32 = 17;
+pub const FAR_COLUMN_SHIFT: u32 = 7;
+pub const FAR_MINOR_SHIFT: u32 = 0;
+
+/// Block types in frame address register
+pub const BLOCK_TYPE_CLB_IO_CLK: u32 = 0;
+pub const BLOCK_TYPE_BRAM_CONTENT: u32 = 1;
+
+/// Frame geometry per variant (from prjxray-db)
+/// (rows, columns_per_row, minor_per_clb, minor_per_bram, minor_per_io)
+#[derive(Debug, Clone)]
+pub struct Xc7FrameGeometry {
+    /// Number of configuration rows (top half + bottom half)
+    pub rows: u32,
+    /// CLB/IO/CLK columns per row
+    pub clb_columns: u32,
+    /// BRAM content columns per row
+    pub bram_columns: u32,
+    /// Minor frames per CLB column (typ. 36)
+    pub minor_per_clb: u32,
+    /// Minor frames per BRAM column (typ. 128)
+    pub minor_per_bram: u32,
+    /// Minor frames per IOB column (typ. 42)
+    pub minor_per_iob: u32,
+    /// Total configuration frames
+    pub total_frames: u32,
+}
+
+/// XC7A35T frame geometry (from prjxray-db)
+pub const FRAMES_XC7A35T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 2,
+    clb_columns: 36,
+    bram_columns: 4,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 5_742,
+};
+
+/// XC7A50T frame geometry
+pub const FRAMES_XC7A50T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 2,
+    clb_columns: 36,
+    bram_columns: 6,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 7_014,
+};
+
+/// XC7A100T frame geometry
+pub const FRAMES_XC7A100T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 4,
+    clb_columns: 50,
+    bram_columns: 8,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 16_042,
+};
+
+/// XC7A200T frame geometry
+pub const FRAMES_XC7A200T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 6,
+    clb_columns: 58,
+    bram_columns: 12,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 35_574,
+};
+
+/// XC7K70T frame geometry
+pub const FRAMES_XC7K70T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 4,
+    clb_columns: 44,
+    bram_columns: 8,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 14_906,
+};
+
+/// XC7K160T frame geometry
+pub const FRAMES_XC7K160T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 6,
+    clb_columns: 50,
+    bram_columns: 10,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 22_158,
+};
+
+/// XC7K325T frame geometry (from prjxray-db)
+pub const FRAMES_XC7K325T: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 8,
+    clb_columns: 58,
+    bram_columns: 14,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 44_462,
+};
+
+/// XC7S50 frame geometry (same die as XC7A50T)
+pub const FRAMES_XC7S50: Xc7FrameGeometry = Xc7FrameGeometry {
+    rows: 2,
+    clb_columns: 36,
+    bram_columns: 6,
+    minor_per_clb: 36,
+    minor_per_bram: 128,
+    minor_per_iob: 42,
+    total_frames: 7_014,
+};

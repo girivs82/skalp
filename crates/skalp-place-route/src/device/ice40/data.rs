@@ -327,3 +327,28 @@ pub const IO_STANDARDS: &[&str] = &["LVCMOS33", "LVCMOS25", "LVCMOS18"];
 pub const IO_DRIVE_STRENGTHS: &[u8] = &[4, 8, 12];
 /// No differential pair support on iCE40
 pub const IO_DIFF_PAIRS: bool = false;
+
+// ---------------------------------------------------------------------------
+// Bitstream constants (from IceStorm)
+// ---------------------------------------------------------------------------
+
+/// Bitstream preamble / sync pattern
+pub const BITSTREAM_PREAMBLE: [u8; 4] = [0x7E, 0xAA, 0x99, 0x7E];
+/// Binary sync pattern (start of .bin file)
+pub const BITSTREAM_SYNC: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+/// CRAM write command byte
+pub const CRAM_WRITE_CMD: u8 = 0x01;
+/// CRAM rows per logic tile (bit rows in .asc format)
+pub const CRAM_LOGIC_ROWS: u8 = 16;
+/// CRAM columns per logic tile
+pub const CRAM_LOGIC_COLS: u8 = 54;
+/// CRAM columns per IO tile
+pub const CRAM_IO_COLS: u8 = 18;
+/// CRAM columns per RAM tile
+pub const CRAM_RAM_COLS: u8 = 42;
+/// CRC polynomial (CRC-16)
+pub const CRC_POLYNOMIAL: u16 = 0x8005;
+/// CRC initial value
+pub const CRC_INIT: u16 = 0xFFFF;
+/// File magic for IceStorm ASCII (.asc) format
+pub const ASC_MAGIC: &str = ".comment";

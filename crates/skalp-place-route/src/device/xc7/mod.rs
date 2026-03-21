@@ -109,6 +109,20 @@ impl Xc7Variant {
 
     /// Speed family for timing selection
     pub fn speed_family(&self) -> data::Xc7SpeedFamily { self.die_data().speed_family }
+
+    /// Frame geometry for bitstream generation
+    pub fn frame_geometry(&self) -> &'static data::Xc7FrameGeometry {
+        match self {
+            Xc7Variant::Xc7a35t => &data::FRAMES_XC7A35T,
+            Xc7Variant::Xc7a50t => &data::FRAMES_XC7A50T,
+            Xc7Variant::Xc7a100t => &data::FRAMES_XC7A100T,
+            Xc7Variant::Xc7a200t => &data::FRAMES_XC7A200T,
+            Xc7Variant::Xc7k70t => &data::FRAMES_XC7K70T,
+            Xc7Variant::Xc7k160t => &data::FRAMES_XC7K160T,
+            Xc7Variant::Xc7k325t => &data::FRAMES_XC7K325T,
+            Xc7Variant::Xc7s50 => &data::FRAMES_XC7S50,
+        }
+    }
 }
 
 impl std::fmt::Display for Xc7Variant {

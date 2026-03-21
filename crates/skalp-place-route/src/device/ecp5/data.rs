@@ -295,3 +295,21 @@ pub const DSP_MULTS_PER_TILE: u8 = 2;
 pub const BRAM_COLUMN_SPACING: u32 = 8;
 /// DSP column spacing
 pub const DSP_COLUMN_SPACING: u32 = 16;
+
+// ---------------------------------------------------------------------------
+// Bitstream constants (from prjtrellis)
+// ---------------------------------------------------------------------------
+
+/// Trellis bitstream file magic / header
+pub const BITSTREAM_MAGIC: &[u8] = b"TRELLIS_ECP5\n";
+/// Section headers in Trellis bitstream
+pub const BITSTREAM_SECTION_TILES: &[u8] = b"TILES\n";
+pub const BITSTREAM_SECTION_IOCONF: &[u8] = b"IOCONF\n";
+/// JTAG command: LSC_INIT_ADDRESS (start of config frame write)
+pub const JTAG_CMD_INIT_ADDR: u8 = 0x46;
+/// JTAG command: LSC_PROG_INCR_NV (write one frame, auto-increment)
+pub const JTAG_CMD_PROG_INCR: u8 = 0x70;
+/// JTAG command: ISC_PROGRAM_DONE (finish configuration)
+pub const JTAG_CMD_DONE: u8 = 0x5E;
+/// CRC polynomial for ECP5 bitstream (CRC-16 CCITT)
+pub const CRC_POLYNOMIAL: u16 = 0x8005;

@@ -216,3 +216,18 @@ pub const IO_DIFF_PAIRS: bool = true;
 pub const BRAM_COLUMN_SPACING: u32 = 10;
 /// DSP column spacing
 pub const DSP_COLUMN_SPACING: u32 = 20;
+
+// ---------------------------------------------------------------------------
+// Bitstream constants (from prjoxide)
+// ---------------------------------------------------------------------------
+
+/// Oxide bitstream file magic / header prefix
+pub const BITSTREAM_MAGIC: &[u8] = b"OXIDE_NEXUS\n";
+/// LSC_INIT_ADDRESS equivalent for Nexus (start config)
+pub const JTAG_CMD_INIT_ADDR: u8 = 0x46;
+/// LSC_PROG_INCR_NV equivalent (write one frame)
+pub const JTAG_CMD_PROG_INCR: u8 = 0x70;
+/// ISC_PROGRAM_DONE equivalent (finish config)
+pub const JTAG_CMD_DONE: u8 = 0x5E;
+/// CRC polynomial for Nexus bitstream
+pub const CRC_POLYNOMIAL: u16 = 0x8005;
