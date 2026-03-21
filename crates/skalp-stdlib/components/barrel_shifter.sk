@@ -1,0 +1,48 @@
+// Standard library barrel shifter component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+//
+// Architecture: logarithmic shift stages (one per bit of shift_amount).
+// Each stage conditionally shifts by a power of 2.
+// barrier between stages gives NCL completion points or pipeline registers.
+//
+// For WIDTH=32: 5 stages (shift by 1, 2, 4, 8, 16).
+// Much better than a monolithic mux tree — each stage is simple.
+
+entity std_barrel_shifter<const WIDTH: usize> {
+    in data: bit<WIDTH>;
+    in shift_amount: bit<log2(WIDTH)>;
+    in direction: bit;     // 0 = left, 1 = right
+    in arithmetic: bit;    // 0 = logical (fill 0), 1 = arithmetic (sign-extend)
+    out result: bit<WIDTH>;
+}
+
+impl std_barrel_shifter {
+    const STAGES: usize = log2(WIDTH);
+
+    signal current: bit<WIDTH>;
+    current = data;
+
+    // Each stage: if shift_amount[i] is set, shift by 2^i
+    generate for i in 0..STAGES {
+        const SHIFT: usize = 1 << i;
+
+        signal fill_bit: bit;
+        fill_bit = if arithmetic { data[WIDTH-1] } else { 0 };
+
+        signal shifted: bit<WIDTH>;
+        shifted = if direction {
+            // Right shift: fill from MSB
+            {{SHIFT{fill_bit}}, current[WIDTH-1:SHIFT]}
+        } else {
+            // Left shift: fill from LSB with zeros
+            {current[WIDTH-SHIFT-1:0], {SHIFT{1'b0}}}
+        };
+
+        current = if shift_amount[i] { shifted } else { current };
+
+        barrier;  // Stage complete — NCL: completion. Sync: pipeline reg.
+    }
+
+    result = current;
+}

@@ -1,4 +1,11 @@
 // Standard library adder component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+// No clk/rst — pure dataflow. The parent context determines interpretation:
+//   - async parent: NCL dual-rail with completion detection
+//   - sync parent:  combinational logic (maps to CARRY4/CCU2 hard chains)
+//   - clocked parent with barrier: pipeline register at barrier point
+
 entity std_adder<const WIDTH: usize> {
     in a: bit<WIDTH>;
     in b: bit<WIDTH>;
@@ -10,15 +17,54 @@ entity std_adder<const WIDTH: usize> {
 
 impl std_adder {
     signal extended_sum: bit<WIDTH+1>;
-    
+
     extended_sum = {1'b0, a} + {1'b0, b} + carry_in;
-    
+
     sum = extended_sum[WIDTH-1:0];
     carry_out = extended_sum[WIDTH];
-    
+
     // Overflow detection for signed arithmetic
     overflow = (a[WIDTH-1] == b[WIDTH-1]) && (sum[WIDTH-1] != a[WIDTH-1]);
-    
+
     // Verification
     assert property (extended_sum == a + b + carry_in);
+}
+
+// Wide adder with barrier — splits into two halves with a pipeline/completion
+// boundary between them. In async context, each half completes independently.
+entity std_adder_wide<const WIDTH: usize> {
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    in carry_in: bit;
+    out sum: bit<WIDTH>;
+    out carry_out: bit;
+}
+
+impl std_adder_wide {
+    const HALF: usize = WIDTH / 2;
+
+    // Lower half
+    signal low_sum: bit<HALF>;
+    signal low_carry: bit;
+    {
+        signal low_ext: bit<HALF+1>;
+        low_ext = {1'b0, a[HALF-1:0]} + {1'b0, b[HALF-1:0]} + carry_in;
+        low_sum = low_ext[HALF-1:0];
+        low_carry = low_ext[HALF];
+    }
+
+    barrier;  // NCL: completion detection. Sync: pipeline register if clocked.
+
+    // Upper half — depends on low_carry from previous stage
+    signal high_sum: bit<WIDTH-HALF>;
+    signal high_carry: bit;
+    {
+        signal high_ext: bit<WIDTH-HALF+1>;
+        high_ext = {1'b0, a[WIDTH-1:HALF]} + {1'b0, b[WIDTH-1:HALF]} + low_carry;
+        high_sum = high_ext[WIDTH-HALF-1:0];
+        high_carry = high_ext[WIDTH-HALF];
+    }
+
+    sum = {high_sum, low_sum};
+    carry_out = high_carry;
 }

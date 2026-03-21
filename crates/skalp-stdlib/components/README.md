@@ -19,6 +19,31 @@ Unlike FPGA vendor IP or hard macros, these implementations are:
 2. **Parameterizable** - Adjust precision, latency, area tradeoffs
 3. **ASIC-friendly** - No vendor-specific primitives
 4. **HLS-style** - Called like software functions, synthesized to hardware modules
+5. **Context-agnostic** - Same component works in both sync and async (NCL) contexts
+
+### Context-Agnostic Pattern
+
+Core arithmetic and datapath components use `barrier` annotations instead of
+explicit clk/rst ports. The parent entity's context determines interpretation:
+
+| Parent context | `barrier` becomes | Behavior |
+|---|---|---|
+| `async entity` (NCL) | Completion detection point | Self-timed pipeline, wave pipelining |
+| Sync clocked entity | Pipeline register | One stage per clock cycle |
+| Sync combinational | Ignored (no-op) | Single-cycle dataflow |
+
+**Example**: `a * b` in user code lowers to `std_multiplier`, which decomposes
+into a chain of `std_adder` stages separated by barriers. In an NCL context,
+each adder stage completes independently via handshake. In a clocked context,
+each stage becomes a pipeline register. The user writes the same code either way.
+
+**Rules for new context-agnostic components:**
+- No `clk`/`rst` ports — pure dataflow
+- Use `barrier` between pipeline stages
+- Arithmetic operators (`+`, `-`) map to `std_adder` → CARRY chains
+- Never use `*` inside multiplier (breaks to shift-and-add with `+`)
+- Use `generate for` for parameterized stage counts
+- `ImplStyle` (`#[impl_style::tree]`) selects between variants at call site
 
 ## Floating-Point Library (`fp/`)
 
@@ -180,11 +205,12 @@ impl MyDesign {
 
 When adding new library functions:
 
-1. Implement as SKALP entity in appropriate subdirectory
-2. Add tests in `tests/stdlib/`
-3. Update this README with function signature and description
-4. Ensure synthesizable (no behavioral constructs)
-5. Document latency and area characteristics
+1. Implement as SKALP entity in `components/`
+2. Prefer context-agnostic pattern (no clk/rst, use barriers) for datapath components
+3. Add tests in `tests/stdlib/`
+4. Update this README with function signature and description
+5. Ensure synthesizable (no behavioral constructs)
+6. Document latency and area characteristics
 
 ## References
 

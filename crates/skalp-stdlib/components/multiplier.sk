@@ -1,69 +1,166 @@
 // Standard library multiplier component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+// No clk/rst — pure dataflow with barrier annotations.
+//
+// The parent context determines interpretation:
+//   - async parent: each stage between barriers is an async entity with
+//     NCL completion detection. Wave pipelining for free.
+//   - sync clocked parent: barriers become pipeline registers.
+//     Throughput = 1 result per clock. Latency = WIDTH cycles.
+//   - sync combinational parent: barriers ignored, single-cycle.
+//
+// Architecture: shift-and-add with partial product accumulation.
+// Each iteration conditionally adds a shifted copy of 'a' to the accumulator.
+// The '+' operator lowers to std_adder (which uses CARRY4/CCU2 hard chains).
+// No circular dependency — this file never uses '*'.
+
 entity std_multiplier<const WIDTH: usize> {
-    in clk: clock;
-    in rst: reset;
     in a: bit<WIDTH>;
     in b: bit<WIDTH>;
-    in start: bit;
     out product: bit<WIDTH*2>;
-    out ready: bit;
-    out busy: bit;
 }
 
 impl std_multiplier {
-    // Pipelined multiplier stages
-    signal stage1_a: bit<WIDTH>;
-    signal stage1_b: bit<WIDTH>;
-    signal stage1_valid: bit;
-    
-    signal stage2_partial: bit<WIDTH*2>;
-    signal stage2_valid: bit;
-    
-    signal stage3_product: bit<WIDTH*2>;
-    signal stage3_valid: bit;
-    
-    on(clk.rise) {
-        if rst.active {
-            stage1_valid = 0;
-            stage2_valid = 0;
-            stage3_valid = 0;
-            stage1_a = 0;
-            stage1_b = 0;
-            stage2_partial = 0;
-            stage3_product = 0;
-        } else {
-            // Stage 1: Input registration
-            if start {
-                stage1_a = a;
-                stage1_b = b;
-                stage1_valid = 1;
-            } else {
-                stage1_valid = 0;
-            }
-            
-            // Stage 2: Partial product calculation
-            if stage1_valid {
-                stage2_partial = stage1_a * stage1_b;
-                stage2_valid = 1;
-            } else {
-                stage2_valid = 0;
-            }
-            
-            // Stage 3: Output registration
-            if stage2_valid {
-                stage3_product = stage2_partial;
-                stage3_valid = 1;
-            } else {
-                stage3_valid = 0;
-            }
-        }
+    const W2: usize = WIDTH * 2;
+
+    // Partial product accumulation chain.
+    // generate-for unrolls at compile time into WIDTH stages,
+    // each separated by a barrier.
+    signal acc: bit<W2> = 0;
+
+    generate for i in 0..WIDTH {
+        // Partial product: if b[i] is set, add (a << i) to accumulator
+        signal partial: bit<W2>;
+        partial = {(W2)'b0, a} << i;
+
+        signal addend: bit<W2>;
+        addend = if b[i] { partial } else { 0 };
+
+        // Accumulate — this '+' maps to std_adder → CARRY chain.
+        // No recursive '*' — just addition and shifts.
+        acc = acc + addend;
+
+        barrier;  // NCL: completion point. Sync: pipeline register. Comb: no-op.
     }
-    
-    product = stage3_product;
-    ready = stage3_valid;
-    busy = stage1_valid || stage2_valid || stage3_valid;
-    
+
+    product = acc;
+
     // Verification
-    assert property (start |=> ##3 ready) @(posedge clk);
-    assert property (ready -> product == $past(a, 3) * $past(b, 3)) @(posedge clk);
+    assert property (product == a * b);
+}
+
+// Signed multiplier — extends inputs to double width, uses unsigned core
+entity std_multiplier_signed<const WIDTH: usize> {
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    out product: bit<WIDTH*2>;
+}
+
+impl std_multiplier_signed {
+    const W2: usize = WIDTH * 2;
+
+    // Sign-extend both operands to double width
+    signal a_ext: bit<W2>;
+    signal b_ext: bit<W2>;
+    a_ext = {{WIDTH{a[WIDTH-1]}}, a};
+    b_ext = {{WIDTH{b[WIDTH-1]}}, b};
+
+    // Use unsigned multiplier on sign-extended operands
+    // Two's complement multiplication: sign-extend then multiply unsigned
+    signal acc: bit<W2> = 0;
+
+    generate for i in 0..W2 {
+        signal partial: bit<W2>;
+        partial = a_ext << i;
+
+        signal addend: bit<W2>;
+        addend = if b_ext[i] { partial } else { 0 };
+
+        acc = acc + addend;
+
+        barrier;
+    }
+
+    product = acc;
+
+    // Verification
+    assert property (product == $signed(a) * $signed(b));
+}
+
+// Tree multiplier — Wallace-tree-style reduction for lower latency.
+// Fewer barrier stages (log₁.₅ N vs N), but more adders per stage.
+// Use via #[impl_style::tree] on the call site, or let the compiler
+// choose based on timing constraints (ImplStyle::Auto).
+entity std_multiplier_tree<const WIDTH: usize> {
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    out product: bit<WIDTH*2>;
+}
+
+impl std_multiplier_tree {
+    const W2: usize = WIDTH * 2;
+
+    // Phase 1: Generate all partial products (combinational, no barriers)
+    signal pp: Array<bit<W2>, WIDTH>;
+    generate for i in 0..WIDTH {
+        pp[i] = if b[i] { {(W2)'b0, a} << i } else { 0 };
+    }
+
+    barrier;  // All partial products ready
+
+    // Phase 2: Reduction tree — pairwise addition with barriers between levels.
+    // Each level halves the number of operands.
+    // Level 0: WIDTH operands → WIDTH/2 sums
+    // Level 1: WIDTH/2 → WIDTH/4
+    // ... until 1 result remains.
+    //
+    // For WIDTH=8: 3 levels of reduction (log2(8) = 3 barriers)
+    // vs 8 barriers in the shift-and-add version.
+
+    signal level0: Array<bit<W2>, (WIDTH+1)/2>;
+    generate for i in 0..(WIDTH/2) {
+        level0[i] = pp[i*2] + pp[i*2 + 1];
+    }
+    generate if WIDTH % 2 == 1 {
+        level0[WIDTH/2] = pp[WIDTH-1];
+    }
+
+    barrier;  // Level 0 reduction complete
+
+    // Level 1: reduce pairs again
+    const L0_COUNT: usize = (WIDTH + 1) / 2;
+    signal level1: Array<bit<W2>, (L0_COUNT+1)/2>;
+    generate for i in 0..(L0_COUNT/2) {
+        level1[i] = level0[i*2] + level0[i*2 + 1];
+    }
+    generate if L0_COUNT % 2 == 1 {
+        level1[L0_COUNT/2] = level0[L0_COUNT-1];
+    }
+
+    barrier;  // Level 1 reduction complete
+
+    // Level 2: final reduction (handles up to WIDTH=16)
+    const L1_COUNT: usize = (L0_COUNT + 1) / 2;
+    signal level2: Array<bit<W2>, (L1_COUNT+1)/2>;
+    generate for i in 0..(L1_COUNT/2) {
+        level2[i] = level1[i*2] + level1[i*2 + 1];
+    }
+    generate if L1_COUNT % 2 == 1 {
+        level2[L1_COUNT/2] = level1[L1_COUNT-1];
+    }
+
+    barrier;  // Level 2 reduction complete
+
+    // Final CPA (carry-propagate add) for remaining operands
+    const L2_COUNT: usize = (L1_COUNT + 1) / 2;
+    signal result: bit<W2> = level2[0];
+    generate for i in 1..L2_COUNT {
+        result = result + level2[i];
+    }
+
+    product = result;
+
+    // Verification
+    assert property (product == a * b);
 }

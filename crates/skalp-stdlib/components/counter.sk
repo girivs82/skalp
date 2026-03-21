@@ -1,10 +1,21 @@
 // Standard library counter component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+//
+// In async context: the increment is an async adder entity.
+//   Each count step completes via NCL handshake — self-timed counting.
+//   barrier separates the increment computation from the output.
+//
+// In sync clocked context: classic synchronous counter.
+//   barrier becomes a pipeline register (one count per clock).
+//
+// In sync combinational context: single-cycle increment.
+
 entity std_counter<const WIDTH: usize> {
-    in clk: clock;
-    in rst: reset;
     in enable: bit;
     in load: bit;
     in load_value: bit<WIDTH>;
+    in direction: bit;   // 0 = up, 1 = down
     out count: bit<WIDTH>;
     out overflow: bit;
     out underflow: bit;
@@ -13,24 +24,57 @@ entity std_counter<const WIDTH: usize> {
 impl std_counter {
     signal counter_reg: bit<WIDTH>;
 
-    on(clk.rise) {
-        if rst.active {
-            counter_reg = 0;
-        } else if load {
-            counter_reg = load_value;
-        } else if enable {
-            counter_reg = counter_reg + 1;
-        }
-    }
+    // Increment/decrement — this '+'/'-' maps to std_adder → CARRY chain
+    signal next_value: bit<WIDTH>;
+    signal inc_ext: bit<WIDTH+1>;
+
+    inc_ext = if direction {
+        {1'b0, counter_reg} - 1
+    } else {
+        {1'b0, counter_reg} + 1
+    };
+
+    next_value = inc_ext[WIDTH-1:0];
+
+    barrier;  // Increment computed — NCL: completion point. Sync: pipeline reg.
+
+    // State update
+    counter_reg = if load {
+        load_value
+    } else if enable {
+        next_value
+    } else {
+        counter_reg
+    };
 
     count = counter_reg;
-    overflow = (counter_reg == (1 << WIDTH) - 1) && enable && !load;
-    underflow = (counter_reg == 0) && enable && !load;
+    overflow = (counter_reg == {WIDTH{1'b1}}) && enable && !load && !direction;
+    underflow = (counter_reg == 0) && enable && !load && direction;
 
-    // Verification properties
-    assert property (rst.active |=> count == 0)
-        @(posedge clk);
+    // Verification
+    assert property (load |=> count == load_value);
+}
 
-    assert property (load |=> count == load_value)
-        @(posedge clk);
+// Modular counter — counts 0 to MODULUS-1, then wraps
+entity std_counter_mod<const WIDTH: usize, const MODULUS: usize> {
+    in enable: bit;
+    out count: bit<WIDTH>;
+    out wrap: bit;
+}
+
+impl std_counter_mod {
+    signal counter_reg: bit<WIDTH>;
+
+    signal at_max: bit;
+    at_max = (counter_reg == MODULUS - 1);
+
+    signal next_value: bit<WIDTH>;
+    next_value = if at_max { 0 } else { counter_reg + 1 };
+
+    barrier;
+
+    counter_reg = if enable { next_value } else { counter_reg };
+
+    count = counter_reg;
+    wrap = at_max && enable;
 }

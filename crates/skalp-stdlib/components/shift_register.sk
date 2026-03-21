@@ -1,31 +1,86 @@
 // Standard library shift register component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+//
+// In async context: each stage is an NCL completion domain.
+//   Data ripples through with wave pipelining — no clock needed.
+//   This is the natural async pipeline: each barrier is a handshake point.
+//
+// In sync clocked context: barriers become pipeline registers.
+//   Classic shift register behavior, one stage per clock.
+//
+// In sync combinational context: barriers ignored, data flows through.
+
+// Core shift register — pure dataflow pipeline
 entity std_shift_register<const WIDTH: usize, const DEPTH: usize> {
-    in clk: clock;
-    in rst: reset;
+    in data_in: bit<WIDTH>;
     in enable: bit;
-    in serial_in: bit;
-    in parallel_load: bit;
-    in parallel_data: bit<WIDTH>;
-    out serial_out: bit;
-    out parallel_out: bit<WIDTH>;
+    out data_out: bit<WIDTH>;
+    out tap: Array<bit<WIDTH>, DEPTH>;  // All intermediate stages visible
 }
 
 impl std_shift_register {
-    signal shift_reg: bit<WIDTH>;
-    
-    on(clk.rise) {
-        if rst.active {
-            shift_reg = 0;
-        } else if parallel_load {
-            shift_reg = parallel_data;
-        } else if enable {
-            shift_reg <= {serial_in, shift_reg[WIDTH-1:1]};
-        }
+    // Pipeline of stages, each separated by a barrier.
+    // In NCL: each stage independently completes and handshakes.
+    // In sync: each stage is a pipeline register.
+
+    signal stages: Array<bit<WIDTH>, DEPTH>;
+
+    // First stage takes input
+    stages[0] = if enable { data_in } else { stages[0] };
+
+    barrier;
+
+    // Chain remaining stages
+    generate for i in 1..DEPTH {
+        stages[i] = if enable { stages[i-1] } else { stages[i] };
+        barrier;
     }
-    
-    serial_out = shift_reg[0];
-    parallel_out = shift_reg;
-    
-    assert property (rst.active |=> shift_reg == 0) @(posedge clk);
-    assert property (parallel_load |=> shift_reg == parallel_data) @(posedge clk);
+
+    data_out = stages[DEPTH-1];
+    tap = stages;
+}
+
+// LFSR (Linear Feedback Shift Register) — useful for pseudo-random generation.
+// Context-agnostic: the XOR feedback is combinational, barriers pace the stages.
+entity std_lfsr<const WIDTH: usize> {
+    in seed: bit<WIDTH>;
+    in load: bit;
+    in enable: bit;
+    out value: bit<WIDTH>;
+}
+
+impl std_lfsr {
+    signal state: bit<WIDTH>;
+
+    // Feedback polynomial taps (maximal-length for common widths)
+    // Width 4: x^4 + x^3 + 1 → taps at [3,2]
+    // Width 8: x^8 + x^6 + x^5 + x^4 + 1 → taps at [7,5,4,3]
+    // Width 16: x^16 + x^15 + x^13 + x^4 + 1 → taps at [15,14,12,3]
+    // Width 32: x^32 + x^22 + x^2 + x + 1 → taps at [31,21,1,0]
+    signal feedback: bit;
+    generate if WIDTH == 4 {
+        feedback = state[3] ^ state[2];
+    } else generate if WIDTH == 8 {
+        feedback = state[7] ^ state[5] ^ state[4] ^ state[3];
+    } else generate if WIDTH == 16 {
+        feedback = state[15] ^ state[14] ^ state[12] ^ state[3];
+    } else generate if WIDTH == 32 {
+        feedback = state[31] ^ state[21] ^ state[1] ^ state[0];
+    } else {
+        // Generic: tap MSB and MSB-1 (not maximal-length, but functional)
+        feedback = state[WIDTH-1] ^ state[WIDTH-2];
+    }
+
+    barrier;  // Feedback computed
+
+    state = if load {
+        seed
+    } else if enable {
+        {feedback, state[WIDTH-1:1]}
+    } else {
+        state
+    };
+
+    value = state;
 }

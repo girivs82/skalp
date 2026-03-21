@@ -1,0 +1,37 @@
+// Standard library comparator component
+//
+// Context-agnostic: works in both sync and async (NCL) contexts.
+// Pure dataflow — the subtraction maps to std_adder (CARRY chain).
+
+entity std_comparator<const WIDTH: usize> {
+    in a: bit<WIDTH>;
+    in b: bit<WIDTH>;
+    out eq: bit;
+    out lt: bit;   // unsigned less-than
+    out gt: bit;   // unsigned greater-than
+    out slt: bit;  // signed less-than
+    out sgt: bit;  // signed greater-than
+}
+
+impl std_comparator {
+    // Subtraction for comparison — maps to CARRY chain via std_adder
+    signal diff: bit<WIDTH+1>;
+    diff = {1'b0, a} - {1'b0, b};
+
+    signal borrow: bit;
+    borrow = diff[WIDTH];  // borrow = 1 means a < b (unsigned)
+
+    barrier;  // Subtraction complete
+
+    eq = (a == b);
+    lt = borrow && !eq;
+    gt = !borrow && !eq;
+
+    // Signed: compare sign bits, then magnitude
+    slt = (a[WIDTH-1] != b[WIDTH-1]) ? a[WIDTH-1] : lt;
+    sgt = (a[WIDTH-1] != b[WIDTH-1]) ? b[WIDTH-1] : gt;
+
+    // Verification
+    assert property (eq == (a == b));
+    assert property (lt == (a < b));
+}
