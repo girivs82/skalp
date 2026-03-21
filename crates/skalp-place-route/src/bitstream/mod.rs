@@ -31,6 +31,8 @@ pub enum BitstreamFormat {
     VtrBitstream,
     /// Project Trellis format (for ECP5)
     TrellisBinary,
+    /// Project Oxide format (for Nexus/CertusPro-NX)
+    OxideBitstream,
     /// OpenFPGA format
     OpenFpgaBitstream,
 }
@@ -120,6 +122,7 @@ impl Bitstream {
             BitstreamFormat::IceStormBinary => "IceStorm Binary (.bin)",
             BitstreamFormat::VtrBitstream => "VTR XML Bitstream",
             BitstreamFormat::TrellisBinary => "Project Trellis Binary",
+            BitstreamFormat::OxideBitstream => "Project Oxide (Nexus)",
             BitstreamFormat::OpenFpgaBitstream => "OpenFPGA Bitstream",
         }
     }
@@ -184,7 +187,9 @@ impl Bitstream {
                 // Already ASCII-based, return as string
                 String::from_utf8_lossy(&self.data).to_string()
             }
-            BitstreamFormat::IceStormBinary | BitstreamFormat::TrellisBinary => {
+            BitstreamFormat::IceStormBinary
+            | BitstreamFormat::TrellisBinary
+            | BitstreamFormat::OxideBitstream => {
                 // Generate a hex dump for binary formats
                 let mut output = String::new();
                 output.push_str(&format!(
@@ -248,6 +253,13 @@ impl Bitstream {
                     ));
                 }
             }
+            BitstreamFormat::OxideBitstream => {
+                if !self.data.starts_with(b"OXIDE_") {
+                    return Err(PlaceRouteError::BitstreamFailed(
+                        "Invalid Oxide/Nexus format".to_string(),
+                    ));
+                }
+            }
             BitstreamFormat::OpenFpgaBitstream => {
                 let content = String::from_utf8_lossy(&self.data);
                 if !content.contains("<openfpga_bitstream>") {
@@ -265,6 +277,8 @@ impl Bitstream {
 pub struct BitstreamGenerator {
     /// Target device
     device: Ice40Device,
+    /// Device name (for non-Ice40 devices)
+    device_name: String,
     /// Configuration
     config: BitstreamConfig,
 }
@@ -272,15 +286,33 @@ pub struct BitstreamGenerator {
 impl BitstreamGenerator {
     /// Create a new bitstream generator
     pub fn new(device: Ice40Device) -> Self {
+        let name = device.name().to_string();
         Self {
             device,
+            device_name: name,
             config: BitstreamConfig::default(),
         }
     }
 
     /// Create with specific configuration
     pub fn with_config(device: Ice40Device, config: BitstreamConfig) -> Self {
-        Self { device, config }
+        let name = device.name().to_string();
+        Self {
+            device,
+            device_name: name,
+            config,
+        }
+    }
+
+    /// Create a bitstream generator for a Nexus device
+    pub fn for_nexus(device_name: &str, config: BitstreamConfig) -> Self {
+        // Use a dummy Ice40 device — Nexus bitstream generation doesn't use it
+        let ice40_dummy = Ice40Device::new(crate::device::ice40::Ice40Variant::Hx1k);
+        Self {
+            device: ice40_dummy,
+            device_name: device_name.to_string(),
+            config,
+        }
     }
 
     /// Generate bitstream from placement and routing
@@ -304,6 +336,7 @@ impl BitstreamGenerator {
             BitstreamFormat::IceStormBinary => self.generate_binary(placement, routing),
             BitstreamFormat::VtrBitstream => self.generate_vtr(placement, routing),
             BitstreamFormat::TrellisBinary => self.generate_trellis(placement, routing),
+            BitstreamFormat::OxideBitstream => self.generate_oxide(placement, routing, netlist),
             BitstreamFormat::OpenFpgaBitstream => self.generate_openfpga(placement, routing),
         }
     }
@@ -408,6 +441,90 @@ impl BitstreamGenerator {
             BitstreamFormat::TrellisBinary,
         );
         bitstream.data = data;
+        bitstream.metadata = self.calculate_metadata(placement, routing);
+
+        Ok(bitstream)
+    }
+
+    /// Generate Project Oxide format for Nexus/CertusPro-NX
+    ///
+    /// Produces a Fasm-like (FPGA Assembly) textual representation compatible
+    /// with prjoxide's bitstream tools. This can be converted to a binary
+    /// bitstream using `ecppack` from Project Oxide.
+    fn generate_oxide(
+        &self,
+        placement: &PlacementResult,
+        routing: &RoutingResult,
+        netlist: Option<&GateNetlist>,
+    ) -> Result<Bitstream> {
+        let mut fasm = String::new();
+        fasm.push_str(&format!(
+            "OXIDE_NEXUS\n.device {}\n\n",
+            self.device_name
+        ));
+
+        // Emit placement (tile configuration)
+        fasm.push_str(".comment Placement\n");
+        for (cell_id, loc) in &placement.placements {
+            let lut_init = if let Some(nl) = netlist {
+                // Look up LUT init value from netlist
+                if let Some(cell) = nl.cells.get(cell_id.0 as usize) {
+                    cell.lut_init.unwrap_or(0)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            match loc.bel_type {
+                crate::device::BelType::Lut4 => {
+                    fasm.push_str(&format!(
+                        "R{}C{}.SLICE{}.LUT{}.INIT[15:0] = 16'h{:04X}\n",
+                        loc.tile_y,
+                        loc.tile_x,
+                        loc.bel_index / 4,
+                        loc.bel_index % 4,
+                        lut_init
+                    ));
+                }
+                crate::device::BelType::Dff
+                | crate::device::BelType::DffE
+                | crate::device::BelType::DffSr
+                | crate::device::BelType::DffSrE => {
+                    fasm.push_str(&format!(
+                        "R{}C{}.SLICE{}.FF{}.REG = 1\n",
+                        loc.tile_y,
+                        loc.tile_x,
+                        loc.bel_index / 4,
+                        loc.bel_index % 4,
+                    ));
+                }
+                crate::device::BelType::IoCell => {
+                    fasm.push_str(&format!(
+                        "R{}C{}.PIO{}.BASE_TYPE = BIDIR\n",
+                        loc.tile_y, loc.tile_x, loc.bel_index,
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Emit routing (PIP configuration)
+        fasm.push_str("\n.comment Routing\n");
+        for (_net_id, route) in &routing.routes {
+            for &pip_id in &route.pips {
+                fasm.push_str(&format!("PIP.{} = 1\n", pip_id.0));
+            }
+        }
+
+        fasm.push_str("\n.comment End of bitstream\n");
+
+        let mut bitstream = Bitstream::new(
+            self.device_name.clone(),
+            BitstreamFormat::OxideBitstream,
+        );
+        bitstream.data = fasm.into_bytes();
         bitstream.metadata = self.calculate_metadata(placement, routing);
 
         Ok(bitstream)

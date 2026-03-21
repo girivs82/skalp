@@ -88,6 +88,12 @@ impl PnrConfig {
         self.tech_library = skalp_lir::tech_library::get_stdlib_library("ice40").ok();
         self
     }
+
+    /// Create config with nexus technology library loaded
+    pub fn with_nexus_library(mut self) -> Self {
+        self.tech_library = skalp_lir::tech_library::get_stdlib_library("nexus").ok();
+        self
+    }
 }
 
 /// P&R result
@@ -412,6 +418,78 @@ pub fn place_and_route_hx8k(netlist: &GateNetlist, config: PnrConfig) -> Result<
 /// Convenience function for UP5K
 pub fn place_and_route_up5k(netlist: &GateNetlist, config: PnrConfig) -> Result<PnrResult> {
     place_and_route(netlist, Ice40Variant::Up5k, config)
+}
+
+/// Place and route targeting Lattice Nexus (CertusPro-NX) devices.
+///
+/// Uses the same generic placer/router pipeline as iCE40 but with:
+/// - Nexus device model (LUT4, EBR 18Kb, DSP 18x18, hard PCIe/LPDDR4)
+/// - Nexus timing model (28nm, ~2x faster than iCE40 40nm)
+/// - Project Oxide compatible bitstream output (FASM format)
+pub fn place_and_route_nexus(
+    netlist: &GateNetlist,
+    variant: crate::device::nexus::NexusVariant,
+    config: PnrConfig,
+) -> Result<PnrResult> {
+    use crate::device::nexus::NexusDevice;
+
+    let device = NexusDevice::new(variant);
+
+    // Run packing
+    let mut packer = CellPacker::new(netlist);
+    let packing = packer.pack();
+
+    // Run placement
+    let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let placement = if packing.carry_chains.is_empty() {
+        placer.place(netlist)?
+    } else {
+        placer.place_with_carry_chains(netlist, &packing.carry_chains)?
+    };
+
+    // Run routing
+    let net_count = netlist.nets.len();
+    let router_config =
+        if config.router.max_iterations == RouterConfig::default().max_iterations {
+            RouterConfig::for_design_size(net_count)
+        } else {
+            config.router.clone()
+        };
+    let mut router = Router::new(router_config, device.clone());
+    let routing = router.route(netlist, &placement)?;
+
+    // Run timing analysis with Nexus delay model
+    let timing = if let Some(timing_config) = config.timing.clone() {
+        let delay_model = crate::timing::DelayModel::nexus();
+        let mut analyzer =
+            TimingAnalyzer::with_delay_model(timing_config, device.clone(), delay_model);
+        let report = analyzer.analyze_timing(netlist, &placement, &routing)?;
+        Some(report)
+    } else {
+        None
+    };
+
+    // Extract wire delays
+    let wire_delays: IndexMap<GateNetId, f64> = routing
+        .routes
+        .iter()
+        .map(|(&net_id, route)| (net_id, route.delay as f64))
+        .collect();
+
+    // Generate Oxide bitstream
+    let mut bs_config = config.bitstream.clone();
+    bs_config.format = crate::bitstream::BitstreamFormat::OxideBitstream;
+    let generator = BitstreamGenerator::for_nexus(device.variant.name(), bs_config);
+    let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
+
+    Ok(PnrResult {
+        placement,
+        routing,
+        bitstream,
+        timing,
+        variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
+        wire_delays,
+    })
 }
 
 #[cfg(test)]

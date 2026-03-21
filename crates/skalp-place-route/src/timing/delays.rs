@@ -190,6 +190,36 @@ impl DelayModel {
         }
     }
 
+    /// Delay model for Lattice Nexus (CertusPro-NX) — 28nm process
+    /// Derived from LFCPNX-100 datasheet (speed grade -8, worst case)
+    pub fn nexus() -> Self {
+        Self {
+            lut4_delay: 0.32,          // 320ps — 28nm vs iCE40 40nm
+            dff_clk_to_q: 0.45,       // 450ps
+            dff_setup: 0.10,           // 100ps
+            dff_hold: 0.02,            // 20ps
+            carry_delay: 0.05,         // 50ps per bit — fast ripple carry
+            io_input_delay: 0.8,       // 800ps (LVCMOS33)
+            io_output_delay: 1.5,      // 1.5ns (LVCMOS33)
+            local_wire_delay: 0.03,    // 30ps
+            span4_delay: 0.08,         // 80ps (H2/V2 span wires)
+            span12_delay: 0.20,        // 200ps (H12/V12 span wires)
+            global_clock_delay: 0.05,  // 50ps — low-skew global network
+            pip_delay: 0.06,           // 60ps per switch
+            ram_read_delay: 2.0,       // 2.0ns (EBR synchronous read)
+            ram_write_delay: 0.0,      // Synchronous write
+            pip_belpin_to_local: 0.015,  // 15ps
+            pip_local_to_local: 0.025,   // 25ps
+            pip_local_to_span4: 0.06,    // 60ps
+            pip_span4_to_span4: 0.04,    // 40ps
+            pip_span4_to_local: 0.04,    // 40ps
+            pip_span12_to_span12: 0.08,  // 80ps
+            pip_local_to_belpin: 0.010,  // 10ps
+            pip_global_to_local: 0.025,  // 25ps
+            fanout_delay_per_load: 0.010, // 10ps per load
+        }
+    }
+
     /// Get cell delay for a given cell type
     pub fn cell_delay(&self, cell_type: &str) -> f64 {
         if cell_type.contains("LUT") || cell_type.starts_with("SB_LUT") {

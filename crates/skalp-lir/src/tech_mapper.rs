@@ -1611,19 +1611,31 @@ fn merge_physical_nodes_into_netlist(
             LirOp::NclComplete { width } => {
                 // Completion detection: all bit positions must be non-NULL
                 // For each bit: OR(t, f) → bit_valid. Then AND all bit_valids.
+                //
+                // Input structure: alternating t and f signals [t0, f0, t1, f1, ...]
+                // Each signal may be multi-bit, so we iterate signal pairs and their bits.
                 let mut valid_nets: Vec<GateNetId> = Vec::new();
-                for i in 0..*width as usize {
-                    let in_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let in_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
-                    let valid = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.valid{}", path, i)));
-                    let mut vc = Cell::new_comb(
-                        CellId(0), or2_cell.name.clone(), library.name.clone(), or2_cell.fit,
-                        format!("{}.or_valid{}", path, i), vec![in_t, in_f], vec![valid],
-                    );
-                    or2_cell.apply_to_cell(&mut vc);
-                    netlist.add_cell(vc);
-                    valid_nets.push(valid);
+                let num_pairs = input_nets.len() / 2;
+                let mut bit_idx = 0usize;
+                for pair_idx in 0..num_pairs {
+                    let t_nets = &input_nets[pair_idx * 2];
+                    let f_nets = &input_nets[pair_idx * 2 + 1];
+                    let pair_width = t_nets.len();
+                    for j in 0..pair_width {
+                        let in_t = t_nets[j];
+                        let in_f = f_nets.get(j).copied().unwrap_or(GateNetId(0));
+                        let valid = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.valid{}", path, bit_idx)));
+                        let mut vc = Cell::new_comb(
+                            CellId(0), or2_cell.name.clone(), library.name.clone(), or2_cell.fit,
+                            format!("{}.or_valid{}", path, bit_idx), vec![in_t, in_f], vec![valid],
+                        );
+                        or2_cell.apply_to_cell(&mut vc);
+                        netlist.add_cell(vc);
+                        valid_nets.push(valid);
+                        bit_idx += 1;
+                    }
                 }
+                debug_assert_eq!(bit_idx, *width as usize, "NclComplete: bit count mismatch");
                 // AND-reduce: tree reduction
                 let out = output_nets.first().copied().unwrap_or(GateNetId(0));
                 let mut current = valid_nets;

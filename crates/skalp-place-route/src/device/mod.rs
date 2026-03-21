@@ -4,6 +4,7 @@
 //! including tiles, basic elements (BELs), wires, and programmable interconnect points (PIPs).
 
 pub mod ice40;
+pub mod nexus;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +16,8 @@ pub enum DeviceFamily {
     Ice40,
     /// Lattice ECP5 FPGAs
     Ecp5,
+    /// Lattice Nexus (CertusPro-NX, CrossLink-NX) FPGAs
+    Nexus,
     /// Generic VTR academic architecture
     Vtr,
     /// OpenFPGA custom architecture
