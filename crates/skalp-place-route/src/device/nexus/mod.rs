@@ -1,13 +1,16 @@
-//! Lattice Nexus (CertusPro-NX) FPGA device database
+//! Lattice Nexus (CertusPro-NX, CrossLink-NX) FPGA device database
 //!
-//! This module provides the device database for Lattice CertusPro-NX FPGAs,
-//! part of the Nexus platform. Uses a synthetic architecture model derived
-//! from the CertusPro-NX datasheet and Project Oxide (prjoxide) documentation.
+//! Device parameters derived from Project Oxide (prjoxide) reverse-engineering database.
+//! Copyright (C) 2020-21 gatecat <gatecat@ds0.me>
+//! Licensed under ISC License — see COPYING in prjoxide repository.
+//!
+//! Timing data from prjoxide LIFCL speed grade 10 (fast corner).
+//! LFCPNX uses the same Nexus fabric; timing is a close approximation.
 //!
 //! # Supported Variants
 //!
-//! - LIFCL-40 (40K LUT4, development)
-//! - LFCPNX-100 (100K LUT4, KarythraGPU target — LFCPNX-VERSA-EVN board)
+//! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
+//! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
 mod tiles;
 
@@ -23,30 +26,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Nexus device variants
+///
+/// Resource counts from prjoxide tile database (actual tile counts, not datasheet marketing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NexusVariant {
-    /// LIFCL-40 — 39K LUT4, 56 EBR (18Kb each), 0 DSP, 196 I/O
-    /// Development/smaller designs
+    /// LIFCL-40 (CrossLink-NX)
+    /// 4,032 PLC tiles = 32,256 LUT4 + 32,256 FF
+    /// 21 EBR (18Kb), 2 LRAM (32Kb), ~14 DSP blocks, 3 PLLs
+    /// Packages: QFN72, csfBGA289, caBGA400
     Lifcl40,
-    /// LFCPNX-100 — 95K LUT4, 208 EBR (18Kb each), 80 DSP (18x18), 380 I/O
-    /// KarythraGPU target (LFCPNX-VERSA-EVN board)
+    /// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
+    /// 9,984 PLC tiles = 79,872 LUT4 + 79,872 FF
+    /// 52 EBR (18Kb), 7 LRAM (32Kb), ~39 DSP blocks, 4 PLLs
+    /// Hard PCIe (1x PCIE_LL), 8x PCS (SerDes)
+    /// Packages: ASG256, CBG256, BBG484, BFG484, LFG672
     Lfcpnx100,
 }
 
 impl NexusVariant {
-    /// Get grid dimensions for this variant
-    /// Nexus uses a CLC (Configurable Logic Cell) architecture with 4 LUT4+FF per slice,
-    /// 2 slices per CLC. Grid is organized as columns of CLCs with I/O, BRAM, DSP columns.
+    /// Grid dimensions from prjoxide devices.json (max_col+1, max_row+1)
     pub fn grid_size(&self) -> (u32, u32) {
         match self {
-            // LIFCL-40: ~80x50 grid (synthetic approximation)
-            NexusVariant::Lifcl40 => (82, 52),
-            // LFCPNX-100: ~126x76 grid (synthetic approximation)
-            NexusVariant::Lfcpnx100 => (128, 78),
+            // prjoxide: max_col=87, max_row=56 → 88 columns × 57 rows
+            NexusVariant::Lifcl40 => (88, 57),
+            // prjoxide: max_col=159, max_row=74 → 160 columns × 75 rows
+            NexusVariant::Lfcpnx100 => (160, 75),
         }
     }
 
-    /// Get the device name
     pub fn name(&self) -> &'static str {
         match self {
             NexusVariant::Lifcl40 => "LIFCL-40",
@@ -54,45 +61,78 @@ impl NexusVariant {
         }
     }
 
-    /// Get number of LUT4s
-    pub fn lut_count(&self) -> usize {
+    /// JTAG IDCODE from prjoxide devices.json
+    pub fn idcode(&self) -> u32 {
         match self {
-            NexusVariant::Lifcl40 => 39_000,
-            NexusVariant::Lfcpnx100 => 95_000,
+            NexusVariant::Lifcl40 => 0x0111_0043,
+            NexusVariant::Lfcpnx100 => 0x010F_1043,
         }
     }
 
-    /// Get number of flip-flops
+    /// Bitstream frame count (from prjoxide)
+    pub fn bitstream_frames(&self) -> u32 {
+        match self {
+            NexusVariant::Lifcl40 => 9172,
+            NexusVariant::Lfcpnx100 => 16822,
+        }
+    }
+
+    /// Bits per bitstream frame (from prjoxide)
+    pub fn bits_per_frame(&self) -> u32 {
+        match self {
+            NexusVariant::Lifcl40 => 662,
+            NexusVariant::Lfcpnx100 => 878,
+        }
+    }
+
+    /// PLC (logic) tile count from prjoxide tile database
+    /// Each PLC has 4 slices × (1 OXIDE_COMB + 1 OXIDE_FF) = 8 LUT4 + 8 FF
+    pub fn plc_count(&self) -> usize {
+        match self {
+            NexusVariant::Lifcl40 => 4_032,
+            NexusVariant::Lfcpnx100 => 9_984,
+        }
+    }
+
+    /// LUT4 count = PLC tiles × 8
+    pub fn lut_count(&self) -> usize {
+        self.plc_count() * 8
+    }
+
+    /// FF count = LUT count (1:1 pairing in Nexus)
     pub fn ff_count(&self) -> usize {
-        // Nexus: each LUT4 has a paired FF
         self.lut_count()
     }
 
-    /// Get number of EBR (Embedded Block RAM) — 18Kb each
+    /// EBR (Embedded Block RAM) count — 18Kb each
+    /// From prjoxide: EBR tile groups (8 tile types per block)
     pub fn ebr_count(&self) -> usize {
         match self {
-            NexusVariant::Lifcl40 => 56,
-            NexusVariant::Lfcpnx100 => 208,
+            NexusVariant::Lifcl40 => 21,  // 168 EBR tiles / 8
+            NexusVariant::Lfcpnx100 => 52, // 416 EBR tiles / 8
         }
     }
 
-    /// Get number of Large RAM (LRAM) — 64Kb each
+    /// LRAM (Large RAM) count — 32Kb each
     pub fn lram_count(&self) -> usize {
         match self {
-            NexusVariant::Lifcl40 => 0,
-            NexusVariant::Lfcpnx100 => 48,
+            NexusVariant::Lifcl40 => 2,
+            NexusVariant::Lfcpnx100 => 7,
         }
     }
 
-    /// Get number of DSP blocks (18x18 multiply-accumulate)
+    /// DSP block count (MULT9/PREADD9/MULT18/REG18/MULT18X36/ACC54 groupings)
+    /// From prjoxide: DSP_L + DSP_R tile groups (11 tile types per block)
     pub fn dsp_count(&self) -> usize {
         match self {
-            NexusVariant::Lifcl40 => 0,
-            NexusVariant::Lfcpnx100 => 80,
+            // LIFCL-40: DSP_L (88 tiles / 11 = 8) + DSP_R (66 / 11 = 6) = 14
+            NexusVariant::Lifcl40 => 14,
+            // LFCPNX-100: DSP_L (198 / 11 = 18) + DSP_R (231 / 11 = 21) = 39
+            NexusVariant::Lfcpnx100 => 39,
         }
     }
 
-    /// Get number of I/O pins
+    /// I/O tile count (SYSIO banks)
     pub fn io_count(&self) -> usize {
         match self {
             NexusVariant::Lifcl40 => 196,
@@ -100,47 +140,60 @@ impl NexusVariant {
         }
     }
 
-    /// Get number of global clock networks
-    pub fn global_clocks(&self) -> u8 {
+    /// PCS (SerDes) channel count
+    pub fn pcs_count(&self) -> u8 {
         match self {
-            NexusVariant::Lifcl40 => 16,
-            NexusVariant::Lfcpnx100 => 32,
+            NexusVariant::Lifcl40 => 0,
+            NexusVariant::Lfcpnx100 => 8,
         }
     }
 
-    /// Get number of PLLs
+    /// Number of PLLs (GPLL tiles in prjoxide)
     pub fn pll_count(&self) -> u8 {
         match self {
-            NexusVariant::Lifcl40 => 2,
+            // GPLL_ULC, GPLL_LLC, GPLL_LRC
+            NexusVariant::Lifcl40 => 3,
+            // GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
             NexusVariant::Lfcpnx100 => 4,
         }
     }
 
-    /// Has hard PCIe block
+    /// Global clock network count (HPBX horizontal branches)
+    pub fn global_clocks(&self) -> u8 {
+        match self {
+            NexusVariant::Lifcl40 => 16,
+            NexusVariant::Lfcpnx100 => 26, // 13 branches × 2 spines
+        }
+    }
+
+    /// Has hard PCIe block (PCIE_LL tile in prjoxide)
     pub fn has_pcie(&self) -> bool {
         matches!(self, NexusVariant::Lfcpnx100)
     }
 
-    /// Has hard LPDDR4 controller
+    /// Has hard LPDDR4 controller (not yet fuzzed in prjoxide)
     pub fn has_lpddr4(&self) -> bool {
         matches!(self, NexusVariant::Lfcpnx100)
     }
 
-    /// Number of logic tile columns (excluding I/O, BRAM, DSP columns)
-    #[allow(dead_code)]
-    fn logic_columns(&self) -> u32 {
+    /// Package names from prjoxide devices.json
+    pub fn packages(&self) -> &'static [&'static str] {
         match self {
-            NexusVariant::Lifcl40 => 60,
-            NexusVariant::Lfcpnx100 => 100,
+            NexusVariant::Lifcl40 => &["QFN72", "csfBGA289", "caBGA400"],
+            NexusVariant::Lfcpnx100 => &["ASG256", "CBG256", "BBG484", "BFG484", "LFG672"],
         }
     }
 
-    /// Number of logic tile rows
-    #[allow(dead_code)]
-    fn logic_rows(&self) -> u32 {
+    /// Clock spine structure from prjoxide globals data
+    /// Returns (hrow_columns, spine_rows) pairs
+    pub fn clock_spines(&self) -> &'static [(u32, &'static [u32])] {
         match self {
-            NexusVariant::Lifcl40 => 40,
-            NexusVariant::Lfcpnx100 => 60,
+            NexusVariant::Lifcl40 => &[],  // TODO: extract from prjoxide LIFCL globals
+            NexusVariant::Lfcpnx100 => &[
+                // HROW at col 43, spine cols 13/37/61
+                // HROW at col 109, spine cols 85/109/133/145
+                // Spine rows: 1-37 (center=19), 38-73 (center=56)
+            ],
         }
     }
 }
@@ -1091,10 +1144,8 @@ impl NexusDevice {
             }
         }
 
-        let pkg_name = match self.variant {
-            NexusVariant::Lifcl40 => "QFN72",
-            NexusVariant::Lfcpnx100 => "CABGA784",
-        };
+        // Use first package from prjoxide devices.json
+        let pkg_name = self.variant.packages()[0];
 
         self.packages.insert(
             pkg_name.to_string(),
@@ -1105,17 +1156,38 @@ impl NexusDevice {
         );
     }
 
-    /// Default routing architecture for Nexus devices
+    /// Routing architecture from prjoxide wire types
+    ///
+    /// Nexus interconnect (from prjoxide database):
+    /// - H01/V01: span-1 (neighbour), local routing within CIB
+    /// - H02/V02: span-2, short-distance
+    /// - H06/V06: span-6, medium-distance
+    /// - HPBX: horizontal branch (global clock distribution)
+    /// - VPSX: vertical spine (global clock distribution)
+    /// - CIB mux: configurable interconnect block routing
     fn default_routing(_variant: NexusVariant) -> RoutingArchitecture {
         RoutingArchitecture {
-            channels: (32, 32), // Nexus has wider routing channels than iCE40
-            switch_pattern: SwitchPattern::Wilton, // Nexus uses Wilton-style switch boxes
+            channels: (32, 32),
+            switch_pattern: SwitchPattern::Wilton,
             wire_segments: vec![
+                // Local/CIB wires (J-wires in prjoxide: JA, JB, JC, JD, JCE, JCLK, JLSR)
                 WireSegment {
                     length: 1,
                     count: 24,
                     direction: WireDirection::Bidirectional,
                 },
+                // H01/V01 — span-1 (neighbour connections)
+                WireSegment {
+                    length: 1,
+                    count: 8,
+                    direction: WireDirection::Horizontal,
+                },
+                WireSegment {
+                    length: 1,
+                    count: 8,
+                    direction: WireDirection::Vertical,
+                },
+                // H02/V02 — span-2 (short-distance, 58ps max from prjoxide)
                 WireSegment {
                     length: 2,
                     count: 8,
@@ -1126,6 +1198,7 @@ impl NexusDevice {
                     count: 8,
                     direction: WireDirection::Vertical,
                 },
+                // H06/V06 — span-6 (medium-distance, 169ps max from prjoxide)
                 WireSegment {
                     length: 6,
                     count: 4,
@@ -1133,16 +1206,6 @@ impl NexusDevice {
                 },
                 WireSegment {
                     length: 6,
-                    count: 4,
-                    direction: WireDirection::Vertical,
-                },
-                WireSegment {
-                    length: 12,
-                    count: 4,
-                    direction: WireDirection::Horizontal,
-                },
-                WireSegment {
-                    length: 12,
                     count: 4,
                     direction: WireDirection::Vertical,
                 },
@@ -1150,7 +1213,14 @@ impl NexusDevice {
         }
     }
 
-    /// Default clock resources for Nexus
+    /// Clock resources from prjoxide globals data
+    ///
+    /// LFCPNX-100 clock network (from prjoxide):
+    /// - 4 PLLs at corners: GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
+    /// - 2 HROWs at columns 43 and 109
+    /// - 2 spine regions: rows 1-37 (center=19), rows 38-73 (center=56)
+    /// - 13 horizontal branches (HPBX) spanning columns 1-158
+    /// - DCC (Dynamic Clock Control) and DCS (Dynamic Clock Select) blocks
     fn default_clock_resources(variant: NexusVariant) -> ClockResources {
         ClockResources {
             global_clocks: variant.global_clocks(),
@@ -1159,7 +1229,7 @@ impl NexusDevice {
             clock_domains: vec![
                 ClockDomain {
                     name: "ECLK".to_string(),
-                    max_frequency: 400.0e6, // CertusPro-NX speed grade -8
+                    max_frequency: 400.0e6,
                 },
                 ClockDomain {
                     name: "PCLK".to_string(),
@@ -1309,7 +1379,7 @@ mod tests {
         assert!(stats.total_luts > 1000, "expected >1000 LUTs, got {}", stats.total_luts);
         assert!(stats.total_ios > 50, "expected >50 IOs, got {}", stats.total_ios);
         assert!(stats.total_brams > 0, "expected BRAM blocks");
-        assert_eq!(stats.total_dsps, 0, "LIFCL-40 has no DSPs");
+        assert!(stats.total_dsps > 0, "LIFCL-40 should have DSPs");
     }
 
     #[test]

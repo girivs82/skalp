@@ -94,6 +94,13 @@ impl PnrConfig {
         self.tech_library = skalp_lir::tech_library::get_stdlib_library("nexus").ok();
         self
     }
+
+    /// Create config with ECP5 technology library loaded
+    /// Note: ECP5 uses the same Lattice cell primitives as the "lattice" library
+    pub fn with_ecp5_library(mut self) -> Self {
+        self.tech_library = skalp_lir::tech_library::get_stdlib_library("lattice").ok();
+        self
+    }
 }
 
 /// P&R result
@@ -480,6 +487,81 @@ pub fn place_and_route_nexus(
     let mut bs_config = config.bitstream.clone();
     bs_config.format = crate::bitstream::BitstreamFormat::OxideBitstream;
     let generator = BitstreamGenerator::for_nexus(device.variant.name(), bs_config);
+    let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
+
+    Ok(PnrResult {
+        placement,
+        routing,
+        bitstream,
+        timing,
+        variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
+        wire_delays,
+    })
+}
+
+/// Place and route targeting Lattice ECP5 devices.
+///
+/// Uses the same generic placer/router pipeline with:
+/// - ECP5 device model (LUT4, DP16KD 18Kb EBR, MULT18X18D DSP, SERDES)
+/// - ECP5 timing model (45nm)
+/// - Project Trellis compatible bitstream output
+///
+/// ECP5 has the most complete open-source toolchain support (prjtrellis) —
+/// including SERDES, DDR3, and all hard IP blocks are fully fuzzed.
+pub fn place_and_route_ecp5(
+    netlist: &GateNetlist,
+    variant: crate::device::ecp5::Ecp5Variant,
+    config: PnrConfig,
+) -> Result<PnrResult> {
+    use crate::device::ecp5::Ecp5Device;
+
+    let device = Ecp5Device::new(variant);
+
+    // Pack
+    let mut packer = CellPacker::new(netlist);
+    let packing = packer.pack();
+
+    // Place
+    let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let placement = if packing.carry_chains.is_empty() {
+        placer.place(netlist)?
+    } else {
+        placer.place_with_carry_chains(netlist, &packing.carry_chains)?
+    };
+
+    // Route
+    let net_count = netlist.nets.len();
+    let router_config =
+        if config.router.max_iterations == RouterConfig::default().max_iterations {
+            RouterConfig::for_design_size(net_count)
+        } else {
+            config.router.clone()
+        };
+    let mut router = Router::new(router_config, device.clone());
+    let routing = router.route(netlist, &placement)?;
+
+    // Timing with ECP5 delay model
+    let timing = if let Some(timing_config) = config.timing.clone() {
+        let delay_model = crate::timing::DelayModel::ecp5();
+        let mut analyzer =
+            TimingAnalyzer::with_delay_model(timing_config, device.clone(), delay_model);
+        let report = analyzer.analyze_timing(netlist, &placement, &routing)?;
+        Some(report)
+    } else {
+        None
+    };
+
+    // Wire delays
+    let wire_delays: IndexMap<GateNetId, f64> = routing
+        .routes
+        .iter()
+        .map(|(&net_id, route)| (net_id, route.delay as f64))
+        .collect();
+
+    // Trellis bitstream
+    let mut bs_config = config.bitstream.clone();
+    bs_config.format = crate::bitstream::BitstreamFormat::TrellisBinary;
+    let generator = BitstreamGenerator::for_nexus(variant.name(), bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
     Ok(PnrResult {

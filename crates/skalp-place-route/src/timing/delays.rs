@@ -190,33 +190,79 @@ impl DelayModel {
         }
     }
 
-    /// Delay model for Lattice Nexus (CertusPro-NX) — 28nm process
-    /// Derived from LFCPNX-100 datasheet (speed grade -8, worst case)
+    /// Delay model for Lattice Nexus (CertusPro-NX / CrossLink-NX) — 28nm process
+    ///
+    /// Timing data from prjoxide LIFCL speed grade 10 (fast corner).
+    /// Copyright (C) 2020-21 gatecat <gatecat@ds0.me>, ISC License.
+    /// LFCPNX uses same Nexus fabric; timing is a close approximation.
+    ///
+    /// Key prjoxide measurements (speed grade 10, max column):
+    /// - OXIDE_COMB LUT4: A/B/C/D → F = 270ps max
+    /// - OXIDE_COMB CCU2: FCI → FCO = 66ps max (carry propagation)
+    /// - OXIDE_FF: CLK → Q = 441ps max
+    /// - OXIDE_FF setup DI@CLK: 0ps (hold: 192ps max)
+    /// - OXIDE_FF setup CE@CLK: 237ps max
+    /// - Interconnect: span0h → abcd = 105ps, span2w → abcd = 58ps
+    /// - CIB mux: cibmuxi → cibmuxo = 44ps
+    /// - Clock: hpbx → clk = ~0ps (dedicated)
     pub fn nexus() -> Self {
         Self {
-            lut4_delay: 0.32,          // 320ps — 28nm vs iCE40 40nm
-            dff_clk_to_q: 0.45,       // 450ps
-            dff_setup: 0.10,           // 100ps
+            // Cell delays from prjoxide timing database (grade 10, max)
+            lut4_delay: 0.270,         // OXIDE_COMB:LUT4 A→F max 270ps
+            dff_clk_to_q: 0.441,      // OXIDE_FF CLK→Q max 441ps
+            dff_setup: 0.0,           // OXIDE_FF DI@CLK setup 0ps (data can arrive at clock edge)
+            dff_hold: 0.192,          // OXIDE_FF DI@CLK hold max 192ps
+            carry_delay: 0.066,       // CCU2 FCI→FCO max 66ps per bit
+            io_input_delay: 0.8,      // estimated (no IO timing in prjoxide for LFCPNX yet)
+            io_output_delay: 1.5,     // estimated
+            // Interconnect delays from prjoxide timing database
+            local_wire_delay: 0.044,  // cibmuxi→cibmuxo max 44ps
+            span4_delay: 0.105,       // span0h→abcd max 105ps (local span)
+            span12_delay: 0.169,      // span6w chain max 169ps (e6:span6w→span6w)
+            global_clock_delay: 0.031,// hpbx→clk max 31ps (dedicated clock, near-zero)
+            pip_delay: 0.058,         // span2w→abcd max 58ps (short span mux)
+            ram_read_delay: 2.0,      // estimated (EBR timing not yet in prjoxide)
+            ram_write_delay: 0.0,
+            // PIP delays by type (from prjoxide interconnect timing)
+            pip_belpin_to_local: 0.134,  // f_lut→f max 134ps (LUT output to local)
+            pip_local_to_local: 0.044,   // cibmuxi→cibmuxo max 44ps
+            pip_local_to_span4: 0.162,   // f→span6w max 162ps (entering span wire)
+            pip_span4_to_span4: 0.059,   // span2w→span0h max 61ps
+            pip_span4_to_local: 0.058,   // span2w→abcd max 58ps
+            pip_span12_to_span12: 0.169, // e6:span6w→span6w max 169ps
+            pip_local_to_belpin: 0.105,  // span0h→abcd max 105ps (into BEL input)
+            pip_global_to_local: 0.031,  // hpbx→clk max 31ps
+            fanout_delay_per_load: 0.010, // estimated
+        }
+    }
+
+    /// Delay model for Lattice ECP5 — 45nm process
+    /// Derived from ECP5 datasheet (speed grade -8, worst case)
+    pub fn ecp5() -> Self {
+        Self {
+            lut4_delay: 0.42,          // 420ps — 45nm, between iCE40 40nm and Nexus 28nm
+            dff_clk_to_q: 0.55,       // 550ps
+            dff_setup: 0.12,           // 120ps
             dff_hold: 0.02,            // 20ps
-            carry_delay: 0.05,         // 50ps per bit — fast ripple carry
-            io_input_delay: 0.8,       // 800ps (LVCMOS33)
-            io_output_delay: 1.5,      // 1.5ns (LVCMOS33)
-            local_wire_delay: 0.03,    // 30ps
-            span4_delay: 0.08,         // 80ps (H2/V2 span wires)
-            span12_delay: 0.20,        // 200ps (H12/V12 span wires)
-            global_clock_delay: 0.05,  // 50ps — low-skew global network
-            pip_delay: 0.06,           // 60ps per switch
-            ram_read_delay: 2.0,       // 2.0ns (EBR synchronous read)
-            ram_write_delay: 0.0,      // Synchronous write
-            pip_belpin_to_local: 0.015,  // 15ps
-            pip_local_to_local: 0.025,   // 25ps
-            pip_local_to_span4: 0.06,    // 60ps
-            pip_span4_to_span4: 0.04,    // 40ps
-            pip_span4_to_local: 0.04,    // 40ps
-            pip_span12_to_span12: 0.08,  // 80ps
-            pip_local_to_belpin: 0.010,  // 10ps
-            pip_global_to_local: 0.025,  // 25ps
-            fanout_delay_per_load: 0.010, // 10ps per load
+            carry_delay: 0.07,         // 70ps per bit
+            io_input_delay: 1.0,       // 1.0ns (LVCMOS33)
+            io_output_delay: 1.8,      // 1.8ns (LVCMOS33)
+            local_wire_delay: 0.04,    // 40ps
+            span4_delay: 0.12,         // 120ps (H02/V02 span wires)
+            span12_delay: 0.25,        // 250ps (H06/V06 span wires)
+            global_clock_delay: 0.06,  // 60ps
+            pip_delay: 0.08,           // 80ps per switch
+            ram_read_delay: 2.5,       // 2.5ns (DP16KD synchronous read)
+            ram_write_delay: 0.0,
+            pip_belpin_to_local: 0.020,  // 20ps
+            pip_local_to_local: 0.035,   // 35ps
+            pip_local_to_span4: 0.08,    // 80ps
+            pip_span4_to_span4: 0.05,    // 50ps
+            pip_span4_to_local: 0.05,    // 50ps
+            pip_span12_to_span12: 0.10,  // 100ps
+            pip_local_to_belpin: 0.015,  // 15ps
+            pip_global_to_local: 0.035,  // 35ps
+            fanout_delay_per_load: 0.015, // 15ps per load
         }
     }
 

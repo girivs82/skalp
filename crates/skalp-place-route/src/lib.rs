@@ -65,6 +65,7 @@ pub mod utils;
 
 // Re-export main types for convenience
 pub use bitstream::{Bitstream, BitstreamConfig, BitstreamFormat, BitstreamGenerator};
+pub use device::ecp5::{Ecp5Device, Ecp5Tile, Ecp5Variant};
 pub use device::ice40::{Ice40ChipDb, Ice40Device, Ice40Variant};
 pub use device::nexus::{NexusDevice, NexusTile, NexusVariant};
 pub use device::{
@@ -78,9 +79,9 @@ pub use placer::{
     RegionConstraint,
 };
 pub use pnr::{
-    auto_configure_pll, place_and_route, place_and_route_hx1k, place_and_route_hx8k,
-    place_and_route_nexus, place_and_route_up5k, place_and_route_with_closure, PnrConfig,
-    PnrResult,
+    auto_configure_pll, place_and_route, place_and_route_ecp5, place_and_route_hx1k,
+    place_and_route_hx8k, place_and_route_nexus, place_and_route_up5k,
+    place_and_route_with_closure, PnrConfig, PnrResult,
 };
 pub use router::{BranchInfo, Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};

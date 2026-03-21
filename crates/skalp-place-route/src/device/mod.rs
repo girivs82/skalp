@@ -3,6 +3,7 @@
 //! This module provides abstractions for describing FPGA device architectures,
 //! including tiles, basic elements (BELs), wires, and programmable interconnect points (PIPs).
 
+pub mod ecp5;
 pub mod ice40;
 pub mod nexus;
 
