@@ -68,6 +68,7 @@ pub use bitstream::{Bitstream, BitstreamConfig, BitstreamFormat, BitstreamGenera
 pub use device::ecp5::{Ecp5Device, Ecp5Tile, Ecp5Variant};
 pub use device::ice40::{Ice40ChipDb, Ice40Device, Ice40Variant};
 pub use device::nexus::{NexusDevice, NexusTile, NexusVariant};
+pub use device::xc7::{Xc7Device, Xc7Tile, Xc7Variant};
 pub use device::{
     Bel, BelId, BelType, Device, DeviceFamily, DeviceStats, PackagePins, Pip, PipId, Tile,
     TileType, Wire, WireId, WireType,
@@ -81,7 +82,7 @@ pub use placer::{
 pub use pnr::{
     auto_configure_pll, place_and_route, place_and_route_ecp5, place_and_route_hx1k,
     place_and_route_hx8k, place_and_route_nexus, place_and_route_up5k,
-    place_and_route_with_closure, PnrConfig, PnrResult,
+    place_and_route_with_closure, place_and_route_xc7, PnrConfig, PnrResult,
 };
 pub use router::{BranchInfo, Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};

@@ -6,6 +6,7 @@ use crate::device::ecp5::data as ecp5_data;
 use crate::device::ice40::data as ice40_data;
 use crate::device::ice40::Ice40Variant;
 use crate::device::nexus::data as nexus_data;
+use crate::device::xc7::data as xc7_data;
 use serde::{Deserialize, Serialize};
 
 /// Delay model for timing analysis
@@ -182,6 +183,50 @@ impl DelayModel {
             pip_span4_to_local: t.pip_span2_to_bel,
             pip_span12_to_span12: t.pip_span6_cascade,
             pip_local_to_belpin: t.pip_to_bel,
+            pip_global_to_local: t.pip_clock_to_local,
+            fanout_delay_per_load: t.fanout_per_load,
+        }
+    }
+
+    /// Delay model for Xilinx 7-series — 28nm HPL
+    /// Timing from prjxray-db SDF files and DS181/DS182.
+    pub fn xc7() -> Self {
+        Self::from_xc7_timing(&xc7_data::TIMING_ARTIX_1)
+    }
+
+    /// Select delay model for a specific 7-series variant
+    pub fn for_xc7_variant(variant: crate::device::xc7::Xc7Variant) -> Self {
+        let timing = match variant.speed_family() {
+            xc7_data::Xc7SpeedFamily::Artix => &xc7_data::TIMING_ARTIX_1,
+            xc7_data::Xc7SpeedFamily::Kintex => &xc7_data::TIMING_KINTEX_1,
+            xc7_data::Xc7SpeedFamily::Spartan => &xc7_data::TIMING_SPARTAN_1,
+        };
+        Self::from_xc7_timing(timing)
+    }
+
+    fn from_xc7_timing(t: &xc7_data::Xc7TimingData) -> Self {
+        Self {
+            lut4_delay: t.lut6_delay,          // LUT6 used as generic LUT delay
+            dff_clk_to_q: t.dff_clk_to_q,
+            dff_setup: t.dff_setup,
+            dff_hold: t.dff_hold,
+            carry_delay: t.carry4_delay,
+            io_input_delay: t.io_input_delay,
+            io_output_delay: t.io_output_delay,
+            local_wire_delay: t.local_wire_delay,
+            span4_delay: t.double_delay,       // map double (span 2) to span4 field
+            span12_delay: t.long_delay,        // map long (span 12) to span12 field
+            global_clock_delay: t.global_clock_delay,
+            pip_delay: t.pip_local_to_local,   // flat fallback
+            ram_read_delay: t.bram_read_delay,
+            ram_write_delay: 0.0,
+            pip_belpin_to_local: t.pip_bel_to_local,
+            pip_local_to_local: t.pip_local_to_local,
+            pip_local_to_span4: t.pip_local_to_double,
+            pip_span4_to_span4: t.pip_double_to_double,
+            pip_span4_to_local: t.pip_span_to_local,
+            pip_span12_to_span12: t.pip_long_to_long,
+            pip_local_to_belpin: t.pip_bel_to_local,  // symmetric estimate
             pip_global_to_local: t.pip_clock_to_local,
             fanout_delay_per_load: t.fanout_per_load,
         }

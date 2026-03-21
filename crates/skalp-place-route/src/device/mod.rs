@@ -6,6 +6,7 @@
 pub mod ecp5;
 pub mod ice40;
 pub mod nexus;
+pub mod xc7;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +20,8 @@ pub enum DeviceFamily {
     Ecp5,
     /// Lattice Nexus (CertusPro-NX, CrossLink-NX) FPGAs
     Nexus,
+    /// Xilinx 7-series (Artix-7, Kintex-7, Spartan-7) FPGAs
+    Xc7,
     /// Generic VTR academic architecture
     Vtr,
     /// OpenFPGA custom architecture
