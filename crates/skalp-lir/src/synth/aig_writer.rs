@@ -941,9 +941,37 @@ impl AigWriterState<'_> {
                     self.netlist.add_cell(cell);
                     new_net
                 } else {
-                    // First use of this net as output — rename in place
-                    self.netlist.rename_net(source_net, name.clone());
-                    source_net
+                    // Check if this net is a __phys_* pseudo-input. If so,
+                    // don't rename it — create a BUF so the physical merge
+                    // step can still find the net by its __phys_* name.
+                    let is_phys = self.netlist.nets.get(source_net.0 as usize)
+                        .map(|n| n.name.starts_with("__phys_"))
+                        .unwrap_or(false);
+                    if is_phys {
+                        let new_net = self.netlist.add_net(
+                            GateNet::new(GateNetId(0), name.clone()),
+                        );
+                        let (buf_type, buf_fit) = self.find_buf_cell();
+                        let mut cell = Cell::new_comb(
+                            CellId(self.next_cell_id),
+                            buf_type.clone(),
+                            self.library.name.clone(),
+                            buf_fit,
+                            format!("aig.phys_buf_{}", name),
+                            vec![source_net],
+                            vec![new_net],
+                        );
+                        if let Some(func) = self.lookup_cell_function(&buf_type) {
+                            cell = cell.with_function(func);
+                        }
+                        self.next_cell_id += 1;
+                        self.netlist.add_cell(cell);
+                        new_net
+                    } else {
+                        // First use of this net as output — rename in place
+                        self.netlist.rename_net(source_net, name.clone());
+                        source_net
+                    }
                 };
 
                 // Mark this net as output

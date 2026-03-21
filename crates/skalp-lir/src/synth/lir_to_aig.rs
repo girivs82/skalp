@@ -78,8 +78,33 @@ impl<'a> LirToSynthAig<'a> {
         // that reads from NclDecode). Without this, get_input_bit() can't find
         // these signals and collapses them to false → all downstream logic becomes
         // constant tie cells.
+        //
+        // IMPORTANT: Only create pseudo-inputs for physical outputs that are
+        // actually consumed by non-physical AIG nodes. Unused pseudo-inputs
+        // (e.g., NclEncode outputs that are only module outputs) can confuse
+        // the AIG optimizer — it treats them as independent inputs and may use
+        // them as divisors in resubstitution, creating incorrect simplifications
+        // when the pseudo-input is actually dependent on computed outputs.
+        let phys_output_set: HashSet<u32> = self.physical_nodes.iter()
+            .map(|&idx| self.lir.nodes[idx].output.0)
+            .collect();
+        let mut consumed_phys_outputs: HashSet<u32> = HashSet::new();
+        for (idx, node) in self.lir.nodes.iter().enumerate() {
+            if !self.is_physical_op(&node.op) && !matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
+                for &input_id in &node.inputs {
+                    if phys_output_set.contains(&input_id.0) {
+                        consumed_phys_outputs.insert(input_id.0);
+                    }
+                }
+            }
+        }
+
         for &phys_idx in &self.physical_nodes {
             let node = &self.lir.nodes[phys_idx];
+            // Skip if this physical output is not consumed by any AIG node
+            if !consumed_phys_outputs.contains(&node.output.0) {
+                continue;
+            }
             let signal = &self.lir.signals[node.output.0 as usize];
             for bit in 0..signal.width {
                 let name = if signal.width == 1 {
@@ -231,7 +256,17 @@ impl<'a> LirToSynthAig<'a> {
         }
 
         // Phase 6: Add primary outputs
+        // Skip outputs that are physical node outputs without pseudo-inputs
+        // (they'll be connected by merge_physical_nodes_into_netlist)
         for &output_id in &self.lir.outputs {
+            // If this output is a physical node output that wasn't given a
+            // pseudo-input, skip it — the physical merge step will create
+            // the output net and drive it.
+            if phys_output_set.contains(&output_id.0)
+                && !consumed_phys_outputs.contains(&output_id.0)
+            {
+                continue;
+            }
             let signal = &self.lir.signals[output_id.0 as usize];
             for bit in 0..signal.width {
                 let name = if signal.width == 1 {

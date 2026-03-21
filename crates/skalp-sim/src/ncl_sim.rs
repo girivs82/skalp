@@ -915,6 +915,14 @@ impl NclSimulator {
             "NOR4" => PrimitiveType::Nor { inputs: 4 },
             "XOR2" | "XOR" => PrimitiveType::Xor,
             "XNOR2" | "XNOR" => PrimitiveType::Xnor,
+            "ANDNOT" | "AND_NOT" => PrimitiveType::AndNot,
+            "ORNOT" | "OR_NOT" => PrimitiveType::OrNot,
+            "AOI21" => PrimitiveType::Aoi21,
+            "AOI22" => PrimitiveType::Aoi22,
+            "OAI21" => PrimitiveType::Oai21,
+            "OAI22" => PrimitiveType::Oai22,
+            "TIE0" => PrimitiveType::Constant { value: false },
+            "TIE1" => PrimitiveType::Constant { value: true },
             "MUX2" => PrimitiveType::Mux2,
             "MUX4" => PrimitiveType::Mux4,
             "HA" | "HALFADDER" | "HALF_ADDER" => PrimitiveType::HalfAdder,
@@ -923,6 +931,7 @@ impl NclSimulator {
             "TIE_LOW" | "TIEL" | "GND" | "VSS" => PrimitiveType::Constant { value: false },
             _ => {
                 // Default to buffer for unknown types
+                eprintln!("WARNING: NCL sim treating unknown cell type '{}' (base '{}') as BUF", cell_type, base_type);
                 PrimitiveType::Buf
             }
         }

@@ -302,16 +302,16 @@ impl CellMatcher {
 
             // Complex gates - each permutation needs its own pin mapping
             CellFunction::Aoi21 => Some(vec![
-                (0x15, vec!["A", "B", "C"]),
-                (0x07, vec!["A", "B", "C"]), // !(a&b | c)
-                (0x23, vec!["A", "C", "B"]), // !(a&c | b)
-                (0x45, vec!["B", "C", "A"]), // !(b&c | a)
+                // AOI21(A,B,C) = ~((A&B) | C); A,B symmetric (AND pair), C is OR input
+                (0x07, vec!["A", "B", "C"]), // C=i2: ~((i0&i1) | i2)
+                (0x13, vec!["A", "C", "B"]), // C=i1: ~((i0&i2) | i1)
+                (0x15, vec!["C", "A", "B"]), // C=i0: ~((i1&i2) | i0)
             ]),
             CellFunction::Oai21 => Some(vec![
-                (0x57, vec!["A", "B", "C"]),
-                (0x1F, vec!["A", "B", "C"]), // !((a|b) & c)
-                (0x2F, vec!["A", "C", "B"]), // !((a|c) & b)
-                (0x4F, vec!["B", "C", "A"]), // !((b|c) & a)
+                // OAI21(A,B,C) = ~((A|B) & C); A,B symmetric (OR pair), C is AND input
+                (0x1F, vec!["A", "B", "C"]), // C=i2: ~((i0|i1) & i2)
+                (0x37, vec!["A", "C", "B"]), // C=i1: ~((i0|i2) & i1)
+                (0x57, vec!["C", "A", "B"]), // C=i0: ~((i1|i2) & i0)
             ]),
             CellFunction::Aoi22 => Some(vec![
                 (0x0777, vec!["A", "B", "C", "D"]),
@@ -329,9 +329,9 @@ impl CellMatcher {
             // The truth table depends on which input maps to index 0, 1, 2
             CellFunction::Mux2 => Some(vec![
                 (0xCA, vec!["A", "B", "S"]), // inputs: (A=i0, B=i1, S=i2)
-                (0xD2, vec!["A", "S", "B"]), // inputs: (A=i0, S=i1, B=i2)
+                (0xE2, vec!["A", "S", "B"]), // inputs: (A=i0, S=i1, B=i2)
                 (0xAC, vec!["B", "A", "S"]), // inputs: (B=i0, A=i1, S=i2)
-                (0xB4, vec!["B", "S", "A"]), // inputs: (B=i0, S=i1, A=i2)
+                (0xB8, vec!["B", "S", "A"]), // inputs: (B=i0, S=i1, A=i2)
                 (0xE4, vec!["S", "A", "B"]), // inputs: (S=i0, A=i1, B=i2)
                 (0xD8, vec!["S", "B", "A"]), // inputs: (S=i0, B=i1, A=i2)
             ]),

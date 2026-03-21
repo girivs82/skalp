@@ -33,6 +33,7 @@ pub mod gpu_gate_runtime;
 pub mod gpu_ncl_runtime;
 #[cfg(target_os = "macos")]
 pub mod gpu_runtime;
+pub mod ncl_behavioral_runtime;
 pub mod ncl_sim;
 pub mod sim_coverage;
 pub mod simulator;
@@ -73,6 +74,7 @@ pub use gpu_ncl_runtime::GpuNclRuntime;
 #[cfg(target_os = "macos")]
 pub use gpu_runtime::{GpuDevice, GpuRuntime};
 
+pub use ncl_behavioral_runtime::{NclBehavioralPhase, NclBehavioralRuntime, NclBehavioralStats};
 pub use ncl_sim::{
     evaluate_thmn_stateful, NclGateState, NclPhase, NclSimConfig, NclSimStats, NclSimulator,
     NclValue,

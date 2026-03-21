@@ -1458,12 +1458,16 @@ impl<'hir> HirToMir<'hir> {
 
                     // Convert event blocks to processes
                     // (entity_instance_outputs is now populated from above)
+                    trace!("[HIR→MIR] Converting {} event_blocks + {} gen_event_blocks for module '{}'",
+                        impl_block.event_blocks.len(), gen_event_blocks.len(), module.name);
                     for event_block in impl_block
                         .event_blocks
                         .iter()
                         .chain(gen_event_blocks.iter())
                     {
                         let process = self.convert_event_block(event_block);
+                        trace!("[HIR→MIR] Event block -> process kind={:?}, sensitivity={:?}",
+                            process.kind, process.sensitivity);
                         module.processes.push(process);
                     }
 
@@ -1979,6 +1983,11 @@ impl<'hir> HirToMir<'hir> {
     /// Analyze event block to determine process kind and sensitivity
     fn analyze_event_block(&self, block: &hir::HirEventBlock) -> (ProcessKind, SensitivityList) {
         if block.triggers.is_empty() {
+            // In async entities, on() with no triggers means NCL sequential:
+            // completion detection acts as implicit clock for internal registers
+            if self.is_current_entity_async() {
+                return (ProcessKind::Async, SensitivityList::Always);
+            }
             return (ProcessKind::Combinational, SensitivityList::Always);
         }
 
@@ -24249,6 +24258,15 @@ impl<'hir> HirToMir<'hir> {
         }
 
         current_level.into_iter().next()
+    }
+
+    /// Check if the current entity being processed is an async (NCL) entity
+    fn is_current_entity_async(&self) -> bool {
+        if let (Some(entity_id), Some(hir)) = (self.current_entity_id, &self.hir) {
+            hir.entities.iter().any(|e| e.id == entity_id && e.is_async)
+        } else {
+            false
+        }
     }
 
     ///

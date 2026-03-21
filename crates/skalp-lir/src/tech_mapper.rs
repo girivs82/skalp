@@ -190,6 +190,50 @@ pub fn synthesize(
         );
     }
 
+    // Step 3.5: Ensure all LIR output signals have output nets in the netlist.
+    // Physical outputs that were skipped by the AIG (no pseudo-input) need
+    // their __phys_* nets promoted to module outputs.
+    if lir.is_ncl {
+        for &output_id in &lir.outputs {
+            let signal = &lir.signals[output_id.0 as usize];
+            for bit in 0..signal.width {
+                let name = if signal.width == 1 {
+                    signal.name.clone()
+                } else {
+                    format!("{}[{}]", signal.name, bit)
+                };
+                // If this output net doesn't exist, check for __phys_ version
+                if result.netlist.get_net_id(&name).is_none() {
+                    let phys_name = if signal.width == 1 {
+                        format!("__phys_{}", signal.name)
+                    } else {
+                        format!("__phys_{}[{}]", signal.name, bit)
+                    };
+                    if let Some(phys_id) = result.netlist.get_net_id(&phys_name) {
+                        // Rename __phys_ net to the output name and mark as output
+                        result.netlist.rename_net(phys_id, name);
+                        if let Some(net) = result.netlist.get_net_mut(phys_id) {
+                            net.is_output = true;
+                        }
+                        if !result.netlist.outputs.contains(&phys_id) {
+                            result.netlist.outputs.push(phys_id);
+                        }
+                    } else {
+                        // Neither exists — create as output
+                        let net_id = result.netlist.add_net(
+                            crate::gate_netlist::GateNet::new(GateNetId(0), name),
+                        );
+                        if let Some(net) = result.netlist.get_net_mut(net_id) {
+                            net.is_output = true;
+                        }
+                        result.netlist.outputs.push(net_id);
+                    }
+                }
+            }
+        }
+        result.netlist.rebuild_cache();
+    }
+
     // Step 4: LUT post-mapping optimization for FPGA targets
     if library.is_fpga() {
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);
@@ -1121,7 +1165,8 @@ fn merge_physical_nodes_into_netlist(
                     if let Some(id) = netlist.get_net_id(&alt_name) {
                         id
                     } else {
-                        GateNetId(0)
+                        // Physical node output not yet in netlist — create it
+                        netlist.add_net(GateNet::new(GateNetId(0), name))
                     }
                 } else if is_lir_input {
                     // Module input not in AIG netlist (only consumed by physical nodes).

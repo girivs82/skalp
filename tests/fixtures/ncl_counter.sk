@@ -1,0 +1,20 @@
+// NCL Sequential Counter — tests on() in async entity
+// A simple 8-bit counter that increments on each NCL DATA phase.
+// Uses on() with empty trigger (NCL completion detection as implicit clock).
+
+async entity NclCounter {
+    in enable: bit
+    out count: bit[8]
+}
+
+impl NclCounter {
+    signal counter: bit[8] = 0
+
+    on() {
+        if enable {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}

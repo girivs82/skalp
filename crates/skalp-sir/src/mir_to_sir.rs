@@ -375,9 +375,9 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn is_port_sequential(&self, port_id: skalp_mir::PortId) -> bool {
-        // Check if this port is assigned in any sequential process
+        // Check if this port is assigned in any sequential or async process
         for process in &self.mir.processes {
-            if process.kind == ProcessKind::Sequential
+            if matches!(process.kind, ProcessKind::Sequential | ProcessKind::Async)
                 && self.is_port_assigned_in_block(&process.body, port_id)
             {
                 return true;
@@ -387,9 +387,9 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn is_signal_sequential(&self, signal_id: skalp_mir::SignalId) -> bool {
-        // Check if this signal is assigned in any sequential process
+        // Check if this signal is assigned in any sequential or async process
         for process in &self.mir.processes {
-            if process.kind == ProcessKind::Sequential
+            if matches!(process.kind, ProcessKind::Sequential | ProcessKind::Async)
                 && self.is_signal_assigned_in_block(&process.body, signal_id)
             {
                 return true;
@@ -635,6 +635,41 @@ impl<'a> MirToSirConverter<'a> {
                             );
                         }
                     }
+                }
+                ProcessKind::Async => {
+                    // NCL async process: on() with no triggers in async entity.
+                    // Create a synthetic implicit clock for the flip-flops.
+                    // At behavioral level, eval_sequential() acts as the clock edge.
+                    // At gate level, ncl_expand converts these to completion-clocked registers.
+                    let implicit_clk = "__ncl_implicit_clk".to_string();
+
+                    // Ensure the implicit clock signal exists
+                    if !self.sir.signals.iter().any(|s| s.name == implicit_clk) {
+                        self.sir.signals.push(SirSignal {
+                            name: implicit_clk.clone(),
+                            width: 1,
+                            sir_type: SirType::Bits(1),
+                            is_state: false,
+                            driver_node: None,
+                            fanout_nodes: Vec::new(),
+                            span: None,
+                        });
+                        // Add as input so C++ codegen includes it in the inputs struct
+                        self.sir.inputs.push(SirPort {
+                            name: implicit_clk.clone(),
+                            width: 1,
+                            sir_type: SirType::Bits(1),
+                            direction: PortDirection::Input,
+                            clock_domain: None,
+                            span: None,
+                        });
+                    }
+
+                    self.convert_sequential_block(
+                        &process.body.statements,
+                        &implicit_clk,
+                        ClockEdge::Rising,
+                    );
                 }
                 _ => {}
             }
@@ -10145,7 +10180,7 @@ impl<'a> MirToSirConverter<'a> {
         module: &Module,
     ) -> bool {
         for process in &module.processes {
-            if process.kind == ProcessKind::Sequential
+            if matches!(process.kind, ProcessKind::Sequential | ProcessKind::Async)
                 && self.is_signal_assigned_in_block(&process.body, signal_id)
             {
                 return true;

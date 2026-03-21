@@ -2676,7 +2676,33 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
             .or_insert_with(|| new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width));
     }
 
+    // Step 3.5: If there are NclReg nodes, create input completion detection
+    // The completion signal fires when all inputs have arrived (DATA phase)
+    // and acts as the clock for internal NCL registers.
+    let has_ncl_regs = lir.nodes.iter().any(|n| matches!(n.op, LirOp::NclReg { .. }));
+    let input_completion_id = if has_ncl_regs && !dual_rail_map.is_empty() {
+        let completion_id = new_lir.add_signal("__ncl_input_complete".to_string(), 1);
+        let mut completion_inputs: Vec<LirSignalId> = Vec::new();
+        let total_width: u32 = dual_rail_map.values()
+            .map(|pair| new_lir.signals[pair.t.0 as usize].width)
+            .sum();
+        for pair in dual_rail_map.values() {
+            completion_inputs.push(pair.t);
+            completion_inputs.push(pair.f);
+        }
+        new_lir.add_node(
+            LirOp::NclComplete { width: total_width },
+            completion_inputs,
+            completion_id,
+            "ncl_input_completion".to_string(),
+        );
+        Some(completion_id)
+    } else {
+        None
+    };
+
     // Step 4: Copy all internal nodes with remapped signals
+    // NclReg nodes are converted to standard Reg with completion clock
     for orig_node in &lir.nodes {
         let new_inputs: Vec<LirSignalId> = orig_node
             .inputs
@@ -2687,12 +2713,41 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
             .get(&orig_node.output)
             .unwrap_or(&orig_node.output);
 
-        new_lir.add_node(
-            orig_node.op.clone(),
-            new_inputs,
-            new_output,
-            orig_node.path.clone(),
-        );
+        if let LirOp::NclReg { width } = &orig_node.op {
+            // Convert NclReg to standard Reg clocked by input completion detection
+            let reg_op = LirOp::Reg {
+                width: *width,
+                has_enable: false,
+                has_reset: false,
+                async_reset: false,
+                reset_value: Some(0),
+            };
+            if let Some(clk) = input_completion_id {
+                new_lir.add_seq_node(
+                    reg_op,
+                    new_inputs,
+                    new_output,
+                    orig_node.path.clone(),
+                    clk,
+                    None,
+                );
+            } else {
+                // No inputs → no completion signal; just copy as-is (degenerate case)
+                new_lir.add_node(
+                    orig_node.op.clone(),
+                    new_inputs,
+                    new_output,
+                    orig_node.path.clone(),
+                );
+            }
+        } else {
+            new_lir.add_node(
+                orig_node.op.clone(),
+                new_inputs,
+                new_output,
+                orig_node.path.clone(),
+            );
+        }
     }
 
     // Step 5: Encode outputs to dual-rail and add completion detection

@@ -797,13 +797,15 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::OnKw);
         self.expect(SyntaxKind::LParen);
 
-        // Parse event triggers
+        // Parse event triggers (may be empty for NCL async entities: `on()`)
         self.start_node(SyntaxKind::EventTriggerList);
-        self.parse_event_trigger();
-
-        while self.at(SyntaxKind::Pipe) || self.at(SyntaxKind::Comma) {
-            self.bump();
+        if !self.at(SyntaxKind::RParen) {
             self.parse_event_trigger();
+
+            while self.at(SyntaxKind::Pipe) || self.at(SyntaxKind::Comma) {
+                self.bump();
+                self.parse_event_trigger();
+            }
         }
         self.finish_node();
 

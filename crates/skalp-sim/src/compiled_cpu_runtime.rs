@@ -373,7 +373,7 @@ impl CompiledCpuRuntime {
     }
 
     /// Run combinational evaluation
-    fn eval_combinational(&mut self) {
+    pub(crate) fn eval_combinational(&mut self) {
         unsafe {
             let kernel = &*self.kernel;
             (kernel.combinational_eval)(
@@ -385,7 +385,7 @@ impl CompiledCpuRuntime {
     }
 
     /// Run sequential update
-    fn eval_sequential(&mut self) {
+    pub(crate) fn eval_sequential(&mut self) {
         unsafe {
             let kernel = &*self.kernel;
             // Copy current registers to shadow
@@ -398,6 +398,61 @@ impl CompiledCpuRuntime {
                 self.registers.as_mut_ptr(),
             );
         }
+    }
+
+    /// Clear all registers to zero
+    pub(crate) fn reset_registers(&mut self) {
+        self.registers.clear();
+        self.shadow_registers.clear();
+    }
+
+    /// Set an input value (synchronous, non-async wrapper)
+    pub(crate) fn set_input_sync(
+        &mut self,
+        name: &str,
+        value: &[u8],
+    ) -> Result<(), crate::simulator::SimulationError> {
+        let sanitized = name.replace('.', "_");
+        if let Some(info) = self.input_fields.get(&sanitized) {
+            let mut padded = vec![0u8; info.size];
+            let copy_len = value.len().min(info.size);
+            padded[..copy_len].copy_from_slice(&value[..copy_len]);
+            self.inputs.write(info.offset, &padded);
+            Ok(())
+        } else {
+            Err(crate::simulator::SimulationError::InvalidInput(
+                name.to_string(),
+            ))
+        }
+    }
+
+    /// Get an output value (synchronous, non-async wrapper)
+    pub(crate) fn get_output_sync(
+        &self,
+        name: &str,
+    ) -> Result<Vec<u8>, crate::simulator::SimulationError> {
+        let sanitized = name.replace('.', "_");
+
+        // Check mapped outputs
+        if let Some(signal_name) = self.output_mappings.get(name) {
+            if let Some(info) = self.signal_fields.get(signal_name) {
+                return Ok(self.signals.read(info.offset, info.size).to_vec());
+            }
+        }
+
+        // Try direct signal lookup
+        if let Some(info) = self.signal_fields.get(&sanitized) {
+            return Ok(self.signals.read(info.offset, info.size).to_vec());
+        }
+
+        // Try register lookup
+        if let Some(info) = self.register_fields.get(&sanitized) {
+            return Ok(self.registers.read(info.offset, info.size).to_vec());
+        }
+
+        Err(crate::simulator::SimulationError::InvalidInput(
+            name.to_string(),
+        ))
     }
 
     /// Get user-facing signal and register names for waveform capture.

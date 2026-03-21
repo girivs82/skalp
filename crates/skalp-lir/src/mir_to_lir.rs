@@ -837,6 +837,8 @@ impl MirToLirTransform {
 
     /// Transform a process
     fn transform_process(&mut self, process: &Process) {
+        trace!("[MIR→LIR] transform_process: kind={:?}, sensitivity={:?}",
+            process.kind, process.sensitivity);
         match process.kind {
             ProcessKind::Sequential => {
                 // Extract clock from sensitivity list
@@ -858,10 +860,157 @@ impl MirToLirTransform {
                 self.transform_combinational_block(&process.body);
             }
             ProcessKind::Async => {
-                // NCL async process - transform as combinational for now
-                // Phase 4 (ncl_expand.rs) will convert to proper NCL gates
-                self.transform_combinational_block(&process.body);
+                // NCL async process
+                // Check if this has non-blocking assignments (from on() sequential blocks)
+                if Self::block_has_nonblocking(&process.body) {
+                    // NCL sequential: on() with non-blocking assignments
+                    // Create NclReg nodes — completion detection wiring added by ncl_expand
+                    self.transform_ncl_sequential_block(&process.body);
+                } else {
+                    // NCL combinational: transform as combinational for now
+                    // Phase 4 (ncl_expand.rs) will convert to proper NCL gates
+                    self.transform_combinational_block(&process.body);
+                }
             }
+        }
+    }
+
+    /// Check if a block contains any non-blocking assignments (sequential semantics)
+    fn block_has_nonblocking(block: &Block) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) {
+                        return true;
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    if Self::block_has_nonblocking(&if_stmt.then_block) {
+                        return true;
+                    }
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        if Self::block_has_nonblocking(else_block) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::Block(inner) => {
+                    if Self::block_has_nonblocking(inner) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Transform an NCL sequential block (from on() in async entity)
+    /// Creates NclReg nodes for non-blocking assignments.
+    /// Completion detection wiring is added later by ncl_expand.
+    fn transform_ncl_sequential_block(&mut self, block: &Block) {
+        for stmt in &block.statements {
+            self.transform_ncl_sequential_statement(stmt);
+        }
+    }
+
+    /// Transform a single NCL sequential statement
+    fn transform_ncl_sequential_statement(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Assignment(assign) => {
+                if matches!(assign.kind, AssignmentKind::NonBlocking) {
+                    let target_signal = self.get_lvalue_signal(&assign.lhs);
+                    let target_width = self.get_lvalue_width(&assign.lhs);
+                    let d_signal = self.transform_expression(&assign.rhs, target_width);
+
+                    let reg_op = LirOp::NclReg {
+                        width: target_width,
+                    };
+
+                    let target_name = self.get_signal_name(target_signal);
+                    let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
+                    self.lir
+                        .add_node(reg_op, vec![d_signal], target_signal, reg_path);
+                } else {
+                    // Blocking assignment — treat as combinational
+                    self.transform_combinational_statement(stmt);
+                }
+            }
+            Statement::If(if_stmt) => {
+                // For NCL sequential if/else, we need mux + NclReg
+                // Reuse the combinational if handler (creates muxes) then
+                // the assignment targets will get NclReg from their non-blocking assigns
+                // inside the branches
+                self.transform_ncl_sequential_if(if_stmt);
+            }
+            Statement::Block(inner) => {
+                self.transform_ncl_sequential_block(inner);
+            }
+            _ => {
+                self.transform_combinational_statement(stmt);
+            }
+        }
+    }
+
+    /// Transform an if statement in NCL sequential context
+    fn transform_ncl_sequential_if(&mut self, if_stmt: &IfStatement) {
+        // Collect assignments from branches
+        let then_assigns = Self::collect_all_assignments_recursive(&if_stmt.then_block);
+        let else_assigns = if let Some(ref else_block) = if_stmt.else_block {
+            Self::collect_all_assignments_recursive(else_block)
+        } else {
+            Vec::new()
+        };
+
+        // Get unique targets
+        let mut targets: Vec<LValue> = Vec::new();
+        for (lv, _) in then_assigns.iter().chain(else_assigns.iter()) {
+            if !targets.contains(lv) {
+                targets.push(lv.clone());
+            }
+        }
+
+        // For each target: create mux between then/else values, then NclReg
+        let cond_width = 1;
+        let cond_signal = self.transform_expression(&if_stmt.condition, cond_width);
+
+        for target_lv in &targets {
+            let target_signal = self.get_lvalue_signal(target_lv);
+            let target_width = self.get_lvalue_width(target_lv);
+
+            let then_val = then_assigns.iter()
+                .find(|(lv, _)| lv == target_lv)
+                .map(|(_, expr)| self.transform_expression(expr, target_width));
+            let else_val = else_assigns.iter()
+                .find(|(lv, _)| lv == target_lv)
+                .map(|(_, expr)| self.transform_expression(expr, target_width));
+
+            // If only one branch assigns, use feedback (current value) for the other
+            let then_sig = then_val.unwrap_or(target_signal);
+            let else_sig = else_val.unwrap_or(target_signal);
+
+            // Create mux: cond ? then : else
+            let mux_out = self.lir.add_signal(
+                format!("{}_ncl_mux", self.get_signal_name(target_signal)),
+                target_width,
+            );
+            let mux_path = self.unique_node_path("ncl_mux");
+            self.lir.add_node(
+                LirOp::Mux2 { width: target_width },
+                vec![cond_signal, else_sig, then_sig],
+                mux_out,
+                mux_path,
+            );
+
+            // Create NclReg
+            let reg_path = format!("{}.{}", self.hierarchy_path, self.get_signal_name(target_signal));
+            self.lir.add_node(
+                LirOp::NclReg { width: target_width },
+                vec![mux_out],
+                target_signal,
+                reg_path,
+            );
         }
     }
 

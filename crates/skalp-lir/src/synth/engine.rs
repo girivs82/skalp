@@ -368,7 +368,6 @@ impl SynthEngine {
 
         let initial_stats = aig.compute_stats();
 
-        // Run optimization passes
         self.run_optimization_passes(&mut aig);
         let final_stats = aig.compute_stats();
 
