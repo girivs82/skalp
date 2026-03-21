@@ -2,7 +2,10 @@
 //!
 //! Provides timing delay models for cells and routing.
 
+use crate::device::ecp5::data as ecp5_data;
+use crate::device::ice40::data as ice40_data;
 use crate::device::ice40::Ice40Variant;
+use crate::device::nexus::data as nexus_data;
 use serde::{Deserialize, Serialize};
 
 /// Delay model for timing analysis
@@ -65,204 +68,122 @@ impl Default for DelayModel {
 impl DelayModel {
     /// Default delay model for iCE40 FPGAs
     pub fn ice40_default() -> Self {
-        Self {
-            // iCE40 typical delays (from datasheet)
-            lut4_delay: 0.59,        // 590ps
-            dff_clk_to_q: 0.85,      // 850ps
-            dff_setup: 0.18,         // 180ps
-            dff_hold: 0.0,           // 0ps
-            carry_delay: 0.09,       // 90ps per bit
-            io_input_delay: 1.2,     // 1.2ns
-            io_output_delay: 2.5,    // 2.5ns
-            local_wire_delay: 0.05,  // 50ps
-            span4_delay: 0.2,        // 200ps
-            span12_delay: 0.4,       // 400ps
-            global_clock_delay: 0.1, // 100ps
-            pip_delay: 0.1,          // 100ps per switch (flat fallback)
-            ram_read_delay: 3.5,     // 3.5ns
-            ram_write_delay: 0.0,    // Write is synchronous
-            // Wire-type-aware PIP delays (from iCE40 datasheet Table 4.2)
-            pip_belpin_to_local: 0.03,   // 30ps — direct connection
-            pip_local_to_local: 0.05,    // 50ps — intra-tile switch
-            pip_local_to_span4: 0.15,    // 150ps — mux into span wire
-            pip_span4_to_span4: 0.10,    // 100ps — switch box traversal
-            pip_span4_to_local: 0.10,    // 100ps — entering tile from span
-            pip_span12_to_span12: 0.15,  // 150ps — long-distance switch
-            pip_local_to_belpin: 0.02,   // 20ps — entering BEL input
-            pip_global_to_local: 0.05,   // 50ps — clock distribution
-            fanout_delay_per_load: 0.02, // 20ps per additional fanout (capacitive)
-        }
+        Self::from_ice40_timing(&ice40_data::TIMING_DEFAULT)
     }
 
     /// Select delay model for a specific iCE40 variant
     pub fn for_variant(variant: Ice40Variant) -> Self {
-        match variant {
-            Ice40Variant::Hx1k | Ice40Variant::Hx4k | Ice40Variant::Hx8k => Self::ice40_hx(),
-            Ice40Variant::Lp1k | Ice40Variant::Lp4k | Ice40Variant::Lp8k => Self::ice40_lp(),
-            Ice40Variant::Up5k => Self::ice40_up(),
-        }
+        use ice40_data::Ice40SpeedFamily;
+        let timing = match variant.die_data().speed_family {
+            Ice40SpeedFamily::Hx => &ice40_data::TIMING_HX,
+            Ice40SpeedFamily::Lp => &ice40_data::TIMING_LP,
+            Ice40SpeedFamily::Up => &ice40_data::TIMING_UP,
+        };
+        Self::from_ice40_timing(timing)
     }
 
     /// Delay model for iCE40 HX series (higher performance)
     pub fn ice40_hx() -> Self {
-        Self {
-            lut4_delay: 0.54,
-            dff_clk_to_q: 0.76,
-            dff_setup: 0.15,
-            dff_hold: 0.0,
-            carry_delay: 0.08,
-            io_input_delay: 1.0,
-            io_output_delay: 2.2,
-            local_wire_delay: 0.04,
-            span4_delay: 0.18,
-            span12_delay: 0.35,
-            global_clock_delay: 0.08,
-            pip_delay: 0.09,
-            ram_read_delay: 3.2,
-            ram_write_delay: 0.0,
-            pip_belpin_to_local: 0.025,
-            pip_local_to_local: 0.04,
-            pip_local_to_span4: 0.13,
-            pip_span4_to_span4: 0.09,
-            pip_span4_to_local: 0.09,
-            pip_span12_to_span12: 0.13,
-            pip_local_to_belpin: 0.018,
-            pip_global_to_local: 0.04,
-            fanout_delay_per_load: 0.018,
-        }
+        Self::from_ice40_timing(&ice40_data::TIMING_HX)
     }
 
     /// Delay model for iCE40 LP series (lower power, ~15% slower than HX)
     pub fn ice40_lp() -> Self {
-        Self {
-            lut4_delay: 0.65,
-            dff_clk_to_q: 0.95,
-            dff_setup: 0.20,
-            dff_hold: 0.0,
-            carry_delay: 0.10,
-            io_input_delay: 1.4,
-            io_output_delay: 2.8,
-            local_wire_delay: 0.06,
-            span4_delay: 0.22,
-            span12_delay: 0.45,
-            global_clock_delay: 0.12,
-            pip_delay: 0.11,
-            ram_read_delay: 3.8,
-            ram_write_delay: 0.0,
-            pip_belpin_to_local: 0.035,
-            pip_local_to_local: 0.058,
-            pip_local_to_span4: 0.17,
-            pip_span4_to_span4: 0.115,
-            pip_span4_to_local: 0.115,
-            pip_span12_to_span12: 0.17,
-            pip_local_to_belpin: 0.023,
-            pip_global_to_local: 0.058,
-            fanout_delay_per_load: 0.023,
-        }
+        Self::from_ice40_timing(&ice40_data::TIMING_LP)
     }
 
     /// Delay model for iCE40 UP series (ultra-low power)
     pub fn ice40_up() -> Self {
+        Self::from_ice40_timing(&ice40_data::TIMING_UP)
+    }
+
+    fn from_ice40_timing(t: &ice40_data::Ice40TimingData) -> Self {
         Self {
-            lut4_delay: 0.70,
-            dff_clk_to_q: 1.0,
-            dff_setup: 0.22,
-            dff_hold: 0.0,
-            carry_delay: 0.11,
-            io_input_delay: 1.5,
-            io_output_delay: 3.0,
-            local_wire_delay: 0.07,
-            span4_delay: 0.25,
-            span12_delay: 0.50,
-            global_clock_delay: 0.15,
-            pip_delay: 0.12,
-            ram_read_delay: 4.0,
+            lut4_delay: t.lut4_delay,
+            dff_clk_to_q: t.dff_clk_to_q,
+            dff_setup: t.dff_setup,
+            dff_hold: t.dff_hold,
+            carry_delay: t.carry_delay,
+            io_input_delay: t.io_input_delay,
+            io_output_delay: t.io_output_delay,
+            local_wire_delay: t.local_wire_delay,
+            span4_delay: t.span4_delay,
+            span12_delay: t.span12_delay,
+            global_clock_delay: t.global_clock_delay,
+            pip_delay: t.pip_delay,
+            ram_read_delay: t.ram_read_delay,
             ram_write_delay: 0.0,
-            pip_belpin_to_local: 0.04,
-            pip_local_to_local: 0.065,
-            pip_local_to_span4: 0.19,
-            pip_span4_to_span4: 0.13,
-            pip_span4_to_local: 0.13,
-            pip_span12_to_span12: 0.19,
-            pip_local_to_belpin: 0.026,
-            pip_global_to_local: 0.065,
-            fanout_delay_per_load: 0.026,
+            pip_belpin_to_local: t.pip_belpin_to_local,
+            pip_local_to_local: t.pip_local_to_local,
+            pip_local_to_span4: t.pip_local_to_span4,
+            pip_span4_to_span4: t.pip_span4_to_span4,
+            pip_span4_to_local: t.pip_span4_to_local,
+            pip_span12_to_span12: t.pip_span12_to_span12,
+            pip_local_to_belpin: t.pip_local_to_belpin,
+            pip_global_to_local: t.pip_global_to_local,
+            fanout_delay_per_load: t.fanout_per_load,
         }
     }
 
-    /// Delay model for Lattice Nexus (CertusPro-NX / CrossLink-NX) — 28nm process
-    ///
-    /// Timing data from prjoxide LIFCL speed grade 10 (fast corner).
-    /// Copyright (C) 2020-21 gatecat <gatecat@ds0.me>, ISC License.
-    /// LFCPNX uses same Nexus fabric; timing is a close approximation.
-    ///
-    /// Key prjoxide measurements (speed grade 10, max column):
-    /// - OXIDE_COMB LUT4: A/B/C/D → F = 270ps max
-    /// - OXIDE_COMB CCU2: FCI → FCO = 66ps max (carry propagation)
-    /// - OXIDE_FF: CLK → Q = 441ps max
-    /// - OXIDE_FF setup DI@CLK: 0ps (hold: 192ps max)
-    /// - OXIDE_FF setup CE@CLK: 237ps max
-    /// - Interconnect: span0h → abcd = 105ps, span2w → abcd = 58ps
-    /// - CIB mux: cibmuxi → cibmuxo = 44ps
-    /// - Clock: hpbx → clk = ~0ps (dedicated)
+    /// Delay model for Lattice Nexus (CertusPro-NX / CrossLink-NX) — 28nm
+    /// Timing from prjoxide LIFCL speed grade 10 (fast corner).
     pub fn nexus() -> Self {
+        let t = &nexus_data::TIMING_GRADE10;
         Self {
-            // Cell delays from prjoxide timing database (grade 10, max)
-            lut4_delay: 0.270,         // OXIDE_COMB:LUT4 A→F max 270ps
-            dff_clk_to_q: 0.441,      // OXIDE_FF CLK→Q max 441ps
-            dff_setup: 0.0,           // OXIDE_FF DI@CLK setup 0ps (data can arrive at clock edge)
-            dff_hold: 0.192,          // OXIDE_FF DI@CLK hold max 192ps
-            carry_delay: 0.066,       // CCU2 FCI→FCO max 66ps per bit
-            io_input_delay: 0.8,      // estimated (no IO timing in prjoxide for LFCPNX yet)
-            io_output_delay: 1.5,     // estimated
-            // Interconnect delays from prjoxide timing database
-            local_wire_delay: 0.044,  // cibmuxi→cibmuxo max 44ps
-            span4_delay: 0.105,       // span0h→abcd max 105ps (local span)
-            span12_delay: 0.169,      // span6w chain max 169ps (e6:span6w→span6w)
-            global_clock_delay: 0.031,// hpbx→clk max 31ps (dedicated clock, near-zero)
-            pip_delay: 0.058,         // span2w→abcd max 58ps (short span mux)
-            ram_read_delay: 2.0,      // estimated (EBR timing not yet in prjoxide)
+            lut4_delay: t.lut4_delay,
+            dff_clk_to_q: t.dff_clk_to_q,
+            dff_setup: t.dff_setup,
+            dff_hold: t.dff_hold,
+            carry_delay: t.carry_delay,
+            io_input_delay: t.io_input_delay,
+            io_output_delay: t.io_output_delay,
+            local_wire_delay: t.cib_mux_delay,
+            span4_delay: t.span0_delay,
+            span12_delay: t.span6_delay,
+            global_clock_delay: t.global_clock_delay,
+            pip_delay: t.span2_delay,
+            ram_read_delay: t.ram_read_delay,
             ram_write_delay: 0.0,
-            // PIP delays by type (from prjoxide interconnect timing)
-            pip_belpin_to_local: 0.134,  // f_lut→f max 134ps (LUT output to local)
-            pip_local_to_local: 0.044,   // cibmuxi→cibmuxo max 44ps
-            pip_local_to_span4: 0.162,   // f→span6w max 162ps (entering span wire)
-            pip_span4_to_span4: 0.059,   // span2w→span0h max 61ps
-            pip_span4_to_local: 0.058,   // span2w→abcd max 58ps
-            pip_span12_to_span12: 0.169, // e6:span6w→span6w max 169ps
-            pip_local_to_belpin: 0.105,  // span0h→abcd max 105ps (into BEL input)
-            pip_global_to_local: 0.031,  // hpbx→clk max 31ps
-            fanout_delay_per_load: 0.010, // estimated
+            pip_belpin_to_local: t.pip_lut_to_local,
+            pip_local_to_local: t.pip_local_to_local,
+            pip_local_to_span4: t.pip_local_to_span,
+            pip_span4_to_span4: t.pip_span2_to_span2,
+            pip_span4_to_local: t.pip_span2_to_local,
+            pip_span12_to_span12: t.pip_span6_to_span6,
+            pip_local_to_belpin: t.pip_local_to_bel,
+            pip_global_to_local: t.pip_clock_to_local,
+            fanout_delay_per_load: t.fanout_per_load,
         }
     }
 
-    /// Delay model for Lattice ECP5 — 45nm process
-    /// Derived from ECP5 datasheet (speed grade -8, worst case)
+    /// Delay model for Lattice ECP5 — 45nm
+    /// Timing from prjtrellis-db, speed grade -8 (fastest).
     pub fn ecp5() -> Self {
+        let t = &ecp5_data::TIMING_SPEED8;
         Self {
-            lut4_delay: 0.42,          // 420ps — 45nm, between iCE40 40nm and Nexus 28nm
-            dff_clk_to_q: 0.55,       // 550ps
-            dff_setup: 0.12,           // 120ps
-            dff_hold: 0.02,            // 20ps
-            carry_delay: 0.07,         // 70ps per bit
-            io_input_delay: 1.0,       // 1.0ns (LVCMOS33)
-            io_output_delay: 1.8,      // 1.8ns (LVCMOS33)
-            local_wire_delay: 0.04,    // 40ps
-            span4_delay: 0.12,         // 120ps (H02/V02 span wires)
-            span12_delay: 0.25,        // 250ps (H06/V06 span wires)
-            global_clock_delay: 0.06,  // 60ps
-            pip_delay: 0.08,           // 80ps per switch
-            ram_read_delay: 2.5,       // 2.5ns (DP16KD synchronous read)
+            lut4_delay: t.lut4_delay,
+            dff_clk_to_q: t.dff_clk_to_q,
+            dff_setup: t.dff_setup,
+            dff_hold: t.dff_hold,
+            carry_delay: t.carry_delay,
+            io_input_delay: t.io_input_delay,
+            io_output_delay: t.io_output_delay,
+            local_wire_delay: t.local_wire_delay,
+            span4_delay: t.span2_delay,
+            span12_delay: t.span6_delay,
+            global_clock_delay: t.global_clock_delay,
+            pip_delay: t.cib_mux_delay,
+            ram_read_delay: t.ram_read_delay,
             ram_write_delay: 0.0,
-            pip_belpin_to_local: 0.020,  // 20ps
-            pip_local_to_local: 0.035,   // 35ps
-            pip_local_to_span4: 0.08,    // 80ps
-            pip_span4_to_span4: 0.05,    // 50ps
-            pip_span4_to_local: 0.05,    // 50ps
-            pip_span12_to_span12: 0.10,  // 100ps
-            pip_local_to_belpin: 0.015,  // 15ps
-            pip_global_to_local: 0.035,  // 35ps
-            fanout_delay_per_load: 0.015, // 15ps per load
+            pip_belpin_to_local: t.pip_f_to_local,
+            pip_local_to_local: t.pip_local_to_local,
+            pip_local_to_span4: t.pip_local_to_span2,
+            pip_span4_to_span4: t.pip_span2_cascade,
+            pip_span4_to_local: t.pip_span2_to_bel,
+            pip_span12_to_span12: t.pip_span6_cascade,
+            pip_local_to_belpin: t.pip_to_bel,
+            pip_global_to_local: t.pip_clock_to_local,
+            fanout_delay_per_load: t.fanout_per_load,
         }
     }
 

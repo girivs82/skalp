@@ -12,6 +12,7 @@
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
+pub mod data;
 mod tiles;
 
 pub use tiles::NexusTile;
@@ -44,158 +45,32 @@ pub enum NexusVariant {
 }
 
 impl NexusVariant {
-    /// Grid dimensions from prjoxide devices.json (max_col+1, max_row+1)
-    pub fn grid_size(&self) -> (u32, u32) {
+    /// Get the data record for this variant
+    pub fn die_data(&self) -> &'static data::NexusDieData {
         match self {
-            // prjoxide: max_col=87, max_row=56 → 88 columns × 57 rows
-            NexusVariant::Lifcl40 => (88, 57),
-            // prjoxide: max_col=159, max_row=74 → 160 columns × 75 rows
-            NexusVariant::Lfcpnx100 => (160, 75),
+            NexusVariant::Lifcl40 => &data::LIFCL_40,
+            NexusVariant::Lfcpnx100 => &data::LFCPNX_100,
         }
     }
 
-    pub fn name(&self) -> &'static str {
-        match self {
-            NexusVariant::Lifcl40 => "LIFCL-40",
-            NexusVariant::Lfcpnx100 => "LFCPNX-100",
-        }
-    }
-
-    /// JTAG IDCODE from prjoxide devices.json
-    pub fn idcode(&self) -> u32 {
-        match self {
-            NexusVariant::Lifcl40 => 0x0111_0043,
-            NexusVariant::Lfcpnx100 => 0x010F_1043,
-        }
-    }
-
-    /// Bitstream frame count (from prjoxide)
-    pub fn bitstream_frames(&self) -> u32 {
-        match self {
-            NexusVariant::Lifcl40 => 9172,
-            NexusVariant::Lfcpnx100 => 16822,
-        }
-    }
-
-    /// Bits per bitstream frame (from prjoxide)
-    pub fn bits_per_frame(&self) -> u32 {
-        match self {
-            NexusVariant::Lifcl40 => 662,
-            NexusVariant::Lfcpnx100 => 878,
-        }
-    }
-
-    /// PLC (logic) tile count from prjoxide tile database
-    /// Each PLC has 4 slices × (1 OXIDE_COMB + 1 OXIDE_FF) = 8 LUT4 + 8 FF
-    pub fn plc_count(&self) -> usize {
-        match self {
-            NexusVariant::Lifcl40 => 4_032,
-            NexusVariant::Lfcpnx100 => 9_984,
-        }
-    }
-
-    /// LUT4 count = PLC tiles × 8
-    pub fn lut_count(&self) -> usize {
-        self.plc_count() * 8
-    }
-
-    /// FF count = LUT count (1:1 pairing in Nexus)
-    pub fn ff_count(&self) -> usize {
-        self.lut_count()
-    }
-
-    /// EBR (Embedded Block RAM) count — 18Kb each
-    /// From prjoxide: EBR tile groups (8 tile types per block)
-    pub fn ebr_count(&self) -> usize {
-        match self {
-            NexusVariant::Lifcl40 => 21,  // 168 EBR tiles / 8
-            NexusVariant::Lfcpnx100 => 52, // 416 EBR tiles / 8
-        }
-    }
-
-    /// LRAM (Large RAM) count — 32Kb each
-    pub fn lram_count(&self) -> usize {
-        match self {
-            NexusVariant::Lifcl40 => 2,
-            NexusVariant::Lfcpnx100 => 7,
-        }
-    }
-
-    /// DSP block count (MULT9/PREADD9/MULT18/REG18/MULT18X36/ACC54 groupings)
-    /// From prjoxide: DSP_L + DSP_R tile groups (11 tile types per block)
-    pub fn dsp_count(&self) -> usize {
-        match self {
-            // LIFCL-40: DSP_L (88 tiles / 11 = 8) + DSP_R (66 / 11 = 6) = 14
-            NexusVariant::Lifcl40 => 14,
-            // LFCPNX-100: DSP_L (198 / 11 = 18) + DSP_R (231 / 11 = 21) = 39
-            NexusVariant::Lfcpnx100 => 39,
-        }
-    }
-
-    /// I/O tile count (SYSIO banks)
-    pub fn io_count(&self) -> usize {
-        match self {
-            NexusVariant::Lifcl40 => 196,
-            NexusVariant::Lfcpnx100 => 380,
-        }
-    }
-
-    /// PCS (SerDes) channel count
-    pub fn pcs_count(&self) -> u8 {
-        match self {
-            NexusVariant::Lifcl40 => 0,
-            NexusVariant::Lfcpnx100 => 8,
-        }
-    }
-
-    /// Number of PLLs (GPLL tiles in prjoxide)
-    pub fn pll_count(&self) -> u8 {
-        match self {
-            // GPLL_ULC, GPLL_LLC, GPLL_LRC
-            NexusVariant::Lifcl40 => 3,
-            // GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
-            NexusVariant::Lfcpnx100 => 4,
-        }
-    }
-
-    /// Global clock network count (HPBX horizontal branches)
-    pub fn global_clocks(&self) -> u8 {
-        match self {
-            NexusVariant::Lifcl40 => 16,
-            NexusVariant::Lfcpnx100 => 26, // 13 branches × 2 spines
-        }
-    }
-
-    /// Has hard PCIe block (PCIE_LL tile in prjoxide)
-    pub fn has_pcie(&self) -> bool {
-        matches!(self, NexusVariant::Lfcpnx100)
-    }
-
-    /// Has hard LPDDR4 controller (not yet fuzzed in prjoxide)
-    pub fn has_lpddr4(&self) -> bool {
-        matches!(self, NexusVariant::Lfcpnx100)
-    }
-
-    /// Package names from prjoxide devices.json
-    pub fn packages(&self) -> &'static [&'static str] {
-        match self {
-            NexusVariant::Lifcl40 => &["QFN72", "csfBGA289", "caBGA400"],
-            NexusVariant::Lfcpnx100 => &["ASG256", "CBG256", "BBG484", "BFG484", "LFG672"],
-        }
-    }
-
-    /// Clock spine structure from prjoxide globals data
-    /// Returns (hrow_columns, spine_rows) pairs
-    pub fn clock_spines(&self) -> &'static [(u32, &'static [u32])] {
-        match self {
-            NexusVariant::Lifcl40 => &[],  // TODO: extract from prjoxide LIFCL globals
-            NexusVariant::Lfcpnx100 => &[
-                // HROW at col 43, spine cols 13/37/61
-                // HROW at col 109, spine cols 85/109/133/145
-                // Spine rows: 1-37 (center=19), 38-73 (center=56)
-            ],
-        }
-    }
+    pub fn grid_size(&self) -> (u32, u32) { self.die_data().grid }
+    pub fn name(&self) -> &'static str { self.die_data().name }
+    pub fn idcode(&self) -> u32 { self.die_data().idcode }
+    pub fn bitstream_frames(&self) -> u32 { self.die_data().bitstream_frames }
+    pub fn bits_per_frame(&self) -> u32 { self.die_data().bits_per_frame }
+    pub fn plc_count(&self) -> usize { self.die_data().plc_tiles }
+    pub fn lut_count(&self) -> usize { self.die_data().plc_tiles * 8 }
+    pub fn ff_count(&self) -> usize { self.lut_count() }
+    pub fn ebr_count(&self) -> usize { self.die_data().ebr_blocks }
+    pub fn lram_count(&self) -> usize { self.die_data().lram_blocks }
+    pub fn dsp_count(&self) -> usize { self.die_data().dsp_blocks }
+    pub fn io_count(&self) -> usize { self.die_data().io_tiles }
+    pub fn pcs_count(&self) -> u8 { self.die_data().pcs_channels }
+    pub fn pll_count(&self) -> u8 { self.die_data().plls }
+    pub fn global_clocks(&self) -> u8 { self.die_data().global_clocks }
+    pub fn has_pcie(&self) -> bool { self.die_data().has_pcie }
+    pub fn has_lpddr4(&self) -> bool { self.die_data().has_lpddr4 }
+    pub fn packages(&self) -> &'static [&'static str] { self.die_data().packages }
 }
 
 impl std::fmt::Display for NexusVariant {
@@ -293,9 +168,13 @@ impl NexusDevice {
         // - BRAM columns at every ~10th column
         // - DSP columns at every ~20th column (LFCPNX-100 only)
 
-        let bram_cols: Vec<u32> = (10..width - 1).step_by(10).collect();
+        let bram_cols: Vec<u32> = (data::BRAM_COLUMN_SPACING..width - 1)
+            .step_by(data::BRAM_COLUMN_SPACING as usize)
+            .collect();
         let dsp_cols: Vec<u32> = if self.variant.dsp_count() > 0 {
-            (20..width - 1).step_by(20).collect()
+            (data::DSP_COLUMN_SPACING..width - 1)
+                .step_by(data::DSP_COLUMN_SPACING as usize)
+                .collect()
         } else {
             Vec::new()
         };
@@ -339,18 +218,11 @@ impl NexusDevice {
                     self.io_tiles.push(IoTile {
                         x,
                         y,
-                        io_count: 2,
+                        io_count: data::IO_CELLS_PER_TILE,
                         side: io_side,
-                        io_standards: vec![
-                            "LVCMOS33".to_string(),
-                            "LVCMOS25".to_string(),
-                            "LVCMOS18".to_string(),
-                            "LVCMOS12".to_string(),
-                            "SSTL15".to_string(),
-                            "HSUL12".to_string(),
-                        ],
-                        drive_strengths: vec![2, 4, 8, 12, 16],
-                        diff_pairs: true,
+                        io_standards: data::IO_STANDARDS.iter().map(|s| s.to_string()).collect(),
+                        drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
+                        diff_pairs: data::IO_DIFF_PAIRS,
                     });
                     self.tiles[y as usize][x as usize] =
                         Some(NexusTile::new(side, x, y, io_bels));
@@ -360,8 +232,8 @@ impl NexusDevice {
                     self.memory_blocks.push(MemoryBlock {
                         x,
                         y,
-                        size_bits: 18 * 1024,
-                        widths: vec![1, 2, 4, 9, 18, 36],
+                        size_bits: data::EBR_SIZE_BITS,
+                        widths: data::EBR_WIDTHS.to_vec(),
                     });
                     // Use RamTop as the tile type (Nexus EBR occupies a single tile)
                     self.tiles[y as usize][x as usize] =
@@ -369,7 +241,7 @@ impl NexusDevice {
                 } else if is_dsp_col {
                     // DSP block (18x18 MAC)
                     let dsp_bels = Self::make_dsp_bels(&mut bel_id_counter, x, y);
-                    self.dsp_tiles.push(DspTile { x, y, mac_count: 2 });
+                    self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MACS_PER_TILE });
                     self.tiles[y as usize][x as usize] =
                         Some(NexusTile::new(TileType::Dsp, x, y, dsp_bels));
                 } else {
@@ -378,8 +250,8 @@ impl NexusDevice {
                     self.logic_tiles.push(LogicTile {
                         x,
                         y,
-                        lut_count: 8,
-                        ff_count: 8,
+                        lut_count: data::LOGIC_LUTS_PER_TILE,
+                        ff_count: data::LOGIC_FFS_PER_TILE,
                         has_carry: true,
                     });
                     self.tiles[y as usize][x as usize] =
@@ -1167,73 +1039,61 @@ impl NexusDevice {
     /// - CIB mux: configurable interconnect block routing
     fn default_routing(_variant: NexusVariant) -> RoutingArchitecture {
         RoutingArchitecture {
-            channels: (32, 32),
+            channels: data::ROUTING_CHANNELS,
             switch_pattern: SwitchPattern::Wilton,
             wire_segments: vec![
-                // Local/CIB wires (J-wires in prjoxide: JA, JB, JC, JD, JCE, JCLK, JLSR)
                 WireSegment {
                     length: 1,
-                    count: 24,
+                    count: data::WIRE_LOCAL_COUNT,
                     direction: WireDirection::Bidirectional,
                 },
-                // H01/V01 — span-1 (neighbour connections)
                 WireSegment {
                     length: 1,
-                    count: 8,
+                    count: data::WIRE_SPAN1_COUNT,
                     direction: WireDirection::Horizontal,
                 },
                 WireSegment {
                     length: 1,
-                    count: 8,
+                    count: data::WIRE_SPAN1_COUNT,
                     direction: WireDirection::Vertical,
                 },
-                // H02/V02 — span-2 (short-distance, 58ps max from prjoxide)
                 WireSegment {
                     length: 2,
-                    count: 8,
+                    count: data::WIRE_SPAN2_COUNT,
                     direction: WireDirection::Horizontal,
                 },
                 WireSegment {
                     length: 2,
-                    count: 8,
+                    count: data::WIRE_SPAN2_COUNT,
                     direction: WireDirection::Vertical,
                 },
-                // H06/V06 — span-6 (medium-distance, 169ps max from prjoxide)
                 WireSegment {
                     length: 6,
-                    count: 4,
+                    count: data::WIRE_SPAN6_COUNT,
                     direction: WireDirection::Horizontal,
                 },
                 WireSegment {
                     length: 6,
-                    count: 4,
+                    count: data::WIRE_SPAN6_COUNT,
                     direction: WireDirection::Vertical,
                 },
             ],
         }
     }
 
-    /// Clock resources from prjoxide globals data
-    ///
-    /// LFCPNX-100 clock network (from prjoxide):
-    /// - 4 PLLs at corners: GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
-    /// - 2 HROWs at columns 43 and 109
-    /// - 2 spine regions: rows 1-37 (center=19), rows 38-73 (center=56)
-    /// - 13 horizontal branches (HPBX) spanning columns 1-158
-    /// - DCC (Dynamic Clock Control) and DCS (Dynamic Clock Select) blocks
     fn default_clock_resources(variant: NexusVariant) -> ClockResources {
         ClockResources {
             global_clocks: variant.global_clocks(),
             plls: variant.pll_count(),
-            dlls: 2,
+            dlls: data::DLLS,
             clock_domains: vec![
                 ClockDomain {
                     name: "ECLK".to_string(),
-                    max_frequency: 400.0e6,
+                    max_frequency: data::MAX_ECLK_FREQ,
                 },
                 ClockDomain {
                     name: "PCLK".to_string(),
-                    max_frequency: 200.0e6,
+                    max_frequency: data::MAX_PCLK_FREQ,
                 },
             ],
         }
@@ -1255,11 +1115,11 @@ impl Device for NexusDevice {
 
     fn stats(&self) -> DeviceStats {
         DeviceStats {
-            total_luts: self.logic_tiles.len() * 8,
-            total_ffs: self.logic_tiles.len() * 8,
-            total_ios: self.io_tiles.len() * 2,
+            total_luts: self.logic_tiles.len() * data::LOGIC_LUTS_PER_TILE as usize,
+            total_ffs: self.logic_tiles.len() * data::LOGIC_FFS_PER_TILE as usize,
+            total_ios: self.io_tiles.len() * data::IO_CELLS_PER_TILE as usize,
             total_brams: self.memory_blocks.len(),
-            total_dsps: self.dsp_tiles.len() * 2,
+            total_dsps: self.dsp_tiles.len() * data::DSP_MACS_PER_TILE as usize,
             total_gclks: self.variant.global_clocks() as usize,
         }
     }

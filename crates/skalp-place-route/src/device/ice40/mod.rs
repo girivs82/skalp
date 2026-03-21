@@ -3,6 +3,7 @@
 //! This module provides the device database for Lattice iCE40 FPGAs,
 //! supporting HX1K, HX4K, HX8K, LP1K, LP8K, and UP5K variants.
 
+pub mod data;
 mod chipdb;
 pub mod chipdb_parser;
 mod tiles;
@@ -40,52 +41,42 @@ pub enum Ice40Variant {
 }
 
 impl Ice40Variant {
+    /// Get the data record for this variant
+    pub fn die_data(&self) -> &'static data::Ice40DieData {
+        match self {
+            Ice40Variant::Hx1k => &data::HX1K,
+            Ice40Variant::Hx4k => &data::HX4K,
+            Ice40Variant::Hx8k => &data::HX8K,
+            Ice40Variant::Lp1k => &data::LP1K,
+            Ice40Variant::Lp4k => &data::LP4K,
+            Ice40Variant::Lp8k => &data::LP8K,
+            Ice40Variant::Up5k => &data::UP5K,
+        }
+    }
+
     /// Get grid dimensions for this variant
     pub fn grid_size(&self) -> (u32, u32) {
-        match self {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => (13, 17),
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k => (17, 17),
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => (33, 33),
-            Ice40Variant::Up5k => (25, 21),
-        }
+        self.die_data().grid
     }
 
     /// Get the device name as a string
     pub fn name(&self) -> &'static str {
-        match self {
-            Ice40Variant::Hx1k => "ice40hx1k",
-            Ice40Variant::Hx4k => "ice40hx4k",
-            Ice40Variant::Hx8k => "ice40hx8k",
-            Ice40Variant::Lp1k => "ice40lp1k",
-            Ice40Variant::Lp4k => "ice40lp4k",
-            Ice40Variant::Lp8k => "ice40lp8k",
-            Ice40Variant::Up5k => "ice40up5k",
-        }
+        self.die_data().name
     }
 
     /// Get number of LUTs for this variant
     pub fn lut_count(&self) -> usize {
-        match self {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => 1280,
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k => 3520,
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => 7680,
-            Ice40Variant::Up5k => 5280,
-        }
+        self.die_data().lut4s
     }
 
     /// Get number of block RAMs for this variant
     pub fn bram_count(&self) -> usize {
-        match self {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => 16,
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k => 20,
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => 32,
-            Ice40Variant::Up5k => 30,
-        }
+        self.die_data().brams
     }
 
     /// Check if this variant has DSP blocks
     pub fn has_dsp(&self) -> bool {
-        matches!(self, Ice40Variant::Up5k)
+        self.die_data().has_dsp
     }
 }
 
@@ -518,55 +509,50 @@ impl Ice40Device {
         None
     }
 
-    /// Default routing architecture for iCE40
+    /// Default routing architecture for iCE40 (from IceStorm)
     fn default_routing() -> RoutingArchitecture {
         RoutingArchitecture {
-            channels: (20, 20),
+            channels: data::ROUTING_CHANNELS,
             switch_pattern: SwitchPattern::Ice40,
             wire_segments: vec![
-                // Local tracks (within tile)
                 WireSegment {
                     length: 1,
-                    count: 8,
+                    count: data::WIRE_LOCAL_COUNT,
                     direction: WireDirection::Bidirectional,
                 },
-                // Span-4 horizontal
                 WireSegment {
                     length: 4,
-                    count: 4,
+                    count: data::WIRE_SPAN4H_COUNT,
                     direction: WireDirection::Horizontal,
                 },
-                // Span-4 vertical
                 WireSegment {
                     length: 4,
-                    count: 4,
+                    count: data::WIRE_SPAN4V_COUNT,
                     direction: WireDirection::Vertical,
                 },
-                // Span-12 horizontal (long lines)
                 WireSegment {
                     length: 12,
-                    count: 2,
+                    count: data::WIRE_SPAN12H_COUNT,
                     direction: WireDirection::Horizontal,
                 },
-                // Span-12 vertical (long lines)
                 WireSegment {
                     length: 12,
-                    count: 2,
+                    count: data::WIRE_SPAN12V_COUNT,
                     direction: WireDirection::Vertical,
                 },
             ],
         }
     }
 
-    /// Default clock resources for iCE40
+    /// Default clock resources for iCE40 (from IceStorm)
     fn default_clock_resources() -> ClockResources {
         ClockResources {
-            global_clocks: 8,
-            plls: 1,
-            dlls: 0,
+            global_clocks: data::GLOBAL_CLOCKS,
+            plls: data::PLLS,
+            dlls: data::DLLS,
             clock_domains: vec![super::ClockDomain {
                 name: "GCLK".to_string(),
-                max_frequency: 275.0e6,
+                max_frequency: data::MAX_GCLK_FREQ,
             }],
         }
     }
@@ -596,8 +582,8 @@ impl Ice40Device {
                             self.logic_tiles.push(LogicTile {
                                 x,
                                 y,
-                                lut_count: 8,
-                                ff_count: 8,
+                                lut_count: data::LOGIC_LUTS_PER_TILE,
+                                ff_count: data::LOGIC_FFS_PER_TILE,
                                 has_carry: true,
                             });
                         }
@@ -615,27 +601,23 @@ impl Ice40Device {
                             self.io_tiles.push(IoTile {
                                 x,
                                 y,
-                                io_count: 2,
+                                io_count: data::IO_CELLS_PER_TILE,
                                 side,
-                                io_standards: vec![
-                                    "LVCMOS33".to_string(),
-                                    "LVCMOS25".to_string(),
-                                    "LVCMOS18".to_string(),
-                                ],
-                                drive_strengths: vec![4, 8, 12],
-                                diff_pairs: false,
+                                io_standards: data::IO_STANDARDS.iter().map(|s| s.to_string()).collect(),
+                                drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
+                                diff_pairs: data::IO_DIFF_PAIRS,
                             });
                         }
                         TileType::RamTop => {
                             self.memory_blocks.push(MemoryBlock {
                                 x,
                                 y,
-                                size_bits: 4096,
-                                widths: vec![1, 2, 4, 8, 16],
+                                size_bits: data::RAM_SIZE_BITS,
+                                widths: data::RAM_WIDTHS.to_vec(),
                             });
                         }
                         TileType::Dsp => {
-                            self.dsp_tiles.push(DspTile { x, y, mac_count: 1 });
+                            self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MACS_PER_TILE });
                         }
                         _ => {}
                     }
@@ -683,13 +665,9 @@ impl Ice40Device {
             return TileType::IoRight;
         }
 
-        // RAM columns (typically at specific x positions)
-        let ram_column = match self.variant {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => x == 3 || x == 9,
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k => x == 4 || x == 12,
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => x == 8 || x == 16 || x == 24,
-            Ice40Variant::Up5k => x == 5 || x == 12 || x == 19,
-        };
+        // RAM columns (from IceStorm chipdb)
+        let die = self.variant.die_data();
+        let ram_column = die.ram_columns.contains(&x);
 
         if ram_column {
             if y % 2 == 1 {
@@ -700,7 +678,7 @@ impl Ice40Device {
         }
 
         // DSP columns (UP5K only)
-        if self.variant.has_dsp() && x == 23 && (1..=8).contains(&y) {
+        if die.has_dsp && x == die.dsp_column && (die.dsp_rows.0..die.dsp_rows.1).contains(&y) {
             return TileType::Dsp;
         }
 

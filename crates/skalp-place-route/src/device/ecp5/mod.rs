@@ -4,13 +4,23 @@
 //! complete open-source toolchain support via Project Trellis (prjtrellis),
 //! including SERDES, DDR3, and all hard IP blocks.
 //!
+//! Device parameters, grid sizes, resource counts, IDCODEs, bitstream geometry,
+//! and timing data are derived from the Project Trellis database and the official
+//! Lattice ECP5 Family Data Sheet (DS1044).
+//!
+//! Copyright (C) 2018 The Project Trellis Authors. All rights reserved.
+//! Licensed under ISC License. See: <https://github.com/YosysHQ/prjtrellis>
+//!
 //! # Supported Variants
 //!
-//! - ECP5-12F (12K LUT4)
-//! - ECP5-25F (24K LUT4)
-//! - ECP5-45F (44K LUT4)
-//! - ECP5-85F (84K LUT4, strongest open-source option with SERDES)
+//! - LFE5U-12F (12K LUT4, 32 EBR, 28 MULT18, 2 PLL)
+//! - LFE5U-25F (24K LUT4, 56 EBR, 28 MULT18, 2 PLL)
+//! - LFE5U-45F (44K LUT4, 108 EBR, 72 MULT18, 4 PLL)
+//! - LFE5U-85F (84K LUT4, 208 EBR, 156 MULT18, 4 PLL)
+//! - LFE5UM variants add SERDES (up to 3.125 Gbps)
+//! - LFE5UM5G variants add 5G SERDES (up to 5 Gbps)
 
+pub mod data;
 mod tiles;
 
 pub use tiles::Ecp5Tile;
@@ -25,39 +35,47 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// ECP5 device variants
+///
+/// Resource counts from prjtrellis devices.json and Lattice DS1044 Table 1-1.
+/// 12F and 25F share the same die (72×50 grid); 12F is fuse-limited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Ecp5Variant {
-    /// ECP5-12F — 12K LUT4, 28 EBR (18Kb), 2 PLL, 194 I/O
+    /// LFE5U-12F — 12K LUT4, 32 EBR, 28 MULT18, 2 PLL, 197 I/O (72×50 grid)
     Lfe5u12f,
-    /// ECP5-25F — 24K LUT4, 56 EBR (18Kb), 2 PLL, 197 I/O
+    /// LFE5U-25F — 24K LUT4, 56 EBR, 28 MULT18, 2 PLL, 197 I/O (72×50 grid)
     Lfe5u25f,
-    /// ECP5-45F — 44K LUT4, 108 EBR (18Kb), 2 PLL, 365 I/O
+    /// LFE5U-45F — 44K LUT4, 108 EBR, 72 MULT18, 4 PLL, 365 I/O (90×71 grid)
     Lfe5u45f,
-    /// ECP5-85F — 84K LUT4, 208 EBR (18Kb), 2 PLL, 365 I/O
+    /// LFE5U-85F — 84K LUT4, 208 EBR, 156 MULT18, 4 PLL, 365 I/O (126×95 grid)
     Lfe5u85f,
-    /// ECP5UM-25F — 25F with SERDES (up to 3.125 Gbps)
+    /// LFE5UM-25F — 25F + SERDES (1 DCU, 2 channels, up to 3.125 Gbps)
     Lfe5um25f,
-    /// ECP5UM-45F — 45F with SERDES
+    /// LFE5UM-45F — 45F + SERDES (2 DCU, 4 channels, up to 3.125 Gbps)
     Lfe5um45f,
-    /// ECP5UM-85F — 85F with SERDES
+    /// LFE5UM-85F — 85F + SERDES (2 DCU, 4 channels, up to 3.125 Gbps)
     Lfe5um85f,
-    /// ECP5UM5G-25F — 25F with 5G SERDES (up to 5 Gbps)
+    /// LFE5UM5G-25F — 25F + 5G SERDES (1 DCU, 2 channels, up to 5 Gbps)
     Lfe5um5g25f,
-    /// ECP5UM5G-45F — 45F with 5G SERDES
+    /// LFE5UM5G-45F — 45F + 5G SERDES (2 DCU, 4 channels, up to 5 Gbps)
     Lfe5um5g45f,
-    /// ECP5UM5G-85F — 85F with 5G SERDES (strongest open-source FPGA)
+    /// LFE5UM5G-85F — 85F + 5G SERDES (2 DCU, 4 channels, up to 5 Gbps)
     Lfe5um5g85f,
 }
 
 impl Ecp5Variant {
-    /// Grid dimensions (synthetic approximation from prjtrellis tile counts)
-    pub fn grid_size(&self) -> (u32, u32) {
+    /// Get the die data record for this variant's base die size
+    pub fn die_data(&self) -> &'static data::Ecp5DieData {
         match self.base_size() {
-            Ecp5Size::F12 => (22, 22),
-            Ecp5Size::F25 => (32, 32),
-            Ecp5Size::F45 => (46, 46),
-            Ecp5Size::F85 => (62, 62),
+            Ecp5Size::F12 => &data::DIE_12F,
+            Ecp5Size::F25 => &data::DIE_25F,
+            Ecp5Size::F45 => &data::DIE_45F,
+            Ecp5Size::F85 => &data::DIE_85F,
         }
+    }
+
+    /// Grid dimensions from prjtrellis devices.json
+    pub fn grid_size(&self) -> (u32, u32) {
+        self.die_data().grid
     }
 
     pub fn name(&self) -> &'static str {
@@ -75,72 +93,73 @@ impl Ecp5Variant {
         }
     }
 
-    pub fn lut_count(&self) -> usize {
-        match self.base_size() {
-            Ecp5Size::F12 => 12_000,
-            Ecp5Size::F25 => 24_000,
-            Ecp5Size::F45 => 44_000,
-            Ecp5Size::F85 => 84_000,
+    pub fn lut_count(&self) -> usize { self.die_data().lut4s }
+    #[allow(dead_code)]
+    pub fn plc2_count(&self) -> usize { self.die_data().plc2_tiles }
+    pub fn ebr_count(&self) -> usize { self.die_data().ebr_blocks }
+    pub fn io_count(&self) -> usize { self.die_data().max_ios }
+    pub fn dsp_count(&self) -> usize { self.die_data().mult18s }
+    pub fn pll_count(&self) -> u8 { self.die_data().plls }
+    #[allow(dead_code)]
+    pub fn dll_count(&self) -> u8 { self.die_data().dlls }
+    #[allow(dead_code)]
+    pub fn dist_ram_kbits(&self) -> usize { self.die_data().dist_ram_kbits }
+
+    /// IDCODE from prjtrellis — depends on U/UM/UM5G family
+    #[allow(dead_code)]
+    pub fn idcode(&self) -> u32 {
+        let die = self.die_data();
+        match self.family_type() {
+            Ecp5Family::U => die.idcode_u,
+            Ecp5Family::Um => die.idcode_um,
+            Ecp5Family::Um5g => die.idcode_um5g,
         }
     }
 
-    pub fn ebr_count(&self) -> usize {
-        match self.base_size() {
-            Ecp5Size::F12 => 28,
-            Ecp5Size::F25 => 56,
-            Ecp5Size::F45 => 108,
-            Ecp5Size::F85 => 208,
-        }
+    /// Bitstream geometry: (frames, bits_per_frame)
+    #[allow(dead_code)]
+    pub fn bitstream_geometry(&self) -> (u32, u32) {
+        let die = self.die_data();
+        (die.bitstream_frames, die.bits_per_frame)
     }
 
-    pub fn io_count(&self) -> usize {
-        match self.base_size() {
-            Ecp5Size::F12 => 194,
-            Ecp5Size::F25 => 197,
-            Ecp5Size::F45 | Ecp5Size::F85 => 365,
-        }
+    /// Available packages
+    #[allow(dead_code)]
+    pub fn packages(&self) -> &'static [&'static str] {
+        self.die_data().packages
     }
 
-    pub fn dsp_count(&self) -> usize {
-        // ECP5 DSP: MULT18X18D blocks (same as Nexus naming)
-        match self.base_size() {
-            Ecp5Size::F12 => 8,
-            Ecp5Size::F25 => 28,
-            Ecp5Size::F45 => 64,
-            Ecp5Size::F85 => 156,
-        }
-    }
-
-    /// Has SERDES transceivers
+    /// Has SERDES transceivers (DCU blocks)
     pub fn has_serdes(&self) -> bool {
-        !matches!(
-            self,
-            Ecp5Variant::Lfe5u12f
-                | Ecp5Variant::Lfe5u25f
-                | Ecp5Variant::Lfe5u45f
-                | Ecp5Variant::Lfe5u85f
-        )
+        !matches!(self.family_type(), Ecp5Family::U)
+    }
+
+    /// Number of SERDES channels (2 per DCU)
+    pub fn serdes_channels(&self) -> u8 {
+        if self.has_serdes() {
+            self.die_data().serdes_channels
+        } else {
+            0
+        }
     }
 
     /// SERDES line rate (Gbps)
     pub fn serdes_rate(&self) -> f64 {
-        match self {
-            Ecp5Variant::Lfe5um25f | Ecp5Variant::Lfe5um45f | Ecp5Variant::Lfe5um85f => 3.125,
-            Ecp5Variant::Lfe5um5g25f | Ecp5Variant::Lfe5um5g45f | Ecp5Variant::Lfe5um5g85f => 5.0,
-            _ => 0.0,
+        match self.family_type() {
+            Ecp5Family::Um => data::SERDES_RATE_UM,
+            Ecp5Family::Um5g => data::SERDES_RATE_UM5G,
+            Ecp5Family::U => 0.0,
         }
     }
 
-    /// Number of SERDES channels
-    pub fn serdes_channels(&self) -> u8 {
-        if self.has_serdes() {
-            match self.base_size() {
-                Ecp5Size::F12 => 0,
-                Ecp5Size::F25 => 2,
-                Ecp5Size::F45 | Ecp5Size::F85 => 4,
-            }
-        } else {
-            0
+    fn family_type(&self) -> Ecp5Family {
+        match self {
+            Ecp5Variant::Lfe5u12f | Ecp5Variant::Lfe5u25f
+            | Ecp5Variant::Lfe5u45f | Ecp5Variant::Lfe5u85f => Ecp5Family::U,
+            Ecp5Variant::Lfe5um25f | Ecp5Variant::Lfe5um45f
+            | Ecp5Variant::Lfe5um85f => Ecp5Family::Um,
+            Ecp5Variant::Lfe5um5g25f | Ecp5Variant::Lfe5um5g45f
+            | Ecp5Variant::Lfe5um5g85f => Ecp5Family::Um5g,
         }
     }
 
@@ -172,6 +191,13 @@ enum Ecp5Size {
     F25,
     F45,
     F85,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Ecp5Family {
+    U,
+    Um,
+    Um5g,
 }
 
 /// Lattice ECP5 device
@@ -237,14 +263,18 @@ impl Ecp5Device {
         let (width, height) = self.grid_size;
         let mut bel_id = 0u32;
 
-        // ECP5 tile layout:
-        // - Row 0, height-1: I/O
-        // - Col 0, width-1: I/O
-        // - BRAM columns every ~8th column
-        // - DSP columns every ~16th column (paired with BRAM in ECP5)
-        let bram_cols: Vec<u32> = (8..width - 1).step_by(8).collect();
+        // ECP5 tile layout from prjtrellis:
+        // - Row 0, height-1: I/O (PIC tiles)
+        // - Col 0, width-1: I/O (PIC tiles)
+        // - BRAM columns at regular intervals
+        // - DSP columns at regular intervals (paired with BRAM)
+        let bram_cols: Vec<u32> = (data::BRAM_COLUMN_SPACING..width - 1)
+            .step_by(data::BRAM_COLUMN_SPACING as usize)
+            .collect();
         let dsp_cols: Vec<u32> = if self.variant.dsp_count() > 0 {
-            (16..width - 1).step_by(16).collect()
+            (data::DSP_COLUMN_SPACING..width - 1)
+                .step_by(data::DSP_COLUMN_SPACING as usize)
+                .collect()
         } else {
             Vec::new()
         };
@@ -286,23 +316,16 @@ impl Ecp5Device {
                     self.io_tiles.push(IoTile {
                         x,
                         y,
-                        io_count: 2,
+                        io_count: data::IO_CELLS_PER_TILE,
                         side: io_side,
-                        io_standards: vec![
-                            "LVCMOS33".to_string(),
-                            "LVCMOS25".to_string(),
-                            "LVCMOS18".to_string(),
-                            "LVCMOS12".to_string(),
-                            "SSTL15".to_string(),
-                            "LVDS".to_string(),
-                        ],
-                        drive_strengths: vec![4, 8, 12, 16],
+                        io_standards: data::IO_STANDARDS.iter().map(|s| s.to_string()).collect(),
+                        drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
                         diff_pairs: true,
                     });
                     self.tiles[y as usize][x as usize] = Some(Ecp5Tile::new(side, x, y, io_bels));
                 } else if is_dsp_col {
                     let dsp_bels = Self::make_dsp_bels(&mut bel_id);
-                    self.dsp_tiles.push(DspTile { x, y, mac_count: 2 });
+                    self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MULTS_PER_TILE });
                     self.tiles[y as usize][x as usize] =
                         Some(Ecp5Tile::new(TileType::Dsp, x, y, dsp_bels));
                 } else if is_bram_col {
@@ -310,8 +333,8 @@ impl Ecp5Device {
                     self.memory_blocks.push(MemoryBlock {
                         x,
                         y,
-                        size_bits: 18 * 1024,
-                        widths: vec![1, 2, 4, 9, 18, 36],
+                        size_bits: data::EBR_SIZE_BITS,
+                        widths: data::EBR_WIDTHS.to_vec(),
                     });
                     self.tiles[y as usize][x as usize] =
                         Some(Ecp5Tile::new(TileType::RamTop, x, y, bram_bels));
@@ -321,8 +344,8 @@ impl Ecp5Device {
                     self.logic_tiles.push(LogicTile {
                         x,
                         y,
-                        lut_count: 8,
-                        ff_count: 8,
+                        lut_count: data::LOGIC_LUTS_PER_TILE,
+                        ff_count: data::LOGIC_FFS_PER_TILE,
                         has_carry: true,
                     });
                     self.tiles[y as usize][x as usize] =
@@ -924,82 +947,101 @@ impl Ecp5Device {
     }
 
     fn build_synthetic_packages(&mut self) {
-        let mut pins = HashMap::new();
-        let mut idx = 0u32;
+        // Generate synthetic pin mappings for all real packages per variant
+        // Real pin-to-pad mappings are in prjtrellis iodb.json
+        let pkg_names = self.variant.packages();
 
-        for io_tile in &self.io_tiles {
-            for iob in 0..io_tile.io_count {
-                pins.insert(format!("P{}", idx), (io_tile.x, io_tile.y, iob));
-                idx += 1;
+        for &pkg_name in pkg_names {
+            let mut pins = HashMap::new();
+            let mut idx = 0u32;
+
+            for io_tile in &self.io_tiles {
+                for iob in 0..io_tile.io_count {
+                    pins.insert(format!("P{}", idx), (io_tile.x, io_tile.y, iob));
+                    idx += 1;
+                }
             }
+
+            self.packages.insert(
+                pkg_name.to_string(),
+                PackagePins {
+                    name: pkg_name.to_string(),
+                    pins,
+                },
+            );
         }
-
-        let pkg = match self.variant.base_size() {
-            Ecp5Size::F12 => "TQFP144",
-            Ecp5Size::F25 => "CABGA256",
-            Ecp5Size::F45 => "CABGA381",
-            Ecp5Size::F85 => "CABGA756",
-        };
-
-        self.packages.insert(
-            pkg.to_string(),
-            PackagePins {
-                name: pkg.to_string(),
-                pins,
-            },
-        );
     }
 
+    /// Routing architecture from prjtrellis/nextpnr wire type classification.
     fn default_routing() -> RoutingArchitecture {
         RoutingArchitecture {
-            channels: (24, 24),
+            channels: data::ROUTING_CHANNELS,
             switch_pattern: SwitchPattern::Wilton,
             wire_segments: vec![
+                // H00/V00: local wires
                 WireSegment {
                     length: 1,
-                    count: 20,
+                    count: data::WIRE_LOCAL_COUNT,
                     direction: WireDirection::Bidirectional,
                 },
+                // H01/V01: span-1 short wires
                 WireSegment {
-                    length: 2,
-                    count: 6,
+                    length: 1,
+                    count: data::WIRE_SPAN1_COUNT,
                     direction: WireDirection::Horizontal,
                 },
                 WireSegment {
-                    length: 2,
-                    count: 6,
+                    length: 1,
+                    count: data::WIRE_SPAN1_COUNT,
                     direction: WireDirection::Vertical,
                 },
+                // H02/V02: span-2 medium wires
+                WireSegment {
+                    length: 2,
+                    count: data::WIRE_SPAN2_COUNT,
+                    direction: WireDirection::Horizontal,
+                },
+                WireSegment {
+                    length: 2,
+                    count: data::WIRE_SPAN2_COUNT,
+                    direction: WireDirection::Vertical,
+                },
+                // H06/V06: span-6 long wires
                 WireSegment {
                     length: 6,
-                    count: 3,
+                    count: data::WIRE_SPAN6_COUNT,
                     direction: WireDirection::Horizontal,
                 },
                 WireSegment {
                     length: 6,
-                    count: 3,
+                    count: data::WIRE_SPAN6_COUNT,
                     direction: WireDirection::Vertical,
                 },
             ],
         }
     }
 
+    /// Clock resources from prjtrellis globals.json.
     fn default_clock_resources(variant: Ecp5Variant) -> ClockResources {
         ClockResources {
-            global_clocks: 8,
-            plls: 2,
-            dlls: 2,
+            global_clocks: data::GLOBAL_CLOCKS,
+            plls: variant.pll_count(),
+            dlls: variant.dll_count(),
             clock_domains: vec![
                 ClockDomain {
-                    name: "ECLK".to_string(),
-                    max_frequency: 400.0e6, // ECP5 speed grade -8
+                    name: "PRIMARY".to_string(),
+                    max_frequency: data::MAX_FABRIC_FREQ,
                 },
                 ClockDomain {
-                    name: "SCLK".to_string(),
+                    name: "SECONDARY".to_string(),
+                    max_frequency: data::MAX_FABRIC_FREQ,
+                },
+                ClockDomain {
+                    name: "ECLK".to_string(),
                     max_frequency: if variant.has_serdes() {
                         variant.serdes_rate() * 1.0e9
                     } else {
-                        200.0e6
+                        data::MAX_FABRIC_FREQ
                     },
                 },
             ],
@@ -1144,19 +1186,26 @@ mod tests {
         let device = Ecp5Device::new(Ecp5Variant::Lfe5u12f);
         assert_eq!(device.family(), DeviceFamily::Ecp5);
         assert_eq!(device.name(), "LFE5U-12F");
+        assert_eq!(device.grid_size(), (72, 50)); // same die as 25F
         let stats = device.stats();
         assert!(stats.total_luts > 500, "got {} LUTs", stats.total_luts);
         assert!(stats.total_ios > 30, "got {} IOs", stats.total_ios);
+        assert!(stats.total_dsps > 0, "12F has 28 MULT18, got {} DSPs", stats.total_dsps);
+        // Check IDCODE
+        assert_eq!(Ecp5Variant::Lfe5u12f.idcode(), 0x2111_1043);
     }
 
     #[test]
     fn test_ecp5_device_85f() {
         let device = Ecp5Device::new(Ecp5Variant::Lfe5u85f);
         assert_eq!(device.name(), "LFE5U-85F");
+        assert_eq!(device.grid_size(), (126, 95));
         let stats = device.stats();
         assert!(stats.total_luts > 5000, "got {} LUTs", stats.total_luts);
         assert!(stats.total_brams > 10, "got {} BRAMs", stats.total_brams);
         assert!(stats.total_dsps > 0, "got {} DSPs", stats.total_dsps);
+        // Check bitstream geometry
+        assert_eq!(Ecp5Variant::Lfe5u85f.bitstream_geometry(), (13294, 1136));
     }
 
     #[test]
