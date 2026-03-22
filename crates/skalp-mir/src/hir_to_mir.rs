@@ -17490,7 +17490,6 @@ impl<'hir> HirToMir<'hir> {
 
         for (i, stmt) in body.iter().enumerate() {
             let is_last = i == body.len() - 1;
-
             match stmt {
                 hir::HirStatement::Let(let_stmt) => {
                     // Substitute parameters in the value expression
@@ -17502,12 +17501,24 @@ impl<'hir> HirToMir<'hir> {
                     let substituted_value =
                         substituted_value.unwrap_or_else(|| let_stmt.value.clone());
 
+                    // Resolve parameterized types using current const bindings
+                    // e.g., bit<N * 2> with N=8 → bit[16]
+                    let resolved_type = match &let_stmt.var_type {
+                        hir::HirType::BitExpr(expr) => {
+                            match self.try_eval_const_expr(expr) {
+                                Some(val) => hir::HirType::Bit(val as u32),
+                                None => let_stmt.var_type.clone(),
+                            }
+                        }
+                        other => other.clone(),
+                    };
+
                     // Create a substituted Let statement
                     let substituted_let = hir::HirLetStatement {
                         id: let_stmt.id,
                         name: let_stmt.name.clone(),
                         mutable: let_stmt.mutable,
-                        var_type: let_stmt.var_type.clone(),
+                        var_type: resolved_type,
                         value: substituted_value,
                     };
                     let substituted_stmt = hir::HirStatement::Let(substituted_let);
