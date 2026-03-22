@@ -91,58 +91,68 @@ impl ModuleResolver {
             }
         }
 
-        // Add standard library path(s) if they exist
-        // Supports colon-separated paths (e.g., "/path1:/path2")
+        // Resolve standard library path.
+        // Priority order:
+        //   1. SKALP_STDLIB_PATH env var (colon-separated, explicit)
+        //   2. <binary_dir>/../share/skalp/stdlib (cargo install / packaged)
+        //   3. ~/.skalp/stdlib (user-local)
+        //   4. <project_root>/stdlib (project-local override)
+        let mut found_stdlib = false;
+
         if let Ok(stdlib_paths) = std::env::var("SKALP_STDLIB_PATH") {
             for path_str in stdlib_paths.split(':') {
                 if !path_str.is_empty() {
-                    search_paths.push(PathBuf::from(path_str));
-                }
-            }
-        } else {
-            // Default stdlib location relative to root
-            let default_stdlib = root_dir.join("stdlib");
-            if default_stdlib.exists() {
-                search_paths.push(default_stdlib);
-            }
-
-            // Search upward through parent directories for crates/skalp-stdlib
-            // This handles projects at different nesting levels (e.g., Karythra vs SKALP own tests)
-            // First, convert root_dir to absolute path
-            let abs_root = root_dir
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&root_dir));
-
-            let mut current = Some(abs_root.as_path());
-            let mut found_stdlib = false;
-
-            while let Some(dir) = current {
-                // Check current/crates/skalp-stdlib
-                let potential_stdlib = dir.join("crates/skalp-stdlib");
-                if potential_stdlib.exists() && potential_stdlib.is_dir() {
-                    search_paths.push(potential_stdlib);
-                    found_stdlib = true;
-                    break;
-                }
-
-                // Also check sibling 'hls' directory: ../hls/crates/skalp-stdlib
-                // This handles the case where we have /src/hw/karythra and /src/hw/hls as siblings
-                if let Some(parent) = dir.parent() {
-                    let hls_stdlib = parent.join("hls/crates/skalp-stdlib");
-                    if hls_stdlib.exists() && hls_stdlib.is_dir() {
-                        search_paths.push(hls_stdlib);
+                    let p = PathBuf::from(path_str);
+                    if p.exists() && p.is_dir() {
+                        trace!("[MODULE_RESOLVER] stdlib from SKALP_STDLIB_PATH: {:?}", p);
+                        search_paths.push(p);
                         found_stdlib = true;
-                        break;
                     }
                 }
-
-                current = dir.parent();
             }
+        }
 
-            if !found_stdlib {
-                trace!("[MODULE_RESOLVER] Warning: Could not find SKALP stdlib. Imports like 'use bitops::*' will fail.");
-                trace!("[MODULE_RESOLVER] Hint: Set SKALP_STDLIB_PATH environment variable or ensure crates/skalp-stdlib exists in a parent directory.");
+        if !found_stdlib {
+            // Relative to binary: <binary_dir>/../share/skalp/stdlib
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(bin_dir) = exe.parent() {
+                    let share_stdlib = bin_dir.join("../share/skalp/stdlib");
+                    if share_stdlib.exists() && share_stdlib.is_dir() {
+                        if let Ok(canonical) = share_stdlib.canonicalize() {
+                            trace!("[MODULE_RESOLVER] stdlib from binary share dir: {:?}", canonical);
+                            search_paths.push(canonical);
+                            found_stdlib = true;
+                        }
+                    }
+                }
             }
+        }
+
+        if !found_stdlib {
+            // User-local: ~/.skalp/stdlib
+            if let Ok(home) = std::env::var("HOME") {
+                let home_stdlib = PathBuf::from(home).join(".skalp/stdlib");
+                if home_stdlib.exists() && home_stdlib.is_dir() {
+                    trace!("[MODULE_RESOLVER] stdlib from ~/.skalp/stdlib: {:?}", home_stdlib);
+                    search_paths.push(home_stdlib);
+                    found_stdlib = true;
+                }
+            }
+        }
+
+        if !found_stdlib {
+            // Project-local: <root>/stdlib
+            let project_stdlib = root_dir.join("stdlib");
+            if project_stdlib.exists() && project_stdlib.is_dir() {
+                trace!("[MODULE_RESOLVER] stdlib from project dir: {:?}", project_stdlib);
+                search_paths.push(project_stdlib);
+                found_stdlib = true;
+            }
+        }
+
+        if !found_stdlib {
+            trace!("[MODULE_RESOLVER] Warning: Could not find skalp stdlib.");
+            trace!("[MODULE_RESOLVER] Set SKALP_STDLIB_PATH or install stdlib to ~/.skalp/stdlib");
         }
 
         Self {
@@ -191,27 +201,20 @@ impl ModuleResolver {
             // annotations for NCL/sync context-agnostic behavior.
             let arith_path = search_path.join("skalp/arithmetic/ops.sk");
             if arith_path.exists() {
-                eprintln!("[PRELOAD_DEBUG] Loading arithmetic ops from: {:?}", arith_path);
+                trace!("Loading arithmetic ops from: {:?}", arith_path);
                 match self.load_module(&arith_path) {
-                    Ok(_) => {
-                        eprintln!("[PRELOAD_DEBUG] Loaded ops.sk successfully");
-                    }
-                    Err(e) => {
-                        eprintln!("[PRELOAD_DEBUG] FAILED to load ops.sk: {:?}", e);
-                    }
+                    Ok(_) => trace!("Loaded ops.sk successfully"),
+                    Err(e) => debug!("Failed to load ops.sk: {:?}", e),
                 }
-            } else {
-                eprintln!("[PRELOAD_DEBUG] ops.sk not found at: {:?}", arith_path);
             }
 
             // Load stdlib component entities needed by arithmetic trait impls.
             for component in &["adder", "multiplier"] {
                 let comp_path = search_path.join(format!("components/{}.sk", component));
-                eprintln!("[PRELOAD_DEBUG] Looking for component {} at: {:?} (exists={})", component, comp_path, comp_path.exists());
                 if comp_path.exists() {
                     match self.load_module(&comp_path) {
-                        Ok(_) => eprintln!("[PRELOAD_DEBUG] Loaded {}.sk successfully", component),
-                        Err(e) => eprintln!("[PRELOAD_DEBUG] FAILED to load {}.sk: {:?}", component, e),
+                        Ok(_) => trace!("Loaded {}.sk successfully", component),
+                        Err(e) => debug!("Failed to load {}.sk: {:?}", component, e),
                     }
                 }
             }

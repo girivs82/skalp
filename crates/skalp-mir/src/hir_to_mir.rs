@@ -897,7 +897,12 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 mir.add_module(module);
-                self.save_entity_scope_to_cache(entity.id);
+                // Only save to cache if this entity ID doesn't collide with a main HIR entity.
+                // Module HIR entities can have the same ID as main entities (IDs are per-file),
+                // so saving here would overwrite the main entity's cached port_map.
+                if !self.entity_scope_cache.contains_key(&entity.id) {
+                    self.save_entity_scope_to_cache(entity.id);
+                }
         }
 
         // Note: Module HIR impl blocks are NOT processed here. The entity port declarations
@@ -2289,7 +2294,7 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
-                    eprintln!("[ENTITY_INST_DEBUG] StructLiteral detected: type='{}', {} generic_args, {} fields",
+                    trace!("[ENTITY_INST] StructLiteral detected: type='{}', {} generic_args, {} fields",
                         struct_lit.type_name, struct_lit.generic_args.len(), struct_lit.fields.len());
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
@@ -4875,6 +4880,10 @@ impl<'hir> HirToMir<'hir> {
             assign.assignment_type,
             hir::HirAssignmentType::Combinational
         ) {
+            if matches!(&assign.rhs, hir::HirExpression::Match(_)) {
+                eprintln!("[CONV_SKIP] Skipping non-combinational match assignment: type={:?}, entity={:?}",
+                    assign.assignment_type, self.current_entity_id);
+            }
             return None;
         }
 
@@ -4885,7 +4894,6 @@ impl<'hir> HirToMir<'hir> {
             std::mem::discriminant(&assign.rhs)
         );
         let rhs = self.convert_expression(&assign.rhs, 0)?;
-        trace!("[TRAIT_DEBUG] convert_expression returned successfully");
 
         Some(ContinuousAssign {
             lhs,
@@ -8036,10 +8044,10 @@ impl<'hir> HirToMir<'hir> {
                 // Skip trait resolution when impl_style is Primitive — this is used by
                 // stdlib entity internals (e.g., std_adder) to avoid recursive resolution,
                 // and by users who want direct hardware mapping: #[impl_style::primitive]
-                eprintln!("[TRAIT_RESOLVE_DEBUG] Binary op={:?}, impl_style={:?}", binary.op, binary.impl_style);
+                trace!("[TRAIT_RESOLVE] Binary op={:?}, impl_style={:?}", binary.op, binary.impl_style);
                 if binary.impl_style != hir::ImplStyle::Primitive {
                 let resolve_result = self.try_resolve_trait_operator(&binary.op, &binary.left);
-                eprintln!("[TRAIT_RESOLVE_DEBUG] try_resolve_trait_operator result: {:?}", resolve_result);
+                trace!("[TRAIT_RESOLVE] try_resolve_trait_operator result: {:?}", resolve_result);
                 if let Some((type_name, trait_name, method_name)) = resolve_result
                 {
                     trace!(
@@ -8082,7 +8090,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Try to inline the trait method body
-                    eprintln!("[TRAIT_RESOLVE_DEBUG] Attempting inline_trait_method for {}::{}({})", trait_name, method_name, type_name);
+                    trace!("[TRAIT_RESOLVE] Attempting inline_trait_method for {}::{}({})", trait_name, method_name, type_name);
                     if let Some(result) = self.inline_trait_method(
                         &type_name,
                         trait_name,
@@ -8096,10 +8104,8 @@ impl<'hir> HirToMir<'hir> {
                             method_name,
                             type_name
                         );
-                        eprintln!("[TRAIT_RESOLVE_DEBUG] INLINING SUCCEEDED for {}::{}", trait_name, method_name);
                         return Some(result);
                     }
-                    eprintln!("[TRAIT_RESOLVE_DEBUG] INLINING FAILED for {}::{}", trait_name, method_name);
 
                     // If inlining fails, fall back to primitive binary operation.
                     // The SIR converter will detect float signal types and use

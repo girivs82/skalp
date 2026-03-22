@@ -154,7 +154,7 @@ impl<'a> LirToSynthAig<'a> {
             if let LirOp::Reg { width, reset_value, .. } = &node.op {
                 let reset_val = reset_value.unwrap_or(0);
                 for bit in 0..*width {
-                    let init_value = (reset_val >> bit) & 1 != 0;
+                    let init_value = if bit < 64 { (reset_val >> bit) & 1 != 0 } else { false };
                     // Pre-create with false_lit as placeholder data
                     let clock_node = self.find_clock_node(node);
                     let reset_node = self.find_reset_node(node);
@@ -235,7 +235,7 @@ impl<'a> LirToSynthAig<'a> {
                     let next_lit = if *has_reset {
                         if let Some(rst_id) = node.reset {
                             let rst_lit = self.get_input_bit(rst_id, 0);
-                            let reset_bit = (reset_val >> bit) & 1 != 0;
+                            let reset_bit = if bit < 64 { (reset_val >> bit) & 1 != 0 } else { false };
                             if reset_bit {
                                 // rst ? 1 : d = rst | d
                                 self.aig.add_or(rst_lit, d_after_enable)
@@ -424,7 +424,7 @@ impl<'a> LirToSynthAig<'a> {
         match &node.op {
             LirOp::Constant { width, value } => {
                 for bit in 0..*width {
-                    let lit = if (value >> bit) & 1 == 1 {
+                    let lit = if bit < 64 && (value >> bit) & 1 == 1 {
                         AigLit::true_lit()
                     } else {
                         AigLit::false_lit()
