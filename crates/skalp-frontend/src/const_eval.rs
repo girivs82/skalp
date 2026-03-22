@@ -232,6 +232,11 @@ impl ConstEvaluator {
         self.const_bindings.shift_remove(name);
     }
 
+    /// Look up a const binding by name
+    pub fn get_binding(&self, name: &str) -> Option<&ConstValue> {
+        self.const_bindings.get(name)
+    }
+
     /// Register a user-defined const function
     pub fn register_function(&mut self, func: HirFunction) {
         if func.is_const {
@@ -1416,6 +1421,7 @@ mod tests {
             left: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 
@@ -1425,6 +1431,7 @@ mod tests {
             left: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(50));
     }
@@ -1465,6 +1472,7 @@ mod tests {
             left: Box::new(HirExpression::GenericParam("N".to_string())),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(9));
     }
@@ -1537,6 +1545,7 @@ mod tests {
             left: Box::new(HirExpression::GenericParam("DEPTH".to_string())),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
     }
@@ -1581,6 +1590,7 @@ mod tests {
                 left: Box::new(HirExpression::Literal(HirLiteral::Integer(8))),
                 right: Box::new(HirExpression::Literal(HirLiteral::Integer(4))),
                 is_trait_op: false,
+                impl_style: ImplStyle::default(),
             }),
         };
 
@@ -1746,6 +1756,7 @@ mod tests {
             left: Box::new(integer_call),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         });
 
         assert_eq!(eval.eval(&plus_one).unwrap(), ConstValue::Int(5));

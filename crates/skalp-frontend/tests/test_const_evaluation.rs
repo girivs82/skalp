@@ -32,6 +32,7 @@ fn test_const_arithmetic() {
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 
@@ -41,6 +42,7 @@ fn test_const_arithmetic() {
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(50));
 
@@ -50,6 +52,7 @@ fn test_const_arithmetic() {
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(20))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(15));
 }
@@ -65,6 +68,7 @@ fn test_const_generic_param() {
         left: Box::new(HirExpression::GenericParam("WIDTH".to_string())),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(9));
 }
@@ -79,7 +83,7 @@ fn test_builtin_clog2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
 
@@ -89,7 +93,7 @@ fn test_builtin_clog2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(0));
 
@@ -99,7 +103,7 @@ fn test_builtin_clog2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
 }
@@ -114,7 +118,7 @@ fn test_builtin_pow2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(3))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(8));
 
@@ -124,7 +128,7 @@ fn test_builtin_pow2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(0))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(1));
 }
@@ -142,7 +146,7 @@ fn test_builtin_max_min() {
             HirExpression::Literal(HirLiteral::Integer(10)),
         ],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
 
@@ -155,7 +159,7 @@ fn test_builtin_max_min() {
             HirExpression::Literal(HirLiteral::Integer(10)),
         ],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 }
@@ -170,7 +174,7 @@ fn test_builtin_popcount() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(3));
 
@@ -180,7 +184,7 @@ fn test_builtin_popcount() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(15))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(4));
 }
@@ -195,7 +199,7 @@ fn test_builtin_is_power_of_2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(8))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(true));
 
@@ -205,7 +209,7 @@ fn test_builtin_is_power_of_2() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Bool(false));
 }
@@ -220,7 +224,7 @@ fn test_builtin_gray_code() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(5))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     let encoded = eval.eval(&expr).unwrap();
     assert_eq!(encoded, ConstValue::Nat(7));
@@ -231,7 +235,7 @@ fn test_builtin_gray_code() {
         type_args: vec![],
         args: vec![HirExpression::Literal(HirLiteral::Integer(7))],
         named_type_args: IndexMap::new(),
-        impl_style: ImplStyle::default(),
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 }
@@ -414,6 +418,7 @@ fn test_enum_variant_in_expressions() {
             variant: "High".to_string(),
         }),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(30));
 
@@ -429,6 +434,7 @@ fn test_enum_variant_in_expressions() {
             variant: "Low".to_string(),
         }),
         is_trait_op: false,
+        impl_style: skalp_frontend::hir::ImplStyle::default(),
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
 }

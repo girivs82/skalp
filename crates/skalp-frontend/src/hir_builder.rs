@@ -2053,6 +2053,7 @@ impl HirBuilderContext {
                     op: bin.op.clone(),
                     right: Box::new(new_right),
                     is_trait_op: bin.is_trait_op,
+                    impl_style: ImplStyle::default(),
                 })
             }
             HirExpression::Unary(un) => {
@@ -3368,6 +3369,7 @@ impl HirBuilderContext {
                 | SyntaxKind::StructLiteral
                 | SyntaxKind::ArrayLiteral
                 | SyntaxKind::ConcatExpr
+                | SyntaxKind::SizedCastExpr
                 | SyntaxKind::TernaryExpr => {
                     if let Some(expr) = self.build_expression(&child) {
                         statements.push(HirStatement::Expression(expr));
@@ -3701,7 +3703,7 @@ impl HirBuilderContext {
                         | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple literal assignments
                         | SyntaxKind::CastExpr // BUG FIX: Support cast expressions in assignments (e.g., y = x as fp32)
                         | SyntaxKind::ConcatExpr // BUG FIX: Support concat expressions in assignments (e.g., result = {high, low})
-                        | SyntaxKind::ReplicateExpr // BUG #182 FIX: Support replication expressions in assignments (e.g., result = {8{1'b1}})
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr // BUG #182 FIX: Support replication expressions in assignments (e.g., result = {8{1'b1}})
                         | SyntaxKind::TernaryExpr // BUG #180 FIX: Support ternary expressions in assignments (e.g., result = cond ? a : b)
                         | SyntaxKind::StructLiteral // BUG FIX: Support struct literal assignments (e.g., faults = FaultFlags { ov: x, ... })
                 )
@@ -3982,6 +3984,7 @@ impl HirBuilderContext {
             op,
             right: Box::new(right_expr),
             is_trait_op: false, // Set during type resolution/monomorphization
+            impl_style: ImplStyle::default(),
         }))
     }
 
@@ -4311,6 +4314,7 @@ impl HirBuilderContext {
                             op,
                             right: Box::new(right),
                             is_trait_op: false,
+                            impl_style: ImplStyle::default(),
                         });
                     }
                 }
@@ -4323,6 +4327,7 @@ impl HirBuilderContext {
                     op: crate::hir::HirBinaryOp::Add,
                     right: Box::new(right),
                     is_trait_op: false,
+                    impl_style: ImplStyle::default(),
                 });
             }
         }
@@ -5060,6 +5065,7 @@ impl HirBuilderContext {
                     op: bin.op.clone(),
                     right: Box::new(right),
                     is_trait_op: bin.is_trait_op,
+                    impl_style: ImplStyle::default(),
                 })
             }
             HirExpression::Unary(un) => HirExpression::Unary(HirUnaryExpr {
@@ -6924,6 +6930,7 @@ impl HirBuilderContext {
             SyntaxKind::TupleExpr => self.build_tuple_expr(node),
             SyntaxKind::ConcatExpr => self.build_concat_expr(node),
             SyntaxKind::ReplicateExpr => self.build_replicate_expr(node),
+            SyntaxKind::SizedCastExpr => self.build_sized_cast_expr(node),
             SyntaxKind::TernaryExpr => self.build_ternary_expr(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
@@ -6985,7 +6992,7 @@ impl HirBuilderContext {
                                 | SyntaxKind::MatchExpr
                                 | SyntaxKind::TernaryExpr
                                 | SyntaxKind::ConcatExpr
-                                | SyntaxKind::ReplicateExpr
+                                | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                         )
                     });
 
@@ -7022,7 +7029,7 @@ impl HirBuilderContext {
                                         | SyntaxKind::CastExpr
                                         | SyntaxKind::TernaryExpr
                                         | SyntaxKind::ConcatExpr
-                                        | SyntaxKind::ReplicateExpr
+                                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                                 )
                             })
                             .and_then(|n| self.build_expression(n))
@@ -7823,6 +7830,7 @@ impl HirBuilderContext {
                     op: bin_expr.op.clone(),
                     right: bin_expr.right.clone(),
                     is_trait_op: bin_expr.is_trait_op,
+                    impl_style: ImplStyle::default(),
                 }));
             }
         }
@@ -7859,7 +7867,7 @@ impl HirBuilderContext {
                         | SyntaxKind::StructLiteral
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr // BUG #181 FIX: Include replication expressions in concat
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr // BUG #181 FIX: Include replication expressions in concat
                         | SyntaxKind::CastExpr
                 )
             })
@@ -7938,6 +7946,41 @@ impl HirBuilderContext {
                 count: Box::new(expressions[0].clone()),
                 value: Box::new(expressions[1].clone()),
             })
+        } else {
+            None
+        }
+    }
+
+    /// Build sized cast expression: (WIDTH)'b0, (N)'hFF, (EXPR)'d15
+    /// Verilog-style sized literal where the width is a dynamic expression.
+    /// Becomes: Cast(Literal(value), Bit(width_expr))
+    fn build_sized_cast_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // First child should be the width expression (e.g., ParenExpr containing W2)
+        let width_expr = node.children().next().and_then(|n| self.build_expression(&n));
+
+        // Find the Lifetime token which contains base+digits (e.g., "b0", "hFF", "d15")
+        let lifetime_text = node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| t.kind() == SyntaxKind::Lifetime)
+            .map(|t| t.text().to_string());
+
+        if let (Some(width_expr), Some(lit_text)) = (width_expr, lifetime_text) {
+            // Parse the literal value from the lifetime text (strip leading apostrophe)
+            let stripped = lit_text.strip_prefix('\'').unwrap_or(&lit_text);
+            let (base, digits) = stripped.split_at(1);
+            let value: u64 = match base {
+                "b" => u64::from_str_radix(digits.trim_start_matches('_'), 2).unwrap_or(0),
+                "h" => u64::from_str_radix(digits.trim_start_matches('_'), 16).unwrap_or(0),
+                "d" => digits.parse().unwrap_or(0),
+                _ => 0,
+            };
+
+            // Create a cast of the literal to bit<width_expr>
+            Some(HirExpression::Cast(HirCastExpr {
+                expr: Box::new(HirExpression::Literal(HirLiteral::Integer(value))),
+                target_type: HirType::BitExpr(Box::new(width_expr)),
+            }))
         } else {
             None
         }
@@ -8160,7 +8203,7 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr // BUG #127: Include CastExpr as valid operand
                         | SyntaxKind::TernaryExpr // BUG #188: Include TernaryExpr as valid operand
                         | SyntaxKind::ConcatExpr // BUG #188: Include ConcatExpr as valid operand
-                        | SyntaxKind::ReplicateExpr // BUG #188: Include ReplicateExpr as valid operand
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr // BUG #188: Include ReplicateExpr as valid operand
                         | SyntaxKind::TupleExpr // BUG #188: Include TupleExpr as valid operand
                 )
             })
@@ -8355,7 +8398,7 @@ impl HirBuilderContext {
                                         | SyntaxKind::CastExpr
                                         | SyntaxKind::TernaryExpr
                                         | SyntaxKind::ConcatExpr
-                                        | SyntaxKind::ReplicateExpr
+                                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                                         | SyntaxKind::TupleExpr
                                 )
                             })
@@ -8402,6 +8445,7 @@ impl HirBuilderContext {
                                     op,
                                     right,
                                     is_trait_op: false,
+                                    impl_style: ImplStyle::default(),
                                 }));
                             } else {
                                 return None; // Error: found BinaryExpr but no left operand yet
@@ -8596,6 +8640,7 @@ impl HirBuilderContext {
                 op,
                 right,
                 is_trait_op: false,
+                impl_style: ImplStyle::default(),
             }));
         }
 
@@ -8695,6 +8740,7 @@ impl HirBuilderContext {
                             op,
                             right: Box::new(right_expr),
                             is_trait_op: false,
+                            impl_style: ImplStyle::default(),
                         });
                     }
                 } else {
@@ -8706,6 +8752,7 @@ impl HirBuilderContext {
                             op: op.clone(),
                             right,
                             is_trait_op: false,
+                            impl_style: ImplStyle::default(),
                         });
                     }
                 }
@@ -8737,6 +8784,7 @@ impl HirBuilderContext {
             op,
             right,
             is_trait_op: false,
+            impl_style: ImplStyle::default(),
         }))
     }
 
@@ -8767,7 +8815,7 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                 )
             })
@@ -9482,6 +9530,7 @@ impl HirBuilderContext {
                 "impl_style_parallel" | "parallel" => Some(ImplStyle::Parallel),
                 "impl_style_tree" | "tree" => Some(ImplStyle::Tree),
                 "impl_style_sequential" | "sequential" => Some(ImplStyle::Sequential),
+                "impl_style_primitive" | "primitive" => Some(ImplStyle::Primitive),
                 "impl_style_auto" | "auto" => Some(ImplStyle::Auto),
                 // For other intents, we'd look them up in intent definitions
                 // For now, default to Auto
@@ -9521,7 +9570,7 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::StructLiteral
@@ -10199,6 +10248,7 @@ impl HirBuilderContext {
                 "parallel" => return Some(ImplStyle::Parallel),
                 "tree" => return Some(ImplStyle::Tree),
                 "sequential" => return Some(ImplStyle::Sequential),
+                "primitive" => return Some(ImplStyle::Primitive),
                 _ => {}
             }
         }
@@ -13761,7 +13811,7 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                 ) {
                     if let Some(arg_expr) = self.build_expression(&child) {
@@ -14292,6 +14342,25 @@ impl HirBuilderContext {
 
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
+        // Extract generic parameters from impl<...> if present
+        let impl_generics = if let Some(generic_list) =
+            node.first_child_of_kind(SyntaxKind::GenericParamList)
+        {
+            self.parse_generic_params(&generic_list)
+        } else {
+            Vec::new()
+        };
+
+        // Push impl generics into scope so the target type can reference them
+        // e.g., `impl<const N: usize> Mul for bit<N>` — N must be in scope for bit<N>
+        if !impl_generics.is_empty() {
+            self.symbols.enter_scope();
+            for generic in &impl_generics {
+                self.symbols
+                    .add_to_scope(&generic.name, SymbolId::GenericParam(generic.name.clone()));
+            }
+        }
+
         // Extract trait name from first identifier
         let ident_tokens: Vec<_> = node
             .children_with_tokens()
@@ -14300,16 +14369,23 @@ impl HirBuilderContext {
             .collect();
 
         if ident_tokens.is_empty() {
+            if !impl_generics.is_empty() {
+                self.symbols.exit_scope();
+            }
             return None;
         }
 
-        let trait_name = ident_tokens[0].text().to_string();
+        // First ident token is the trait name, but skip any that are generic param names
+        let trait_name = ident_tokens
+            .iter()
+            .find(|t| !impl_generics.iter().any(|g| g.name == t.text().to_string()))
+            .map(|t| t.text().to_string())
+            .unwrap_or_else(|| ident_tokens[0].text().to_string());
 
         // Find the target type (comes after 'for' keyword, now as TypeAnnotation)
         let target = if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
             // Parse as type (e.g., nat[32], bit[8], fp32, CustomType<T>)
-            // BUG FIX: Use extract_hir_type which handles all type variants (nat, int, bit, etc.)
-            // build_hir_type only handles a subset and falls through to Bit(8) as default
+            // With impl generics in scope, `bit<N>` resolves N as a GenericParam
             let target_type = self.extract_hir_type(&type_node);
             TraitImplTarget::Type(target_type)
         } else if ident_tokens.len() >= 2 {
@@ -14352,9 +14428,15 @@ impl HirBuilderContext {
             }
         }
 
+        // Pop the impl generics scope
+        if !impl_generics.is_empty() {
+            self.symbols.exit_scope();
+        }
+
         Some(HirTraitImplementation {
             trait_name,
             target,
+            generics: impl_generics,
             method_implementations,
             type_implementations,
             const_implementations,

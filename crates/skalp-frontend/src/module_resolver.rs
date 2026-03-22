@@ -47,6 +47,10 @@ pub struct ModuleResolver {
 
     /// Root directory of the current project
     root_dir: PathBuf,
+
+    /// When true, allow loading modules with parse errors (for stdlib components
+    /// where some secondary entities may use syntax the parser doesn't yet support)
+    tolerant_parse: bool,
 }
 
 impl ModuleResolver {
@@ -146,6 +150,7 @@ impl ModuleResolver {
             loaded_modules: IndexMap::new(),
             loading: HashSet::new(),
             root_dir,
+            tolerant_parse: false,
         }
     }
 
@@ -180,6 +185,41 @@ impl ModuleResolver {
             if traits_path.exists() {
                 let _ = self.load_module(&traits_path);
             }
+
+            // Check for skalp/arithmetic/ops.sk (contains impl Add/Sub/Mul for bit)
+            // These route arithmetic operators through stdlib entities with barrier
+            // annotations for NCL/sync context-agnostic behavior.
+            let arith_path = search_path.join("skalp/arithmetic/ops.sk");
+            if arith_path.exists() {
+                eprintln!("[PRELOAD_DEBUG] Loading arithmetic ops from: {:?}", arith_path);
+                match self.load_module(&arith_path) {
+                    Ok(_) => {
+                        eprintln!("[PRELOAD_DEBUG] Loaded ops.sk successfully");
+                    }
+                    Err(e) => {
+                        eprintln!("[PRELOAD_DEBUG] FAILED to load ops.sk: {:?}", e);
+                    }
+                }
+            } else {
+                eprintln!("[PRELOAD_DEBUG] ops.sk not found at: {:?}", arith_path);
+            }
+
+            // Load stdlib component entities needed by arithmetic trait impls.
+            // Use tolerant parsing: some component files have secondary entities using
+            // syntax the parser doesn't yet support ($signed, Array<>), but the primary
+            // entities we need (std_adder, std_multiplier) parse correctly.
+            self.tolerant_parse = true;
+            for component in &["adder", "multiplier"] {
+                let comp_path = search_path.join(format!("components/{}.sk", component));
+                eprintln!("[PRELOAD_DEBUG] Looking for component {} at: {:?} (exists={})", component, comp_path, comp_path.exists());
+                if comp_path.exists() {
+                    match self.load_module(&comp_path) {
+                        Ok(_) => eprintln!("[PRELOAD_DEBUG] Loaded {}.sk successfully", component),
+                        Err(e) => eprintln!("[PRELOAD_DEBUG] FAILED to load {}.sk: {:?}", component, e),
+                    }
+                }
+            }
+            self.tolerant_parse = false;
         }
         Ok(())
     }
@@ -318,15 +358,26 @@ impl ModuleResolver {
         let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
 
         if !parse_errors.is_empty() {
-            let error_msg = format!(
-                "Parsing failed with {} errors: {}",
-                parse_errors.len(),
-                parse_errors
-                    .first()
-                    .map(|e| &e.message)
-                    .unwrap_or(&"unknown error".to_string())
-            );
-            bail!(error_msg);
+            // For stdlib component files, allow partial parsing — the entities that
+            // parsed successfully are still usable even if secondary entities have
+            // syntax the parser doesn't yet support (e.g., $signed, Array<>).
+            if self.tolerant_parse {
+                trace!(
+                    "[MODULE_RESOLVER] Tolerant mode: ignoring {} parse errors in {:?}",
+                    parse_errors.len(),
+                    path
+                );
+            } else {
+                let error_msg = format!(
+                    "Parsing failed with {} errors: {}",
+                    parse_errors.len(),
+                    parse_errors
+                        .first()
+                        .map(|e| &e.message)
+                        .unwrap_or(&"unknown error".to_string())
+                );
+                bail!(error_msg);
+            }
         }
 
         // Build HIR

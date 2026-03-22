@@ -5,6 +5,10 @@
 //   - async parent: NCL dual-rail with completion detection
 //   - sync parent:  combinational logic (maps to CARRY4/CCU2 hard chains)
 //   - clocked parent with barrier: pipeline register at barrier point
+//
+// Internal '+' uses #[impl_style::primitive] to avoid recursive trait resolution.
+// User code that calls std_adder goes through the trait; std_adder itself
+// maps directly to hardware carry chains.
 
 entity std_adder<const WIDTH: usize> {
     in a: bit<WIDTH>;
@@ -18,6 +22,8 @@ entity std_adder<const WIDTH: usize> {
 impl std_adder {
     signal extended_sum: bit<WIDTH+1>;
 
+    // #[impl_style::primitive] — direct carry chain, no stdlib recursion
+    #[impl_style::primitive]
     extended_sum = {1'b0, a} + {1'b0, b} + carry_in;
 
     sum = extended_sum[WIDTH-1:0];
@@ -43,11 +49,12 @@ entity std_adder_wide<const WIDTH: usize> {
 impl std_adder_wide {
     const HALF: usize = WIDTH / 2;
 
-    // Lower half
+    // Lower half — primitive add, direct carry chain
     signal low_sum: bit<HALF>;
     signal low_carry: bit;
     {
         signal low_ext: bit<HALF+1>;
+        #[impl_style::primitive]
         low_ext = {1'b0, a[HALF-1:0]} + {1'b0, b[HALF-1:0]} + carry_in;
         low_sum = low_ext[HALF-1:0];
         low_carry = low_ext[HALF];
@@ -60,6 +67,7 @@ impl std_adder_wide {
     signal high_carry: bit;
     {
         signal high_ext: bit<WIDTH-HALF+1>;
+        #[impl_style::primitive]
         high_ext = {1'b0, a[WIDTH-1:HALF]} + {1'b0, b[WIDTH-1:HALF]} + low_carry;
         high_sum = high_ext[WIDTH-HALF-1:0];
         high_carry = high_ext[WIDTH-HALF];

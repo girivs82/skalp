@@ -1,0 +1,12 @@
+// Test: bit<N> multiplication through stdlib trait resolution
+// a * b on bit[8] should resolve through impl Mul for bit → std_multiplier
+
+async entity TestBitMul {
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[16]
+}
+
+impl TestBitMul {
+    result = a * b
+}

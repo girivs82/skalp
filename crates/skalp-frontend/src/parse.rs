@@ -511,6 +511,15 @@ impl<'a> ParseState<'a> {
                     // Treat as identifier in assignment context
                     self.parse_assignment_or_statement();
                 }
+                // Anonymous scope blocks: { signal x: ...; x = ...; }
+                // Used in stdlib components to group related logic (e.g., adder halves)
+                Some(SyntaxKind::LBrace) => {
+                    self.start_node(SyntaxKind::BlockStmt);
+                    self.bump(); // consume '{'
+                    self.parse_impl_body(); // reuse impl body parsing for block contents
+                    self.expect(SyntaxKind::RBrace);
+                    self.finish_node();
+                }
                 Some(SyntaxKind::RBrace) => break,
                 _ => {
                     self.error_and_bump("expected implementation item");
@@ -1763,6 +1772,26 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
+                Some(SyntaxKind::BarrierKw) => self.parse_barrier_stmt(),
+                Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
+                Some(SyntaxKind::AssumeKw) => self.parse_assume_statement(),
+                Some(SyntaxKind::CoverKw) => self.parse_cover_statement(),
+                // Anonymous scope blocks inside generate body
+                Some(SyntaxKind::LBrace) => {
+                    self.start_node(SyntaxKind::BlockStmt);
+                    self.bump(); // consume '{'
+                    self.parse_generate_body(); // reuse for block contents
+                    self.expect(SyntaxKind::RBrace);
+                    self.finish_node();
+                }
+                // Port direction keywords used as identifiers in assignment context
+                Some(SyntaxKind::InKw)
+                | Some(SyntaxKind::InputKw)
+                | Some(SyntaxKind::OutKw)
+                | Some(SyntaxKind::OutputKw)
+                | Some(SyntaxKind::InoutKw) => {
+                    self.parse_assignment_or_statement();
+                }
                 Some(SyntaxKind::Ident) => self.parse_assignment_or_statement(),
                 _ => {
                     self.error("unexpected token in generate block");
@@ -2117,6 +2146,11 @@ impl<'a> ParseState<'a> {
         // Optional '!' for macro-style (assert! vs assert)
         if self.at(SyntaxKind::Bang) {
             self.bump(); // consume '!'
+        }
+
+        // Optional 'property' keyword: assert property (cond)
+        if self.at(SyntaxKind::PropertyKw) {
+            self.bump(); // consume 'property'
         }
 
         // Expect opening parenthesis
@@ -4405,7 +4439,8 @@ impl<'a> ParseState<'a> {
 
         // Check for binary operators (+, -, *, /, %)
         // But stop at > which closes the type argument list
-        if matches!(
+        // Handle chained operations: WIDTH-HALF+1 → (WIDTH-HALF)+1
+        while matches!(
             self.current_kind(),
             Some(SyntaxKind::Plus)
                 | Some(SyntaxKind::Minus)
@@ -4413,7 +4448,7 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::Slash)
                 | Some(SyntaxKind::Percent)
         ) {
-            // Wrap everything in a BinaryExpr node starting from the checkpoint
+            // Wrap everything so far in a BinaryExpr node starting from the checkpoint
             self.builder
                 .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // operator
@@ -5033,6 +5068,28 @@ impl<'a> ParseState<'a> {
                         );
                         self.expect(SyntaxKind::RParen);
                         self.finish_node();
+
+                        // Handle Verilog-style sized literal cast: (W2)'b0, (N)'hFF
+                        // After a parenthesized expression, a Lifetime token starting with
+                        // b/h/d followed by hex digits is a sized literal specifier.
+                        if let Some(SyntaxKind::Lifetime) = self.current_kind() {
+                            if let Some(text) = self.current_text() {
+                                // text is the full source including apostrophe, e.g. "'b0"
+                                let after_apos = text.strip_prefix('\'').unwrap_or(text);
+                                let first_char = after_apos.chars().next().unwrap_or(' ');
+                                if matches!(first_char, 'b' | 'h' | 'd') {
+                                    // This is (expr)'b0 / (expr)'hFF / (expr)'d15
+                                    // Wrap in SizedCastExpr
+                                    self.builder.start_node_at(
+                                        checkpoint,
+                                        rowan::SyntaxKind(SyntaxKind::SizedCastExpr as u16),
+                                    );
+                                    self.bump(); // consume the Lifetime token (contains base+digits)
+                                    self.builder.finish_node();
+                                    return; // SizedCastExpr is complete
+                                }
+                            }
+                        }
 
                         // Handle postfix operations on parenthesized expressions
                         // This allows (expr).method(), (expr)[index], (expr)(args), (expr) as Type

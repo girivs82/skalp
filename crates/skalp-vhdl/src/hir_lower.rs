@@ -3703,6 +3703,7 @@ impl VhdlHirBuilder {
                         op: inner_op,
                         right: Box::new(right),
                         is_trait_op: false,
+                        impl_style: skalp_frontend::hir::ImplStyle::default(),
                     })),
                 }));
             }
@@ -3733,6 +3734,7 @@ impl VhdlHirBuilder {
             op,
             right: Box::new(right),
             is_trait_op: false,
+            impl_style: skalp_frontend::hir::ImplStyle::default(),
         }))
     }
 
@@ -4124,6 +4126,7 @@ impl VhdlHirBuilder {
                                             HirLiteral::Integer(1),
                                         )),
                                         is_trait_op: false,
+                                        impl_style: skalp_frontend::hir::ImplStyle::default(),
                                     }),
                                     // low/right = 0
                                     "low" | "right" => {

@@ -1041,6 +1041,7 @@ fn remap_expr_ports(
                 left: Box::new(left),
                 right: Box::new(right),
                 is_trait_op: bin.is_trait_op,
+                impl_style: bin.impl_style,
             })
         }
         hir::HirExpression::Unary(unary) => {
@@ -1338,6 +1339,7 @@ fn rewrite_generic_params_to_constants(
                 left: Box::new(left),
                 right: Box::new(right),
                 is_trait_op: bin.is_trait_op,
+                impl_style: bin.impl_style,
             })
         }
         hir::HirExpression::Unary(unary) => {

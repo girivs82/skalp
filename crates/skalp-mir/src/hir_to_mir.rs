@@ -93,6 +93,9 @@ pub struct HirToMir<'hir> {
     next_match_id: u32,
     /// Entity to module ID mapping
     entity_map: IndexMap<hir::EntityId, ModuleId>,
+    /// Entity name to module ID mapping (for cross-module entity lookup where entity IDs
+    /// from different HIR files may collide)
+    entity_name_to_module: IndexMap<String, ModuleId>,
     /// Function to module ID mapping (for module instantiation instead of inlining)
     /// Maps function name -> ModuleId
     function_map: IndexMap<String, ModuleId>,
@@ -348,6 +351,7 @@ impl<'hir> HirToMir<'hir> {
             next_clock_domain_id: 0,
             next_match_id: 0, // BUG FIX #6
             entity_map: IndexMap::new(),
+            entity_name_to_module: IndexMap::new(),
             function_map: IndexMap::new(),
             port_map: IndexMap::new(),
             flattened_ports: IndexMap::new(),
@@ -447,6 +451,7 @@ impl<'hir> HirToMir<'hir> {
 
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
+            self.entity_name_to_module.insert(entity.name.clone(), module_id);
             if entity.name.contains("FpAdd")
                 || entity.name == "KarythraCLEAsync"
                 || entity.name == "FpSub"
@@ -811,6 +816,94 @@ impl<'hir> HirToMir<'hir> {
             // so the second pass can restore them when processing impl blocks
             self.save_entity_scope_to_cache(entity.id);
         }
+
+        // First pass (continued): process module HIR entities (stdlib components)
+        // This enables trait method bodies (e.g., impl Mul for bit → std_multiplier)
+        // to instantiate entities from loaded modules.
+        // Collect entities first to avoid borrow conflict with self.
+        let module_entities: Vec<_> = self
+            .module_hirs
+            .values()
+            .flat_map(|h| h.entities.iter().cloned())
+            .collect();
+        for entity in &module_entities {
+                // Skip if entity with same name already has a module
+                // (entity IDs from different HIR files can collide, so we check by name too)
+                if self.entity_name_to_module.contains_key(&entity.name) {
+                    continue;
+                }
+
+                self.clear_entity_scope_maps();
+
+                let module_id = self.next_module_id();
+                // Only insert into entity_map if the ID doesn't collide with a main HIR entity
+                if !self.entity_map.contains_key(&entity.id) {
+                    self.entity_map.insert(entity.id, module_id);
+                }
+                self.entity_name_to_module.insert(entity.name.clone(), module_id);
+                trace!(
+                    "[HIR_TO_MIR] Module HIR entity '{}' ({:?}) -> {:?}",
+                    entity.name, entity.id, module_id
+                );
+
+                let mut module = Module::new(module_id, entity.name.clone());
+
+                if entity.is_async {
+                    module.is_async = true;
+                }
+
+                // Convert generic parameters
+                for hir_generic in &entity.generics {
+                    let parameter = GenericParameter {
+                        name: hir_generic.name.clone(),
+                        param_type: self.convert_generic_type(&hir_generic.param_type),
+                        default: hir_generic
+                            .default_value
+                            .as_ref()
+                            .and_then(|expr| self.convert_literal_expr(expr)),
+                    };
+                    module.parameters.push(parameter);
+                }
+
+                // Convert ports
+                self.current_entity_id = Some(entity.id);
+                for hir_port in &entity.ports {
+                    let port_type = self.convert_type(&hir_port.port_type);
+                    let direction = self.convert_port_direction(&hir_port.direction);
+
+                    let (flattened_ports, flattened_fields) = self.flatten_port(
+                        &hir_port.name,
+                        &port_type,
+                        direction,
+                        hir_port.physical_constraints.clone(),
+                        None,
+                    );
+
+                    if !flattened_fields.is_empty() {
+                        self.flattened_ports
+                            .insert(hir_port.id, flattened_fields.clone());
+                    }
+                    for field in &flattened_fields {
+                        self.port_to_hir
+                            .insert(PortId(field.id), (hir_port.id, field.field_path.clone()));
+                    }
+                    if let Some(first_port) = flattened_ports.first() {
+                        self.port_map.insert(hir_port.id, first_port.id);
+                    }
+                    self.port_owner.insert(hir_port.id, entity.id);
+                    for port in flattened_ports {
+                        module.ports.push(port);
+                    }
+                }
+
+                mir.add_module(module);
+                self.save_entity_scope_to_cache(entity.id);
+        }
+
+        // Note: Module HIR impl blocks are NOT processed here. The entity port declarations
+        // (from the first pass above) are sufficient for entity instantiation during trait
+        // method inlining. The actual entity implementations are compiled on-demand during
+        // hierarchical synthesis (lower_mir_hierarchical_for_optimize_first).
 
         // Second pass: add implementations
         for impl_block in &hir.implementations {
@@ -2196,6 +2289,8 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
+                    eprintln!("[ENTITY_INST_DEBUG] StructLiteral detected: type='{}', {} generic_args, {} fields",
+                        struct_lit.type_name, struct_lit.generic_args.len(), struct_lit.fields.len());
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
@@ -2266,18 +2361,32 @@ impl<'hir> HirToMir<'hir> {
                         };
 
                         // BUG #207 FIX: Look for specialized entity first, then fall back to generic
+                        // Also search module HIRs for stdlib entities (e.g., std_multiplier, FpMul)
                         let entity = hir
                             .entities
                             .iter()
                             .find(|e| e.name == target_entity_name)
                             .or_else(|| {
-                                // Fall back to generic entity name if specialized not found
                                 hir.entities.iter().find(|e| e.name == resolved_type_name)
                             });
+                        // If not found in main HIR, search module HIRs (clone to avoid borrow conflict)
+                        let module_hir_entity: Option<hir::HirEntity>;
+                        let entity = if entity.is_some() {
+                            entity
+                        } else {
+                            module_hir_entity = self.module_hirs.values()
+                                .flat_map(|h| h.entities.iter())
+                                .find(|e| e.name == target_entity_name || e.name == resolved_type_name)
+                                .cloned();
+                            module_hir_entity.as_ref()
+                        };
 
                         if let Some(entity) = entity {
-                            // Get the module ID for this entity
-                            if let Some(&module_id) = self.entity_map.get(&entity.id) {
+                            // Get the module ID for this entity.
+                            // Prefer name-based lookup (handles cross-module ID collisions).
+                            let module_id_opt = self.entity_name_to_module.get(&entity.name).copied()
+                                .or_else(|| self.entity_map.get(&entity.id).copied());
+                            if let Some(module_id) = module_id_opt {
                                 // Create module instance
                                 // BUG #197/198/199 FIX: Include unique ID in entity instance name
                                 // to prevent name collisions between entity instances.
@@ -5854,6 +5963,10 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::GenericParam(name) => {
+                // Check const_evaluator bindings first (e.g., N bound during trait inlining)
+                if let Some(val) = self.const_evaluator.get_binding(name) {
+                    return val.as_int();
+                }
                 // Look up in current entity's generics (monomorphized value)
                 if let Some(hir) = self.hir {
                     if let Some(entity_id) = self.current_entity_id {
@@ -5934,6 +6047,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin.op.clone(),
                     right: Box::new(right),
                     is_trait_op: bin.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 })
             }
             hir::HirExpression::Unary(un) => hir::HirExpression::Unary(hir::HirUnaryExpr {
@@ -7839,6 +7953,16 @@ impl<'hir> HirToMir<'hir> {
                     ));
                 }
 
+                // Check const_evaluator bindings (e.g., N bound during trait inlining)
+                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                    if let Some(n) = val.as_nat() {
+                        return Some(Expression::new(
+                            ExpressionKind::Literal(Value::Integer(n as i64)),
+                            ty,
+                        ));
+                    }
+                }
+
                 // Look up the generic parameter value in the current context
                 // Generic parameters are treated as constants after monomorphization
                 if let Some(hir) = self.hir {
@@ -7908,8 +8032,15 @@ impl<'hir> HirToMir<'hir> {
                 // Try to resolve the operator through trait implementations first.
                 // If a trait impl exists (e.g., `impl Add for myint`), inline the trait method
                 // body instead of using a primitive binary operation.
-                if let Some((type_name, trait_name, method_name)) =
-                    self.try_resolve_trait_operator(&binary.op, &binary.left)
+                //
+                // Skip trait resolution when impl_style is Primitive — this is used by
+                // stdlib entity internals (e.g., std_adder) to avoid recursive resolution,
+                // and by users who want direct hardware mapping: #[impl_style::primitive]
+                eprintln!("[TRAIT_RESOLVE_DEBUG] Binary op={:?}, impl_style={:?}", binary.op, binary.impl_style);
+                if binary.impl_style != hir::ImplStyle::Primitive {
+                let resolve_result = self.try_resolve_trait_operator(&binary.op, &binary.left);
+                eprintln!("[TRAIT_RESOLVE_DEBUG] try_resolve_trait_operator result: {:?}", resolve_result);
+                if let Some((type_name, trait_name, method_name)) = resolve_result
                 {
                     trace!(
                         "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
@@ -7951,6 +8082,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Try to inline the trait method body
+                    eprintln!("[TRAIT_RESOLVE_DEBUG] Attempting inline_trait_method for {}::{}({})", trait_name, method_name, type_name);
                     if let Some(result) = self.inline_trait_method(
                         &type_name,
                         trait_name,
@@ -7964,8 +8096,10 @@ impl<'hir> HirToMir<'hir> {
                             method_name,
                             type_name
                         );
+                        eprintln!("[TRAIT_RESOLVE_DEBUG] INLINING SUCCEEDED for {}::{}", trait_name, method_name);
                         return Some(result);
                     }
+                    eprintln!("[TRAIT_RESOLVE_DEBUG] INLINING FAILED for {}::{}", trait_name, method_name);
 
                     // If inlining fails, fall back to primitive binary operation.
                     // The SIR converter will detect float signal types and use
@@ -7985,6 +8119,7 @@ impl<'hir> HirToMir<'hir> {
                         ty,
                     ));
                 }
+                } // end if impl_style != Primitive
 
                 // Fall back to primitive binary operation
                 let left = match self.convert_expression(&binary.left, depth + 1) {
@@ -11550,6 +11685,7 @@ impl<'hir> HirToMir<'hir> {
                 left: Box::new(self.substitute_variables(&bin.left, var_exprs, _let_bindings)),
                 right: Box::new(self.substitute_variables(&bin.right, var_exprs, _let_bindings)),
                 is_trait_op: bin.is_trait_op,
+                impl_style: hir::ImplStyle::default(),
             }),
             hir::HirExpression::Unary(un) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: un.op.clone(),
@@ -12255,6 +12391,7 @@ impl<'hir> HirToMir<'hir> {
                     op: binary.op.clone(),
                     right,
                     is_trait_op: binary.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 }))
             }
 
@@ -12417,6 +12554,7 @@ impl<'hir> HirToMir<'hir> {
                     op: binary.op.clone(),
                     right,
                     is_trait_op: binary.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 }))
             }
 
@@ -13230,6 +13368,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin.op.clone(),
                     right: Box::new(new_right),
                     is_trait_op: bin.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 })
             }
 
@@ -14558,6 +14697,7 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
                     is_trait_op: bin_expr.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 }))
             }
 
@@ -15092,6 +15232,7 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
                     is_trait_op: bin_expr.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 })
             }
 
@@ -15465,6 +15606,7 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
                     is_trait_op: bin_expr.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 })
             }
 
@@ -15855,6 +15997,7 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
                     is_trait_op: bin_expr.is_trait_op,
+                    impl_style: hir::ImplStyle::default(),
                 })
             }
 
@@ -17168,8 +17311,19 @@ impl<'hir> HirToMir<'hir> {
         &'a self,
         trait_name: &str,
     ) -> Option<&'a hir::HirTraitDefinition> {
-        let hir = self.hir.as_ref()?;
-        hir.trait_definitions.iter().find(|t| t.name == trait_name)
+        // Search main HIR first
+        if let Some(hir) = self.hir.as_ref() {
+            if let Some(def) = hir.trait_definitions.iter().find(|t| t.name == trait_name) {
+                return Some(def);
+            }
+        }
+        // Search module HIRs (stdlib trait definitions like Add, Mul, etc.)
+        for (_path, module_hir) in &self.module_hirs {
+            if let Some(def) = module_hir.trait_definitions.iter().find(|t| t.name == trait_name) {
+                return Some(def);
+            }
+        }
+        None
     }
 
     /// Find a trait method definition (parameters and return type) by trait and method name
@@ -17282,6 +17436,15 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
+        // Extract generic binding info before releasing the borrow on self
+        let impl_generic_binding: Option<(String, usize)> = if !trait_impl.generics.is_empty() {
+            if let Some(width) = Self::extract_bit_width(type_name) {
+                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) = &trait_impl.target {
+                    Some((param_name.clone(), width))
+                } else { None }
+            } else { None }
+        } else { None };
+
         trace!(
             "[TRAIT_INLINE] Found {} parameters and {} body statements",
             params.len(),
@@ -17293,88 +17456,152 @@ impl<'hir> HirToMir<'hir> {
         let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
         if !params.is_empty() {
             param_map.insert(params[0].name.clone(), left_expr);
-            trace!(
-                "[BUG #200 PARAM_MAP] param '{}' = {:?}",
-                params[0].name,
-                std::mem::discriminant(left_expr)
-            );
         }
         if params.len() >= 2 {
             param_map.insert(params[1].name.clone(), right_expr);
-            trace!(
-                "[BUG #200 PARAM_MAP] param '{}' = {:?}",
-                params[1].name,
-                std::mem::discriminant(right_expr)
-            );
+        }
+
+        // Bind impl generics for the concrete type.
+        // e.g., `impl<const N: usize> Mul for bit<N>` with type_name="bit[8]" → bind N=8
+        let mut bound_generics: Vec<String> = Vec::new();
+        if let Some((param_name, width)) = impl_generic_binding {
+            self.const_evaluator.bind(param_name.clone(), ConstValue::Nat(width));
+            trace!("[TRAIT_INLINE] Bound generic {}={} for type '{}'", param_name, width, type_name);
+            bound_generics.push(param_name);
+        }
+        // Fallback: also bind WIDTH for backward compatibility with `impl Mul for bit`
+        let mut bound_width = false;
+        if bound_generics.is_empty() {
+            if let Some(width) = Self::extract_bit_width(type_name) {
+                self.const_evaluator.bind("WIDTH".to_string(), ConstValue::Nat(width));
+                bound_width = true;
+                trace!("[TRAIT_INLINE] Bound WIDTH={} for type '{}'", width, type_name);
+            }
         }
 
         // Build var_id -> name mapping for let bindings in the body
         let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
-        // Convert body to expression (like inline_function_call does)
-        let body_expr = self.convert_body_to_expression(&body);
-        if body_expr.is_none() {
-            trace!("[TRAIT_INLINE] FAILED: convert_body_to_expression returned None");
-            return None;
+        // Process body statements directly, handling side effects (entity instantiation,
+        // signal declarations) that the old convert_body_to_expression approach lost.
+        // This fixes trait method bodies that instantiate entities (e.g., FpMul, std_multiplier).
+        let mut result: Option<Expression> = None;
+
+        for (i, stmt) in body.iter().enumerate() {
+            let is_last = i == body.len() - 1;
+
+            match stmt {
+                hir::HirStatement::Let(let_stmt) => {
+                    // Substitute parameters in the value expression
+                    let substituted_value = self.substitute_expression_with_var_map(
+                        &let_stmt.value,
+                        &param_map,
+                        &var_id_to_name,
+                    );
+                    let substituted_value =
+                        substituted_value.unwrap_or_else(|| let_stmt.value.clone());
+
+                    // Create a substituted Let statement
+                    let substituted_let = hir::HirLetStatement {
+                        id: let_stmt.id,
+                        name: let_stmt.name.clone(),
+                        mutable: let_stmt.mutable,
+                        var_type: let_stmt.var_type.clone(),
+                        value: substituted_value,
+                    };
+                    let substituted_stmt = hir::HirStatement::Let(substituted_let);
+
+                    // Process the statement (handles entity instantiation, signal declarations)
+                    let _ = self.convert_statement(&substituted_stmt);
+                }
+                hir::HirStatement::Expression(expr) => {
+                    // Substitute parameters in the expression
+                    let substituted = self.substitute_expression_with_var_map(
+                        expr,
+                        &param_map,
+                        &var_id_to_name,
+                    );
+                    if let Some(subst_expr) = substituted {
+                        if is_last {
+                            // Last expression = return value
+                            result = if let Some(ctx) = module_ctx {
+                                self.convert_hir_expr_for_module(&subst_expr, ctx, depth + 1)
+                            } else {
+                                self.convert_expression(&subst_expr, 0)
+                            };
+                        }
+                    }
+                }
+                hir::HirStatement::Return(Some(expr)) => {
+                    let substituted = self.substitute_expression_with_var_map(
+                        expr,
+                        &param_map,
+                        &var_id_to_name,
+                    );
+                    if let Some(subst_expr) = substituted {
+                        result = if let Some(ctx) = module_ctx {
+                            self.convert_hir_expr_for_module(&subst_expr, ctx, depth + 1)
+                        } else {
+                            self.convert_expression(&subst_expr, 0)
+                        };
+                    }
+                }
+                hir::HirStatement::Assignment(assign) => {
+                    // Substitute parameters in the RHS
+                    let substituted_rhs = self.substitute_expression_with_var_map(
+                        &assign.rhs,
+                        &param_map,
+                        &var_id_to_name,
+                    );
+                    if let Some(subst_rhs) = substituted_rhs {
+                        let substituted_assign = hir::HirAssignment {
+                            id: assign.id,
+                            comments: assign.comments.clone(),
+                            lhs: assign.lhs.clone(),
+                            assignment_type: assign.assignment_type.clone(),
+                            rhs: subst_rhs,
+                        };
+                        let _ = self.convert_statement(&hir::HirStatement::Assignment(
+                            substituted_assign,
+                        ));
+                    }
+                }
+                hir::HirStatement::Barrier(barrier) => {
+                    // Barriers in trait method bodies should be propagated
+                    let _ = self.convert_statement(&hir::HirStatement::Barrier(barrier.clone()));
+                }
+                _ => {
+                    // Other statement types: process as-is
+                    let _ = self.convert_statement(stmt);
+                }
+            }
         }
-        let body_expr = body_expr.unwrap();
 
-        trace!(
-            "[TRAIT_INLINE] Body expression type: {:?}",
-            std::mem::discriminant(&body_expr)
-        );
-
-        // Substitute parameters in the body expression
-        let substituted =
-            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name);
-        if substituted.is_none() {
-            trace!("[TRAIT_INLINE] FAILED: substitute_expression_with_var_map returned None");
-            return None;
+        // Unbind generics we bound
+        for name in &bound_generics {
+            self.const_evaluator.unbind(name);
         }
-        let substituted = substituted.unwrap();
-
-        trace!(
-            "[TRAIT_INLINE] Substituted expression type: {:?}",
-            std::mem::discriminant(&substituted)
-        );
-
-        // BUG #196/BUG #197 FIX: Keep match_arm_prefix for entity instance naming
-        // When a trait method is inlined from within a match arm, entity instances created
-        // by the trait method (like FpAdd) MUST get the match_arm_prefix to have unique names.
-        // Different match arms may all call the same trait method, creating entity instances
-        // with the same name (e.g., "__adder_result"), but with different connections.
-        //
-        // Note: Local variables inside the trait method might get the prefix too, but that's
-        // acceptable because they're scoped to the trait method's context anyway.
-        trace!(
-            "[BUG #196/197] Trait inline '{}::{}': keeping match_arm_prefix={:?}",
-            trait_name,
-            method_name,
-            self.match_arm_prefix
-        );
-
-        // BUG #209 FIX: Use convert_hir_expr_for_module when module context is available.
-        // This ensures entity instances (FpAdd, FpMul, FpDiv) are properly connected
-        // to their outputs when inlined from within module context (e.g., match arms).
-        // Without this, entity instances are created but their outputs are constant 0.
-        let result = if let Some(ctx) = module_ctx {
-            trace!(
-                "[BUG #209 FIX] Using convert_hir_expr_for_module for trait inline '{}::{}'",
-                trait_name,
-                method_name
-            );
-            self.convert_hir_expr_for_module(&substituted, ctx, depth + 1)
-        } else {
-            // No module context - use regular convert_expression
-            // The Block expression handler will process let statements and entity instantiations
-            self.convert_expression(&substituted, 0)
-        };
+        if bound_width {
+            self.const_evaluator.unbind("WIDTH");
+        }
 
         if result.is_none() {
-            trace!("[TRAIT_INLINE] FAILED: convert_expression returned None");
+            trace!(
+                "[TRAIT_INLINE] FAILED: no result expression from {} body statements",
+                body.len()
+            );
         }
         result
+    }
+
+    /// Extract bit width from a type name like "bit[8]" → Some(8)
+    fn extract_bit_width(type_name: &str) -> Option<usize> {
+        if type_name.starts_with("bit[") && type_name.ends_with(']') {
+            type_name[4..type_name.len()-1].parse().ok()
+        } else {
+            None
+        }
     }
 
     /// Inline a unary trait method call (e.g., Sqrt::sqrt(x))
@@ -17438,6 +17665,15 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
+        // Extract generic binding info before releasing the borrow on self
+        let impl_generic_binding: Option<(String, usize)> = if !trait_impl.generics.is_empty() {
+            if let Some(width) = Self::extract_bit_width(type_name) {
+                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) = &trait_impl.target {
+                    Some((param_name.clone(), width))
+                } else { None }
+            } else { None }
+        } else { None };
+
         trace!(
             "[TRAIT_INLINE_UNARY] Found {} parameters and {} body statements",
             params.len(),
@@ -17449,6 +17685,13 @@ impl<'hir> HirToMir<'hir> {
         let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
         if !params.is_empty() {
             param_map.insert(params[0].name.clone(), arg_expr);
+        }
+
+        // Bind impl generics for the concrete type
+        let mut bound_generics: Vec<String> = Vec::new();
+        if let Some((param_name, width)) = impl_generic_binding {
+            self.const_evaluator.bind(param_name.clone(), ConstValue::Nat(width));
+            bound_generics.push(param_name);
         }
 
         // Build var_id -> name mapping for let bindings in the body
@@ -17494,6 +17737,11 @@ impl<'hir> HirToMir<'hir> {
         // Convert the substituted expression to MIR
         let result = self.convert_expression(&substituted, 0);
 
+        // Unbind generics we bound
+        for name in &bound_generics {
+            self.const_evaluator.unbind(name);
+        }
+
         if result.is_none() {
             trace!("[TRAIT_INLINE_UNARY] FAILED: convert_expression returned None");
         }
@@ -17537,7 +17785,22 @@ impl<'hir> HirToMir<'hir> {
                         hir::HirType::Float32 => type_name == "fp32",
                         hir::HirType::Float64 => type_name == "fp64",
                         hir::HirType::Float16 => type_name == "fp16",
-                        hir::HirType::Bit(width) => type_name == format!("bit[{}]", width),
+                        hir::HirType::Bit(width) => {
+                            // Bit(1) from `impl Trait for bit` (no explicit width)
+                            // acts as a wildcard matching any bit[N] query.
+                            // Explicit widths (e.g., `impl Trait for bit[8]`) match exactly.
+                            if *width == 1 && type_name.starts_with("bit[") {
+                                true
+                            } else {
+                                type_name == format!("bit[{}]", width)
+                            }
+                        }
+                        hir::HirType::BitParam(_) => {
+                            // BitParam from `impl<const N: usize> Mul for bit<N>`
+                            // matches any bit[X] query — the generic N will be bound
+                            // to X during trait method inlining.
+                            type_name.starts_with("bit[")
+                        }
                         hir::HirType::Bool => type_name == "bool",
                         hir::HirType::Int(width) => type_name == format!("int[{}]", width),
                         _ => false,
@@ -17859,10 +18122,22 @@ impl<'hir> HirToMir<'hir> {
                 trace!("[TRAIT_OP_DEBUG] Float64 -> mapping to 'fp64' for trait lookup");
                 "fp64".to_string()
             }
+            // Map built-in bit types to "bit[N]" for stdlib trait lookup.
+            // This allows resolution of impl Mul for bit[N], impl Add for bit[N], etc.
+            // The trait impl's body (in stdlib) instantiates the appropriate entity
+            // (e.g., std_multiplier<N>) with barrier annotations for NCL/sync support.
+            hir::HirType::Bit(width) => {
+                trace!("[TRAIT_OP_DEBUG] Bit({}) -> mapping to 'bit[{}]' for trait lookup", width, width);
+                format!("bit[{}]", width)
+            }
+            hir::HirType::BitParam(param) => {
+                trace!("[TRAIT_OP_DEBUG] BitParam({}) -> mapping to 'bit[{}]' for trait lookup", param, param);
+                format!("bit[{}]", param)
+            }
             // Other built-in types use primitive operators
             _ => {
                 trace!(
-                    "[TRAIT_OP_DEBUG] Not a Custom/Float type, skipping trait resolution for {:?}",
+                    "[TRAIT_OP_DEBUG] Not a Custom/Float/Bit type, skipping trait resolution for {:?}",
                     left_type
                 );
                 return None;

@@ -1,0 +1,89 @@
+// Arithmetic Operator Trait Implementations for bit types
+//
+// These trait impls route operators (+, -, *) through stdlib entities,
+// which contain barrier annotations for NCL/sync context-agnostic behavior.
+//
+// When `a * b` is written in user code:
+//   1. The compiler resolves `*` to `impl Mul for bit[N]`
+//   2. This impl instantiates `std_multiplier<N>` (from components/multiplier.sk)
+//   3. The entity body has barrier annotations between stages
+//   4. In async context: barriers become NCL completion detection points
+//   5. In sync context: barriers become pipeline registers (or no-ops)
+//
+// Stdlib entity bodies use #[impl_style::primitive] internally to avoid
+// recursive trait resolution (bootstrapping).
+//
+// For users who want direct hardware mapping without barriers:
+//   #[impl_style::primitive]
+//   let sum = a + b;  // bypasses stdlib, maps directly to carry chain
+
+// Entity declarations for stdlib components referenced by these trait impls.
+// std_adder and std_multiplier are defined in components/adder.sk and
+// components/multiplier.sk respectively, and are resolved at instantiation time.
+
+// ============================================================================
+// Addition: bit[N] + bit[N]
+// ============================================================================
+
+/// Addition for bit types routes through std_adder entity.
+/// The adder maps to CARRY4/CCU2 hard chains with optional barrier
+/// for wide operands (std_adder_wide splits into halves).
+impl<const N: usize> Add for bit<N> {
+    fn add(a: Self, b: Self) -> Self {
+        signal result: Self;
+        signal carry: bit;
+        signal overflow: bit;
+        let adder = std_adder<N> {
+            a: a,
+            b: b,
+            carry_in: 0,
+            sum: result,
+            carry_out: carry,
+            overflow: overflow,
+        };
+        result
+    }
+}
+
+// ============================================================================
+// Subtraction: bit[N] - bit[N]
+// ============================================================================
+
+/// Subtraction for bit types — uses adder with two's complement.
+/// b is inverted and carry_in=1: a + (~b) + 1.
+impl<const N: usize> Sub for bit<N> {
+    fn sub(a: Self, b: Self) -> Self {
+        signal result: Self;
+        signal carry: bit;
+        signal overflow: bit;
+        let subtractor = std_adder<N> {
+            a: a,
+            b: ~b,
+            carry_in: 1,
+            sum: result,
+            carry_out: carry,
+            overflow: overflow,
+        };
+        result
+    }
+}
+
+// ============================================================================
+// Multiplication: bit[N] * bit[N]
+// ============================================================================
+
+/// Multiplication for bit types routes through std_multiplier entity.
+/// The multiplier decomposes into shift-and-add stages with barriers.
+/// In async context: each adder stage has NCL completion detection.
+/// In sync context: each barrier is a pipeline register.
+impl<const N: usize> Mul for bit<N> {
+    fn mul(a: Self, b: Self) -> Self {
+        signal result: bit<N * 2>;
+        let multiplier = std_multiplier<N> {
+            a: a,
+            b: b,
+            product: result,
+        };
+        result
+    }
+}

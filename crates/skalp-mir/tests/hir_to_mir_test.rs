@@ -128,6 +128,7 @@ fn create_simple_entity() -> Hir {
                     op: HirBinaryOp::Add,
                     right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
                     is_trait_op: false,
+                    impl_style: skalp_frontend::hir::ImplStyle::default(),
                 }),
                 assignment_type: HirAssignmentType::NonBlocking,
                 comments: vec![],

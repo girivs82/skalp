@@ -437,7 +437,8 @@ pub enum SyntaxKind {
     MatchExpr,
     CastExpr,
     ConcatExpr,
-    ReplicateExpr, // Verilog-style replication: {N{expr}}
+    ReplicateExpr,  // Verilog-style replication: {N{expr}}
+    SizedCastExpr,  // Verilog-style sized literal with expression width: (W2)'b0, (N)'hFF
     TernaryExpr,
     TupleExpr,
     RangeExpr,

@@ -1691,6 +1691,13 @@ pub struct HirBinaryExpr {
     /// Used by the inlining heuristic to count trait operations as complex calls.
     #[serde(default)]
     pub is_trait_op: bool,
+    /// Implementation style hint from `#[impl_style::primitive]` attribute.
+    /// When `Primitive`, bypasses stdlib trait resolution and maps directly to hardware.
+    /// When `Auto` (default), the compiler decides based on context:
+    ///   - async entity: resolves to stdlib (barriers = NCL completion points)
+    ///   - sync entity: may use stdlib or primitive depending on width/context
+    #[serde(default)]
+    pub impl_style: ImplStyle,
 }
 
 /// Binary operators in HIR
@@ -2113,6 +2120,11 @@ pub enum PipelineStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ImplStyle {
     /// Compiler decides based on context and timing constraints (default)
+    ///
+    /// For arithmetic operators (`+`, `-`, `*`, etc.):
+    ///   - async context: resolves to stdlib entity (barriers = NCL completion points)
+    ///   - sync clocked context: resolves to stdlib entity (barriers = pipeline registers)
+    ///   - sync combinational / small width: uses primitive (direct hardware mapping)
     #[default]
     Auto,
     /// Fully unrolled single-cycle implementation (more area, lower latency)
@@ -2124,6 +2136,11 @@ pub enum ImplStyle {
     /// Multi-cycle iterative implementation (minimal area, higher latency)
     /// E.g., popcount32 generates FSM with counter
     Sequential,
+    /// Direct hardware mapping — bypass stdlib, no barriers.
+    /// Maps directly to carry chains (add/sub), gate-level (mul), etc.
+    /// Used internally by stdlib entities to avoid recursion,
+    /// and by users who need raw single-cycle combinational operators.
+    Primitive,
 }
 
 /// Requirement in HIR
@@ -2439,6 +2456,9 @@ pub struct HirTraitImplementation {
     pub trait_name: String,
     /// Target (entity or type)
     pub target: TraitImplTarget,
+    /// Generic parameters on the impl block (e.g., `impl<const N: usize> Mul for bit<N>`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generics: Vec<HirGeneric>,
     /// Method implementations
     pub method_implementations: Vec<HirTraitMethodImpl>,
     /// Type implementations

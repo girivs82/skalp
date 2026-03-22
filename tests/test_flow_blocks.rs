@@ -150,6 +150,9 @@ mod flow_block_tests {
                     skalp_frontend::hir::HirStatement::Barrier(barrier) => {
                         println!("    Statement {}: Barrier (stage {})", j, barrier.stage_id);
                     }
+                    skalp_frontend::hir::HirStatement::While(_) => {
+                        println!("    Statement {}: While", j);
+                    }
                 }
             }
         }

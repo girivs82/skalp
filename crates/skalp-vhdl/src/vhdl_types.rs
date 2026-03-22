@@ -56,6 +56,7 @@ impl RangeInfo {
                     left: Box::new(high_expr.clone()),
                     right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
                     is_trait_op: false,
+                    impl_style: skalp_frontend::hir::ImplStyle::default(),
                 }));
             }
         }
@@ -71,9 +72,11 @@ impl RangeInfo {
                 left: Box::new(high_expr.clone()),
                 right: Box::new(low),
                 is_trait_op: false,
+                impl_style: skalp_frontend::hir::ImplStyle::default(),
             })),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
             is_trait_op: false,
+            impl_style: skalp_frontend::hir::ImplStyle::default(),
         }))
     }
 }
@@ -136,6 +139,7 @@ pub fn resolve_vhdl_type(
                                 left: Box::new(expr),
                                 right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
                                 is_trait_op: false,
+                                impl_style: skalp_frontend::hir::ImplStyle::default(),
                             })],
                             impl_style: ImplStyle::Auto,
                         });

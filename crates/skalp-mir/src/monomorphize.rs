@@ -258,6 +258,7 @@ impl TypeSubstitution {
                 op: binary.op.clone(),
                 right: Box::new(self.substitute_expression(&binary.right)),
                 is_trait_op: binary.is_trait_op,
+                impl_style: skalp_frontend::hir::ImplStyle::default(),
             }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),
@@ -1397,6 +1398,7 @@ impl Monomorphizer {
                 op: binary.op.clone(),
                 right: Box::new(self.replace_calls_in_expression(&binary.right, ctx)),
                 is_trait_op: binary.is_trait_op,
+                impl_style: skalp_frontend::hir::ImplStyle::default(),
             }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),

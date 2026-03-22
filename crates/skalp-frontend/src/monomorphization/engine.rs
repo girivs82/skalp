@@ -3,7 +3,7 @@
 //! Generates concrete entity definitions from generic ones
 
 use crate::const_eval::{ConstEvaluator, ConstValue};
-use crate::hir::{Hir, HirEntity, HirExpression, HirImplementation, HirType};
+use crate::hir::{Hir, HirEntity, HirExpression, HirImplementation, HirType, ImplStyle};
 use crate::monomorphization::collector::{Instantiation, IntentValue};
 use indexmap::IndexMap;
 use tracing::trace;
@@ -1301,6 +1301,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     left: Box::new(left.clone()),
                     right: Box::new(right.clone()),
                     is_trait_op,
+                    impl_style: bin.impl_style,
                 };
 
                 // If we can evaluate, replace with literal
@@ -1817,6 +1818,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     left: Box::new(left),
                     right: Box::new(right),
                     is_trait_op: bin.is_trait_op,
+                    impl_style: ImplStyle::default(),
                 })
             }
             HirExpression::Unary(unary) => {
