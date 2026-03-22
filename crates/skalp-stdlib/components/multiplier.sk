@@ -84,8 +84,8 @@ impl std_multiplier_signed {
 
     product = acc;
 
-    // Verification
-    assert property (product == $signed(a) * $signed(b));
+    // Verification: cast to signed int for comparison
+    assert property (product == (a as int<WIDTH>) * (b as int<WIDTH>));
 }
 
 // Tree multiplier — Wallace-tree-style reduction for lower latency.
@@ -102,7 +102,7 @@ impl std_multiplier_tree {
     const W2: usize = WIDTH * 2;
 
     // Phase 1: Generate all partial products (combinational, no barriers)
-    signal pp: Array<bit<W2>, WIDTH>;
+    signal pp: [bit<W2>; WIDTH];
     generate for i in 0..WIDTH {
         pp[i] = if b[i] { {(W2)'b0, a} << i } else { 0 };
     }
@@ -118,7 +118,7 @@ impl std_multiplier_tree {
     // For WIDTH=8: 3 levels of reduction (log2(8) = 3 barriers)
     // vs 8 barriers in the shift-and-add version.
 
-    signal level0: Array<bit<W2>, (WIDTH+1)/2>;
+    signal level0: [bit<W2>; (WIDTH+1)/2];
     generate for i in 0..(WIDTH/2) {
         level0[i] = pp[i*2] + pp[i*2 + 1];
     }
@@ -130,7 +130,7 @@ impl std_multiplier_tree {
 
     // Level 1: reduce pairs again
     const L0_COUNT: usize = (WIDTH + 1) / 2;
-    signal level1: Array<bit<W2>, (L0_COUNT+1)/2>;
+    signal level1: [bit<W2>; (L0_COUNT+1)/2];
     generate for i in 0..(L0_COUNT/2) {
         level1[i] = level0[i*2] + level0[i*2 + 1];
     }
@@ -142,7 +142,7 @@ impl std_multiplier_tree {
 
     // Level 2: final reduction (handles up to WIDTH=16)
     const L1_COUNT: usize = (L0_COUNT + 1) / 2;
-    signal level2: Array<bit<W2>, (L1_COUNT+1)/2>;
+    signal level2: [bit<W2>; (L1_COUNT+1)/2];
     generate for i in 0..(L1_COUNT/2) {
         level2[i] = level1[i*2] + level1[i*2 + 1];
     }

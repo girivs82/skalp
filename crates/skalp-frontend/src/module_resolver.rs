@@ -205,10 +205,6 @@ impl ModuleResolver {
             }
 
             // Load stdlib component entities needed by arithmetic trait impls.
-            // Use tolerant parsing: some component files have secondary entities using
-            // syntax the parser doesn't yet support ($signed, Array<>), but the primary
-            // entities we need (std_adder, std_multiplier) parse correctly.
-            self.tolerant_parse = true;
             for component in &["adder", "multiplier"] {
                 let comp_path = search_path.join(format!("components/{}.sk", component));
                 eprintln!("[PRELOAD_DEBUG] Looking for component {} at: {:?} (exists={})", component, comp_path, comp_path.exists());
@@ -219,7 +215,6 @@ impl ModuleResolver {
                     }
                 }
             }
-            self.tolerant_parse = false;
         }
         Ok(())
     }
