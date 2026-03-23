@@ -4881,7 +4881,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirAssignmentType::Combinational
         ) {
             if matches!(&assign.rhs, hir::HirExpression::Match(_)) {
-                eprintln!("[CONV_SKIP] Skipping non-combinational match assignment: type={:?}, entity={:?}",
+                trace!("[CONV_SKIP] Skipping non-combinational match assignment: type={:?}, entity={:?}",
                     assign.assignment_type, self.current_entity_id);
             }
             return None;

@@ -62,7 +62,7 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
 
         // Check if Q is in the transitive fanin of D
         if !is_in_fanin(aig, data_lit.node, *latch_id) {
-            eprintln!("[DFF_DECOMP] latch {:?}: Q not in fanin, skipping", latch_id);
+            tracing::trace!("[DFF_DECOMP] latch {:?}: Q not in fanin, skipping", latch_id);
             continue; // Q doesn't feed back — no enable possible
         }
 
@@ -93,23 +93,23 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         let f_q1 = cofactor(aig, data_after_reset, q_lit, true);
         let bool_diff = build_xor(aig, f_q0, f_q1);
 
-        eprintln!("[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
+        tracing::trace!("[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
             latch_id, f_q0, f_q1, bool_diff, bool_diff.const_value());
 
         let enable = if bool_diff.const_value() == Some(false) {
             // dF/dQ = 0: F doesn't depend on Q (after reset peeling).
             // Q dropped out — no enable pattern.
-            eprintln!("[DFF_DECOMP] latch {:?}: dF/dQ=0, no enable", latch_id);
+            tracing::trace!("[DFF_DECOMP] latch {:?}: dF/dQ=0, no enable", latch_id);
             None
         } else if bool_diff.const_value() == Some(true) {
             // dF/dQ = 1: F always depends on Q. This means F = Q or F = ~Q,
             // not a MUX enable pattern.
-            eprintln!("[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q", latch_id);
+            tracing::trace!("[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q", latch_id);
             None
         } else {
             // Non-trivial enable: E = ~bool_diff
             let e_lit = bool_diff.invert();
-            eprintln!("[DFF_DECOMP] latch {:?}: enable={:?}", latch_id, e_lit);
+            tracing::trace!("[DFF_DECOMP] latch {:?}: enable={:?}", latch_id, e_lit);
             Some(e_lit)
         };
 
@@ -140,10 +140,10 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         };
 
         if !decomp_ok {
-            eprintln!("[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping", latch_id);
+            tracing::debug!("[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping", latch_id);
             continue; // Decomposition incorrect, skip this latch
         }
-        eprintln!("[DFF_DECOMP] latch {:?}: decomposition accepted (enable={:?}, data={:?}, sync_reset={:?})",
+        tracing::trace!("[DFF_DECOMP] latch {:?}: decomposition accepted (enable={:?}, data={:?}, sync_reset={:?})",
             latch_id, enable, new_data, sync_reset);
 
         results.insert(
@@ -176,7 +176,7 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
     let only_orig: Vec<_> = inputs_orig.difference(&inputs_recon).collect();
     let only_recon: Vec<_> = inputs_recon.difference(&inputs_orig).collect();
     if !only_orig.is_empty() || !only_recon.is_empty() {
-        eprintln!("[DFF_VERIFY] latch {:?}: orig_only_inputs={:?}, recon_only_inputs={:?}",
+        tracing::trace!("[DFF_VERIFY] latch {:?}: orig_only_inputs={:?}, recon_only_inputs={:?}",
             latch_id, only_orig, only_recon);
     }
 
@@ -199,9 +199,9 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
 
         if orig_val != recon_val {
             if round == 0 {
-                eprintln!("[DFF_VERIFY] latch {:?}: MISMATCH round {} orig={:016x} recon={:016x} xor={:016x}",
+                tracing::debug!("[DFF_VERIFY] latch {:?}: MISMATCH round {} orig={:016x} recon={:016x} xor={:016x}",
                     latch_id, round, orig_val, recon_val, orig_val ^ recon_val);
-                eprintln!("[DFF_VERIFY]   original={:?} reconstructed={:?}", original, reconstructed);
+                tracing::debug!("[DFF_VERIFY]   original={:?} reconstructed={:?}", original, reconstructed);
             }
             return false;
         }

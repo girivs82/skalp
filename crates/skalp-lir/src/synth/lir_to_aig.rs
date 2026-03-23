@@ -342,7 +342,7 @@ impl<'a> LirToSynthAig<'a> {
             .unwrap_or_else(|| {
                 let sig_name = self.lir.signals.get(signal_id.0 as usize)
                     .map(|s| s.name.as_str()).unwrap_or("???");
-                eprintln!(
+                tracing::trace!(
                     "[LIR_SYNTH_AIG] Missing signal lookup: signal_id={} ({}), bit={}, signal_width={}",
                     signal_id.0, sig_name, bit,
                     self.lir.signals.get(signal_id.0 as usize).map(|s| s.width).unwrap_or(0)
@@ -412,7 +412,7 @@ impl<'a> LirToSynthAig<'a> {
         }
 
         if sorted.len() != n {
-            eprintln!("[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order");
+            tracing::warn!("[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order");
             (0..n).collect()
         } else {
             sorted
