@@ -28,7 +28,7 @@
 //! | NOT(a)     | a_f                 | a_t                 |
 //! | XOR(a,b)   | complex (see impl)  | complex (see impl)  |
 
-use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId};
+use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId, NclSignalKind};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use tracing::trace;
@@ -151,7 +151,7 @@ impl NclExpander {
             is_input: false,
             is_output: false,
             is_detection: false,
-            ncl_rail: None,
+            ncl_info: None,
         });
         id
     }
@@ -2636,12 +2636,21 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         let orig_sig = &lir.signals[orig_input_id.0 as usize];
         let width = orig_sig.width;
 
-        // Create dual-rail input signals (t and f rails)
+        // Create dual-rail input signals (t and f rails) with NCL metadata
         let t_id = new_lir.add_input(format!("{}_t", orig_sig.name), width);
+        new_lir.signals[t_id.0 as usize].ncl_info = Some(NclSignalKind::TrueRail {
+            origin_port: orig_sig.name.clone(),
+        });
         let f_id = new_lir.add_input(format!("{}_f", orig_sig.name), width);
+        new_lir.signals[f_id.0 as usize].ncl_info = Some(NclSignalKind::FalseRail {
+            origin_port: orig_sig.name.clone(),
+        });
 
         // Create single-rail decoded signal for internal use
         let decoded_id = new_lir.add_signal(format!("{}_dec", orig_sig.name), width);
+        new_lir.signals[decoded_id.0 as usize].ncl_info = Some(NclSignalKind::Decoded {
+            origin_port: orig_sig.name.clone(),
+        });
 
         // Add decode node: NclDecode(t, f) -> decoded
         new_lir.add_node(
@@ -2673,7 +2682,13 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         // Use _sr suffix (single-rail) to distinguish from _t/_f rails
         signal_map
             .entry(orig_output_id)
-            .or_insert_with(|| new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width));
+            .or_insert_with(|| {
+                let sr_id = new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width);
+                new_lir.signals[sr_id.0 as usize].ncl_info = Some(NclSignalKind::SingleRailSource {
+                    origin_port: orig_sig.name.clone(),
+                });
+                sr_id
+            });
     }
 
     // Step 3.5: If there are NclReg nodes, create input completion detection
@@ -2758,9 +2773,15 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         let width = orig_sig.width;
         let single_rail_id = *signal_map.get(&orig_output_id).unwrap();
 
-        // Create dual-rail output signals
+        // Create dual-rail output signals with NCL metadata
         let t_id = new_lir.add_output(format!("{}_t", orig_sig.name), width);
+        new_lir.signals[t_id.0 as usize].ncl_info = Some(NclSignalKind::TrueRail {
+            origin_port: orig_sig.name.clone(),
+        });
         let f_id = new_lir.add_output(format!("{}_f", orig_sig.name), width);
+        new_lir.signals[f_id.0 as usize].ncl_info = Some(NclSignalKind::FalseRail {
+            origin_port: orig_sig.name.clone(),
+        });
 
         // Add encode node: NclEncode(single_rail) -> t
         // For boundary NCL, t-rail = value (when DATA), f-rail = !value
@@ -3044,7 +3065,7 @@ mod tests {
             is_input: true,
             is_output: false,
             is_detection: false,
-            ncl_rail: None,
+            ncl_info: None,
         };
 
         let pair = expander.create_dual_rail(&original);

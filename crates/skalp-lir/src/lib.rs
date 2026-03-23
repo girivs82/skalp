@@ -53,7 +53,7 @@ pub mod technology;
 pub use lir::{FitOverrides, HierarchyNode, LirSafetyInfo, NetId, PrimitiveId, PrimitiveType};
 
 // LIR types (word-level, input to technology mapping)
-pub use lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId, LirStats};
+pub use lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId, LirStats, NclSignalKind};
 
 // Backward-compatible type aliases
 pub use lir::{WordLir, WordLirStats, WordNode, WordNodeId, WordOp, WordSignal, WordSignalId};

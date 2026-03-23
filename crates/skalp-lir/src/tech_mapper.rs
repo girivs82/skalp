@@ -316,6 +316,64 @@ pub fn synthesize(
         }
     }
 
+    // Step 6: Propagate NCL metadata from LIR signals to gate nets.
+    // Build a map from net name patterns to NclSignalKind, then stamp matching nets.
+    // This replaces fragile name-suffix conventions with structured metadata.
+    if lir.is_ncl {
+        use crate::gate_netlist::{GateNetNclInfo, GateNetNclKind};
+        // Build map: for each LIR signal with ncl_info, map all its bit-indexed
+        // net names to the corresponding GateNetNclInfo.
+        let mut ncl_net_map: std::collections::HashMap<String, GateNetNclInfo> =
+            std::collections::HashMap::new();
+        for signal in &lir.signals {
+            if let Some(ref ncl_kind) = signal.ncl_info {
+                let (gate_kind, origin_port) = match ncl_kind {
+                    crate::lir::NclSignalKind::TrueRail { origin_port } => {
+                        (GateNetNclKind::TrueRail, origin_port.clone())
+                    }
+                    crate::lir::NclSignalKind::FalseRail { origin_port } => {
+                        (GateNetNclKind::FalseRail, origin_port.clone())
+                    }
+                    crate::lir::NclSignalKind::Decoded { origin_port } => {
+                        (GateNetNclKind::Decoded, origin_port.clone())
+                    }
+                    crate::lir::NclSignalKind::SingleRailSource { origin_port } => {
+                        (GateNetNclKind::SingleRailSource, origin_port.clone())
+                    }
+                };
+                for bit in 0..signal.width {
+                    let net_name = if signal.width == 1 {
+                        signal.name.clone()
+                    } else {
+                        format!("{}[{}]", signal.name, bit)
+                    };
+                    ncl_net_map.insert(net_name.clone(), GateNetNclInfo {
+                        kind: gate_kind,
+                        origin_port: origin_port.clone(),
+                        bit_index: bit as usize,
+                    });
+                    // Also map __phys_ prefixed version (for physical decode outputs)
+                    let phys_name = if signal.width == 1 {
+                        format!("__phys_{}", signal.name)
+                    } else {
+                        format!("__phys_{}[{}]", signal.name, bit)
+                    };
+                    ncl_net_map.insert(phys_name, GateNetNclInfo {
+                        kind: gate_kind,
+                        origin_port: origin_port.clone(),
+                        bit_index: bit as usize,
+                    });
+                }
+            }
+        }
+        // Stamp matching nets
+        for net in &mut result.netlist.nets {
+            if let Some(info) = ncl_net_map.get(&net.name) {
+                net.ncl_info = Some(info.clone());
+            }
+        }
+    }
+
     result
 }
 
@@ -2024,6 +2082,7 @@ fn create_blackbox_netlist(
                 is_detection: false,
                 detection_config: None,
                 alias_of: None,
+                ncl_info: None,
             };
             input_nets.push(net.id);
             netlist.inputs.push(net.id);
@@ -2057,6 +2116,7 @@ fn create_blackbox_netlist(
                 is_detection: false,
                 detection_config: None,
                 alias_of: None,
+                ncl_info: None,
             };
             output_nets.push(net.id);
             netlist.outputs.push(net.id);
@@ -2090,6 +2150,7 @@ fn create_blackbox_netlist(
                 is_detection: false,
                 detection_config: None,
                 alias_of: None,
+                ncl_info: None,
             };
             input_nets.push(net.id);
             output_nets.push(net.id);

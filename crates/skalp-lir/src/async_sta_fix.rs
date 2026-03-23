@@ -450,6 +450,7 @@ fn insert_delay_on_net(
                 None
             },
             alias_of: None,
+            ncl_info: None,
         };
 
         // Create the buffer cell
@@ -633,6 +634,7 @@ fn fix_single_violation(
             is_detection: false,
             detection_config: None,
             alias_of: None,
+            ncl_info: None,
         };
 
         // Create the buffer cell

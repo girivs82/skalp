@@ -415,6 +415,42 @@ pub struct GateNet {
     /// Used by NCL simulation to resolve net lookups.
     #[serde(default)]
     pub alias_of: Option<GateNetId>,
+    /// NCL metadata — identifies this net's role in dual-rail encoding.
+    /// Set during synthesis from LIR signal metadata. Used by the hierarchical
+    /// stitcher to detect NCL boundary crossings without relying on name suffixes.
+    #[serde(default)]
+    pub ncl_info: Option<GateNetNclInfo>,
+}
+
+/// NCL metadata on a gate-level net.
+///
+/// Replaces fragile name-suffix conventions (`_t`, `_f`, `__phys_`) with
+/// structured metadata for identifying NCL dual-rail signals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateNetNclInfo {
+    /// What kind of NCL signal this is.
+    pub kind: GateNetNclKind,
+    /// The original (pre-NCL expansion) port name this derives from.
+    /// For hierarchical stitching, this is the key identifier that links
+    /// dual-rail child nets to single-rail parent nets.
+    pub origin_port: String,
+    /// Bit index within the original port (0 for single-bit signals).
+    pub bit_index: usize,
+}
+
+/// Classification of an NCL net's role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GateNetNclKind {
+    /// True rail (data=1 → rail=1).
+    TrueRail,
+    /// False rail (data=0 → rail=1, i.e., complement of true rail).
+    FalseRail,
+    /// Decoded single-rail (output of NclDecode, drives internal logic).
+    Decoded,
+    /// Single-rail source (internal logic output, feeds into NclEncode).
+    SingleRailSource,
+    /// Physical node output (replaces `__phys_` prefix convention).
+    PhysicalNodeOutput,
 }
 
 impl GateNet {
@@ -433,6 +469,7 @@ impl GateNet {
             is_detection: false,
             detection_config: None,
             alias_of: None,
+            ncl_info: None,
         }
     }
 
@@ -451,6 +488,7 @@ impl GateNet {
             is_detection: false,
             detection_config: None,
             alias_of: None,
+            ncl_info: None,
         }
     }
 
@@ -469,6 +507,7 @@ impl GateNet {
             is_detection: false,
             detection_config: None,
             alias_of: None,
+            ncl_info: None,
         }
     }
 
@@ -487,6 +526,7 @@ impl GateNet {
             is_detection: true,
             detection_config: Some(DetectionConfig::default()), // Default to continuous mode
             alias_of: None,
+            ncl_info: None,
         }
     }
 
@@ -509,6 +549,7 @@ impl GateNet {
             is_detection: true,
             detection_config: Some(config),
             alias_of: None,
+            ncl_info: None,
         }
     }
 }
@@ -1575,6 +1616,7 @@ impl GateNetlist {
             is_detection: false,
             detection_config: None,
             alias_of: None,
+            ncl_info: None,
         };
         self.net_map.insert(name.clone(), id);
         // Index the net name for fast prefix lookups

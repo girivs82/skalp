@@ -1157,17 +1157,38 @@ pub struct LirSignal {
     /// Set via #[detection_signal] attribute on port
     #[serde(default)]
     pub is_detection: bool,
-    /// NCL dual-rail annotation: set during NCL expansion instead of relying on suffix matching
+    /// NCL signal classification — set during NCL expansion.
+    /// Replaces name-based suffix matching (_t/_f/_dec/_sr) with structured metadata.
     #[serde(default)]
-    pub ncl_rail: Option<NclRail>,
+    pub ncl_info: Option<NclSignalKind>,
 }
 
-/// NCL (Null Convention Logic) dual-rail designation
+/// NCL signal classification at LIR level.
+///
+/// Tracks the role of each signal created during NCL boundary expansion,
+/// linking it back to the original (pre-NCL) signal by name. This metadata
+/// propagates through synthesis to the gate netlist, where the stitcher uses
+/// it instead of fragile name-suffix conventions (`_t`, `_f`, `_dec`, `_sr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NclSignalKind {
+    /// True rail of a dual-rail pair.
+    /// `origin_port`: the pre-NCL port name this rail encodes.
+    TrueRail { origin_port: String },
+    /// False rail of a dual-rail pair.
+    /// `origin_port`: the pre-NCL port name this rail encodes.
+    FalseRail { origin_port: String },
+    /// Decoded single-rail signal (output of NclDecode).
+    /// `origin_port`: the pre-NCL input port this was decoded from.
+    Decoded { origin_port: String },
+    /// Single-rail source feeding into NclEncode for output.
+    /// `origin_port`: the pre-NCL output port.
+    SingleRailSource { origin_port: String },
+}
+
+/// Backward-compatible alias for code that still references the old enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NclRail {
-    /// True rail (data = 1 represented by rail = 1)
     True,
-    /// False rail (data = 0 represented by rail = 1)
     False,
 }
 
@@ -1234,7 +1255,7 @@ impl Lir {
             is_input: false,
             is_output: false,
             is_detection: false,
-            ncl_rail: None,
+            ncl_info: None,
         });
         id
     }
