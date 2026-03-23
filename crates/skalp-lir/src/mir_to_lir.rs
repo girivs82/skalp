@@ -6933,7 +6933,24 @@ fn extract_connection_info(
                     _ => {
                         // Simple signal reference
                         let signal_name = lvalue_to_name_with_fallback(lvalue);
-                        PortConnectionInfo::Signal(signal_name)
+                        // Check if this signal is an instance output (pattern: {instance}_{port})
+                        // If so, convert to InstancePort for proper hierarchical stitching.
+                        // Instance output signals are created in HIR→MIR when accessing inst.port.
+                        let mut as_instance_port = None;
+                        for inst in &parent_module.instances {
+                            let prefix = format!("{}_", inst.name);
+                            if signal_name.starts_with(&prefix) {
+                                let port_name = &signal_name[prefix.len()..];
+                                if !port_name.is_empty() {
+                                    as_instance_port = Some(PortConnectionInfo::InstancePort(
+                                        inst.name.clone(),
+                                        port_name.to_string(),
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                        as_instance_port.unwrap_or(PortConnectionInfo::Signal(signal_name))
                     }
                 }
             }

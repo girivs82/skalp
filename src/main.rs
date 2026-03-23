@@ -2735,15 +2735,36 @@ fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::M
     // are uninstantiated, but only the specialized one has actual logic
     // Include assignments and ports in the score so designs with function calls
     // (no sub-entity instances) still rank above imported library entities
-    mir.modules
+    // Prefer modules from the main source file over imported/stdlib modules
+    let candidates: Vec<_> = mir.modules
         .iter()
         .filter(|m| !instantiated.contains(&m.id))
+        .collect();
+
+    // First try: uninstantiated modules from main source, pick largest
+    candidates
+        .iter()
+        .filter(|m| m.is_from_main_source)
         .max_by_key(|m| {
             m.instances.len()
                 + m.processes.len()
                 + m.signals.len()
                 + m.assignments.len()
                 + m.ports.len()
+        })
+        .copied()
+        // Fallback: any uninstantiated module
+        .or_else(|| {
+            candidates
+                .iter()
+                .max_by_key(|m| {
+                    m.instances.len()
+                        + m.processes.len()
+                        + m.signals.len()
+                        + m.assignments.len()
+                        + m.ports.len()
+                })
+                .copied()
         })
         .or_else(|| mir.modules.last())
 }

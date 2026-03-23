@@ -524,15 +524,25 @@ impl HierarchicalNetlist {
                         }
                     }
                     PortConnection::ChildPort(child_path, child_port) => {
-                        // Direct connection between instances
+                        // Direct connection between sibling instances
                         let net1 = format!("{}.{}", path, port_name);
-                        let net2 = format!("{}.{}", child_path, child_port);
+                        // child_path may be relative (e.g. "m1") — make it absolute
+                        // by prepending the parent path
+                        let abs_child_path = if child_path.contains('.') {
+                            child_path.clone() // Already absolute
+                        } else if parent_path.is_empty() {
+                            child_path.clone()
+                        } else {
+                            format!("{}.{}", parent_path, child_path)
+                        };
+                        let net2 = format!("{}.{}", abs_child_path, child_port);
 
                         // Try direct merge first
                         let net1_exists = result.get_net(&net1).is_some();
                         let net2_exists = result.get_net(&net2).is_some();
 
                         if net1_exists && net2_exists {
+                            trace!("[STITCH]   ✓ {} <-> {} (ChildPort direct)", net1, net2);
                             merge_pairs.push((net1, net2));
                         } else {
                             // Try bit-level stitching
@@ -540,13 +550,18 @@ impl HierarchicalNetlist {
                             let bits2 = result.find_bit_indexed_nets(&net2);
 
                             if !bits1.is_empty() && !bits2.is_empty() {
+                                let mut stitched = 0;
                                 for (idx, bit1_net) in &bits1 {
                                     if let Some((_, bit2_net)) =
                                         bits2.iter().find(|(idx2, _)| idx2 == idx)
                                     {
                                         merge_pairs.push((bit1_net.clone(), bit2_net.clone()));
+                                        stitched += 1;
                                     }
                                 }
+                                trace!("[STITCH]   ✓ {} <-> {} (ChildPort bits: {})", net1, net2, stitched);
+                            } else {
+                                trace!("[STITCH]   ✗ {} <-> {} (ChildPort: bits1={}, bits2={})", net1, net2, bits1.len(), bits2.len());
                             }
                         }
                     }

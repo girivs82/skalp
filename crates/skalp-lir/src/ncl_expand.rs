@@ -2998,7 +2998,10 @@ pub fn apply_boundary_ncl_to_hierarchy(
                         };
                         if let Some(name) = signal_name {
                             if input_names.contains(name.as_str()) {
-                                *name = format!("{}_dec", name);
+                                // Decoded input signals get __phys_ prefix in synthesis
+                                // because they're physical decode node outputs (not module outputs).
+                                // The tech mapper only strips __phys_ for module outputs.
+                                *name = format!("__phys_{}_dec", name);
                             } else if output_names.contains(name.as_str()) {
                                 *name = format!("{}_sr", name);
                             }

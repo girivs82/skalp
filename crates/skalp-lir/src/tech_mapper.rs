@@ -253,6 +253,42 @@ pub fn synthesize(
     // Preserve NCL flag
     result.netlist.is_ncl = lir.is_ncl;
 
+    // Step 5.5: Preserve input port names for hierarchical stitching.
+    // The AIG optimizer may inline input signals into LUT truth tables,
+    // losing the named input nets. Re-create them so the flattener can
+    // stitch parent↔child connections by port name.
+    for &input_id in &lir.inputs {
+        let signal = &lir.signals[input_id.0 as usize];
+        for bit in 0..signal.width {
+            let name = if signal.width == 1 {
+                signal.name.clone()
+            } else {
+                format!("{}[{}]", signal.name, bit)
+            };
+            if result.netlist.get_net_id(&name).is_none() {
+                let net_id = result.netlist.add_net_with_name(name);
+                if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
+                    net.is_input = true;
+                }
+                result.netlist.inputs.push(net_id);
+            } else {
+                // Net exists but may not be marked as input
+                let net_id = result.netlist.get_net_id(&if signal.width == 1 {
+                    signal.name.clone()
+                } else {
+                    format!("{}[{}]", signal.name, bit)
+                }).unwrap();
+                if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
+                    if !net.is_input {
+                        net.is_input = true;
+                        result.netlist.inputs.push(net_id);
+                    }
+                }
+            }
+        }
+    }
+    result.netlist.rebuild_cache();
+
     // Sync is_output flags with netlist.outputs — post-processing passes may
     // have moved output references without updating the per-net flag.
     result.netlist.sync_output_flags();

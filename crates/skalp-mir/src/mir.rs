@@ -127,6 +127,10 @@ pub struct Module {
     /// Indicates which safety goal/mechanism this module implements
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<SafetyContext>,
+    /// Whether this module originates from the main source file (vs imported/stdlib)
+    /// Used by top-module selection to prefer user-defined entities over library entities
+    #[serde(default)]
+    pub is_from_main_source: bool,
     /// Whether this is an async (NCL) module
     /// NCL modules have no clocks and use dual-rail encoding
     #[serde(default)]
@@ -1334,6 +1338,7 @@ impl Module {
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
+            is_from_main_source: false,
             is_async: false,
             barriers: Vec::new(),
             ncl_boundary_mode: None,
