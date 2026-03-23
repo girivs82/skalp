@@ -272,13 +272,21 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
             }
         }
 
-        // Ensure minimum realistic path delay for iCE40
-        // Even the simplest reg→reg path has: clk-to-Q + routing (2 local + 1 span4 + 3 PIPs) + setup
-        let min_realistic_delay = self.delay_model.dff_clk_to_q
-            + self.delay_model.dff_setup
-            + self.delay_model.local_wire_delay * 2.0
-            + self.delay_model.span4_delay
-            + self.delay_model.pip_delay * 3.0;
+        // Ensure minimum realistic path delay
+        let min_realistic_delay = if !registers.is_empty() {
+            // Sequential: reg→reg includes clk-to-Q + routing + setup
+            self.delay_model.dff_clk_to_q
+                + self.delay_model.dff_setup
+                + self.delay_model.local_wire_delay * 2.0
+                + self.delay_model.span4_delay
+                + self.delay_model.pip_delay * 3.0
+        } else {
+            // Combinational: just I/O pad delay + minimal routing
+            self.delay_model.io_input_delay
+                + self.delay_model.io_output_delay
+                + self.delay_model.local_wire_delay * 2.0
+                + self.delay_model.pip_delay * 2.0
+        };
         worst_delay = worst_delay.max(min_realistic_delay);
 
         // For sequential designs, add setup time of destination register

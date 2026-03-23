@@ -1867,11 +1867,51 @@ pub fn synthesize_hierarchical(
 
     let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
 
+    // Bug B fix: Build map of internal signals that children reference in their
+    // port connections. These must be promoted to outputs before synthesis so the
+    // AIG optimizer doesn't inline them into LUT truth tables.
+    let mut signals_needed_by_children: IndexMap<String, std::collections::HashSet<String>> =
+        IndexMap::new();
+    for (path, inst) in &hier_lir.instances {
+        // Get the parent path for this instance
+        if let Some(parent_dot) = path.rfind('.') {
+            let parent_path = &path[..parent_dot];
+            for (_port_name, conn) in &inst.port_connections {
+                let signal_name = match conn {
+                    PortConnectionInfo::Signal(name) => Some(name.clone()),
+                    PortConnectionInfo::Range(name, _, _) => Some(name.clone()),
+                    PortConnectionInfo::BitSelect(name, _) => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some(name) = signal_name {
+                    // Check if this signal is internal (not an input/output of the parent)
+                    if let Some(parent_inst) = hier_lir.instances.get(parent_path) {
+                        let lir = &parent_inst.lir_result.lir;
+                        let is_port = lir.inputs.iter().chain(lir.outputs.iter()).any(|&id| {
+                            lir.signals.get(id.0 as usize)
+                                .map(|s| s.name == name)
+                                .unwrap_or(false)
+                        });
+                        if !is_port {
+                            signals_needed_by_children
+                                .entry(parent_path.to_string())
+                                .or_default()
+                                .insert(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut sorted_paths: Vec<_> = hier_lir.instances.keys().collect();
     sorted_paths.sort();
 
     for path in sorted_paths {
         let inst_lir = hier_lir.instances.get(path).unwrap();
+
+        // Check if this instance has internal signals referenced by children
+        let needs_promotion = signals_needed_by_children.get(path.as_str());
 
         let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
@@ -1882,6 +1922,24 @@ pub fn synthesize_hierarchical(
             }
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
+        } else if let Some(signal_names) = needs_promotion {
+            // Promote internal signals to outputs so synthesis preserves them
+            let mut lir = inst_lir.lir_result.lir.clone();
+            for sig_name in signal_names {
+                // Strip __phys_ prefix if present (NCL decoded signals)
+                let lookup_name = sig_name.strip_prefix("__phys_").unwrap_or(sig_name);
+                if let Some(sig_id) = lir.signals.iter().position(|s| s.name == lookup_name || s.name == *sig_name) {
+                    let sid = crate::lir::LirSignalId(sig_id as u32);
+                    if !lir.outputs.contains(&sid) {
+                        tracing::trace!(
+                            "[SYNTH_HIER] Promoting internal signal '{}' to output for instance '{}'",
+                            sig_name, path
+                        );
+                        lir.outputs.push(sid);
+                    }
+                }
+            }
+            synthesize(&lir, library, preset).netlist
         } else {
             synthesize(&inst_lir.lir_result.lir, library, preset).netlist
         };
