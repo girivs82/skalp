@@ -542,6 +542,9 @@ impl HierarchicalNetlist {
                                     }
                                 }
                                 trace!("[STITCH]   ✓ {} <-> {} (ChildPort bits: {})", net1, net2, stitched);
+                            } else if bits1.is_empty() && bits2.is_empty() {
+                                // Both sides empty — port was unused and DCE'd
+                                trace!("[STITCH]   - {} <-> {} (ChildPort: unused, DCE'd)", net1, net2);
                             } else {
                                 trace!("[STITCH]   ✗ {} <-> {} (ChildPort: bits1={}, bits2={})", net1, net2, bits1.len(), bits2.len());
                             }
