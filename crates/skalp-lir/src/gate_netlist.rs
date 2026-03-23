@@ -438,6 +438,26 @@ pub struct GateNetNclInfo {
     pub bit_index: usize,
 }
 
+/// Result of metadata-based NCL net lookup.
+/// Each entry is (bit_index, net_id, net_name).
+#[derive(Debug, Clone, Default)]
+pub struct NclNetsByMetadata {
+    pub true_rails: Vec<(usize, GateNetId, String)>,
+    pub false_rails: Vec<(usize, GateNetId, String)>,
+    pub decoded: Vec<(usize, GateNetId, String)>,
+    pub single_rail: Vec<(usize, GateNetId, String)>,
+}
+
+impl NclNetsByMetadata {
+    pub fn has_dual_rail(&self) -> bool {
+        !self.true_rails.is_empty() || !self.false_rails.is_empty()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.true_rails.is_empty() && self.false_rails.is_empty()
+            && self.decoded.is_empty() && self.single_rail.is_empty()
+    }
+}
+
 /// Classification of an NCL net's role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GateNetNclKind {
@@ -1903,6 +1923,54 @@ impl GateNetlist {
             .cloned()
             .unwrap_or_default();
         (true_rail, false_rail)
+    }
+
+    /// Find NCL nets by metadata instead of name-suffix parsing.
+    ///
+    /// Given a hierarchical net name prefix (e.g., "top.pipe.a"), finds all nets
+    /// whose `ncl_info.origin_port` matches when combined with the instance path.
+    /// Returns (true_rails, false_rails, decoded, single_rail_source) grouped by bit index.
+    ///
+    /// The `instance_prefix` is the instance path (e.g., "top.pipe") and `port_name`
+    /// is the original port (e.g., "a"). This is more robust than suffix matching.
+    #[allow(clippy::type_complexity)]
+    pub fn find_ncl_nets_by_metadata(
+        &self,
+        instance_prefix: &str,
+        port_name: &str,
+    ) -> NclNetsByMetadata {
+        let mut result = NclNetsByMetadata::default();
+        for net in &self.nets {
+            if let Some(ref info) = net.ncl_info {
+                // Check if this net belongs to the right instance and port.
+                // The net name must start with the instance prefix AND the remaining
+                // part (after prefix) must not contain another '.' before the port-related
+                // suffix — this prevents matching nested child instance nets.
+                if info.origin_port == port_name
+                    && net.name.starts_with(instance_prefix)
+                {
+                    // Verify no nested '.' in the suffix (excluding bracket indexing)
+                    let suffix = &net.name[instance_prefix.len()..];
+                    let before_bracket = suffix.split('[').next().unwrap_or(suffix);
+                    if before_bracket.contains('.') {
+                        continue; // This net belongs to a nested child, skip
+                    }
+                    let entry = (info.bit_index, net.id, net.name.clone());
+                    match info.kind {
+                        GateNetNclKind::TrueRail => result.true_rails.push(entry),
+                        GateNetNclKind::FalseRail => result.false_rails.push(entry),
+                        GateNetNclKind::Decoded => result.decoded.push(entry),
+                        GateNetNclKind::SingleRailSource => result.single_rail.push(entry),
+                        GateNetNclKind::PhysicalNodeOutput => result.decoded.push(entry),
+                    }
+                }
+            }
+        }
+        result.true_rails.sort_by_key(|e| e.0);
+        result.false_rails.sort_by_key(|e| e.0);
+        result.decoded.sort_by_key(|e| e.0);
+        result.single_rail.sort_by_key(|e| e.0);
+        result
     }
 
     /// Get a map of nets driven by constant (TIE) cells.

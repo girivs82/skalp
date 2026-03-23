@@ -366,50 +366,51 @@ impl HierarchicalNetlist {
                                     stitched
                                 );
                             } else {
-                                // Mismatch or missing: try NCL-aware stitching
-                                let (child_t, child_f) =
-                                    result.find_ncl_bit_indexed_nets(&child_net_name);
-                                let (parent_t, parent_f) =
-                                    result.find_ncl_bit_indexed_nets(&parent_net_name);
+                                // Mismatch or missing: try metadata-based NCL stitching first,
+                                // fall back to name-suffix matching if no metadata.
+                                let child_ncl = result.find_ncl_nets_by_metadata(
+                                    &format!("{}.", path), port_name);
+                                let parent_ncl = result.find_ncl_nets_by_metadata(
+                                    &format!("{}.", parent_path), parent_signal);
 
-                                if !child_t.is_empty() && !parent_t.is_empty() {
-                                    // Both sides dual-rail: stitch rail-to-rail
-                                    let parent_t_map: HashMap<usize, &String> =
-                                        parent_t.iter().map(|(idx, name)| (*idx, name)).collect();
-                                    let parent_f_map: HashMap<usize, &String> =
-                                        parent_f.iter().map(|(idx, name)| (*idx, name)).collect();
+                                if child_ncl.has_dual_rail() && parent_ncl.has_dual_rail() {
+                                    // Both sides have NCL metadata — stitch rail-to-rail
+                                    let parent_t_map: HashMap<usize, GateNetId> =
+                                        parent_ncl.true_rails.iter().map(|e| (e.0, e.1)).collect();
+                                    let parent_f_map: HashMap<usize, GateNetId> =
+                                        parent_ncl.false_rails.iter().map(|e| (e.0, e.1)).collect();
                                     let mut stitched = 0;
-                                    for (idx, child_bit_net) in &child_t {
-                                        if let Some(parent_bit_net) = parent_t_map.get(idx) {
-                                            merge_pairs.push(((*parent_bit_net).clone(), child_bit_net.clone()));
+                                    for &(idx, _, ref child_name) in &child_ncl.true_rails {
+                                        if let Some(&parent_id) = parent_t_map.get(&idx) {
+                                            let parent_name = &result.nets[parent_id.0 as usize].name;
+                                            merge_pairs.push((parent_name.clone(), child_name.clone()));
                                             stitched += 1;
                                         }
                                     }
-                                    for (idx, child_bit_net) in &child_f {
-                                        if let Some(parent_bit_net) = parent_f_map.get(idx) {
-                                            merge_pairs.push(((*parent_bit_net).clone(), child_bit_net.clone()));
+                                    for &(idx, _, ref child_name) in &child_ncl.false_rails {
+                                        if let Some(&parent_id) = parent_f_map.get(&idx) {
+                                            let parent_name = &result.nets[parent_id.0 as usize].name;
+                                            merge_pairs.push((parent_name.clone(), child_name.clone()));
                                             stitched += 1;
                                         }
                                     }
-                                    trace!("[STITCH]   ✓ {} <-> {} (NCL dual-rail: {} nets)", child_net_name, parent_net_name, stitched);
-                                } else if !child_f.is_empty() && !parent_bits.is_empty() {
-                                    // Bug A fix: NCL boundary crossing — child has dual-rail
-                                    // (_f nets exist, _t may have been optimized away),
+                                    trace!("[STITCH]   ✓ {} <-> {} (NCL metadata dual-rail: {} nets)", child_net_name, parent_net_name, stitched);
+                                } else if child_ncl.has_dual_rail() && !parent_bits.is_empty() {
+                                    // NCL boundary crossing: child has dual-rail (metadata),
                                     // parent has single-rail. Insert encode bridge.
                                     let parent_map: HashMap<usize, &String> =
                                         parent_bits.iter().map(|(idx, name)| (*idx, name)).collect();
-                                    let child_t_map: HashMap<usize, &String> =
-                                        child_t.iter().map(|(idx, name)| (*idx, name)).collect();
+                                    let child_t_map: HashMap<usize, (GateNetId, &String)> =
+                                        child_ncl.true_rails.iter().map(|e| (e.0, (e.1, &e.2))).collect();
                                     let mut stitched = 0;
-                                    // True rail: merge parent[N] with child_t[N] if it exists,
-                                    // otherwise create child_t[N] as alias of parent[N]
-                                    for (idx, _child_f_net) in &child_f {
-                                        if let Some(parent_bit_net) = parent_map.get(idx) {
-                                            if let Some(child_t_net) = child_t_map.get(idx) {
-                                                merge_pairs.push(((*parent_bit_net).clone(), (*child_t_net).clone()));
+
+                                    // True rail: merge parent[N] with child_t[N]
+                                    for &(idx, _, ref child_f_name) in &child_ncl.false_rails {
+                                        if let Some(parent_bit_net) = parent_map.get(&idx) {
+                                            if let Some((_, child_t_name)) = child_t_map.get(&idx) {
+                                                merge_pairs.push(((*parent_bit_net).clone(), (*child_t_name).clone()));
                                             } else {
-                                                // _t net was optimized away — create it and
-                                                // merge with parent
+                                                // _t net was optimized away — create and merge
                                                 let t_name = format!("{}_t[{}]", child_net_name, idx);
                                                 let t_id = result.add_net_with_name(t_name.clone());
                                                 if let Some(net) = result.nets.get_mut(t_id.0 as usize) {
@@ -420,12 +421,10 @@ impl HierarchicalNetlist {
                                             stitched += 1;
                                         }
                                     }
-                                    // False rail: create INV cells from parent[N] to child_f[N]
-                                    for (idx, child_f_net) in &child_f {
-                                        if let Some(parent_bit_net) = parent_map.get(idx) {
+                                    // False rail: insert INV cells
+                                    for &(idx, child_f_id, _) in &child_ncl.false_rails {
+                                        if let Some(parent_bit_net) = parent_map.get(&idx) {
                                             let parent_net_id = result.get_net_id(parent_bit_net).unwrap();
-                                            let child_f_id = result.get_net_id(child_f_net).unwrap();
-                                            // LUT4 as INV: truth table 0x5555 (Y = ~I0)
                                             let cell_id = CellId(result.cells.len() as u32);
                                             let mut inv_cell = Cell::new_comb(
                                                 cell_id,
@@ -436,31 +435,89 @@ impl HierarchicalNetlist {
                                                 vec![parent_net_id],
                                                 vec![child_f_id],
                                             );
-                                            inv_cell.lut_init = Some(0x5555); // NOT: Y = ~I0
+                                            inv_cell.lut_init = Some(0x5555);
                                             inv_cell.source_op = Some("ncl_encode".to_string());
                                             result.cells.push(inv_cell);
                                             stitched += 1;
                                         }
                                     }
-                                    trace!("[STITCH]   ✓ {} <-> {} (NCL encode bridge: {} nets)", child_net_name, parent_net_name, stitched);
-                                } else if !parent_t.is_empty() && !child_bits.is_empty() {
-                                    // Reverse: parent has dual-rail, child has single-rail (decode)
-                                    // Take true rail as value
+                                    trace!("[STITCH]   ✓ {} <-> {} (NCL metadata encode: {} nets)", child_net_name, parent_net_name, stitched);
+                                } else if parent_ncl.has_dual_rail() && !child_bits.is_empty() {
+                                    // Reverse: parent dual-rail, child single-rail (decode)
                                     let child_map: HashMap<usize, &String> =
                                         child_bits.iter().map(|(idx, name)| (*idx, name)).collect();
                                     let mut stitched = 0;
-                                    for (idx, parent_t_net) in &parent_t {
-                                        if let Some(child_bit_net) = child_map.get(idx) {
-                                            merge_pairs.push((parent_t_net.clone(), (*child_bit_net).clone()));
+                                    for &(idx, _, ref parent_t_name) in &parent_ncl.true_rails {
+                                        if let Some(child_bit_net) = child_map.get(&idx) {
+                                            merge_pairs.push((parent_t_name.clone(), (*child_bit_net).clone()));
                                             stitched += 1;
                                         }
                                     }
-                                    trace!("[STITCH]   ✓ {} <-> {} (NCL decode bridge: {} nets)", child_net_name, parent_net_name, stitched);
-                                } else if !child_t.is_empty() || !parent_t.is_empty() {
-                                    trace!("[STITCH]   ~ {} -> {} (NCL mismatch: child_t={}, parent_t={}, child_bits={}, parent_bits={})",
-                                        child_net_name, parent_net_name, child_t.len(), parent_t.len(), child_bits.len(), parent_bits.len());
+                                    trace!("[STITCH]   ✓ {} <-> {} (NCL metadata decode: {} nets)", child_net_name, parent_net_name, stitched);
                                 } else {
-                                    trace!("[STITCH]   ✗ {} -> {} (neither exists)", child_net_name, parent_net_name);
+                                    // No metadata — fall back to name-based NCL detection
+                                    let (child_t, child_f) =
+                                        result.find_ncl_bit_indexed_nets(&child_net_name);
+                                    let (parent_t, _parent_f) =
+                                        result.find_ncl_bit_indexed_nets(&parent_net_name);
+
+                                    if !child_f.is_empty() && !parent_bits.is_empty() {
+                                        // Name-based fallback: NCL boundary encode
+                                        let parent_map: HashMap<usize, &String> =
+                                            parent_bits.iter().map(|(idx, name)| (*idx, name)).collect();
+                                        let child_t_map: HashMap<usize, &String> =
+                                            child_t.iter().map(|(idx, name)| (*idx, name)).collect();
+                                        let mut stitched = 0;
+                                        for (idx, _) in &child_f {
+                                            if let Some(parent_bit_net) = parent_map.get(idx) {
+                                                if let Some(child_t_net) = child_t_map.get(idx) {
+                                                    merge_pairs.push(((*parent_bit_net).clone(), (*child_t_net).clone()));
+                                                } else {
+                                                    let t_name = format!("{}_t[{}]", child_net_name, idx);
+                                                    let t_id = result.add_net_with_name(t_name.clone());
+                                                    if let Some(net) = result.nets.get_mut(t_id.0 as usize) {
+                                                        net.is_input = true;
+                                                    }
+                                                    merge_pairs.push(((*parent_bit_net).clone(), t_name));
+                                                }
+                                                stitched += 1;
+                                            }
+                                        }
+                                        for (idx, child_f_net) in &child_f {
+                                            if let Some(parent_bit_net) = parent_map.get(idx) {
+                                                let parent_net_id = result.get_net_id(parent_bit_net).unwrap();
+                                                let child_f_id = result.get_net_id(child_f_net).unwrap();
+                                                let cell_id = CellId(result.cells.len() as u32);
+                                                let mut inv_cell = Cell::new_comb(
+                                                    cell_id,
+                                                    "SB_LUT4_INV".to_string(),
+                                                    result.library_name.clone(),
+                                                    0.0,
+                                                    format!("{}.ncl_enc_f[{}]", child_net_name, idx),
+                                                    vec![parent_net_id],
+                                                    vec![child_f_id],
+                                                );
+                                                inv_cell.lut_init = Some(0x5555);
+                                                inv_cell.source_op = Some("ncl_encode".to_string());
+                                                result.cells.push(inv_cell);
+                                                stitched += 1;
+                                            }
+                                        }
+                                        trace!("[STITCH]   ✓ {} <-> {} (NCL name-fallback encode: {} nets)", child_net_name, parent_net_name, stitched);
+                                    } else if !parent_t.is_empty() && !child_bits.is_empty() {
+                                        let child_map: HashMap<usize, &String> =
+                                            child_bits.iter().map(|(idx, name)| (*idx, name)).collect();
+                                        let mut stitched = 0;
+                                        for (idx, parent_t_net) in &parent_t {
+                                            if let Some(child_bit_net) = child_map.get(idx) {
+                                                merge_pairs.push((parent_t_net.clone(), (*child_bit_net).clone()));
+                                                stitched += 1;
+                                            }
+                                        }
+                                        trace!("[STITCH]   ✓ {} <-> {} (NCL name-fallback decode: {} nets)", child_net_name, parent_net_name, stitched);
+                                    } else {
+                                        trace!("[STITCH]   ✗ {} -> {} (neither exists)", child_net_name, parent_net_name);
+                                    }
                                 }
                             }
                         }
