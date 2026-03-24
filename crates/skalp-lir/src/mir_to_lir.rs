@@ -6631,19 +6631,47 @@ fn elaborate_instance_for_optimize_first(
             // Add output port connections: the parent module has signals named
             // "{instance}_{port}" for each child output. These are read by the
             // parent's assignments but don't appear in inst.connections.
+            //
+            // For the connection key (child side), trace through the child's MIR
+            // assignments to find the actual source signal. If z = __adder_result_0_sum,
+            // use "__adder_result_0_sum" as the key since "z" gets merged away during
+            // AIG optimization and won't exist as a named net.
             let best_child = find_best_module(child_mod, module_map);
             for port in &best_child.module.ports {
                 if port.direction == skalp_mir::mir::PortDirection::Output
                     && !child_connections.contains_key(&port.name)
                 {
                     let parent_signal_name = format!("{}_{}", inst.name, port.name);
-                    // Verify this signal exists in the parent module
                     let exists_in_parent = module.signals.iter().any(|s| s.name == parent_signal_name);
                     if exists_in_parent {
+                        // Insert connection with the port name as key
                         child_connections.insert(
                             port.name.clone(),
-                            PortConnectionInfo::Signal(parent_signal_name),
+                            PortConnectionInfo::Signal(parent_signal_name.clone()),
                         );
+                        // Also trace the output port to its source signal in the child.
+                        // If z = __adder_result_0_sum, add a second connection for the
+                        // source name, since the port name may not survive AIG optimization.
+                        for assign in &best_child.module.assignments {
+                            if let skalp_mir::mir::LValue::Port(pid) = &assign.lhs {
+                                if *pid == port.id {
+                                    if let skalp_mir::mir::ExpressionKind::Ref(
+                                        skalp_mir::mir::LValue::Signal(sid),
+                                    ) = &assign.rhs.kind
+                                    {
+                                        if let Some(sig) = best_child.module.signals.iter().find(|s| s.id == *sid) {
+                                            if sig.name != port.name {
+                                                child_connections.insert(
+                                                    sig.name.clone(),
+                                                    PortConnectionInfo::Signal(parent_signal_name.clone()),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6790,6 +6818,9 @@ fn elaborate_instance(
 
             // Add output port connections: the parent has signals "{inst}_{port}"
             // for each child output, but inst.connections only has inputs.
+            // Trace output ports to their source signal in the child's MIR
+            // (e.g., z = __adder_result_0_sum) since the port name may get
+            // merged away during AIG optimization.
             let best_child = find_best_module(child_mod, module_map);
             for port in &best_child.module.ports {
                 if port.direction == skalp_mir::mir::PortDirection::Output
@@ -6800,8 +6831,29 @@ fn elaborate_instance(
                     if exists {
                         child_connections.insert(
                             port.name.clone(),
-                            PortConnectionInfo::Signal(parent_signal_name),
+                            PortConnectionInfo::Signal(parent_signal_name.clone()),
                         );
+                        // Also trace output port to source signal (may differ after AIG opt)
+                        for assign in &best_child.module.assignments {
+                            if let skalp_mir::mir::LValue::Port(pid) = &assign.lhs {
+                                if *pid == port.id {
+                                    if let skalp_mir::mir::ExpressionKind::Ref(
+                                        skalp_mir::mir::LValue::Signal(sid),
+                                    ) = &assign.rhs.kind
+                                    {
+                                        if let Some(sig) = best_child.module.signals.iter().find(|s| s.id == *sid) {
+                                            if sig.name != port.name {
+                                                child_connections.insert(
+                                                    sig.name.clone(),
+                                                    PortConnectionInfo::Signal(parent_signal_name.clone()),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
