@@ -620,14 +620,6 @@ pub struct GateNetlist {
     /// E.g., "signal" -> [(0, "signal[0]"), (1, "signal[1]"), ...]
     #[serde(skip, default)]
     bit_index: HashMap<String, Vec<(usize, String)>>,
-    /// Index for NCL true rail nets: prefix -> [(bit_index, full_name), ...]
-    /// E.g., "signal" -> [(0, "signal_t[0]"), (1, "signal_t[1]"), ...]
-    #[serde(skip, default)]
-    ncl_true_index: HashMap<String, Vec<(usize, String)>>,
-    /// Index for NCL false rail nets: prefix -> [(bit_index, full_name), ...]
-    /// E.g., "signal" -> [(0, "signal_f[0]"), (1, "signal_f[1]"), ...]
-    #[serde(skip, default)]
-    ncl_false_index: HashMap<String, Vec<(usize, String)>>,
 }
 
 impl GateNetlist {
@@ -648,8 +640,6 @@ impl GateNetlist {
             net_map: IndexMap::new(),
             stats: GateNetlistStats::default(),
             bit_index: HashMap::new(),
-            ncl_true_index: HashMap::new(),
-            ncl_false_index: HashMap::new(),
         }
     }
 
@@ -660,33 +650,14 @@ impl GateNetlist {
         // Rebuild net_map from nets
         self.net_map.clear();
         self.bit_index.clear();
-        self.ncl_true_index.clear();
-        self.ncl_false_index.clear();
 
         for net in &self.nets {
             self.net_map.insert(net.name.clone(), net.id);
-            // Bit index: always from name (prefix[N] pattern)
             Self::index_bit_from_name(&net.name, &mut self.bit_index);
-            // NCL index: only for NCL netlists. Sync designs never get NCL
-            // indexes — prevents misclassifying user signals like "data_t".
-            if self.is_ncl {
-                Self::index_ncl_from_net(
-                    net,
-                    &mut self.ncl_true_index,
-                    &mut self.ncl_false_index,
-                    &mut self.bit_index,
-                );
-            }
         }
 
-        // Sort all index entries by bit index for consistent ordering
+        // Sort bit index entries for consistent ordering
         for entries in self.bit_index.values_mut() {
-            entries.sort_by_key(|(idx, _)| *idx);
-        }
-        for entries in self.ncl_true_index.values_mut() {
-            entries.sort_by_key(|(idx, _)| *idx);
-        }
-        for entries in self.ncl_false_index.values_mut() {
             entries.sort_by_key(|(idx, _)| *idx);
         }
 
@@ -694,20 +665,10 @@ impl GateNetlist {
         self.stats = GateNetlistStats::from_netlist(self);
     }
 
-    /// Parse a net name and add it to the appropriate prefix indexes.
-    /// Called when adding a new net (before ncl_info may be set).
+    /// Parse a net name and add it to the bit index.
+    /// NCL indexing is done later via rebuild_cache from metadata only.
     fn index_net_name(&mut self, name: &str) {
-        // Bit index from name (always valid)
         Self::index_bit_from_name(name, &mut self.bit_index);
-        // NCL from name suffix only for NCL netlists (prevents sync designs
-        // from misclassifying signals like "data_t" as NCL rails)
-        if self.is_ncl {
-            Self::index_ncl_from_name_suffix(
-                name,
-                &mut self.ncl_true_index,
-                &mut self.ncl_false_index,
-            );
-        }
     }
 
     /// Index a net's bit position from its name (prefix[N] pattern).
@@ -730,98 +691,6 @@ impl GateNetlist {
         }
     }
 
-    /// Index NCL rail info from a GateNet's metadata.
-    /// If metadata is present, uses origin_port to build the NCL indexes.
-    /// If no metadata, falls back to name-suffix parsing for legacy netlists.
-    /// Also removes the net from bit_index when classified as NCL (to avoid
-    /// double-indexing as both regular bit and NCL rail).
-    fn index_ncl_from_net(
-        net: &GateNet,
-        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
-        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
-        bit_index: &mut HashMap<String, Vec<(usize, String)>>,
-    ) {
-        if let Some(ref info) = net.ncl_info {
-            // Metadata-based indexing: use origin_port as the lookup key.
-            // Build the hierarchical prefix by stripping the signal-specific suffix
-            // from the net name to get the instance path + origin_port.
-            let instance_prefix = if let Some(bracket_pos) = net.name.rfind('[') {
-                let before_bracket = &net.name[..bracket_pos];
-                // Strip the signal suffix (e.g., "_t", "_f", "_dec", "_sr") to get base
-                let base = before_bracket
-                    .strip_suffix("_t")
-                    .or_else(|| before_bracket.strip_suffix("_f"))
-                    .or_else(|| before_bracket.strip_suffix("_dec"))
-                    .or_else(|| before_bracket.strip_suffix("_sr"))
-                    .unwrap_or(before_bracket);
-                base.to_string()
-            } else {
-                // 1-bit signal without bracket
-                net.name
-                    .strip_suffix("_t")
-                    .or_else(|| net.name.strip_suffix("_f"))
-                    .or_else(|| net.name.strip_suffix("_dec"))
-                    .or_else(|| net.name.strip_suffix("_sr"))
-                    .unwrap_or(&net.name)
-                    .to_string()
-            };
-
-            match info.kind {
-                GateNetNclKind::TrueRail => {
-                    ncl_true_index
-                        .entry(instance_prefix.clone())
-                        .or_default()
-                        .push((info.bit_index, net.name.clone()));
-                    // Remove from bit_index to avoid double classification
-                    if let Some(entries) = bit_index.get_mut(&format!("{}_t", instance_prefix)) {
-                        entries.retain(|(_, n)| n != &net.name);
-                    }
-                }
-                GateNetNclKind::FalseRail => {
-                    ncl_false_index
-                        .entry(instance_prefix.clone())
-                        .or_default()
-                        .push((info.bit_index, net.name.clone()));
-                    if let Some(entries) = bit_index.get_mut(&format!("{}_f", instance_prefix)) {
-                        entries.retain(|(_, n)| n != &net.name);
-                    }
-                }
-                _ => {} // Decoded and SingleRailSource don't go in NCL rail indexes
-            }
-        } else {
-            // No metadata — fall back to name-suffix parsing for legacy netlists
-            Self::index_ncl_from_name_suffix(
-                &net.name,
-                ncl_true_index,
-                ncl_false_index,
-            );
-        }
-    }
-
-    /// Legacy: index NCL rail from name suffix (_t/_f) for netlists without metadata.
-    fn index_ncl_from_name_suffix(
-        name: &str,
-        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
-        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
-    ) {
-        if let Some(bracket_pos) = name.rfind('[') {
-            if name.ends_with(']') {
-                let prefix = &name[..bracket_pos];
-                let idx_str = &name[bracket_pos + 1..name.len() - 1];
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    if let Some(base_prefix) = prefix.strip_suffix("_t") {
-                        ncl_true_index.entry(base_prefix.to_string()).or_default().push((idx, name.to_string()));
-                    } else if let Some(base_prefix) = prefix.strip_suffix("_f") {
-                        ncl_false_index.entry(base_prefix.to_string()).or_default().push((idx, name.to_string()));
-                    }
-                }
-            }
-        } else if let Some(base_prefix) = name.strip_suffix("_t") {
-            ncl_true_index.entry(base_prefix.to_string()).or_default().push((0, name.to_string()));
-        } else if let Some(base_prefix) = name.strip_suffix("_f") {
-            ncl_false_index.entry(base_prefix.to_string()).or_default().push((0, name.to_string()));
-        }
-    }
 
     /// Add a net and return its ID
     pub fn add_net(&mut self, mut net: GateNet) -> GateNetId {
@@ -1974,32 +1843,7 @@ impl GateNetlist {
         self.bit_index.get(prefix).cloned().unwrap_or_default()
     }
 
-    /// Find all NCL dual-rail bit-indexed nets matching a prefix
-    ///
-    /// For NCL signals, the naming convention is:
-    /// - `signal_t[N]` for true rail of bit N
-    /// - `signal_f[N]` for false rail of bit N
-    ///
-    /// Returns two sorted lists: (true_rail_nets, false_rail_nets)
-    /// Each list contains (bit_index, net_name) pairs.
-    /// For 1-bit signals, the net name is just {prefix}_t without [0], so we check for exact match too.
-    /// Uses O(1) prefix index lookup instead of O(n) scan.
-    #[allow(clippy::type_complexity)]
-    pub fn find_ncl_bit_indexed_nets(
-        &self,
-        prefix: &str,
-    ) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
-        // O(1) lookup in the NCL prefix indexes
-        let true_rail = self.ncl_true_index.get(prefix).cloned().unwrap_or_default();
-        let false_rail = self
-            .ncl_false_index
-            .get(prefix)
-            .cloned()
-            .unwrap_or_default();
-        (true_rail, false_rail)
-    }
-
-    /// Find NCL nets by metadata instead of name-suffix parsing.
+    /// Find NCL nets by metadata.
     ///
     /// Given a hierarchical net name prefix (e.g., "top.pipe.a"), finds all nets
     /// whose `ncl_info.origin_port` matches when combined with the instance path.
