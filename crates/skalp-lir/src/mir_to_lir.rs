@@ -6625,8 +6625,28 @@ fn elaborate_instance_for_optimize_first(
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Use the same connection extraction as the regular elaborate_instance
             // Pass the generic module for fallback name lookups if we're using a monomorphized module
-            let child_connections =
+            let mut child_connections =
                 extract_connection_info(&inst.connections, module, generic_module, &inst.name);
+
+            // Add output port connections: the parent module has signals named
+            // "{instance}_{port}" for each child output. These are read by the
+            // parent's assignments but don't appear in inst.connections.
+            let best_child = find_best_module(child_mod, module_map);
+            for port in &best_child.module.ports {
+                if port.direction == skalp_mir::mir::PortDirection::Output
+                    && !child_connections.contains_key(&port.name)
+                {
+                    let parent_signal_name = format!("{}_{}", inst.name, port.name);
+                    // Verify this signal exists in the parent module
+                    let exists_in_parent = module.signals.iter().any(|s| s.name == parent_signal_name);
+                    if exists_in_parent {
+                        child_connections.insert(
+                            port.name.clone(),
+                            PortConnectionInfo::Signal(parent_signal_name),
+                        );
+                    }
+                }
+            }
 
             // Recurse with optimize-first flow
             elaborate_instance_for_optimize_first(
@@ -6765,8 +6785,26 @@ fn elaborate_instance(
             for (port_name, expr) in &inst.connections {
                 trace!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
             }
-            let child_connections =
+            let mut child_connections =
                 extract_connection_info(&inst.connections, module, generic_module, &inst.name);
+
+            // Add output port connections: the parent has signals "{inst}_{port}"
+            // for each child output, but inst.connections only has inputs.
+            let best_child = find_best_module(child_mod, module_map);
+            for port in &best_child.module.ports {
+                if port.direction == skalp_mir::mir::PortDirection::Output
+                    && !child_connections.contains_key(&port.name)
+                {
+                    let parent_signal_name = format!("{}_{}", inst.name, port.name);
+                    let exists = module.signals.iter().any(|s| s.name == parent_signal_name);
+                    if exists {
+                        child_connections.insert(
+                            port.name.clone(),
+                            PortConnectionInfo::Signal(parent_signal_name),
+                        );
+                    }
+                }
+            }
 
             // Recursively elaborate child, propagating async context
             // If parent is async (by declaration or inheritance), children inherit it

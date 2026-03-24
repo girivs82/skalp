@@ -397,51 +397,80 @@ impl HierarchicalNetlist {
                                     trace!("[STITCH]   ✓ {} <-> {} (NCL metadata dual-rail: {} nets)", child_net_name, parent_net_name, stitched);
                                 } else if child_ncl.has_dual_rail() && !parent_bits.is_empty() {
                                     // NCL boundary crossing: child has dual-rail (metadata),
-                                    // parent has single-rail. Insert encode bridge.
+                                    // parent has single-rail.
+                                    //
+                                    // Direction detection: if the child's _f nets have drivers,
+                                    // the child drives them → output port → decode (take _t rail).
+                                    // If undriven → input port → encode (create INV for _f).
+                                    let is_output = child_ncl.false_rails.first()
+                                        .and_then(|&(_, fid, _)| result.nets.get(fid.0 as usize))
+                                        .map(|n| n.driver.is_some())
+                                        .unwrap_or(false);
+
                                     let parent_map: HashMap<usize, &String> =
                                         parent_bits.iter().map(|(idx, name)| (*idx, name)).collect();
                                     let child_t_map: HashMap<usize, (GateNetId, &String)> =
                                         child_ncl.true_rails.iter().map(|e| (e.0, (e.1, &e.2))).collect();
                                     let mut stitched = 0;
 
-                                    // True rail: merge parent[N] with child_t[N]
-                                    for &(idx, _, ref child_f_name) in &child_ncl.false_rails {
-                                        if let Some(parent_bit_net) = parent_map.get(&idx) {
-                                            if let Some((_, child_t_name)) = child_t_map.get(&idx) {
-                                                merge_pairs.push(((*parent_bit_net).clone(), (*child_t_name).clone()));
-                                            } else {
-                                                // _t net was optimized away — create and merge
-                                                let t_name = format!("{}_t[{}]", child_net_name, idx);
-                                                let t_id = result.add_net_with_name(t_name.clone());
-                                                if let Some(net) = result.nets.get_mut(t_id.0 as usize) {
-                                                    net.is_input = true;
-                                                }
-                                                merge_pairs.push(((*parent_bit_net).clone(), t_name));
+                                    if is_output {
+                                        // OUTPUT: decode — merge child_t[N] with parent[N]
+                                        // (take true rail as decoded value). No INV cells needed.
+                                        for &(idx, _, ref child_t_name) in &child_ncl.true_rails {
+                                            if let Some(parent_bit_net) = parent_map.get(&idx) {
+                                                merge_pairs.push(((*parent_bit_net).clone(), child_t_name.clone()));
+                                                stitched += 1;
                                             }
-                                            stitched += 1;
                                         }
-                                    }
-                                    // False rail: insert INV cells
-                                    for &(idx, child_f_id, _) in &child_ncl.false_rails {
-                                        if let Some(parent_bit_net) = parent_map.get(&idx) {
-                                            let parent_net_id = result.get_net_id(parent_bit_net).unwrap();
-                                            let cell_id = CellId(result.cells.len() as u32);
-                                            let mut inv_cell = Cell::new_comb(
-                                                cell_id,
-                                                "SB_LUT4_INV".to_string(),
-                                                result.library_name.clone(),
-                                                0.0,
-                                                format!("{}.ncl_enc_f[{}]", child_net_name, idx),
-                                                vec![parent_net_id],
-                                                vec![child_f_id],
-                                            );
-                                            inv_cell.lut_init = Some(0x5555);
-                                            inv_cell.source_op = Some("ncl_encode".to_string());
-                                            result.cells.push(inv_cell);
-                                            stitched += 1;
+                                        // If _t nets are missing, try _sr (single-rail source)
+                                        if stitched == 0 && !child_ncl.single_rail.is_empty() {
+                                            for &(idx, _, ref sr_name) in &child_ncl.single_rail {
+                                                if let Some(parent_bit_net) = parent_map.get(&idx) {
+                                                    merge_pairs.push(((*parent_bit_net).clone(), sr_name.clone()));
+                                                    stitched += 1;
+                                                }
+                                            }
                                         }
+                                        trace!("[STITCH]   ✓ {} <-> {} (NCL metadata decode: {} nets)", child_net_name, parent_net_name, stitched);
+                                    } else {
+                                        // INPUT: encode — merge parent[N] with child_t[N],
+                                        // create INV cells for child_f[N].
+                                        for &(idx, _, ref _child_f_name) in &child_ncl.false_rails {
+                                            if let Some(parent_bit_net) = parent_map.get(&idx) {
+                                                if let Some((_, child_t_name)) = child_t_map.get(&idx) {
+                                                    merge_pairs.push(((*parent_bit_net).clone(), (*child_t_name).clone()));
+                                                } else {
+                                                    let t_name = format!("{}_t[{}]", child_net_name, idx);
+                                                    let t_id = result.add_net_with_name(t_name.clone());
+                                                    if let Some(net) = result.nets.get_mut(t_id.0 as usize) {
+                                                        net.is_input = true;
+                                                    }
+                                                    merge_pairs.push(((*parent_bit_net).clone(), t_name));
+                                                }
+                                                stitched += 1;
+                                            }
+                                        }
+                                        for &(idx, child_f_id, _) in &child_ncl.false_rails {
+                                            if let Some(parent_bit_net) = parent_map.get(&idx) {
+                                                let parent_net_id = result.get_net_id(parent_bit_net).unwrap();
+                                                let cell_id = CellId(result.cells.len() as u32);
+                                                let mut inv_cell = Cell::new_comb(
+                                                    cell_id,
+                                                    "SB_LUT4_INV".to_string(),
+                                                    result.library_name.clone(),
+                                                    0.0,
+                                                    format!("{}.ncl_enc_f[{}]", child_net_name, idx),
+                                                    vec![parent_net_id],
+                                                    vec![child_f_id],
+                                                );
+                                                inv_cell.lut_init = Some(0x5555);
+                                                inv_cell.source_op = Some("ncl_encode".to_string());
+                                                result.cells.push(inv_cell);
+                                                stitched += 1;
+                                            }
+                                        }
+                                        trace!("[STITCH]   ✓ {} <-> {} (NCL metadata encode: {} nets)", child_net_name, parent_net_name, stitched);
                                     }
-                                    trace!("[STITCH]   ✓ {} <-> {} (NCL metadata encode: {} nets)", child_net_name, parent_net_name, stitched);
                                 } else if parent_ncl.has_dual_rail() && !child_bits.is_empty() {
                                     // Reverse: parent dual-rail, child single-rail (decode)
                                     let child_map: HashMap<usize, &String> =

@@ -641,7 +641,7 @@ impl Testbench {
     ) -> Result<Self> {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
-            get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
+            get_stdlib_library, lower_mir_module_to_lir,
             synthesize, synthesize_hierarchical,
         };
 
@@ -665,12 +665,28 @@ impl Testbench {
             )
         })?;
 
-        // Lower to GateNetlist using AIG-based synthesis engine
+        // Lower to GateNetlist using optimize-first NCL pipeline (matches CLI synth path)
         let has_hierarchy =
             mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+        let has_async = mir.modules.iter().any(|m| m.is_async);
 
         let netlist = if has_hierarchy || top_module_name.is_some() {
-            let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
+            let (hier_lir, detected_async) =
+                skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+
+            let hier_lir = if detected_async || has_async {
+                let ncl_config = skalp_lir::NclConfig {
+                    boundary_only: true,
+                    use_weak_completion: true,
+                    completion_tree_depth: None,
+                    generate_null_wavefront: true,
+                    use_opaque_arithmetic: true,
+                };
+                skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
+            } else {
+                hier_lir
+            };
+
             let hier_netlist = synthesize_hierarchical(
                 &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
             );
