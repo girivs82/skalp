@@ -665,12 +665,14 @@ impl GateNetlist {
 
         for net in &self.nets {
             self.net_map.insert(net.name.clone(), net.id);
-            // Also rebuild prefix indexes
-            Self::index_net_name_static(
-                &net.name,
-                &mut self.bit_index,
+            // Bit index: always from name (prefix[N] pattern)
+            Self::index_bit_from_name(&net.name, &mut self.bit_index);
+            // NCL index: prefer metadata, fall back to name suffix for legacy netlists
+            Self::index_ncl_from_net(
+                net,
                 &mut self.ncl_true_index,
                 &mut self.ncl_false_index,
+                &mut self.bit_index,
             );
         }
 
@@ -690,62 +692,128 @@ impl GateNetlist {
     }
 
     /// Parse a net name and add it to the appropriate prefix indexes.
-    /// Called when adding a new net.
+    /// Called when adding a new net (before ncl_info may be set).
     fn index_net_name(&mut self, name: &str) {
-        Self::index_net_name_static(
+        // Bit index from name (always valid)
+        Self::index_bit_from_name(name, &mut self.bit_index);
+        // NCL from name suffix (fallback for nets added before metadata is stamped)
+        Self::index_ncl_from_name_suffix(
             name,
-            &mut self.bit_index,
             &mut self.ncl_true_index,
             &mut self.ncl_false_index,
         );
     }
 
-    /// Static helper to parse net name and add to indexes (for use in rebuild_cache)
-    fn index_net_name_static(
+    /// Index a net's bit position from its name (prefix[N] pattern).
+    /// Only adds to bit_index, not NCL indexes.
+    fn index_bit_from_name(
         name: &str,
         bit_index: &mut HashMap<String, Vec<(usize, String)>>,
-        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
-        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
     ) {
-        // Check for bit-indexed pattern: prefix[N]
         if let Some(bracket_pos) = name.rfind('[') {
             if name.ends_with(']') {
                 let prefix = &name[..bracket_pos];
                 let idx_str = &name[bracket_pos + 1..name.len() - 1];
                 if let Ok(idx) = idx_str.parse::<usize>() {
-                    // Check if this is an NCL rail (ends with _t or _f before the bracket)
+                    bit_index
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push((idx, name.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Index NCL rail info from a GateNet's metadata.
+    /// If metadata is present, uses origin_port to build the NCL indexes.
+    /// If no metadata, falls back to name-suffix parsing for legacy netlists.
+    /// Also removes the net from bit_index when classified as NCL (to avoid
+    /// double-indexing as both regular bit and NCL rail).
+    fn index_ncl_from_net(
+        net: &GateNet,
+        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
+        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
+        bit_index: &mut HashMap<String, Vec<(usize, String)>>,
+    ) {
+        if let Some(ref info) = net.ncl_info {
+            // Metadata-based indexing: use origin_port as the lookup key.
+            // Build the hierarchical prefix by stripping the signal-specific suffix
+            // from the net name to get the instance path + origin_port.
+            let instance_prefix = if let Some(bracket_pos) = net.name.rfind('[') {
+                let before_bracket = &net.name[..bracket_pos];
+                // Strip the signal suffix (e.g., "_t", "_f", "_dec", "_sr") to get base
+                let base = before_bracket
+                    .strip_suffix("_t")
+                    .or_else(|| before_bracket.strip_suffix("_f"))
+                    .or_else(|| before_bracket.strip_suffix("_dec"))
+                    .or_else(|| before_bracket.strip_suffix("_sr"))
+                    .unwrap_or(before_bracket);
+                base.to_string()
+            } else {
+                // 1-bit signal without bracket
+                net.name
+                    .strip_suffix("_t")
+                    .or_else(|| net.name.strip_suffix("_f"))
+                    .or_else(|| net.name.strip_suffix("_dec"))
+                    .or_else(|| net.name.strip_suffix("_sr"))
+                    .unwrap_or(&net.name)
+                    .to_string()
+            };
+
+            match info.kind {
+                GateNetNclKind::TrueRail => {
+                    ncl_true_index
+                        .entry(instance_prefix.clone())
+                        .or_default()
+                        .push((info.bit_index, net.name.clone()));
+                    // Remove from bit_index to avoid double classification
+                    if let Some(entries) = bit_index.get_mut(&format!("{}_t", instance_prefix)) {
+                        entries.retain(|(_, n)| n != &net.name);
+                    }
+                }
+                GateNetNclKind::FalseRail => {
+                    ncl_false_index
+                        .entry(instance_prefix.clone())
+                        .or_default()
+                        .push((info.bit_index, net.name.clone()));
+                    if let Some(entries) = bit_index.get_mut(&format!("{}_f", instance_prefix)) {
+                        entries.retain(|(_, n)| n != &net.name);
+                    }
+                }
+                _ => {} // Decoded and SingleRailSource don't go in NCL rail indexes
+            }
+        } else {
+            // No metadata — fall back to name-suffix parsing for legacy netlists
+            Self::index_ncl_from_name_suffix(
+                &net.name,
+                ncl_true_index,
+                ncl_false_index,
+            );
+        }
+    }
+
+    /// Legacy: index NCL rail from name suffix (_t/_f) for netlists without metadata.
+    fn index_ncl_from_name_suffix(
+        name: &str,
+        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
+        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
+    ) {
+        if let Some(bracket_pos) = name.rfind('[') {
+            if name.ends_with(']') {
+                let prefix = &name[..bracket_pos];
+                let idx_str = &name[bracket_pos + 1..name.len() - 1];
+                if let Ok(idx) = idx_str.parse::<usize>() {
                     if let Some(base_prefix) = prefix.strip_suffix("_t") {
-                        ncl_true_index
-                            .entry(base_prefix.to_string())
-                            .or_default()
-                            .push((idx, name.to_string()));
+                        ncl_true_index.entry(base_prefix.to_string()).or_default().push((idx, name.to_string()));
                     } else if let Some(base_prefix) = prefix.strip_suffix("_f") {
-                        ncl_false_index
-                            .entry(base_prefix.to_string())
-                            .or_default()
-                            .push((idx, name.to_string()));
-                    } else {
-                        // Regular bit-indexed net
-                        bit_index
-                            .entry(prefix.to_string())
-                            .or_default()
-                            .push((idx, name.to_string()));
+                        ncl_false_index.entry(base_prefix.to_string()).or_default().push((idx, name.to_string()));
                     }
                 }
             }
-        } else {
-            // Check for NCL 1-bit signals: prefix_t or prefix_f (no bracket)
-            if let Some(base_prefix) = name.strip_suffix("_t") {
-                ncl_true_index
-                    .entry(base_prefix.to_string())
-                    .or_default()
-                    .push((0, name.to_string()));
-            } else if let Some(base_prefix) = name.strip_suffix("_f") {
-                ncl_false_index
-                    .entry(base_prefix.to_string())
-                    .or_default()
-                    .push((0, name.to_string()));
-            }
+        } else if let Some(base_prefix) = name.strip_suffix("_t") {
+            ncl_true_index.entry(base_prefix.to_string()).or_default().push((0, name.to_string()));
+        } else if let Some(base_prefix) = name.strip_suffix("_f") {
+            ncl_false_index.entry(base_prefix.to_string()).or_default().push((0, name.to_string()));
         }
     }
 
