@@ -180,6 +180,98 @@ impl HierarchicalNetlist {
         // Stitching changes cell connections, so we need to rebuild driver/fanout info
         result.rebuild_net_connectivity();
 
+        // Phase 2.75: Fix undriven NCL decoded nets.
+        // NclDecode physical nodes create BUF cells during per-instance synthesis,
+        // but buffer removal may merge them away, leaving a_dec[N] undriven.
+        // Use NCL metadata to find decoded nets without drivers and create BUF
+        // cells from their origin port's aliased true-rail net.
+        if result.is_ncl {
+            use crate::gate_netlist::GateNetNclKind;
+            let mut bufs_to_add = Vec::new();
+            for net in &result.nets {
+                if let Some(ref info) = net.ncl_info {
+                    if net.driver.is_some() {
+                        continue; // Already driven, no fixup needed
+                    }
+                    // Strip suffix to get instance prefix (e.g., "top.pipe.a" from "top.pipe.a_dec[0]")
+                    let strip_suffix_and_bracket = |name: &str, suffix: &str| -> Option<String> {
+                        if let Some(bracket_pos) = name.rfind('[') {
+                            let before = &name[..bracket_pos];
+                            before.strip_suffix(suffix).map(|s| s.to_string())
+                        } else {
+                            name.strip_suffix(suffix).map(|s| s.to_string())
+                        }
+                    };
+                    match info.kind {
+                        GateNetNclKind::Decoded => {
+                            // a_dec[N] should be driven by a_t[N] (true rail = decoded value)
+                            let base = strip_suffix_and_bracket(&net.name, "_dec");
+                            if let Some(base) = base {
+                                let t_name = format!("{}_t[{}]", base, info.bit_index);
+                                if let Some(t_id) = result.get_net_id(&t_name) {
+                                    bufs_to_add.push((result.resolve_alias(t_id), net.id));
+                                }
+                            }
+                        }
+                        GateNetNclKind::TrueRail => {
+                            // result_t[N] should be driven by result_sr[N] (NclEncode)
+                            let base = strip_suffix_and_bracket(&net.name, "_t");
+                            if let Some(base) = base {
+                                let sr_name = format!("{}_sr[{}]", base, info.bit_index);
+                                if let Some(sr_id) = result.get_net_id(&sr_name) {
+                                    let resolved_sr = result.resolve_alias(sr_id);
+                                    bufs_to_add.push((resolved_sr, net.id));
+                                }
+                            }
+                        }
+                        GateNetNclKind::FalseRail => {
+                            // result_f[N] should be driven by NOT(result_sr[N])
+                            // Only add if undriven (normally NclEncode creates these)
+                            let base = strip_suffix_and_bracket(&net.name, "_f");
+                            if let Some(base) = base {
+                                let sr_name = format!("{}_sr[{}]", base, info.bit_index);
+                                if let Some(sr_id) = result.get_net_id(&sr_name) {
+                                    let resolved_sr = result.resolve_alias(sr_id);
+                                    // INV cell for false rail
+                                    let cell_id = CellId(result.cells.len() as u32);
+                                    let mut inv = Cell::new_comb(
+                                        cell_id,
+                                        "SB_LUT4_INV".to_string(),
+                                        result.library_name.clone(),
+                                        0.0,
+                                        format!("ncl_enc_f_fix_{}", net.id.0),
+                                        vec![resolved_sr],
+                                        vec![net.id],
+                                    );
+                                    inv.lut_init = Some(0x5555);
+                                    inv.source_op = Some("NclEncode_f".to_string());
+                                    result.cells.push(inv);
+                                    // Don't add to bufs_to_add (it's an INV, not BUF)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            for (src, dst) in bufs_to_add {
+                let cell_id = CellId(result.cells.len() as u32);
+                let mut buf = Cell::new_comb(
+                    cell_id,
+                    "SB_LUT4_BUF".to_string(),
+                    result.library_name.clone(),
+                    0.0,
+                    format!("ncl_dec_buf_{}", dst.0),
+                    vec![src],
+                    vec![dst],
+                );
+                buf.lut_init = Some(0xAAAA); // BUF: Y = I0
+                buf.source_op = Some("NclDecode".to_string());
+                result.cells.push(buf);
+            }
+            result.rebuild_net_connectivity();
+        }
+
         // Phase 3: Set up top-level inputs and outputs
         // Find the "top" instance and export its I/O
         // Note: After stitching, some "inputs" may actually be driven by child modules,

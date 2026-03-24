@@ -244,12 +244,12 @@ pub fn synthesize(
     // Preserve NCL flag
     result.netlist.is_ncl = lir.is_ncl;
 
-    // Step 5.5: Preserve input port names for hierarchical stitching.
-    // The AIG optimizer may inline input signals into LUT truth tables,
-    // losing the named input nets. Re-create them so the flattener can
-    // stitch parent↔child connections by port name.
-    for &input_id in &lir.inputs {
-        let signal = &lir.signals[input_id.0 as usize];
+    // Step 5.5: Preserve input AND output port names for hierarchical stitching.
+    // The AIG optimizer may inline input signals into LUT truth tables or
+    // merge output names away. Re-create them so the flattener can stitch
+    // parent↔child connections by port name.
+    for &port_id in lir.inputs.iter().chain(lir.outputs.iter()) {
+        let signal = &lir.signals[port_id.0 as usize];
         for bit in 0..signal.width {
             let name = if signal.width == 1 {
                 signal.name.clone()

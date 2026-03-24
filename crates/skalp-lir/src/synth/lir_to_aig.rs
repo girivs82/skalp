@@ -98,11 +98,25 @@ impl<'a> LirToSynthAig<'a> {
                 }
             }
         }
+        // Physical outputs that are module outputs are also "consumed" —
+        // they need to survive synthesis even if no internal node reads them
+        // (they're consumed externally by children via port connections).
+        for &output_id in &self.lir.outputs {
+            if phys_output_set.contains(&output_id.0) {
+                consumed_phys_outputs.insert(output_id.0);
+            }
+        }
 
+        tracing::trace!("[LIR_TO_AIG] physical_nodes={}, consumed_phys={}, phys_output_set={}",
+            self.physical_nodes.len(), consumed_phys_outputs.len(), phys_output_set.len());
         for &phys_idx in &self.physical_nodes {
             let node = &self.lir.nodes[phys_idx];
+            let sig_name = &self.lir.signals[node.output.0 as usize].name;
+            let consumed = consumed_phys_outputs.contains(&node.output.0);
+            tracing::trace!("[LIR_TO_AIG] phys node '{}' op={:?} output={}({}), consumed={}",
+                sig_name, std::mem::discriminant(&node.op), node.output.0, sig_name, consumed);
             // Skip if this physical output is not consumed by any AIG node
-            if !consumed_phys_outputs.contains(&node.output.0) {
+            if !consumed {
                 continue;
             }
             let signal = &self.lir.signals[node.output.0 as usize];
