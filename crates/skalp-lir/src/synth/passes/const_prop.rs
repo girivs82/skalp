@@ -106,7 +106,7 @@ impl Pass for ConstProp {
                 AigNode::Const => {
                     // Constant node - already exists in new AIG at index 0
                 }
-                AigNode::Input { name, source_net } => {
+                AigNode::Input { name, source_net, .. } => {
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                     self.replacements.insert(id, AigLit::new(new_id));

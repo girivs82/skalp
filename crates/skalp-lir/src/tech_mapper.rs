@@ -191,8 +191,8 @@ pub fn synthesize(
     }
 
     // Step 3.5: Ensure all LIR output signals have output nets in the netlist.
-    // Physical outputs that were skipped by the AIG (no pseudo-input) need
-    // their __phys_* nets promoted to module outputs.
+    // Physical inputs now use actual names (is_physical flag replaces __phys_ prefix),
+    // so we just check if the output net exists and create it if not.
     if lir.is_ncl {
         for &output_id in &lir.outputs {
             let signal = &lir.signals[output_id.0 as usize];
@@ -202,32 +202,23 @@ pub fn synthesize(
                 } else {
                     format!("{}[{}]", signal.name, bit)
                 };
-                // If this output net doesn't exist, check for __phys_ version
-                if result.netlist.get_net_id(&name).is_none() {
-                    let phys_name = if signal.width == 1 {
-                        format!("__phys_{}", signal.name)
-                    } else {
-                        format!("__phys_{}[{}]", signal.name, bit)
-                    };
-                    if let Some(phys_id) = result.netlist.get_net_id(&phys_name) {
-                        // Rename __phys_ net to the output name and mark as output
-                        result.netlist.rename_net(phys_id, name);
-                        if let Some(net) = result.netlist.get_net_mut(phys_id) {
+                if let Some(net_id) = result.netlist.get_net_id(&name) {
+                    // Net exists — ensure it's marked as output
+                    if let Some(net) = result.netlist.get_net_mut(net_id) {
+                        if !net.is_output {
                             net.is_output = true;
+                            result.netlist.outputs.push(net_id);
                         }
-                        if !result.netlist.outputs.contains(&phys_id) {
-                            result.netlist.outputs.push(phys_id);
-                        }
-                    } else {
-                        // Neither exists — create as output
-                        let net_id = result.netlist.add_net(
-                            crate::gate_netlist::GateNet::new(GateNetId(0), name),
-                        );
-                        if let Some(net) = result.netlist.get_net_mut(net_id) {
-                            net.is_output = true;
-                        }
-                        result.netlist.outputs.push(net_id);
                     }
+                } else {
+                    // Create as output
+                    let net_id = result.netlist.add_net(
+                        crate::gate_netlist::GateNet::new(GateNetId(0), name),
+                    );
+                    if let Some(net) = result.netlist.get_net_mut(net_id) {
+                        net.is_output = true;
+                    }
+                    result.netlist.outputs.push(net_id);
                 }
             }
         }
@@ -297,17 +288,10 @@ pub fn synthesize(
     // with output nets, leaving nets marked as both input and output. Remove
     // output nets from the input list — they're driven by physical cells, not external.
     if lir.is_ncl {
+        // Remove output nets from input list — physical cells now drive them.
         let output_set: std::collections::HashSet<GateNetId> =
             result.netlist.outputs.iter().copied().collect();
         result.netlist.inputs.retain(|id| !output_set.contains(id));
-        // Also remove any remaining __phys_* pseudo-inputs that weren't cleaned up
-        result.netlist.inputs.retain(|&id| {
-            if let Some(net) = result.netlist.nets.get(id.0 as usize) {
-                !net.name.starts_with("__phys_")
-            } else {
-                true
-            }
-        });
         // Clear is_input on output nets that were removed from inputs
         for net in &mut result.netlist.nets {
             if net.is_output && net.is_input {
@@ -347,18 +331,7 @@ pub fn synthesize(
                     } else {
                         format!("{}[{}]", signal.name, bit)
                     };
-                    ncl_net_map.insert(net_name.clone(), GateNetNclInfo {
-                        kind: gate_kind,
-                        origin_port: origin_port.clone(),
-                        bit_index: bit as usize,
-                    });
-                    // Also map __phys_ prefixed version (for physical decode outputs)
-                    let phys_name = if signal.width == 1 {
-                        format!("__phys_{}", signal.name)
-                    } else {
-                        format!("__phys_{}[{}]", signal.name, bit)
-                    };
-                    ncl_net_map.insert(phys_name, GateNetNclInfo {
+                    ncl_net_map.insert(net_name, GateNetNclInfo {
                         kind: gate_kind,
                         origin_port: origin_port.clone(),
                         bit_index: bit as usize,
@@ -1231,37 +1204,18 @@ fn merge_physical_nodes_into_netlist(
     // physical nodes aren't in the AIG-derived netlist).
     let resolve_signal = |netlist: &mut GateNetlist, sig_id: LirSignalId| -> Vec<GateNetId> {
         let sig = &lir.signals[sig_id.0 as usize];
-        let is_phys = phys_output_signals.contains(&sig_id.0);
         let is_lir_input = lir_input_signals.contains(&sig_id.0);
         (0..sig.width)
             .map(|bit| {
+                // Physical nodes no longer use __phys_ prefix; use actual signal name.
+                // The is_physical flag on AIG nodes replaces the prefix convention.
                 let name = if sig.width == 1 {
-                    if is_phys {
-                        format!("__phys_{}", sig.name)
-                    } else {
-                        sig.name.clone()
-                    }
-                } else if is_phys {
-                    format!("__phys_{}[{}]", sig.name, bit)
+                    sig.name.clone()
                 } else {
                     format!("{}[{}]", sig.name, bit)
                 };
                 if let Some(id) = netlist.get_net_id(&name) {
                     id
-                } else if is_phys {
-                    // The AIG writer renames __phys_* nets to output names when
-                    // they are direct pass-through outputs. Try without prefix.
-                    let alt_name = if sig.width == 1 {
-                        sig.name.clone()
-                    } else {
-                        format!("{}[{}]", sig.name, bit)
-                    };
-                    if let Some(id) = netlist.get_net_id(&alt_name) {
-                        id
-                    } else {
-                        // Physical node output not yet in netlist — create it
-                        netlist.add_net(GateNet::new(GateNetId(0), name))
-                    }
                 } else if is_lir_input {
                     // Module input not in AIG netlist (only consumed by physical nodes).
                     // Create it as a primary input.
@@ -1857,19 +1811,21 @@ fn merge_physical_nodes_into_netlist(
         }
     }
 
-    // Remove __phys_* nets from the netlist's primary input list.
+    // Remove physical pseudo-input nets from the primary input list.
     // These nets are now driven by the physical cells we just created.
+    // Identify them by checking if the net now has a driver (was input, now driven).
+    netlist.rebuild_net_connectivity();
     netlist.inputs.retain(|&net_id| {
         if let Some(net) = netlist.nets.get(net_id.0 as usize) {
-            !net.name.starts_with("__phys_")
+            // If the net now has a driver, it's no longer a primary input
+            net.driver.is_none()
         } else {
             true
         }
     });
-
-    // Also clear the is_input flag on these nets
+    // Clear is_input on nets that were removed from the input list
     for net in &mut netlist.nets {
-        if net.name.starts_with("__phys_") {
+        if net.driver.is_some() && net.is_input {
             net.is_input = false;
         }
     }
@@ -1984,9 +1940,7 @@ pub fn synthesize_hierarchical(
             // Promote internal signals to outputs so synthesis preserves them
             let mut lir = inst_lir.lir_result.lir.clone();
             for sig_name in signal_names {
-                // Strip __phys_ prefix if present (NCL decoded signals)
-                let lookup_name = sig_name.strip_prefix("__phys_").unwrap_or(sig_name);
-                if let Some(sig_id) = lir.signals.iter().position(|s| s.name == lookup_name || s.name == *sig_name) {
+                if let Some(sig_id) = lir.signals.iter().position(|s| s.name == *sig_name) {
                     let sid = crate::lir::LirSignalId(sig_id as u32);
                     if !lir.outputs.contains(&sid) {
                         tracing::trace!(

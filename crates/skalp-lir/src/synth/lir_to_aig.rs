@@ -107,12 +107,13 @@ impl<'a> LirToSynthAig<'a> {
             }
             let signal = &self.lir.signals[node.output.0 as usize];
             for bit in 0..signal.width {
+                // Use actual signal name (no __phys_ prefix) with is_physical flag
                 let name = if signal.width == 1 {
-                    format!("__phys_{}", signal.name)
+                    signal.name.clone()
                 } else {
-                    format!("__phys_{}[{}]", signal.name, bit)
+                    format!("{}[{}]", signal.name, bit)
                 };
-                let node_id = self.aig.add_input(name, None);
+                let node_id = self.aig.add_physical_input(name);
                 let lit = AigLit::new(node_id);
                 self.signal_map.insert((node.output.0, bit), lit);
             }

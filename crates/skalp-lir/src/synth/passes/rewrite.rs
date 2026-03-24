@@ -504,7 +504,7 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
     // Phase 0: Process input nodes FIRST so clock/reset mappings are available for latches
     let mut input_ids = Vec::new();
     for &id in queue.iter() {
-        if let Some(AigNode::Input { name, source_net }) = aig.get_node(id) {
+        if let Some(AigNode::Input { name, source_net, .. }) = aig.get_node(id) {
             let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
             let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
             node_map.insert(id, AigLit::new(new_id));
@@ -617,9 +617,14 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
             AigNode::Input {
                 ref name,
                 source_net,
+                is_physical,
             } => {
                 let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
-                let new_id = new_aig.add_input_with_safety(name.clone(), source_net, safety);
+                let new_id = if is_physical {
+                    new_aig.add_physical_input(name.clone())
+                } else {
+                    new_aig.add_input_with_safety(name.clone(), source_net, safety)
+                };
                 node_map.insert(id, AigLit::new(new_id));
             }
             AigNode::And { left, right } => {

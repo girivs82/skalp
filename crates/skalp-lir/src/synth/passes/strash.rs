@@ -77,7 +77,7 @@ impl Pass for Strash {
 
         // Phase 1a: Process inputs FIRST (must be in node_map before latches reference them)
         for (id, node) in aig.iter_nodes() {
-            if let AigNode::Input { name, source_net } = node {
+            if let AigNode::Input { name, source_net, .. } = node {
                 let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                 let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                 node_map.insert(id, AigLit::new(new_id));

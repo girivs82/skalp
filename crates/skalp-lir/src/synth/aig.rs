@@ -137,6 +137,9 @@ pub enum AigNode {
         name: String,
         /// Source net ID from gate netlist (for traceability)
         source_net: Option<GateNetId>,
+        /// True if this is a pseudo-input for a physical node output
+        /// (NCL decode, BRAM, DSP). Replaces the `__phys_` prefix convention.
+        is_physical: bool,
     },
 
     /// AND gate with two inputs
@@ -422,7 +425,17 @@ impl Aig {
     /// Add a primary input
     pub fn add_input(&mut self, name: String, source_net: Option<GateNetId>) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
-        self.nodes.push(AigNode::Input { name, source_net });
+        self.nodes.push(AigNode::Input { name, source_net, is_physical: false });
+        self.safety_info.push(AigSafetyInfo::empty());
+        id
+    }
+
+    /// Add a physical pseudo-input (NCL decode, BRAM, DSP output).
+    /// These are driven by physical cells added later in the tech mapper,
+    /// not by external signals. Replaces the `__phys_` prefix convention.
+    pub fn add_physical_input(&mut self, name: String) -> AigNodeId {
+        let id = AigNodeId(self.nodes.len() as u32);
+        self.nodes.push(AigNode::Input { name, source_net: None, is_physical: true });
         self.safety_info.push(AigSafetyInfo::empty());
         id
     }
@@ -435,7 +448,7 @@ impl Aig {
         safety: AigSafetyInfo,
     ) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
-        self.nodes.push(AigNode::Input { name, source_net });
+        self.nodes.push(AigNode::Input { name, source_net, is_physical: false });
         self.safety_info.push(safety);
         id
     }

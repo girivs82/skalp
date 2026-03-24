@@ -136,6 +136,7 @@ impl<'a> AigWriter<'a> {
             next_cell_id: 0,
             latch_decomps: &self.latch_decomps,
             latch_decomp_nodes,
+            physical_nets: HashSet::new(),
         };
 
         // Phase 1: Create nets for inputs
@@ -219,13 +220,17 @@ struct AigWriterState<'a> {
     /// AND nodes needed by latch decompositions (their transitive fan-in)
     /// When mapping is active, these nodes need AND2 cells even if not in mapped_nodes.
     latch_decomp_nodes: HashSet<AigNodeId>,
+
+    /// Nets created from physical AIG pseudo-inputs (NCL decode, BRAM, DSP).
+    /// Used to prevent renaming physical nets during output creation.
+    physical_nets: HashSet<GateNetId>,
 }
 
 impl AigWriterState<'_> {
     /// Create nets for primary inputs
     fn create_input_nets(&mut self, aig: &Aig) {
         for (id, node) in aig.iter_nodes() {
-            if let AigNode::Input { name, source_net } = node {
+            if let AigNode::Input { name, source_net, is_physical } = node {
                 // Use AIG-level clock/reset flags (populated from GateNet.is_clock/is_reset
                 // during AIG building). Fall back to name matching with a warning.
                 let is_clock = if aig.clock_inputs.contains(&id) {
@@ -259,6 +264,11 @@ impl AigWriterState<'_> {
                 } else {
                     self.netlist.add_input(name.clone())
                 };
+
+                // Track physical pseudo-inputs for output creation
+                if *is_physical {
+                    self.physical_nets.insert(net_id);
+                }
 
                 self.node_to_net.insert(id, net_id);
                 self.lit_to_net.insert((id, false), net_id);
@@ -941,12 +951,10 @@ impl AigWriterState<'_> {
                     self.netlist.add_cell(cell);
                     new_net
                 } else {
-                    // Check if this net is a __phys_* pseudo-input. If so,
-                    // don't rename it — create a BUF so the physical merge
-                    // step can still find the net by its __phys_* name.
-                    let is_phys = self.netlist.nets.get(source_net.0 as usize)
-                        .map(|n| n.name.starts_with("__phys_"))
-                        .unwrap_or(false);
+                    // Check if this net is a physical pseudo-input (NCL decode,
+                    // BRAM, DSP). Don't rename it — create a BUF so the physical
+                    // merge step can still find the net by its original name.
+                    let is_phys = self.physical_nets.contains(&source_net);
                     if is_phys {
                         let new_net = self.netlist.add_net(
                             GateNet::new(GateNetId(0), name.clone()),
