@@ -94,6 +94,9 @@ pub struct Testbench {
     coverage_sample_rate: usize,
     /// When pending inputs are applied relative to clock edges
     input_timing: InputTiming,
+    /// Port name mapping for hierarchical designs: user name → flattened name.
+    /// E.g., "a" → "top.a" when the design was flattened with "top" as the root.
+    hierarchical_port_map: IndexMap<String, String>,
 }
 
 impl Testbench {
@@ -299,6 +302,104 @@ impl Testbench {
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
+        })
+    }
+
+    /// Create an NCL gate-level testbench from a hierarchical design.
+    ///
+    /// Compiles through the full hierarchical NCL pipeline (HIR → MIR →
+    /// hierarchical LIR → NCL boundary → synthesize → flatten), then loads
+    /// the flattened netlist into the NCL simulator.
+    ///
+    /// The `top_module` should be the **sync wrapper** entity (e.g., "T1Top")
+    /// which has single-rail ports. The simulator uses `CircuitMode::Sync`
+    /// gate-level simulation with enough combinational evaluation iterations
+    /// to propagate through NCL encode/decode logic.
+    ///
+    /// Port names are mapped: user `"a"` → flattened `"top.a"`.
+    pub fn hierarchical_ncl(source_path: &str, top_module: &str) -> Result<Self> {
+        use skalp_frontend::parse_and_build_hir_from_file;
+        use skalp_sim::gate_netlist_to_sir::convert_gate_netlist_to_sir;
+        use std::path::Path;
+
+        let path = Path::new(source_path);
+        let hir = parse_and_build_hir_from_file(path)?;
+
+        let compiler = MirCompiler::new();
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+        let library = skalp_lir::get_stdlib_library("ice40").map_err(|e| {
+            anyhow::anyhow!("Failed to load library: {:?}", e)
+        })?;
+
+        // Hierarchical LIR with NCL expansion
+        let (hier_lir, has_async) =
+            skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+        let hier_lir = if has_async {
+            let ncl_config = skalp_lir::NclConfig {
+                boundary_only: true,
+                use_weak_completion: true,
+                completion_tree_depth: None,
+                generate_null_wavefront: true,
+                use_opaque_arithmetic: true,
+            };
+            skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
+        } else {
+            hier_lir
+        };
+
+        let hier_netlist = skalp_lir::synthesize_hierarchical(
+            &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+        );
+        let netlist = hier_netlist.flatten();
+
+        // Convert to SIR for the gate-level sync simulator.
+        // The sync gate simulator handles combinational convergence internally
+        // (evaluates until stable), which works for NCL encode/decode logic.
+        let sir_result = convert_gate_netlist_to_sir(&netlist);
+
+        // Build port name map from the top module's MIR ports
+        let mut port_map = IndexMap::new();
+        if let Some(top_mir) = mir.modules.iter().find(|m| m.name == top_module) {
+            for port in &top_mir.ports {
+                port_map.insert(port.name.clone(), format!("top.{}", port.name));
+            }
+        }
+
+        // Use sync gate-level simulator — it evaluates combinational logic
+        // until convergence, which handles NCL encode/decode within a sync wrapper.
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: HwAccel::Cpu,
+            max_cycles: 1_000_000,
+            ..Default::default()
+        };
+
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_gate_level(&sir_result.sir)
+            .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::GateLevel,
+            pending_inputs: IndexMap::new(),
+            pending_inputs_wide: IndexMap::new(),
+            cycle_count: 0,
+            input_names: vec![],
+            output_names: vec![],
+            sir_module: None,
+            coverage_db: None,
+            coverage_enabled: false,
+            coverage_input_info: vec![],
+            coverage_sample_rate: 1,
+            input_timing: InputTiming::default(),
+            hierarchical_port_map: port_map,
         })
     }
 
@@ -446,6 +547,7 @@ impl Testbench {
             coverage_input_info,
             coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
         })
     }
 
@@ -563,6 +665,7 @@ impl Testbench {
             coverage_input_info,
             coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
         })
     }
 
@@ -625,6 +728,7 @@ impl Testbench {
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
         })
     }
 
@@ -743,6 +847,7 @@ impl Testbench {
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
         })
     }
 
@@ -809,6 +914,7 @@ impl Testbench {
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
             input_timing: InputTiming::default(),
+            hierarchical_port_map: IndexMap::new(),
         })
     }
 
@@ -962,12 +1068,37 @@ impl Testbench {
         self
     }
 
+    /// Resolve a user-facing port name to the flattened name using the hierarchical
+    /// port map. Returns the original name if no mapping exists.
+    fn resolve_port_name(&self, name: &str) -> String {
+        self.hierarchical_port_map
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// Flush all pending inputs to the simulator.
     async fn flush_pending_inputs(&mut self) {
-        for (signal, value) in self.pending_inputs.drain(..) {
+        let resolved_inputs: Vec<(String, u64)> = self
+            .pending_inputs
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        let resolved_wide: Vec<(String, Vec<u8>)> = self
+            .pending_inputs_wide
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        for (signal, value) in resolved_inputs {
             self.sim.set_input(&signal, value).await;
         }
-        for (signal, bytes) in self.pending_inputs_wide.drain(..) {
+        for (signal, bytes) in resolved_wide {
             self.sim.set_input_bytes(&signal, &bytes).await;
         }
     }
@@ -1148,12 +1279,59 @@ impl Testbench {
         self
     }
 
-    /// Apply pending inputs and step the simulation once
-    pub async fn step(&mut self) -> &mut Self {
-        for (signal, value) in self.pending_inputs.drain(..) {
+    /// Apply pending inputs and advance one full NCL wavefront (DATA propagation
+    /// until stable). For sync mode, this is equivalent to `step()`.
+    /// Returns true if the wavefront converged.
+    pub async fn ncl_converge(&mut self) -> bool {
+        // Resolve and collect before draining to avoid borrow conflict
+        let resolved_inputs: Vec<(String, u64)> = self
+            .pending_inputs
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        let resolved_wide: Vec<(String, Vec<u8>)> = self
+            .pending_inputs_wide
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        for (signal, value) in resolved_inputs {
             self.sim.set_input(&signal, value).await;
         }
-        for (signal, bytes) in self.pending_inputs_wide.drain(..) {
+        for (signal, bytes) in resolved_wide {
+            self.sim.set_input_bytes(&signal, &bytes).await;
+        }
+        self.cycle_count += 1;
+        self.sim.advance_wavefront()
+    }
+
+    /// Apply pending inputs and step the simulation once
+    pub async fn step(&mut self) -> &mut Self {
+        let resolved_inputs: Vec<(String, u64)> = self
+            .pending_inputs
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        let resolved_wide: Vec<(String, Vec<u8>)> = self
+            .pending_inputs_wide
+            .drain(..)
+            .map(|(s, v)| {
+                let r = self.hierarchical_port_map.get(&s).cloned().unwrap_or(s);
+                (r, v)
+            })
+            .collect();
+        for (signal, value) in resolved_inputs {
+            self.sim.set_input(&signal, value).await;
+        }
+        for (signal, bytes) in resolved_wide {
             self.sim.set_input_bytes(&signal, &bytes).await;
         }
         if self.coverage_enabled {
@@ -1170,6 +1348,11 @@ impl Testbench {
             self.step().await;
         }
 
+        let resolved = self.resolve_port_name(signal);
+        if let Some(val) = self.sim.get_output(&resolved).await {
+            return val as u32;
+        }
+        // Try original name as fallback
         if let Some(val) = self.sim.get_output(signal).await {
             return val as u32;
         }
@@ -1183,6 +1366,10 @@ impl Testbench {
             self.step().await;
         }
 
+        let resolved = self.resolve_port_name(signal);
+        if let Some(val) = self.sim.get_output(&resolved).await {
+            return val;
+        }
         if let Some(val) = self.sim.get_output(signal).await {
             return val;
         }
