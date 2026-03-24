@@ -399,13 +399,12 @@ impl HierarchicalNetlist {
                                     // NCL boundary crossing: child has dual-rail (metadata),
                                     // parent has single-rail.
                                     //
-                                    // Direction detection: if the child's _f nets have drivers,
-                                    // the child drives them → output port → decode (take _t rail).
-                                    // If undriven → input port → encode (create INV for _f).
-                                    let is_output = child_ncl.false_rails.first()
-                                        .and_then(|&(_, fid, _)| result.nets.get(fid.0 as usize))
-                                        .map(|n| n.driver.is_some())
-                                        .unwrap_or(false);
+                                    // Direction detection via metadata:
+                                    // - SingleRailSource nets exist → output port (NCL encode feeds _t/_f)
+                                    // - Decoded nets exist → input port (NCL decode produces decoded value)
+                                    // Driver-based detection doesn't work here because
+                                    // rebuild_net_connectivity hasn't been called yet.
+                                    let is_output = !child_ncl.single_rail.is_empty();
 
                                     let parent_map: HashMap<usize, &String> =
                                         parent_bits.iter().map(|(idx, name)| (*idx, name)).collect();
