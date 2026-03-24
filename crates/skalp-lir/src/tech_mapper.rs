@@ -1895,6 +1895,10 @@ pub fn synthesize_hierarchical(
                     PortConnectionInfo::Signal(name) => Some(name.clone()),
                     PortConnectionInfo::Range(name, _, _) => Some(name.clone()),
                     PortConnectionInfo::BitSelect(name, _) => Some(name.clone()),
+                    PortConnectionInfo::InstancePort(inst_name, port_name) => {
+                        // Instance output port → parent signal "{inst}_{port}"
+                        Some(format!("{}_{}", inst_name, port_name))
+                    }
                     _ => None,
                 };
                 if let Some(name) = signal_name {
@@ -1937,17 +1941,42 @@ pub fn synthesize_hierarchical(
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
         } else if let Some(signal_names) = needs_promotion {
-            // Promote internal signals to outputs so synthesis preserves them
+            // Promote internal signals so synthesis preserves them.
+            // Signals driven by children (instance outputs like "core_y")
+            // must be inputs of the parent — otherwise the synthesizer sees
+            // them as undriven and replaces with constant 0.
+            // Signals consumed by children (internal computed values like "t0")
+            // must be outputs.
             let mut lir = inst_lir.lir_result.lir.clone();
             for sig_name in signal_names {
                 if let Some(sig_id) = lir.signals.iter().position(|s| s.name == *sig_name) {
                     let sid = crate::lir::LirSignalId(sig_id as u32);
-                    if !lir.outputs.contains(&sid) {
-                        tracing::trace!(
-                            "[SYNTH_HIER] Promoting internal signal '{}' to output for instance '{}'",
-                            sig_name, path
-                        );
-                        lir.outputs.push(sid);
+                    let sig = &lir.signals[sig_id];
+                    let has_driver = sig.driver.is_some();
+                    if has_driver {
+                        // Signal is driven by parent logic → promote to output
+                        // (consumed by a child instance)
+                        if !lir.outputs.contains(&sid) {
+                            tracing::trace!(
+                                "[SYNTH_HIER] Promoting driven signal '{}' to output for '{}'",
+                                sig_name, path
+                            );
+                            lir.outputs.push(sid);
+                        }
+                    } else {
+                        // Signal has no driver in parent → it's driven by a child instance.
+                        // Promote to input so the synthesizer preserves it as a port.
+                        if !lir.inputs.contains(&sid) {
+                            tracing::trace!(
+                                "[SYNTH_HIER] Promoting undriven signal '{}' to input for '{}'",
+                                sig_name, path
+                            );
+                            lir.inputs.push(sid);
+                        }
+                        // Also promote to output if it feeds other logic (e.g., y = core_y)
+                        if !lir.outputs.contains(&sid) {
+                            lir.outputs.push(sid);
+                        }
                     }
                 }
             }

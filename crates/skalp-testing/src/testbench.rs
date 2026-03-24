@@ -361,12 +361,29 @@ impl Testbench {
         // (evaluates until stable), which works for NCL encode/decode logic.
         let sir_result = convert_gate_netlist_to_sir(&netlist);
 
-        // Build port name map from the top module's MIR ports.
-        // The gate_netlist_to_sir conversion strips the "top." prefix from
-        // port signal names, so the SIR uses bare names like "a[0]".
-        // Map user names directly (no prefix needed).
-        let port_map = IndexMap::new();
-        // Note: no mapping needed — SIR port names already match user names
+        // Build port name map for outputs that may be renamed during synthesis.
+        // Output ports assigned from instance output signals (y = core.y → core_y)
+        // may survive as "core_y" instead of "y" in the SIR.
+        let mut port_map = IndexMap::new();
+        if let Some(top_mir) = mir.modules.iter().find(|m| m.name == top_module) {
+            for assign in &top_mir.assignments {
+                // Match pattern: Port(out) = Signal(inst_port)
+                if let skalp_mir::mir::LValue::Port(port_id) = &assign.lhs {
+                    if let skalp_mir::mir::ExpressionKind::Ref(
+                        skalp_mir::mir::LValue::Signal(sig_id),
+                    ) = &assign.rhs.kind
+                    {
+                        if let Some(port) = top_mir.ports.iter().find(|p| p.id == *port_id) {
+                            if let Some(sig) = top_mir.signals.iter().find(|s| s.id == *sig_id) {
+                                if port.name != sig.name {
+                                    port_map.insert(port.name.clone(), sig.name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Use sync gate-level simulator — it evaluates combinational logic
         // until convergence, which handles NCL encode/decode within a sync wrapper.
