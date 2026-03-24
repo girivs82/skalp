@@ -667,13 +667,16 @@ impl GateNetlist {
             self.net_map.insert(net.name.clone(), net.id);
             // Bit index: always from name (prefix[N] pattern)
             Self::index_bit_from_name(&net.name, &mut self.bit_index);
-            // NCL index: prefer metadata, fall back to name suffix for legacy netlists
-            Self::index_ncl_from_net(
-                net,
-                &mut self.ncl_true_index,
-                &mut self.ncl_false_index,
-                &mut self.bit_index,
-            );
+            // NCL index: only for NCL netlists. Sync designs never get NCL
+            // indexes — prevents misclassifying user signals like "data_t".
+            if self.is_ncl {
+                Self::index_ncl_from_net(
+                    net,
+                    &mut self.ncl_true_index,
+                    &mut self.ncl_false_index,
+                    &mut self.bit_index,
+                );
+            }
         }
 
         // Sort all index entries by bit index for consistent ordering
@@ -696,12 +699,15 @@ impl GateNetlist {
     fn index_net_name(&mut self, name: &str) {
         // Bit index from name (always valid)
         Self::index_bit_from_name(name, &mut self.bit_index);
-        // NCL from name suffix (fallback for nets added before metadata is stamped)
-        Self::index_ncl_from_name_suffix(
-            name,
-            &mut self.ncl_true_index,
-            &mut self.ncl_false_index,
-        );
+        // NCL from name suffix only for NCL netlists (prevents sync designs
+        // from misclassifying signals like "data_t" as NCL rails)
+        if self.is_ncl {
+            Self::index_ncl_from_name_suffix(
+                name,
+                &mut self.ncl_true_index,
+                &mut self.ncl_false_index,
+            );
+        }
     }
 
     /// Index a net's bit position from its name (prefix[N] pattern).
