@@ -2236,20 +2236,44 @@ impl<'a> SharedCodegen<'a> {
         if self.uses_array_storage(output_width) {
             // Array mux - element-wise
             let array_size = self.get_array_size(output_width);
-            self.write_indented(&format!(
-                "for (uint32_t i = 0; i < {}; i++) {{\n",
-                array_size
-            ));
-            self.indent();
-            self.write_indented(&format!(
-                "signals->{}[i] = signals->{} ? signals->{}[i] : signals->{}[i];\n",
-                self.sanitize_name(output),
-                self.sanitize_name(sel),
-                self.sanitize_name(true_val),
-                self.sanitize_name(false_val)
-            ));
-            self.dedent();
-            self.write_indented("}\n");
+
+            if self.type_mapper.target == BackendTarget::Cpp {
+                // C++: Use flat pointer cast for array access to handle both 1D and 2D arrays.
+                // A signal may be declared as uint32_t[M][K] (2D, e.g. Array(Hash256, 4096))
+                // while the mux output is uint32_t[M*K] (flat 1D). Using ((uint32_t*)ptr)[i]
+                // ensures correct flat indexing regardless of the underlying array shape.
+                let san_output = self.sanitize_name(output);
+                let san_sel = self.sanitize_name(sel);
+                let san_true = self.sanitize_name(true_val);
+                let san_false = self.sanitize_name(false_val);
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) {{\n",
+                    array_size
+                ));
+                self.indent();
+                self.write_indented(&format!(
+                    "((uint32_t*)signals->{})[i] = signals->{} ? ((uint32_t*)signals->{})[i] : ((uint32_t*)signals->{})[i];\n",
+                    san_output, san_sel, san_true, san_false
+                ));
+                self.dedent();
+                self.write_indented("}\n");
+            } else {
+                // Metal: use simple array indexing (Metal doesn't have 2D array signals)
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) {{\n",
+                    array_size
+                ));
+                self.indent();
+                self.write_indented(&format!(
+                    "signals->{}[i] = signals->{} ? signals->{}[i] : signals->{}[i];\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(sel),
+                    self.sanitize_name(true_val),
+                    self.sanitize_name(false_val)
+                ));
+                self.dedent();
+                self.write_indented("}\n");
+            }
         } else {
             // Scalar/vector mux
             self.write_indented(&format!(
