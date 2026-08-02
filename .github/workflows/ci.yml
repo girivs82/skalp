@@ -81,7 +81,7 @@ jobs:
         run: cargo test -p skalp-frontend --test hir_builder_regression --verbose
 
       - name: Run golden file tests
-        run: cargo test --test golden_file_tests --verbose
+        run: cargo test --test suite golden_file_tests --verbose
 
       - name: Run frontend integration tests
         run: cargo test -p skalp-frontend --test integration_tests --verbose
@@ -103,10 +103,10 @@ jobs:
         run: cargo test -p skalp-verify --verbose || echo "Skipping verification tests (z3 not installed)"
 
       - name: Run CLI integration tests
-        run: cargo test --test cli_integration --verbose
+        run: cargo test --test suite cli_integration --verbose
 
       - name: Run E2E example tests
-        run: cargo test --test e2e_examples_test --verbose
+        run: cargo test --test suite e2e_examples_test --verbose
 
       - name: Run all other integration tests
         run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --tests --verbose

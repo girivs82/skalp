@@ -115,7 +115,10 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
-debug = true
+# line-tables-only keeps usable backtraces/panics while dropping full type
+# debuginfo, which dominates the size of test binaries and rlibs. Full test
+# builds previously consumed tens of GB of target/ space (see tests/suite).
+debug = "line-tables-only"
 
 [workspace]
 members = [
