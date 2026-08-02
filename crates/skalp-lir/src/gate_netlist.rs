@@ -453,8 +453,10 @@ impl NclNetsByMetadata {
         !self.true_rails.is_empty() || !self.false_rails.is_empty()
     }
     pub fn is_empty(&self) -> bool {
-        self.true_rails.is_empty() && self.false_rails.is_empty()
-            && self.decoded.is_empty() && self.single_rail.is_empty()
+        self.true_rails.is_empty()
+            && self.false_rails.is_empty()
+            && self.decoded.is_empty()
+            && self.single_rail.is_empty()
     }
 }
 
@@ -673,10 +675,7 @@ impl GateNetlist {
 
     /// Index a net's bit position from its name (prefix[N] pattern).
     /// Only adds to bit_index, not NCL indexes.
-    fn index_bit_from_name(
-        name: &str,
-        bit_index: &mut HashMap<String, Vec<(usize, String)>>,
-    ) {
+    fn index_bit_from_name(name: &str, bit_index: &mut HashMap<String, Vec<(usize, String)>>) {
         if let Some(bracket_pos) = name.rfind('[') {
             if name.ends_with(']') {
                 let prefix = &name[..bracket_pos];
@@ -690,7 +689,6 @@ impl GateNetlist {
             }
         }
     }
-
 
     /// Add a net and return its ID
     pub fn add_net(&mut self, mut net: GateNet) -> GateNetId {
@@ -1864,9 +1862,7 @@ impl GateNetlist {
                 // The net name must start with the instance prefix AND the remaining
                 // part (after prefix) must not contain another '.' before the port-related
                 // suffix — this prevents matching nested child instance nets.
-                if info.origin_port == port_name
-                    && net.name.starts_with(instance_prefix)
-                {
+                if info.origin_port == port_name && net.name.starts_with(instance_prefix) {
                     // Verify no nested '.' in the suffix (excluding bracket indexing)
                     let suffix = &net.name[instance_prefix.len()..];
                     let before_bracket = suffix.split('[').next().unwrap_or(suffix);
@@ -1952,7 +1948,13 @@ fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&
     if cell_type.starts_with("OXIDE_FF") {
         return match index {
             0 => "DI".to_string(),
-            1 => if cell_type.contains("RST") { "LSR".to_string() } else { "CE".to_string() },
+            1 => {
+                if cell_type.contains("RST") {
+                    "LSR".to_string()
+                } else {
+                    "CE".to_string()
+                }
+            }
             _ => "CE".to_string(),
         };
     }

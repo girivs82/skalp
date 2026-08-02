@@ -139,7 +139,9 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
         }
         // Transfer is_output flag and output name from old net to passthrough net
         if is_primary_output {
-            let output_name = netlist.nets.get(output_net.0 as usize)
+            let output_name = netlist
+                .nets
+                .get(output_net.0 as usize)
                 .map(|n| n.name.clone())
                 .unwrap_or_default();
             if let Some(old_net) = netlist.nets.get_mut(output_net.0 as usize) {

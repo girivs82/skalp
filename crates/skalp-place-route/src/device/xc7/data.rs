@@ -342,51 +342,51 @@ pub struct Xc7TimingData {
 /// Artix-7 speed grade -1 (slowest), from prjxray-db SDF + DS181
 pub const TIMING_ARTIX_1: Xc7TimingData = Xc7TimingData {
     // Cell delays (from prjxray SDF, speed grade -1)
-    lut6_delay: 0.124,          // A6LUT A→O6 124ps
-    dff_clk_to_q: 0.303,       // FDRE CLK→Q 303ps
-    dff_setup: 0.058,           // FDRE D@CLK setup 58ps
-    dff_hold: 0.115,            // FDRE D@CLK hold 115ps
-    carry4_delay: 0.114,        // CARRY4 CIN→CO[3] 114ps
-    io_input_delay: 0.800,      // IBUF estimated
-    io_output_delay: 1.500,     // OBUF estimated
-    bram_read_delay: 2.454,     // RAMB36E1 CLK→DOA 2454ps
-    dsp_delay: 1.800,           // DSP48E1 A→P estimated
+    lut6_delay: 0.124,      // A6LUT A→O6 124ps
+    dff_clk_to_q: 0.303,    // FDRE CLK→Q 303ps
+    dff_setup: 0.058,       // FDRE D@CLK setup 58ps
+    dff_hold: 0.115,        // FDRE D@CLK hold 115ps
+    carry4_delay: 0.114,    // CARRY4 CIN→CO[3] 114ps
+    io_input_delay: 0.800,  // IBUF estimated
+    io_output_delay: 1.500, // OBUF estimated
+    bram_read_delay: 2.454, // RAMB36E1 CLK→DOA 2454ps
+    dsp_delay: 1.800,       // DSP48E1 A→P estimated
 
     // Interconnect delays
-    local_wire_delay: 0.030,    // site-internal
-    single_delay: 0.090,        // NN1/EE1/SS1/WW1
-    double_delay: 0.140,        // NN2/EE2/SS2/WW2
-    quad_delay: 0.200,          // NN4/EE4/SS4/WW4 (or 6-tile variants)
-    long_delay: 0.350,          // LH/LV 12-tile long wires
-    global_clock_delay: 0.100,  // BUFG to FF CLK pin
+    local_wire_delay: 0.030,   // site-internal
+    single_delay: 0.090,       // NN1/EE1/SS1/WW1
+    double_delay: 0.140,       // NN2/EE2/SS2/WW2
+    quad_delay: 0.200,         // NN4/EE4/SS4/WW4 (or 6-tile variants)
+    long_delay: 0.350,         // LH/LV 12-tile long wires
+    global_clock_delay: 0.100, // BUFG to FF CLK pin
 
     // PIP delays
-    pip_bel_to_local: 0.035,    // site pin → INT
-    pip_local_to_local: 0.040,  // INT internal mux
-    pip_local_to_single: 0.100, // INT → single wire entry
+    pip_bel_to_local: 0.035,     // site pin → INT
+    pip_local_to_local: 0.040,   // INT internal mux
+    pip_local_to_single: 0.100,  // INT → single wire entry
     pip_single_to_single: 0.080, // single cascade
-    pip_span_to_local: 0.060,   // single/double → INT
-    pip_local_to_double: 0.130, // INT → double wire entry
+    pip_span_to_local: 0.060,    // single/double → INT
+    pip_local_to_double: 0.130,  // INT → double wire entry
     pip_double_to_double: 0.110, // double cascade
-    pip_local_to_quad: 0.170,   // INT → quad wire entry
-    pip_long_to_local: 0.080,   // long → INT
-    pip_long_to_long: 0.180,    // long cascade
-    pip_clock_to_local: 0.040,  // GCLK → tile
-    fanout_per_load: 0.008,     // ~8ps per fanout
+    pip_local_to_quad: 0.170,    // INT → quad wire entry
+    pip_long_to_local: 0.080,    // long → INT
+    pip_long_to_long: 0.180,     // long cascade
+    pip_clock_to_local: 0.040,   // GCLK → tile
+    fanout_per_load: 0.008,      // ~8ps per fanout
 };
 
 /// Kintex-7 speed grade -1 (slowest), estimated from Artix-7 × 0.82
 /// (Kintex uses the same 28nm HPL process but with better routing)
 pub const TIMING_KINTEX_1: Xc7TimingData = Xc7TimingData {
-    lut6_delay: 0.102,          // 124 × 0.82
-    dff_clk_to_q: 0.248,       // 303 × 0.82
-    dff_setup: 0.048,           // 58 × 0.82
-    dff_hold: 0.094,            // 115 × 0.82
-    carry4_delay: 0.093,        // 114 × 0.82
-    io_input_delay: 0.656,      // 800 × 0.82
-    io_output_delay: 1.230,     // 1500 × 0.82
-    bram_read_delay: 2.012,     // 2454 × 0.82
-    dsp_delay: 1.476,           // 1800 × 0.82
+    lut6_delay: 0.102,      // 124 × 0.82
+    dff_clk_to_q: 0.248,    // 303 × 0.82
+    dff_setup: 0.048,       // 58 × 0.82
+    dff_hold: 0.094,        // 115 × 0.82
+    carry4_delay: 0.093,    // 114 × 0.82
+    io_input_delay: 0.656,  // 800 × 0.82
+    io_output_delay: 1.230, // 1500 × 0.82
+    bram_read_delay: 2.012, // 2454 × 0.82
+    dsp_delay: 1.476,       // 1800 × 0.82
 
     local_wire_delay: 0.025,
     single_delay: 0.074,
@@ -410,9 +410,12 @@ pub const TIMING_KINTEX_1: Xc7TimingData = Xc7TimingData {
 };
 
 /// Spartan-7 speed grade -1 (same die as Artix, ~5% slower due to binning)
+// dff_clk_to_q is a measured timing value in ns (303 ps x 1.05), not an
+// approximation of 1/pi.
+#[allow(clippy::approx_constant)]
 pub const TIMING_SPARTAN_1: Xc7TimingData = Xc7TimingData {
-    lut6_delay: 0.130,          // 124 × 1.05
-    dff_clk_to_q: 0.318,       // 303 × 1.05
+    lut6_delay: 0.130,   // 124 × 1.05
+    dff_clk_to_q: 0.318, // 303 × 1.05
     dff_setup: 0.061,
     dff_hold: 0.121,
     carry4_delay: 0.120,
@@ -451,11 +454,11 @@ pub const ROUTING_CHANNELS: (u32, u32) = (60, 60);
 
 /// Wire counts per INT tile per direction
 /// From prjxray INT tile analysis: ~60 wires per direction
-pub const WIRE_LOCAL_COUNT: u8 = 24;    // IMUX, bounce, bypass wires
-pub const WIRE_SINGLE_COUNT: u8 = 8;   // NN1/SS1/EE1/WW1 (span 1 tile)
-pub const WIRE_DOUBLE_COUNT: u8 = 8;   // NN2/SS2/EE2/WW2 (span 2 tiles)
-pub const WIRE_QUAD_COUNT: u8 = 4;     // NN4/SS4/EE4/WW4 (span 4-6 tiles)
-pub const WIRE_LONG_COUNT: u8 = 4;     // LH/LV (span 12 tiles)
+pub const WIRE_LOCAL_COUNT: u8 = 24; // IMUX, bounce, bypass wires
+pub const WIRE_SINGLE_COUNT: u8 = 8; // NN1/SS1/EE1/WW1 (span 1 tile)
+pub const WIRE_DOUBLE_COUNT: u8 = 8; // NN2/SS2/EE2/WW2 (span 2 tiles)
+pub const WIRE_QUAD_COUNT: u8 = 4; // NN4/SS4/EE4/WW4 (span 4-6 tiles)
+pub const WIRE_LONG_COUNT: u8 = 4; // LH/LV (span 12 tiles)
 
 // ---------------------------------------------------------------------------
 // Clock network (UG472)
@@ -498,8 +501,7 @@ pub const DSP_MULT_WIDTH: u8 = 25; // 25×18 multiplier
 
 /// Supported I/O standards (HR banks)
 pub const IO_STANDARDS: &[&str] = &[
-    "LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS15", "LVCMOS12",
-    "SSTL135", "SSTL15", "LVDS_25",
+    "LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS15", "LVCMOS12", "SSTL135", "SSTL15", "LVDS_25",
 ];
 /// Supported drive strengths (mA)
 pub const IO_DRIVE_STRENGTHS: &[u8] = &[4, 8, 12, 16, 24];
@@ -519,11 +521,11 @@ pub const DSP_COLUMN_SPACING: u32 = 14;
 // Bitstream constants (from UG470 + prjxray-db)
 // ---------------------------------------------------------------------------
 
-/// Xilinx 7-series bitstream structure (UG470):
-///   [Dummy words] [Bus width detect] [Sync word] [Register writes] [Frame data] [DESYNC]
-///
-/// Frame addressing: Type(3) | Top/Bottom(1) | Row(5) | Column(8) | Minor(7)
-/// All 7-series use 101-word (3232-bit) frames.
+// Xilinx 7-series bitstream structure (UG470):
+//   [Dummy words] [Bus width detect] [Sync word] [Register writes] [Frame data] [DESYNC]
+//
+// Frame addressing: Type(3) | Top/Bottom(1) | Row(5) | Column(8) | Minor(7)
+// All 7-series use 101-word (3232-bit) frames.
 
 /// Dummy word (32-bit, sent before sync)
 pub const BITSTREAM_DUMMY_WORD: u32 = 0xFFFF_FFFF;

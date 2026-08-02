@@ -191,10 +191,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     ) -> Result<RoutingResult> {
         let mut result = RoutingResult::new();
         let mut congestion = CongestionTracker::new();
-        let astar = AStarRouter::with_delay_model(
-            self.device,
-            crate::timing::DelayModel::ice40_default(),
-        );
+        let astar =
+            AStarRouter::with_delay_model(self.device, crate::timing::DelayModel::ice40_default());
 
         // Build matched-delay lookup from NCL constraints (empty for non-NCL designs)
         let matched_delay_lookup: HashMap<GateNetId, &MatchedDelayGroup> = netlist
@@ -314,8 +312,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             if congestion_history.len() >= 15 {
                 let window = 8;
                 if congestion_history.len() >= window {
-                    let recent =
-                        &congestion_history[congestion_history.len() - window..];
+                    let recent = &congestion_history[congestion_history.len() - window..];
                     let oldest = recent[0];
                     let newest = recent[window - 1];
                     if oldest > 0.0 && (oldest - newest) / oldest < 0.02 {
@@ -327,10 +324,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
             // Classic PathFinder: escalate cost factors each iteration
             // This creates increasing pressure to avoid congested wires
-            let iter_present_factor =
-                base_present_factor * (1.0 + iteration as f64 * 0.5);
-            let iter_history_factor =
-                base_history_factor * (1.0 + iteration as f64 * 0.2);
+            let iter_present_factor = base_present_factor * (1.0 + iteration as f64 * 0.5);
+            let iter_history_factor = base_history_factor * (1.0 + iteration as f64 * 0.2);
 
             // Update history costs BEFORE rip-up so we capture the actual congestion
             congestion.update_history();
@@ -450,7 +445,10 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             })
             .collect();
 
-        let max = total_delays.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max = total_delays
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let min = total_delays.iter().cloned().fold(f64::INFINITY, f64::min);
         (max - min).max(0.0)
     }
@@ -677,9 +675,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     // Compute delay for THIS branch only (not cumulative over all branches)
                     let branch_delay: u32 = pips
                         .iter()
-                        .map(|&pip_id| {
-                            self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0)
-                        })
+                        .map(|&pip_id| self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0))
                         .sum();
 
                     // Add wires/PIPs to the route-level aggregates
@@ -769,8 +765,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     /// 4. Rip up that branch's wires/PIPs
     /// 5. Block its wires so A* finds a longer alternate path
     /// 6. Repeat up to `max_attempts`
-    #[allow(clippy::too_many_arguments)]
+    ///
     /// Retained for potential future use; not called in current ready-signal-delay flow.
+    #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     fn enforce_skew_constraint(
         &self,
@@ -814,15 +811,19 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     .iter()
                     .enumerate()
                     .min_by(|(_, a), (_, b)| {
-                        let a_total = a.dest_cell
+                        let a_total = a
+                            .dest_cell
                             .and_then(|c| cell_delay_map.get(&c).copied())
                             .unwrap_or(0.0)
                             + a.delay_ps as f64;
-                        let b_total = b.dest_cell
+                        let b_total = b
+                            .dest_cell
                             .and_then(|c| cell_delay_map.get(&c).copied())
                             .unwrap_or(0.0)
                             + b.delay_ps as f64;
-                        a_total.partial_cmp(&b_total).unwrap_or(std::cmp::Ordering::Equal)
+                        a_total
+                            .partial_cmp(&b_total)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(i, _)| i)
                     .unwrap()
@@ -881,9 +882,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 Ok((new_wires, new_pips)) => {
                     let new_delay: u32 = new_pips
                         .iter()
-                        .map(|&pip_id| {
-                            self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0)
-                        })
+                        .map(|&pip_id| self.device.pip(pip_id).map(|p| p.delay).unwrap_or(0))
                         .sum();
 
                     // Add the rerouted branch back
@@ -1181,8 +1180,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             }
 
             // Add nets not covered by STA (e.g., no register paths)
-            let sta_nets: HashSet<GateNetId> =
-                net_slacks.iter().map(|ns| ns.net_id).collect();
+            let sta_nets: HashSet<GateNetId> = net_slacks.iter().map(|ns| ns.net_id).collect();
             for net in &netlist.nets {
                 if net.driver.is_none() || net.fanout.is_empty() {
                     continue;

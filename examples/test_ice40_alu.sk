@@ -1,0 +1,17 @@
+
+entity TestAlu {
+    in a: bit[8]
+    in b: bit[8]
+    in op: bit[2]
+    out result: bit[8]
+}
+
+impl TestAlu {
+    result = match op {
+        0b00 => a + b,
+        0b01 => a - b,
+        0b10 => a & b,
+        0b11 => a | b,
+        _ => 0
+    }
+}

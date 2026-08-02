@@ -93,17 +93,33 @@ impl Ecp5Variant {
         }
     }
 
-    pub fn lut_count(&self) -> usize { self.die_data().lut4s }
+    pub fn lut_count(&self) -> usize {
+        self.die_data().lut4s
+    }
     #[allow(dead_code)]
-    pub fn plc2_count(&self) -> usize { self.die_data().plc2_tiles }
-    pub fn ebr_count(&self) -> usize { self.die_data().ebr_blocks }
-    pub fn io_count(&self) -> usize { self.die_data().max_ios }
-    pub fn dsp_count(&self) -> usize { self.die_data().mult18s }
-    pub fn pll_count(&self) -> u8 { self.die_data().plls }
+    pub fn plc2_count(&self) -> usize {
+        self.die_data().plc2_tiles
+    }
+    pub fn ebr_count(&self) -> usize {
+        self.die_data().ebr_blocks
+    }
+    pub fn io_count(&self) -> usize {
+        self.die_data().max_ios
+    }
+    pub fn dsp_count(&self) -> usize {
+        self.die_data().mult18s
+    }
+    pub fn pll_count(&self) -> u8 {
+        self.die_data().plls
+    }
     #[allow(dead_code)]
-    pub fn dll_count(&self) -> u8 { self.die_data().dlls }
+    pub fn dll_count(&self) -> u8 {
+        self.die_data().dlls
+    }
     #[allow(dead_code)]
-    pub fn dist_ram_kbits(&self) -> usize { self.die_data().dist_ram_kbits }
+    pub fn dist_ram_kbits(&self) -> usize {
+        self.die_data().dist_ram_kbits
+    }
 
     /// IDCODE from prjtrellis — depends on U/UM/UM5G family
     #[allow(dead_code)]
@@ -154,12 +170,16 @@ impl Ecp5Variant {
 
     fn family_type(&self) -> Ecp5Family {
         match self {
-            Ecp5Variant::Lfe5u12f | Ecp5Variant::Lfe5u25f
-            | Ecp5Variant::Lfe5u45f | Ecp5Variant::Lfe5u85f => Ecp5Family::U,
-            Ecp5Variant::Lfe5um25f | Ecp5Variant::Lfe5um45f
-            | Ecp5Variant::Lfe5um85f => Ecp5Family::Um,
-            Ecp5Variant::Lfe5um5g25f | Ecp5Variant::Lfe5um5g45f
-            | Ecp5Variant::Lfe5um5g85f => Ecp5Family::Um5g,
+            Ecp5Variant::Lfe5u12f
+            | Ecp5Variant::Lfe5u25f
+            | Ecp5Variant::Lfe5u45f
+            | Ecp5Variant::Lfe5u85f => Ecp5Family::U,
+            Ecp5Variant::Lfe5um25f | Ecp5Variant::Lfe5um45f | Ecp5Variant::Lfe5um85f => {
+                Ecp5Family::Um
+            }
+            Ecp5Variant::Lfe5um5g25f | Ecp5Variant::Lfe5um5g45f | Ecp5Variant::Lfe5um5g85f => {
+                Ecp5Family::Um5g
+            }
         }
     }
 
@@ -325,7 +345,11 @@ impl Ecp5Device {
                     self.tiles[y as usize][x as usize] = Some(Ecp5Tile::new(side, x, y, io_bels));
                 } else if is_dsp_col {
                     let dsp_bels = Self::make_dsp_bels(&mut bel_id);
-                    self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MULTS_PER_TILE });
+                    self.dsp_tiles.push(DspTile {
+                        x,
+                        y,
+                        mac_count: data::DSP_MULTS_PER_TILE,
+                    });
                     self.tiles[y as usize][x as usize] =
                         Some(Ecp5Tile::new(TileType::Dsp, x, y, dsp_bels));
                 } else if is_bram_col {
@@ -366,11 +390,31 @@ impl Ecp5Device {
                 bel_type: BelType::Lut4,
                 name: format!("LUT4_{}", i),
                 pins: vec![
-                    BelPin { name: "A".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "B".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "C".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "D".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "Z".into(), direction: PinDirection::Output, wire: None },
+                    BelPin {
+                        name: "A".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "B".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "C".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "D".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "Z".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -383,11 +427,31 @@ impl Ecp5Device {
                 bel_type: BelType::DffSrE,
                 name: format!("FF_{}", i),
                 pins: vec![
-                    BelPin { name: "D".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CLK".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CE".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "LSR".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "Q".into(), direction: PinDirection::Output, wire: None },
+                    BelPin {
+                        name: "D".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CLK".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CE".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "LSR".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "Q".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -399,8 +463,16 @@ impl Ecp5Device {
             bel_type: BelType::Carry,
             name: "CCU2C".into(),
             pins: vec![
-                BelPin { name: "CIN".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "COUT".into(), direction: PinDirection::Output, wire: None },
+                BelPin {
+                    name: "CIN".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "COUT".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
             ],
         });
 
@@ -417,10 +489,26 @@ impl Ecp5Device {
                 bel_type: BelType::IoCell,
                 name: format!("PIO_{}", i),
                 pins: vec![
-                    BelPin { name: "PAD".into(), direction: PinDirection::Inout, wire: None },
-                    BelPin { name: "I".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "O".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "T".into(), direction: PinDirection::Input, wire: None },
+                    BelPin {
+                        name: "PAD".into(),
+                        direction: PinDirection::Inout,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "I".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "O".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "T".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -435,18 +523,66 @@ impl Ecp5Device {
             bel_type: BelType::RamSlice,
             name: "DP16KD".into(),
             pins: vec![
-                BelPin { name: "ADDRA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "ADDRB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DOA".into(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "DOB".into(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "CLKA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CLKB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEB".into(), direction: PinDirection::Input, wire: None },
+                BelPin {
+                    name: "ADDRA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "ADDRB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOA".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOB".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
             ],
         }]
     }
@@ -461,12 +597,36 @@ impl Ecp5Device {
                 bel_type: BelType::DspSlice,
                 name: format!("MULT18X18D_{}", i),
                 pins: vec![
-                    BelPin { name: "A".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "B".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "P".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "CLK".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CE".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "RST".into(), direction: PinDirection::Input, wire: None },
+                    BelPin {
+                        name: "A".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "B".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "P".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CLK".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CE".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "RST".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -586,7 +746,7 @@ impl Ecp5Device {
                                 self.bel_wires.get(&(x, y, format!("LUT{}_{}", lc, pin)))
                             {
                                 for lo in 0..3u8 {
-                                    let li = ((lc * 2 + inp + lo as usize) % 20) as usize;
+                                    let li = (lc * 2 + inp + lo as usize) % 20;
                                     if let Some(locals) = self.tile_wires.get(&(x, y)) {
                                         if let Some(&lw) = locals.get(li) {
                                             let p = Pip {
@@ -625,7 +785,8 @@ impl Ecp5Device {
                         delay: 60,
                     };
                     self.wire_names.insert(clk_wire.name.clone(), clk_wire.id);
-                    self.bel_wires.insert((x, y, "CLK".to_string()), clk_wire.id);
+                    self.bel_wires
+                        .insert((x, y, "CLK".to_string()), clk_wire.id);
                     self.tile_wires.entry((x, y)).or_default().push(clk_wire.id);
                     self.wires.push(clk_wire);
                     wire_id += 1;
@@ -838,14 +999,8 @@ impl Ecp5Device {
                                         tile_x: dest_x,
                                         tile_y: dest_y,
                                     };
-                                    self.wire_to_pips
-                                        .entry(p.dst_wire)
-                                        .or_default()
-                                        .push(p.id);
-                                    self.wire_src_pips
-                                        .entry(p.src_wire)
-                                        .or_default()
-                                        .push(p.id);
+                                    self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                    self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                     self.pips.push(p);
                                     pip_id += 1;
                                 }
@@ -855,9 +1010,7 @@ impl Ecp5Device {
                 }
 
                 // Neighbour wires (4 directions)
-                for (dx, dy, dir) in
-                    [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")]
-                {
+                for (dx, dy, dir) in [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")] {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
                     if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
@@ -1190,7 +1343,11 @@ mod tests {
         let stats = device.stats();
         assert!(stats.total_luts > 500, "got {} LUTs", stats.total_luts);
         assert!(stats.total_ios > 30, "got {} IOs", stats.total_ios);
-        assert!(stats.total_dsps > 0, "12F has 28 MULT18, got {} DSPs", stats.total_dsps);
+        assert!(
+            stats.total_dsps > 0,
+            "12F has 28 MULT18, got {} DSPs",
+            stats.total_dsps
+        );
         // Check IDCODE
         assert_eq!(Ecp5Variant::Lfe5u12f.idcode(), 0x2111_1043);
     }

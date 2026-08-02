@@ -1,0 +1,10 @@
+
+entity TestSubtractor {
+    in a: bit[8]
+    in b: bit[8]
+    out diff: bit[8]
+}
+
+impl TestSubtractor {
+    diff = a - b
+}

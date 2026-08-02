@@ -94,16 +94,17 @@ impl AsyncStaFixConfig {
     /// For FPGA targets (iCE40), the buffer is implemented as an SB_LUT4 with
     /// INIT=0xAAAA, so the delay is the LUT4 propagation delay (~590ps).
     pub fn from_library(lib: &crate::tech_library::TechLibrary) -> Self {
-        let mut config = Self::default();
-        config.library_name = lib.name.clone();
+        let mut config = Self {
+            library_name: lib.name.clone(),
+            ..Self::default()
+        };
 
         // Try to find a buffer cell and its delay
         // Search order: SB_LUT4_BUF (ice40), BUF_X1 (ASIC), then any buf-function cell
-        let buf_cell = lib.get_cell("SB_LUT4_BUF")
+        let buf_cell = lib
+            .get_cell("SB_LUT4_BUF")
             .or_else(|| lib.get_cell("BUF_X1"))
-            .or_else(|| {
-                lib.find_best_cell(&crate::tech_library::CellFunction::Buf)
-            });
+            .or_else(|| lib.find_best_cell(&crate::tech_library::CellFunction::Buf));
 
         if let Some(cell) = buf_cell {
             config.buffer_cell_type = cell.name.clone();

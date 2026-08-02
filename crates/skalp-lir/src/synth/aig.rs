@@ -425,7 +425,11 @@ impl Aig {
     /// Add a primary input
     pub fn add_input(&mut self, name: String, source_net: Option<GateNetId>) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
-        self.nodes.push(AigNode::Input { name, source_net, is_physical: false });
+        self.nodes.push(AigNode::Input {
+            name,
+            source_net,
+            is_physical: false,
+        });
         self.safety_info.push(AigSafetyInfo::empty());
         id
     }
@@ -435,7 +439,11 @@ impl Aig {
     /// not by external signals. Replaces the `__phys_` prefix convention.
     pub fn add_physical_input(&mut self, name: String) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
-        self.nodes.push(AigNode::Input { name, source_net: None, is_physical: true });
+        self.nodes.push(AigNode::Input {
+            name,
+            source_net: None,
+            is_physical: true,
+        });
         self.safety_info.push(AigSafetyInfo::empty());
         id
     }
@@ -448,7 +456,11 @@ impl Aig {
         safety: AigSafetyInfo,
     ) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
-        self.nodes.push(AigNode::Input { name, source_net, is_physical: false });
+        self.nodes.push(AigNode::Input {
+            name,
+            source_net,
+            is_physical: false,
+        });
         self.safety_info.push(safety);
         id
     }

@@ -585,7 +585,10 @@ impl Fraig {
 
         // Phase 1a: Add inputs
         for (old_id, node) in aig.iter_nodes() {
-            if let AigNode::Input { name, source_net, .. } = node {
+            if let AigNode::Input {
+                name, source_net, ..
+            } = node
+            {
                 let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
                 let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                 old_to_new.insert(old_id, AigLit::new(new_id));
@@ -598,8 +601,26 @@ impl Fraig {
         // Phase 1b: Pre-create latches/barriers with placeholder data
         // In sequential circuits, latch data inputs reference AND nodes that may have
         // higher IDs. We must process all AND nodes before resolving latch data.
-        let mut latch_ids: Vec<(AigNodeId, AigLit, Option<bool>, Option<AigNodeId>, Option<AigNodeId>)> = Vec::new();
-        let mut barrier_ids: Vec<(AigNodeId, BarrierType, AigLit, Option<AigLit>, Option<AigNodeId>, Option<AigNodeId>, Option<bool>)> = Vec::new();
+        // (old_id, data, init, clock, reset)
+        type LatchInfo = (
+            AigNodeId,
+            AigLit,
+            Option<bool>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+        );
+        // (old_id, barrier_type, data, enable, clock, reset, init)
+        type BarrierInfo = (
+            AigNodeId,
+            BarrierType,
+            AigLit,
+            Option<AigLit>,
+            Option<AigNodeId>,
+            Option<AigNodeId>,
+            Option<bool>,
+        );
+        let mut latch_ids: Vec<LatchInfo> = Vec::new();
+        let mut barrier_ids: Vec<BarrierInfo> = Vec::new();
 
         for (old_id, node) in aig.iter_nodes() {
             // Skip merged nodes
@@ -607,26 +628,55 @@ impl Fraig {
                 continue;
             }
             match node {
-                AigNode::Latch { data, init, clock, reset } => {
+                AigNode::Latch {
+                    data,
+                    init,
+                    clock,
+                    reset,
+                } => {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
                     let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
                     let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_latch_with_safety(
-                        AigLit::false_lit(), *init, new_clock, new_reset, safety,
+                        AigLit::false_lit(),
+                        *init,
+                        new_clock,
+                        new_reset,
+                        safety,
                     );
                     old_to_new.insert(old_id, AigLit::new(new_id));
                     latch_ids.push((old_id, *data, *init, *clock, *reset));
                 }
-                AigNode::Barrier { barrier_type, data, enable, clock, reset, init } => {
+                AigNode::Barrier {
+                    barrier_type,
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    init,
+                } => {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
                     let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
                     let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
-                        barrier_type.clone(), AigLit::false_lit(), None,
-                        new_clock, new_reset, *init, safety,
+                        barrier_type.clone(),
+                        AigLit::false_lit(),
+                        None,
+                        new_clock,
+                        new_reset,
+                        *init,
+                        safety,
                     );
                     old_to_new.insert(old_id, AigLit::new(new_id));
-                    barrier_ids.push((old_id, barrier_type.clone(), *data, *enable, *clock, *reset, *init));
+                    barrier_ids.push((
+                        old_id,
+                        barrier_type.clone(),
+                        *data,
+                        *enable,
+                        *clock,
+                        *reset,
+                        *init,
+                    ));
                 }
                 _ => {}
             }
@@ -649,7 +699,10 @@ impl Fraig {
             }
 
             match node {
-                AigNode::Const | AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
+                AigNode::Const
+                | AigNode::Input { .. }
+                | AigNode::Latch { .. }
+                | AigNode::Barrier { .. } => {
                     // Already handled in phases 1a/1b
                 }
                 AigNode::And { left, right } => {

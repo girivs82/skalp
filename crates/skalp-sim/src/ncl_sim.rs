@@ -931,7 +931,10 @@ impl NclSimulator {
             "TIE_LOW" | "TIEL" | "GND" | "VSS" => PrimitiveType::Constant { value: false },
             _ => {
                 // Default to buffer for unknown types
-                eprintln!("WARNING: NCL sim treating unknown cell type '{}' (base '{}') as BUF", cell_type, base_type);
+                eprintln!(
+                    "WARNING: NCL sim treating unknown cell type '{}' (base '{}') as BUF",
+                    cell_type, base_type
+                );
                 PrimitiveType::Buf
             }
         }

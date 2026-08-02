@@ -651,10 +651,7 @@ impl<'a> SharedCodegen<'a> {
             let sanitized = self.sanitize_name(&input.name);
             let (base_type, array_suffix) =
                 self.type_mapper.get_struct_field_parts(&input.sir_type);
-            self.write_indented(&format!(
-                "{} {}{};\n",
-                base_type, sanitized, array_suffix
-            ));
+            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
             self.input_field_names.push(sanitized);
         }
 
@@ -685,10 +682,7 @@ impl<'a> SharedCodegen<'a> {
 
             let sanitized = self.sanitize_name(name);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
-            self.write_indented(&format!(
-                "{} {}{};\n",
-                base_type, sanitized, array_suffix
-            ));
+            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
             self.register_field_names.push(sanitized);
         }
 
@@ -713,10 +707,7 @@ impl<'a> SharedCodegen<'a> {
             let width = self.get_signal_width(name);
             let sir_type = SirType::Bits(width);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(&sir_type);
-            self.write_indented(&format!(
-                "{} {}{};\n",
-                base_type, sanitized, array_suffix
-            ));
+            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
             self.register_field_names.push(sanitized);
         }
 
@@ -769,8 +760,7 @@ impl<'a> SharedCodegen<'a> {
                         .get(array_signal)
                         .copied()
                         .unwrap_or_else(|| {
-                            self.type_mapper
-                                .get_signal_width(self.module, array_signal)
+                            self.type_mapper.get_signal_width(self.module, array_signal)
                         });
                     if source_width > 32 {
                         array_source_signals.insert(array_signal.clone());
@@ -975,12 +965,7 @@ impl<'a> SharedCodegen<'a> {
         out.push_str("};\n\n");
 
         // Helper closure to emit a table for a given struct
-        fn emit_table(
-            out: &mut String,
-            struct_name: &str,
-            table_name: &str,
-            fields: &[String],
-        ) {
+        fn emit_table(out: &mut String, struct_name: &str, table_name: &str, fields: &[String]) {
             out.push_str(&format!(
                 "static const SkalpFieldEntry {}_field_table[] = {{\n",
                 table_name
@@ -988,7 +973,10 @@ impl<'a> SharedCodegen<'a> {
             for field in fields {
                 out.push_str(&format!(
                     "    {{\"{}\", offsetof({}, {}), sizeof((({struct_name}*)0)->{})}},\n",
-                    field, struct_name, field, field,
+                    field,
+                    struct_name,
+                    field,
+                    field,
                     struct_name = struct_name,
                 ));
             }
@@ -1004,7 +992,12 @@ impl<'a> SharedCodegen<'a> {
         }
 
         emit_table(&mut out, "Inputs", "inputs", &self.input_field_names);
-        emit_table(&mut out, "Registers", "registers", &self.register_field_names);
+        emit_table(
+            &mut out,
+            "Registers",
+            "registers",
+            &self.register_field_names,
+        );
         emit_table(&mut out, "Signals", "signals", &self.signal_field_names);
 
         out
@@ -2452,7 +2445,8 @@ impl<'a> SharedCodegen<'a> {
                 // indexing (arr[idx/32] >> (idx%32)).
                 let is_element_array = {
                     // Check SIR type of the source signal or state element
-                    let resolved = self.resolve_to_array_source(input)
+                    let resolved = self
+                        .resolve_to_array_source(input)
                         .unwrap_or_else(|| input.to_string());
                     let sir_type = if let Some(elem) = self.module.state_elements.get(&resolved) {
                         elem.sir_type.clone()
@@ -2484,32 +2478,32 @@ impl<'a> SharedCodegen<'a> {
                         elem_mask
                     ));
                 } else {
-                // Regular array with 32-bit elements (C++ or Metal with >128-bit elements)
-                let element_idx = low / 32;
-                let bit_in_element = low % 32;
+                    // Regular array with 32-bit elements (C++ or Metal with >128-bit elements)
+                    let element_idx = low / 32;
+                    let bit_in_element = low % 32;
 
-                if width <= 32 && bit_in_element + width <= 32 {
-                    // Slice fits in single element
-                    let elem_mask = if width >= 32 {
-                        0xFFFFFFFF
-                    } else {
-                        (1u32 << width) - 1
-                    };
-                    self.write_indented(&format!(
-                        "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
-                        self.sanitize_name(output),
-                        input_base,
-                        element_idx,
-                        bit_in_element,
-                        elem_mask
-                    ));
-                } else if width <= 32 {
-                    // Slice spans two elements
-                    let bits_from_first = 32 - bit_in_element;
-                    let bits_from_second = width - bits_from_first;
-                    let first_mask = (1u32 << bits_from_first) - 1;
-                    let second_mask = (1u32 << bits_from_second) - 1;
-                    self.write_indented(&format!(
+                    if width <= 32 && bit_in_element + width <= 32 {
+                        // Slice fits in single element
+                        let elem_mask = if width >= 32 {
+                            0xFFFFFFFF
+                        } else {
+                            (1u32 << width) - 1
+                        };
+                        self.write_indented(&format!(
+                            "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
+                            self.sanitize_name(output),
+                            input_base,
+                            element_idx,
+                            bit_in_element,
+                            elem_mask
+                        ));
+                    } else if width <= 32 {
+                        // Slice spans two elements
+                        let bits_from_first = 32 - bit_in_element;
+                        let bits_from_second = width - bits_from_first;
+                        let first_mask = (1u32 << bits_from_first) - 1;
+                        let second_mask = (1u32 << bits_from_second) - 1;
+                        self.write_indented(&format!(
                         "signals->{} = (({}[{}] >> {}) & 0x{:X}) | (({}[{}] & 0x{:X}) << {});\n",
                         self.sanitize_name(output),
                         input_base,
@@ -2521,28 +2515,28 @@ impl<'a> SharedCodegen<'a> {
                         second_mask,
                         bits_from_first
                     ));
-                } else if width <= 64 {
-                    // 33-64 bit slice from array - combine two elements
-                    self.write_indented(&format!(
-                        "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
-                        self.sanitize_name(output),
-                        input_base,
-                        element_idx,
-                        bit_in_element,
-                        input_base,
-                        element_idx + 1,
-                        32 - bit_in_element
-                    ));
-                } else {
-                    // Wide slice to scalar (shouldn't happen often)
-                    self.write_indented(&format!(
-                        "signals->{} = {}[{}];\n",
-                        self.sanitize_name(output),
-                        input_base,
-                        element_idx
-                    ));
-                }
-            } // end !is_element_array
+                    } else if width <= 64 {
+                        // 33-64 bit slice from array - combine two elements
+                        self.write_indented(&format!(
+                            "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
+                            self.sanitize_name(output),
+                            input_base,
+                            element_idx,
+                            bit_in_element,
+                            input_base,
+                            element_idx + 1,
+                            32 - bit_in_element
+                        ));
+                    } else {
+                        // Wide slice to scalar (shouldn't happen often)
+                        self.write_indented(&format!(
+                            "signals->{} = {}[{}];\n",
+                            self.sanitize_name(output),
+                            input_base,
+                            element_idx
+                        ));
+                    }
+                } // end !is_element_array
             }
         } else if self.uses_vector_storage(input_width) {
             // Input is a Metal vector type (uint2/uint4), output is scalar

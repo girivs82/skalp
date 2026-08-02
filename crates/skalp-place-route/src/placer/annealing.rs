@@ -15,6 +15,10 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Result of a placement-move cost evaluation:
+/// (total delta, per-net (index, new_wl, new_timing) updates, proximity (index, new_cost) updates).
+type CostDelta = (f64, Vec<(usize, f64, f64)>, Vec<(usize, f64)>);
+
 /// NCL proximity group for placement co-location enforcement.
 /// Tracks which cells must be placed close together and the tile distance limit.
 struct ProximityGroupInfo {
@@ -102,7 +106,11 @@ impl ProximityCostTracker {
 
     /// Compute the delta in proximity cost for a new placement.
     /// Only recomputes groups that contain moved cells.
-    fn compute_delta(&self, moved_cells: &[CellId], new_placement: &PlacementResult) -> (f64, Vec<(usize, f64)>) {
+    fn compute_delta(
+        &self,
+        moved_cells: &[CellId],
+        new_placement: &PlacementResult,
+    ) -> (f64, Vec<(usize, f64)>) {
         let mut affected_groups: HashSet<usize> = HashSet::new();
         for cell in moved_cells {
             if let Some(gids) = self.cell_to_groups.get(cell) {
@@ -177,8 +185,7 @@ impl NetCostCache {
             } else {
                 0.0
             };
-            let (wl, timing) =
-                Self::compute_net_costs(net, placement, delay_model, criticality);
+            let (wl, timing) = Self::compute_net_costs(net, placement, delay_model, criticality);
             net_wl_cost[i] = wl;
             net_timing_cost[i] = timing;
         }
@@ -210,8 +217,7 @@ impl NetCostCache {
         let base = if timing_weight == 0.0 {
             self.total_wl_cost
         } else {
-            (1.0 - timing_weight) * self.total_wl_cost
-                + timing_weight * self.total_timing_cost
+            (1.0 - timing_weight) * self.total_wl_cost + timing_weight * self.total_timing_cost
         };
         // Proximity penalty scaled to be comparable to wirelength cost.
         // Weight of 10.0 makes 1-tile excess equivalent to 10 HPWL units.
@@ -231,6 +237,7 @@ impl NetCostCache {
 
     /// Compute the cost delta for a new placement, updating only affected nets.
     /// Returns (delta, net updates, proximity updates) for later commit.
+    #[allow(clippy::too_many_arguments)]
     fn compute_delta(
         &self,
         affected: &[usize],
@@ -240,7 +247,7 @@ impl NetCostCache {
         net_criticalities: &HashMap<GateNetId, f64>,
         delay_model: &DelayModel,
         timing_weight: f64,
-    ) -> (f64, Vec<(usize, f64, f64)>, Vec<(usize, f64)>) {
+    ) -> CostDelta {
         let mut wl_delta = 0.0;
         let mut timing_delta = 0.0;
         let mut updates = Vec::with_capacity(affected.len());
@@ -267,19 +274,14 @@ impl NetCostCache {
         };
 
         // Proximity cost delta (only recomputes affected groups)
-        let (prox_delta, prox_updates) =
-            self.proximity.compute_delta(moved_cells, new_placement);
+        let (prox_delta, prox_updates) = self.proximity.compute_delta(moved_cells, new_placement);
         let delta = base_delta + 10.0 * prox_delta;
 
         (delta, updates, prox_updates)
     }
 
     /// Apply cached updates after a move is accepted.
-    fn apply_updates(
-        &mut self,
-        net_updates: &[(usize, f64, f64)],
-        prox_updates: &[(usize, f64)],
-    ) {
+    fn apply_updates(&mut self, net_updates: &[(usize, f64, f64)], prox_updates: &[(usize, f64)]) {
         for &(net_idx, new_wl, new_timing) in net_updates {
             self.total_wl_cost += new_wl - self.net_wl_cost[net_idx];
             self.total_timing_cost += new_timing - self.net_timing_cost[net_idx];
@@ -530,16 +532,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
             for _ in 0..100.min(cal_cells.len() * 2) {
                 let move_op = self.generate_move(&cal_placement, &cal_cells, &mut cal_rng);
-                let affected = self.moved_cells_with_displaced(
-                    &move_op,
-                    &cal_placement,
-                    &cal_loc_map,
-                );
-                let undo = self.apply_move_in_place(
-                    &mut cal_placement,
-                    &mut cal_loc_map,
-                    &move_op,
-                );
+                let affected =
+                    self.moved_cells_with_displaced(&move_op, &cal_placement, &cal_loc_map);
+                let undo = self.apply_move_in_place(&mut cal_placement, &mut cal_loc_map, &move_op);
                 let affected_nets = cost_cache.affected_nets(&affected);
                 let (delta, _, _) = cost_cache.compute_delta(
                     &affected_nets,
@@ -602,18 +597,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 };
 
                 // Determine affected cells before mutation
-                let affected = self.moved_cells_with_displaced(
-                    &move_op,
-                    &current,
-                    &location_to_cell,
-                );
+                let affected =
+                    self.moved_cells_with_displaced(&move_op, &current, &location_to_cell);
 
                 // Apply move in-place (no clone), get undo record
-                let undo = self.apply_move_in_place(
-                    &mut current,
-                    &mut location_to_cell,
-                    &move_op,
-                );
+                let undo = self.apply_move_in_place(&mut current, &mut location_to_cell, &move_op);
 
                 // Incremental cost delta: only recompute nets connected to moved cells
                 let affected_nets = cost_cache.affected_nets(&affected);
@@ -764,11 +752,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     .map(|move_op| {
                         let (new_placement, new_loc_map) =
                             self.apply_move(&current, &location_to_cell, &move_op);
-                        let affected = self.moved_cells_with_displaced(
-                            &move_op,
-                            &current,
-                            &location_to_cell,
-                        );
+                        let affected =
+                            self.moved_cells_with_displaced(&move_op, &current, &location_to_cell);
                         let affected_nets = cost_cache.affected_nets(&affected);
                         let (delta, net_updates, prox_updates) = cost_cache.compute_delta(
                             &affected_nets,
@@ -779,7 +764,14 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             &self.delay_model,
                             self.timing_weight,
                         );
-                        (move_op, new_placement, new_loc_map, delta, net_updates, prox_updates)
+                        (
+                            move_op,
+                            new_placement,
+                            new_loc_map,
+                            delta,
+                            net_updates,
+                            prox_updates,
+                        )
                     })
                     .collect();
 
@@ -958,8 +950,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     for (i, &cell_id) in chain.cells.iter().enumerate() {
                         cells.push(cell_id);
                         // Check for displaced occupants
-                        let tile_y = (*new_start_y + (i as u32 / 8))
-                            .min(height.saturating_sub(2).max(1));
+                        let tile_y =
+                            (*new_start_y + (i as u32 / 8)).min(height.saturating_sub(2).max(1));
                         let bel_idx = i % 8;
                         let key = (*new_x, tile_y, bel_idx);
                         if let Some(&occupant) = loc_map.get(&key) {
@@ -1154,21 +1146,18 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 if let Some(chain) = self.carry_chains.get(*chain_id) {
                     let (_, height) = self.device.grid_size();
                     // Snapshot current loc_map state for new keys before any mutations
-                    let chain_cell_set: HashSet<CellId> =
-                        chain.cells.iter().copied().collect();
+                    let chain_cell_set: HashSet<CellId> = chain.cells.iter().copied().collect();
 
                     for (i, &cell_id) in chain.cells.iter().enumerate() {
                         if let Some(&old_loc) = placement.placements.get(&cell_id) {
-                            let old_key =
-                                (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
+                            let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
 
                             let tile_y = (*new_start_y + (i as u32 / 8))
                                 .min(height.saturating_sub(2).max(1));
                             let bel_idx = i % 8;
                             let new_loc =
                                 PlacementLoc::new(*new_x, tile_y, bel_idx, BelType::Carry);
-                            let new_key =
-                                (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
+                            let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
 
                             // Record undo for old key
                             undo.placement_changes.push((cell_id, old_loc));
@@ -1180,8 +1169,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                                 if !chain_cell_set.contains(&occupant) {
                                     let occ_loc = placement.placements[&occupant];
                                     undo.placement_changes.push((occupant, occ_loc));
-                                    undo.loc_map_changes
-                                        .push((new_key, Some(occupant)));
+                                    undo.loc_map_changes.push((new_key, Some(occupant)));
 
                                     let displaced_loc = PlacementLoc::new(
                                         old_loc.tile_x,

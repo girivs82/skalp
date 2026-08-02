@@ -1111,7 +1111,12 @@ impl Pass for Refactor {
                     refactored.insert(internal);
                 }
                 refactored.insert(node_id);
-                entries.push(RefactorEntry { node: node_id, cone, form, savings });
+                entries.push(RefactorEntry {
+                    node: node_id,
+                    cone,
+                    form,
+                    savings,
+                });
             }
         }
 

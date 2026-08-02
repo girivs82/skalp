@@ -157,15 +157,19 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                     .or_else(|| signal_name.strip_suffix("_obuf"))
                     .unwrap_or(signal_name);
 
-                let (ax, ay) = if let Some(&(tx, ty, _bel)) =
-                    self.resolved_io_constraints.get(signal_name)
-                {
-                    (tx as f64, ty as f64)
-                } else {
-                    self.get_io_anchor(
-                        cell.id, netlist, &initial_positions, cell_indices, width, height,
-                    )
-                };
+                let (ax, ay) =
+                    if let Some(&(tx, ty, _bel)) = self.resolved_io_constraints.get(signal_name) {
+                        (tx as f64, ty as f64)
+                    } else {
+                        self.get_io_anchor(
+                            cell.id,
+                            netlist,
+                            &initial_positions,
+                            cell_indices,
+                            width,
+                            height,
+                        )
+                    };
                 bx[idx] += anchor_weight * ax;
                 by[idx] += anchor_weight * ay;
             } else {
@@ -363,8 +367,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     ) -> (f64, f64) {
         // Check if this I/O drives or sinks a clock/reset net
         for net in &netlist.nets {
-            let connected = net.driver == Some(cell_id)
-                || net.fanout.iter().any(|(id, _)| *id == cell_id);
+            let connected =
+                net.driver == Some(cell_id) || net.fanout.iter().any(|(id, _)| *id == cell_id);
             if connected && net.is_clock {
                 return (width as f64 / 2.0, 0.5);
             }
@@ -379,8 +383,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let mut count = 0u32;
 
         for net in &netlist.nets {
-            let io_connected = net.driver == Some(cell_id)
-                || net.fanout.iter().any(|(id, _)| *id == cell_id);
+            let io_connected =
+                net.driver == Some(cell_id) || net.fanout.iter().any(|(id, _)| *id == cell_id);
             if !io_connected {
                 continue;
             }
@@ -432,7 +436,10 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             }
         } else {
             // No connected internal cells — distribute evenly around perimeter
-            let path = &netlist.cells.iter().find(|c| c.id == cell_id)
+            let path = &netlist
+                .cells
+                .iter()
+                .find(|c| c.id == cell_id)
                 .map(|c| c.path.as_str())
                 .unwrap_or("");
             let hash = path.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));

@@ -1126,21 +1126,37 @@ mod tests {
         assert!(!pips.is_empty(), "Should have PIPs");
 
         // Check gbufpin parsing (HX1K has 8 GBUF-capable pads)
-        assert_eq!(chipdb.gbufpin.len(), 8, "HX1K should have 8 gbufpin entries");
+        assert_eq!(
+            chipdb.gbufpin.len(),
+            8,
+            "HX1K should have 8 gbufpin entries"
+        );
         // Verify a known entry: tile(7,0) IOB_0 → glb_netwk_3
         assert!(
-            chipdb.gbufpin.iter().any(|g| g.tile_x == 7 && g.tile_y == 0 && g.pio_num == 0 && g.glb_num == 3),
+            chipdb
+                .gbufpin
+                .iter()
+                .any(|g| g.tile_x == 7 && g.tile_y == 0 && g.pio_num == 0 && g.glb_num == 3),
             "Should have gbufpin entry for tile(7,0) IOB_0 → glb_netwk_3"
         );
 
         // Check extra_bits parsing (should have 8 padin_glb_netwk entries)
-        let padin_bits: Vec<_> = chipdb.extra_bits.iter()
+        let padin_bits: Vec<_> = chipdb
+            .extra_bits
+            .iter()
             .filter(|eb| eb.name.starts_with("padin_glb_netwk"))
             .collect();
-        assert_eq!(padin_bits.len(), 8, "Should have 8 padin_glb_netwk extra bits");
+        assert_eq!(
+            padin_bits.len(),
+            8,
+            "Should have 8 padin_glb_netwk extra bits"
+        );
         // Verify a known entry: padin_glb_netwk.0 at bank 0, row 330, col 142
         assert!(
-            padin_bits.iter().any(|eb| eb.name == "padin_glb_netwk.0" && eb.bank == 0 && eb.addr_x == 330 && eb.addr_y == 142),
+            padin_bits.iter().any(|eb| eb.name == "padin_glb_netwk.0"
+                && eb.bank == 0
+                && eb.addr_x == 330
+                && eb.addr_y == 142),
             "Should have padin_glb_netwk.0 at (0, 330, 142)"
         );
     }

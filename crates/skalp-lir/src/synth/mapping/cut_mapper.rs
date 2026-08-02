@@ -380,8 +380,14 @@ impl CutMapper {
                     node_best_cut.insert(node_id, None);
                 }
                 AigNode::And { left, right } => {
-                    let best =
-                        self.find_best_match_if(aig, node_id, cuts, &node_delay, &node_area_flow, &fanout_count);
+                    let best = self.find_best_match_if(
+                        aig,
+                        node_id,
+                        cuts,
+                        &node_delay,
+                        &node_area_flow,
+                        &fanout_count,
+                    );
 
                     if let Some(ref match_) = best {
                         let arrival = self.compute_arrival(&match_.cut, &node_delay);
@@ -431,7 +437,9 @@ impl CutMapper {
         }
         for (id, node) in aig.iter_nodes() {
             match node {
-                AigNode::Latch { data, clock, reset, .. } => {
+                AigNode::Latch {
+                    data, clock, reset, ..
+                } => {
                     worklist.push(data.node);
                     if let Some(c) = clock {
                         worklist.push(*c);
@@ -440,7 +448,13 @@ impl CutMapper {
                         worklist.push(*r);
                     }
                 }
-                AigNode::Barrier { data, enable, clock, reset, .. } => {
+                AigNode::Barrier {
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    ..
+                } => {
                     worklist.push(data.node);
                     if let Some(e) = enable {
                         worklist.push(e.node);
@@ -514,8 +528,7 @@ impl CutMapper {
                             })
                             .sum();
                         let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
-                        node_area_flow
-                            .insert(node_id, (match_.area + leaf_area) / refs as f64);
+                        node_area_flow.insert(node_id, (match_.area + leaf_area) / refs as f64);
                     }
                 }
             }
@@ -538,8 +551,7 @@ impl CutMapper {
                 let mut best_area_flow = node_area_flow.get(&node_id).copied().unwrap_or(f64::MAX);
 
                 for cut in &cut_set.cuts {
-                    if cut.leaves.is_empty()
-                        || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
+                    if cut.leaves.is_empty() || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
                     {
                         continue;
                     }
@@ -595,7 +607,9 @@ impl CutMapper {
             }
             for (_, node) in aig.iter_nodes() {
                 match node {
-                    AigNode::Latch { data, clock, reset, .. } => {
+                    AigNode::Latch {
+                        data, clock, reset, ..
+                    } => {
                         worklist.push(data.node);
                         if let Some(c) = clock {
                             worklist.push(*c);
@@ -604,7 +618,13 @@ impl CutMapper {
                             worklist.push(*r);
                         }
                     }
-                    AigNode::Barrier { data, enable, clock, reset, .. } => {
+                    AigNode::Barrier {
+                        data,
+                        enable,
+                        clock,
+                        reset,
+                        ..
+                    } => {
                         worklist.push(data.node);
                         if let Some(e) = enable {
                             worklist.push(e.node);

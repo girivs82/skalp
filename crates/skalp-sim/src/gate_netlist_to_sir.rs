@@ -232,7 +232,10 @@ impl GateNetlistToSirConverter {
                 } else {
                     addr_width_without_mask as u8
                 };
-                PrimitiveType::RamBlock { addr_width, data_width }
+                PrimitiveType::RamBlock {
+                    addr_width,
+                    data_width,
+                }
             } else if let Some(func) = &cell.function {
                 // Use the library-provided function for accurate mapping
                 self.cell_function_to_primitive(func)
@@ -261,8 +264,14 @@ impl GateNetlistToSirConverter {
                 })
                 .collect();
             if inputs.len() != expected_inputs {
-                eprintln!("[WARN] Cell {} ({}): expected {} inputs, got {} (dropped {})",
-                    cell.path, cell.cell_type, expected_inputs, inputs.len(), expected_inputs - inputs.len());
+                eprintln!(
+                    "[WARN] Cell {} ({}): expected {} inputs, got {} (dropped {})",
+                    cell.path,
+                    cell.cell_type,
+                    expected_inputs,
+                    inputs.len(),
+                    expected_inputs - inputs.len()
+                );
             }
 
             let expected_outputs = cell.outputs.len();
@@ -280,8 +289,14 @@ impl GateNetlistToSirConverter {
                 })
                 .collect();
             if outputs.len() != expected_outputs {
-                eprintln!("[WARN] Cell {} ({}): expected {} outputs, got {} (dropped {})",
-                    cell.path, cell.cell_type, expected_outputs, outputs.len(), expected_outputs - outputs.len());
+                eprintln!(
+                    "[WARN] Cell {} ({}): expected {} outputs, got {} (dropped {})",
+                    cell.path,
+                    cell.cell_type,
+                    expected_outputs,
+                    outputs.len(),
+                    expected_outputs - outputs.len()
+                );
             }
 
             let op = SirOperation::Primitive {
@@ -467,7 +482,7 @@ impl GateNetlistToSirConverter {
             // Sequential
             CellFunction::Dff => PrimitiveType::DffP,
             CellFunction::DffR => PrimitiveType::DffSR, // DFF with sync reset to 0
-            CellFunction::DffE => PrimitiveType::DffE, // DFF with enable
+            CellFunction::DffE => PrimitiveType::DffE,  // DFF with enable
             CellFunction::DffRE => PrimitiveType::DffE, // DFF with reset and enable
             CellFunction::Latch => PrimitiveType::Dlatch,
 
@@ -820,7 +835,14 @@ impl GateNetlistToSirConverter {
             // Debug: show which operations have remaining in-degree
             for (idx, &deg) in in_degree.iter().enumerate() {
                 if deg > 0 {
-                    if let SirOperation::Primitive { ptype, inputs, outputs, path, .. } = &ops[idx] {
+                    if let SirOperation::Primitive {
+                        ptype,
+                        inputs,
+                        outputs,
+                        path,
+                        ..
+                    } = &ops[idx]
+                    {
                         eprintln!("[TOPO SORT]   stuck op[{}]: {:?} path={} in_degree={} inputs={:?} outputs={:?}",
                             idx, ptype, path, deg, inputs, outputs);
                     }

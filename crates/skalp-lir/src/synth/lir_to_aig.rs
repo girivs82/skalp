@@ -9,8 +9,8 @@
 //! but targets the synthesis AIG which has safety info, clock/reset tracking,
 //! and structural hashing.
 
-use crate::lir::{Lir, LirNode, LirOp, LirSignalId};
 use crate::gate_netlist::GateNetId;
+use crate::lir::{Lir, LirNode, LirOp, LirSignalId};
 
 use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo};
 
@@ -85,12 +85,16 @@ impl<'a> LirToSynthAig<'a> {
         // the AIG optimizer — it treats them as independent inputs and may use
         // them as divisors in resubstitution, creating incorrect simplifications
         // when the pseudo-input is actually dependent on computed outputs.
-        let phys_output_set: HashSet<u32> = self.physical_nodes.iter()
+        let phys_output_set: HashSet<u32> = self
+            .physical_nodes
+            .iter()
             .map(|&idx| self.lir.nodes[idx].output.0)
             .collect();
         let mut consumed_phys_outputs: HashSet<u32> = HashSet::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if !self.is_physical_op(&node.op) && !matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
+            if !self.is_physical_op(&node.op)
+                && !matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. })
+            {
                 for &input_id in &node.inputs {
                     if phys_output_set.contains(&input_id.0) {
                         consumed_phys_outputs.insert(input_id.0);
@@ -107,14 +111,24 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
-        tracing::trace!("[LIR_TO_AIG] physical_nodes={}, consumed_phys={}, phys_output_set={}",
-            self.physical_nodes.len(), consumed_phys_outputs.len(), phys_output_set.len());
+        tracing::trace!(
+            "[LIR_TO_AIG] physical_nodes={}, consumed_phys={}, phys_output_set={}",
+            self.physical_nodes.len(),
+            consumed_phys_outputs.len(),
+            phys_output_set.len()
+        );
         for &phys_idx in &self.physical_nodes {
             let node = &self.lir.nodes[phys_idx];
             let sig_name = &self.lir.signals[node.output.0 as usize].name;
             let consumed = consumed_phys_outputs.contains(&node.output.0);
-            tracing::trace!("[LIR_TO_AIG] phys node '{}' op={:?} output={}({}), consumed={}",
-                sig_name, std::mem::discriminant(&node.op), node.output.0, sig_name, consumed);
+            tracing::trace!(
+                "[LIR_TO_AIG] phys node '{}' op={:?} output={}({}), consumed={}",
+                sig_name,
+                std::mem::discriminant(&node.op),
+                node.output.0,
+                sig_name,
+                consumed
+            );
             // Skip if this physical output is not consumed by any AIG node
             if !consumed {
                 continue;
@@ -166,10 +180,17 @@ impl<'a> LirToSynthAig<'a> {
         let mut latch_node_ids: HashMap<(u32, u32), AigNodeId> = HashMap::new();
         for &reg_idx in &register_indices {
             let node = &self.lir.nodes[reg_idx];
-            if let LirOp::Reg { width, reset_value, .. } = &node.op {
+            if let LirOp::Reg {
+                width, reset_value, ..
+            } = &node.op
+            {
                 let reset_val = reset_value.unwrap_or(0);
                 for bit in 0..*width {
-                    let init_value = if bit < 64 { (reset_val >> bit) & 1 != 0 } else { false };
+                    let init_value = if bit < 64 {
+                        (reset_val >> bit) & 1 != 0
+                    } else {
+                        false
+                    };
                     // Pre-create with false_lit as placeholder data
                     let clock_node = self.find_clock_node(node);
                     let reset_node = self.find_reset_node(node);
@@ -215,9 +236,19 @@ impl<'a> LirToSynthAig<'a> {
         // Phase 5: Connect latch data inputs (now that combinational logic is built)
         for &reg_idx in &register_indices {
             let node = &self.lir.nodes[reg_idx];
-            if let LirOp::Reg { width, has_reset, reset_value, has_enable, .. } = &node.op {
+            if let LirOp::Reg {
+                width,
+                has_reset,
+                reset_value,
+                has_enable,
+                ..
+            } = &node.op
+            {
                 let d_input = node.inputs.first().copied().unwrap_or(LirSignalId(0));
-                let d_width = self.lir.signals.get(d_input.0 as usize)
+                let d_width = self
+                    .lir
+                    .signals
+                    .get(d_input.0 as usize)
                     .map(|s| s.width)
                     .unwrap_or(*width);
                 let reset_val = reset_value.unwrap_or(0);
@@ -237,7 +268,7 @@ impl<'a> LirToSynthAig<'a> {
                         if let Some(en_id) = node.inputs.get(1).copied() {
                             let en_lit = self.get_input_bit(en_id, 0);
                             let q_lit = AigLit::new(latch_id); // Current latch output
-                            // en ? d : q
+                                                               // en ? d : q
                             self.aig.add_mux(en_lit, d_lit, q_lit)
                         } else {
                             d_lit
@@ -250,7 +281,11 @@ impl<'a> LirToSynthAig<'a> {
                     let next_lit = if *has_reset {
                         if let Some(rst_id) = node.reset {
                             let rst_lit = self.get_input_bit(rst_id, 0);
-                            let reset_bit = if bit < 64 { (reset_val >> bit) & 1 != 0 } else { false };
+                            let reset_bit = if bit < 64 {
+                                (reset_val >> bit) & 1 != 0
+                            } else {
+                                false
+                            };
                             if reset_bit {
                                 // rst ? 1 : d = rst | d
                                 self.aig.add_or(rst_lit, d_after_enable)
@@ -289,7 +324,8 @@ impl<'a> LirToSynthAig<'a> {
                 } else {
                     format!("{}[{}]", signal.name, bit)
                 };
-                let lit = self.signal_map
+                let lit = self
+                    .signal_map
                     .get(&(output_id.0, bit))
                     .copied()
                     .unwrap_or(AigLit::false_lit());
@@ -307,47 +343,48 @@ impl<'a> LirToSynthAig<'a> {
     fn is_physical_op(&self, op: &LirOp) -> bool {
         match op {
             // Mul is physical only when DSP hard blocks are available and width fits
-            LirOp::Mul { width, .. } if self.dsp_max_width > 0
-                && *width <= self.dsp_max_width * 2 => true,
-            LirOp::MemBlock { .. } |
-            LirOp::MemRead { .. } |
-            LirOp::MemWrite { .. } |
-            LirOp::Th12 { .. } |
-            LirOp::Th22 { .. } |
-            LirOp::NclEncode { .. } |
-            LirOp::NclDecode { .. } |
-            LirOp::NclAnd { .. } |
-            LirOp::NclOr { .. } |
-            LirOp::NclXor { .. } |
-            LirOp::NclNot { .. } |
-            LirOp::NclAdd { .. } |
-            LirOp::NclSub { .. } |
-            LirOp::NclMul { .. } |
-            LirOp::NclLt { .. } |
-            LirOp::NclEq { .. } |
-            LirOp::NclShl { .. } |
-            LirOp::NclShr { .. } |
-            LirOp::NclMux2 { .. } |
-            LirOp::NclReg { .. } |
-            LirOp::NclComplete { .. } |
-            LirOp::NclNull { .. } |
-            LirOp::Tristate { .. } => true,
+            LirOp::Mul { width, .. }
+                if self.dsp_max_width > 0 && *width <= self.dsp_max_width * 2 =>
+            {
+                true
+            }
+            LirOp::MemBlock { .. }
+            | LirOp::MemRead { .. }
+            | LirOp::MemWrite { .. }
+            | LirOp::Th12 { .. }
+            | LirOp::Th22 { .. }
+            | LirOp::NclEncode { .. }
+            | LirOp::NclDecode { .. }
+            | LirOp::NclAnd { .. }
+            | LirOp::NclOr { .. }
+            | LirOp::NclXor { .. }
+            | LirOp::NclNot { .. }
+            | LirOp::NclAdd { .. }
+            | LirOp::NclSub { .. }
+            | LirOp::NclMul { .. }
+            | LirOp::NclLt { .. }
+            | LirOp::NclEq { .. }
+            | LirOp::NclShl { .. }
+            | LirOp::NclShr { .. }
+            | LirOp::NclMux2 { .. }
+            | LirOp::NclReg { .. }
+            | LirOp::NclComplete { .. }
+            | LirOp::NclNull { .. }
+            | LirOp::Tristate { .. } => true,
             _ => false,
         }
     }
 
     /// Find the AIG clock node for a register
     fn find_clock_node(&self, node: &LirNode) -> Option<AigNodeId> {
-        node.clock.and_then(|clk_id| {
-            self.signal_map.get(&(clk_id.0, 0)).map(|lit| lit.node)
-        })
+        node.clock
+            .and_then(|clk_id| self.signal_map.get(&(clk_id.0, 0)).map(|lit| lit.node))
     }
 
     /// Find the AIG reset node for a register
     fn find_reset_node(&self, node: &LirNode) -> Option<AigNodeId> {
-        node.reset.and_then(|rst_id| {
-            self.signal_map.get(&(rst_id.0, 0)).map(|lit| lit.node)
-        })
+        node.reset
+            .and_then(|rst_id| self.signal_map.get(&(rst_id.0, 0)).map(|lit| lit.node))
     }
 
     fn get_input_bit(&self, signal_id: LirSignalId, bit: u32) -> AigLit {
@@ -392,12 +429,16 @@ impl<'a> LirToSynthAig<'a> {
             }
             if let Some(clk) = node.clock {
                 if let Some(&p) = signal_producer.get(&clk.0) {
-                    if p != idx { dependencies[idx].insert(p); }
+                    if p != idx {
+                        dependencies[idx].insert(p);
+                    }
                 }
             }
             if let Some(rst) = node.reset {
                 if let Some(&p) = signal_producer.get(&rst.0) {
-                    if p != idx { dependencies[idx].insert(p); }
+                    if p != idx {
+                        dependencies[idx].insert(p);
+                    }
                 }
             }
         }
@@ -410,7 +451,9 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
-        let mut queue: VecDeque<usize> = in_degree.iter().enumerate()
+        let mut queue: VecDeque<usize> = in_degree
+            .iter()
+            .enumerate()
             .filter(|(_, &d)| d == 0)
             .map(|(i, _)| i)
             .collect();
@@ -427,7 +470,9 @@ impl<'a> LirToSynthAig<'a> {
         }
 
         if sorted.len() != n {
-            tracing::warn!("[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order");
+            tracing::warn!(
+                "[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order"
+            );
             (0..n).collect()
         } else {
             sorted
@@ -468,10 +513,9 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::And { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 for bit in 0..*width {
-                    let result = self.aig.add_and(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    );
+                    let result = self
+                        .aig
+                        .add_and(self.get_input_bit(a, bit), self.get_input_bit(b, bit));
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -479,10 +523,9 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Or { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 for bit in 0..*width {
-                    let result = self.aig.add_or(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    );
+                    let result = self
+                        .aig
+                        .add_or(self.get_input_bit(a, bit), self.get_input_bit(b, bit));
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -490,10 +533,9 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Xor { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 for bit in 0..*width {
-                    let result = self.aig.add_xor(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    );
+                    let result = self
+                        .aig
+                        .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit));
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -501,10 +543,10 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Nand { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 for bit in 0..*width {
-                    let result = self.aig.add_and(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    ).invert();
+                    let result = self
+                        .aig
+                        .add_and(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
+                        .invert();
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -512,10 +554,10 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Nor { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 for bit in 0..*width {
-                    let result = self.aig.add_or(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    ).invert();
+                    let result = self
+                        .aig
+                        .add_or(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
+                        .invert();
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -546,12 +588,16 @@ impl<'a> LirToSynthAig<'a> {
                 }
                 let sel = node.inputs[0];
                 let data_inputs: Vec<LirSignalId> = node.inputs[1..].to_vec();
-                let sel_width = self.lir.signals.get(sel.0 as usize)
+                let sel_width = self
+                    .lir
+                    .signals
+                    .get(sel.0 as usize)
                     .map(|s| s.width)
                     .unwrap_or(1);
 
                 for bit in 0..*width {
-                    let mut values: Vec<AigLit> = data_inputs.iter()
+                    let mut values: Vec<AigLit> = data_inputs
+                        .iter()
                         .map(|&d| self.get_input_bit(d, bit))
                         .collect();
 
@@ -580,10 +626,10 @@ impl<'a> LirToSynthAig<'a> {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 let mut result = AigLit::true_lit();
                 for bit in 0..*width {
-                    let bit_eq = self.aig.add_xor(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    ).invert();
+                    let bit_eq = self
+                        .aig
+                        .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
+                        .invert();
                     result = self.aig.add_and(result, bit_eq);
                 }
                 self.set_output_bit(node.output, 0, result);
@@ -593,16 +639,17 @@ impl<'a> LirToSynthAig<'a> {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 let mut result = AigLit::false_lit();
                 for bit in 0..*width {
-                    let bit_ne = self.aig.add_xor(
-                        self.get_input_bit(a, bit),
-                        self.get_input_bit(b, bit),
-                    );
+                    let bit_ne = self
+                        .aig
+                        .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit));
                     result = self.aig.add_or(result, bit_ne);
                 }
                 self.set_output_bit(node.output, 0, result);
             }
 
-            LirOp::Add { width, has_carry, .. } => {
+            LirOp::Add {
+                width, has_carry, ..
+            } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
                 let mut carry = AigLit::false_lit();
 
@@ -709,8 +756,11 @@ impl<'a> LirToSynthAig<'a> {
                 self.build_barrel_shifter(node, *width, ShiftDir::Right, true);
             }
 
-            LirOp::Mul { width, result_width, signed }
-                if self.dsp_max_width == 0 || *width > self.dsp_max_width * 2 => {
+            LirOp::Mul {
+                width,
+                result_width,
+                signed,
+            } if self.dsp_max_width == 0 || *width > self.dsp_max_width * 2 => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 
@@ -771,7 +821,10 @@ impl<'a> LirToSynthAig<'a> {
                 // For variable index, build MUX tree
                 let data = node.inputs[0];
                 let index = node.inputs[1];
-                let data_width = self.lir.signals.get(data.0 as usize)
+                let data_width = self
+                    .lir
+                    .signals
+                    .get(data.0 as usize)
                     .map(|s| s.width)
                     .unwrap_or(1);
 
@@ -780,7 +833,10 @@ impl<'a> LirToSynthAig<'a> {
                     .map(|bit| self.get_input_bit(data, bit))
                     .collect();
 
-                let sel_width = self.lir.signals.get(index.0 as usize)
+                let sel_width = self
+                    .lir
+                    .signals
+                    .get(index.0 as usize)
                     .map(|s| s.width)
                     .unwrap_or(1);
 
@@ -888,7 +944,13 @@ impl<'a> LirToSynthAig<'a> {
     }
 
     /// Build barrel shifter for shift operations
-    fn build_barrel_shifter(&mut self, node: &LirNode, width: u32, dir: ShiftDir, arithmetic: bool) {
+    fn build_barrel_shifter(
+        &mut self,
+        node: &LirNode,
+        width: u32,
+        dir: ShiftDir,
+        arithmetic: bool,
+    ) {
         let data = node.inputs[0];
         let amount = node.inputs[1];
         let fill_bit = if arithmetic {
@@ -901,7 +963,11 @@ impl<'a> LirToSynthAig<'a> {
             .map(|bit| self.get_input_bit(data, bit))
             .collect();
 
-        let stages = if width <= 1 { 1 } else { (width as f32).log2().ceil() as u32 };
+        let stages = if width <= 1 {
+            1
+        } else {
+            (width as f32).log2().ceil() as u32
+        };
         for stage in 0..stages {
             let shift_bit = self.get_input_bit(amount, stage);
             let shift_amount = 1u32 << stage;
@@ -951,7 +1017,9 @@ impl<'a> LirToSynthAig<'a> {
 
             for j in 0..width {
                 let out_idx = (i + j) as usize;
-                if out_idx >= result_width as usize { break; }
+                if out_idx >= result_width as usize {
+                    break;
+                }
 
                 let a_bit = self.get_input_bit(a, j);
                 let gated = self.aig.add_and(a_bit, b_bit);
@@ -972,7 +1040,9 @@ impl<'a> LirToSynthAig<'a> {
                 let sum = self.aig.add_xor(result[idx], carry);
                 carry = self.aig.add_and(result[idx], carry);
                 result[idx] = sum;
-                if carry == AigLit::false_lit() { break; }
+                if carry == AigLit::false_lit() {
+                    break;
+                }
                 idx += 1;
             }
         }
@@ -996,10 +1066,22 @@ impl<'a> LirToSynthAig<'a> {
 
         // Sign-extend inputs
         let a_bits: Vec<AigLit> = (0..width)
-            .map(|i| if i < a_actual_width { self.get_input_bit(a, i) } else { a_sign })
+            .map(|i| {
+                if i < a_actual_width {
+                    self.get_input_bit(a, i)
+                } else {
+                    a_sign
+                }
+            })
             .collect();
         let b_bits: Vec<AigLit> = (0..width)
-            .map(|i| if i < b_actual_width { self.get_input_bit(b, i) } else { b_sign })
+            .map(|i| {
+                if i < b_actual_width {
+                    self.get_input_bit(b, i)
+                } else {
+                    b_sign
+                }
+            })
             .collect();
 
         // Get magnitudes
@@ -1016,7 +1098,12 @@ impl<'a> LirToSynthAig<'a> {
         self.mux_vectors(result_sign, &neg_result, &unsigned_result)
     }
 
-    fn unsigned_mul_vectors(&mut self, a: &[AigLit], b: &[AigLit], result_width: u32) -> Vec<AigLit> {
+    fn unsigned_mul_vectors(
+        &mut self,
+        a: &[AigLit],
+        b: &[AigLit],
+        result_width: u32,
+    ) -> Vec<AigLit> {
         let width = a.len() as u32;
         let mut result: Vec<AigLit> = vec![AigLit::false_lit(); result_width as usize];
 
@@ -1026,7 +1113,9 @@ impl<'a> LirToSynthAig<'a> {
 
             for j in 0..width {
                 let out_idx = (i + j) as usize;
-                if out_idx >= result_width as usize { break; }
+                if out_idx >= result_width as usize {
+                    break;
+                }
 
                 let a_bit = a.get(j as usize).copied().unwrap_or(AigLit::false_lit());
                 let gated = self.aig.add_and(a_bit, b_bit);
@@ -1047,7 +1136,9 @@ impl<'a> LirToSynthAig<'a> {
                 let sum = self.aig.add_xor(result[idx], carry);
                 carry = self.aig.add_and(result[idx], carry);
                 result[idx] = sum;
-                if carry == AigLit::false_lit() { break; }
+                if carry == AigLit::false_lit() {
+                    break;
+                }
                 idx += 1;
             }
         }

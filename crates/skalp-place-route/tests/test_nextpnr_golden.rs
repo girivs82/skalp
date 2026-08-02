@@ -147,7 +147,7 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
     let mut tile_bits: Vec<Vec<bool>> = Vec::new();
 
     // Helper closure to process accumulated tile bits
-    let mut process_tile = |tile_bits: &[Vec<bool>], inits: &mut Vec<u16>| {
+    let process_tile = |tile_bits: &[Vec<bool>], inits: &mut Vec<u16>| {
         if !tile_bits.is_empty() {
             for mapping in lc_mappings {
                 let init = extract_lc_lut_init_chipdb(tile_bits, mapping);

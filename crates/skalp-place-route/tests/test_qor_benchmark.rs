@@ -33,6 +33,7 @@ struct BenchmarkDesign {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)] // report fields retained for QoR log output evolution
 struct FlowResult {
     success: bool,
     error: Option<String>,
@@ -287,9 +288,11 @@ fn run_skalp_flow(design: &BenchmarkDesign) -> FlowResult {
                     result.fmax_mhz = Some(timing.design_frequency);
                     result.worst_slack_ns = Some(timing.worst_negative_slack);
                     result.critical_path_stages = Some(
-                        timing.critical_paths.first()
+                        timing
+                            .critical_paths
+                            .first()
                             .map(|p| p.path.len())
-                            .unwrap_or(0)
+                            .unwrap_or(0),
                     );
                 }
 
@@ -363,7 +366,11 @@ fn run_reference_flow(design: &BenchmarkDesign) -> FlowResult {
         .unwrap_or_else(|| design.top_module.to_string());
 
     // Combine all SV into a single string
-    let sv_combined: String = sv_files.iter().map(|f| f.code.as_str()).collect::<Vec<_>>().join("\n");
+    let sv_combined: String = sv_files
+        .iter()
+        .map(|f| f.code.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let dir = match tempfile::tempdir() {
         Ok(d) => d,
@@ -513,10 +520,18 @@ fn parse_yosys_stats(stdout: &str, result: &mut FlowResult) {
         }
     }
 
-    if luts > 0 { result.luts = Some(luts); }
-    if dffs > 0 { result.dffs = Some(dffs); }
-    if carries > 0 { result.carries = Some(carries); }
-    if ios > 0 { result.ios = Some(ios); }
+    if luts > 0 {
+        result.luts = Some(luts);
+    }
+    if dffs > 0 {
+        result.dffs = Some(dffs);
+    }
+    if carries > 0 {
+        result.carries = Some(carries);
+    }
+    if ios > 0 {
+        result.ios = Some(ios);
+    }
 }
 
 fn extract_cell_count(line: &str, cell_name: &str) -> Option<usize> {
@@ -595,34 +610,121 @@ fn print_single_comparison(cmp: &QorComparison) {
     println!("{}", "-".repeat(42));
 
     fn fmt_opt(v: Option<usize>) -> String {
-        v.map(|n| format!("{}", n)).unwrap_or_else(|| "-".to_string())
+        v.map(|n| format!("{}", n))
+            .unwrap_or_else(|| "-".to_string())
     }
     fn fmt_opt_f64(v: Option<f64>) -> String {
-        v.map(|f| format!("{:.1}", f)).unwrap_or_else(|| "-".to_string())
+        v.map(|f| format!("{:.1}", f))
+            .unwrap_or_else(|| "-".to_string())
     }
 
-    println!("{:<20} {:>10} {:>10}", "LUTs", fmt_opt(cmp.skalp.luts), fmt_opt(cmp.reference.luts));
-    println!("{:<20} {:>10} {:>10}", "DFFs", fmt_opt(cmp.skalp.dffs), fmt_opt(cmp.reference.dffs));
-    println!("{:<20} {:>10} {:>10}", "Carries", fmt_opt(cmp.skalp.carries), fmt_opt(cmp.reference.carries));
-    println!("{:<20} {:>10} {:>10}", "I/Os", fmt_opt(cmp.skalp.ios), fmt_opt(cmp.reference.ios));
-    println!("{:<20} {:>10} {:>10}", "Total LCs", fmt_opt(cmp.skalp.total_lcs), fmt_opt(cmp.reference.total_lcs));
-    println!("{:<20} {:>10} {:>10}", "Wirelength", fmt_opt(cmp.skalp.wirelength), fmt_opt(cmp.reference.wirelength));
-    println!("{:<20} {:>10} {:>10}", "Fmax (MHz)", fmt_opt_f64(cmp.skalp.fmax_mhz), fmt_opt_f64(cmp.reference.fmax_mhz));
-    println!("{:<20} {:>10} {:>10}", "Bitstream (B)", fmt_opt(cmp.skalp.bitstream_bytes), fmt_opt(cmp.reference.bitstream_bytes));
-    println!("{:<20} {:>10.2?} {:>10.2?}", "Compile time", cmp.skalp.compile_time, cmp.reference.compile_time);
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "LUTs",
+        fmt_opt(cmp.skalp.luts),
+        fmt_opt(cmp.reference.luts)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "DFFs",
+        fmt_opt(cmp.skalp.dffs),
+        fmt_opt(cmp.reference.dffs)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "Carries",
+        fmt_opt(cmp.skalp.carries),
+        fmt_opt(cmp.reference.carries)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "I/Os",
+        fmt_opt(cmp.skalp.ios),
+        fmt_opt(cmp.reference.ios)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "Total LCs",
+        fmt_opt(cmp.skalp.total_lcs),
+        fmt_opt(cmp.reference.total_lcs)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "Wirelength",
+        fmt_opt(cmp.skalp.wirelength),
+        fmt_opt(cmp.reference.wirelength)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "Fmax (MHz)",
+        fmt_opt_f64(cmp.skalp.fmax_mhz),
+        fmt_opt_f64(cmp.reference.fmax_mhz)
+    );
+    println!(
+        "{:<20} {:>10} {:>10}",
+        "Bitstream (B)",
+        fmt_opt(cmp.skalp.bitstream_bytes),
+        fmt_opt(cmp.reference.bitstream_bytes)
+    );
+    println!(
+        "{:<20} {:>10.2?} {:>10.2?}",
+        "Compile time", cmp.skalp.compile_time, cmp.reference.compile_time
+    );
 
     // PnR detail metrics
     if cmp.skalp.congestion.is_some() {
         println!();
         println!("  PnR Details:");
-        println!("    Placement WL:    {}", cmp.skalp.placement_wirelength.map(|w| format!("{}", w)).unwrap_or("-".into()));
-        println!("    Placement cost:  {}", cmp.skalp.placement_cost.map(|c| format!("{:.1}", c)).unwrap_or("-".into()));
-        println!("    Utilization:     {}", cmp.skalp.utilization.map(|u| format!("{:.1}%", u * 100.0)).unwrap_or("-".into()));
+        println!(
+            "    Placement WL:    {}",
+            cmp.skalp
+                .placement_wirelength
+                .map(|w| format!("{}", w))
+                .unwrap_or("-".into())
+        );
+        println!(
+            "    Placement cost:  {}",
+            cmp.skalp
+                .placement_cost
+                .map(|c| format!("{:.1}", c))
+                .unwrap_or("-".into())
+        );
+        println!(
+            "    Utilization:     {}",
+            cmp.skalp
+                .utilization
+                .map(|u| format!("{:.1}%", u * 100.0))
+                .unwrap_or("-".into())
+        );
         println!("    Congestion:      {}", fmt_opt_f64(cmp.skalp.congestion));
-        println!("    Route iters:     {}", cmp.skalp.routing_iterations.map(|i| format!("{}", i)).unwrap_or("-".into()));
-        println!("    Route success:   {}", cmp.skalp.routing_success.map(|s| format!("{}", s)).unwrap_or("-".into()));
-        println!("    Worst slack:     {}", cmp.skalp.worst_slack_ns.map(|s| format!("{:.2} ns", s)).unwrap_or("-".into()));
-        println!("    Crit path depth: {}", cmp.skalp.critical_path_stages.map(|n| format!("{}", n)).unwrap_or("-".into()));
+        println!(
+            "    Route iters:     {}",
+            cmp.skalp
+                .routing_iterations
+                .map(|i| format!("{}", i))
+                .unwrap_or("-".into())
+        );
+        println!(
+            "    Route success:   {}",
+            cmp.skalp
+                .routing_success
+                .map(|s| format!("{}", s))
+                .unwrap_or("-".into())
+        );
+        println!(
+            "    Worst slack:     {}",
+            cmp.skalp
+                .worst_slack_ns
+                .map(|s| format!("{:.2} ns", s))
+                .unwrap_or("-".into())
+        );
+        println!(
+            "    Crit path depth: {}",
+            cmp.skalp
+                .critical_path_stages
+                .map(|n| format!("{}", n))
+                .unwrap_or("-".into())
+        );
     }
 
     if let Some(ref e) = cmp.skalp.error {
@@ -647,7 +749,13 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
         "{:<20} | {:>17} | {:>17} | {:>11}",
         "Design", "skalp native", "yosys+nextpnr", "ratio (S/R)"
     );
-    println!("{}+{}+{}+{}", "-".repeat(20), "-".repeat(18), "-".repeat(18), "-".repeat(12));
+    println!(
+        "{}+{}+{}+{}",
+        "-".repeat(20),
+        "-".repeat(18),
+        "-".repeat(18),
+        "-".repeat(12)
+    );
 
     let mut lut_ratios = Vec::new();
     let mut fmax_ratios = Vec::new();
@@ -655,12 +763,36 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
     let total = comparisons.len();
 
     for cmp in comparisons {
-        let sl = cmp.skalp.luts.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
-        let sd = cmp.skalp.dffs.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
-        let sc = cmp.skalp.carries.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
-        let rl = cmp.reference.luts.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
-        let rd = cmp.reference.dffs.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
-        let rc = cmp.reference.carries.map(|n| format!("{:>5}", n)).unwrap_or_else(|| "    -".to_string());
+        let sl = cmp
+            .skalp
+            .luts
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
+        let sd = cmp
+            .skalp
+            .dffs
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
+        let sc = cmp
+            .skalp
+            .carries
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
+        let rl = cmp
+            .reference
+            .luts
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
+        let rd = cmp
+            .reference
+            .dffs
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
+        let rc = cmp
+            .reference
+            .carries
+            .map(|n| format!("{:>5}", n))
+            .unwrap_or_else(|| "    -".to_string());
 
         let lut_ratio = match (cmp.skalp.luts, cmp.reference.luts) {
             (Some(s), Some(r)) if r > 0 => {
@@ -698,10 +830,26 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
     println!("{}+{}+{}", "-".repeat(20), "-".repeat(22), "-".repeat(22));
 
     for cmp in comparisons {
-        let sf = cmp.skalp.fmax_mhz.map(|f| format!("{:>10.1}", f)).unwrap_or_else(|| "         -".to_string());
-        let rf = cmp.reference.fmax_mhz.map(|f| format!("{:>10.1}", f)).unwrap_or_else(|| "         -".to_string());
-        let sb = cmp.skalp.bitstream_bytes.map(|n| format!("{:>10}", n)).unwrap_or_else(|| "         -".to_string());
-        let rb = cmp.reference.bitstream_bytes.map(|n| format!("{:>10}", n)).unwrap_or_else(|| "         -".to_string());
+        let sf = cmp
+            .skalp
+            .fmax_mhz
+            .map(|f| format!("{:>10.1}", f))
+            .unwrap_or_else(|| "         -".to_string());
+        let rf = cmp
+            .reference
+            .fmax_mhz
+            .map(|f| format!("{:>10.1}", f))
+            .unwrap_or_else(|| "         -".to_string());
+        let sb = cmp
+            .skalp
+            .bitstream_bytes
+            .map(|n| format!("{:>10}", n))
+            .unwrap_or_else(|| "         -".to_string());
+        let rb = cmp
+            .reference
+            .bitstream_bytes
+            .map(|n| format!("{:>10}", n))
+            .unwrap_or_else(|| "         -".to_string());
 
         if let (Some(s), Some(r)) = (cmp.skalp.fmax_mhz, cmp.reference.fmax_mhz) {
             if r > 0.0 {
@@ -721,20 +869,41 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
     println!("{}+{}", "-".repeat(20), "-".repeat(52));
 
     for cmp in comparisons {
-        let plc_wl = cmp.skalp.placement_wirelength
-            .map(|w| format!("{:>6}", w)).unwrap_or_else(|| "     -".to_string());
-        let rte_wl = cmp.skalp.wirelength
-            .map(|w| format!("{:>7}", w)).unwrap_or_else(|| "      -".to_string());
-        let cong = cmp.skalp.congestion
-            .map(|c| format!("{:>5.2}", c)).unwrap_or_else(|| "    -".to_string());
-        let iter = cmp.skalp.routing_iterations
-            .map(|i| format!("{:>5}", i)).unwrap_or_else(|| "    -".to_string());
-        let util = cmp.skalp.utilization
-            .map(|u| format!("{:>7.1}", u * 100.0)).unwrap_or_else(|| "      -".to_string());
-        let slack = cmp.skalp.worst_slack_ns
-            .map(|s| format!("{:>8.2}", s)).unwrap_or_else(|| "       -".to_string());
-        let crit_d = cmp.skalp.critical_path_stages
-            .map(|n| format!("{:>6}", n)).unwrap_or_else(|| "     -".to_string());
+        let plc_wl = cmp
+            .skalp
+            .placement_wirelength
+            .map(|w| format!("{:>6}", w))
+            .unwrap_or_else(|| "     -".to_string());
+        let rte_wl = cmp
+            .skalp
+            .wirelength
+            .map(|w| format!("{:>7}", w))
+            .unwrap_or_else(|| "      -".to_string());
+        let cong = cmp
+            .skalp
+            .congestion
+            .map(|c| format!("{:>5.2}", c))
+            .unwrap_or_else(|| "    -".to_string());
+        let iter = cmp
+            .skalp
+            .routing_iterations
+            .map(|i| format!("{:>5}", i))
+            .unwrap_or_else(|| "    -".to_string());
+        let util = cmp
+            .skalp
+            .utilization
+            .map(|u| format!("{:>7.1}", u * 100.0))
+            .unwrap_or_else(|| "      -".to_string());
+        let slack = cmp
+            .skalp
+            .worst_slack_ns
+            .map(|s| format!("{:>8.2}", s))
+            .unwrap_or_else(|| "       -".to_string());
+        let crit_d = cmp
+            .skalp
+            .critical_path_stages
+            .map(|n| format!("{:>6}", n))
+            .unwrap_or_else(|| "     -".to_string());
 
         println!(
             "{:<20} | {} {} {} {} {} {} {}",
@@ -750,28 +919,43 @@ fn print_suite_summary(comparisons: &[QorComparison]) {
     }
     // Fmax geomean: only include designs with DFFs (sequential logic)
     // Purely combinational designs have meaningless Fmax
-    let seq_fmax_ratios: Vec<f64> = comparisons.iter().filter_map(|cmp| {
-        let has_dffs = cmp.skalp.dffs.map(|d| d > 0).unwrap_or(false);
-        if !has_dffs { return None; }
-        match (cmp.skalp.fmax_mhz, cmp.reference.fmax_mhz) {
-            (Some(s), Some(r)) if r > 0.0 => Some(s / r),
-            _ => None,
-        }
-    }).collect();
+    let seq_fmax_ratios: Vec<f64> = comparisons
+        .iter()
+        .filter_map(|cmp| {
+            let has_dffs = cmp.skalp.dffs.map(|d| d > 0).unwrap_or(false);
+            if !has_dffs {
+                return None;
+            }
+            match (cmp.skalp.fmax_mhz, cmp.reference.fmax_mhz) {
+                (Some(s), Some(r)) if r > 0.0 => Some(s / r),
+                _ => None,
+            }
+        })
+        .collect();
     if !seq_fmax_ratios.is_empty() {
         let geo_mean_fmax = geometric_mean(&seq_fmax_ratios);
-        println!("Geometric mean Fmax ratio: {:.2}x (sequential designs only, n={})", geo_mean_fmax, seq_fmax_ratios.len());
+        println!(
+            "Geometric mean Fmax ratio: {:.2}x (sequential designs only, n={})",
+            geo_mean_fmax,
+            seq_fmax_ratios.len()
+        );
     }
     // Wirelength stats
-    let wl_ratios: Vec<f64> = comparisons.iter().filter_map(|cmp| {
-        match (cmp.skalp.placement_wirelength, cmp.skalp.wirelength) {
-            (Some(p), Some(r)) if p > 0 => Some(r as f64 / p as f64),
-            _ => None,
-        }
-    }).collect();
+    let wl_ratios: Vec<f64> = comparisons
+        .iter()
+        .filter_map(
+            |cmp| match (cmp.skalp.placement_wirelength, cmp.skalp.wirelength) {
+                (Some(p), Some(r)) if p > 0 => Some(r as f64 / p as f64),
+                _ => None,
+            },
+        )
+        .collect();
     if !wl_ratios.is_empty() {
         let avg_ratio = wl_ratios.iter().sum::<f64>() / wl_ratios.len() as f64;
-        println!("Avg route/place WL ratio:  {:.1}x (lower = better routing efficiency)", avg_ratio);
+        println!(
+            "Avg route/place WL ratio:  {:.1}x (lower = better routing efficiency)",
+            avg_ratio
+        );
     }
     println!("Designs passing both flows: {}/{}", both_pass, total);
 }
@@ -798,16 +982,17 @@ fn test_qor_designs_compile() {
 
         let result = std::panic::catch_unwind(|| {
             let hir = parse_and_build_hir(source).expect("parse failed");
-            let mir = MirCompiler::new()
-                .compile_to_mir(&hir)
-                .expect("MIR failed");
+            let mir = MirCompiler::new().compile_to_mir(&hir).expect("MIR failed");
             assert!(!mir.modules.is_empty(), "no modules in MIR");
 
             let module = mir.modules.last().unwrap();
             let lir_result = lower_mir_module_to_lir_with_bram(module);
             let library = get_stdlib_library("ice40").expect("ice40 library");
             let synth = synthesize_balanced(&lir_result.lir, &library);
-            assert!(!synth.netlist.cells.is_empty(), "synthesis produced no cells");
+            assert!(
+                !synth.netlist.cells.is_empty(),
+                "synthesis produced no cells"
+            );
         });
 
         match result {
@@ -1024,7 +1209,7 @@ fn test_qor_benchmark_suite() {
     }
 
     let designs = benchmark_designs();
-    let comparisons: Vec<QorComparison> = designs.iter().map(|d| run_comparison(d)).collect();
+    let comparisons: Vec<QorComparison> = designs.iter().map(run_comparison).collect();
 
     print_suite_summary(&comparisons);
 

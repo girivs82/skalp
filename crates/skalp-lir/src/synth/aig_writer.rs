@@ -76,7 +76,12 @@ impl<'a> AigWriter<'a> {
             // Also mark AND nodes in the transitive fanin of latch data inputs
             for (_id, node) in aig.iter_nodes() {
                 if let AigNode::Latch { data, .. } = node {
-                    mark_and_fanin_unmapped(aig, data.node, &mapping.mapped_nodes, &mut required_unmapped);
+                    mark_and_fanin_unmapped(
+                        aig,
+                        data.node,
+                        &mapping.mapped_nodes,
+                        &mut required_unmapped,
+                    );
                 }
             }
 
@@ -150,8 +155,6 @@ impl<'a> AigWriter<'a> {
 
         // Phase 4: Process nodes in topological order
         state.process_nodes(aig);
-
-
 
         // Phase 5: Create outputs
         state.create_outputs(aig);
@@ -230,7 +233,12 @@ impl AigWriterState<'_> {
     /// Create nets for primary inputs
     fn create_input_nets(&mut self, aig: &Aig) {
         for (id, node) in aig.iter_nodes() {
-            if let AigNode::Input { name, source_net, is_physical } = node {
+            if let AigNode::Input {
+                name,
+                source_net,
+                is_physical,
+            } = node
+            {
                 // Use AIG-level clock/reset flags (populated from GateNet.is_clock/is_reset
                 // during AIG building). Fall back to name matching with a warning.
                 let is_clock = if aig.clock_inputs.contains(&id) {
@@ -683,22 +691,19 @@ impl AigWriterState<'_> {
         // When technology mapping is active, only use the decomposition if all referenced
         // nodes have cells or nets (the decomposition creates AND nodes that the mapper's
         // backward covering may not have reached).
-        let enable_pattern = self
-            .latch_decomps
-            .get(&id)
-            .and_then(|decomp| {
-                let enable = decomp.enable?;
-                // Check that the decomposed nodes have nets (mapped or pre-created)
-                let data_ok = decomp.data.node == AigNodeId::FALSE
-                    || self.node_to_net.contains_key(&decomp.data.node);
-                let enable_ok = enable.node == AigNodeId::FALSE
-                    || self.node_to_net.contains_key(&enable.node);
-                if data_ok && enable_ok {
-                    Some((enable, decomp.data))
-                } else {
-                    None // Decomposed nodes not available, fall back to raw data
-                }
-            });
+        let enable_pattern = self.latch_decomps.get(&id).and_then(|decomp| {
+            let enable = decomp.enable?;
+            // Check that the decomposed nodes have nets (mapped or pre-created)
+            let data_ok = decomp.data.node == AigNodeId::FALSE
+                || self.node_to_net.contains_key(&decomp.data.node);
+            let enable_ok =
+                enable.node == AigNodeId::FALSE || self.node_to_net.contains_key(&enable.node);
+            if data_ok && enable_ok {
+                Some((enable, decomp.data))
+            } else {
+                None // Decomposed nodes not available, fall back to raw data
+            }
+        });
 
         if let Some((enable_lit, new_data_lit)) = enable_pattern {
             let enable_net = self.get_or_create_lit_net(aig, enable_lit);
@@ -778,9 +783,10 @@ impl AigWriterState<'_> {
                 if self.lit_to_net.contains_key(&(lit.node, true)) {
                     // output_inverted case: node_to_net holds the inverted form.
                     // Create an inverter to get the non-inverted form.
-                    let inv_net = self
-                        .netlist
-                        .add_net(GateNet::new(GateNetId(0), format!("n{}_noninv", lit.node.0)));
+                    let inv_net = self.netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("n{}_noninv", lit.node.0),
+                    ));
                     let (cell_type, cell_fit) = self.find_inv_cell();
                     let safety = aig
                         .get_safety_info(lit.node)
@@ -925,15 +931,17 @@ impl AigWriterState<'_> {
                 // (e.g., shift: stage2_out[0] = stage1_out[1], so their
                 // inverted forms share the same AIG node). Each output needs
                 // its own dedicated net to avoid rename conflicts.
-                let is_already_output = self.netlist.get_net_mut(source_net)
+                let is_already_output = self
+                    .netlist
+                    .get_net_mut(source_net)
                     .map(|n| n.is_output)
                     .unwrap_or(false);
 
                 let output_net = if is_already_output {
                     // Create a dedicated net and a BUF to drive it
-                    let new_net = self.netlist.add_net(
-                        GateNet::new(GateNetId(0), name.clone()),
-                    );
+                    let new_net = self
+                        .netlist
+                        .add_net(GateNet::new(GateNetId(0), name.clone()));
                     let (buf_type, buf_fit) = self.find_buf_cell();
                     let mut cell = Cell::new_comb(
                         CellId(self.next_cell_id),
@@ -956,9 +964,9 @@ impl AigWriterState<'_> {
                     // merge step can still find the net by its original name.
                     let is_phys = self.physical_nets.contains(&source_net);
                     if is_phys {
-                        let new_net = self.netlist.add_net(
-                            GateNet::new(GateNetId(0), name.clone()),
-                        );
+                        let new_net = self
+                            .netlist
+                            .add_net(GateNet::new(GateNetId(0), name.clone()));
                         let (buf_type, buf_fit) = self.find_buf_cell();
                         let mut cell = Cell::new_comb(
                             CellId(self.next_cell_id),
@@ -1674,7 +1682,11 @@ fn expand_truth_table_to_lut4(tt: u64, num_inputs: usize) -> u64 {
     match num_inputs {
         0 => {
             // Constant: replicate bit 0 across all 16 bits
-            if base & 1 != 0 { 0xFFFF } else { 0x0000 }
+            if base & 1 != 0 {
+                0xFFFF
+            } else {
+                0x0000
+            }
         }
         1 => {
             // 2-entry → replicate 8 times to fill 16 bits
@@ -1736,7 +1748,10 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
     let mut consumers: HashMap<GateNetId, Vec<(usize, usize)>> = HashMap::new();
     for (cell_idx, cell) in netlist.cells.iter().enumerate() {
         for (pin_idx, &net_id) in cell.inputs.iter().enumerate() {
-            consumers.entry(net_id).or_default().push((cell_idx, pin_idx));
+            consumers
+                .entry(net_id)
+                .or_default()
+                .push((cell_idx, pin_idx));
         }
         // Also check clock nets — these should NOT absorb inversions
         if let Some(clk_net) = cell.clock {
@@ -1782,9 +1797,9 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
         };
 
         // ALL consumers must be LUT cells (have lut_init)
-        let all_consumers_are_luts = consumer_list.iter().all(|&(ci, pin)| {
-            pin != usize::MAX && netlist.cells[ci].lut_init.is_some()
-        });
+        let all_consumers_are_luts = consumer_list
+            .iter()
+            .all(|&(ci, pin)| pin != usize::MAX && netlist.cells[ci].lut_init.is_some());
 
         if all_consumers_are_luts {
             inv_removals.push((cell_idx, inv_input, inv_output));
@@ -1866,8 +1881,8 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
     // Find INV cells whose producing LUT can absorb the inversion
     let mut inv_to_remove: Vec<usize> = Vec::new();
     // Track which LUTs to flip: producer_idx → [(inv_idx, inv_output_net, non-INV LUT consumers)]
-    let mut luts_to_flip: HashMap<usize, Vec<(usize, GateNetId, Vec<(usize, usize)>)>> =
-        HashMap::new();
+    type LutFlip = (usize, GateNetId, Vec<(usize, usize)>);
+    let mut luts_to_flip: HashMap<usize, Vec<LutFlip>> = HashMap::new();
 
     for (cell_idx, cell) in netlist.cells.iter().enumerate() {
         let is_inv = cell
@@ -1918,9 +1933,7 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
                 .function
                 .as_ref()
                 .is_some_and(|f| matches!(f, CellFunction::Inv))
-                || (c.cell_type.contains("INV")
-                    && c.inputs.len() == 1
-                    && c.outputs.len() == 1);
+                || (c.cell_type.contains("INV") && c.inputs.len() == 1 && c.outputs.len() == 1);
 
             if is_inv {
                 inv_consumers.push(ci);
@@ -1939,10 +1952,11 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
         // Flip if: removing INV cells saves more than adding INVs for 'other' consumers
         // When other_count == 0, all non-INV consumers are LUTs that absorb for free
         if !inv_consumers.is_empty() && inv_consumers.len() > other_count {
-            luts_to_flip
-                .entry(producer_idx)
-                .or_default()
-                .push((cell_idx, inv_output_net, lut_consumers.clone()));
+            luts_to_flip.entry(producer_idx).or_default().push((
+                cell_idx,
+                inv_output_net,
+                lut_consumers.clone(),
+            ));
         }
     }
 
@@ -1958,12 +1972,11 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
         // Complement non-INV LUT consumers' truth tables at the affected input
         // (they were consuming non-inverted; now the LUT produces inverted)
         let mut complemented_luts: HashSet<(usize, usize)> = HashSet::new();
-        for &(_, _, ref lut_consumers) in flip_info {
+        for (_, _, lut_consumers) in flip_info {
             for &(ci, pin_idx) in lut_consumers {
                 if complemented_luts.insert((ci, pin_idx)) {
                     if let Some(init) = netlist.cells[ci].lut_init {
-                        netlist.cells[ci].lut_init =
-                            Some(complement_tt_input(init, pin_idx, 4));
+                        netlist.cells[ci].lut_init = Some(complement_tt_input(init, pin_idx, 4));
                     }
                 }
             }
@@ -1990,7 +2003,9 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
                 }
             }
             if was_output {
-                let output_name = netlist.nets.get(inv_output_net.0 as usize)
+                let output_name = netlist
+                    .nets
+                    .get(inv_output_net.0 as usize)
                     .map(|n| n.name.clone())
                     .unwrap_or_default();
                 if let Some(old_net) = netlist.nets.get_mut(inv_output_net.0 as usize) {
@@ -2151,20 +2166,26 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
                     cons_input_map.push(usize::MAX); // placeholder for producer output
                     continue;
                 }
-                let pos = combined_inputs.iter().position(|&n| n == net).unwrap_or_else(|| {
-                    combined_inputs.push(net);
-                    combined_inputs.len() - 1
-                });
+                let pos = combined_inputs
+                    .iter()
+                    .position(|&n| n == net)
+                    .unwrap_or_else(|| {
+                        combined_inputs.push(net);
+                        combined_inputs.len() - 1
+                    });
                 cons_input_map.push(pos);
             }
 
             // Map: for each producer input, what index in combined_inputs?
             let mut prod_input_map: Vec<usize> = Vec::new();
             for &net in &prod_inputs {
-                let pos = combined_inputs.iter().position(|&n| n == net).unwrap_or_else(|| {
-                    combined_inputs.push(net);
-                    combined_inputs.len() - 1
-                });
+                let pos = combined_inputs
+                    .iter()
+                    .position(|&n| n == net)
+                    .unwrap_or_else(|| {
+                        combined_inputs.push(net);
+                        combined_inputs.len() - 1
+                    });
                 prod_input_map.push(pos);
             }
 
@@ -2196,10 +2217,8 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
                         if prod_out == 1 {
                             cons_row |= 1 << ci_pin;
                         }
-                    } else {
-                        if (row >> mapped) & 1 == 1 {
-                            cons_row |= 1 << ci_pin;
-                        }
+                    } else if (row >> mapped) & 1 == 1 {
+                        cons_row |= 1 << ci_pin;
                     }
                 }
                 let cons_out = (cons_init >> cons_row) & 1;

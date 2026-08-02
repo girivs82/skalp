@@ -860,14 +860,12 @@ impl GateOptimizer {
         // because output port net IDs are fixed (part of module interface)
         let output_port_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
 
-
         // BUG #246 FIX: Build set of "alias target" nets - nets that are the canonical
         // representative after hierarchical port stitching. These nets have other nets
         // pointing to them via alias_of, so they must not be replaced by buffer removal.
         // If we replace them, the alias chains become broken and EC mismatches occur.
         let alias_targets: HashSet<GateNetId> =
             netlist.nets.iter().filter_map(|net| net.alias_of).collect();
-
 
         for cell in &netlist.cells {
             if self.cells_to_remove.contains(&cell.id) {
@@ -888,7 +886,7 @@ impl GateOptimizer {
             let identity_input = if !is_buffer {
                 if let Some(init) = cell.lut_init {
                     match init {
-                        0xAAAA => cell.inputs.get(0).copied(),
+                        0xAAAA => cell.inputs.first().copied(),
                         0xCCCC => cell.inputs.get(1).copied(),
                         0xF0F0 => cell.inputs.get(2).copied(),
                         0xFF00 => cell.inputs.get(3).copied(),
@@ -898,8 +896,13 @@ impl GateOptimizer {
                             // When all 4 inputs are the same net, any of the above patterns match I0
                             if cell.inputs.len() >= 2 {
                                 let all_same = cell.inputs.iter().all(|&i| i == cell.inputs[0]);
-                                if all_same && (init == 0xAAAA || init == 0xCCCC || init == 0xF0F0 || init == 0xFF00) {
-                                    cell.inputs.get(0).copied()
+                                if all_same
+                                    && (init == 0xAAAA
+                                        || init == 0xCCCC
+                                        || init == 0xF0F0
+                                        || init == 0xFF00)
+                                {
+                                    cell.inputs.first().copied()
                                 } else {
                                     None
                                 }
@@ -935,26 +938,26 @@ impl GateOptimizer {
                 let input = pass_input;
                 let output = pass_output;
 
-                    // Do NOT remove buffers that drive output ports!
-                    // Output port net IDs are fixed (part of module interface).
-                    // If we remove the buffer, the output port would have no driver.
-                    if output_port_nets.contains(&output) {
-                        continue;
-                    }
+                // Do NOT remove buffers that drive output ports!
+                // Output port net IDs are fixed (part of module interface).
+                // If we remove the buffer, the output port would have no driver.
+                if output_port_nets.contains(&output) {
+                    continue;
+                }
 
-                    // BUG #246 FIX: Do NOT remove buffers that drive alias target nets!
-                    // These are canonical representatives from hierarchical port stitching.
-                    // If we replace them, it breaks the alias chain and causes EC mismatches.
-                    if alias_targets.contains(&output) {
-                        continue;
-                    }
+                // BUG #246 FIX: Do NOT remove buffers that drive alias target nets!
+                // These are canonical representatives from hierarchical port stitching.
+                // If we replace them, it breaks the alias chain and causes EC mismatches.
+                if alias_targets.contains(&output) {
+                    continue;
+                }
 
-                    // Replace buffer output with its input
-                    // For NCL circuits, we'll also set alias_of in apply_optimizations
-                    // so that simulations can resolve the old net name to the new value
-                    self.net_replacements.insert(output, input);
-                    self.cells_to_remove.insert(cell.id);
-                    removed += 1;
+                // Replace buffer output with its input
+                // For NCL circuits, we'll also set alias_of in apply_optimizations
+                // so that simulations can resolve the old net name to the new value
+                self.net_replacements.insert(output, input);
+                self.cells_to_remove.insert(cell.id);
+                removed += 1;
             }
         }
 

@@ -4165,17 +4165,26 @@ mod tests {
         );
 
         let and2 = lib.find_best_cell(&CellFunction::And2);
-        assert!(and2.is_some(), "AND2 cell should be present in nexus library");
+        assert!(
+            and2.is_some(),
+            "AND2 cell should be present in nexus library"
+        );
 
         let or2 = lib.find_best_cell(&CellFunction::Or2);
         assert!(or2.is_some(), "OR2 cell should be present in nexus library");
 
         let xor2 = lib.find_best_cell(&CellFunction::Xor2);
-        assert!(xor2.is_some(), "XOR2 cell should be present in nexus library");
+        assert!(
+            xor2.is_some(),
+            "XOR2 cell should be present in nexus library"
+        );
 
         // Verify LUT4 primitive
         let lut4 = lib.find_best_cell(&CellFunction::Lut4);
-        assert!(lut4.is_some(), "LUT4 cell should be present in nexus library");
+        assert!(
+            lut4.is_some(),
+            "LUT4 cell should be present in nexus library"
+        );
         assert_eq!(lut4.unwrap().name, "OXIDE_COMB");
     }
 
@@ -4188,13 +4197,22 @@ mod tests {
         assert_eq!(dff.unwrap().name, "OXIDE_FF");
 
         let dff_r = lib.find_best_cell(&CellFunction::DffR);
-        assert!(dff_r.is_some(), "DFF with reset should be present in nexus library");
+        assert!(
+            dff_r.is_some(),
+            "DFF with reset should be present in nexus library"
+        );
 
         let dff_e = lib.find_best_cell(&CellFunction::DffE);
-        assert!(dff_e.is_some(), "DFF with enable should be present in nexus library");
+        assert!(
+            dff_e.is_some(),
+            "DFF with enable should be present in nexus library"
+        );
 
         let dff_re = lib.find_best_cell(&CellFunction::DffRE);
-        assert!(dff_re.is_some(), "DFF with reset+enable should be present in nexus library");
+        assert!(
+            dff_re.is_some(),
+            "DFF with reset+enable should be present in nexus library"
+        );
     }
 
     #[test]
@@ -4225,7 +4243,10 @@ mod tests {
 
         // Clock buffer
         let clk = lib.find_best_cell(&CellFunction::ClkBuf);
-        assert!(clk.is_some(), "ClkBuf cell should be present in nexus library");
+        assert!(
+            clk.is_some(),
+            "ClkBuf cell should be present in nexus library"
+        );
         assert_eq!(clk.unwrap().name, "DCC");
     }
 
@@ -4233,8 +4254,10 @@ mod tests {
     fn test_nexus_aliases() {
         let nexus = get_stdlib_library("nexus").expect("Failed to load nexus");
         let certuspro = get_stdlib_library("certuspro").expect("Failed to load certuspro alias");
-        let certuspro_nx = get_stdlib_library("certuspro_nx").expect("Failed to load certuspro_nx alias");
-        let lattice_nexus = get_stdlib_library("lattice_nexus").expect("Failed to load lattice_nexus alias");
+        let certuspro_nx =
+            get_stdlib_library("certuspro_nx").expect("Failed to load certuspro_nx alias");
+        let lattice_nexus =
+            get_stdlib_library("lattice_nexus").expect("Failed to load lattice_nexus alias");
 
         assert_eq!(nexus.name, certuspro.name);
         assert_eq!(nexus.name, certuspro_nx.name);
@@ -4246,20 +4269,32 @@ mod tests {
         let lib = get_stdlib_library("nexus").expect("Failed to load nexus library");
 
         // Should have bidirectional IO
-        let bidir_cells: Vec<_> = lib.cells.iter()
+        let bidir_cells: Vec<_> = lib
+            .cells
+            .iter()
             .filter(|(_, c)| matches!(c.function, CellFunction::BidirPad))
             .collect();
-        assert!(bidir_cells.len() >= 2, "nexus should have SEIO18 and SEIO33 bidirectional pads");
+        assert!(
+            bidir_cells.len() >= 2,
+            "nexus should have SEIO18 and SEIO33 bidirectional pads"
+        );
 
         // Should have input-only and output-only
-        let input_cells: Vec<_> = lib.cells.iter()
+        let input_cells: Vec<_> = lib
+            .cells
+            .iter()
             .filter(|(_, c)| matches!(c.function, CellFunction::InputPad))
             .collect();
         assert!(input_cells.len() >= 2, "nexus should have input-only pads");
 
-        let output_cells: Vec<_> = lib.cells.iter()
+        let output_cells: Vec<_> = lib
+            .cells
+            .iter()
             .filter(|(_, c)| matches!(c.function, CellFunction::OutputPad))
             .collect();
-        assert!(output_cells.len() >= 2, "nexus should have output-only pads");
+        assert!(
+            output_cells.len() >= 2,
+            "nexus should have output-only pads"
+        );
     }
 }

@@ -312,7 +312,9 @@ fn compute_truth_table_for_node(aig: &Aig, node: AigNodeId, leaves: &[AigNodeId]
 /// Compute truth table for a literal given specific leaves.
 fn compute_truth_table_for_lit(aig: &Aig, lit: AigLit, leaves: &[AigNodeId]) -> u64 {
     let n = leaves.len();
-    if n > 6 { return 0; }
+    if n > 6 {
+        return 0;
+    }
     let num_rows = 1u64 << n;
     let mut tt = 0u64;
 
@@ -334,10 +336,18 @@ fn compute_truth_table_for_lit(aig: &Aig, lit: AigLit, leaves: &[AigNodeId]) -> 
 
 fn eval_lit(aig: &Aig, lit: AigLit, vals: &mut std::collections::HashMap<AigNodeId, bool>) -> bool {
     let val = eval_node(aig, lit.node, vals);
-    if lit.inverted { !val } else { val }
+    if lit.inverted {
+        !val
+    } else {
+        val
+    }
 }
 
-fn eval_node(aig: &Aig, node: AigNodeId, vals: &mut std::collections::HashMap<AigNodeId, bool>) -> bool {
+fn eval_node(
+    aig: &Aig,
+    node: AigNodeId,
+    vals: &mut std::collections::HashMap<AigNodeId, bool>,
+) -> bool {
     if let Some(&v) = vals.get(&node) {
         return v;
     }
@@ -504,7 +514,10 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
     // Phase 0: Process input nodes FIRST so clock/reset mappings are available for latches
     let mut input_ids = Vec::new();
     for &id in queue.iter() {
-        if let Some(AigNode::Input { name, source_net, .. }) = aig.get_node(id) {
+        if let Some(AigNode::Input {
+            name, source_net, ..
+        }) = aig.get_node(id)
+        {
             let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
             let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
             node_map.insert(id, AigLit::new(new_id));
@@ -735,7 +748,11 @@ impl Rewrite {
         let topo_nodes: Vec<AigNodeId> = aig
             .iter_nodes()
             .filter_map(|(id, node)| {
-                if matches!(node, AigNode::And { .. }) { Some(id) } else { None }
+                if matches!(node, AigNode::And { .. }) {
+                    Some(id)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -755,8 +772,12 @@ impl Rewrite {
             let mut best_candidate: Option<RewriteCandidate> = None;
 
             for cut in &cut_set.cuts {
-                if cut.size() <= 1 { continue; }
-                if cut.leaves.iter().any(|l| subst_map.contains_key(l)) { continue; }
+                if cut.size() <= 1 {
+                    continue;
+                }
+                if cut.leaves.iter().any(|l| subst_map.contains_key(l)) {
+                    continue;
+                }
 
                 let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
                     Some(x) => x,
@@ -770,7 +791,11 @@ impl Rewrite {
                 if gain >= best_gain {
                     best_gain = gain;
                     best_candidate = Some(RewriteCandidate {
-                        node: node_id, cut: cut.clone(), canonical, implementation: impl_, gain,
+                        node: node_id,
+                        cut: cut.clone(),
+                        canonical,
+                        implementation: impl_,
+                        gain,
                     });
                 }
             }
@@ -782,8 +807,10 @@ impl Rewrite {
                     // intermediate rewrites may have changed the AIG structure
                     // (new AND nodes added by prior apply_rewrite calls).
                     if new_lit.node != node_id {
-                        let old_tt = compute_truth_table_for_node(aig, node_id, &candidate.cut.leaves);
-                        let new_tt = compute_truth_table_for_lit(aig, new_lit, &candidate.cut.leaves);
+                        let old_tt =
+                            compute_truth_table_for_node(aig, node_id, &candidate.cut.leaves);
+                        let new_tt =
+                            compute_truth_table_for_lit(aig, new_lit, &candidate.cut.leaves);
                         if old_tt != new_tt {
                             continue; // Truth tables diverged — skip this rewrite
                         }
@@ -814,7 +841,11 @@ impl Rewrite {
         let topo_nodes: Vec<AigNodeId> = aig
             .iter_nodes()
             .filter_map(|(id, node)| {
-                if matches!(node, AigNode::And { .. }) { Some(id) } else { None }
+                if matches!(node, AigNode::And { .. }) {
+                    Some(id)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -831,7 +862,9 @@ impl Rewrite {
         let mut entries: Vec<ZRewriteEntry> = Vec::new();
 
         for &node_id in &topo_nodes {
-            if rewritten.contains(&node_id) { continue; }
+            if rewritten.contains(&node_id) {
+                continue;
+            }
 
             let cut_set = match cuts.get_cuts(node_id) {
                 Some(cs) => cs,
@@ -842,8 +875,12 @@ impl Rewrite {
             let mut best_candidate: Option<ZRewriteEntry> = None;
 
             for cut in &cut_set.cuts {
-                if cut.size() <= 1 { continue; }
-                if cut.leaves.iter().any(|l| rewritten.contains(l)) { continue; }
+                if cut.size() <= 1 {
+                    continue;
+                }
+                if cut.leaves.iter().any(|l| rewritten.contains(l)) {
+                    continue;
+                }
 
                 let (impl_, canonical) = match self.npn_db.lookup(cut.truth_table, cut.size()) {
                     Some(x) => x,
@@ -857,7 +894,11 @@ impl Rewrite {
                 if gain >= best_gain {
                     best_gain = gain;
                     best_candidate = Some(ZRewriteEntry {
-                        node: node_id, cut: cut.clone(), canonical, implementation: impl_, gain,
+                        node: node_id,
+                        cut: cut.clone(),
+                        canonical,
+                        implementation: impl_,
+                        gain,
                     });
                 }
             }

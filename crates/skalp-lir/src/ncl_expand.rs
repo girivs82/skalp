@@ -2680,25 +2680,27 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         let orig_sig = &lir.signals[orig_output_id.0 as usize];
         // If output is also an input, it's already mapped
         // Use _sr suffix (single-rail) to distinguish from _t/_f rails
-        signal_map
-            .entry(orig_output_id)
-            .or_insert_with(|| {
-                let sr_id = new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width);
-                new_lir.signals[sr_id.0 as usize].ncl_info = Some(NclSignalKind::SingleRailSource {
-                    origin_port: orig_sig.name.clone(),
-                });
-                sr_id
+        signal_map.entry(orig_output_id).or_insert_with(|| {
+            let sr_id = new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width);
+            new_lir.signals[sr_id.0 as usize].ncl_info = Some(NclSignalKind::SingleRailSource {
+                origin_port: orig_sig.name.clone(),
             });
+            sr_id
+        });
     }
 
     // Step 3.5: If there are NclReg nodes, create input completion detection
     // The completion signal fires when all inputs have arrived (DATA phase)
     // and acts as the clock for internal NCL registers.
-    let has_ncl_regs = lir.nodes.iter().any(|n| matches!(n.op, LirOp::NclReg { .. }));
+    let has_ncl_regs = lir
+        .nodes
+        .iter()
+        .any(|n| matches!(n.op, LirOp::NclReg { .. }));
     let input_completion_id = if has_ncl_regs && !dual_rail_map.is_empty() {
         let completion_id = new_lir.add_signal("__ncl_input_complete".to_string(), 1);
         let mut completion_inputs: Vec<LirSignalId> = Vec::new();
-        let total_width: u32 = dual_rail_map.values()
+        let total_width: u32 = dual_rail_map
+            .values()
             .map(|pair| new_lir.signals[pair.t.0 as usize].width)
             .sum();
         for pair in dual_rail_map.values() {
@@ -3170,7 +3172,6 @@ mod tests {
     /// End-to-end test: build simple AND gate → boundary NCL expand → tech map → validate netlist
     #[test]
     fn test_ncl_boundary_end_to_end_and_gate() {
-
         use crate::tech_mapper::synthesize;
 
         // Step 1: Build a simple 1-bit AND gate in single-rail LIR
@@ -3178,7 +3179,12 @@ mod tests {
         let a = lir.add_input("a".to_string(), 1);
         let b = lir.add_input("b".to_string(), 1);
         let q = lir.add_output("q".to_string(), 1);
-        lir.add_node(LirOp::And { width: 1 }, vec![a, b], q, "and_gate".to_string());
+        lir.add_node(
+            LirOp::And { width: 1 },
+            vec![a, b],
+            q,
+            "and_gate".to_string(),
+        );
 
         // Step 2: Expand with boundary-only NCL
         let config = NclConfig::default();
@@ -3187,49 +3193,105 @@ mod tests {
         let ncl_lir = &ncl_result.lir;
 
         // Verify: inputs are dual-rail (a_t, a_f, b_t, b_f)
-        let input_names: Vec<&str> = ncl_lir.inputs.iter()
+        let input_names: Vec<&str> = ncl_lir
+            .inputs
+            .iter()
             .map(|&id| ncl_lir.signals[id.0 as usize].name.as_str())
             .collect();
-        assert!(input_names.contains(&"a_t"), "missing a_t input, got: {:?}", input_names);
-        assert!(input_names.contains(&"a_f"), "missing a_f input, got: {:?}", input_names);
-        assert!(input_names.contains(&"b_t"), "missing b_t input, got: {:?}", input_names);
-        assert!(input_names.contains(&"b_f"), "missing b_f input, got: {:?}", input_names);
+        assert!(
+            input_names.contains(&"a_t"),
+            "missing a_t input, got: {:?}",
+            input_names
+        );
+        assert!(
+            input_names.contains(&"a_f"),
+            "missing a_f input, got: {:?}",
+            input_names
+        );
+        assert!(
+            input_names.contains(&"b_t"),
+            "missing b_t input, got: {:?}",
+            input_names
+        );
+        assert!(
+            input_names.contains(&"b_f"),
+            "missing b_f input, got: {:?}",
+            input_names
+        );
 
         // Verify: outputs are dual-rail (q_t, q_f) + completion
-        let output_names: Vec<&str> = ncl_lir.outputs.iter()
+        let output_names: Vec<&str> = ncl_lir
+            .outputs
+            .iter()
             .map(|&id| ncl_lir.signals[id.0 as usize].name.as_str())
             .collect();
-        assert!(output_names.contains(&"q_t"), "missing q_t output, got: {:?}", output_names);
-        assert!(output_names.contains(&"q_f"), "missing q_f output, got: {:?}", output_names);
-        assert!(output_names.iter().any(|n| n.contains("complete")),
-            "missing completion output, got: {:?}", output_names);
+        assert!(
+            output_names.contains(&"q_t"),
+            "missing q_t output, got: {:?}",
+            output_names
+        );
+        assert!(
+            output_names.contains(&"q_f"),
+            "missing q_f output, got: {:?}",
+            output_names
+        );
+        assert!(
+            output_names.iter().any(|n| n.contains("complete")),
+            "missing completion output, got: {:?}",
+            output_names
+        );
 
         // Verify: internal AND node is preserved (boundary-only keeps internals single-rail)
-        let has_and = ncl_lir.nodes.iter().any(|n| matches!(n.op, LirOp::And { .. }));
-        assert!(has_and, "boundary-only mode should preserve internal AND gate");
+        let has_and = ncl_lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::And { .. }));
+        assert!(
+            has_and,
+            "boundary-only mode should preserve internal AND gate"
+        );
 
         // Verify: NCL encode/decode nodes exist
-        let has_decode = ncl_lir.nodes.iter().any(|n| matches!(n.op, LirOp::NclDecode { .. }));
-        let has_encode = ncl_lir.nodes.iter().any(|n| matches!(n.op, LirOp::NclEncode { .. }));
-        let has_complete = ncl_lir.nodes.iter().any(|n| matches!(n.op, LirOp::NclComplete { .. }));
+        let has_decode = ncl_lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::NclDecode { .. }));
+        let has_encode = ncl_lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::NclEncode { .. }));
+        let has_complete = ncl_lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::NclComplete { .. }));
         assert!(has_decode, "should have NclDecode nodes at inputs");
         assert!(has_encode, "should have NclEncode nodes at outputs");
-        assert!(has_complete, "should have NclComplete node for completion detection");
+        assert!(
+            has_complete,
+            "should have NclComplete node for completion detection"
+        );
 
         // Step 3: Tech-map to nexus library
-        let library = crate::tech_library::get_stdlib_library("nexus").expect("nexus library should load");
+        let library =
+            crate::tech_library::get_stdlib_library("nexus").expect("nexus library should load");
         let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
         let netlist = &synth_result.netlist;
 
         // Verify: netlist has cells
-        assert!(!netlist.cells.is_empty(), "netlist should have cells after synthesis");
+        assert!(
+            !netlist.cells.is_empty(),
+            "netlist should have cells after synthesis"
+        );
 
         // Verify: netlist is marked as NCL
         assert!(netlist.is_ncl, "netlist should be marked as NCL");
 
         // Step 4: Validate JSON output
         let json = netlist.to_nextpnr_json();
-        assert!(json.contains("OXIDE_COMB"), "JSON should contain OXIDE_COMB cells");
+        assert!(
+            json.contains("OXIDE_COMB"),
+            "JSON should contain OXIDE_COMB cells"
+        );
 
         // Check for reasonable cell count — 1-bit boundary NCL AND should produce:
         // - 2 decode buffers (a, b inputs)
@@ -3238,28 +3300,41 @@ mod tests {
         // - 1 NOT (q_f)
         // - completion detection tree
         let cell_count = netlist.cells.len();
-        assert!(cell_count >= 4, "expected at least 4 cells, got {}", cell_count);
-        assert!(cell_count <= 20, "expected at most 20 cells for 1-bit AND, got {}", cell_count);
+        assert!(
+            cell_count >= 4,
+            "expected at least 4 cells, got {}",
+            cell_count
+        );
+        assert!(
+            cell_count <= 20,
+            "expected at most 20 cells for 1-bit AND, got {}",
+            cell_count
+        );
     }
 
     /// End-to-end: XOR gate through full NCL boundary pipeline
     #[test]
     fn test_ncl_boundary_end_to_end_xor_gate() {
-
         use crate::tech_mapper::synthesize;
 
         let mut lir = crate::lir::Lir::new("test_xor".to_string());
         let a = lir.add_input("a".to_string(), 1);
         let b = lir.add_input("b".to_string(), 1);
         let q = lir.add_output("q".to_string(), 1);
-        lir.add_node(LirOp::Xor { width: 1 }, vec![a, b], q, "xor_gate".to_string());
+        lir.add_node(
+            LirOp::Xor { width: 1 },
+            vec![a, b],
+            q,
+            "xor_gate".to_string(),
+        );
 
         let config = NclConfig::default();
         let ncl_result = expand_to_ncl(&lir, &config);
         let ncl_lir = &ncl_result.lir;
 
         // Tech-map to ice40 to verify cross-library support
-        let library = crate::tech_library::get_stdlib_library("ice40").expect("ice40 library should load");
+        let library =
+            crate::tech_library::get_stdlib_library("ice40").expect("ice40 library should load");
         let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
         let netlist = &synth_result.netlist;
 
@@ -3267,20 +3342,31 @@ mod tests {
         assert!(netlist.is_ncl, "netlist should be NCL");
 
         let json = netlist.to_nextpnr_json();
-        assert!(json.contains("SB_LUT4"), "JSON should contain SB_LUT4 cells for ice40");
+        assert!(
+            json.contains("SB_LUT4"),
+            "JSON should contain SB_LUT4 cells for ice40"
+        );
     }
 
     /// End-to-end: multi-bit adder through boundary NCL pipeline
     #[test]
     fn test_ncl_boundary_end_to_end_4bit_adder() {
-
         use crate::tech_mapper::synthesize;
 
         let mut lir = crate::lir::Lir::new("test_add4".to_string());
         let a = lir.add_input("a".to_string(), 4);
         let b = lir.add_input("b".to_string(), 4);
         let sum = lir.add_output("sum".to_string(), 4);
-        lir.add_node(LirOp::Add { width: 4, const_b: None, has_carry: false }, vec![a, b], sum, "adder".to_string());
+        lir.add_node(
+            LirOp::Add {
+                width: 4,
+                const_b: None,
+                has_carry: false,
+            },
+            vec![a, b],
+            sum,
+            "adder".to_string(),
+        );
 
         let config = NclConfig::default();
         let ncl_result = expand_to_ncl(&lir, &config);
@@ -3293,7 +3379,8 @@ mod tests {
         }
 
         // Tech-map to ecp5
-        let library = crate::tech_library::get_stdlib_library("ecp5").expect("ecp5 library should load");
+        let library =
+            crate::tech_library::get_stdlib_library("ecp5").expect("ecp5 library should load");
         let synth_result = synthesize(ncl_lir, &library, crate::synth::SynthPreset::Quick);
         let netlist = &synth_result.netlist;
 
@@ -3301,6 +3388,9 @@ mod tests {
         assert!(netlist.is_ncl, "netlist should be NCL");
 
         let json = netlist.to_nextpnr_json();
-        assert!(json.contains("TRELLIS"), "JSON should contain TRELLIS cells for ecp5");
+        assert!(
+            json.contains("TRELLIS"),
+            "JSON should contain TRELLIS cells for ecp5"
+        );
     }
 }

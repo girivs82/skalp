@@ -3,9 +3,9 @@
 //! This module provides the device database for Lattice iCE40 FPGAs,
 //! supporting HX1K, HX4K, HX8K, LP1K, LP8K, and UP5K variants.
 
-pub mod data;
 mod chipdb;
 pub mod chipdb_parser;
+pub mod data;
 mod tiles;
 
 pub use chipdb::Ice40ChipDb;
@@ -603,7 +603,10 @@ impl Ice40Device {
                                 y,
                                 io_count: data::IO_CELLS_PER_TILE,
                                 side,
-                                io_standards: data::IO_STANDARDS.iter().map(|s| s.to_string()).collect(),
+                                io_standards: data::IO_STANDARDS
+                                    .iter()
+                                    .map(|s| s.to_string())
+                                    .collect(),
                                 drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
                                 diff_pairs: data::IO_DIFF_PAIRS,
                             });
@@ -617,7 +620,11 @@ impl Ice40Device {
                             });
                         }
                         TileType::Dsp => {
-                            self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MACS_PER_TILE });
+                            self.dsp_tiles.push(DspTile {
+                                x,
+                                y,
+                                mac_count: data::DSP_MACS_PER_TILE,
+                            });
                         }
                         _ => {}
                     }
@@ -1092,8 +1099,10 @@ impl Ice40Device {
 
                 // Check if this is a logic tile (has local wires)
                 let is_logic = tile_wires.iter().any(|&w| {
-                    matches!(self.wires.get(w.0 as usize).map(|w| &w.wire_type),
-                             Some(WireType::Local(_)))
+                    matches!(
+                        self.wires.get(w.0 as usize).map(|w| &w.wire_type),
+                        Some(WireType::Local(_))
+                    )
                 });
 
                 if is_logic {
@@ -1137,8 +1146,10 @@ impl Ice40Device {
 
                 // I/O tiles: create BEL pin wires for 2 IOBs
                 let is_io = tile_wires.iter().any(|&w| {
-                    matches!(self.wires.get(w.0 as usize).map(|w| &w.wire_type),
-                             Some(WireType::Global(_)))
+                    matches!(
+                        self.wires.get(w.0 as usize).map(|w| &w.wire_type),
+                        Some(WireType::Global(_))
+                    )
                 }) && !is_logic;
 
                 if is_io {

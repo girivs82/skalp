@@ -15,9 +15,7 @@ use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
 use crate::lir::{Lir, LirOp, LirSignalId};
-use crate::tech_library::{
-    CellFunction, LibraryCell, LibraryFailureMode, TechLibrary,
-};
+use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
 use indexmap::IndexMap;
 use skalp_frontend::hir::PhysicalConstraints;
 
@@ -64,7 +62,12 @@ impl LibraryCellInfo {
 }
 
 /// Look up a library cell by function, falling back to a default if not found.
-fn lookup_cell(library: &TechLibrary, func: CellFunction, fallback_name: &str, fallback_fit: f64) -> LibraryCellInfo {
+fn lookup_cell(
+    library: &TechLibrary,
+    func: CellFunction,
+    fallback_name: &str,
+    fallback_fit: f64,
+) -> LibraryCellInfo {
     match library.find_best_cell(&func) {
         Some(cell) => LibraryCellInfo::from_library_cell(cell),
         None => LibraryCellInfo {
@@ -85,7 +88,6 @@ fn convert_failure_mode(fm: &LibraryFailureMode) -> CellFailureMode {
         fault_type: fm.fault_type,
     }
 }
-
 
 /// Ceiling log2
 fn clog2(n: u32) -> u32 {
@@ -165,7 +167,8 @@ pub fn synthesize(
     // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist).
     // Physical ops (NCL, BRAM, DSP) become pseudo-inputs in the AIG so that
     // combinational logic referencing their outputs is preserved.
-    let dsp_max_width = library.find_dsp_cell()
+    let dsp_max_width = library
+        .find_dsp_cell()
         .map(|(_, info)| info.a_width.min(info.b_width))
         .unwrap_or(0);
     let converter = LirToSynthAig::new(lir).with_dsp_max_width(dsp_max_width);
@@ -212,9 +215,9 @@ pub fn synthesize(
                     }
                 } else {
                     // Create as output
-                    let net_id = result.netlist.add_net(
-                        crate::gate_netlist::GateNet::new(GateNetId(0), name),
-                    );
+                    let net_id = result
+                        .netlist
+                        .add_net(crate::gate_netlist::GateNet::new(GateNetId(0), name));
                     if let Some(net) = result.netlist.get_net_mut(net_id) {
                         net.is_output = true;
                     }
@@ -264,11 +267,14 @@ pub fn synthesize(
                 result.netlist.inputs.push(net_id);
             } else {
                 // Net exists but may not be marked as input
-                let net_id = result.netlist.get_net_id(&if signal.width == 1 {
-                    signal.name.clone()
-                } else {
-                    format!("{}[{}]", signal.name, bit)
-                }).unwrap();
+                let net_id = result
+                    .netlist
+                    .get_net_id(&if signal.width == 1 {
+                        signal.name.clone()
+                    } else {
+                        format!("{}[{}]", signal.name, bit)
+                    })
+                    .unwrap();
                 if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
                     if !net.is_input {
                         net.is_input = true;
@@ -331,11 +337,14 @@ pub fn synthesize(
                     } else {
                         format!("{}[{}]", signal.name, bit)
                     };
-                    ncl_net_map.insert(net_name, GateNetNclInfo {
-                        kind: gate_kind,
-                        origin_port: origin_port.clone(),
-                        bit_index: bit as usize,
-                    });
+                    ncl_net_map.insert(
+                        net_name,
+                        GateNetNclInfo {
+                            kind: gate_kind,
+                            origin_port: origin_port.clone(),
+                            bit_index: bit as usize,
+                        },
+                    );
                 }
             }
         }
@@ -421,8 +430,7 @@ pub fn insert_io_buffers(
 
     let input_nets: Vec<GateNetId> = netlist.inputs.clone();
     let output_nets: Vec<GateNetId> = netlist.outputs.clone();
-    let clock_nets: std::collections::HashSet<GateNetId> =
-        netlist.clocks.iter().copied().collect();
+    let clock_nets: std::collections::HashSet<GateNetId> = netlist.clocks.iter().copied().collect();
 
     // Insert input IO buffers
     for &input_net_id in &input_nets {
@@ -627,14 +635,22 @@ fn map_dsp_standalone(
 
     // Get tie nets
     let tie_low = {
-        if let Some(id) = netlist.get_net_id("tie_low").or_else(|| netlist.get_net_id("gnd")) {
+        if let Some(id) = netlist
+            .get_net_id("tie_low")
+            .or_else(|| netlist.get_net_id("gnd"))
+        {
             id
         } else {
             let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
             let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
             let mut cell = Cell::new_comb(
-                CellId(0), tie_info.name, library.name.clone(), tie_info.fit,
-                "tie_low".to_string(), vec![], vec![id],
+                CellId(0),
+                tie_info.name,
+                library.name.clone(),
+                tie_info.fit,
+                "tie_low".to_string(),
+                vec![],
+                vec![id],
             );
             cell.function = Some(CellFunction::TieLow);
             netlist.add_cell(cell);
@@ -647,22 +663,32 @@ fn map_dsp_standalone(
 
     // Determine sign extension bits
     let a_sign = if signed {
-        inputs[0].get(width as usize - 1).copied().unwrap_or(tie_low)
+        inputs[0]
+            .get(width as usize - 1)
+            .copied()
+            .unwrap_or(tie_low)
     } else {
         tie_low
     };
     let b_sign = if signed {
-        inputs[1].get(width as usize - 1).copied().unwrap_or(tie_low)
+        inputs[1]
+            .get(width as usize - 1)
+            .copied()
+            .unwrap_or(tie_low)
     } else {
         tie_low
     };
 
     // Helper: instantiate a single DSP block
     let instantiate_dsp = |netlist: &mut GateNetlist,
-                           a_nets: &[GateNetId], b_nets: &[GateNetId],
-                           a_w: u32, b_w: u32, rw: u32,
+                           a_nets: &[GateNetId],
+                           b_nets: &[GateNetId],
+                           a_w: u32,
+                           b_w: u32,
+                           rw: u32,
                            out: &[GateNetId],
-                           a_ext: GateNetId, b_ext: GateNetId,
+                           a_ext: GateNetId,
+                           b_ext: GateNetId,
                            suffix: &str| {
         let mut cell_inputs = Vec::new();
 
@@ -683,7 +709,9 @@ fn map_dsp_standalone(
             }
         }
         // C input — tie low
-        for _ in 0..18 { cell_inputs.push(tie_low); }
+        for _ in 0..18 {
+            cell_inputs.push(tie_low);
+        }
         // SIGNEDA, SIGNEDB
         cell_inputs.push(signed_net);
         cell_inputs.push(signed_net);
@@ -691,9 +719,13 @@ fn map_dsp_standalone(
         cell_inputs.push(tie_low);
         cell_inputs.push(tie_low);
         // CLK[0..3], CE[0..3], RST[0..3] — combinational mode
-        for _ in 0..12 { cell_inputs.push(tie_low); }
+        for _ in 0..12 {
+            cell_inputs.push(tie_low);
+        }
         // SRIA[0..17], SRIB[0..17] — unused
-        for _ in 0..36 { cell_inputs.push(tie_low); }
+        for _ in 0..36 {
+            cell_inputs.push(tie_low);
+        }
 
         // Outputs: P[0..p_width], SIGNEDP, cascade/shift outputs
         let mut cell_outputs = Vec::new();
@@ -702,42 +734,64 @@ fn map_dsp_standalone(
                 cell_outputs.push(out[bit]);
             } else {
                 let unused = netlist.add_net(GateNet::new(
-                    GateNetId(0), format!("{}{}.dsp_unused_p{}", path, suffix, bit),
+                    GateNetId(0),
+                    format!("{}{}.dsp_unused_p{}", path, suffix, bit),
                 ));
                 cell_outputs.push(unused);
             }
         }
         // SIGNEDP
         let signedp = netlist.add_net(GateNet::new(
-            GateNetId(0), format!("{}{}.dsp_unused_signedp", path, suffix),
+            GateNetId(0),
+            format!("{}{}.dsp_unused_signedp", path, suffix),
         ));
         cell_outputs.push(signedp);
         // Cascade outputs: sroa/srob/roa/rob/roc × 18
         for prefix in &["sroa", "srob", "roa", "rob", "roc"] {
             for bit in 0..18 {
                 let unused = netlist.add_net(GateNet::new(
-                    GateNetId(0), format!("{}{}.dsp_unused_{}_{}", path, suffix, prefix, bit),
+                    GateNetId(0),
+                    format!("{}{}.dsp_unused_{}_{}", path, suffix, prefix, bit),
                 ));
                 cell_outputs.push(unused);
             }
         }
 
-        let cell_path = if suffix.is_empty() { path.to_string() } else { format!("{}{}", path, suffix) };
+        let cell_path = if suffix.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}{}", path, suffix)
+        };
         let mut cell = Cell::new_comb(
-            CellId(0), dsp_cell_name.clone(), library.name.clone(),
-            dsp_cell_fit, cell_path, cell_inputs, cell_outputs,
+            CellId(0),
+            dsp_cell_name.clone(),
+            library.name.clone(),
+            dsp_cell_fit,
+            cell_path,
+            cell_inputs,
+            cell_outputs,
         );
         cell.source_op = Some("DspMultiply".to_string());
-        cell.parameters.insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
-        cell.parameters.insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
-        cell.parameters.insert("REG_INPUTC_CLK".to_string(), "NONE".to_string());
-        cell.parameters.insert("REG_PIPELINE_CLK".to_string(), "NONE".to_string());
-        cell.parameters.insert("REG_OUTPUT_CLK".to_string(), "NONE".to_string());
-        cell.parameters.insert("SOURCEB_MODE".to_string(), "B_INPUT".to_string());
-        cell.parameters.insert("MULT_BYPASS".to_string(), "DISABLED".to_string());
-        cell.parameters.insert("RESETMODE".to_string(), "SYNC".to_string());
-        cell.parameters.insert("SIGNED_MODE".to_string(),
-            if signed { "SIGNED" } else { "UNSIGNED" }.to_string());
+        cell.parameters
+            .insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
+        cell.parameters
+            .insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
+        cell.parameters
+            .insert("REG_INPUTC_CLK".to_string(), "NONE".to_string());
+        cell.parameters
+            .insert("REG_PIPELINE_CLK".to_string(), "NONE".to_string());
+        cell.parameters
+            .insert("REG_OUTPUT_CLK".to_string(), "NONE".to_string());
+        cell.parameters
+            .insert("SOURCEB_MODE".to_string(), "B_INPUT".to_string());
+        cell.parameters
+            .insert("MULT_BYPASS".to_string(), "DISABLED".to_string());
+        cell.parameters
+            .insert("RESETMODE".to_string(), "SYNC".to_string());
+        cell.parameters.insert(
+            "SIGNED_MODE".to_string(),
+            if signed { "SIGNED" } else { "UNSIGNED" }.to_string(),
+        );
         dsp_cell_info.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
     };
@@ -745,9 +799,16 @@ fn map_dsp_standalone(
     if width <= dsp_info.a_width && width <= dsp_info.b_width {
         // Single DSP block
         instantiate_dsp(
-            netlist, &inputs[0], &inputs[1],
-            width, width, result_width,
-            outputs, a_sign, b_sign, "",
+            netlist,
+            &inputs[0],
+            &inputs[1],
+            width,
+            width,
+            result_width,
+            outputs,
+            a_sign,
+            b_sign,
+            "",
         );
     } else if width <= dsp_info.a_width * 2 && width <= dsp_info.b_width * 2 {
         // Tiled: split operands into hi/lo halves, 4 DSP blocks
@@ -779,7 +840,9 @@ fn map_dsp_standalone(
                 }
             })
             .collect();
-        instantiate_dsp(netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, "_ll");
+        instantiate_dsp(
+            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, "_ll",
+        );
 
         // P_lh = A_lo * B_hi (contributes to bits [half..half+2*max(half,b_hi_w)])
         // P_hl = A_hi * B_lo (contributes to bits [half..half+2*max(a_hi_w,half)])
@@ -792,19 +855,25 @@ fn map_dsp_standalone(
         let lh_out: Vec<GateNetId> = (0..lh_p_width as usize)
             .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.lh_p{}", path, i))))
             .collect();
-        instantiate_dsp(netlist, &a_lo, &b_hi, half, b_hi_w, lh_p_width, &lh_out, tie_low, b_sign, "_lh");
+        instantiate_dsp(
+            netlist, &a_lo, &b_hi, half, b_hi_w, lh_p_width, &lh_out, tie_low, b_sign, "_lh",
+        );
 
         let hl_p_width = (a_hi_w + half).min(dsp_info.p_width);
         let hl_out: Vec<GateNetId> = (0..hl_p_width as usize)
             .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hl_p{}", path, i))))
             .collect();
-        instantiate_dsp(netlist, &a_hi, &b_lo, a_hi_w, half, hl_p_width, &hl_out, a_sign, tie_low, "_hl");
+        instantiate_dsp(
+            netlist, &a_hi, &b_lo, a_hi_w, half, hl_p_width, &hl_out, a_sign, tie_low, "_hl",
+        );
 
         let hh_p_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
         let hh_out: Vec<GateNetId> = (0..hh_p_width as usize)
             .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hh_p{}", path, i))))
             .collect();
-        instantiate_dsp(netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_p_width, &hh_out, a_sign, b_sign, "_hh");
+        instantiate_dsp(
+            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_p_width, &hh_out, a_sign, b_sign, "_hh",
+        );
 
         // For remaining output bits [half..result_width], we need to add the partial products.
         // The full result is: outputs[i] = ll[i] + (lh[i-half] + hl[i-half]) + hh[i-2*half]
@@ -815,33 +884,47 @@ fn map_dsp_standalone(
         let xor_info = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
 
         for i in half as usize..result_width.min(result_width) as usize {
-            if i >= outputs.len() { break; }
+            if i >= outputs.len() {
+                break;
+            }
             let lh_bit = lh_out.get(i - half as usize).copied().unwrap_or(tie_low);
             let hl_bit = hl_out.get(i - half as usize).copied().unwrap_or(tie_low);
 
             // Simple combine: XOR partial products into output bit
             // (not carry-accurate, but tests only check DSP cell count)
             let combined = netlist.add_net(GateNet::new(
-                GateNetId(0), format!("{}.dsp_combine_{}", path, i),
+                GateNetId(0),
+                format!("{}.dsp_combine_{}", path, i),
             ));
             let mut xc1 = Cell::new_comb(
-                CellId(0), xor_info.name.clone(), library.name.clone(), xor_info.fit,
+                CellId(0),
+                xor_info.name.clone(),
+                library.name.clone(),
+                xor_info.fit,
                 format!("{}.dsp_xor_{}", path, i),
-                vec![lh_bit, hl_bit], vec![combined],
+                vec![lh_bit, hl_bit],
+                vec![combined],
             );
             xor_info.apply_to_cell(&mut xc1);
             netlist.add_cell(xc1);
 
             // XOR with hh contribution if applicable
             let hh_bit = if i >= 2 * half as usize {
-                hh_out.get(i - 2 * half as usize).copied().unwrap_or(tie_low)
+                hh_out
+                    .get(i - 2 * half as usize)
+                    .copied()
+                    .unwrap_or(tie_low)
             } else {
                 tie_low
             };
             let mut xc2 = Cell::new_comb(
-                CellId(0), xor_info.name.clone(), library.name.clone(), xor_info.fit,
+                CellId(0),
+                xor_info.name.clone(),
+                library.name.clone(),
+                xor_info.fit,
                 format!("{}.dsp_xor2_{}", path, i),
-                vec![combined, hh_bit], vec![outputs[i]],
+                vec![combined, hh_bit],
+                vec![outputs[i]],
             );
             xor_info.apply_to_cell(&mut xc2);
             netlist.add_cell(xc2);
@@ -849,7 +932,10 @@ fn map_dsp_standalone(
     } else {
         // Too wide for DSP — should not happen since the AIG path would handle it,
         // but just in case, warn
-        eprintln!("warning: Mul too wide for DSP at {} (width={}), falling through", path, width);
+        eprintln!(
+            "warning: Mul too wide for DSP at {} (width={}), falling through",
+            path, width
+        );
     }
 }
 
@@ -875,7 +961,10 @@ fn map_memblock_standalone(
     let (ram_cell, ram_info) = match library.find_ram_cell() {
         Some(info) => info,
         None => {
-            eprintln!("warning: no RAM cell in library, BRAM at {} will be unimplemented", path);
+            eprintln!(
+                "warning: no RAM cell in library, BRAM at {} will be unimplemented",
+                path
+            );
             return;
         }
     };
@@ -895,14 +984,22 @@ fn map_memblock_standalone(
 
     // Get tie nets
     let tie_low = {
-        if let Some(id) = netlist.get_net_id("tie_low").or_else(|| netlist.get_net_id("gnd")) {
+        if let Some(id) = netlist
+            .get_net_id("tie_low")
+            .or_else(|| netlist.get_net_id("gnd"))
+        {
             id
         } else {
             let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
             let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
             let mut cell = Cell::new_comb(
-                CellId(0), tie_info.name, library.name.clone(), tie_info.fit,
-                "tie_low".to_string(), vec![], vec![id],
+                CellId(0),
+                tie_info.name,
+                library.name.clone(),
+                tie_info.fit,
+                "tie_low".to_string(),
+                vec![],
+                vec![id],
             );
             cell.function = Some(CellFunction::TieLow);
             netlist.add_cell(cell);
@@ -913,9 +1010,17 @@ fn map_memblock_standalone(
 
     // Extract input nets
     let raddr_nets = &inputs[0];
-    let waddr_nets = if has_write && inputs.len() > 1 { &inputs[1] } else { &inputs[0] };
+    let waddr_nets = if has_write && inputs.len() > 1 {
+        &inputs[1]
+    } else {
+        &inputs[0]
+    };
     let empty_vec = Vec::new();
-    let wdata_nets = if has_write && inputs.len() > 2 { &inputs[2] } else { &empty_vec };
+    let wdata_nets = if has_write && inputs.len() > 2 {
+        &inputs[2]
+    } else {
+        &empty_vec
+    };
     let we_net = if has_write && inputs.len() > 3 {
         inputs[3].first().copied().unwrap_or(tie_low)
     } else {
@@ -924,9 +1029,13 @@ fn map_memblock_standalone(
 
     // Helper to instantiate a single RAM block
     let instantiate_single = |netlist: &mut GateNetlist,
-                              raddr: &[GateNetId], waddr: &[GateNetId],
-                              wdata: &[GateNetId], we: GateNetId,
-                              out: &[GateNetId], dw: u32, aw: u32,
+                              raddr: &[GateNetId],
+                              waddr: &[GateNetId],
+                              wdata: &[GateNetId],
+                              we: GateNetId,
+                              out: &[GateNetId],
+                              dw: u32,
+                              aw: u32,
                               suffix: &str| {
         let mut cell_inputs = Vec::new();
 
@@ -934,7 +1043,7 @@ fn map_memblock_standalone(
         for bit in 0..block_addr_width as usize {
             cell_inputs.push(raddr.get(bit).copied().unwrap_or(tie_low));
         }
-        cell_inputs.push(clk);    // RCLK
+        cell_inputs.push(clk); // RCLK
         cell_inputs.push(tie_high); // RCLKE
         cell_inputs.push(tie_high); // RE
 
@@ -945,12 +1054,16 @@ fn map_memblock_standalone(
             for bit in 0..block_addr_width as usize {
                 cell_inputs.push(waddr.get(bit).copied().unwrap_or(tie_low));
             }
-            cell_inputs.push(clk);    // WCLK
+            cell_inputs.push(clk); // WCLK
             cell_inputs.push(tie_high); // WCLKE
-            cell_inputs.push(we);      // WE
+            cell_inputs.push(we); // WE
         } else {
-            for _ in 0..block_width as usize { cell_inputs.push(tie_low); }
-            for _ in 0..block_addr_width as usize { cell_inputs.push(tie_low); }
+            for _ in 0..block_width as usize {
+                cell_inputs.push(tie_low);
+            }
+            for _ in 0..block_addr_width as usize {
+                cell_inputs.push(tie_low);
+            }
             cell_inputs.push(clk);
             cell_inputs.push(tie_low); // WCLKE
             cell_inputs.push(tie_low); // WE
@@ -970,20 +1083,34 @@ fn map_memblock_standalone(
                 cell_outputs.push(out.get(bit).copied().unwrap_or(out[0]));
             } else {
                 let unused = netlist.add_net(GateNet::new(
-                    GateNetId(0), format!("{}{}.unused_rdata{}", path, suffix, bit),
+                    GateNetId(0),
+                    format!("{}{}.unused_rdata{}", path, suffix, bit),
                 ));
                 cell_outputs.push(unused);
             }
         }
 
-        let cell_path = if suffix.is_empty() { path.to_string() } else { format!("{}{}", path, suffix) };
+        let cell_path = if suffix.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}{}", path, suffix)
+        };
         let mut cell = Cell::new_seq(
-            CellId(0), ram_cell_name.clone(), library.name.clone(),
-            ram_cell_fit, cell_path, cell_inputs, cell_outputs, clk, None,
+            CellId(0),
+            ram_cell_name.clone(),
+            library.name.clone(),
+            ram_cell_fit,
+            cell_path,
+            cell_inputs,
+            cell_outputs,
+            clk,
+            None,
         );
         cell.source_op = Some("MemBlock".to_string());
-        cell.parameters.insert("READ_MODE".to_string(), block_width.to_string());
-        cell.parameters.insert("WRITE_MODE".to_string(), block_width.to_string());
+        cell.parameters
+            .insert("READ_MODE".to_string(), block_width.to_string());
+        cell.parameters
+            .insert("WRITE_MODE".to_string(), block_width.to_string());
         ram_cell_info.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
     };
@@ -991,8 +1118,8 @@ fn map_memblock_standalone(
     if depth_blocks == 1 && width_blocks == 1 {
         // Single block
         instantiate_single(
-            netlist, raddr_nets, waddr_nets, wdata_nets, we_net,
-            outputs, data_width, addr_width, "",
+            netlist, raddr_nets, waddr_nets, wdata_nets, we_net, outputs, data_width, addr_width,
+            "",
         );
     } else if depth_blocks == 1 {
         // Width tiling: split data across multiple blocks
@@ -1009,8 +1136,15 @@ fn map_memblock_standalone(
                 .collect();
 
             instantiate_single(
-                netlist, raddr_nets, waddr_nets, &slice_wdata, we_net,
-                &slice_out, slice_width, addr_width, &format!("_w{}", wb),
+                netlist,
+                raddr_nets,
+                waddr_nets,
+                &slice_wdata,
+                we_net,
+                &slice_out,
+                slice_width,
+                addr_width,
+                &format!("_w{}", wb),
             );
         }
     } else {
@@ -1027,16 +1161,21 @@ fn map_memblock_standalone(
                 let expected = (db >> bit) & 1;
 
                 let match_net = netlist.add_net(GateNet::new(
-                    GateNetId(0), format!("{}_d{}_addr_match_{}", path, db, bit),
+                    GateNetId(0),
+                    format!("{}_d{}_addr_match_{}", path, db, bit),
                 ));
 
                 if expected == 0 {
                     // Need INV
                     let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
                     let mut cell = Cell::new_comb(
-                        CellId(0), inv_ci.name, library.name.clone(), inv_ci.fit,
+                        CellId(0),
+                        inv_ci.name,
+                        library.name.clone(),
+                        inv_ci.fit,
                         format!("{}_d{}_addr_inv_{}", path, db, bit),
-                        vec![addr_bit], vec![match_net],
+                        vec![addr_bit],
+                        vec![match_net],
                     );
                     cell.function = Some(CellFunction::Inv);
                     netlist.add_cell(cell);
@@ -1044,9 +1183,13 @@ fn map_memblock_standalone(
                     // Buffer/pass through
                     let buf_ci = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
                     let mut cell = Cell::new_comb(
-                        CellId(0), buf_ci.name, library.name.clone(), buf_ci.fit,
+                        CellId(0),
+                        buf_ci.name,
+                        library.name.clone(),
+                        buf_ci.fit,
                         format!("{}_d{}_addr_buf_{}", path, db, bit),
-                        vec![addr_bit], vec![match_net],
+                        vec![addr_bit],
+                        vec![match_net],
                     );
                     cell.function = Some(CellFunction::Buf);
                     netlist.add_cell(cell);
@@ -1054,13 +1197,18 @@ fn map_memblock_standalone(
 
                 // AND with running bank_sel
                 let new_sel = netlist.add_net(GateNet::new(
-                    GateNetId(0), format!("{}_d{}_bank_sel_{}", path, db, bit),
+                    GateNetId(0),
+                    format!("{}_d{}_bank_sel_{}", path, db, bit),
                 ));
                 let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
                 let mut cell = Cell::new_comb(
-                    CellId(0), and_ci.name, library.name.clone(), and_ci.fit,
+                    CellId(0),
+                    and_ci.name,
+                    library.name.clone(),
+                    and_ci.fit,
                     format!("{}_d{}_bank_and_{}", path, db, bit),
-                    vec![bank_sel, match_net], vec![new_sel],
+                    vec![bank_sel, match_net],
+                    vec![new_sel],
                 );
                 cell.function = Some(CellFunction::And2);
                 netlist.add_cell(cell);
@@ -1069,13 +1217,18 @@ fn map_memblock_standalone(
 
             // Bank-qualified write enable
             let bank_we = netlist.add_net(GateNet::new(
-                GateNetId(0), format!("{}_d{}_bank_we", path, db),
+                GateNetId(0),
+                format!("{}_d{}_bank_we", path, db),
             ));
             let we_and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
             let mut cell = Cell::new_comb(
-                CellId(0), we_and_ci.name, library.name.clone(), we_and_ci.fit,
+                CellId(0),
+                we_and_ci.name,
+                library.name.clone(),
+                we_and_ci.fit,
                 format!("{}_d{}_we_and", path, db),
-                vec![we_net, bank_sel], vec![bank_we],
+                vec![we_net, bank_sel],
+                vec![bank_we],
             );
             cell.function = Some(CellFunction::And2);
             netlist.add_cell(cell);
@@ -1094,14 +1247,22 @@ fn map_memblock_standalone(
                 let block_out: Vec<GateNetId> = (bit_lo..bit_hi)
                     .map(|i| {
                         netlist.add_net(GateNet::new(
-                            GateNetId(0), format!("{}_d{}_w{}_rdata{}", path, db, wb, i - bit_lo),
+                            GateNetId(0),
+                            format!("{}_d{}_w{}_rdata{}", path, db, wb, i - bit_lo),
                         ))
                     })
                     .collect();
 
                 instantiate_single(
-                    netlist, raddr_nets, waddr_nets, &slice_wdata, bank_we,
-                    &block_out, slice_width, addr_width, &format!("_d{}_w{}", db, wb),
+                    netlist,
+                    raddr_nets,
+                    waddr_nets,
+                    &slice_wdata,
+                    bank_we,
+                    &block_out,
+                    slice_width,
+                    addr_width,
+                    &format!("_d{}_w{}", db, wb),
                 );
 
                 // MUX read data: if bank_sel, use this block's output, else keep previous
@@ -1112,11 +1273,15 @@ fn map_memblock_standalone(
                     // First bank: wire block outputs to intermediate "result" nets
                     for i in bit_lo..bit_hi {
                         let result_net = netlist.add_net(GateNet::new(
-                            GateNetId(0), format!("{}_w{}_result{}", path, wb, i - bit_lo),
+                            GateNetId(0),
+                            format!("{}_w{}_result{}", path, wb, i - bit_lo),
                         ));
                         // MUX: bank_sel ? block_out : tie_low
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
+                            CellId(0),
+                            mux_ci.name.clone(),
+                            library.name.clone(),
+                            mux_ci.fit,
                             format!("{}_d0_w{}_rmux{}", path, wb, i - bit_lo),
                             vec![bank_sel, tie_low, block_out[i - bit_lo]],
                             vec![result_net],
@@ -1128,13 +1293,16 @@ fn map_memblock_standalone(
                 } else if db == depth_blocks - 1 {
                     // Last bank: MUX to final output
                     for i in bit_lo..bit_hi {
-                        let prev_result = netlist.get_net_id(
-                            &format!("{}_w{}_result{}", path, wb, i - bit_lo)
-                        ).unwrap_or(tie_low);
+                        let prev_result = netlist
+                            .get_net_id(&format!("{}_w{}_result{}", path, wb, i - bit_lo))
+                            .unwrap_or(tie_low);
                         let final_out = outputs.get(i).copied().unwrap_or(outputs[0]);
                         // MUX: bank_sel ? block_out : prev_result → final output
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
+                            CellId(0),
+                            mux_ci.name.clone(),
+                            library.name.clone(),
+                            mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
                             vec![bank_sel, prev_result, block_out[i - bit_lo]],
                             vec![final_out],
@@ -1149,10 +1317,14 @@ fn map_memblock_standalone(
                         let prev_name = format!("{}_w{}_result{}", path, wb, i - bit_lo);
                         let prev_result = netlist.get_net_id(&prev_name).unwrap_or(tie_low);
                         let new_result = netlist.add_net(GateNet::new(
-                            GateNetId(0), format!("{}_d{}_w{}_result{}", path, db, wb, i - bit_lo),
+                            GateNetId(0),
+                            format!("{}_d{}_w{}_result{}", path, db, wb, i - bit_lo),
                         ));
                         let mut cell = Cell::new_comb(
-                            CellId(0), mux_ci.name.clone(), library.name.clone(), mux_ci.fit,
+                            CellId(0),
+                            mux_ci.name.clone(),
+                            library.name.clone(),
+                            mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
                             vec![bank_sel, prev_result, block_out[i - bit_lo]],
                             vec![new_result],
@@ -1304,12 +1476,11 @@ fn merge_physical_nodes_into_netlist(
                 netlist.add_cell(cell);
             } else {
                 // C-element macro: 2 AND2 + 2 OR2
-                let ab_and = netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("{}.ab_and", path)));
-                let ab_or = netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("{}.ab_or", path)));
-                let q_and_or = netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("{}.q_and_or", path)));
+                let ab_and =
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.ab_and", path)));
+                let ab_or = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.ab_or", path)));
+                let q_and_or =
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.q_and_or", path)));
 
                 // ab_and = A & B
                 let mut c1 = Cell::new_comb(
@@ -1485,15 +1656,37 @@ fn merge_physical_nodes_into_netlist(
             LirOp::NclAnd { width } => {
                 // inputs[0], inputs[1] are dual-rail: [t0,f0,t1,f1,...] each
                 for i in 0..*width as usize {
-                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
-                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let a_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let a_f = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_t = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_f = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
                     let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
                     let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
                     // True rail: TH22(a_t, b_t)
-                    make_th22_or_celement(netlist, a_t, b_t, out_t, &format!("{}.and_t{}", path, i));
+                    make_th22_or_celement(
+                        netlist,
+                        a_t,
+                        b_t,
+                        out_t,
+                        &format!("{}.and_t{}", path, i),
+                    );
                     // False rail: TH12(a_f, b_f)
                     make_th12_or_or2(netlist, a_f, b_f, out_f, &format!("{}.and_f{}", path, i));
                 }
@@ -1501,10 +1694,26 @@ fn merge_physical_nodes_into_netlist(
 
             LirOp::NclOr { width } => {
                 for i in 0..*width as usize {
-                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
-                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let a_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let a_f = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_t = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_f = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
                     let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
                     let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
@@ -1519,55 +1728,137 @@ fn merge_physical_nodes_into_netlist(
                 // XOR(a,b)_t = TH22(TH12(a_t, b_f), TH12(a_f, b_t))
                 // XOR(a,b)_f = TH22(TH12(a_t, b_t), TH12(a_f, b_f))
                 for i in 0..*width as usize {
-                    let a_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let a_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
-                    let b_t = input_nets.get(1).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let b_f = input_nets.get(1).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let a_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let a_f = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_t = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let b_f = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
                     let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
                     let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
                     // Intermediate nets
-                    let at_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_at_bf{}", path, i)));
-                    let af_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_af_bt{}", path, i)));
-                    let at_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_at_bt{}", path, i)));
-                    let af_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.xor_af_bf{}", path, i)));
+                    let at_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.xor_at_bf{}", path, i),
+                    ));
+                    let af_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.xor_af_bt{}", path, i),
+                    ));
+                    let at_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.xor_at_bt{}", path, i),
+                    ));
+                    let af_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.xor_af_bf{}", path, i),
+                    ));
 
                     // TH12(a_t, b_f) → at_bf
-                    make_th12_or_or2(netlist, a_t, b_f, at_bf, &format!("{}.xor_th12_1_{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        a_t,
+                        b_f,
+                        at_bf,
+                        &format!("{}.xor_th12_1_{}", path, i),
+                    );
                     // TH12(a_f, b_t) → af_bt
-                    make_th12_or_or2(netlist, a_f, b_t, af_bt, &format!("{}.xor_th12_2_{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        a_f,
+                        b_t,
+                        af_bt,
+                        &format!("{}.xor_th12_2_{}", path, i),
+                    );
                     // TH22(at_bf, af_bt) → out_t
-                    make_th22_or_celement(netlist, at_bf, af_bt, out_t, &format!("{}.xor_t{}", path, i));
+                    make_th22_or_celement(
+                        netlist,
+                        at_bf,
+                        af_bt,
+                        out_t,
+                        &format!("{}.xor_t{}", path, i),
+                    );
 
                     // TH12(a_t, b_t) → at_bt
-                    make_th12_or_or2(netlist, a_t, b_t, at_bt, &format!("{}.xor_th12_3_{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        a_t,
+                        b_t,
+                        at_bt,
+                        &format!("{}.xor_th12_3_{}", path, i),
+                    );
                     // TH12(a_f, b_f) → af_bf
-                    make_th12_or_or2(netlist, a_f, b_f, af_bf, &format!("{}.xor_th12_4_{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        a_f,
+                        b_f,
+                        af_bf,
+                        &format!("{}.xor_th12_4_{}", path, i),
+                    );
                     // TH22(at_bt, af_bf) → out_f
-                    make_th22_or_celement(netlist, at_bt, af_bf, out_f, &format!("{}.xor_f{}", path, i));
+                    make_th22_or_celement(
+                        netlist,
+                        at_bt,
+                        af_bf,
+                        out_f,
+                        &format!("{}.xor_f{}", path, i),
+                    );
                 }
             }
 
             LirOp::NclNot { width } => {
                 // NOT swaps t and f rails
                 for i in 0..*width as usize {
-                    let in_t = input_nets.get(0).and_then(|v| v.get(i * 2)).copied().unwrap_or(GateNetId(0));
-                    let in_f = input_nets.get(0).and_then(|v| v.get(i * 2 + 1)).copied().unwrap_or(GateNetId(0));
+                    let in_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let in_f = input_nets
+                        .first()
+                        .and_then(|v| v.get(i * 2 + 1))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
                     let out_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
                     let out_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
                     // out_t = in_f, out_f = in_t (swap rails)
                     let mut ct = Cell::new_comb(
-                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
-                        format!("{}.not_t{}", path, i), vec![in_f], vec![out_t],
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.not_t{}", path, i),
+                        vec![in_f],
+                        vec![out_t],
                     );
                     ct.source_op = Some("NclNot_T".to_string());
                     buf_cell.apply_to_cell(&mut ct);
                     netlist.add_cell(ct);
 
                     let mut cf = Cell::new_comb(
-                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
-                        format!("{}.not_f{}", path, i), vec![in_t], vec![out_f],
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.not_f{}", path, i),
+                        vec![in_t],
+                        vec![out_f],
                     );
                     cf.source_op = Some("NclNot_F".to_string());
                     buf_cell.apply_to_cell(&mut cf);
@@ -1584,71 +1875,279 @@ fn merge_physical_nodes_into_netlist(
                 let mut carry_f = tie_high;
 
                 for i in 0..*width as usize {
-                    let a_t = input_nets.get(0).and_then(|v| v.get(i)).copied().unwrap_or(tie_low);
-                    let a_f = input_nets.get(1).and_then(|v| v.get(i)).copied().unwrap_or(tie_high);
-                    let b_t = input_nets.get(2).and_then(|v| v.get(i)).copied().unwrap_or(tie_low);
-                    let b_f = input_nets.get(3).and_then(|v| v.get(i)).copied().unwrap_or(tie_high);
+                    let a_t = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(tie_low);
+                    let a_f = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(tie_high);
+                    let b_t = input_nets
+                        .get(2)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(tie_low);
+                    let b_f = input_nets
+                        .get(3)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(tie_high);
 
                     let sum_t = output_nets.get(i * 2).copied().unwrap_or(GateNetId(0));
                     let sum_f = output_nets.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
                     // XOR(a, b) — intermediate dual-rail
-                    let xor_ab_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xor_ab_t{}", path, i)));
-                    let xor_ab_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xor_ab_f{}", path, i)));
+                    let xor_ab_t = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xor_ab_t{}", path, i),
+                    ));
+                    let xor_ab_f = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xor_ab_f{}", path, i),
+                    ));
 
                     // Build XOR(a,b) inline
-                    let at_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_at_bf{}", path, i)));
-                    let af_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_af_bt{}", path, i)));
-                    let at_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_at_bt{}", path, i)));
-                    let af_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_af_bf{}", path, i)));
+                    let at_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_at_bf{}", path, i),
+                    ));
+                    let af_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_af_bt{}", path, i),
+                    ));
+                    let at_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_at_bt{}", path, i),
+                    ));
+                    let af_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_af_bf{}", path, i),
+                    ));
 
-                    make_th12_or_or2(netlist, a_t, b_f, at_bf, &format!("{}.add_xor1_{}", path, i));
-                    make_th12_or_or2(netlist, a_f, b_t, af_bt, &format!("{}.add_xor2_{}", path, i));
-                    make_th22_or_celement(netlist, at_bf, af_bt, xor_ab_t, &format!("{}.add_xorab_t{}", path, i));
-                    make_th12_or_or2(netlist, a_t, b_t, at_bt, &format!("{}.add_xor3_{}", path, i));
-                    make_th12_or_or2(netlist, a_f, b_f, af_bf, &format!("{}.add_xor4_{}", path, i));
-                    make_th22_or_celement(netlist, at_bt, af_bf, xor_ab_f, &format!("{}.add_xorab_f{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        a_t,
+                        b_f,
+                        at_bf,
+                        &format!("{}.add_xor1_{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        a_f,
+                        b_t,
+                        af_bt,
+                        &format!("{}.add_xor2_{}", path, i),
+                    );
+                    make_th22_or_celement(
+                        netlist,
+                        at_bf,
+                        af_bt,
+                        xor_ab_t,
+                        &format!("{}.add_xorab_t{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        a_t,
+                        b_t,
+                        at_bt,
+                        &format!("{}.add_xor3_{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        a_f,
+                        b_f,
+                        af_bf,
+                        &format!("{}.add_xor4_{}", path, i),
+                    );
+                    make_th22_or_celement(
+                        netlist,
+                        at_bt,
+                        af_bf,
+                        xor_ab_f,
+                        &format!("{}.add_xorab_f{}", path, i),
+                    );
 
                     // XOR(xor_ab, carry) → sum
-                    let xc_t_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_t_bf{}", path, i)));
-                    let xc_f_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_f_bt{}", path, i)));
-                    let xc_t_bt = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_t_bt{}", path, i)));
-                    let xc_f_bf = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_xc_f_bf{}", path, i)));
+                    let xc_t_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xc_t_bf{}", path, i),
+                    ));
+                    let xc_f_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xc_f_bt{}", path, i),
+                    ));
+                    let xc_t_bt = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xc_t_bt{}", path, i),
+                    ));
+                    let xc_f_bf = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}.add_xc_f_bf{}", path, i),
+                    ));
 
-                    make_th12_or_or2(netlist, xor_ab_t, carry_f, xc_t_bf, &format!("{}.add_sxor1_{}", path, i));
-                    make_th12_or_or2(netlist, xor_ab_f, carry_t, xc_f_bt, &format!("{}.add_sxor2_{}", path, i));
-                    make_th22_or_celement(netlist, xc_t_bf, xc_f_bt, sum_t, &format!("{}.add_sum_t{}", path, i));
-                    make_th12_or_or2(netlist, xor_ab_t, carry_t, xc_t_bt, &format!("{}.add_sxor3_{}", path, i));
-                    make_th12_or_or2(netlist, xor_ab_f, carry_f, xc_f_bf, &format!("{}.add_sxor4_{}", path, i));
-                    make_th22_or_celement(netlist, xc_t_bt, xc_f_bf, sum_f, &format!("{}.add_sum_f{}", path, i));
+                    make_th12_or_or2(
+                        netlist,
+                        xor_ab_t,
+                        carry_f,
+                        xc_t_bf,
+                        &format!("{}.add_sxor1_{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        xor_ab_f,
+                        carry_t,
+                        xc_f_bt,
+                        &format!("{}.add_sxor2_{}", path, i),
+                    );
+                    make_th22_or_celement(
+                        netlist,
+                        xc_t_bf,
+                        xc_f_bt,
+                        sum_t,
+                        &format!("{}.add_sum_t{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        xor_ab_t,
+                        carry_t,
+                        xc_t_bt,
+                        &format!("{}.add_sxor3_{}", path, i),
+                    );
+                    make_th12_or_or2(
+                        netlist,
+                        xor_ab_f,
+                        carry_f,
+                        xc_f_bf,
+                        &format!("{}.add_sxor4_{}", path, i),
+                    );
+                    make_th22_or_celement(
+                        netlist,
+                        xc_t_bt,
+                        xc_f_bf,
+                        sum_f,
+                        &format!("{}.add_sum_f{}", path, i),
+                    );
 
                     // Carry: majority(a, b, cin) in dual-rail
                     // cout_t = TH22(a_t,b_t) | TH22(a_t,cin_t) | TH22(b_t,cin_t)
                     // cout_f = TH22(a_f,b_f) | TH22(a_f,cin_f) | TH22(b_f,cin_f)
                     if i < (*width as usize) - 1 {
-                        let new_carry_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_carry_t{}", path, i)));
-                        let new_carry_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_carry_f{}", path, i)));
+                        let new_carry_t = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_carry_t{}", path, i),
+                        ));
+                        let new_carry_f = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_carry_f{}", path, i),
+                        ));
 
-                        let ab_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ab_t{}", path, i)));
-                        let ac_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ac_t{}", path, i)));
-                        let bc_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_bc_t{}", path, i)));
-                        make_th22_or_celement(netlist, a_t, b_t, ab_t, &format!("{}.add_maj_ab_t{}", path, i));
-                        make_th22_or_celement(netlist, a_t, carry_t, ac_t, &format!("{}.add_maj_ac_t{}", path, i));
-                        make_th22_or_celement(netlist, b_t, carry_t, bc_t, &format!("{}.add_maj_bc_t{}", path, i));
+                        let ab_t = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_ab_t{}", path, i),
+                        ));
+                        let ac_t = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_ac_t{}", path, i),
+                        ));
+                        let bc_t = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_bc_t{}", path, i),
+                        ));
+                        make_th22_or_celement(
+                            netlist,
+                            a_t,
+                            b_t,
+                            ab_t,
+                            &format!("{}.add_maj_ab_t{}", path, i),
+                        );
+                        make_th22_or_celement(
+                            netlist,
+                            a_t,
+                            carry_t,
+                            ac_t,
+                            &format!("{}.add_maj_ac_t{}", path, i),
+                        );
+                        make_th22_or_celement(
+                            netlist,
+                            b_t,
+                            carry_t,
+                            bc_t,
+                            &format!("{}.add_maj_bc_t{}", path, i),
+                        );
                         // OR3 via two OR2: (ab | ac) | bc
-                        let ab_ac_t = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_abac_t{}", path, i)));
-                        make_th12_or_or2(netlist, ab_t, ac_t, ab_ac_t, &format!("{}.add_maj_or1_t{}", path, i));
-                        make_th12_or_or2(netlist, ab_ac_t, bc_t, new_carry_t, &format!("{}.add_maj_or2_t{}", path, i));
+                        let ab_ac_t = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_abac_t{}", path, i),
+                        ));
+                        make_th12_or_or2(
+                            netlist,
+                            ab_t,
+                            ac_t,
+                            ab_ac_t,
+                            &format!("{}.add_maj_or1_t{}", path, i),
+                        );
+                        make_th12_or_or2(
+                            netlist,
+                            ab_ac_t,
+                            bc_t,
+                            new_carry_t,
+                            &format!("{}.add_maj_or2_t{}", path, i),
+                        );
 
-                        let ab_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ab_f{}", path, i)));
-                        let ac_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_ac_f{}", path, i)));
-                        let bc_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_bc_f{}", path, i)));
-                        make_th22_or_celement(netlist, a_f, b_f, ab_f, &format!("{}.add_maj_ab_f{}", path, i));
-                        make_th22_or_celement(netlist, a_f, carry_f, ac_f, &format!("{}.add_maj_ac_f{}", path, i));
-                        make_th22_or_celement(netlist, b_f, carry_f, bc_f, &format!("{}.add_maj_bc_f{}", path, i));
-                        let ab_ac_f = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.add_maj_abac_f{}", path, i)));
-                        make_th12_or_or2(netlist, ab_f, ac_f, ab_ac_f, &format!("{}.add_maj_or1_f{}", path, i));
-                        make_th12_or_or2(netlist, ab_ac_f, bc_f, new_carry_f, &format!("{}.add_maj_or2_f{}", path, i));
+                        let ab_f = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_ab_f{}", path, i),
+                        ));
+                        let ac_f = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_ac_f{}", path, i),
+                        ));
+                        let bc_f = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_bc_f{}", path, i),
+                        ));
+                        make_th22_or_celement(
+                            netlist,
+                            a_f,
+                            b_f,
+                            ab_f,
+                            &format!("{}.add_maj_ab_f{}", path, i),
+                        );
+                        make_th22_or_celement(
+                            netlist,
+                            a_f,
+                            carry_f,
+                            ac_f,
+                            &format!("{}.add_maj_ac_f{}", path, i),
+                        );
+                        make_th22_or_celement(
+                            netlist,
+                            b_f,
+                            carry_f,
+                            bc_f,
+                            &format!("{}.add_maj_bc_f{}", path, i),
+                        );
+                        let ab_ac_f = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.add_maj_abac_f{}", path, i),
+                        ));
+                        make_th12_or_or2(
+                            netlist,
+                            ab_f,
+                            ac_f,
+                            ab_ac_f,
+                            &format!("{}.add_maj_or1_f{}", path, i),
+                        );
+                        make_th12_or_or2(
+                            netlist,
+                            ab_ac_f,
+                            bc_f,
+                            new_carry_f,
+                            &format!("{}.add_maj_or2_f{}", path, i),
+                        );
 
                         carry_t = new_carry_t;
                         carry_f = new_carry_f;
@@ -1669,13 +2168,20 @@ fn merge_physical_nodes_into_netlist(
                     let t_nets = &input_nets[pair_idx * 2];
                     let f_nets = &input_nets[pair_idx * 2 + 1];
                     let pair_width = t_nets.len();
-                    for j in 0..pair_width {
-                        let in_t = t_nets[j];
+                    for (j, &in_t) in t_nets.iter().enumerate().take(pair_width) {
                         let in_f = f_nets.get(j).copied().unwrap_or(GateNetId(0));
-                        let valid = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.valid{}", path, bit_idx)));
+                        let valid = netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.valid{}", path, bit_idx),
+                        ));
                         let mut vc = Cell::new_comb(
-                            CellId(0), or2_cell.name.clone(), library.name.clone(), or2_cell.fit,
-                            format!("{}.or_valid{}", path, bit_idx), vec![in_t, in_f], vec![valid],
+                            CellId(0),
+                            or2_cell.name.clone(),
+                            library.name.clone(),
+                            or2_cell.fit,
+                            format!("{}.or_valid{}", path, bit_idx),
+                            vec![in_t, in_f],
+                            vec![valid],
                         );
                         or2_cell.apply_to_cell(&mut vc);
                         netlist.add_cell(vc);
@@ -1694,11 +2200,19 @@ fn merge_physical_nodes_into_netlist(
                             let intermediate = if next.is_empty() && current.len() == 2 {
                                 out
                             } else {
-                                netlist.add_net(GateNet::new(GateNetId(0), format!("{}.and_tree_{}", path, next.len())))
+                                netlist.add_net(GateNet::new(
+                                    GateNetId(0),
+                                    format!("{}.and_tree_{}", path, next.len()),
+                                ))
                             };
                             let mut ac = Cell::new_comb(
-                                CellId(0), and2_cell.name.clone(), library.name.clone(), and2_cell.fit,
-                                format!("{}.and_tree_{}", path, next.len()), vec![pair[0], pair[1]], vec![intermediate],
+                                CellId(0),
+                                and2_cell.name.clone(),
+                                library.name.clone(),
+                                and2_cell.fit,
+                                format!("{}.and_tree_{}", path, next.len()),
+                                vec![pair[0], pair[1]],
+                                vec![intermediate],
                             );
                             and2_cell.apply_to_cell(&mut ac);
                             netlist.add_cell(ac);
@@ -1712,8 +2226,13 @@ fn merge_physical_nodes_into_netlist(
                 if current.len() == 1 && current[0] != out {
                     // Single valid bit → buffer to output
                     let mut bc = Cell::new_comb(
-                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
-                        format!("{}.buf_out", path), vec![current[0]], vec![out],
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.buf_out", path),
+                        vec![current[0]],
+                        vec![out],
                     );
                     buf_cell.apply_to_cell(&mut bc);
                     netlist.add_cell(bc);
@@ -1726,8 +2245,13 @@ fn merge_physical_nodes_into_netlist(
                 for i in 0..(*width * 2) as usize {
                     let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
                     let mut nc = Cell::new_comb(
-                        CellId(0), buf_cell.name.clone(), library.name.clone(), buf_cell.fit,
-                        format!("{}.null{}", path, i), vec![tie_low], vec![out],
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.null{}", path, i),
+                        vec![tie_low],
+                        vec![out],
                     );
                     buf_cell.apply_to_cell(&mut nc);
                     netlist.add_cell(nc);
@@ -1735,15 +2259,31 @@ fn merge_physical_nodes_into_netlist(
             }
 
             LirOp::Th12 { .. } => {
-                let a = input_nets.get(0).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
-                let b = input_nets.get(1).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let a = input_nets
+                    .first()
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
+                let b = input_nets
+                    .get(1)
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
                 let q = output_nets.first().copied().unwrap_or(GateNetId(0));
                 make_th12_or_or2(netlist, a, b, q, &format!("{}.th12", path));
             }
 
             LirOp::Th22 { .. } => {
-                let a = input_nets.get(0).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
-                let b = input_nets.get(1).and_then(|v| v.first()).copied().unwrap_or(GateNetId(0));
+                let a = input_nets
+                    .first()
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
+                let b = input_nets
+                    .get(1)
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
                 let q = output_nets.first().copied().unwrap_or(GateNetId(0));
                 make_th22_or_celement(netlist, a, b, q, &format!("{}.th22", path));
             }
@@ -1757,7 +2297,10 @@ fn merge_physical_nodes_into_netlist(
                 );
             }
 
-            LirOp::NclMul { input_width, result_width } => {
+            LirOp::NclMul {
+                input_width,
+                result_width,
+            } => {
                 eprintln!(
                     "warning: NclMul not yet supported in new synth path, {}→{} bits at {}",
                     input_width, result_width, path
@@ -1765,43 +2308,85 @@ fn merge_physical_nodes_into_netlist(
             }
 
             LirOp::NclLt { width } => {
-                eprintln!("warning: NclLt not yet supported in new synth path, {} bits at {}", width, path);
+                eprintln!(
+                    "warning: NclLt not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
             }
 
             LirOp::NclEq { width } => {
-                eprintln!("warning: NclEq not yet supported in new synth path, {} bits at {}", width, path);
+                eprintln!(
+                    "warning: NclEq not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
             }
 
             LirOp::NclShl { width } | LirOp::NclShr { width } => {
-                eprintln!("warning: NclShift not yet supported in new synth path, {} bits at {}", width, path);
+                eprintln!(
+                    "warning: NclShift not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
             }
 
             LirOp::NclMux2 { width } => {
-                eprintln!("warning: NclMux2 not yet supported in new synth path, {} bits at {}", width, path);
+                eprintln!(
+                    "warning: NclMux2 not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
             }
 
             LirOp::NclReg { width } => {
-                eprintln!("warning: NclReg not yet supported in new synth path, {} bits at {}", width, path);
+                eprintln!(
+                    "warning: NclReg not yet supported in new synth path, {} bits at {}",
+                    width, path
+                );
             }
 
-            LirOp::MemBlock { data_width, addr_width, depth, has_write, .. } => {
-                let clk_net = node.clock.and_then(|clk_sig| {
-                    let clk_name = &lir.signals[clk_sig.0 as usize].name;
-                    netlist.get_net_id(clk_name)
-                }).unwrap_or_else(|| get_tie_low(netlist));
+            LirOp::MemBlock {
+                data_width,
+                addr_width,
+                depth,
+                has_write,
+                ..
+            } => {
+                let clk_net = node
+                    .clock
+                    .and_then(|clk_sig| {
+                        let clk_name = &lir.signals[clk_sig.0 as usize].name;
+                        netlist.get_net_id(clk_name)
+                    })
+                    .unwrap_or_else(|| get_tie_low(netlist));
                 map_memblock_standalone(
-                    netlist, library, *data_width, *addr_width, *depth, *has_write,
-                    &input_nets, &output_nets, path, clk_net,
+                    netlist,
+                    library,
+                    *data_width,
+                    *addr_width,
+                    *depth,
+                    *has_write,
+                    &input_nets,
+                    &output_nets,
+                    path,
+                    clk_net,
                 );
             }
             LirOp::MemRead { .. } | LirOp::MemWrite { .. } => {
                 // MemRead/MemWrite are part of MemBlock — handled above
             }
 
-            LirOp::Mul { width, result_width, signed } => {
+            LirOp::Mul {
+                width,
+                result_width,
+                signed,
+            } => {
                 map_dsp_standalone(
-                    netlist, library, *width, *result_width, *signed,
-                    &input_nets, &output_nets, path,
+                    netlist,
+                    library,
+                    *width,
+                    *result_width,
+                    *signed,
+                    &input_nets,
+                    &output_nets,
+                    path,
                 );
             }
 
@@ -1906,7 +2491,8 @@ pub fn synthesize_hierarchical(
                     if let Some(parent_inst) = hier_lir.instances.get(parent_path) {
                         let lir = &parent_inst.lir_result.lir;
                         let is_port = lir.inputs.iter().chain(lir.outputs.iter()).any(|&id| {
-                            lir.signals.get(id.0 as usize)
+                            lir.signals
+                                .get(id.0 as usize)
                                 .map(|s| s.name == name)
                                 .unwrap_or(false)
                         });
@@ -1934,9 +2520,7 @@ pub fn synthesize_hierarchical(
         let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
                 Ok(compiled_ip) => compiled_ip.netlist.clone(),
-                Err(_e) => {
-                    synthesize(&inst_lir.lir_result.lir, library, preset).netlist
-                }
+                Err(_e) => synthesize(&inst_lir.lir_result.lir, library, preset).netlist,
             }
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
@@ -1959,7 +2543,8 @@ pub fn synthesize_hierarchical(
                         if !lir.outputs.contains(&sid) {
                             tracing::trace!(
                                 "[SYNTH_HIER] Promoting driven signal '{}' to output for '{}'",
-                                sig_name, path
+                                sig_name,
+                                path
                             );
                             lir.outputs.push(sid);
                         }
@@ -1969,7 +2554,8 @@ pub fn synthesize_hierarchical(
                         if !lir.inputs.contains(&sid) {
                             tracing::trace!(
                                 "[SYNTH_HIER] Promoting undriven signal '{}' to input for '{}'",
-                                sig_name, path
+                                sig_name,
+                                path
                             );
                             lir.inputs.push(sid);
                         }
@@ -2198,7 +2784,12 @@ mod tests {
         let a = lir.add_input("a".to_string(), 8);
         let b = lir.add_input("b".to_string(), 8);
         let y = lir.add_output("y".to_string(), 8);
-        lir.add_node(LirOp::And { width: 8 }, vec![a, b], y, "test.and".to_string());
+        lir.add_node(
+            LirOp::And { width: 8 },
+            vec![a, b],
+            y,
+            "test.and".to_string(),
+        );
 
         let result = synthesize(&lir, &lib, crate::synth::SynthPreset::Quick);
         assert!(!result.netlist.cells.is_empty(), "Should produce cells");
@@ -2213,8 +2804,14 @@ mod tests {
         let b = lir.add_input("b".to_string(), 4);
         let sum = lir.add_output("sum".to_string(), 4);
         lir.add_node(
-            LirOp::Add { width: 4, has_carry: false, const_b: None },
-            vec![a, b], sum, "test.add".to_string(),
+            LirOp::Add {
+                width: 4,
+                has_carry: false,
+                const_b: None,
+            },
+            vec![a, b],
+            sum,
+            "test.add".to_string(),
         );
 
         let result = synthesize(&lir, &lib, crate::synth::SynthPreset::Quick);
@@ -2230,7 +2827,12 @@ mod tests {
         let d0 = lir.add_input("d0".to_string(), 16);
         let d1 = lir.add_input("d1".to_string(), 16);
         let y = lir.add_output("y".to_string(), 16);
-        lir.add_node(LirOp::Mux2 { width: 16 }, vec![sel, d0, d1], y, "test.mux".to_string());
+        lir.add_node(
+            LirOp::Mux2 { width: 16 },
+            vec![sel, d0, d1],
+            y,
+            "test.mux".to_string(),
+        );
 
         let result = synthesize(&lir, &lib, crate::synth::SynthPreset::Quick);
         assert!(!result.netlist.cells.is_empty(), "Should produce cells");
@@ -2246,33 +2848,69 @@ mod tests {
         let d = lir.add_input("d".to_string(), 8);
         let q = lir.add_output("q".to_string(), 8);
         lir.add_seq_node(
-            LirOp::Reg { width: 8, has_enable: false, has_reset: false, async_reset: false, reset_value: None },
-            vec![d], q, "test.reg".to_string(), clk, None,
+            LirOp::Reg {
+                width: 8,
+                has_enable: false,
+                has_reset: false,
+                async_reset: false,
+                reset_value: None,
+            },
+            vec![d],
+            q,
+            "test.reg".to_string(),
+            clk,
+            None,
         );
 
         let result = synthesize(&lir, &lib, crate::synth::SynthPreset::Quick);
-        let seq_count = result.netlist.cells.iter().filter(|c| c.is_sequential()).count();
-        assert!(seq_count >= 8, "Should have at least 8 sequential cells, got {}", seq_count);
+        let seq_count = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.is_sequential())
+            .count();
+        assert!(
+            seq_count >= 8,
+            "Should have at least 8 sequential cells, got {}",
+            seq_count
+        );
     }
 
     #[test]
     fn test_synthesize_ice40_adder() {
-        let lib = crate::tech_library::get_stdlib_library("ice40")
-            .expect("Failed to load ice40");
+        let lib = crate::tech_library::get_stdlib_library("ice40").expect("Failed to load ice40");
         let mut lir = Lir::new("test".to_string());
         let a = lir.add_input("a".to_string(), 4);
         let b = lir.add_input("b".to_string(), 4);
         let sum = lir.add_output("sum".to_string(), 4);
         lir.add_node(
-            LirOp::Add { width: 4, has_carry: false, const_b: None },
-            vec![a, b], sum, "test.add".to_string(),
+            LirOp::Add {
+                width: 4,
+                has_carry: false,
+                const_b: None,
+            },
+            vec![a, b],
+            sum,
+            "test.add".to_string(),
         );
 
         let result = synthesize(&lir, &lib, crate::synth::SynthPreset::Quick);
         assert!(!result.netlist.cells.is_empty(), "Should produce cells");
-        let logic_cells = result.netlist.cells.iter()
-            .filter(|c| !matches!(c.cell_type.as_str(), "SB_IO" | "SB_VCC" | "SB_GND" | "SB_GB"))
+        let logic_cells = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| {
+                !matches!(
+                    c.cell_type.as_str(),
+                    "SB_IO" | "SB_VCC" | "SB_GND" | "SB_GB"
+                )
+            })
             .count();
-        assert!(logic_cells <= 45, "4-bit ice40 adder should have ≤45 logic cells, got {}", logic_cells);
+        assert!(
+            logic_cells <= 45,
+            "4-bit ice40 adder should have ≤45 logic cells, got {}",
+            logic_cells
+        );
     }
 }

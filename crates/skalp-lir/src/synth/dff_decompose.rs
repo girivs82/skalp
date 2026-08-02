@@ -50,7 +50,7 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         .iter_latches()
         .map(|(id, node)| {
             if let AigNode::Latch { data, reset, .. } = node {
-                (id, data.clone(), *reset)
+                (id, *data, *reset)
             } else {
                 unreachable!()
             }
@@ -62,7 +62,10 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
 
         // Check if Q is in the transitive fanin of D
         if !is_in_fanin(aig, data_lit.node, *latch_id) {
-            tracing::trace!("[DFF_DECOMP] latch {:?}: Q not in fanin, skipping", latch_id);
+            tracing::trace!(
+                "[DFF_DECOMP] latch {:?}: Q not in fanin, skipping",
+                latch_id
+            );
             continue; // Q doesn't feed back — no enable possible
         }
 
@@ -93,8 +96,14 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         let f_q1 = cofactor(aig, data_after_reset, q_lit, true);
         let bool_diff = build_xor(aig, f_q0, f_q1);
 
-        tracing::trace!("[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
-            latch_id, f_q0, f_q1, bool_diff, bool_diff.const_value());
+        tracing::trace!(
+            "[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
+            latch_id,
+            f_q0,
+            f_q1,
+            bool_diff,
+            bool_diff.const_value()
+        );
 
         let enable = if bool_diff.const_value() == Some(false) {
             // dF/dQ = 0: F doesn't depend on Q (after reset peeling).
@@ -104,7 +113,10 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         } else if bool_diff.const_value() == Some(true) {
             // dF/dQ = 1: F always depends on Q. This means F = Q or F = ~Q,
             // not a MUX enable pattern.
-            tracing::trace!("[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q", latch_id);
+            tracing::trace!(
+                "[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q",
+                latch_id
+            );
             None
         } else {
             // Non-trivial enable: E = ~bool_diff
@@ -133,14 +145,17 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
             // Reconstructed: F_recon = mux(E, D_new, Q)
             let f_recon = build_mux(aig, e_lit, new_data, q_lit);
             verify_equivalence(aig, data_after_reset, f_recon, *latch_id)
-        } else if sync_reset.is_some() {
-            true // Reset peeling is straightforward, trust it
         } else {
+            // Reset peeling (sync_reset present) is straightforward — trust it;
+            // and with no reset there is nothing to verify.
             true
         };
 
         if !decomp_ok {
-            tracing::debug!("[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping", latch_id);
+            tracing::debug!(
+                "[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping",
+                latch_id
+            );
             continue; // Decomposition incorrect, skip this latch
         }
         tracing::trace!("[DFF_DECOMP] latch {:?}: decomposition accepted (enable={:?}, data={:?}, sync_reset={:?})",
@@ -162,12 +177,22 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
 
 /// Verify that two AIG literals are functionally equivalent using random simulation.
 /// Checks 256 random input patterns (4 rounds of 64-bit parallel sim).
-fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_id: AigNodeId) -> bool {
+fn verify_equivalence(
+    aig: &Aig,
+    original: AigLit,
+    reconstructed: AigLit,
+    latch_id: AigNodeId,
+) -> bool {
     // Collect all input nodes (PIs and latches) in the transitive fanin of both functions
     let mut inputs_orig = HashSet::new();
     let mut inputs_recon = HashSet::new();
     collect_inputs(aig, original.node, &mut inputs_orig, &mut HashSet::new());
-    collect_inputs(aig, reconstructed.node, &mut inputs_recon, &mut HashSet::new());
+    collect_inputs(
+        aig,
+        reconstructed.node,
+        &mut inputs_recon,
+        &mut HashSet::new(),
+    );
     let mut all_inputs = inputs_orig.clone();
     all_inputs.extend(&inputs_recon);
     let inputs: Vec<AigNodeId> = all_inputs.into_iter().collect();
@@ -176,8 +201,12 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
     let only_orig: Vec<_> = inputs_orig.difference(&inputs_recon).collect();
     let only_recon: Vec<_> = inputs_recon.difference(&inputs_orig).collect();
     if !only_orig.is_empty() || !only_recon.is_empty() {
-        tracing::trace!("[DFF_VERIFY] latch {:?}: orig_only_inputs={:?}, recon_only_inputs={:?}",
-            latch_id, only_orig, only_recon);
+        tracing::trace!(
+            "[DFF_VERIFY] latch {:?}: orig_only_inputs={:?}, recon_only_inputs={:?}",
+            latch_id,
+            only_orig,
+            only_recon
+        );
     }
 
     // Use a simple PRNG (xorshift64) for reproducibility
@@ -201,7 +230,11 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
             if round == 0 {
                 tracing::debug!("[DFF_VERIFY] latch {:?}: MISMATCH round {} orig={:016x} recon={:016x} xor={:016x}",
                     latch_id, round, orig_val, recon_val, orig_val ^ recon_val);
-                tracing::debug!("[DFF_VERIFY]   original={:?} reconstructed={:?}", original, reconstructed);
+                tracing::debug!(
+                    "[DFF_VERIFY]   original={:?} reconstructed={:?}",
+                    original,
+                    reconstructed
+                );
             }
             return false;
         }
@@ -211,7 +244,12 @@ fn verify_equivalence(aig: &Aig, original: AigLit, reconstructed: AigLit, latch_
 }
 
 /// Collect all primary input and latch nodes in the transitive fanin of a node.
-fn collect_inputs(aig: &Aig, node: AigNodeId, inputs: &mut HashSet<AigNodeId>, visited: &mut HashSet<AigNodeId>) {
+fn collect_inputs(
+    aig: &Aig,
+    node: AigNodeId,
+    inputs: &mut HashSet<AigNodeId>,
+    visited: &mut HashSet<AigNodeId>,
+) {
     if node == AigNodeId::FALSE || !visited.insert(node) {
         return;
     }
@@ -230,7 +268,11 @@ fn collect_inputs(aig: &Aig, node: AigNodeId, inputs: &mut HashSet<AigNodeId>, v
 /// Evaluate an AIG literal using 64-bit parallel simulation.
 fn eval_lit(aig: &Aig, lit: AigLit, values: &mut HashMap<AigNodeId, u64>) -> u64 {
     let val = eval_node(aig, lit.node, values);
-    if lit.inverted { !val } else { val }
+    if lit.inverted {
+        !val
+    } else {
+        val
+    }
 }
 
 fn eval_node(aig: &Aig, node: AigNodeId, values: &mut HashMap<AigNodeId, u64>) -> u64 {
@@ -424,7 +466,10 @@ mod tests {
 
         assert_eq!(decomps.len(), 1);
         let decomp = decomps.values().next().unwrap();
-        assert!(decomp.enable.is_some(), "Should detect enable from nested MUX");
+        assert!(
+            decomp.enable.is_some(),
+            "Should detect enable from nested MUX"
+        );
     }
 
     #[test]
@@ -493,6 +538,9 @@ mod tests {
         let decomps = decompose_latches(&mut aig);
         assert_eq!(decomps.len(), 1);
         let decomp = decomps.values().next().unwrap();
-        assert!(decomp.enable.is_some(), "Should detect enable with multiple data paths");
+        assert!(
+            decomp.enable.is_some(),
+            "Should detect enable with multiple data paths"
+        );
     }
 }

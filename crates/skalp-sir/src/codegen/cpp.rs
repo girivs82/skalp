@@ -397,7 +397,8 @@ extern "C" void batched_simulation(
         // Emit field offset tables (uses offsetof/sizeof for authoritative layout)
         out.push_str(&self.shared.generate_field_offset_tables());
 
-        out.push_str(r#"// Export table for dynamic loading
+        out.push_str(
+            r#"// Export table for dynamic loading
 struct SkalpKernel {
     void (*combinational_eval)(const Inputs*, const Registers*, Signals*);
     void (*sequential_update)(const Inputs*, const Registers*, const Signals*, Registers*);
@@ -427,7 +428,8 @@ extern "C" const SkalpKernel SKALP_KERNEL = {
     signals_field_table,
     signals_field_count
 };
-"#);
+"#,
+        );
         out
     }
 }

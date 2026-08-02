@@ -274,7 +274,7 @@ fn add_high_fanout_constraints(
             dest_cells: dest_cells.clone(),
             dest_cell_names: dest_cell_names.clone(),
             max_skew_ps: constraints.global_max_skew_ps,
-            priority: 0, // low priority — preventive, not reactive
+            priority: 0,                       // low priority — preventive, not reactive
             branch_cell_delays_ps: Vec::new(), // no STA data for high-fanout preventive groups
         });
     }
@@ -380,9 +380,7 @@ impl NclRoutingConstraints {
 
     /// Total number of constraint groups
     pub fn total_groups(&self) -> usize {
-        self.matched_delay_groups.len()
-            + self.proximity_groups.len()
-            + self.completion_guards.len()
+        self.matched_delay_groups.len() + self.proximity_groups.len() + self.completion_guards.len()
     }
 }
 
@@ -428,8 +426,15 @@ impl NclRoutingConstraints {
                 group.name, group.max_distance_tiles
             ));
             // Use UGROUP to group cells for co-placement
-            out.push_str(&format!("UGROUP \"{}\" BBOX {} {} ", group.name, group.max_distance_tiles, group.max_distance_tiles));
-            let names: Vec<String> = group.cell_names.iter().map(|n| format!("\"{}\"", n)).collect();
+            out.push_str(&format!(
+                "UGROUP \"{}\" BBOX {} {} ",
+                group.name, group.max_distance_tiles, group.max_distance_tiles
+            ));
+            let names: Vec<String> = group
+                .cell_names
+                .iter()
+                .map(|n| format!("\"{}\"", n))
+                .collect();
             out.push_str(&names.join(" "));
             out.push_str(";\n");
         }
@@ -485,9 +490,7 @@ impl NclRoutingConstraints {
         }
 
         for guard in &self.completion_guards {
-            let cell_attrs = attrs
-                .entry(guard.completion_cell_name.clone())
-                .or_default();
+            let cell_attrs = attrs.entry(guard.completion_cell_name.clone()).or_default();
             cell_attrs.insert(
                 "MIN_DELAY_PS".to_string(),
                 format!("{:.0}", guard.min_guard_delay_ps),
@@ -519,12 +522,18 @@ impl NclRoutingConstraints {
         ));
 
         if !self.matched_delay_groups.is_empty() {
-            let max_priority = self.matched_delay_groups.iter().map(|g| g.priority).max().unwrap_or(0);
-            let critical = self.matched_delay_groups.iter().filter(|g| g.priority == 3).count();
-            s.push_str(&format!(
-                "  Critical forks (priority 3): {}\n",
-                critical
-            ));
+            let max_priority = self
+                .matched_delay_groups
+                .iter()
+                .map(|g| g.priority)
+                .max()
+                .unwrap_or(0);
+            let critical = self
+                .matched_delay_groups
+                .iter()
+                .filter(|g| g.priority == 3)
+                .count();
+            s.push_str(&format!("  Critical forks (priority 3): {}\n", critical));
             s.push_str(&format!("  Max priority: {}\n", max_priority));
         }
 
@@ -615,10 +624,7 @@ mod tests {
         let constraints = generate_ncl_constraints(&netlist, &sta, &config);
         // Only Error and above should be constrained
         assert_eq!(constraints.matched_delay_groups.len(), 1);
-        assert_eq!(
-            constraints.matched_delay_groups[0].fork_net_name,
-            "net_2"
-        );
+        assert_eq!(constraints.matched_delay_groups[0].fork_net_name, "net_2");
     }
 
     #[test]
@@ -674,10 +680,7 @@ mod tests {
         // Both destination cells should have ROUTE_GROUP attributes
         assert!(attrs.contains_key("TH22_a"));
         assert!(attrs.contains_key("TH12_b"));
-        assert_eq!(
-            attrs["TH22_a"].get("ROUTE_GROUP").unwrap(),
-            "fork_0"
-        );
+        assert_eq!(attrs["TH22_a"].get("ROUTE_GROUP").unwrap(), "fork_0");
     }
 
     #[test]

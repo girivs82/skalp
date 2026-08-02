@@ -331,13 +331,11 @@ impl Testbench {
             .compile_to_mir(&hir)
             .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
-        let library = skalp_lir::get_stdlib_library("ice40").map_err(|e| {
-            anyhow::anyhow!("Failed to load library: {:?}", e)
-        })?;
+        let library = skalp_lir::get_stdlib_library("ice40")
+            .map_err(|e| anyhow::anyhow!("Failed to load library: {:?}", e))?;
 
         // Hierarchical LIR with NCL expansion
-        let (hier_lir, has_async) =
-            skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+        let (hier_lir, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
         let hier_lir = if has_async {
             let ncl_config = skalp_lir::NclConfig {
                 boundary_only: true,
@@ -352,7 +350,9 @@ impl Testbench {
         };
 
         let hier_netlist = skalp_lir::synthesize_hierarchical(
-            &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+            &hier_lir,
+            &library,
+            skalp_lir::synth::SynthPreset::Balanced,
         );
         let netlist = hier_netlist.flatten();
 
@@ -369,9 +369,9 @@ impl Testbench {
             for assign in &top_mir.assignments {
                 // Match pattern: Port(out) = Signal(inst_port)
                 if let skalp_mir::mir::LValue::Port(port_id) = &assign.lhs {
-                    if let skalp_mir::mir::ExpressionKind::Ref(
-                        skalp_mir::mir::LValue::Signal(sig_id),
-                    ) = &assign.rhs.kind
+                    if let skalp_mir::mir::ExpressionKind::Ref(skalp_mir::mir::LValue::Signal(
+                        sig_id,
+                    )) = &assign.rhs.kind
                     {
                         if let Some(port) = top_mir.ports.iter().find(|p| p.id == *port_id) {
                             if let Some(sig) = top_mir.signals.iter().find(|s| s.id == *sig_id) {
@@ -606,7 +606,9 @@ impl Testbench {
         let netlist = if has_hierarchy || top_module_name.is_some() {
             let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
             let hier_netlist = synthesize_hierarchical(
-                &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+                &hier_lir,
+                &library,
+                skalp_lir::synth::SynthPreset::Balanced,
             );
             hier_netlist.flatten()
         } else {
@@ -616,7 +618,9 @@ impl Testbench {
                 .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
             let lir_result = lower_mir_module_to_lir(top_module);
             let synth_result = synthesize(
-                &lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+                &lir_result.lir,
+                &library,
+                skalp_lir::synth::SynthPreset::Balanced,
             );
             synth_result.netlist
         };
@@ -761,8 +765,7 @@ impl Testbench {
     ) -> Result<Self> {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
-            get_stdlib_library, lower_mir_module_to_lir,
-            synthesize, synthesize_hierarchical,
+            get_stdlib_library, lower_mir_module_to_lir, synthesize, synthesize_hierarchical,
         };
 
         let path = Path::new(source_path);
@@ -808,7 +811,9 @@ impl Testbench {
             };
 
             let hier_netlist = synthesize_hierarchical(
-                &hier_lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+                &hier_lir,
+                &library,
+                skalp_lir::synth::SynthPreset::Balanced,
             );
             hier_netlist.flatten()
         } else {
@@ -818,7 +823,9 @@ impl Testbench {
                 .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
             let lir_result = lower_mir_module_to_lir(top_module);
             let synth_result = synthesize(
-                &lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced,
+                &lir_result.lir,
+                &library,
+                skalp_lir::synth::SynthPreset::Balanced,
             );
             synth_result.netlist
         };
@@ -904,9 +911,8 @@ impl Testbench {
             .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
 
         let hier_lir = lower_mir_hierarchical(&mir);
-        let hier_netlist = synthesize_hierarchical(
-            &hier_lir, &library, skalp_lir::synth::SynthPreset::Quick,
-        );
+        let hier_netlist =
+            synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
         let netlist = hier_netlist.flatten();
 
         // Load as NCL

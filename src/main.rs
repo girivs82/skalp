@@ -748,7 +748,15 @@ fn main() -> Result<()> {
             pnr_preset,
             emit,
         } => {
-            synthesize_design(&source, &device, full_flow, &output, &optimize, &pnr_preset, emit.as_deref())?;
+            synthesize_design(
+                &source,
+                &device,
+                full_flow,
+                &output,
+                &optimize,
+                &pnr_preset,
+                emit.as_deref(),
+            )?;
         }
 
         Commands::Pnr {
@@ -1388,8 +1396,7 @@ fn build_design(
                 };
 
                 // Single-pass hierarchical synthesis using AIG-based engine
-                let hier_netlist =
-                    skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
+                let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
                 info!(
                     "Synthesized {} cells across {} instances",
                     hier_netlist.total_cell_count(),
@@ -2047,7 +2054,11 @@ fn compile_to_ip(
     println!("   Library: {}", library_name);
 
     // Synthesize using AIG-based engine
-    let synth_result = synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced);
+    let synth_result = synthesize(
+        &lir_result.lir,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    );
     let mut netlist = synth_result.netlist;
     println!("   Cells: {} gates", netlist.cells.len());
 
@@ -2337,8 +2348,7 @@ fn simulate_gate_level(
         } else {
             skalp_lir::synth::SynthPreset::Balanced
         };
-        let hier_netlist =
-            skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
+        let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
         println!(
             "   Synthesized {} cells across {} instances",
             hier_netlist.total_cell_count(),
@@ -2736,7 +2746,8 @@ fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::M
     // Include assignments and ports in the score so designs with function calls
     // (no sub-entity instances) still rank above imported library entities
     // Prefer modules from the main source file over imported/stdlib modules
-    let candidates: Vec<_> = mir.modules
+    let candidates: Vec<_> = mir
+        .modules
         .iter()
         .filter(|m| !instantiated.contains(&m.id))
         .collect();
@@ -2971,7 +2982,10 @@ fn run_equivalence_check(
                         println!("       input {}: {} (0x{:x})", name, val, val);
                     }
                     for (user, internal, mir_v, gate_v, m) in &entry.signals {
-                        println!("       {} ({}): mir={:?} gate={:?} match={}", user, internal, mir_v, gate_v, m);
+                        println!(
+                            "       {} ({}): mir={:?} gate={:?} match={}",
+                            user, internal, mir_v, gate_v, m
+                        );
                     }
                 }
             }
@@ -4024,8 +4038,7 @@ fn synthesize_design(
     println!("Library: {}", library_name);
 
     // Parse and build HIR with full module resolution (stdlib, imports)
-    let context =
-        parse_and_build_compilation_context(source).context("Failed to parse source")?;
+    let context = parse_and_build_compilation_context(source).context("Failed to parse source")?;
     let hir = context.main_hir;
     let module_hirs = context.module_hirs;
 
@@ -4054,8 +4067,7 @@ fn synthesize_design(
     println!("Module: {}", top_module.name);
 
     // Hierarchical LIR lowering with NCL expansion for async modules
-    let (hier_lir, has_async) =
-        skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let (hier_lir, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
 
     if has_async {
         println!("NCL: async modules detected, applying boundary NCL");
@@ -4080,14 +4092,20 @@ fn synthesize_design(
         if let Some(top) = hier_lir.instances.get(&hier_lir.top_module) {
             println!("{}", serde_json::to_string_pretty(&top.lir_result.lir)?);
         } else {
-            anyhow::bail!("Top module '{}' not found in hierarchical LIR", hier_lir.top_module);
+            anyhow::bail!(
+                "Top module '{}' not found in hierarchical LIR",
+                hier_lir.top_module
+            );
         }
         return Ok(());
     }
 
     if let Some(stage) = emit {
         if stage != "aig" {
-            anyhow::bail!("Unknown --emit stage: '{}'. Options: hir, mir, lir, aig", stage);
+            anyhow::bail!(
+                "Unknown --emit stage: '{}'. Options: hir, mir, lir, aig",
+                stage
+            );
         }
     }
 
@@ -4108,9 +4126,7 @@ fn synthesize_design(
     println!("Optimize: {}", optimize);
 
     // Hierarchical synthesis: each module independently, then flatten
-    let hier_netlist = skalp_lir::synthesize_hierarchical(
-        &hier_lir, &library, preset,
-    );
+    let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
     let gate_netlist = hier_netlist.flatten();
     println!("Cells: {}", gate_netlist.cells.len());
     println!("Nets: {}", gate_netlist.nets.len());
@@ -5261,7 +5277,11 @@ fn run_fi_driven_safety(
         get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
     // Synthesize using AIG-based engine
-    let synth_result = skalp_lir::synthesize(&lir_result.lir, &library, skalp_lir::synth::SynthPreset::Balanced);
+    let synth_result = skalp_lir::synthesize(
+        &lir_result.lir,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    );
     let netlist = &synth_result.netlist;
 
     let total_cells = netlist.cells.len();
@@ -6882,9 +6902,7 @@ fn run_signal_trace(
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::signal_trace::{SignalTracer, TraceDirection};
-    use skalp_lir::{
-        get_stdlib_library, lower_mir_hierarchical_with_top, synthesize_hierarchical,
-    };
+    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, synthesize_hierarchical};
 
     println!("🔍 Signal Trace");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -6949,9 +6967,8 @@ fn run_signal_trace(
         println!("🔧 Synthesizing gate-level netlist...");
         let library =
             get_stdlib_library("generic_asic").context("Failed to load technology library")?;
-        let hier_netlist = synthesize_hierarchical(
-            &hier_lir, &library, skalp_lir::synth::SynthPreset::Quick,
-        );
+        let hier_netlist =
+            synthesize_hierarchical(&hier_lir, &library, skalp_lir::synth::SynthPreset::Quick);
         let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
         println!("   Nets: {}", netlist.nets.len());

@@ -204,32 +204,32 @@ pub struct Ecp5TimingData {
 /// Speed grade 8 (fastest), typ column.
 pub const TIMING_SPEED8: Ecp5TimingData = Ecp5TimingData {
     // SLOGICB cell delays (speed grade 8, typ)
-    lut4_delay: 0.166,          // A0→F0 [153, 166, 180] ps
-    dff_clk_to_q: 0.362,       // CLK→Q0 [329, 362, 395] ps
-    dff_setup: 0.237,           // LSR setup max 287ps; DI hold 222ps
-    dff_hold: 0.222,            // DI hold at CLK [213, 222, 232] ps
-    carry_delay: 0.053,         // SCCU2C FCI→FCO [50, 53, 56] ps
-    io_input_delay: 1.0,        // estimated (package-dependent)
-    io_output_delay: 1.8,       // estimated (package-dependent)
-    ram_read_delay: 2.5,        // DP16KD estimated
+    lut4_delay: 0.166,    // A0→F0 [153, 166, 180] ps
+    dff_clk_to_q: 0.362,  // CLK→Q0 [329, 362, 395] ps
+    dff_setup: 0.237,     // LSR setup max 287ps; DI hold 222ps
+    dff_hold: 0.222,      // DI hold at CLK [213, 222, 232] ps
+    carry_delay: 0.053,   // SCCU2C FCI→FCO [50, 53, 56] ps
+    io_input_delay: 1.0,  // estimated (package-dependent)
+    io_output_delay: 1.8, // estimated (package-dependent)
+    ram_read_delay: 2.5,  // DP16KD estimated
 
     // Interconnect delays (speed grade 8, typ)
-    local_wire_delay: 0.027,    // slice_internal [22, 27, 31] ps
-    span2_delay: 0.145,         // f_to_span2he [140, 145, 151] ps
-    span6_delay: 0.210,         // f_to_span6vn [195, 210, 226] ps
-    global_clock_delay: 0.050,  // estimated primary distribution
-    cib_mux_delay: 0.068,       // f_to_d [60, 68, 76] ps
+    local_wire_delay: 0.027,   // slice_internal [22, 27, 31] ps
+    span2_delay: 0.145,        // f_to_span2he [140, 145, 151] ps
+    span6_delay: 0.210,        // f_to_span6vn [195, 210, 226] ps
+    global_clock_delay: 0.050, // estimated primary distribution
+    cib_mux_delay: 0.068,      // f_to_d [60, 68, 76] ps
 
     // PIP delays (speed grade 8, typ)
-    pip_f_to_local: 0.046,      // f_to_span0hr [39, 46, 52] ps
-    pip_local_to_local: 0.068,  // f_to_d [60, 68, 76] ps
-    pip_local_to_span2: 0.145,  // f_to_span2he [140, 145, 151] ps
-    pip_span2_cascade: 0.168,   // span2he_to_span2he_e2 [157, 168, 179] ps
-    pip_span2_to_bel: 0.301,    // span2he_to_a [251, 301, 351] ps
-    pip_span6_cascade: 0.192,   // span6he_to_span6he_e6 [187, 192, 197] ps
-    pip_to_bel: 0.031,          // slice_internal → BEL
-    pip_clock_to_local: 0.050,  // clock distribution to tile
-    fanout_per_load: 0.005,     // ~4.5ps/fanout from f_to_d model
+    pip_f_to_local: 0.046,     // f_to_span0hr [39, 46, 52] ps
+    pip_local_to_local: 0.068, // f_to_d [60, 68, 76] ps
+    pip_local_to_span2: 0.145, // f_to_span2he [140, 145, 151] ps
+    pip_span2_cascade: 0.168,  // span2he_to_span2he_e2 [157, 168, 179] ps
+    pip_span2_to_bel: 0.301,   // span2he_to_a [251, 301, 351] ps
+    pip_span6_cascade: 0.192,  // span6he_to_span6he_e6 [187, 192, 197] ps
+    pip_to_bel: 0.031,         // slice_internal → BEL
+    pip_clock_to_local: 0.050, // clock distribution to tile
+    fanout_per_load: 0.005,    // ~4.5ps/fanout from f_to_d model
 };
 
 // ---------------------------------------------------------------------------
@@ -242,9 +242,9 @@ pub const ROUTING_CHANNELS: (u32, u32) = (56, 56);
 /// Wire segment definitions: (length_in_tiles, count_per_tile)
 /// H00/V00 local, H01/V01 span-1, H02/V02 span-2, H06/V06 span-6
 pub const WIRE_LOCAL_COUNT: u8 = 20;
-pub const WIRE_SPAN1_COUNT: u8 = 8;  // H01/V01 per direction
-pub const WIRE_SPAN2_COUNT: u8 = 6;  // H02/V02 per direction
-pub const WIRE_SPAN6_COUNT: u8 = 3;  // H06/V06 per direction
+pub const WIRE_SPAN1_COUNT: u8 = 8; // H01/V01 per direction
+pub const WIRE_SPAN2_COUNT: u8 = 6; // H02/V02 per direction
+pub const WIRE_SPAN6_COUNT: u8 = 3; // H06/V06 per direction
 
 // ---------------------------------------------------------------------------
 // Clock network (from prjtrellis globals.json)
@@ -300,14 +300,14 @@ pub const DSP_COLUMN_SPACING: u32 = 16;
 // Bitstream constants (from prjtrellis)
 // ---------------------------------------------------------------------------
 
-/// ECP5 SPI bitstream format (from prjtrellis ecppack):
-///
-/// Structure: [dummy] [preamble] [commands...] [frame data...] [postamble]
-///
-/// Each command is 4 bytes: opcode + 3 operand/padding bytes.
-/// Frame data follows LSC_PROG_INCR_NV, one frame at a time.
-///
-/// Sources: prjtrellis/libtrellis/src/Bitstream.cpp, Lattice TN1260
+// ECP5 SPI bitstream format (from prjtrellis ecppack):
+//
+// Structure: [dummy] [preamble] [commands...] [frame data...] [postamble]
+//
+// Each command is 4 bytes: opcode + 3 operand/padding bytes.
+// Frame data follows LSC_PROG_INCR_NV, one frame at a time.
+//
+// Sources: prjtrellis/libtrellis/src/Bitstream.cpp, Lattice TN1260
 
 /// Trellis text format magic (for .config / FASM-like output)
 pub const TEXT_FORMAT_MAGIC: &[u8] = b"TRELLIS_ECP5\n";
@@ -343,8 +343,8 @@ pub const CMD_DUMMY: u8 = 0xFF;
 /// PROG_INCR_NV operand with CRC check enabled (bit 7 of byte 2)
 pub const PROG_INCR_CRC_FLAG: u8 = 0x80;
 
-/// Bytes per frame = bits_per_frame / 8 (varies by die, see Ecp5DieData)
-/// Use `die.bits_per_frame / 8` at runtime.
+// Bytes per frame = bits_per_frame / 8 (varies by die, see Ecp5DieData)
+// Use `die.bits_per_frame / 8` at runtime.
 
 /// CRC polynomial for ECP5 bitstream (CRC-16/AUG-CCITT)
 pub const CRC_POLYNOMIAL: u16 = 0x8005;

@@ -119,7 +119,10 @@ impl ModuleResolver {
                     let share_stdlib = bin_dir.join("../share/skalp/stdlib");
                     if share_stdlib.exists() && share_stdlib.is_dir() {
                         if let Ok(canonical) = share_stdlib.canonicalize() {
-                            trace!("[MODULE_RESOLVER] stdlib from binary share dir: {:?}", canonical);
+                            trace!(
+                                "[MODULE_RESOLVER] stdlib from binary share dir: {:?}",
+                                canonical
+                            );
                             search_paths.push(canonical);
                             found_stdlib = true;
                         }
@@ -133,7 +136,10 @@ impl ModuleResolver {
             if let Ok(home) = std::env::var("HOME") {
                 let home_stdlib = PathBuf::from(home).join(".skalp/stdlib");
                 if home_stdlib.exists() && home_stdlib.is_dir() {
-                    trace!("[MODULE_RESOLVER] stdlib from ~/.skalp/stdlib: {:?}", home_stdlib);
+                    trace!(
+                        "[MODULE_RESOLVER] stdlib from ~/.skalp/stdlib: {:?}",
+                        home_stdlib
+                    );
                     search_paths.push(home_stdlib);
                     found_stdlib = true;
                 }
@@ -144,7 +150,10 @@ impl ModuleResolver {
             // Project-local: <root>/stdlib
             let project_stdlib = root_dir.join("stdlib");
             if project_stdlib.exists() && project_stdlib.is_dir() {
-                trace!("[MODULE_RESOLVER] stdlib from project dir: {:?}", project_stdlib);
+                trace!(
+                    "[MODULE_RESOLVER] stdlib from project dir: {:?}",
+                    project_stdlib
+                );
                 search_paths.push(project_stdlib);
                 found_stdlib = true;
             }

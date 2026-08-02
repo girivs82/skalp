@@ -296,8 +296,7 @@ impl CompiledCpuRuntime {
         let k = &*kernel;
 
         // Read input field table
-        let input_entries =
-            std::slice::from_raw_parts(k.inputs_fields, k.inputs_field_count);
+        let input_entries = std::slice::from_raw_parts(k.inputs_fields, k.inputs_field_count);
         for entry in input_entries {
             let name = std::ffi::CStr::from_ptr(entry.name)
                 .to_str()
@@ -319,8 +318,7 @@ impl CompiledCpuRuntime {
         }
 
         // Read signal field table
-        let signal_entries =
-            std::slice::from_raw_parts(k.signals_fields, k.signals_field_count);
+        let signal_entries = std::slice::from_raw_parts(k.signals_fields, k.signals_field_count);
         for entry in signal_entries {
             let name = std::ffi::CStr::from_ptr(entry.name)
                 .to_str()
@@ -365,9 +363,7 @@ impl CompiledCpuRuntime {
     /// This function matches that layout so runtime field offsets are correct.
     fn sir_type_byte_size(sir_type: &SirType) -> usize {
         match sir_type {
-            SirType::Array(elem_type, count) => {
-                Self::sir_type_byte_size(elem_type) * count
-            }
+            SirType::Array(elem_type, count) => Self::sir_type_byte_size(elem_type) * count,
             _ => Self::type_byte_size(sir_type.width()),
         }
     }

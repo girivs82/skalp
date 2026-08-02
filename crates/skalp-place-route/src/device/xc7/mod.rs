@@ -82,21 +82,43 @@ impl Xc7Variant {
     }
 
     /// Grid dimensions from prjxray-db tilegrid.json
-    pub fn grid_size(&self) -> (u32, u32) { self.die_data().grid }
-    pub fn name(&self) -> &'static str { self.die_data().name }
-    pub fn lut_count(&self) -> usize { self.die_data().lut6s }
-    pub fn slice_count(&self) -> usize { self.die_data().slices }
-    pub fn bram_count(&self) -> usize { self.die_data().bram36s }
-    pub fn dsp_count(&self) -> usize { self.die_data().dsp48e1s }
-    pub fn io_count(&self) -> usize { self.die_data().max_ios }
-    pub fn mmcm_count(&self) -> u8 { self.die_data().mmcms }
-    pub fn pll_count(&self) -> u8 { self.die_data().plls }
+    pub fn grid_size(&self) -> (u32, u32) {
+        self.die_data().grid
+    }
+    pub fn name(&self) -> &'static str {
+        self.die_data().name
+    }
+    pub fn lut_count(&self) -> usize {
+        self.die_data().lut6s
+    }
+    pub fn slice_count(&self) -> usize {
+        self.die_data().slices
+    }
+    pub fn bram_count(&self) -> usize {
+        self.die_data().bram36s
+    }
+    pub fn dsp_count(&self) -> usize {
+        self.die_data().dsp48e1s
+    }
+    pub fn io_count(&self) -> usize {
+        self.die_data().max_ios
+    }
+    pub fn mmcm_count(&self) -> u8 {
+        self.die_data().mmcms
+    }
+    pub fn pll_count(&self) -> u8 {
+        self.die_data().plls
+    }
 
     #[allow(dead_code)]
-    pub fn idcode(&self) -> u32 { self.die_data().idcode }
+    pub fn idcode(&self) -> u32 {
+        self.die_data().idcode
+    }
 
     #[allow(dead_code)]
-    pub fn packages(&self) -> &'static [&'static str] { self.die_data().packages }
+    pub fn packages(&self) -> &'static [&'static str] {
+        self.die_data().packages
+    }
 
     /// Has GTX/GTP transceivers
     pub fn has_transceivers(&self) -> bool {
@@ -105,10 +127,14 @@ impl Xc7Variant {
     }
 
     /// Has hard PCIe block
-    pub fn has_pcie(&self) -> bool { self.die_data().pcie_blocks > 0 }
+    pub fn has_pcie(&self) -> bool {
+        self.die_data().pcie_blocks > 0
+    }
 
     /// Speed family for timing selection
-    pub fn speed_family(&self) -> data::Xc7SpeedFamily { self.die_data().speed_family }
+    pub fn speed_family(&self) -> data::Xc7SpeedFamily {
+        self.die_data().speed_family
+    }
 
     /// Frame geometry for bitstream generation
     pub fn frame_geometry(&self) -> &'static data::Xc7FrameGeometry {
@@ -297,7 +323,7 @@ impl Xc7Device {
             let prefix = if slice == 0 { "L" } else { "M" };
 
             // 4 LUT6 per slice (positions A/B/C/D)
-            for (_i, pos) in positions.iter().enumerate() {
+            for pos in positions.iter() {
                 let id = BelId(*bel_id);
                 *bel_id += 1;
                 bels.push(Bel {
@@ -305,14 +331,46 @@ impl Xc7Device {
                     bel_type: BelType::Lut6,
                     name: format!("SLICE{}_{}{}_LUT", prefix, pos, "6"),
                     pins: vec![
-                        BelPin { name: "A1".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "A2".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "A3".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "A4".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "A5".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "A6".into(), direction: PinDirection::Input, wire: None },
-                        BelPin { name: "O6".into(), direction: PinDirection::Output, wire: None },
-                        BelPin { name: "O5".into(), direction: PinDirection::Output, wire: None },
+                        BelPin {
+                            name: "A1".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "A2".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "A3".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "A4".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "A5".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "A6".into(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "O6".into(),
+                            direction: PinDirection::Output,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "O5".into(),
+                            direction: PinDirection::Output,
+                            wire: None,
+                        },
                     ],
                 });
 
@@ -330,11 +388,31 @@ impl Xc7Device {
                         bel_type: BelType::DffSrE,
                         name: ff_name,
                         pins: vec![
-                            BelPin { name: "D".into(), direction: PinDirection::Input, wire: None },
-                            BelPin { name: "C".into(), direction: PinDirection::Input, wire: None },
-                            BelPin { name: "CE".into(), direction: PinDirection::Input, wire: None },
-                            BelPin { name: "R".into(), direction: PinDirection::Input, wire: None },
-                            BelPin { name: "Q".into(), direction: PinDirection::Output, wire: None },
+                            BelPin {
+                                name: "D".into(),
+                                direction: PinDirection::Input,
+                                wire: None,
+                            },
+                            BelPin {
+                                name: "C".into(),
+                                direction: PinDirection::Input,
+                                wire: None,
+                            },
+                            BelPin {
+                                name: "CE".into(),
+                                direction: PinDirection::Input,
+                                wire: None,
+                            },
+                            BelPin {
+                                name: "R".into(),
+                                direction: PinDirection::Input,
+                                wire: None,
+                            },
+                            BelPin {
+                                name: "Q".into(),
+                                direction: PinDirection::Output,
+                                wire: None,
+                            },
                         ],
                     });
                 }
@@ -348,11 +426,31 @@ impl Xc7Device {
                 bel_type: BelType::Carry,
                 name: format!("SLICE{}_CARRY4", prefix),
                 pins: vec![
-                    BelPin { name: "CI".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CO3".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "CO2".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "CO1".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "CO0".into(), direction: PinDirection::Output, wire: None },
+                    BelPin {
+                        name: "CI".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CO3".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CO2".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CO1".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CO0".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -370,10 +468,26 @@ impl Xc7Device {
                 bel_type: BelType::IoCell,
                 name: format!("IOB_{}", i),
                 pins: vec![
-                    BelPin { name: "PAD".into(), direction: PinDirection::Inout, wire: None },
-                    BelPin { name: "I".into(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "O".into(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "T".into(), direction: PinDirection::Input, wire: None },
+                    BelPin {
+                        name: "PAD".into(),
+                        direction: PinDirection::Inout,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "I".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "O".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "T".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -388,18 +502,66 @@ impl Xc7Device {
             bel_type: BelType::RamSlice,
             name: "RAMB36E1".into(),
             pins: vec![
-                BelPin { name: "ADDRA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "ADDRB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DOA".into(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "DOB".into(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "CLKA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CLKB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "ENA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "ENB".into(), direction: PinDirection::Input, wire: None },
+                BelPin {
+                    name: "ADDRA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "ADDRB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOA".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOB".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "ENA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "ENB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
             ],
         }]
     }
@@ -412,15 +574,51 @@ impl Xc7Device {
             bel_type: BelType::DspSlice,
             name: "DSP48E1".into(),
             pins: vec![
-                BelPin { name: "A".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "B".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "C".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "D".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "P".into(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "CLK".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEA".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEB".into(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "RST".into(), direction: PinDirection::Input, wire: None },
+                BelPin {
+                    name: "A".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "B".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "C".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "D".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "P".into(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLK".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEA".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEB".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "RST".into(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
             ],
         }]
     }
@@ -533,12 +731,12 @@ impl Xc7Device {
 
                         // Local → LUT input PIPs (connect 3 locals to each of 6 inputs)
                         for inp in 0..6 {
-                            if let Some(&lut_in_id) = self
-                                .bel_wires
-                                .get(&(x, y, format!("LUT{}_A{}", lc, inp + 1)))
+                            if let Some(&lut_in_id) =
+                                self.bel_wires
+                                    .get(&(x, y, format!("LUT{}_A{}", lc, inp + 1)))
                             {
                                 for lo in 0..3u8 {
-                                    let li = ((lc * 3 + inp + lo as usize) % 24) as usize;
+                                    let li = (lc * 3 + inp + lo as usize) % 24;
                                     if let Some(locals) = self.tile_wires.get(&(x, y)) {
                                         if let Some(&lw) = locals.get(li) {
                                             let p = Pip {
@@ -577,7 +775,8 @@ impl Xc7Device {
                         delay: 50,
                     };
                     self.wire_names.insert(clk_wire.name.clone(), clk_wire.id);
-                    self.bel_wires.insert((x, y, "CLK".to_string()), clk_wire.id);
+                    self.bel_wires
+                        .insert((x, y, "CLK".to_string()), clk_wire.id);
                     self.tile_wires.entry((x, y)).or_default().push(clk_wire.id);
                     self.wires.push(clk_wire);
                     wire_id += 1;
@@ -789,14 +988,8 @@ impl Xc7Device {
                                         tile_x: dest_x,
                                         tile_y: dest_y,
                                     };
-                                    self.wire_to_pips
-                                        .entry(p.dst_wire)
-                                        .or_default()
-                                        .push(p.id);
-                                    self.wire_src_pips
-                                        .entry(p.src_wire)
-                                        .or_default()
-                                        .push(p.id);
+                                    self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                    self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                     self.pips.push(p);
                                     pip_id += 1;
                                 }
@@ -806,9 +999,7 @@ impl Xc7Device {
                 }
 
                 // Neighbour wires (4 directions)
-                for (dx, dy, dir) in
-                    [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")]
-                {
+                for (dx, dy, dir) in [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")] {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
                     if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
@@ -886,7 +1077,7 @@ impl Xc7Device {
             let w = Wire {
                 id: WireId(wire_id),
                 name: format!("GCLK_{}", gclk),
-                wire_type: WireType::Global(gclk as u8),
+                wire_type: WireType::Global(gclk),
                 tile_x: 0,
                 tile_y: 0,
                 delay: 50,
@@ -1089,8 +1280,9 @@ impl Device for Xc7Device {
             // Also accept Lut4 mapping for smaller LUTs
             t if t.starts_with("LUT") => bel_type == BelType::Lut6 || bel_type == BelType::Lut4,
             // FF primitives
-            "FDRE" | "FDSE" | "FDCE" | "FDPE" | "FD" | "FDE" | "FDR" | "FDS" | "LDCE"
-            | "LDPE" => bel_type.is_ff(),
+            "FDRE" | "FDSE" | "FDCE" | "FDPE" | "FD" | "FDE" | "FDR" | "FDS" | "LDCE" | "LDPE" => {
+                bel_type.is_ff()
+            }
             // Carry
             "CARRY4" => bel_type == BelType::Carry,
             // I/O
@@ -1103,9 +1295,7 @@ impl Device for Xc7Device {
             "DSP48E1" => bel_type == BelType::DspSlice,
             // Clock
             "BUFG" | "BUFGCTRL" | "BUFR" | "BUFMR" => bel_type == BelType::GlobalBuf,
-            "MMCME2_ADV" | "MMCME2_BASE" | "PLLE2_ADV" | "PLLE2_BASE" => {
-                bel_type == BelType::Pll
-            }
+            "MMCME2_ADV" | "MMCME2_BASE" | "PLLE2_ADV" | "PLLE2_BASE" => bel_type == BelType::Pll,
             _ => false,
         }
     }
@@ -1178,8 +1368,16 @@ mod tests {
         assert_eq!(device.grid_size(), (237, 365));
         let stats = device.stats();
         assert!(stats.total_luts > 10_000, "got {} LUTs", stats.total_luts);
-        assert!(stats.total_brams > 0, "K325T has 445 BRAM36, got {} BRAMs", stats.total_brams);
-        assert!(stats.total_dsps > 0, "K325T has 840 DSP48E1, got {} DSPs", stats.total_dsps);
+        assert!(
+            stats.total_brams > 0,
+            "K325T has 445 BRAM36, got {} BRAMs",
+            stats.total_brams
+        );
+        assert!(
+            stats.total_dsps > 0,
+            "K325T has 840 DSP48E1, got {} DSPs",
+            stats.total_dsps
+        );
         // Check IDCODE
         assert_eq!(Xc7Variant::Xc7k325t.idcode(), 0x0365_1093);
     }

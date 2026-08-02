@@ -115,51 +115,52 @@ impl<'a, D: Device> GlobalNetRouter<'a, D> {
 
         // 1. Find the clock source (driver) location
         let driver_id = net.driver.ok_or_else(|| {
-            crate::error::PlaceRouteError::RoutingFailed(
-                "Clock net has no driver".to_string(),
-            )
+            crate::error::PlaceRouteError::RoutingFailed("Clock net has no driver".to_string())
         })?;
 
         let source_loc = placement.get(driver_id).ok_or_else(|| {
-            crate::error::PlaceRouteError::RoutingFailed(
-                "Clock driver not placed".to_string(),
-            )
+            crate::error::PlaceRouteError::RoutingFailed("Clock driver not placed".to_string())
         })?;
 
         // 2. Check if the driver pad is GBUF-capable
         let pio_num = source_loc.bel_index as u8;
-        let glb_num = self.device.gbufpin_for_pad(
-            source_loc.tile_x,
-            source_loc.tile_y,
-            pio_num,
-        ).ok_or_else(|| {
-            crate::error::PlaceRouteError::RoutingFailed(format!(
-                "Clock pad at ({},{}) IOB_{} is not GBUF-capable",
-                source_loc.tile_x, source_loc.tile_y, pio_num
-            ))
-        })?;
+        let glb_num = self
+            .device
+            .gbufpin_for_pad(source_loc.tile_x, source_loc.tile_y, pio_num)
+            .ok_or_else(|| {
+                crate::error::PlaceRouteError::RoutingFailed(format!(
+                    "Clock pad at ({},{}) IOB_{} is not GBUF-capable",
+                    source_loc.tile_x, source_loc.tile_y, pio_num
+                ))
+            })?;
 
         // 3. Allocate the specific global network (each pad is hardwired to one)
-        self.allocator.allocate_specific(net_id, glb_num).ok_or_else(|| {
-            crate::error::PlaceRouteError::RoutingFailed(format!(
-                "Global network {} already in use", glb_num
-            ))
-        })?;
+        self.allocator
+            .allocate_specific(net_id, glb_num)
+            .ok_or_else(|| {
+                crate::error::PlaceRouteError::RoutingFailed(format!(
+                    "Global network {} already in use",
+                    glb_num
+                ))
+            })?;
 
         // 4. Record the padin_glb_netwk extra bit
         if let Some((bank, addr_x, addr_y)) = self.device.padin_extra_bit(glb_num) {
-            self.extra_bits.push(ExtraBitConfig { bank, addr_x, addr_y });
+            self.extra_bits.push(ExtraBitConfig {
+                bank,
+                addr_x,
+                addr_y,
+            });
         }
 
         // 5. Build the route
         let mut route = Route::new(net_id);
 
         // Source: the IO input wire at the pad tile
-        if let Some(src_wire) = self.device.io_input_wire(
-            source_loc.tile_x,
-            source_loc.tile_y,
-            pio_num as usize,
-        ) {
+        if let Some(src_wire) =
+            self.device
+                .io_input_wire(source_loc.tile_x, source_loc.tile_y, pio_num as usize)
+        {
             route.source = src_wire;
             route.wires.push(src_wire);
         }

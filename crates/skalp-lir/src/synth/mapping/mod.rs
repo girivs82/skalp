@@ -61,10 +61,9 @@ pub fn eval_pin_order(function: &CellFunction) -> Option<&'static [&'static str]
         // 3-input asymmetric — gate_eval expects [a, b, c] = [A, B, C]
         CellFunction::Aoi21 | CellFunction::Oai21 => Some(&["A", "B", "C"]),
         // 4-input symmetric
-        CellFunction::And4
-        | CellFunction::Or4
-        | CellFunction::Nand4
-        | CellFunction::Nor4 => Some(&["A", "B", "C", "D"]),
+        CellFunction::And4 | CellFunction::Or4 | CellFunction::Nand4 | CellFunction::Nor4 => {
+            Some(&["A", "B", "C", "D"])
+        }
         // 4-input asymmetric — gate_eval expects [a, b, c, d] = [A, B, C, D]
         CellFunction::Aoi22 | CellFunction::Oai22 => Some(&["A", "B", "C", "D"]),
         // MUX2: gate_eval expects [sel, d0, d1] = [S, A, B]
@@ -240,7 +239,11 @@ impl CellMatcher {
                     let area = 1.0 + cell.fit * 15.0;
                     let delay = 15.0 + cell.fit * 50.0;
                     // Only upgrade if we don't already have a LUT (prefer larger)
-                    if matcher.universal_lut.as_ref().map_or(true, |(_, _, _, k)| *k < 6) {
+                    if matcher
+                        .universal_lut
+                        .as_ref()
+                        .is_none_or(|(_, _, _, k)| *k < 6)
+                    {
                         matcher.universal_lut = Some((name.to_string(), area, delay, 6));
                     }
                 }
@@ -530,9 +533,8 @@ impl CellMatcher {
         if matches.is_empty() {
             if let Some((ref lut_name, area, delay, max_inputs)) = self.universal_lut {
                 if num_inputs <= max_inputs {
-                    let pin_names: Vec<String> = (0..num_inputs)
-                        .map(|i| format!("I{}", i))
-                        .collect();
+                    let pin_names: Vec<String> =
+                        (0..num_inputs).map(|i| format!("I{}", i)).collect();
                     matches.push(CutMatch {
                         cut: Cut {
                             leaves: Vec::new(),

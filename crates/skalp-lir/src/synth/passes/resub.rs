@@ -14,6 +14,7 @@
 //!       - 0-resub: target == divisor (saves MFFC nodes)
 //!       - 1-resub: target == d1 AND/OR/XOR d2 (saves MFFC-1 nodes)
 //!       - 2-resub: target == (d1 AND d2) OR d3 / MUX (saves MFFC-2 nodes)
+//!
 //!    d. Apply the first profitable match
 //!
 //! # References
@@ -62,28 +63,33 @@ impl Resub {
     /// Build a resub replacement pattern from divisor literals
     fn build_resub_pattern(aig: &mut Aig, pattern_kind: u8, lits: &[AigLit]) -> AigLit {
         match pattern_kind {
-            0 => lits[0], // Equal
+            0 => lits[0],                       // Equal
             1 => aig.add_and(lits[0], lits[1]), // And2
-            2 => { // Or2
+            2 => {
+                // Or2
                 let nand = aig.add_and(lits[0].invert(), lits[1].invert());
                 nand.invert()
             }
-            3 => { // Xor2
+            3 => {
+                // Xor2
                 let a_nb = aig.add_and(lits[0], lits[1].invert());
                 let na_b = aig.add_and(lits[0].invert(), lits[1]);
                 let nand = aig.add_and(a_nb.invert(), na_b.invert());
                 nand.invert()
             }
-            4 => { // AndOr
+            4 => {
+                // AndOr
                 let ab = aig.add_and(lits[0], lits[1]);
                 let nand = aig.add_and(ab.invert(), lits[2].invert());
                 nand.invert()
             }
-            5 => { // OrAnd
+            5 => {
+                // OrAnd
                 let nor = aig.add_and(lits[0].invert(), lits[1].invert());
                 aig.add_and(nor.invert(), lits[2])
             }
-            6 => { // Mux
+            6 => {
+                // Mux
                 let sel_d1 = aig.add_and(lits[0], lits[1]);
                 let nsel_d0 = aig.add_and(lits[0].invert(), lits[2]);
                 let nand = aig.add_and(sel_d1.invert(), nsel_d0.invert());
@@ -98,8 +104,12 @@ impl Resub {
         let mut stack = vec![new_node];
         let mut visited = std::collections::HashSet::new();
         while let Some(n) = stack.pop() {
-            if n == target { return true; }
-            if !visited.insert(n) { continue; }
+            if n == target {
+                return true;
+            }
+            if !visited.insert(n) {
+                continue;
+            }
             if let Some(AigNode::And { left, right }) = aig.get_node(n) {
                 stack.push(left.node);
                 stack.push(right.node);
@@ -152,7 +162,9 @@ impl SimSignatures {
             for (id, node) in aig.iter_nodes() {
                 match node {
                     AigNode::Input { .. } | AigNode::Latch { .. } | AigNode::Barrier { .. } => {
-                        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        rng_state = rng_state
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
                         sigs.insert(id, rng_state);
                     }
                     _ => {}
@@ -164,7 +176,11 @@ impl SimSignatures {
                     let left_sig = sigs.get(&left.node).copied().unwrap_or(0);
                     let left_sig = if left.inverted { !left_sig } else { left_sig };
                     let right_sig = sigs.get(&right.node).copied().unwrap_or(0);
-                    let right_sig = if right.inverted { !right_sig } else { right_sig };
+                    let right_sig = if right.inverted {
+                        !right_sig
+                    } else {
+                        right_sig
+                    };
                     sigs.insert(id, left_sig & right_sig);
                 }
             }
@@ -189,11 +205,7 @@ impl SimSignatures {
 /// Count MFFC nodes by decrementing reference counts.
 /// Returns the number of AND nodes in the MFFC.
 /// WARNING: Mutates ref_counts. Call mffc_ref to restore.
-fn mffc_deref(
-    aig: &Aig,
-    root: AigNodeId,
-    ref_counts: &mut IndexMap<AigNodeId, usize>,
-) -> usize {
+fn mffc_deref(aig: &Aig, root: AigNodeId, ref_counts: &mut IndexMap<AigNodeId, usize>) -> usize {
     let (left, right) = match aig.get_node(root) {
         Some(AigNode::And { left, right }) => (*left, *right),
         _ => return 0,
@@ -221,11 +233,7 @@ fn mffc_deref(
 }
 
 /// Restore reference counts after mffc_deref.
-fn mffc_ref(
-    aig: &Aig,
-    root: AigNodeId,
-    ref_counts: &mut IndexMap<AigNodeId, usize>,
-) -> usize {
+fn mffc_ref(aig: &Aig, root: AigNodeId, ref_counts: &mut IndexMap<AigNodeId, usize>) -> usize {
     let (left, right) = match aig.get_node(root) {
         Some(AigNode::And { left, right }) => (*left, *right),
         _ => return 0,
@@ -338,18 +346,16 @@ fn collect_divisors(
                 stack.push(left.node);
                 stack.push(right.node);
             }
-            Some(AigNode::Input { .. }) => {
-                if node != target {
+            Some(AigNode::Input { .. })
+                if node != target => {
                     divisors.push(node);
                 }
-            }
-            Some(AigNode::Latch { .. } | AigNode::Barrier { .. }) => {
+            Some(AigNode::Latch { .. } | AigNode::Barrier { .. })
                 // Latch/barrier outputs are valid divisors (they act as pseudo-inputs
                 // for the combinational cone), but don't follow their data inputs
-                if node != target {
+                if node != target => {
                     divisors.push(node);
                 }
-            }
             _ => {}
         }
     }
@@ -435,11 +441,7 @@ impl ResubMatch {
 
 /// Verify a candidate resub match against additional simulation rounds.
 /// Returns true if the match holds for ALL rounds (not just round 0).
-fn verify_resub_multi_round(
-    sigs: &SimSignatures,
-    target: AigNodeId,
-    resub: &ResubMatch,
-) -> bool {
+fn verify_resub_multi_round(sigs: &SimSignatures, target: AigNodeId, resub: &ResubMatch) -> bool {
     for round in 1..SIM_ROUNDS {
         let target_sig = sigs.get_round(round, target);
         let ok = match resub {
@@ -449,36 +451,96 @@ fn verify_resub_multi_round(
                 target_sig == sa
             }
             ResubMatch::And2(a, b) => {
-                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
-                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                let sa = if a.inverted {
+                    !sigs.get_round(round, a.node)
+                } else {
+                    sigs.get_round(round, a.node)
+                };
+                let sb = if b.inverted {
+                    !sigs.get_round(round, b.node)
+                } else {
+                    sigs.get_round(round, b.node)
+                };
                 target_sig == (sa & sb)
             }
             ResubMatch::Or2(a, b) => {
-                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
-                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                let sa = if a.inverted {
+                    !sigs.get_round(round, a.node)
+                } else {
+                    sigs.get_round(round, a.node)
+                };
+                let sb = if b.inverted {
+                    !sigs.get_round(round, b.node)
+                } else {
+                    sigs.get_round(round, b.node)
+                };
                 target_sig == (sa | sb)
             }
             ResubMatch::Xor2(a, b) => {
-                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
-                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
+                let sa = if a.inverted {
+                    !sigs.get_round(round, a.node)
+                } else {
+                    sigs.get_round(round, a.node)
+                };
+                let sb = if b.inverted {
+                    !sigs.get_round(round, b.node)
+                } else {
+                    sigs.get_round(round, b.node)
+                };
                 target_sig == (sa ^ sb)
             }
             ResubMatch::AndOr(a, b, c) => {
-                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
-                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
-                let sc = if c.inverted { !sigs.get_round(round, c.node) } else { sigs.get_round(round, c.node) };
+                let sa = if a.inverted {
+                    !sigs.get_round(round, a.node)
+                } else {
+                    sigs.get_round(round, a.node)
+                };
+                let sb = if b.inverted {
+                    !sigs.get_round(round, b.node)
+                } else {
+                    sigs.get_round(round, b.node)
+                };
+                let sc = if c.inverted {
+                    !sigs.get_round(round, c.node)
+                } else {
+                    sigs.get_round(round, c.node)
+                };
                 target_sig == ((sa & sb) | sc)
             }
             ResubMatch::OrAnd(a, b, c) => {
-                let sa = if a.inverted { !sigs.get_round(round, a.node) } else { sigs.get_round(round, a.node) };
-                let sb = if b.inverted { !sigs.get_round(round, b.node) } else { sigs.get_round(round, b.node) };
-                let sc = if c.inverted { !sigs.get_round(round, c.node) } else { sigs.get_round(round, c.node) };
+                let sa = if a.inverted {
+                    !sigs.get_round(round, a.node)
+                } else {
+                    sigs.get_round(round, a.node)
+                };
+                let sb = if b.inverted {
+                    !sigs.get_round(round, b.node)
+                } else {
+                    sigs.get_round(round, b.node)
+                };
+                let sc = if c.inverted {
+                    !sigs.get_round(round, c.node)
+                } else {
+                    sigs.get_round(round, c.node)
+                };
                 target_sig == ((sa | sb) & sc)
             }
             ResubMatch::Mux(sel, d1, d0) => {
-                let ss = if sel.inverted { !sigs.get_round(round, sel.node) } else { sigs.get_round(round, sel.node) };
-                let s1 = if d1.inverted { !sigs.get_round(round, d1.node) } else { sigs.get_round(round, d1.node) };
-                let s0 = if d0.inverted { !sigs.get_round(round, d0.node) } else { sigs.get_round(round, d0.node) };
+                let ss = if sel.inverted {
+                    !sigs.get_round(round, sel.node)
+                } else {
+                    sigs.get_round(round, sel.node)
+                };
+                let s1 = if d1.inverted {
+                    !sigs.get_round(round, d1.node)
+                } else {
+                    sigs.get_round(round, d1.node)
+                };
+                let s0 = if d0.inverted {
+                    !sigs.get_round(round, d0.node)
+                } else {
+                    sigs.get_round(round, d0.node)
+                };
                 target_sig == ((ss & s1) | (!ss & s0))
             }
         };
@@ -501,7 +563,7 @@ fn try_resub_sim(
 
     // 0-resub: target == divisor or target == !divisor
     // Cost = 0, gain = mffc_size
-    if mffc_size as i32 >= min_gain as i32 {
+    if mffc_size as i32 >= min_gain {
         for &(div, div_sig) in divisors {
             if target_sig == div_sig {
                 return Some(ResubMatch::Equal(AigLit::new(div)));
@@ -513,13 +575,11 @@ fn try_resub_sim(
     }
 
     // 1-resub AND/OR: cost = 1, gain = mffc_size - 1
-    if mffc_size as i32 - 1 >= min_gain as i32 {
+    if mffc_size as i32 > min_gain {
         let n = divisors.len().min(50);
         for i in 0..n {
             let (d1, s1) = divisors[i];
-            for j in (i + 1)..n {
-                let (d2, s2) = divisors[j];
-
+            for (j, &(d2, s2)) in divisors.iter().enumerate().take(n).skip(i + 1) {
                 // AND variants
                 if target_sig == s1 & s2 {
                     return Some(ResubMatch::And2(AigLit::new(d1), AigLit::new(d2)));
@@ -549,71 +609,77 @@ fn try_resub_sim(
                 }
 
                 // XOR variants (cost = 3, need mffc >= 4 for positive gain)
-                if mffc_size as i32 - 3 >= min_gain as i32 {
-                    if target_sig == (s1 ^ s2) {
-                        return Some(ResubMatch::Xor2(AigLit::new(d1), AigLit::new(d2)));
-                    }
+                if mffc_size as i32 - 3 >= min_gain && target_sig == (s1 ^ s2) {
+                    return Some(ResubMatch::Xor2(AigLit::new(d1), AigLit::new(d2)));
                 }
             }
         }
     }
 
     // 2-resub AND-OR / OR-AND: cost = 2, gain = mffc_size - 2
-    if mffc_size as i32 - 2 >= min_gain as i32 {
+    if mffc_size as i32 - 2 >= min_gain {
         let n = divisors.len().min(30);
         for i in 0..n {
             let (d1, s1) = divisors[i];
-            for j in (i + 1)..n {
-                let (d2, s2) = divisors[j];
+            for (j, &(d2, s2)) in divisors.iter().enumerate().take(n).skip(i + 1) {
                 let and_12 = s1 & s2;
                 let or_12 = s1 | s2;
 
-                for k in 0..n {
+                for (k, &(d3, s3)) in divisors.iter().enumerate().take(n) {
                     if k == i || k == j {
                         continue;
                     }
-                    let (d3, s3) = divisors[k];
 
                     // (d1 AND d2) OR d3
                     if target_sig == (and_12 | s3) {
                         return Some(ResubMatch::AndOr(
-                            AigLit::new(d1), AigLit::new(d2), AigLit::new(d3),
+                            AigLit::new(d1),
+                            AigLit::new(d2),
+                            AigLit::new(d3),
                         ));
                     }
                     if target_sig == (and_12 | !s3) {
                         return Some(ResubMatch::AndOr(
-                            AigLit::new(d1), AigLit::new(d2), AigLit::not(d3),
+                            AigLit::new(d1),
+                            AigLit::new(d2),
+                            AigLit::not(d3),
                         ));
                     }
 
                     // (!d1 AND d2) OR d3
                     if target_sig == ((!s1 & s2) | s3) {
                         return Some(ResubMatch::AndOr(
-                            AigLit::not(d1), AigLit::new(d2), AigLit::new(d3),
+                            AigLit::not(d1),
+                            AigLit::new(d2),
+                            AigLit::new(d3),
                         ));
                     }
 
                     // (d1 AND !d2) OR d3
                     if target_sig == ((s1 & !s2) | s3) {
                         return Some(ResubMatch::AndOr(
-                            AigLit::new(d1), AigLit::not(d2), AigLit::new(d3),
+                            AigLit::new(d1),
+                            AigLit::not(d2),
+                            AigLit::new(d3),
                         ));
                     }
 
                     // (d1 OR d2) AND d3
                     if target_sig == (or_12 & s3) {
                         return Some(ResubMatch::OrAnd(
-                            AigLit::new(d1), AigLit::new(d2), AigLit::new(d3),
+                            AigLit::new(d1),
+                            AigLit::new(d2),
+                            AigLit::new(d3),
                         ));
                     }
 
                     // MUX: sel ? d2 : d3 (cost = 3, need mffc >= 4)
-                    if mffc_size as i32 - 3 >= min_gain as i32 {
-                        if target_sig == ((s1 & s2) | (!s1 & s3)) {
-                            return Some(ResubMatch::Mux(
-                                AigLit::new(d1), AigLit::new(d2), AigLit::new(d3),
-                            ));
-                        }
+                    if mffc_size as i32 - 3 >= min_gain && target_sig == ((s1 & s2) | (!s1 & s3)) {
+                        return Some(ResubMatch::Mux(
+                            AigLit::new(d1),
+                            AigLit::new(d2),
+                            AigLit::new(d3),
+                        ));
                     }
                 }
             }
@@ -625,7 +691,11 @@ fn try_resub_sim(
 
 impl Pass for Resub {
     fn name(&self) -> &str {
-        if self.zero_cost { "resub_z" } else { "resub" }
+        if self.zero_cost {
+            "resub_z"
+        } else {
+            "resub"
+        }
     }
 
     fn run(&mut self, aig: &mut Aig) -> PassResult {
@@ -663,12 +733,13 @@ impl Pass for Resub {
         struct ResubEntry {
             target: AigNodeId,
             divisors: Vec<(AigNodeId, bool)>, // (node, inverted) pairs from match
-            pattern_kind: u8,                  // 0=Equal, 1=And2, 2=Or2, 3=Xor2, 4=AndOr, 5=OrAnd, 6=Mux
+            pattern_kind: u8, // 0=Equal, 1=And2, 2=Or2, 3=Xor2, 4=AndOr, 5=OrAnd, 6=Mux
             gain: i32,
         }
 
         let mut entries: Vec<ResubEntry> = Vec::new();
-        let mut substituted_nodes: std::collections::HashSet<AigNodeId> = std::collections::HashSet::new();
+        let mut substituted_nodes: std::collections::HashSet<AigNodeId> =
+            std::collections::HashSet::new();
 
         for target in &topo_nodes {
             if substituted_nodes.contains(target) {
@@ -697,7 +768,9 @@ impl Pass for Resub {
 
             let target_sig = sigs.get(*target);
 
-            if let Some(resub_match) = try_resub_sim(target_sig, &divisor_sigs, mffc_size, self.zero_cost) {
+            if let Some(resub_match) =
+                try_resub_sim(target_sig, &divisor_sigs, mffc_size, self.zero_cost)
+            {
                 let gain = mffc_size as i32 - resub_match.cost() as i32;
                 let accept = if self.zero_cost { gain >= 0 } else { gain > 0 };
 
@@ -707,12 +780,39 @@ impl Pass for Resub {
                     // Extract divisor info from the match (without building)
                     let (kind, divs) = match &resub_match {
                         ResubMatch::Equal(a) => (0u8, vec![(a.node, a.inverted)]),
-                        ResubMatch::And2(a, b) => (1, vec![(a.node, a.inverted), (b.node, b.inverted)]),
-                        ResubMatch::Or2(a, b) => (2, vec![(a.node, a.inverted), (b.node, b.inverted)]),
-                        ResubMatch::Xor2(a, b) => (3, vec![(a.node, a.inverted), (b.node, b.inverted)]),
-                        ResubMatch::AndOr(a, b, c) => (4, vec![(a.node, a.inverted), (b.node, b.inverted), (c.node, c.inverted)]),
-                        ResubMatch::OrAnd(a, b, c) => (5, vec![(a.node, a.inverted), (b.node, b.inverted), (c.node, c.inverted)]),
-                        ResubMatch::Mux(a, b, c) => (6, vec![(a.node, a.inverted), (b.node, b.inverted), (c.node, c.inverted)]),
+                        ResubMatch::And2(a, b) => {
+                            (1, vec![(a.node, a.inverted), (b.node, b.inverted)])
+                        }
+                        ResubMatch::Or2(a, b) => {
+                            (2, vec![(a.node, a.inverted), (b.node, b.inverted)])
+                        }
+                        ResubMatch::Xor2(a, b) => {
+                            (3, vec![(a.node, a.inverted), (b.node, b.inverted)])
+                        }
+                        ResubMatch::AndOr(a, b, c) => (
+                            4,
+                            vec![
+                                (a.node, a.inverted),
+                                (b.node, b.inverted),
+                                (c.node, c.inverted),
+                            ],
+                        ),
+                        ResubMatch::OrAnd(a, b, c) => (
+                            5,
+                            vec![
+                                (a.node, a.inverted),
+                                (b.node, b.inverted),
+                                (c.node, c.inverted),
+                            ],
+                        ),
+                        ResubMatch::Mux(a, b, c) => (
+                            6,
+                            vec![
+                                (a.node, a.inverted),
+                                (b.node, b.inverted),
+                                (c.node, c.inverted),
+                            ],
+                        ),
                     };
 
                     substituted_nodes.insert(*target);
@@ -739,11 +839,18 @@ impl Pass for Resub {
                 // Incremental mode for zero-cost
                 let mut any_applied = false;
                 for entry in &entries {
-                    let lits: Vec<AigLit> = entry.divisors.iter()
-                        .map(|&(node, inv)| AigLit { node, inverted: inv })
+                    let lits: Vec<AigLit> = entry
+                        .divisors
+                        .iter()
+                        .map(|&(node, inv)| AigLit {
+                            node,
+                            inverted: inv,
+                        })
                         .collect();
                     let new_lit = Self::build_resub_pattern(aig, entry.pattern_kind, &lits);
-                    if new_lit.node != entry.target && !Self::creates_cycle(aig, new_lit.node, entry.target) {
+                    if new_lit.node != entry.target
+                        && !Self::creates_cycle(aig, new_lit.node, entry.target)
+                    {
                         let mut single = IndexMap::new();
                         single.insert(entry.target, new_lit);
                         aig.apply_substitutions(&single);
@@ -761,11 +868,18 @@ impl Pass for Resub {
                 aig.clear_strash();
                 let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
                 for entry in &entries {
-                    let lits: Vec<AigLit> = entry.divisors.iter()
-                        .map(|&(node, inv)| AigLit { node, inverted: inv })
+                    let lits: Vec<AigLit> = entry
+                        .divisors
+                        .iter()
+                        .map(|&(node, inv)| AigLit {
+                            node,
+                            inverted: inv,
+                        })
                         .collect();
                     let new_lit = Self::build_resub_pattern(aig, entry.pattern_kind, &lits);
-                    if new_lit.node != entry.target && !Self::creates_cycle(aig, new_lit.node, entry.target) {
+                    if new_lit.node != entry.target
+                        && !Self::creates_cycle(aig, new_lit.node, entry.target)
+                    {
                         subst_map.insert(entry.target, new_lit);
                         self.resub_count += 1;
                         self.total_savings += entry.gain;

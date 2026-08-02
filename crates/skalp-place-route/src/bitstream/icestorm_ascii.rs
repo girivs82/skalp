@@ -376,7 +376,10 @@ impl<'a> IceStormAscii<'a> {
 
         // Emit extra bits (padin_glb_netwk for GBUF routing)
         for eb in &routing.extra_bits {
-            asc.push_str(&format!(".extra_bit {} {} {}\n", eb.bank, eb.addr_x, eb.addr_y));
+            asc.push_str(&format!(
+                ".extra_bit {} {} {}\n",
+                eb.bank, eb.addr_x, eb.addr_y
+            ));
         }
 
         Ok(asc)
@@ -956,7 +959,8 @@ impl<'a> IceStormAscii<'a> {
             .chipdb
             .as_ref()
             .and_then(|db| {
-                db.tile_dimensions.get(&tile_type)
+                db.tile_dimensions
+                    .get(&tile_type)
                     .or_else(|| db.tile_dimensions.get(&TileType::IoTop))
             })
             .map(|d| (d.rows as usize, d.columns as usize))
@@ -972,8 +976,10 @@ impl<'a> IceStormAscii<'a> {
         // Set default Input Enable (IE) bits for unused IO pads.
         // This prevents floating inputs and matches nextpnr/icestorm behavior.
         // Only set IE for IOBs that have physical pads (per-IOB check from chipdb).
-        let has_iob0_pad = self.padded_io_iobs.is_empty() || self.padded_io_iobs.contains(&(x, y, 0));
-        let has_iob1_pad = self.padded_io_iobs.is_empty() || self.padded_io_iobs.contains(&(x, y, 1));
+        let has_iob0_pad =
+            self.padded_io_iobs.is_empty() || self.padded_io_iobs.contains(&(x, y, 0));
+        let has_iob1_pad =
+            self.padded_io_iobs.is_empty() || self.padded_io_iobs.contains(&(x, y, 1));
         let ie_0_pos = self
             .lookup_config_bit(tile_type, "IoCtrl.IE_0")
             .or_else(|| self.lookup_config_bit(TileType::IoTop, "IoCtrl.IE_0"))
@@ -1082,20 +1088,20 @@ impl<'a> IceStormAscii<'a> {
 
         // Set column buffer control bits for global networks in IO tiles (data-driven from chipdb)
         if needs_colbuf {
-            let io_colbuf_positions = self
-                .colbuf_positions_for_tile(tile_type)
-                .unwrap_or_else(|| {
-                    vec![
-                        (1, 9, 0),
-                        (0, 9, 1),
-                        (3, 9, 2),
-                        (2, 9, 3),
-                        (5, 9, 4),
-                        (4, 9, 5),
-                        (7, 9, 6),
-                        (6, 9, 7),
-                    ]
-                });
+            let io_colbuf_positions =
+                self.colbuf_positions_for_tile(tile_type)
+                    .unwrap_or_else(|| {
+                        vec![
+                            (1, 9, 0),
+                            (0, 9, 1),
+                            (3, 9, 2),
+                            (2, 9, 3),
+                            (5, 9, 4),
+                            (4, 9, 5),
+                            (7, 9, 6),
+                            (6, 9, 7),
+                        ]
+                    });
 
             for (row, col, glb_idx) in &io_colbuf_positions {
                 if (global_config.active_networks >> glb_idx) & 1 == 1 {
@@ -1510,9 +1516,7 @@ impl<'a> IceStormAscii<'a> {
         }
 
         // Always emit .ram_data section (icepack expects it for all RAMB tiles)
-        let init_data = ram_configs
-            .get(&(x, y))
-            .and_then(|c| c.init_data.as_ref());
+        let init_data = ram_configs.get(&(x, y)).and_then(|c| c.init_data.as_ref());
         asc.push_str(&format!(".ram_data {} {}\n", x, y));
         // 16 lines (INIT_0..INIT_F), each 64 hex chars (256 bits)
         for line in 0..16 {
@@ -1556,7 +1560,9 @@ impl<'a> IceStormAscii<'a> {
 
         // RAMT config mirrors the corresponding RAMB tile (at y-1)
         let ramb_y = y.saturating_sub(1);
-        let config = ram_configs.get(&(x, ramb_y)).or_else(|| ram_configs.get(&(x, y)));
+        let config = ram_configs
+            .get(&(x, ramb_y))
+            .or_else(|| ram_configs.get(&(x, y)));
 
         // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
         if let Some(config) = config {

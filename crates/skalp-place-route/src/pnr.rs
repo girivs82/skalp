@@ -166,14 +166,14 @@ pub fn place_and_route(
 
     // Run routing — scale iterations to design size for faster small-design compilation
     let net_count = netlist.nets.len();
-    let mut router_config = if config.router.max_iterations == RouterConfig::default().max_iterations
-    {
-        // Default config: auto-scale iterations based on design complexity
-        RouterConfig::for_design_size(net_count)
-    } else {
-        // User explicitly configured iterations: respect their choice
-        config.router.clone()
-    };
+    let mut router_config =
+        if config.router.max_iterations == RouterConfig::default().max_iterations {
+            // Default config: auto-scale iterations based on design complexity
+            RouterConfig::for_design_size(net_count)
+        } else {
+            // User explicitly configured iterations: respect their choice
+            config.router.clone()
+        };
     let freq_constraints = collect_frequency_constraints(netlist, &config);
     if !freq_constraints.is_empty() && router_config.timing_weight < 0.3 {
         router_config.timing_weight = 0.5;
@@ -346,8 +346,7 @@ pub fn place_and_route_with_closure(
     // If library is provided, derive buffer delay from it instead of using hardcoded default
     let mut closure_config = closure_config.unwrap_or_default();
     if let Some(lib) = library {
-        closure_config.fix_config =
-            skalp_lir::async_sta_fix::AsyncStaFixConfig::from_library(lib);
+        closure_config.fix_config = skalp_lir::async_sta_fix::AsyncStaFixConfig::from_library(lib);
     }
 
     // === Ready-signal-delay approach ===
@@ -456,12 +455,11 @@ pub fn place_and_route_nexus(
 
     // Run routing
     let net_count = netlist.nets.len();
-    let router_config =
-        if config.router.max_iterations == RouterConfig::default().max_iterations {
-            RouterConfig::for_design_size(net_count)
-        } else {
-            config.router.clone()
-        };
+    let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
+        RouterConfig::for_design_size(net_count)
+    } else {
+        config.router.clone()
+    };
     let mut router = Router::new(router_config, device.clone());
     let routing = router.route(netlist, &placement)?;
 
@@ -531,12 +529,11 @@ pub fn place_and_route_ecp5(
 
     // Route
     let net_count = netlist.nets.len();
-    let router_config =
-        if config.router.max_iterations == RouterConfig::default().max_iterations {
-            RouterConfig::for_design_size(net_count)
-        } else {
-            config.router.clone()
-        };
+    let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
+        RouterConfig::for_design_size(net_count)
+    } else {
+        config.router.clone()
+    };
     let mut router = Router::new(router_config, device.clone());
     let routing = router.route(netlist, &placement)?;
 
@@ -606,12 +603,11 @@ pub fn place_and_route_xc7(
 
     // Route
     let net_count = netlist.nets.len();
-    let router_config =
-        if config.router.max_iterations == RouterConfig::default().max_iterations {
-            RouterConfig::for_design_size(net_count)
-        } else {
-            config.router.clone()
-        };
+    let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
+        RouterConfig::for_design_size(net_count)
+    } else {
+        config.router.clone()
+    };
     let mut router = Router::new(router_config, device.clone());
     let routing = router.route(netlist, &placement)?;
 
@@ -656,8 +652,7 @@ mod tests {
 
     /// Load the ice40 tech library for tests
     fn ice40_library() -> TechLibrary {
-        skalp_lir::tech_library::get_stdlib_library("ice40")
-            .expect("Failed to load ice40 library")
+        skalp_lir::tech_library::get_stdlib_library("ice40").expect("Failed to load ice40 library")
     }
 
     /// Create a PnrConfig with the ice40 library for NCL tests
@@ -1235,15 +1230,16 @@ mod tests {
         // Check gbuf locations exist on the device
         let device = Ice40Device::new(Ice40Variant::Hx1k);
         println!("GBUF locations: {:?}", device.gbuf_locations());
-        assert_eq!(device.gbuf_locations().len(), 8, "HX1K should have 8 GBUF locations");
+        assert_eq!(
+            device.gbuf_locations().len(),
+            8,
+            "HX1K should have 8 GBUF locations"
+        );
 
         // Verify clock net was routed (either GBUF or fabric)
         let clock_id = skalp_lir::gate_netlist::GateNetId(0);
         let clock_route = result.routing.routes.get(&clock_id);
-        assert!(
-            clock_route.is_some(),
-            "Clock net should be routed"
-        );
+        assert!(clock_route.is_some(), "Clock net should be routed");
         let route = clock_route.unwrap();
         println!(
             "Clock route: {} wires, {} pips, {} sinks, delay {} ps",
@@ -1262,7 +1258,10 @@ mod tests {
         // If GBUF routing succeeded, extra_bits should have a padin_glb_netwk entry
         if route.pips.is_empty() {
             // GBUF route — no PIPs, uses extra bits instead
-            println!("Clock routed via GBUF (no PIPs, {} extra bits)", result.routing.extra_bits.len());
+            println!(
+                "Clock routed via GBUF (no PIPs, {} extra bits)",
+                result.routing.extra_bits.len()
+            );
             assert!(
                 !result.routing.extra_bits.is_empty(),
                 "GBUF route should set padin_glb_netwk extra bit"
@@ -2896,19 +2895,20 @@ set_io btn A6
     /// Fork `sel_t` fans out to:
     ///   - TH22_merge_t (sync point, 40ps → stops)
     ///   - TH12_carry   (sync point, 30ps → stops)
+    ///
     /// Skew: 40 - 30 = 10ps (between direct TH destinations)
     ///
     /// Fork `dat_t` fans out to:
     ///   - AND2_cmp0 (NOT sync point, traces downstream: AND2→XOR2→OR2→TH22 = 25+35+25+40 = 125ps)
     ///   - TH22_merge_t via a direct connection (sync point, 40ps → stops)
+    ///
     /// Skew: 125 - 40 = 85ps (large asymmetry from comparator chain!)
     ///
     /// With max_fork_skew_ps=5.0, both forks should trigger violations.
     fn create_ncl_conditional_merge() -> GateNetlist {
         use skalp_lir::gate_netlist::{CellId, GateNetId};
 
-        let mut netlist =
-            GateNetlist::new("ncl_cond_merge".to_string(), "ice40".to_string());
+        let mut netlist = GateNetlist::new("ncl_cond_merge".to_string(), "ice40".to_string());
         netlist.is_ncl = true;
 
         // ===== Primary I/O nets =====
@@ -2935,24 +2935,49 @@ set_io btn A6
         // Each input pad produces one internal net — this gives fork nets a driver
         // so the router will actually route them (it skips nets with driver=None)
         netlist.add_cell(Cell::new_comb(
-            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
-            "io.sel_t".into(), vec![], vec![sel_t],
+            CellId(0),
+            "SB_IO_INPUT".into(),
+            "ice40".into(),
+            0.0,
+            "io.sel_t".into(),
+            vec![],
+            vec![sel_t],
         ));
         netlist.add_cell(Cell::new_comb(
-            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
-            "io.sel_f".into(), vec![], vec![sel_f],
+            CellId(0),
+            "SB_IO_INPUT".into(),
+            "ice40".into(),
+            0.0,
+            "io.sel_f".into(),
+            vec![],
+            vec![sel_f],
         ));
         netlist.add_cell(Cell::new_comb(
-            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
-            "io.dat_t".into(), vec![], vec![dat_t],
+            CellId(0),
+            "SB_IO_INPUT".into(),
+            "ice40".into(),
+            0.0,
+            "io.dat_t".into(),
+            vec![],
+            vec![dat_t],
         ));
         netlist.add_cell(Cell::new_comb(
-            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
-            "io.ref_t".into(), vec![], vec![ref_t],
+            CellId(0),
+            "SB_IO_INPUT".into(),
+            "ice40".into(),
+            0.0,
+            "io.ref_t".into(),
+            vec![],
+            vec![ref_t],
         ));
         netlist.add_cell(Cell::new_comb(
-            CellId(0), "SB_IO_INPUT".into(), "ice40".into(), 0.0,
-            "io.aux".into(), vec![], vec![aux],
+            CellId(0),
+            "SB_IO_INPUT".into(),
+            "ice40".into(),
+            0.0,
+            "io.aux".into(),
+            vec![],
+            vec![aux],
         ));
 
         // ===== Internal nets =====
@@ -2963,7 +2988,10 @@ set_io btn A6
         // ===== Long path: comparator chain (non-sync-point cells) =====
         // AND2_cmp0: first stage of comparator (dat_t AND aux)
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "AND2".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "AND2".into(),
+            "ice40".into(),
+            0.0,
             "cond.cmp0".into(),
             vec![dat_t, aux],
             vec![cmp0_out],
@@ -2972,7 +3000,10 @@ set_io btn A6
 
         // XOR2_cmp1: second stage (cmp0 XOR ref_t)
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "XOR2".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "XOR2".into(),
+            "ice40".into(),
+            0.0,
             "cond.cmp1".into(),
             vec![cmp0_out, ref_t],
             vec![cmp1_out],
@@ -2981,7 +3012,10 @@ set_io btn A6
 
         // OR2_cmp2: third stage (cmp1 OR ref_t) — ref_t also feeds here
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "OR2".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "OR2".into(),
+            "ice40".into(),
+            0.0,
             "cond.cmp2".into(),
             vec![cmp1_out, ref_t],
             vec![cmp2_out],
@@ -2992,7 +3026,10 @@ set_io btn A6
         // TH22_merge_t: merge sel_t (direct, short path) with cmp2_out (long path)
         // This is where the skew matters — both inputs must arrive "together"
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "TH22".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "TH22".into(),
+            "ice40".into(),
+            0.0,
             "cond.merge_t".into(),
             vec![sel_t, cmp2_out],
             vec![out_t],
@@ -3001,7 +3038,10 @@ set_io btn A6
 
         // TH12_carry: short path from sel_t fork
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "TH12".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "TH12".into(),
+            "ice40".into(),
+            0.0,
             "cond.carry".into(),
             vec![sel_t, dat_t],
             vec![carry_out],
@@ -3011,7 +3051,10 @@ set_io btn A6
         // ===== False rail (symmetric, simpler) =====
         // TH12_merge_f: false rail merge
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "TH12".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "TH12".into(),
+            "ice40".into(),
+            0.0,
             "cond.merge_f".into(),
             vec![sel_f],
             vec![out_f],
@@ -3020,7 +3063,10 @@ set_io btn A6
 
         // TH22_ack: acknowledgement from sel_f fork
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "TH22".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "TH22".into(),
+            "ice40".into(),
+            0.0,
             "cond.ack".into(),
             vec![sel_f, ref_t],
             vec![ack_out],
@@ -3031,7 +3077,10 @@ set_io btn A6
         // TH22 completion: both true and false rails must have data
         // Output is the ready/done signal — this is what gets delayed
         netlist.add_cell(Cell::new_lut(
-            CellId(0), "NCL_COMPLETE".into(), "ice40".into(), 0.0,
+            CellId(0),
+            "NCL_COMPLETE".into(),
+            "ice40".into(),
+            0.0,
             "cond.completion".into(),
             vec![out_t, out_f],
             vec![completion_out],
@@ -3066,21 +3115,28 @@ set_io btn A6
         println!("Nets: {}", netlist.nets.len());
 
         // Verify fork points exist
-        let fork_nets: Vec<_> = netlist
-            .nets
-            .iter()
-            .filter(|n| n.fanout.len() > 1)
-            .collect();
+        let fork_nets: Vec<_> = netlist.nets.iter().filter(|n| n.fanout.len() > 1).collect();
         println!("Fork nets (fanout > 1): {}", fork_nets.len());
         for net in &fork_nets {
-            let dest_types: Vec<_> = net.fanout.iter().map(|(cid, pin)| {
-                let ctype = netlist.cells.iter()
-                    .find(|c| c.id == *cid)
-                    .map(|c| c.cell_type.as_str())
-                    .unwrap_or("?");
-                format!("{}(cell{}:pin{})", ctype, cid.0, pin)
-            }).collect();
-            println!("  {} (fanout={}): {:?}", net.name, net.fanout.len(), dest_types);
+            let dest_types: Vec<_> = net
+                .fanout
+                .iter()
+                .map(|(cid, pin)| {
+                    let ctype = netlist
+                        .cells
+                        .iter()
+                        .find(|c| c.id == *cid)
+                        .map(|c| c.cell_type.as_str())
+                        .unwrap_or("?");
+                    format!("{}(cell{}:pin{})", ctype, cid.0, pin)
+                })
+                .collect();
+            println!(
+                "  {} (fanout={}): {:?}",
+                net.name,
+                net.fanout.len(),
+                dest_types
+            );
         }
         assert!(
             fork_nets.len() >= 3,
@@ -3130,19 +3186,19 @@ set_io btn A6
         println!("Library: {} ({} cells)", lib.name, lib.cell_count());
         println!(
             "Buffer cell: {} (delay: {:.1}ps)",
-            closure_config.fix_config.buffer_cell_type,
-            closure_config.fix_config.buffer_delay_ps
+            closure_config.fix_config.buffer_cell_type, closure_config.fix_config.buffer_delay_ps
         );
 
         // Verify detection net exists
-        let detection_nets: Vec<_> = netlist.nets.iter()
-            .filter(|n| n.is_detection)
-            .collect();
+        let detection_nets: Vec<_> = netlist.nets.iter().filter(|n| n.is_detection).collect();
         println!("Detection nets: {}", detection_nets.len());
         for net in &detection_nets {
             println!("  {} (id={:?})", net.name, net.id);
         }
-        assert!(!detection_nets.is_empty(), "Need at least one detection net");
+        assert!(
+            !detection_nets.is_empty(),
+            "Need at least one detection net"
+        );
 
         // Phase 1: Pre-PnR — detect skew violations with 5ps threshold
         // Cell delays come from the ice40 library
@@ -3166,8 +3222,12 @@ set_io btn A6
         // Phase 3: Post-PnR STA with actual wire delays + library cell delays
         let wire_delays = result.wire_delays.clone();
         let iter1 = skalp_lir::post_pnr_iteration(
-            &mut netlist, Some(&lib), wire_delays,
-            1, iter0.max_skew_ps, &closure_config,
+            &mut netlist,
+            Some(&lib),
+            wire_delays,
+            1,
+            iter0.max_skew_ps,
+            &closure_config,
         );
 
         println!("\n--- Post-PnR STA (library cell delays + actual wire delays) ---");
@@ -3187,21 +3247,24 @@ set_io btn A6
         println!("Strategy: {:?}", closure_config.fix_config.strategy);
         println!(
             "Buffer delay: {:.1}ps (from library: {})",
-            closure_config.fix_config.buffer_delay_ps,
-            closure_config.fix_config.buffer_cell_type
+            closure_config.fix_config.buffer_delay_ps, closure_config.fix_config.buffer_cell_type
         );
         println!("Buffers inserted: {}", fix_result.buffers_inserted);
         println!("Violations fixed: {}", fix_result.violations_fixed);
         for fix in &fix_result.fixes {
             println!(
                 "  {}: {} buffers, skew {:.1}ps → {:.1}ps",
-                fix.fork_net_name, fix.buffers_inserted,
-                fix.original_skew_ps, fix.estimated_skew_ps
+                fix.fork_net_name,
+                fix.buffers_inserted,
+                fix.original_skew_ps,
+                fix.estimated_skew_ps
             );
         }
 
         // Verify buffers were inserted on detection nets (not data paths)
-        let buf_cells: Vec<_> = netlist.cells.iter()
+        let buf_cells: Vec<_> = netlist
+            .cells
+            .iter()
             .filter(|c| c.source_op.as_deref() == Some("async_sta_fix_ready_delay"))
             .collect();
         println!("Buffer cells with ready_delay tag: {}", buf_cells.len());
@@ -3252,7 +3315,9 @@ set_io btn A6
         assert!(!result.wire_delays.is_empty());
 
         // Check that ready delay buffers were inserted into the netlist
-        let buf_cells: Vec<_> = netlist.cells.iter()
+        let buf_cells: Vec<_> = netlist
+            .cells
+            .iter()
             .filter(|c| c.source_op.as_deref() == Some("async_sta_fix_ready_delay"))
             .collect();
         println!("Ready delay buffer cells: {}", buf_cells.len());
@@ -3275,7 +3340,8 @@ set_io btn A6
             assert!(
                 net.fanout.len() > 1,
                 "Net '{}' should be a fork (fanout > 1), got {}",
-                group.fork_net_name, net.fanout.len()
+                group.fork_net_name,
+                net.fanout.len()
             );
 
             for dest in &group.dest_cells {
@@ -3302,9 +3368,17 @@ set_io btn A6
         let config = PnrConfig::default();
         let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
 
-        let routed = result.routing.routes.values()
-            .filter(|r| !r.wires.is_empty()).count();
-        println!("Wire delays: {} entries, {} routed nets", result.wire_delays.len(), routed);
+        let routed = result
+            .routing
+            .routes
+            .values()
+            .filter(|r| !r.wires.is_empty())
+            .count();
+        println!(
+            "Wire delays: {} entries, {} routed nets",
+            result.wire_delays.len(),
+            routed
+        );
 
         // Reverse flow: feed delays back to netlist
         netlist.ncl_wire_delays = Some(result.wire_delays.clone());

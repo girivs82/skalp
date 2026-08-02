@@ -285,13 +285,7 @@ impl Bitstream {
                 use crate::device::xc7::data as xc7_data;
                 // Look for the sync word (0xAA995566) in the first 64 bytes
                 let sync_bytes = xc7_data::BITSTREAM_SYNC_WORD.to_be_bytes();
-                if self.data.len() < 20
-                    || !self
-                        .data
-                        .windows(4)
-                        .take(64)
-                        .any(|w| w == sync_bytes)
-                {
+                if self.data.len() < 20 || !self.data.windows(4).take(64).any(|w| w == sync_bytes) {
                     return Err(PlaceRouteError::BitstreamFailed(
                         "Invalid Xilinx 7-series bitstream: sync word not found".to_string(),
                     ));
@@ -556,9 +550,10 @@ impl BitstreamGenerator {
 
         // --- Preamble ---
         // Dummy bytes
-        for _ in 0..ecp5_data::BITSTREAM_DUMMY_COUNT {
-            data.push(ecp5_data::BITSTREAM_DUMMY);
-        }
+        data.extend(std::iter::repeat_n(
+            ecp5_data::BITSTREAM_DUMMY,
+            ecp5_data::BITSTREAM_DUMMY_COUNT,
+        ));
         // Sync / preamble
         data.extend_from_slice(&ecp5_data::BITSTREAM_PREAMBLE);
 
@@ -601,7 +596,7 @@ impl BitstreamGenerator {
 
             // Simplified: encode PIP bits into frame data
             // Real implementation needs prjtrellis tile→frame bit mapping
-            for (_net_id, route) in &routing.routes {
+            for route in routing.routes.values() {
                 for &pip_id in &route.pips {
                     let target_frame = pip_id.0 % bitstream_frames;
                     if target_frame == frame_idx {
@@ -632,11 +627,13 @@ impl BitstreamGenerator {
         data.push(0x00);
 
         // --- Postamble (trailing dummy bytes) ---
-        for _ in 0..ecp5_data::POSTAMBLE_BYTES {
-            data.push(ecp5_data::BITSTREAM_DUMMY);
-        }
+        data.extend(std::iter::repeat_n(
+            ecp5_data::BITSTREAM_DUMMY,
+            ecp5_data::POSTAMBLE_BYTES,
+        ));
 
-        let mut bitstream = Bitstream::new(self.device_name.clone(), BitstreamFormat::TrellisBinary);
+        let mut bitstream =
+            Bitstream::new(self.device_name.clone(), BitstreamFormat::TrellisBinary);
         bitstream.data = data;
         bitstream.metadata = self.calculate_metadata(placement, routing);
 
@@ -666,7 +663,8 @@ impl BitstreamGenerator {
             } => (*idcode, *bitstream_frames, *bits_per_frame),
             _ => {
                 return Err(PlaceRouteError::BitstreamFailed(
-                    "Nexus bitstream info not set — use BitstreamGenerator::for_nexus()".to_string(),
+                    "Nexus bitstream info not set — use BitstreamGenerator::for_nexus()"
+                        .to_string(),
                 ));
             }
         };
@@ -675,9 +673,10 @@ impl BitstreamGenerator {
         let mut data: Vec<u8> = Vec::new();
 
         // --- Preamble ---
-        for _ in 0..nexus_data::BITSTREAM_DUMMY_COUNT {
-            data.push(nexus_data::BITSTREAM_DUMMY);
-        }
+        data.extend(std::iter::repeat_n(
+            nexus_data::BITSTREAM_DUMMY,
+            nexus_data::BITSTREAM_DUMMY_COUNT,
+        ));
         data.extend_from_slice(&nexus_data::BITSTREAM_PREAMBLE);
 
         // --- DEVICE_CTRL with IDCODE ---
@@ -716,7 +715,7 @@ impl BitstreamGenerator {
             let mut frame = vec![0u8; bytes_per_frame];
 
             // Simplified PIP encoding (real needs prjoxide tile→frame mapping)
-            for (_net_id, route) in &routing.routes {
+            for route in routing.routes.values() {
                 for &pip_id in &route.pips {
                     let target_frame = pip_id.0 % bitstream_frames;
                     if target_frame == frame_idx {
@@ -747,9 +746,10 @@ impl BitstreamGenerator {
         data.push(0x00);
 
         // --- Postamble ---
-        for _ in 0..nexus_data::POSTAMBLE_BYTES {
-            data.push(nexus_data::BITSTREAM_DUMMY);
-        }
+        data.extend(std::iter::repeat_n(
+            nexus_data::BITSTREAM_DUMMY,
+            nexus_data::POSTAMBLE_BYTES,
+        ));
 
         let mut bitstream =
             Bitstream::new(self.device_name.clone(), BitstreamFormat::OxideBitstream);
@@ -852,7 +852,7 @@ impl BitstreamGenerator {
                     || loc.bel_type == crate::device::BelType::Lut4
                 {
                     if let Some(cell) = nl.cells.get(cell_id.0 as usize) {
-                        let init = cell.lut_init.unwrap_or(0) as u64;
+                        let init = cell.lut_init.unwrap_or(0);
                         // Simplified frame encoding: place init bits at a
                         // deterministic offset derived from tile coords and BEL index.
                         // Real implementation would use prjxray segbits tables.
@@ -861,15 +861,14 @@ impl BitstreamGenerator {
                         let byte_offset =
                             (loc.tile_y as usize * 8 + loc.bel_index) % (frame_bytes - 8);
                         let offset = frame_idx.min(byte_offset).min(frame_bytes - 8);
-                        frame_data[offset..offset + 8]
-                            .copy_from_slice(&init.to_le_bytes());
+                        frame_data[offset..offset + 8].copy_from_slice(&init.to_le_bytes());
                     }
                 }
             }
         }
 
         // Encode PIP enables (simplified)
-        for (_net_id, route) in &routing.routes {
+        for route in routing.routes.values() {
             for &pip_id in &route.pips {
                 // Set a bit for each active PIP (simplified — real encoding
                 // requires per-tile PIP segbits from prjxray-db)

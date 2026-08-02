@@ -598,10 +598,16 @@ impl<'a> MirToSirConverter<'a> {
         // process tries to read them via get_or_create_signal_driver().
         // Without this ordering, the sequential process sees driver=0 (initial constant)
         // instead of the final mux chain from the combinational logic.
-        let combinational_processes: Vec<_> = self.mir.processes.iter()
+        let combinational_processes: Vec<_> = self
+            .mir
+            .processes
+            .iter()
             .filter(|p| matches!(p.kind, ProcessKind::Combinational))
             .collect();
-        let sequential_processes: Vec<_> = self.mir.processes.iter()
+        let sequential_processes: Vec<_> = self
+            .mir
+            .processes
+            .iter()
             .filter(|p| !matches!(p.kind, ProcessKind::Combinational))
             .collect();
 
@@ -830,7 +836,9 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::ResolvedConditional(resolved) => {
                     // Check if this is an array write (typed array or dynamic index)
                     if let LValue::BitSelect { base, index } = &resolved.target {
-                        if self.is_lvalue_typed_array(base) || self.evaluate_constant_expression(index).is_none() {
+                        if self.is_lvalue_typed_array(base)
+                            || self.evaluate_constant_expression(index).is_none()
+                        {
                             // Dynamic array write with conditional: array[index] <= mux(conds, values)
                             let array_name = self.lvalue_to_string(base);
 
@@ -1896,10 +1904,7 @@ impl<'a> MirToSirConverter<'a> {
                         self.scan_block_for_array_writes(&item.block.statements, array_writes);
                     }
                     if let Some(default_block) = &case_stmt.default {
-                        self.scan_block_for_array_writes(
-                            &default_block.statements,
-                            array_writes,
-                        );
+                        self.scan_block_for_array_writes(&default_block.statements, array_writes);
                     }
                 }
                 _ => {}
@@ -1926,15 +1931,13 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
-                    let (idx, val, we) =
-                        self.synthesize_array_write_in_if(nested_if, array_base);
+                    let (idx, val, we) = self.synthesize_array_write_in_if(nested_if, array_base);
                     if idx != 0 && val != 0 {
                         return (idx, val, we);
                     }
                 }
                 Statement::Case(case_stmt) => {
-                    let (idx, val, we) =
-                        self.synthesize_array_write_in_case(case_stmt, array_base);
+                    let (idx, val, we) = self.synthesize_array_write_in_case(case_stmt, array_base);
                     if idx != 0 && val != 0 {
                         return (idx, val, we);
                     }
@@ -1965,11 +1968,12 @@ impl<'a> MirToSirConverter<'a> {
             self.find_array_write_in_statements(&if_stmt.then_block.statements, array_base);
 
         // Find array write in else branch
-        let (else_index, else_value, else_write_enable) = if let Some(else_block) = &if_stmt.else_block {
-            self.find_array_write_in_statements(&else_block.statements, array_base)
-        } else {
-            (0, 0, 0)
-        };
+        let (else_index, else_value, else_write_enable) =
+            if let Some(else_block) = &if_stmt.else_block {
+                self.find_array_write_in_statements(&else_block.statements, array_base)
+            } else {
+                (0, 0, 0)
+            };
 
         // Build conditional mux for both index and value
         let condition = self.create_expression_node(&if_stmt.condition);
@@ -1978,11 +1982,7 @@ impl<'a> MirToSirConverter<'a> {
             // Only then branch writes — write enable = condition AND sub-condition
             let write_enable = if then_write_enable != 0 {
                 // Nested condition: condition AND nested_write_enable
-                self.create_binary_op_node(
-                    &skalp_mir::BinaryOp::And,
-                    condition,
-                    then_write_enable,
-                )
+                self.create_binary_op_node(&skalp_mir::BinaryOp::And, condition, then_write_enable)
             } else {
                 // Direct write in then branch: write enable = condition
                 condition
@@ -1990,8 +1990,7 @@ impl<'a> MirToSirConverter<'a> {
             (then_index, then_value, write_enable)
         } else if then_index == 0 && else_index != 0 {
             // Only else branch writes — write enable = !condition AND sub-condition
-            let not_condition =
-                self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
+            let not_condition = self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
             let write_enable = if else_write_enable != 0 {
                 self.create_binary_op_node(
                     &skalp_mir::BinaryOp::And,
@@ -2020,8 +2019,7 @@ impl<'a> MirToSirConverter<'a> {
                 } else {
                     condition
                 };
-                let not_cond =
-                    self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
+                let not_cond = self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
                 let else_we = if else_write_enable != 0 {
                     self.create_binary_op_node(
                         &skalp_mir::BinaryOp::And,
@@ -2059,19 +2057,11 @@ impl<'a> MirToSirConverter<'a> {
                 // Build case guard: case_expr == arm_value(s)
                 let guard = if item.values.len() == 1 {
                     let val_node = self.create_expression_node(&item.values[0]);
-                    self.create_binary_op_node(
-                        &skalp_mir::BinaryOp::Equal,
-                        case_expr,
-                        val_node,
-                    )
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr, val_node)
                 } else {
                     let mut or_node = {
                         let val_node = self.create_expression_node(&item.values[0]);
-                        self.create_binary_op_node(
-                            &skalp_mir::BinaryOp::Equal,
-                            case_expr,
-                            val_node,
-                        )
+                        self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr, val_node)
                     };
                     for value in &item.values[1..] {
                         let val_node = self.create_expression_node(value);
@@ -2080,11 +2070,8 @@ impl<'a> MirToSirConverter<'a> {
                             case_expr,
                             val_node,
                         );
-                        or_node = self.create_binary_op_node(
-                            &skalp_mir::BinaryOp::Or,
-                            or_node,
-                            eq_node,
-                        );
+                        or_node =
+                            self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
                     }
                     or_node
                 };
@@ -2127,8 +2114,7 @@ impl<'a> MirToSirConverter<'a> {
             result_val = self.create_mux_node(arm_we, arm_val, result_val);
             // Combined write_enable = arm_we OR result_we
             if result_we != 0 {
-                result_we =
-                    self.create_binary_op_node(&skalp_mir::BinaryOp::Or, arm_we, result_we);
+                result_we = self.create_binary_op_node(&skalp_mir::BinaryOp::Or, arm_we, result_we);
             } else {
                 result_we = arm_we;
             }
@@ -2349,8 +2335,6 @@ impl<'a> MirToSirConverter<'a> {
             None
         };
 
-
-
         // BUG #222 FIX: Use provided default when neither branch assigns
         let keep_value = match default_value {
             Some(default) => default,
@@ -2384,12 +2368,11 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Build priority-encoded mux tree
-        let result = if cases.is_empty() {
+        if cases.is_empty() {
             keep_value
         } else {
             self.build_priority_mux(&cases, target)
-        };
-        result
+        }
     }
 
     /// Synthesize a mux tree for a specific target within a case statement
@@ -3861,10 +3844,7 @@ impl<'a> MirToSirConverter<'a> {
                 // The result width is determined by the left operand, not the
                 // assignment target. Propagating target_width would truncate
                 // the shifted value (e.g., 64-bit << 45 stored in uint32_t).
-                let is_shift = matches!(
-                    op,
-                    BinaryOp::LeftShift | BinaryOp::RightShift
-                );
+                let is_shift = matches!(op, BinaryOp::LeftShift | BinaryOp::RightShift);
 
                 let operand_width = if is_comparison || is_shift {
                     // Comparisons: operands should use their own type widths, not the 1-bit result width
@@ -4159,9 +4139,8 @@ impl<'a> MirToSirConverter<'a> {
                 // When no target width, infer from value: use 64 bits if value
                 // exceeds 32-bit range (e.g., Ascon IV 0x00400c0000000100).
                 let val = *i as u64;
-                let inferred_width = target_width.unwrap_or_else(|| {
-                    if val > u32::MAX as u64 { 64 } else { 32 }
-                });
+                let inferred_width =
+                    target_width.unwrap_or(if val > u32::MAX as u64 { 64 } else { 32 });
                 (val, inferred_width)
             }
             Value::BitVector { width, value } => (*value, *width),
@@ -4695,8 +4674,7 @@ impl<'a> MirToSirConverter<'a> {
             (true, true) => {
                 // {current[signal_width-1 : high+1], new_value, current[low-1 : 0]}
                 let lower = self.create_slice_node(current_value, low_usize - 1, 0);
-                let upper =
-                    self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
+                let upper = self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
                 self.create_concat_node(vec![upper, new_range_value, lower])
             }
             (true, false) => {
@@ -4706,8 +4684,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             (false, true) => {
                 // {current[signal_width-1 : high+1], new_value}
-                let upper =
-                    self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
+                let upper = self.create_slice_node(current_value, signal_width - 1, high_usize + 1);
                 self.create_concat_node(vec![upper, new_range_value])
             }
             (false, false) => {
@@ -5620,15 +5597,19 @@ impl<'a> MirToSirConverter<'a> {
                 });
 
                 // Check if existing driver is also a combinational (non-flip-flop) node
-                let existing_is_combinational = self.sir.combinational_nodes.iter().any(|n| {
-                    n.id == existing_driver
-                });
+                let existing_is_combinational = self
+                    .sir
+                    .combinational_nodes
+                    .iter()
+                    .any(|n| n.id == existing_driver);
 
-                if new_node_is_flipflop && signal.is_state {
-                    old_driver_to_update = Some(existing_driver);
-                } else if existing_is_constant {
-                    old_driver_to_update = Some(existing_driver);
-                } else if !new_node_is_flipflop && existing_is_combinational {
+                // Replace the old driver when: the new node is a flip-flop for a
+                // state signal, the old driver was a constant placeholder, or a
+                // combinational driver is superseded by another combinational node.
+                if (new_node_is_flipflop && signal.is_state)
+                    || existing_is_constant
+                    || (!new_node_is_flipflop && existing_is_combinational)
+                {
                     old_driver_to_update = Some(existing_driver);
                 } else {
                     return;

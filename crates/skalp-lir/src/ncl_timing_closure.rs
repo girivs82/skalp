@@ -52,9 +52,7 @@
 //! let result = run_timing_closure(&mut netlist, None, &config, |n, c| run_pnr(n, c));
 //! ```
 
-use crate::async_sta::{
-    analyze_async_timing, AsyncStaConfig, AsyncStaResult, ViolationSeverity,
-};
+use crate::async_sta::{analyze_async_timing, AsyncStaConfig, AsyncStaResult, ViolationSeverity};
 use crate::async_sta_fix::{fix_fork_violations, AsyncStaFixConfig, AsyncStaFixResult};
 use crate::gate_netlist::{GateNetId, GateNetlist};
 use crate::ncl_constraints::{
@@ -190,10 +188,7 @@ impl TimingClosureResult {
                     (ClosureAction::InsertedBuffers, _) => "post-PnR+buf",
                     _ => "unknown",
                 };
-                s.push_str(&format!(
-                    " {:.1}ps({})",
-                    iter.max_skew_ps, tag
-                ));
+                s.push_str(&format!(" {:.1}ps({})", iter.max_skew_ps, tag));
                 if iter.iteration < self.history.len() - 1 {
                     s.push_str(" →");
                 }
@@ -295,9 +290,9 @@ pub fn post_pnr_iteration(
     let mut tightened_config = config.constraint_config.clone();
     if iteration > 1 {
         // Tighten the skew margin on each re-route iteration
-        tightened_config.skew_margin_ps +=
-            config.constraint_config.skew_margin_ps * (1.0 - config.constraint_tightening_factor)
-                * iteration as f64;
+        tightened_config.skew_margin_ps += config.constraint_config.skew_margin_ps
+            * (1.0 - config.constraint_tightening_factor)
+            * iteration as f64;
     }
     let constraints = generate_ncl_constraints(netlist, &sta_result, &tightened_config);
 
@@ -360,14 +355,7 @@ where
         let wire_delays = run_pnr(netlist, &last_constraints);
 
         // Post-PnR STA with actual delays
-        let iter = post_pnr_iteration(
-            netlist,
-            library,
-            wire_delays,
-            i,
-            prev_max_skew,
-            config,
-        );
+        let iter = post_pnr_iteration(netlist, library, wire_delays, i, prev_max_skew, config);
 
         if let Some(ref fix) = iter.fix_result {
             total_buffers += fix.buffers_inserted;
@@ -394,9 +382,15 @@ where
         }
 
         // 2. Only warnings remain (no errors/critical)
-        let has_errors = history.last().unwrap().sta_result.fork_violations.iter().any(|v| {
-            v.severity == ViolationSeverity::Error || v.severity == ViolationSeverity::Critical
-        });
+        let has_errors = history
+            .last()
+            .unwrap()
+            .sta_result
+            .fork_violations
+            .iter()
+            .any(|v| {
+                v.severity == ViolationSeverity::Error || v.severity == ViolationSeverity::Critical
+            });
         if !has_errors {
             return TimingClosureResult {
                 converged: true,
@@ -537,8 +531,17 @@ mod tests {
     #[test]
     fn test_closure_action_progression() {
         // Verify the action types are what we expect
-        assert_eq!(ClosureAction::InitialConstraints, ClosureAction::InitialConstraints);
-        assert_ne!(ClosureAction::InitialConstraints, ClosureAction::TightenedConstraints);
-        assert_ne!(ClosureAction::TightenedConstraints, ClosureAction::InsertedBuffers);
+        assert_eq!(
+            ClosureAction::InitialConstraints,
+            ClosureAction::InitialConstraints
+        );
+        assert_ne!(
+            ClosureAction::InitialConstraints,
+            ClosureAction::TightenedConstraints
+        );
+        assert_ne!(
+            ClosureAction::TightenedConstraints,
+            ClosureAction::InsertedBuffers
+        );
     }
 }

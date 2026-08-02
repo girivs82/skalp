@@ -37,8 +37,8 @@ pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_constraints;
 pub mod ncl_expand;
-pub mod ncl_timing_closure;
 pub mod ncl_optimizer;
+pub mod ncl_timing_closure;
 pub mod netlist;
 pub mod pattern_detector;
 pub mod pipeline_annotations;
@@ -92,8 +92,8 @@ pub use tech_library::{
 
 // Synthesis
 pub use tech_mapper::{
-    insert_clock_buffers, insert_io_buffers, synthesize, synthesize_balanced,
-    synthesize_for_area, synthesize_for_timing, synthesize_hierarchical,
+    insert_clock_buffers, insert_io_buffers, synthesize, synthesize_balanced, synthesize_for_area,
+    synthesize_for_timing, synthesize_hierarchical,
 };
 
 // Structural pattern detection for safety mechanisms

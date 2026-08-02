@@ -168,7 +168,10 @@ impl Pass for Dce {
             if !live.contains(&id) {
                 continue;
             }
-            if let AigNode::Input { name, source_net, .. } = node {
+            if let AigNode::Input {
+                name, source_net, ..
+            } = node
+            {
                 let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                 let new_id = new_aig.add_input_with_safety(name.clone(), *source_net, safety);
                 node_map.insert(id, AigLit::new(new_id));
@@ -296,7 +299,11 @@ pub fn try_resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> Option
         return Some(lit);
     }
     map.get(&lit.node).map(|&mapped| {
-        if lit.inverted { mapped.invert() } else { mapped }
+        if lit.inverted {
+            mapped.invert()
+        } else {
+            mapped
+        }
     })
 }
 

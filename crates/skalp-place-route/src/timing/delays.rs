@@ -206,7 +206,7 @@ impl DelayModel {
 
     fn from_xc7_timing(t: &xc7_data::Xc7TimingData) -> Self {
         Self {
-            lut4_delay: t.lut6_delay,          // LUT6 used as generic LUT delay
+            lut4_delay: t.lut6_delay, // LUT6 used as generic LUT delay
             dff_clk_to_q: t.dff_clk_to_q,
             dff_setup: t.dff_setup,
             dff_hold: t.dff_hold,
@@ -214,10 +214,10 @@ impl DelayModel {
             io_input_delay: t.io_input_delay,
             io_output_delay: t.io_output_delay,
             local_wire_delay: t.local_wire_delay,
-            span4_delay: t.double_delay,       // map double (span 2) to span4 field
-            span12_delay: t.long_delay,        // map long (span 12) to span12 field
+            span4_delay: t.double_delay, // map double (span 2) to span4 field
+            span12_delay: t.long_delay,  // map long (span 12) to span12 field
             global_clock_delay: t.global_clock_delay,
-            pip_delay: t.pip_local_to_local,   // flat fallback
+            pip_delay: t.pip_local_to_local, // flat fallback
             ram_read_delay: t.bram_read_delay,
             ram_write_delay: 0.0,
             pip_belpin_to_local: t.pip_bel_to_local,
@@ -226,7 +226,7 @@ impl DelayModel {
             pip_span4_to_span4: t.pip_double_to_double,
             pip_span4_to_local: t.pip_span_to_local,
             pip_span12_to_span12: t.pip_long_to_long,
-            pip_local_to_belpin: t.pip_bel_to_local,  // symmetric estimate
+            pip_local_to_belpin: t.pip_bel_to_local, // symmetric estimate
             pip_global_to_local: t.pip_clock_to_local,
             fanout_delay_per_load: t.fanout_per_load,
         }
@@ -403,10 +403,8 @@ impl DelayModel {
                 if let Some(src_loc) = placement.get(driver_id) {
                     for (sink_id, _) in &net.fanout {
                         if let Some(dst_loc) = placement.get(*sink_id) {
-                            let dx =
-                                (src_loc.tile_x as i32 - dst_loc.tile_x as i32).unsigned_abs();
-                            let dy =
-                                (src_loc.tile_y as i32 - dst_loc.tile_y as i32).unsigned_abs();
+                            let dx = (src_loc.tile_x as i32 - dst_loc.tile_x as i32).unsigned_abs();
+                            let dy = (src_loc.tile_y as i32 - dst_loc.tile_y as i32).unsigned_abs();
                             total_manhattan_distance += dx + dy;
                             route_count += 1;
                         }
@@ -420,8 +418,7 @@ impl DelayModel {
         }
 
         let actual_avg = total_actual_delay / route_count as f64;
-        let estimated_avg =
-            self.estimated_path_delay(total_manhattan_distance / route_count);
+        let estimated_avg = self.estimated_path_delay(total_manhattan_distance / route_count);
 
         (actual_avg, estimated_avg)
     }

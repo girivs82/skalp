@@ -36,12 +36,12 @@
 mod aig;
 mod aig_builder;
 mod aig_writer;
-pub mod lir_to_aig;
 pub mod cuts;
-pub mod dff_decompose;
 pub mod datapath;
+pub mod dff_decompose;
 mod engine;
 pub mod liberty;
+pub mod lir_to_aig;
 pub mod mapping;
 pub mod npn;
 pub mod partition;
@@ -53,13 +53,13 @@ pub mod timing;
 pub use aig::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, BarrierType};
 pub use aig_builder::AigBuilder;
 pub use aig_writer::AigWriter;
-pub use lir_to_aig::{LirToSynthAig, LirToAigResult};
 pub use cuts::{Cut, CutEnumeration, CutParams, CutPriority, CutSet};
 pub use datapath::{
     generate_carry_lookahead, generate_kogge_stone, generate_ripple_carry, AdderArchitecture,
     AdderConfig, AdderOptimizer, AdderStats, DatapathConfig, DatapathOp, DatapathStats,
 };
 pub use engine::{SynthConfig, SynthEngine, SynthPreset, SynthResult};
+pub use lir_to_aig::{LirToAigResult, LirToSynthAig};
 
 // Re-export pipeline annotations for external use
 pub use crate::pipeline_annotations::{

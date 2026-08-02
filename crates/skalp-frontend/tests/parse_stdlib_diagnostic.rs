@@ -45,7 +45,11 @@ fn diagnose_file(path: &str) {
 
     eprintln!("\n{}", "=".repeat(72));
     eprintln!("FILE: {}", path);
-    eprintln!("Source length: {} bytes, {} lines", source.len(), source.lines().count());
+    eprintln!(
+        "Source length: {} bytes, {} lines",
+        source.len(),
+        source.lines().count()
+    );
     eprintln!("Parse errors: {}", errors.len());
     eprintln!("{}", "=".repeat(72));
 
@@ -59,7 +63,10 @@ fn diagnose_file(path: &str) {
         let src_line = source_line_at(&source, err.position);
 
         eprintln!("\n--- Error {} ---", i + 1);
-        eprintln!("  Location:  line {}, col {} (byte offset {})", line, col, err.position);
+        eprintln!(
+            "  Location:  line {}, col {} (byte offset {})",
+            line, col, err.position
+        );
         eprintln!("  Kind:      {:?}", err.kind);
         eprintln!("  Message:   {}", err.message);
         if let Some(ref expected) = err.expected {
@@ -140,6 +147,8 @@ fn diagnose_multiplier_parse() {
     // Wait with a timeout to avoid getting SIGKILLed
     let result = handle.join();
     if result.is_err() {
-        eprintln!("\n!!! multiplier.sk parse CRASHED (likely stack overflow / infinite recursion) !!!");
+        eprintln!(
+            "\n!!! multiplier.sk parse CRASHED (likely stack overflow / infinite recursion) !!!"
+        );
     }
 }

@@ -1,0 +1,10 @@
+
+entity TestAdder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+}
+
+impl TestAdder {
+    sum = a + b
+}

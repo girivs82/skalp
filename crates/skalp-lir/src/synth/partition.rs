@@ -108,7 +108,12 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         if physical_cell_ids.contains(&cell.id) {
             continue; // skip physical cells — we want logic cell inputs
         }
-        for &net_id in cell.inputs.iter().chain(cell.clock.iter()).chain(cell.reset.iter()) {
+        for &net_id in cell
+            .inputs
+            .iter()
+            .chain(cell.clock.iter())
+            .chain(cell.reset.iter())
+        {
             if phys_driven_nets.contains(&net_id) {
                 boundary_inputs.insert(net_id);
             }

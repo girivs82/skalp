@@ -337,7 +337,10 @@ impl PrimitiveType {
             PrimitiveType::CompBit => 4,
             PrimitiveType::MemCell => 3,
             PrimitiveType::RegCell => 3,
-            PrimitiveType::RamBlock { addr_width, data_width } => {
+            PrimitiveType::RamBlock {
+                addr_width,
+                data_width,
+            } => {
                 // raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE
                 *addr_width * 2 + *data_width + 6
             }
@@ -430,7 +433,10 @@ impl PrimitiveType {
             PrimitiveType::CompBit => 0.15,
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
-            PrimitiveType::RamBlock { addr_width, data_width } => {
+            PrimitiveType::RamBlock {
+                addr_width,
+                data_width,
+            } => {
                 // FIT scales with memory size
                 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64)
             }
@@ -470,7 +476,10 @@ impl PrimitiveType {
 
     /// Returns true if this primitive type represents memory
     pub fn is_memory(&self) -> bool {
-        matches!(self, PrimitiveType::MemCell | PrimitiveType::RegCell | PrimitiveType::RamBlock { .. })
+        matches!(
+            self,
+            PrimitiveType::MemCell | PrimitiveType::RegCell | PrimitiveType::RamBlock { .. }
+        )
     }
 
     /// Returns the short name for this primitive type
@@ -594,7 +603,10 @@ impl std::fmt::Display for PrimitiveType {
             PrimitiveType::Thmn { m, n } => write!(f, "TH{}{}", m, n),
             PrimitiveType::ThmnW { m, n, .. } => write!(f, "TH{}{}W", m, n),
             PrimitiveType::NclCompletion { width } => write!(f, "NCLCOMP{}", width),
-            PrimitiveType::RamBlock { addr_width, data_width } => {
+            PrimitiveType::RamBlock {
+                addr_width,
+                data_width,
+            } => {
                 write!(f, "RAM{}x{}", 1u64 << addr_width, data_width)
             }
             _ => write!(f, "{}", self.short_name()),
@@ -753,7 +765,11 @@ pub enum LirOp {
     /// Addition: result = a + b (with optional carry-out)
     /// If `const_b` is Some, operand b is a known constant — the carry chain can
     /// fold the constant into LUT INITs and avoid creating separate TIE cells.
-    Add { width: u32, has_carry: bool, const_b: Option<u64> },
+    Add {
+        width: u32,
+        has_carry: bool,
+        const_b: Option<u64>,
+    },
     /// Subtraction: result = a - b (with optional borrow-out)
     Sub { width: u32, has_borrow: bool },
     /// Multiplication: result = a * b
@@ -942,7 +958,9 @@ impl LirOp {
     /// Returns the output width of this operation
     pub fn output_width(&self) -> u32 {
         match self {
-            LirOp::Add { width, has_carry, .. } => {
+            LirOp::Add {
+                width, has_carry, ..
+            } => {
                 if *has_carry {
                     width + 1
                 } else {

@@ -140,8 +140,8 @@ enum NclPrimitiveType {
     Aoi21 = 35,
     Oai21 = 36,
     Lut4 = 37,
-    AndNot = 38,  // A & ~B
-    OrNot = 39,   // A | ~B
+    AndNot = 38, // A & ~B
+    OrNot = 39,  // A | ~B
 
     // NCL threshold gates (stateful - need hysteresis)
     Th12 = 20,
