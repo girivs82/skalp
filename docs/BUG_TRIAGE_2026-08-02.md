@@ -266,10 +266,18 @@ CellFunction arms (semantics matched to gate_eval.rs) plus ordered name-based
 fallbacks. All reproducers AND SpiMaster now pass with full SAT proofs
 ("Transition functions equivalent for ALL states"). The harness's
 init-constraint machinery remains for genuine don't-care divergences.
-Remaining related item: `test_mwe_lir_gate_equivalence` (BMC on a
-`fault_latched` design) still fails via the LIR-side formal converter
-(`GateNetlistToAig`'s sibling `convert_sequential(lir)`) — likely an analogous
-op-coverage gap on the LIR side, untouched by this fix.
+The suspected "LIR-side converter gap" (`test_mwe_lir_gate_equivalence`)
+turned out to be the opposite — **FIXED 6: a real synthesis bug the BMC was
+correctly reporting.** `AigWriter::create_outputs` renamed the SOURCE net to
+the output name for passthrough outputs ("rename in place"); when the source
+was a primary INPUT net (e.g. `sm_state = sm_st` with `sm_st` a promoted input
+driven by a child instance), the input's name was destroyed. Hierarchical
+stitching then attached the child's driver to a freshly-created net under the
+old input name, leaving the real output net floating — the flattened MWE
+netlist drove `sm_state`/`fault_latched`/`counter_out` from nothing. Fix:
+never rename primary-input nets in create_outputs; emit a dedicated output net
+plus BUF (same treatment as physical pseudo-inputs). test_equivalence_mwe is
+now 8/8 green including the BMC check.
 
 Also noted during triage: `decompose_latches` in `synth/dff_decompose.rs` is
 "TEMPORARILY DISABLED" (returns empty) — dead code path at HEAD; and `skalp ec`

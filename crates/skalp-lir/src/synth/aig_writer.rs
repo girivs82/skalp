@@ -971,10 +971,24 @@ impl AigWriterState<'_> {
                     new_net
                 } else {
                     // Check if this net is a physical pseudo-input (NCL decode,
-                    // BRAM, DSP). Don't rename it — create a BUF so the physical
-                    // merge step can still find the net by its original name.
+                    // BRAM, DSP) or a PRIMARY INPUT. Don't rename those — create
+                    // a BUF so the net keeps its original name.
+                    //
+                    // For primary inputs this is load-bearing for hierarchical
+                    // synthesis: a passthrough output (e.g. `sm_state = sm_st`
+                    // where `sm_st` is a promoted input driven by a child
+                    // instance) used to RENAME the input net to the output name.
+                    // The stitcher then connected the child's driver to a
+                    // freshly-created net with the old input name, leaving the
+                    // real output net floating (BMC caught the netlist driving
+                    // outputs from nothing; see BUG_TRIAGE FIXED-6).
                     let is_phys = self.physical_nets.contains(&source_net);
-                    if is_phys {
+                    let is_primary_input = self
+                        .netlist
+                        .get_net_mut(source_net)
+                        .map(|n| n.is_input)
+                        .unwrap_or(false);
+                    if is_phys || is_primary_input {
                         let new_net = self
                             .netlist
                             .add_net(GateNet::new(GateNetId(0), name.clone()));
