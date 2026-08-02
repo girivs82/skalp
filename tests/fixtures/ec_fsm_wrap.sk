@@ -1,0 +1,23 @@
+entity Wrap {
+    in clk: clock
+    in reset: reset
+    out any: bit
+}
+
+impl Wrap {
+    signal count: bit[3] = 0
+
+    on(clk.rise) {
+        if (reset.active) {
+            count = 0
+        } else {
+            if (count == 7) {
+                count = 0
+            } else {
+                count = count + 1
+            }
+        }
+    }
+
+    any = (count != 0)
+}

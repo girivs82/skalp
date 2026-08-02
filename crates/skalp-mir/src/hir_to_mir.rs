@@ -744,9 +744,13 @@ impl<'hir> HirToMir<'hir> {
 
                 // BUG FIX: Generate continuous assignment for signals with non-literal initial expressions
                 // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
-                if let Some(init_expr) = &hir_signal.initial_value {
-                    // Only generate assignment if it's NOT a literal (literals are handled above)
-                    if !matches!(init_expr, hir::HirExpression::Literal(_)) {
+                if let Some(init_expr) = hir_signal.initial_value.clone() {
+                    // Only generate an assignment if the initializer is NOT a
+                    // compile-time constant. Constants (literals, enum variants)
+                    // were already stored as the signal's initial value above —
+                    // emitting a continuous assign too would multi-drive the net.
+                    if self.convert_literal_expr(&init_expr).is_none() {
+                        let init_expr = &init_expr;
                         trace!(
                             "[HIR→MIR] Signal '{}' has non-literal initial_value, generating continuous assign",
                             hir_signal.name
@@ -1202,7 +1206,8 @@ impl<'hir> HirToMir<'hir> {
                                 hir_signal.name
                             );
                         }
-                        if let Some(init_expr) = opt_init {
+                        if let Some(init_expr) = opt_init.clone() {
+                            let init_expr = &init_expr;
                             if is_fp_module {
                                 // Debug: print expression type
                                 trace!(
@@ -1212,8 +1217,12 @@ impl<'hir> HirToMir<'hir> {
                                     matches!(init_expr, hir::HirExpression::Literal(_))
                                 );
                             }
-                            // Only generate assignment if it's NOT a literal (literals are handled above)
-                            let is_literal = matches!(init_expr, hir::HirExpression::Literal(_));
+                            // Only generate an assignment if the initializer is NOT a
+                            // compile-time constant (literal or enum variant). Constant
+                            // initializers were already stored as the flip-flop initial
+                            // value during flattening; also emitting a continuous assign
+                            // would multi-drive the signal (SpiMaster FSM bug).
+                            let is_literal = self.convert_literal_expr(init_expr).is_some();
                             if is_fp_module {
                                 trace!(
                                     "[BUG #207 NOT-LIT] Module '{}' Signal '{}' is_literal={}, entering non-literal block: {}",
@@ -10920,6 +10929,19 @@ impl<'hir> HirToMir<'hir> {
     fn convert_literal_expr(&mut self, expr: &hir::HirExpression) -> Option<Value> {
         match expr {
             hir::HirExpression::Literal(lit) => self.convert_literal(lit),
+            // Enum variant references (e.g. `State::Idle`) are compile-time
+            // constants: resolve to the variant's encoded value. Without this,
+            // `signal state: State = State::Idle` was treated as a NON-literal
+            // initializer and lowered to a continuous assignment `state = 0`,
+            // multi-driving the state register alongside its process driver —
+            // gate-level synthesis then const-folded FSM outputs to garbage
+            // (SpiMaster: ready ≡ 0, cs ≡ 1; see docs/BUG_TRIAGE_2026-08-02.md).
+            hir::HirExpression::EnumVariant { enum_type, variant } => self
+                .resolve_enum_variant_value(enum_type, variant)
+                .and_then(|e| match e.kind {
+                    ExpressionKind::Literal(v) => Some(v),
+                    _ => None,
+                }),
             // BUG #158 FIX: Handle Cast expressions wrapping literals
             // e.g., `100 as bit[256]` or `(-5.0 as fp32) as bit[32]`
             hir::HirExpression::Cast(cast_expr) => {

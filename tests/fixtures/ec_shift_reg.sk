@@ -1,0 +1,20 @@
+entity Shifter {
+    in clk: clock
+    in reset: reset
+    in din: bit
+    out q: bit[8]
+}
+
+impl Shifter {
+    signal sr: bit[8] = 0
+
+    on(clk.rise) {
+        if (reset.active) {
+            sr = 0
+        } else {
+            sr = {sr[6:0], din}
+        }
+    }
+
+    q = sr
+}

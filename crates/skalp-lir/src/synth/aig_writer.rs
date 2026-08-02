@@ -844,14 +844,25 @@ impl AigWriterState<'_> {
         let base_net = if let Some(&net) = self.node_to_net.get(&lit.node) {
             net
         } else if let Some(AigNode::And { left, right }) = aig.get_node(lit.node).cloned() {
-            // AND node not yet processed — create an AND2 cell on-the-fly.
+            // AND node not yet processed — emit it on demand.
             // This can happen when the topological sort or tech mapper misses
             // AND nodes in the transitive fanin of latch data inputs.
             self.process_and_node(aig, lit.node, left, right);
-            self.node_to_net.get(&lit.node).copied().unwrap_or_else(|| {
-                self.netlist
-                    .add_net(GateNet::new(GateNetId(0), format!("n{}", lit.node.0)))
-            })
+            // CORRECTNESS: the on-demand emission may have produced an
+            // OUTPUT-INVERTED mapped cell (e.g. NAND3 implementing an AND node),
+            // registering node_to_net with the complemented net. Re-resolve
+            // through the polarity-aware paths above instead of blindly taking
+            // node_to_net as the non-inverted value — doing the latter silently
+            // flipped the phase of every consumer that requested the literal
+            // before the producer was written (preset-dependent miscompiles:
+            // the SpiMaster/FSM `count == 7` inversion, see BUG_TRIAGE doc).
+            if self.node_to_net.contains_key(&lit.node)
+                || self.lit_to_net.contains_key(&(lit.node, lit.inverted))
+            {
+                return self.get_or_create_lit_net(aig, lit);
+            }
+            self.netlist
+                .add_net(GateNet::new(GateNetId(0), format!("n{}", lit.node.0)))
         } else {
             // Non-AND node without a net — create placeholder
             self.netlist

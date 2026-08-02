@@ -251,7 +251,18 @@ pub fn synthesize(
     // The AIG optimizer may inline input signals into LUT truth tables or
     // merge output names away. Re-create them so the flattener can stitch
     // parent↔child connections by port name.
-    for &port_id in lir.inputs.iter().chain(lir.outputs.iter()) {
+    //
+    // Direction matters: output-port nets must be preserved AS OUTPUTS. The old
+    // code marked every preserved port net is_input, which dual-flagged all
+    // driven outputs; downstream the gate→SIR converter classifies is_input
+    // first, so every output port surfaced as an *input* and equivalence
+    // checking found no outputs to compare.
+    for (&port_id, port_is_output) in lir
+        .inputs
+        .iter()
+        .map(|p| (p, false))
+        .chain(lir.outputs.iter().map(|p| (p, true)))
+    {
         let signal = &lir.signals[port_id.0 as usize];
         for bit in 0..signal.width {
             let name = if signal.width == 1 {
@@ -259,27 +270,19 @@ pub fn synthesize(
             } else {
                 format!("{}[{}]", signal.name, bit)
             };
-            if result.netlist.get_net_id(&name).is_none() {
-                let net_id = result.netlist.add_net_with_name(name);
-                if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
-                    net.is_input = true;
-                }
-                result.netlist.inputs.push(net_id);
-            } else {
-                // Net exists but may not be marked as input
-                let net_id = result
-                    .netlist
-                    .get_net_id(&if signal.width == 1 {
-                        signal.name.clone()
-                    } else {
-                        format!("{}[{}]", signal.name, bit)
-                    })
-                    .unwrap();
-                if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
-                    if !net.is_input {
-                        net.is_input = true;
-                        result.netlist.inputs.push(net_id);
+            let net_id = match result.netlist.get_net_id(&name) {
+                Some(id) => id,
+                None => result.netlist.add_net_with_name(name),
+            };
+            if let Some(net) = result.netlist.nets.get_mut(net_id.0 as usize) {
+                if port_is_output {
+                    if !net.is_output {
+                        net.is_output = true;
+                        result.netlist.outputs.push(net_id);
                     }
+                } else if !net.is_input {
+                    net.is_input = true;
+                    result.netlist.inputs.push(net_id);
                 }
             }
         }

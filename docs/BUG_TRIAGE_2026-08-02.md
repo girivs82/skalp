@@ -203,16 +203,61 @@ already exists — route `inst` there, sever the LetStmt path), `hir_to_mir.rs`
 instance lowering (wire dot-access reads to instance output nets — this is the actual
 bug-3 fix), formatter, LSP completion, then examples/stdlib/tutorial migration.
 
-## Evidence: MIR vs gate-level NON-equivalence on SpiMaster
+## TRIAGED: MIR vs gate-level NON-equivalence (SpiMaster et al.)
 
-A stray `equiv/ec_report.txt` (output of `skalp ec`, now gitignored) documents a
-concrete NOT EQUIVALENT verdict: at cycle 2, MIR simulation has `data_out = 77`
-while the gate-level netlist holds the previous value 102 — the gate side missed
-the `shift_reg -> data_out` update. Consistent with `test_equivalence_mwe` and
-`test_ergonomic_testbench`/gate-sim entries in the failure inventory below, and
-with the pre-existing Auto-preset `unreachable!` in `synth/engine.rs:974`
-(`test_skalp_sources_compile`). The MIR->LIR->gate path around registered
-outputs deserves a focused triage.
+Full triage completed 2026-08-02. The single "SpiMaster NOT EQUIVALENT" report
+decomposed into FOUR distinct defects; three are FIXED, one remains open with a
+minimal reproducer.
+
+**FIXED 1 — netlist outputs dual-flagged as inputs (EC unusable).**
+`tech_mapper.rs` Step 5.5 marked every preserved port net `is_input = true`,
+outputs included; the gate→SIR converter classifies `is_input` first, so all
+outputs surfaced as inputs and `skalp ec` died with "No matching outputs
+between MIR and Gate" on every design (regression introduced after Mar 17,
+when netlists still had disjoint input/output sets). Fix: preserve output-port
+nets as outputs.
+
+**FIXED 2 — enum-variant signal initializers lowered as continuous assigns.**
+`signal state: State = State::Idle` failed the `is_literal` check in
+`hir_to_mir` (EnumVariant is not `HirExpression::Literal`), generating a bogus
+continuous assignment `state = 0` that multi-drove the state register alongside
+its process driver. MIR simulation survived via last-write-wins; gate synthesis
+const-folded FSM outputs to TIE cells (`ready ≡ 0`, `cs ≡ 1`). Fix:
+`convert_literal_expr` now resolves enum variants to their encoded constants
+(stored as the FF initial value), and both continuous-assign fallbacks gate on
+const-evaluability instead of literal-ness.
+
+**FIXED 3 — AIG writer dropped output-inversions on on-demand emission.**
+The deep one, preset-dependent. When `get_or_create_lit_net` resolved a literal
+whose producer had not been written yet (emission order is mapping-insertion
+order = reverse-topological from backward covering), it emitted the producer on
+demand and then blindly took `node_to_net` as the non-inverted net — but the
+on-demand cell may be OUTPUT-INVERTED (e.g. NAND3 implementing an AND node).
+Every early consumer got the complemented net with no compensating INV.
+Concretely: `if (count == 7)` FSM exits inverted — the counter wrapped at the
+wrong time and `SynthPreset::Quick` (used by `skalp ec`) tripped it while
+`Balanced` happened not to. Reproducer: `tests/fixtures/ec_fsm_wrap.sk` — now
+passes with a full SAT proof. Fix: re-resolve through the polarity-aware paths
+after on-demand emission.
+
+**OPEN 4 — concat-shift miscompiles in sequential blocks.**
+`sr = {sr[6:0], din}` produces a gate netlist computing `sr | (din << 7)` — the
+shift disappears. 8-line reproducer: `tests/fixtures/ec_shift_reg.sk` (run
+`skalp ec` on it). This is what still blocks SpiMaster's full pass (its
+`shift_reg` update); MIR value 205 vs gate 230 at the first shift.
+
+**OPEN 5 — EC SAT phase explores unreachable states.**
+For enum-typed FSMs the symbolic check now fails AFTER the 100-cycle smoke test
+passes: SAT compares transition functions over ALL register states, including
+encodings unreachable from reset (unused enum patterns), where MIR and gates
+legitimately differ. The SAT phase needs reachability constraints or an
+init-state-anchored k-induction.
+
+Also noted during triage: `decompose_latches` in `synth/dff_decompose.rs` is
+"TEMPORARILY DISABLED" (returns empty) — dead code path at HEAD; and `skalp ec`
+synthesizes with `SynthPreset::Quick` while `skalp build` uses the default
+preset, so EC never verifies the netlist users actually ship — it should take
+the build preset (Quick's weaker pipeline is also what exposed FIXED-3).
 
 ## Pre-existing test-suite failures (measured 2026-08-02, NOT regressions)
 
