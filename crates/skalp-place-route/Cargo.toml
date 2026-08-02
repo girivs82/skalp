@@ -8,6 +8,10 @@ description = "Native FPGA Place and Route for SKALP"
 default = []
 programmer = ["libftd2xx"]
 hardware-test = ["programmer"]
+# Real Nexus bitstream packing via libprjoxide (ISC). SKALP computes which config
+# bits are set; libprjoxide owns the frame container + CRC16 + ECC14. Opt-in so the
+# crate still builds without the prjoxide checkout.
+nexus-bitstream = ["prjoxide"]
 
 [dependencies]
 skalp-lir = { path = "../skalp-lir" }
@@ -17,11 +21,19 @@ indexmap = "2.0"
 thiserror = "1.0"
 rayon = "1.7"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.8"
 rand = "0.8"
 log = "0.4"
 
 # FTDI programmer support (optional)
 libftd2xx = { version = "0.32", optional = true }
+
+# Lattice Nexus bitstream packer (frame container + CRC16/ECC14), ISC-licensed.
+# Git dep pinned to upstream; only compiled when `nexus-bitstream` is enabled.
+# (The fuzzed device database is NOT part of the crate — set PRJOXIDE_DB or
+# clone prjoxide to ~/src/prjoxide; tests skip gracefully when absent.)
+prjoxide = { git = "https://github.com/gatecat/prjoxide", rev = "9ab3b4ee3b9c5c1d210243c667b1f39ee7c01496", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

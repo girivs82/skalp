@@ -13,8 +13,14 @@
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
 pub mod data;
+pub mod prjoxide_bels;
+pub mod prjoxide_graph;
+pub mod prjoxide_load;
+pub mod prjoxide_pack;
 mod tiles;
 
+pub use prjoxide_graph::{resolve_wire, NodeKey};
+pub use prjoxide_load::{load_tilegrid, PrjoxideTile};
 pub use tiles::NexusTile;
 
 use super::{
@@ -53,24 +59,60 @@ impl NexusVariant {
         }
     }
 
-    pub fn grid_size(&self) -> (u32, u32) { self.die_data().grid }
-    pub fn name(&self) -> &'static str { self.die_data().name }
-    pub fn idcode(&self) -> u32 { self.die_data().idcode }
-    pub fn bitstream_frames(&self) -> u32 { self.die_data().bitstream_frames }
-    pub fn bits_per_frame(&self) -> u32 { self.die_data().bits_per_frame }
-    pub fn plc_count(&self) -> usize { self.die_data().plc_tiles }
-    pub fn lut_count(&self) -> usize { self.die_data().plc_tiles * 8 }
-    pub fn ff_count(&self) -> usize { self.lut_count() }
-    pub fn ebr_count(&self) -> usize { self.die_data().ebr_blocks }
-    pub fn lram_count(&self) -> usize { self.die_data().lram_blocks }
-    pub fn dsp_count(&self) -> usize { self.die_data().dsp_blocks }
-    pub fn io_count(&self) -> usize { self.die_data().io_tiles }
-    pub fn pcs_count(&self) -> u8 { self.die_data().pcs_channels }
-    pub fn pll_count(&self) -> u8 { self.die_data().plls }
-    pub fn global_clocks(&self) -> u8 { self.die_data().global_clocks }
-    pub fn has_pcie(&self) -> bool { self.die_data().has_pcie }
-    pub fn has_lpddr4(&self) -> bool { self.die_data().has_lpddr4 }
-    pub fn packages(&self) -> &'static [&'static str] { self.die_data().packages }
+    pub fn grid_size(&self) -> (u32, u32) {
+        self.die_data().grid
+    }
+    pub fn name(&self) -> &'static str {
+        self.die_data().name
+    }
+    pub fn idcode(&self) -> u32 {
+        self.die_data().idcode
+    }
+    pub fn bitstream_frames(&self) -> u32 {
+        self.die_data().bitstream_frames
+    }
+    pub fn bits_per_frame(&self) -> u32 {
+        self.die_data().bits_per_frame
+    }
+    pub fn plc_count(&self) -> usize {
+        self.die_data().plc_tiles
+    }
+    pub fn lut_count(&self) -> usize {
+        self.die_data().plc_tiles * 8
+    }
+    pub fn ff_count(&self) -> usize {
+        self.lut_count()
+    }
+    pub fn ebr_count(&self) -> usize {
+        self.die_data().ebr_blocks
+    }
+    pub fn lram_count(&self) -> usize {
+        self.die_data().lram_blocks
+    }
+    pub fn dsp_count(&self) -> usize {
+        self.die_data().dsp_blocks
+    }
+    pub fn io_count(&self) -> usize {
+        self.die_data().io_tiles
+    }
+    pub fn pcs_count(&self) -> u8 {
+        self.die_data().pcs_channels
+    }
+    pub fn pll_count(&self) -> u8 {
+        self.die_data().plls
+    }
+    pub fn global_clocks(&self) -> u8 {
+        self.die_data().global_clocks
+    }
+    pub fn has_pcie(&self) -> bool {
+        self.die_data().has_pcie
+    }
+    pub fn has_lpddr4(&self) -> bool {
+        self.die_data().has_lpddr4
+    }
+    pub fn packages(&self) -> &'static [&'static str] {
+        self.die_data().packages
+    }
 }
 
 impl std::fmt::Display for NexusVariant {
@@ -118,10 +160,145 @@ pub struct NexusDevice {
     pub dsp_tiles: Vec<DspTile>,
 }
 
+/// Placement priority when multiple prjoxide tiles share a grid cell: the most
+/// placeable wins the single `tiles[y][x]` slot (routing-only tiles rank lowest).
+fn placement_rank(t: &TileType) -> u8 {
+    match t {
+        TileType::Logic => 6,
+        TileType::RamTop | TileType::RamBottom => 5,
+        TileType::Dsp => 4,
+        TileType::IoTop | TileType::IoBottom | TileType::IoLeft | TileType::IoRight => 3,
+        TileType::Pll => 2,
+        TileType::GlobalBuf | TileType::IpCon => 1,
+        TileType::Empty => 0,
+    }
+}
+
 impl NexusDevice {
     /// Create a new Nexus device with synthetic architecture
     pub fn new(variant: NexusVariant) -> Self {
         Self::new_synthetic(variant)
+    }
+
+    /// Build a Nexus device from the real prjoxide database, restricted to the
+    /// inclusive grid window `bbox = (x0, y0, x1, y1)`.
+    ///
+    /// This is the *real-silicon* constructor (M1): the tile grid, routing graph,
+    /// and BEL/wire bindings all come from prjoxide, so placement and routing run
+    /// on the actual LFCPNX-100 fabric. A bounded window keeps construction cheap
+    /// for bring-up; the full fabric is ~28M pips (see [`prjoxide_graph`]).
+    ///
+    /// `db_root` is the prjoxide database root (see
+    /// [`prjoxide_load::find_database`]). Returns an error if the database can't
+    /// be read.
+    pub fn from_prjoxide_bbox(
+        variant: NexusVariant,
+        db_root: &std::path::Path,
+        bbox: (u32, u32, u32, u32),
+    ) -> Result<Self, String> {
+        use prjoxide_graph::{build_routing_graph, node_name, resolve_wire};
+
+        let (width, height) = variant.grid_size();
+        let family = variant.prjoxide_family();
+
+        // M1a: real tile grid. M1b: real routing graph for the window.
+        let all_tiles = prjoxide_load::load_tilegrid(db_root, variant)?;
+        let graph = build_routing_graph(db_root, family, &all_tiles, Some(bbox))?;
+
+        let mut tiles: Vec<Vec<Option<NexusTile>>> =
+            vec![vec![None; width as usize]; height as usize];
+        let mut bel_wires: HashMap<(u32, u32, String), WireId> = HashMap::new();
+        let mut logic_tiles: Vec<LogicTile> = Vec::new();
+        let mut bel_id_counter = 0u32;
+
+        // Pick the primary placeable tile per cell (PLC wins; routing tiles are
+        // skipped here but still contribute to the graph). Within the bbox.
+        let (x0, y0, x1, y1) = bbox;
+        // Group prjoxide tiles by cell, preferring PLC.
+        let mut primary: HashMap<(u32, u32), &prjoxide_load::PrjoxideTile> = HashMap::new();
+        for t in &all_tiles {
+            if t.x < x0 || t.x > x1 || t.y < y0 || t.y > y1 {
+                continue;
+            }
+            let better = match primary.get(&(t.x, t.y)) {
+                None => true,
+                Some(cur) => placement_rank(&t.skalp_type) > placement_rank(&cur.skalp_type),
+            };
+            if better {
+                primary.insert((t.x, t.y), t);
+            }
+        }
+
+        for (&(x, y), t) in &primary {
+            let bels = if t.tiletype == "PLC" {
+                let mut bels = Vec::with_capacity(16);
+                for pb in prjoxide_bels::plc_bels() {
+                    let mut pins = Vec::with_capacity(pb.pins.len());
+                    for (conv_key, site_wire, dir) in &pb.pins {
+                        let wire = resolve_wire(x, y, site_wire)
+                            .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                        if let Some(w) = wire {
+                            bel_wires.insert((x, y, conv_key.clone()), w);
+                        }
+                        // Pin name = conventional key's suffix after the BEL name.
+                        let pin_name = conv_key
+                            .rsplit_once('_')
+                            .map(|(_, p)| p.to_string())
+                            .unwrap_or_else(|| conv_key.clone());
+                        pins.push(BelPin {
+                            name: pin_name,
+                            direction: *dir,
+                            wire,
+                        });
+                    }
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: pb.bel_type,
+                        name: pb.name,
+                        pins,
+                    });
+                    bel_id_counter += 1;
+                }
+                // Coarse per-tile clock wire for Device::clock_wire.
+                if let Some(w) = resolve_wire(x, y, prjoxide_bels::plc_clock_site_wire())
+                    .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                {
+                    bel_wires.insert((x, y, "CLK".to_string()), w);
+                }
+                logic_tiles.push(LogicTile {
+                    x,
+                    y,
+                    lut_count: data::LOGIC_LUTS_PER_TILE,
+                    ff_count: data::LOGIC_FFS_PER_TILE,
+                    has_carry: true,
+                });
+                bels
+            } else {
+                // Non-logic primary tiles: correct type, BELs deferred (M3+).
+                Vec::new()
+            };
+            tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
+        }
+
+        Ok(Self {
+            variant,
+            grid_size: (width, height),
+            tiles,
+            wires: graph.wires,
+            wire_names: graph.wire_names,
+            pips: graph.pips,
+            wire_to_pips: graph.wire_to_pips,
+            wire_src_pips: graph.wire_src_pips,
+            tile_wires: graph.tile_wires,
+            bel_wires,
+            packages: HashMap::new(), // M3: package pins from prjoxide iodb
+            routing: Self::default_routing(variant),
+            clock_resources: Self::default_clock_resources(variant),
+            logic_tiles,
+            io_tiles: Vec::new(),
+            memory_blocks: Vec::new(),
+            dsp_tiles: Vec::new(),
+        })
     }
 
     /// Create a synthetic Nexus device from datasheet parameters
@@ -224,8 +401,7 @@ impl NexusDevice {
                         drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
                         diff_pairs: data::IO_DIFF_PAIRS,
                     });
-                    self.tiles[y as usize][x as usize] =
-                        Some(NexusTile::new(side, x, y, io_bels));
+                    self.tiles[y as usize][x as usize] = Some(NexusTile::new(side, x, y, io_bels));
                 } else if is_bram_col && !is_dsp_col {
                     // EBR (Embedded Block RAM) — 18Kb
                     let bram_bels = Self::make_bram_bels(&mut bel_id_counter, x, y);
@@ -241,7 +417,11 @@ impl NexusDevice {
                 } else if is_dsp_col {
                     // DSP block (18x18 MAC)
                     let dsp_bels = Self::make_dsp_bels(&mut bel_id_counter, x, y);
-                    self.dsp_tiles.push(DspTile { x, y, mac_count: data::DSP_MACS_PER_TILE });
+                    self.dsp_tiles.push(DspTile {
+                        x,
+                        y,
+                        mac_count: data::DSP_MACS_PER_TILE,
+                    });
                     self.tiles[y as usize][x as usize] =
                         Some(NexusTile::new(TileType::Dsp, x, y, dsp_bels));
                 } else {
@@ -274,11 +454,31 @@ impl NexusDevice {
                 bel_type: BelType::Lut4,
                 name: format!("LUT4_{}", i),
                 pins: vec![
-                    BelPin { name: "A".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "B".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "C".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "D".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "Z".to_string(), direction: PinDirection::Output, wire: None },
+                    BelPin {
+                        name: "A".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "B".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "C".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "D".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "Z".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -292,11 +492,31 @@ impl NexusDevice {
                 bel_type: BelType::DffSrE,
                 name: format!("FF_{}", i),
                 pins: vec![
-                    BelPin { name: "D".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CLK".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CE".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "LSR".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "Q".to_string(), direction: PinDirection::Output, wire: None },
+                    BelPin {
+                        name: "D".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CLK".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CE".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "LSR".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "Q".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -309,8 +529,16 @@ impl NexusDevice {
             bel_type: BelType::Carry,
             name: "CCU2C".to_string(),
             pins: vec![
-                BelPin { name: "CIN".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "COUT".to_string(), direction: PinDirection::Output, wire: None },
+                BelPin {
+                    name: "CIN".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "COUT".to_string(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
             ],
         });
 
@@ -328,10 +556,26 @@ impl NexusDevice {
                 bel_type: BelType::IoCell,
                 name: format!("PIO_{}", i),
                 pins: vec![
-                    BelPin { name: "PAD".to_string(), direction: PinDirection::Inout, wire: None },
-                    BelPin { name: "I".to_string(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "O".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "T".to_string(), direction: PinDirection::Input, wire: None },
+                    BelPin {
+                        name: "PAD".to_string(),
+                        direction: PinDirection::Inout,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "I".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "O".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "T".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -347,18 +591,66 @@ impl NexusDevice {
             bel_type: BelType::RamSlice,
             name: "EBR".to_string(),
             pins: vec![
-                BelPin { name: "ADDRA".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "ADDRB".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIA".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DIB".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "DOA".to_string(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "DOB".to_string(), direction: PinDirection::Output, wire: None },
-                BelPin { name: "CLKA".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CLKB".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEA".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "WEB".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEA".to_string(), direction: PinDirection::Input, wire: None },
-                BelPin { name: "CEB".to_string(), direction: PinDirection::Input, wire: None },
+                BelPin {
+                    name: "ADDRA".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "ADDRB".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIA".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DIB".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOA".to_string(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "DOB".to_string(),
+                    direction: PinDirection::Output,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKA".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CLKB".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEA".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "WEB".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEA".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
+                BelPin {
+                    name: "CEB".to_string(),
+                    direction: PinDirection::Input,
+                    wire: None,
+                },
             ],
         }]
     }
@@ -374,12 +666,36 @@ impl NexusDevice {
                 bel_type: BelType::DspSlice,
                 name: format!("MULT18X18_{}", i),
                 pins: vec![
-                    BelPin { name: "A".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "B".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "P".to_string(), direction: PinDirection::Output, wire: None },
-                    BelPin { name: "CLK".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "CE".to_string(), direction: PinDirection::Input, wire: None },
-                    BelPin { name: "RST".to_string(), direction: PinDirection::Input, wire: None },
+                    BelPin {
+                        name: "A".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "B".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "P".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CLK".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "CE".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "RST".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
                 ],
             });
         }
@@ -451,10 +767,8 @@ impl NexusDevice {
                                 delay: 0,
                             };
                             self.wire_names.insert(in_wire.name.clone(), in_wire.id);
-                            self.bel_wires.insert(
-                                (x, y, format!("LUT{}_{}", lc, pin_name)),
-                                in_wire.id,
-                            );
+                            self.bel_wires
+                                .insert((x, y, format!("LUT{}_{}", lc, pin_name)), in_wire.id);
                             self.tile_wires.entry((x, y)).or_default().push(in_wire.id);
                             self.wires.push(in_wire);
                             wire_id += 1;
@@ -490,14 +804,8 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips
-                                    .entry(p.dst_wire)
-                                    .or_default()
-                                    .push(p.id);
-                                self.wire_src_pips
-                                    .entry(p.src_wire)
-                                    .or_default()
-                                    .push(p.id);
+                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                 self.pips.push(p);
                                 pip_id += 1;
                             }
@@ -507,12 +815,12 @@ impl NexusDevice {
                         for inp in 0..4 {
                             let pin_name = ["A", "B", "C", "D"][inp];
                             if let Some(&lut_in_id) =
-                                self.bel_wires.get(&(x, y, format!("LUT{}_{}", lc, pin_name)))
+                                self.bel_wires
+                                    .get(&(x, y, format!("LUT{}_{}", lc, pin_name)))
                             {
                                 // Connect from a few local wires
                                 for local_offset in 0..4u8 {
-                                    let local_idx =
-                                        ((lc * 3 + inp + local_offset as usize) % 24) as usize;
+                                    let local_idx = (lc * 3 + inp + local_offset as usize) % 24;
                                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                                         if let Some(&local_wire) = local_wires.get(local_idx) {
                                             let p = Pip {
@@ -551,7 +859,8 @@ impl NexusDevice {
                         delay: 50,
                     };
                     self.wire_names.insert(clk_wire.name.clone(), clk_wire.id);
-                    self.bel_wires.insert((x, y, "CLK".to_string()), clk_wire.id);
+                    self.bel_wires
+                        .insert((x, y, "CLK".to_string()), clk_wire.id);
                     self.tile_wires.entry((x, y)).or_default().push(clk_wire.id);
                     self.wires.push(clk_wire);
                     wire_id += 1;
@@ -634,14 +943,8 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -662,14 +965,8 @@ impl NexusDevice {
                                     tile_x: dest_x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips
-                                    .entry(p.dst_wire)
-                                    .or_default()
-                                    .push(p.id);
-                                self.wire_src_pips
-                                    .entry(p.src_wire)
-                                    .or_default()
-                                    .push(p.id);
+                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                 self.pips.push(p);
                                 pip_id += 1;
                             }
@@ -706,14 +1003,8 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -734,14 +1025,8 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: dest_y,
                                 };
-                                self.wire_to_pips
-                                    .entry(p.dst_wire)
-                                    .or_default()
-                                    .push(p.id);
-                                self.wire_src_pips
-                                    .entry(p.src_wire)
-                                    .or_default()
-                                    .push(p.id);
+                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                 self.pips.push(p);
                                 pip_id += 1;
                             }
@@ -779,14 +1064,8 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -807,14 +1086,8 @@ impl NexusDevice {
                                     tile_x: dest_x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips
-                                    .entry(p.dst_wire)
-                                    .or_default()
-                                    .push(p.id);
-                                self.wire_src_pips
-                                    .entry(p.src_wire)
-                                    .or_default()
-                                    .push(p.id);
+                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                 self.pips.push(p);
                                 pip_id += 1;
                             }
@@ -849,14 +1122,8 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -877,14 +1144,8 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: dest_y,
                                 };
-                                self.wire_to_pips
-                                    .entry(p.dst_wire)
-                                    .or_default()
-                                    .push(p.id);
-                                self.wire_src_pips
-                                    .entry(p.src_wire)
-                                    .or_default()
-                                    .push(p.id);
+                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                                 self.pips.push(p);
                                 pip_id += 1;
                             }
@@ -893,7 +1154,8 @@ impl NexusDevice {
                 }
 
                 // Neighbour wires (to adjacent tiles — 4 directions)
-                for (dx, dy, dir_name) in [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")]
+                for (dx, dy, dir_name) in
+                    [(1i32, 0i32, "E"), (-1, 0, "W"), (0, 1, "N"), (0, -1, "S")]
                 {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
@@ -936,14 +1198,8 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -967,14 +1223,8 @@ impl NexusDevice {
                                 tile_x: nx,
                                 tile_y: ny,
                             };
-                            self.wire_to_pips
-                                .entry(p.dst_wire)
-                                .or_default()
-                                .push(p.id);
-                            self.wire_src_pips
-                                .entry(p.src_wire)
-                                .or_default()
-                                .push(p.id);
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
                             self.pips.push(p);
                             pip_id += 1;
                         }
@@ -1236,8 +1486,16 @@ mod tests {
         assert_eq!(device.family(), DeviceFamily::Nexus);
         assert_eq!(device.name(), "LIFCL-40");
         let stats = device.stats();
-        assert!(stats.total_luts > 1000, "expected >1000 LUTs, got {}", stats.total_luts);
-        assert!(stats.total_ios > 50, "expected >50 IOs, got {}", stats.total_ios);
+        assert!(
+            stats.total_luts > 1000,
+            "expected >1000 LUTs, got {}",
+            stats.total_luts
+        );
+        assert!(
+            stats.total_ios > 50,
+            "expected >50 IOs, got {}",
+            stats.total_ios
+        );
         assert!(stats.total_brams > 0, "expected BRAM blocks");
         assert!(stats.total_dsps > 0, "LIFCL-40 should have DSPs");
     }
@@ -1247,9 +1505,21 @@ mod tests {
         let device = NexusDevice::new(NexusVariant::Lfcpnx100);
         assert_eq!(device.name(), "LFCPNX-100");
         let stats = device.stats();
-        assert!(stats.total_luts > 5000, "expected >5000 LUTs, got {}", stats.total_luts);
-        assert!(stats.total_ios > 100, "expected >100 IOs, got {}", stats.total_ios);
-        assert!(stats.total_brams > 10, "expected >10 BRAM blocks, got {}", stats.total_brams);
+        assert!(
+            stats.total_luts > 5000,
+            "expected >5000 LUTs, got {}",
+            stats.total_luts
+        );
+        assert!(
+            stats.total_ios > 100,
+            "expected >100 IOs, got {}",
+            stats.total_ios
+        );
+        assert!(
+            stats.total_brams > 10,
+            "expected >10 BRAM blocks, got {}",
+            stats.total_brams
+        );
         assert!(stats.total_dsps > 0, "LFCPNX-100 should have DSPs");
     }
 
@@ -1300,5 +1570,73 @@ mod tests {
         assert!(device.can_place("DP16KD", BelType::RamSlice));
         assert!(device.can_place("MULT18X18D", BelType::DspSlice));
         assert!(!device.can_place("LUT4", BelType::IoCell));
+    }
+
+    /// M1c-part2: a device built from the real prjoxide database exposes, through
+    /// the exact `Device` trait the Placer/Router use, real BELs whose pins bind to
+    /// real routing nodes that are reachable through the fabric. This is the first
+    /// end-to-end exercise of the silicon-grounded device model.
+    #[test]
+    fn from_prjoxide_device_is_placeable_and_routable() {
+        let Some(db) = prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        // A window with interior PLC tiles plus neighbours for routing context.
+        let device =
+            NexusDevice::from_prjoxide_bbox(variant, &db, (4, 4, 12, 12)).expect("build device");
+
+        // Locate a PLC (Logic) cell in the window.
+        let mut plc = None;
+        for y in 4..=12 {
+            for x in 4..=12 {
+                if let Some(t) = device.tile_at(x, y) {
+                    if t.tile_type() == TileType::Logic {
+                        plc = Some((x, y));
+                    }
+                }
+            }
+        }
+        let (px, py) = plc.expect("a Logic tile in window");
+
+        // The tile holds the full PLC complement: 8 LUT4 + 8 FF.
+        let tile = device.tile_at(px, py).unwrap();
+        assert_eq!(tile.available_bels(BelType::Lut4), 8, "8 LUT4 BELs in PLC");
+        assert_eq!(tile.available_bels(BelType::Dff), 8, "8 FF BELs in PLC");
+
+        // BEL pins bind to real wires via the conventional Device helpers.
+        let lut0_out = device.lut_output_wire(px, py, 0).expect("LUT0 output wire");
+        let lut0_in_a = device
+            .lut_input_wire(px, py, 0, 0)
+            .expect("LUT0 A input wire");
+        let clk = device.clock_wire(px, py).expect("clock wire");
+        assert!(device.wire(lut0_out).is_some());
+        assert!(device.wire(lut0_in_a).is_some());
+        assert!(device.wire(clk).is_some());
+
+        // Routability: the LUT output drives PIPs into the fabric, and the LUT
+        // input is driven by PIPs from the fabric. Without this, nothing routes.
+        assert!(
+            !device.wire_src_pips(lut0_out).is_empty(),
+            "LUT output must drive fabric pips"
+        );
+        assert!(
+            !device.wire_pips(lut0_in_a).is_empty(),
+            "LUT input must be reachable via fabric pips"
+        );
+
+        // can_place still wires the standard cell types onto these BELs.
+        assert!(device.can_place("OXIDE_COMB", BelType::Lut4));
+        assert!(device.can_place("OXIDE_FF", BelType::Dff));
+
+        eprintln!(
+            "M1c-part2 OK: from_prjoxide device — PLC@({px},{py}) has 8 LUT4 + 8 FF, \
+             LUT0.out drives {} pips, LUT0.A reached by {} pips; {} wires / {} pips total",
+            device.wire_src_pips(lut0_out).len(),
+            device.wire_pips(lut0_in_a).len(),
+            device.wire_count(),
+            device.pips.len(),
+        );
     }
 }

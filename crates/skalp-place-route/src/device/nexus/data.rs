@@ -59,14 +59,14 @@ pub struct NexusDieData {
 
 /// LIFCL-40 (CrossLink-NX)
 pub const LIFCL_40: NexusDieData = NexusDieData {
-    grid: (88, 57),   // prjoxide: max_col=87, max_row=56
+    grid: (88, 57), // prjoxide: max_col=87, max_row=56
     name: "LIFCL-40",
     plc_tiles: 4_032, // = 32,256 LUT4
     ebr_blocks: 21,   // 168 EBR tiles / 8
     lram_blocks: 2,
-    dsp_blocks: 14,   // DSP_L(88/11=8) + DSP_R(66/11=6)
+    dsp_blocks: 14, // DSP_L(88/11=8) + DSP_R(66/11=6)
     io_tiles: 196,
-    plls: 3,          // GPLL_ULC, GPLL_LLC, GPLL_LRC
+    plls: 3, // GPLL_ULC, GPLL_LLC, GPLL_LRC
     global_clocks: 16,
     pcs_channels: 0,
     idcode: 0x0111_0043,
@@ -79,12 +79,12 @@ pub const LIFCL_40: NexusDieData = NexusDieData {
 
 /// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
 pub const LFCPNX_100: NexusDieData = NexusDieData {
-    grid: (160, 75),   // prjoxide: max_col=159, max_row=74
+    grid: (160, 75), // prjoxide: max_col=159, max_row=74
     name: "LFCPNX-100",
-    plc_tiles: 9_984,  // = 79,872 LUT4
-    ebr_blocks: 52,    // 416 EBR tiles / 8
+    plc_tiles: 9_984, // = 79,872 LUT4
+    ebr_blocks: 52,   // 416 EBR tiles / 8
     lram_blocks: 7,
-    dsp_blocks: 39,    // DSP_L(198/11=18) + DSP_R(231/11=21)
+    dsp_blocks: 39, // DSP_L(198/11=18) + DSP_R(231/11=21)
     io_tiles: 380,
     plls: 4,           // GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
     global_clocks: 26, // 13 branches × 2 spines
@@ -133,14 +133,14 @@ pub struct NexusTimingData {
 
 /// Speed grade 10, max column (fast corner)
 pub const TIMING_GRADE10: NexusTimingData = NexusTimingData {
-    lut4_delay: 0.270,         // OXIDE_COMB:LUT4 A→F max 270ps
-    dff_clk_to_q: 0.441,      // OXIDE_FF CLK→Q max 441ps
-    dff_setup: 0.0,            // OXIDE_FF DI@CLK setup 0ps
-    dff_hold: 0.192,           // OXIDE_FF DI@CLK hold max 192ps
-    carry_delay: 0.066,        // CCU2 FCI→FCO max 66ps
-    io_input_delay: 0.8,       // estimated (no IO timing in prjoxide for LFCPNX)
-    io_output_delay: 1.5,      // estimated
-    ram_read_delay: 2.0,       // estimated (EBR timing not yet in prjoxide)
+    lut4_delay: 0.270,    // OXIDE_COMB:LUT4 A→F max 270ps
+    dff_clk_to_q: 0.441,  // OXIDE_FF CLK→Q max 441ps
+    dff_setup: 0.0,       // OXIDE_FF DI@CLK setup 0ps
+    dff_hold: 0.192,      // OXIDE_FF DI@CLK hold max 192ps
+    carry_delay: 0.066,   // CCU2 FCI→FCO max 66ps
+    io_input_delay: 0.8,  // estimated (no IO timing in prjoxide for LFCPNX)
+    io_output_delay: 1.5, // estimated
+    ram_read_delay: 2.0,  // estimated (EBR timing not yet in prjoxide)
 
     cib_mux_delay: 0.044,      // cibmuxi→cibmuxo max 44ps
     span0_delay: 0.105,        // span0h→abcd max 105ps
@@ -166,10 +166,10 @@ pub const TIMING_GRADE10: NexusTimingData = NexusTimingData {
 pub const ROUTING_CHANNELS: (u32, u32) = (32, 32);
 
 /// Wire counts per tile per direction
-pub const WIRE_LOCAL_COUNT: u8 = 24;  // CIB local wires
-pub const WIRE_SPAN1_COUNT: u8 = 8;  // H01/V01
-pub const WIRE_SPAN2_COUNT: u8 = 8;  // H02/V02
-pub const WIRE_SPAN6_COUNT: u8 = 4;  // H06/V06
+pub const WIRE_LOCAL_COUNT: u8 = 24; // CIB local wires
+pub const WIRE_SPAN1_COUNT: u8 = 8; // H01/V01
+pub const WIRE_SPAN2_COUNT: u8 = 8; // H02/V02
+pub const WIRE_SPAN6_COUNT: u8 = 4; // H06/V06
 
 // ---------------------------------------------------------------------------
 // Clock network
@@ -221,12 +221,12 @@ pub const DSP_COLUMN_SPACING: u32 = 20;
 // Bitstream constants (from prjoxide)
 // ---------------------------------------------------------------------------
 
-/// Nexus SPI bitstream format (from prjoxide nxpack):
-///
-/// Structure is similar to ECP5: [dummy] [preamble] [commands] [frames] [postamble]
-/// Nexus uses the same Lattice SPI command set but with different preamble.
-///
-/// Sources: prjoxide/libprjoxide/src/bitstream.rs, Lattice TN1313
+// Nexus SPI bitstream format (from prjoxide nxpack):
+//
+// Structure is similar to ECP5: [dummy] [preamble] [commands] [frames] [postamble]
+// Nexus uses the same Lattice SPI command set but with different preamble.
+//
+// Sources: prjoxide/libprjoxide/src/bitstream.rs, Lattice TN1313
 
 /// Oxide text format magic (for FASM-like output)
 pub const TEXT_FORMAT_MAGIC: &[u8] = b"OXIDE_NEXUS\n";
