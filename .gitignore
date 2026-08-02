@@ -11,3 +11,6 @@ benchmark_results_*.txt
 examples/karythra*.sk
 examples/KARYTHRA*.md
 safety_collaterals/
+
+# Equivalence-checking reports (skalp ec default output dir)
+/equiv/

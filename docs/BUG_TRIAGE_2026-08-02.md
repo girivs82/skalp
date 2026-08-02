@@ -203,6 +203,17 @@ already exists — route `inst` there, sever the LetStmt path), `hir_to_mir.rs`
 instance lowering (wire dot-access reads to instance output nets — this is the actual
 bug-3 fix), formatter, LSP completion, then examples/stdlib/tutorial migration.
 
+## Evidence: MIR vs gate-level NON-equivalence on SpiMaster
+
+A stray `equiv/ec_report.txt` (output of `skalp ec`, now gitignored) documents a
+concrete NOT EQUIVALENT verdict: at cycle 2, MIR simulation has `data_out = 77`
+while the gate-level netlist holds the previous value 102 — the gate side missed
+the `shift_reg -> data_out` update. Consistent with `test_equivalence_mwe` and
+`test_ergonomic_testbench`/gate-sim entries in the failure inventory below, and
+with the pre-existing Auto-preset `unreachable!` in `synth/engine.rs:974`
+(`test_skalp_sources_compile`). The MIR->LIR->gate path around registered
+outputs deserves a focused triage.
+
 ## Pre-existing test-suite failures (measured 2026-08-02, NOT regressions)
 
 Running the FULL integration suite (first time it has been compilable at HEAD —
