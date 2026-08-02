@@ -205,6 +205,7 @@ impl MirToLirTransform {
     /// Uses a cost model comparison instead of magic thresholds:
     /// - FF cost = total_bits (1 LUT per FF bit for distributed RAM)
     /// - BRAM cost = ceil(total_bits / bram_tile_size) * bram_lut_equiv + addr_decode
+    ///
     /// Chooses whichever is cheaper.
     fn should_use_bram(
         config: &skalp_frontend::hir::MemoryConfig,
@@ -232,7 +233,7 @@ impl MirToLirTransform {
                 // iCE40 EBR: 4096 bits per tile, ~8 LUT equivalent overhead
                 let bram_tile_bits: usize = 4096;
                 let bram_lut_equiv: usize = 8;
-                let bram_tiles = (total_bits + bram_tile_bits - 1) / bram_tile_bits;
+                let bram_tiles = total_bits.div_ceil(bram_tile_bits);
                 // Address decode for BRAM is minimal (built into BRAM primitive)
                 let bram_cost = bram_tiles * bram_lut_equiv;
 
@@ -837,8 +838,11 @@ impl MirToLirTransform {
 
     /// Transform a process
     fn transform_process(&mut self, process: &Process) {
-        trace!("[MIR→LIR] transform_process: kind={:?}, sensitivity={:?}",
-            process.kind, process.sensitivity);
+        trace!(
+            "[MIR→LIR] transform_process: kind={:?}, sensitivity={:?}",
+            process.kind,
+            process.sensitivity
+        );
         match process.kind {
             ProcessKind::Sequential => {
                 // Extract clock from sensitivity list
@@ -894,10 +898,8 @@ impl MirToLirTransform {
                         }
                     }
                 }
-                Statement::Block(inner) => {
-                    if Self::block_has_nonblocking(inner) {
-                        return true;
-                    }
+                Statement::Block(inner) if Self::block_has_nonblocking(inner) => {
+                    return true;
                 }
                 _ => {}
             }
@@ -979,10 +981,12 @@ impl MirToLirTransform {
             let target_signal = self.get_lvalue_signal(target_lv);
             let target_width = self.get_lvalue_width(target_lv);
 
-            let then_val = then_assigns.iter()
+            let then_val = then_assigns
+                .iter()
                 .find(|(lv, _)| lv == target_lv)
                 .map(|(_, expr)| self.transform_expression(expr, target_width));
-            let else_val = else_assigns.iter()
+            let else_val = else_assigns
+                .iter()
                 .find(|(lv, _)| lv == target_lv)
                 .map(|(_, expr)| self.transform_expression(expr, target_width));
 
@@ -997,16 +1001,24 @@ impl MirToLirTransform {
             );
             let mux_path = self.unique_node_path("ncl_mux");
             self.lir.add_node(
-                LirOp::Mux2 { width: target_width },
+                LirOp::Mux2 {
+                    width: target_width,
+                },
                 vec![cond_signal, else_sig, then_sig],
                 mux_out,
                 mux_path,
             );
 
             // Create NclReg
-            let reg_path = format!("{}.{}", self.hierarchy_path, self.get_signal_name(target_signal));
+            let reg_path = format!(
+                "{}.{}",
+                self.hierarchy_path,
+                self.get_signal_name(target_signal)
+            );
             self.lir.add_node(
-                LirOp::NclReg { width: target_width },
+                LirOp::NclReg {
+                    width: target_width,
+                },
                 vec![mux_out],
                 target_signal,
                 reg_path,
@@ -1131,7 +1143,6 @@ impl MirToLirTransform {
                     let target_name = self.get_signal_name(target_signal);
                     let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
 
-
                     if let Some(clk) = clock_signal {
                         self.lir.add_seq_node(
                             reg_op,
@@ -1218,20 +1229,26 @@ impl MirToLirTransform {
                                 }
 
                                 // Wire write address combinationally
-                                let addr_signal = self.transform_expression(index, mem_info.addr_width);
+                                let addr_signal =
+                                    self.transform_expression(index, mem_info.addr_width);
                                 let path_waddr = self.unique_node_path("mem_waddr");
                                 self.lir.add_node(
-                                    LirOp::Buf { width: mem_info.addr_width },
+                                    LirOp::Buf {
+                                        width: mem_info.addr_width,
+                                    },
                                     vec![addr_signal],
                                     mem_info.waddr_signal,
                                     path_waddr,
                                 );
 
                                 // Wire write data combinationally
-                                let data_signal = self.transform_expression(rhs_expr, mem_info.element_width);
+                                let data_signal =
+                                    self.transform_expression(rhs_expr, mem_info.element_width);
                                 let path_wdata = self.unique_node_path("mem_wdata");
                                 self.lir.add_node(
-                                    LirOp::Buf { width: mem_info.element_width },
+                                    LirOp::Buf {
+                                        width: mem_info.element_width,
+                                    },
                                     vec![data_signal],
                                     mem_info.wdata_signal,
                                     path_wdata,
@@ -1247,11 +1264,12 @@ impl MirToLirTransform {
                                 // we need: !reset & inner_condition
                                 if is_reset_condition {
                                     // Write is in else branch — find the inner if condition
-                                    let inner_cond = if let Some(ref else_block) = if_stmt.else_block {
-                                        Self::find_condition_for_target(else_block, target)
-                                    } else {
-                                        None
-                                    };
+                                    let inner_cond =
+                                        if let Some(ref else_block) = if_stmt.else_block {
+                                            Self::find_condition_for_target(else_block, target)
+                                        } else {
+                                            None
+                                        };
 
                                     let we_signal_val = if let Some(inner) = inner_cond {
                                         // we = !rst & inner_condition
@@ -3180,7 +3198,11 @@ impl MirToLirTransform {
                 let left_const = Self::try_extract_constant(left);
                 let const_b = right_const.or_else(|| {
                     // If left is constant, swap operands so const is always on the right
-                    if left_const.is_some() { left_const } else { None }
+                    if left_const.is_some() {
+                        left_const
+                    } else {
+                        None
+                    }
                 });
                 let (actual_left, actual_right) = if right_const.is_none() && left_const.is_some() {
                     (right, left) // swap so constant is on the right
@@ -3390,21 +3412,19 @@ impl MirToLirTransform {
                 let is_signed = left_signed || right_signed;
 
                 // Optimize x > 0 (unsigned) → RedOr(x)
-                if !is_signed {
-                    if extract_constant_value(right) == Some(0) {
-                        let left_sig = self.transform_expression(left, operand_width);
-                        let result = self.alloc_temp_signal(1);
-                        let path = self.unique_node_path("gt0_redor");
-                        self.lir.add_node(
-                            LirOp::RedOr {
-                                width: operand_width,
-                            },
-                            vec![left_sig],
-                            result,
-                            path,
-                        );
-                        return result;
-                    }
+                if !is_signed && extract_constant_value(right) == Some(0) {
+                    let left_sig = self.transform_expression(left, operand_width);
+                    let result = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("gt0_redor");
+                    self.lir.add_node(
+                        LirOp::RedOr {
+                            width: operand_width,
+                        },
+                        vec![left_sig],
+                        result,
+                        path,
+                    );
+                    return result;
                 }
 
                 let left_sig = self.transform_expression(left, operand_width);
@@ -3447,9 +3467,7 @@ impl MirToLirTransform {
                 (
                     left_sig,
                     right_sig,
-                    LirOp::Shl {
-                        width: shift_width,
-                    },
+                    LirOp::Shl { width: shift_width },
                     shift_width,
                 )
             }
@@ -3460,13 +3478,9 @@ impl MirToLirTransform {
                 // BUG FIX #247: Use arithmetic right shift (Sar) for signed operands
                 let is_signed = self.infer_expression_is_signed(left);
                 let op = if is_signed {
-                    LirOp::Sar {
-                        width: shift_width,
-                    }
+                    LirOp::Sar { width: shift_width }
                 } else {
-                    LirOp::Shr {
-                        width: shift_width,
-                    }
+                    LirOp::Shr { width: shift_width }
                 };
                 (left_sig, right_sig, op, shift_width)
             }
@@ -3563,10 +3577,8 @@ impl MirToLirTransform {
 
                         // Signed: use arithmetic shift (preserves sign)
                         if is_signed {
-                            let shift_const = self.create_constant(
-                                &Value::Integer(shift_amount as i64),
-                                div_width,
-                            );
+                            let shift_const = self
+                                .create_constant(&Value::Integer(shift_amount as i64), div_width);
                             return self.create_arithmetic_shift_right_node(
                                 dividend_sig,
                                 shift_const,
@@ -3575,15 +3587,9 @@ impl MirToLirTransform {
                         }
 
                         // Fallback for edge cases
-                        let shift_const = self.create_constant(
-                            &Value::Integer(shift_amount as i64),
-                            div_width,
-                        );
-                        return self.create_shift_right_node(
-                            dividend_sig,
-                            shift_const,
-                            div_width,
-                        );
+                        let shift_const =
+                            self.create_constant(&Value::Integer(shift_amount as i64), div_width);
+                        return self.create_shift_right_node(dividend_sig, shift_const, div_width);
                     }
 
                     // For signed division, use sign-magnitude approach:
@@ -4009,35 +4015,23 @@ impl MirToLirTransform {
             let const_sig = self.create_constant_value(constant, width);
             let xor_out = self.alloc_temp_signal(width);
             let path = self.unique_node_path("eqc_xor");
-            self.lir.add_node(
-                LirOp::Xor { width },
-                vec![signal, const_sig],
-                xor_out,
-                path,
-            );
+            self.lir
+                .add_node(LirOp::Xor { width }, vec![signal, const_sig], xor_out, path);
             xor_out
         };
 
         let or_out = self.alloc_temp_signal(1);
         let path = self.unique_node_path("eqc_redor");
-        self.lir.add_node(
-            LirOp::RedOr { width },
-            vec![xor_input],
-            or_out,
-            path,
-        );
+        self.lir
+            .add_node(LirOp::RedOr { width }, vec![xor_input], or_out, path);
 
         if is_not_equal {
             or_out
         } else {
             let result = self.alloc_temp_signal(1);
             let path = self.unique_node_path("eqc_inv");
-            self.lir.add_node(
-                LirOp::Not { width: 1 },
-                vec![or_out],
-                result,
-                path,
-            );
+            self.lir
+                .add_node(LirOp::Not { width: 1 }, vec![or_out], result, path);
             result
         }
     }
@@ -6642,7 +6636,8 @@ fn elaborate_instance_for_optimize_first(
                     && !child_connections.contains_key(&port.name)
                 {
                     let parent_signal_name = format!("{}_{}", inst.name, port.name);
-                    let exists_in_parent = module.signals.iter().any(|s| s.name == parent_signal_name);
+                    let exists_in_parent =
+                        module.signals.iter().any(|s| s.name == parent_signal_name);
                     if exists_in_parent {
                         // Insert connection with the port name as key
                         child_connections.insert(
@@ -6659,11 +6654,15 @@ fn elaborate_instance_for_optimize_first(
                                         skalp_mir::mir::LValue::Signal(sid),
                                     ) = &assign.rhs.kind
                                     {
-                                        if let Some(sig) = best_child.module.signals.iter().find(|s| s.id == *sid) {
+                                        if let Some(sig) =
+                                            best_child.module.signals.iter().find(|s| s.id == *sid)
+                                        {
                                             if sig.name != port.name {
                                                 child_connections.insert(
                                                     sig.name.clone(),
-                                                    PortConnectionInfo::Signal(parent_signal_name.clone()),
+                                                    PortConnectionInfo::Signal(
+                                                        parent_signal_name.clone(),
+                                                    ),
                                                 );
                                             }
                                         }
@@ -6841,11 +6840,15 @@ fn elaborate_instance(
                                         skalp_mir::mir::LValue::Signal(sid),
                                     ) = &assign.rhs.kind
                                     {
-                                        if let Some(sig) = best_child.module.signals.iter().find(|s| s.id == *sid) {
+                                        if let Some(sig) =
+                                            best_child.module.signals.iter().find(|s| s.id == *sid)
+                                        {
                                             if sig.name != port.name {
                                                 child_connections.insert(
                                                     sig.name.clone(),
-                                                    PortConnectionInfo::Signal(parent_signal_name.clone()),
+                                                    PortConnectionInfo::Signal(
+                                                        parent_signal_name.clone(),
+                                                    ),
                                                 );
                                             }
                                         }
@@ -7590,6 +7593,7 @@ mod tests {
 
     fn make_simple_module() -> Module {
         Module {
+            is_from_main_source: false,
             id: ModuleId(0),
             name: "test_module".to_string(),
             parameters: Vec::new(),
@@ -7698,6 +7702,7 @@ mod tests {
     #[test]
     fn test_word_lir_comparison() {
         let module = Module {
+            is_from_main_source: false,
             id: ModuleId(0),
             name: "cmp_module".to_string(),
             parameters: Vec::new(),
@@ -7794,6 +7799,7 @@ mod tests {
     #[test]
     fn test_word_lir_mux() {
         let module = Module {
+            is_from_main_source: false,
             id: ModuleId(0),
             name: "mux_module".to_string(),
             parameters: Vec::new(),

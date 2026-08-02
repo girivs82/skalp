@@ -1398,7 +1398,7 @@ impl Default for ConstEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{HirBinaryExpr, HirBinaryOp, HirExpression, HirLiteral};
+    use crate::hir::{HirBinaryExpr, HirBinaryOp, HirExpression, HirLiteral, ImplStyle};
 
     #[test]
     fn test_eval_literal() {

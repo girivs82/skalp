@@ -930,7 +930,9 @@ impl LirToAig {
                 self.set_output_bit(node.output, 0, result);
             }
 
-            LirOp::Add { width, has_carry, .. } => {
+            LirOp::Add {
+                width, has_carry, ..
+            } => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
                 let mut carry = self.aig.false_lit();
@@ -2647,9 +2649,17 @@ pub fn check_sequential_equivalence_sat(
                         Ok(true) => {
                             // Still SAT even with init constraints — real failure
                             let constrained_model = solver.model().unwrap().to_vec();
-                            print_counterexample_diagnosis(&miter, &var_map, &constrained_model, diff_name);
+                            print_counterexample_diagnosis(
+                                &miter,
+                                &var_map,
+                                &constrained_model,
+                                diff_name,
+                            );
                             let counterexample = extract_symbolic_counterexample(
-                                &miter, &var_map, &constrained_model, Some(diff_name.clone()),
+                                &miter,
+                                &var_map,
+                                &constrained_model,
+                                Some(diff_name.clone()),
                             );
                             return Ok(SymbolicEquivalenceResult {
                                 equivalent: false,
@@ -2673,9 +2683,8 @@ pub fn check_sequential_equivalence_sat(
             // No init constraints available — original behavior: first SAT is a failure
             let (_, diff_name, model) = &sat_results[0];
             print_counterexample_diagnosis(&miter, &var_map, model, diff_name);
-            let counterexample = extract_symbolic_counterexample(
-                &miter, &var_map, model, Some(diff_name.clone()),
-            );
+            let counterexample =
+                extract_symbolic_counterexample(&miter, &var_map, model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
@@ -11030,7 +11039,8 @@ impl SimBasedEquivalenceChecker {
         library: &skalp_lir::TechLibrary,
     ) -> FormalResult<SimEquivalenceResult> {
         // Tech-map LIR to gate netlist
-        let lir_netlist = skalp_lir::synthesize(lir, library, skalp_lir::SynthPreset::Quick).netlist;
+        let lir_netlist =
+            skalp_lir::synthesize(lir, library, skalp_lir::SynthPreset::Quick).netlist;
 
         self.check_gate_equivalence(&lir_netlist, netlist)
     }
@@ -12341,6 +12351,7 @@ mod tests {
 
         // Create a simple MIR module: out = a & b
         let module = Module {
+            is_from_main_source: false,
             id: ModuleId(0),
             name: "and_gate".to_string(),
             parameters: vec![],
@@ -12432,6 +12443,7 @@ mod tests {
         // Create two identical MIR modules
         fn create_and_module() -> Module {
             Module {
+                is_from_main_source: false,
                 id: ModuleId(0),
                 name: "and_gate".to_string(),
                 parameters: vec![],

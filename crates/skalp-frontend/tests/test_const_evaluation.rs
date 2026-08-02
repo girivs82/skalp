@@ -6,7 +6,6 @@ use indexmap::IndexMap;
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{
     HirBinaryExpr, HirBinaryOp, HirEnumType, HirEnumVariant, HirExpression, HirLiteral, HirType,
-    ImplStyle,
 };
 
 #[test]
