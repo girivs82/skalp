@@ -1323,8 +1323,13 @@ impl LirToAig {
             }
 
             LirOp::Concat { widths } => {
+                // LIR Concat follows Verilog {a, b, ...} semantics: the FIRST
+                // operand is the MSB side. Pack from the LAST operand upward —
+                // this previously mirrored the same first-operand-at-LSB bug as
+                // lir_to_aig, so the SAT reference model was wrong in exactly
+                // the same way as the netlist under comparison.
                 let mut out_bit = 0u32;
-                for (i, &w) in widths.iter().enumerate() {
+                for (i, &w) in widths.iter().enumerate().rev() {
                     let input = node.inputs[i];
                     for bit in 0..w {
                         let lit = self.get_input_bit(input, bit);

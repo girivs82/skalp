@@ -240,11 +240,18 @@ wrong time and `SynthPreset::Quick` (used by `skalp ec`) tripped it while
 passes with a full SAT proof. Fix: re-resolve through the polarity-aware paths
 after on-demand emission.
 
-**OPEN 4 — concat-shift miscompiles in sequential blocks.**
-`sr = {sr[6:0], din}` produces a gate netlist computing `sr | (din << 7)` — the
-shift disappears. 8-line reproducer: `tests/fixtures/ec_shift_reg.sk` (run
-`skalp ec` on it). This is what still blocks SpiMaster's full pass (its
-`shift_reg` update); MIR value 205 vs gate 230 at the first shift.
+**FIXED 4 — Concat packed operands in reverse (LSB-first) order.**
+LIR `Concat` follows Verilog `{a, b, ...}` semantics — first operand is the
+MSB side (documented in ncl_expand.rs; the SIR simulation codegen packs in
+reverse order accordingly). Both `lir_to_aig.rs` and the formal AIG builder in
+`skalp-formal/equivalence.rs` packed the FIRST operand at the LSB, silently
+"byte-swapping" every synthesized concat: `sr = {sr[6:0], din}` became
+`sr | (din << 7)`. The formal copy meant the SAT reference model was wrong in
+exactly the same way as the netlist, masking the bug from symbolic checks.
+Fix: pack from the last operand upward in both. `ec_shift_reg.sk` now passes
+with a full SAT proof; SpiMaster passes the 100-cycle smoke test (its SAT
+phase still trips OPEN-5's unreachable-state strictness); the whole
+pre-existing `test_bitreverse_mwe` suite (17 tests) went green.
 
 **OPEN 5 — EC SAT phase explores unreachable states.**
 For enum-typed FSMs the symbolic check now fails AFTER the 100-cycle smoke test

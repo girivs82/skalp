@@ -805,8 +805,15 @@ impl<'a> LirToSynthAig<'a> {
             }
 
             LirOp::Concat { widths } => {
+                // LIR Concat follows Verilog {a, b, ...} semantics: the FIRST
+                // operand is the MSB side (see the convention note in
+                // ncl_expand.rs and the SIR codegen, which packs operands in
+                // reverse order). Pack from the LAST operand upward — packing
+                // list-order-at-LSB silently byte-swapped every concat, e.g.
+                // sr = {sr[6:0], din} became sr | (din << 7)
+                // (tests/fixtures/ec_shift_reg.sk).
                 let mut out_bit = 0u32;
-                for (i, &w) in widths.iter().enumerate() {
+                for (i, &w) in widths.iter().enumerate().rev() {
                     let input = node.inputs[i];
                     for bit in 0..w {
                         let lit = self.get_input_bit(input, bit);
