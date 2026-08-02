@@ -271,10 +271,13 @@ the build preset (Quick's weaker pipeline is also what exposed FIXED-3).
 Running the FULL integration suite (first time it has been compilable at HEAD —
 see issue 21) shows **60 pre-existing test failures**, verified identical on a
 clean-HEAD worktree with the original per-file test binaries: test_function_inlining
-15/16, test_intent_and_numeric 5/24, test_ice40_synthesis 5, test_bitreverse_mwe 5/6,
-test_counter_example 4/4, test_l0_l5_ops 4, test_graphics_pipeline_functional 4,
+15/16, test_intent_and_numeric 5/24, test_ice40_synthesis 5, test_bitreverse_mwe 5/6 (ALL 17 fixed by the concat
+fix, f1609a8), test_counter_example 4/4, test_l0_l5_ops 21/21 (the earlier
+"4" undercounted — the SIGABRT-truncated run never reached the rest; verified
+21/21 at the pre-fix baseline too), test_graphics_pipeline_functional 4,
 test_fpmul_entity 3/3, test_async_reset 3/11 (the *_synthesis_uses_dff* trio),
-test_fp32_gate_sim 2, test_ergonomic_testbench 2, test_cdc_verification 2/6,
+test_fp32_gate_sim 4/4 (same undercount correction), test_ergonomic_testbench 2,
+test_cdc_verification 2/6,
 plus singles (fpmul_debug/nogeneric, equivalence_mwe, bug71_metal, async_sta_fix,
 gpu_simulation). Additionally `test_ice40_aig_synthesis_timing` hits a **stack
 overflow in debug builds** (runaway recursion in AIG timing analysis; also at
