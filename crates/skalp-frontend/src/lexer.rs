@@ -135,6 +135,8 @@ pub enum Token {
     Return,
     #[token("let")]
     Let,
+    #[token("inst")]
+    Inst,
     #[token("mut")]
     Mut,
 

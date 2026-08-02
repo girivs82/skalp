@@ -78,6 +78,7 @@ pub enum SyntaxKind {
     FnKw,
     ReturnKw,
     LetKw,
+    InstKw,
     MutKw,
 
     // Type Conversion (1)
@@ -437,8 +438,8 @@ pub enum SyntaxKind {
     MatchExpr,
     CastExpr,
     ConcatExpr,
-    ReplicateExpr,  // Verilog-style replication: {N{expr}}
-    SizedCastExpr,  // Verilog-style sized literal with expression width: (W2)'b0, (N)'hFF
+    ReplicateExpr, // Verilog-style replication: {N{expr}}
+    SizedCastExpr, // Verilog-style sized literal with expression width: (W2)'b0, (N)'hFF
     TernaryExpr,
     TupleExpr,
     RangeExpr,
@@ -570,7 +571,7 @@ impl SyntaxKind {
             // Design Intent (3)
             | IntentKw | FlowKw | RequirementKw
             // Async/NCL and Testbench (7)
-            | AsyncKw | AwaitKw | BarrierKw | FnKw | ReturnKw | LetKw | MutKw
+            | AsyncKw | AwaitKw | BarrierKw | FnKw | ReturnKw | LetKw | InstKw | MutKw
             // Type Conversion (1)
             | AsKw
             // Module System (4)
@@ -712,6 +713,7 @@ impl SyntaxKind {
             FnKw => "'fn'",
             ReturnKw => "'return'",
             LetKw => "'let'",
+            InstKw => "'inst'",
             MutKw => "'mut'",
 
             // Type Conversion (1)
@@ -987,6 +989,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Fn => FnKw,
             Token::Return => ReturnKw,
             Token::Let => LetKw,
+            Token::Inst => InstKw,
             Token::Mut => MutKw,
 
             // Type Conversion (1)

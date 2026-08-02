@@ -74,6 +74,65 @@ impl MirCompiler {
         let mut transformer = HirToMir::new_with_modules(module_hirs);
         let mut mir = transformer.transform(hir);
 
+        // Fail on conversion errors: these are cases where the converter would
+        // otherwise emit silently wrong hardware (unresolved identifiers → 0,
+        // silently dropped struct literals). Only errors in modules REACHABLE from
+        // the main design fail the build — stdlib entities are monomorphized even
+        // when unused, and a latent problem in an unused stdlib entity must not
+        // block an unrelated design.
+        let conversion_errors = transformer.conversion_errors();
+        if !conversion_errors.is_empty() {
+            use std::collections::{HashSet, VecDeque};
+            // Roots: modules for entities defined in the main source file. An empty
+            // main_entity_names means the provenance is unknown (e.g. direct-HIR
+            // callers like the VHDL frontend) — be strict and treat every module
+            // as a root in that case.
+            let mut reachable: HashSet<crate::mir::ModuleId> = if hir.main_entity_names.is_empty() {
+                mir.modules.iter().map(|m| m.id).collect()
+            } else {
+                mir.modules
+                    .iter()
+                    .filter(|m| hir.main_entity_names.iter().any(|n| n == &m.name))
+                    .map(|m| m.id)
+                    .collect()
+            };
+            let mut queue: VecDeque<crate::mir::ModuleId> = reachable.iter().copied().collect();
+            while let Some(mid) = queue.pop_front() {
+                if let Some(module) = mir.modules.iter().find(|m| m.id == mid) {
+                    for inst in &module.instances {
+                        if reachable.insert(inst.module) {
+                            queue.push_back(inst.module);
+                        }
+                    }
+                }
+            }
+            let reachable_names: HashSet<&str> = mir
+                .modules
+                .iter()
+                .filter(|m| reachable.contains(&m.id))
+                .map(|m| m.name.as_str())
+                .collect();
+
+            let mut seen = HashSet::new();
+            let relevant: Vec<&str> = conversion_errors
+                .iter()
+                .filter(|(entity, _)| {
+                    // Module names for monomorphized entities equal the entity name
+                    reachable_names.contains(entity.as_str())
+                })
+                .map(|(_, msg)| msg.as_str())
+                .filter(|m| seen.insert(*m))
+                .collect();
+
+            if !relevant.is_empty() {
+                return Err(format!(
+                    "MIR conversion failed with {} error(s):\n  {}",
+                    relevant.len(),
+                    relevant.join("\n  ")
+                ));
+            }
+        }
+
         // Step 2: Perform CDC analysis
         let violations = self.perform_cdc_analysis(&mir);
 

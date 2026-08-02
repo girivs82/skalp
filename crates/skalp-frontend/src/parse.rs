@@ -400,6 +400,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
+                Some(SyntaxKind::InstKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
@@ -555,7 +556,7 @@ impl<'a> ParseState<'a> {
                 if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
                     self.bump();
                 }
-            } else if self.at(SyntaxKind::LetKw) {
+            } else if self.at(SyntaxKind::LetKw) || self.at(SyntaxKind::InstKw) {
                 // Allow instance declarations in entity body (for DUT instantiation)
                 self.parse_instance_decl();
 
@@ -727,8 +728,12 @@ impl<'a> ParseState<'a> {
     fn parse_instance_decl(&mut self) {
         self.start_node(SyntaxKind::InstanceDecl);
 
-        // 'let' keyword
-        self.expect(SyntaxKind::LetKw);
+        // 'inst' keyword (preferred) or legacy 'let' form
+        if self.at(SyntaxKind::InstKw) || self.at(SyntaxKind::LetKw) {
+            self.bump();
+        } else {
+            self.error("expected 'inst' or 'let'");
+        }
 
         // Instance name
         self.expect(SyntaxKind::Ident);
@@ -997,6 +1002,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ConstKw) => {
                     self.parse_constant_decl();
                 }
+                Some(SyntaxKind::InstKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
@@ -1222,6 +1228,7 @@ impl<'a> ParseState<'a> {
 
             // Check if this looks like a statement (starts with a statement keyword)
             match self.current_kind() {
+                Some(SyntaxKind::InstKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::LetKw) => {
                     self.parse_let_statement();
                 }
@@ -1434,6 +1441,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(), // Nested for loops
                 Some(SyntaxKind::WhileKw) => self.parse_while_stmt(),
+                Some(SyntaxKind::InstKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
@@ -1714,6 +1722,7 @@ impl<'a> ParseState<'a> {
                     }
                 }
                 Some(SyntaxKind::FnKw) => self.parse_impl_function(),
+                Some(SyntaxKind::InstKw) => self.parse_instance_decl(),
                 Some(SyntaxKind::LetKw) => {
                     // Check for instance declaration pattern
                     let mut is_instance = false;

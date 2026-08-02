@@ -24,6 +24,8 @@ fn create_simple_entity() -> Hir {
         imports: vec![],
         functions: vec![],
         safety_definitions: ModuleSafetyDefinitions::default(),
+        unresolved_instances: Vec::new(),
+        main_entity_names: Vec::new(),
         entity_aliases: vec![],
     };
 

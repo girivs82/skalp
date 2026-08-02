@@ -147,6 +147,19 @@ pub struct Hir {
     /// ISO 26262 compliance support
     #[serde(default, skip_serializing_if = "ModuleSafetyDefinitions::is_empty")]
     pub safety_definitions: ModuleSafetyDefinitions,
+    /// Instances whose entity could not be resolved during HIR building.
+    /// Tolerated during the first pass (the entity may come from an import that
+    /// has not been merged yet); after the final rebuild pass any remaining
+    /// entry is a compile error. (instance_name, entity_name)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_instances: Vec<(String, String)>,
+    /// Names of entities defined in the MAIN source file (before imports are
+    /// merged in). Used to scope build-failing MIR conversion errors to entities
+    /// actually reachable from the user's design, so latent problems in unused
+    /// (but always-monomorphized) stdlib entities don't block unrelated builds.
+    /// Empty means "unknown" — treat every module as reachable (strict mode).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub main_entity_names: Vec<String>,
 }
 
 /// Entity in HIR
@@ -2326,6 +2339,8 @@ impl HirBuilder {
             imports: Vec::new(),
             functions: Vec::new(),
             safety_definitions: ModuleSafetyDefinitions::default(),
+            unresolved_instances: Vec::new(),
+            main_entity_names: Vec::new(),
         }
     }
 
@@ -2421,6 +2436,8 @@ impl Hir {
             imports: Vec::new(),
             functions: Vec::new(),
             safety_definitions: ModuleSafetyDefinitions::default(),
+            unresolved_instances: Vec::new(),
+            main_entity_names: Vec::new(),
         }
     }
 }

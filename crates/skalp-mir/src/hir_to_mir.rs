@@ -137,6 +137,14 @@ pub struct HirToMir<'hir> {
     clock_domain_map: IndexMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
+    /// Errors collected during conversion that must fail the build.
+    /// These are cases where the converter would otherwise emit silently wrong
+    /// hardware (e.g. an unresolved identifier lowered to literal 0).
+    /// Entries are (entity_name, message); the compiler only fails the build for
+    /// entities reachable from the main design, so latent problems in unused
+    /// stdlib entities (which are monomorphized regardless of use) don't block
+    /// unrelated builds.
+    conversion_errors: Vec<(String, String)>,
     /// All loaded module HIRs for proper scope resolution (Bug #84 fix)
     /// This allows resolving function calls in their original module scope
     module_hirs: IndexMap<PathBuf, Hir>,
@@ -367,6 +375,7 @@ impl<'hir> HirToMir<'hir> {
             mir_variable_types: IndexMap::new(),
             clock_domain_map: IndexMap::new(),
             hir: None,
+            conversion_errors: Vec::new(),
             module_hirs: module_hirs.clone(),
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
@@ -401,6 +410,24 @@ impl<'hir> HirToMir<'hir> {
             current_module_param_to_port: None,  // BUG #205 FIX
             entity_scope_cache: IndexMap::new(), // BUG #237 FIX
         }
+    }
+
+    /// Errors collected during conversion that must fail the build
+    /// (e.g. unresolved identifiers that would otherwise lower to literal 0).
+    /// Entries are (entity_name, message).
+    pub fn conversion_errors(&self) -> &[(String, String)] {
+        &self.conversion_errors
+    }
+
+    /// Name of the entity currently being converted (for error attribution)
+    fn current_entity_name(&self) -> String {
+        self.current_entity_id
+            .and_then(|id| {
+                self.hir
+                    .and_then(|h| h.entities.iter().find(|e| e.id == id))
+            })
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| "<unknown>".to_string())
     }
 
     /// Transform HIR to MIR
@@ -451,7 +478,8 @@ impl<'hir> HirToMir<'hir> {
 
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
-            self.entity_name_to_module.insert(entity.name.clone(), module_id);
+            self.entity_name_to_module
+                .insert(entity.name.clone(), module_id);
             if entity.name.contains("FpAdd")
                 || entity.name == "KarythraCLEAsync"
                 || entity.name == "FpSub"
@@ -651,7 +679,8 @@ impl<'hir> HirToMir<'hir> {
                     None
                 };
                 let is_memory = hir_signal.memory_config.is_some() || auto_memory_config.is_some();
-                let effective_memory_config = hir_signal.memory_config.clone().or(auto_memory_config);
+                let effective_memory_config =
+                    hir_signal.memory_config.clone().or(auto_memory_config);
 
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
@@ -828,82 +857,85 @@ impl<'hir> HirToMir<'hir> {
             .flat_map(|h| h.entities.iter().cloned())
             .collect();
         for entity in &module_entities {
-                // Skip if entity with same name already has a module
-                // (entity IDs from different HIR files can collide, so we check by name too)
-                if self.entity_name_to_module.contains_key(&entity.name) {
-                    continue;
-                }
+            // Skip if entity with same name already has a module
+            // (entity IDs from different HIR files can collide, so we check by name too)
+            if self.entity_name_to_module.contains_key(&entity.name) {
+                continue;
+            }
 
-                self.clear_entity_scope_maps();
+            self.clear_entity_scope_maps();
 
-                let module_id = self.next_module_id();
-                // Only insert into entity_map if the ID doesn't collide with a main HIR entity
-                if !self.entity_map.contains_key(&entity.id) {
-                    self.entity_map.insert(entity.id, module_id);
-                }
-                self.entity_name_to_module.insert(entity.name.clone(), module_id);
-                trace!(
-                    "[HIR_TO_MIR] Module HIR entity '{}' ({:?}) -> {:?}",
-                    entity.name, entity.id, module_id
+            let module_id = self.next_module_id();
+            // Only insert into entity_map if the ID doesn't collide with a main HIR entity
+            if !self.entity_map.contains_key(&entity.id) {
+                self.entity_map.insert(entity.id, module_id);
+            }
+            self.entity_name_to_module
+                .insert(entity.name.clone(), module_id);
+            trace!(
+                "[HIR_TO_MIR] Module HIR entity '{}' ({:?}) -> {:?}",
+                entity.name,
+                entity.id,
+                module_id
+            );
+
+            let mut module = Module::new(module_id, entity.name.clone());
+
+            if entity.is_async {
+                module.is_async = true;
+            }
+
+            // Convert generic parameters
+            for hir_generic in &entity.generics {
+                let parameter = GenericParameter {
+                    name: hir_generic.name.clone(),
+                    param_type: self.convert_generic_type(&hir_generic.param_type),
+                    default: hir_generic
+                        .default_value
+                        .as_ref()
+                        .and_then(|expr| self.convert_literal_expr(expr)),
+                };
+                module.parameters.push(parameter);
+            }
+
+            // Convert ports
+            self.current_entity_id = Some(entity.id);
+            for hir_port in &entity.ports {
+                let port_type = self.convert_type(&hir_port.port_type);
+                let direction = self.convert_port_direction(&hir_port.direction);
+
+                let (flattened_ports, flattened_fields) = self.flatten_port(
+                    &hir_port.name,
+                    &port_type,
+                    direction,
+                    hir_port.physical_constraints.clone(),
+                    None,
                 );
 
-                let mut module = Module::new(module_id, entity.name.clone());
-
-                if entity.is_async {
-                    module.is_async = true;
+                if !flattened_fields.is_empty() {
+                    self.flattened_ports
+                        .insert(hir_port.id, flattened_fields.clone());
                 }
-
-                // Convert generic parameters
-                for hir_generic in &entity.generics {
-                    let parameter = GenericParameter {
-                        name: hir_generic.name.clone(),
-                        param_type: self.convert_generic_type(&hir_generic.param_type),
-                        default: hir_generic
-                            .default_value
-                            .as_ref()
-                            .and_then(|expr| self.convert_literal_expr(expr)),
-                    };
-                    module.parameters.push(parameter);
+                for field in &flattened_fields {
+                    self.port_to_hir
+                        .insert(PortId(field.id), (hir_port.id, field.field_path.clone()));
                 }
-
-                // Convert ports
-                self.current_entity_id = Some(entity.id);
-                for hir_port in &entity.ports {
-                    let port_type = self.convert_type(&hir_port.port_type);
-                    let direction = self.convert_port_direction(&hir_port.direction);
-
-                    let (flattened_ports, flattened_fields) = self.flatten_port(
-                        &hir_port.name,
-                        &port_type,
-                        direction,
-                        hir_port.physical_constraints.clone(),
-                        None,
-                    );
-
-                    if !flattened_fields.is_empty() {
-                        self.flattened_ports
-                            .insert(hir_port.id, flattened_fields.clone());
-                    }
-                    for field in &flattened_fields {
-                        self.port_to_hir
-                            .insert(PortId(field.id), (hir_port.id, field.field_path.clone()));
-                    }
-                    if let Some(first_port) = flattened_ports.first() {
-                        self.port_map.insert(hir_port.id, first_port.id);
-                    }
-                    self.port_owner.insert(hir_port.id, entity.id);
-                    for port in flattened_ports {
-                        module.ports.push(port);
-                    }
+                if let Some(first_port) = flattened_ports.first() {
+                    self.port_map.insert(hir_port.id, first_port.id);
                 }
-
-                mir.add_module(module);
-                // Only save to cache if this entity ID doesn't collide with a main HIR entity.
-                // Module HIR entities can have the same ID as main entities (IDs are per-file),
-                // so saving here would overwrite the main entity's cached port_map.
-                if !self.entity_scope_cache.contains_key(&entity.id) {
-                    self.save_entity_scope_to_cache(entity.id);
+                self.port_owner.insert(hir_port.id, entity.id);
+                for port in flattened_ports {
+                    module.ports.push(port);
                 }
+            }
+
+            mir.add_module(module);
+            // Only save to cache if this entity ID doesn't collide with a main HIR entity.
+            // Module HIR entities can have the same ID as main entities (IDs are per-file),
+            // so saving here would overwrite the main entity's cached port_map.
+            if !self.entity_scope_cache.contains_key(&entity.id) {
+                self.save_entity_scope_to_cache(entity.id);
+            }
         }
 
         // Note: Module HIR impl blocks are NOT processed here. The entity port declarations
@@ -1065,8 +1097,10 @@ impl<'hir> HirToMir<'hir> {
                         } else {
                             None
                         };
-                        let is_memory = hir_signal.memory_config.is_some() || auto_memory_config.is_some();
-                        let effective_memory_config = hir_signal.memory_config.clone().or(auto_memory_config);
+                        let is_memory =
+                            hir_signal.memory_config.is_some() || auto_memory_config.is_some();
+                        let effective_memory_config =
+                            hir_signal.memory_config.clone().or(auto_memory_config);
 
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
@@ -1458,9 +1492,24 @@ impl<'hir> HirToMir<'hir> {
                                         // Skip creating new signals - use parent's signals
                                         // But still propagate detection flags if needed (handled below)
                                     } else {
-                                        // Output port is NOT connected - create new signals as before
-                                        let signal_name =
+                                        // Output port is NOT connected - create new signals as before.
+                                        // Collision-proofing: a user let/signal may already be named
+                                        // "{instance}_{port}" (e.g. `let tx_fifo_empty = tx_fifo.empty`).
+                                        // All compiler-internal references go through the SignalId in
+                                        // instance_outputs_by_name, so pick a non-colliding name.
+                                        let mut signal_name =
                                             format!("{}_{}", hir_instance.name, port.name);
+                                        let name_taken = |n: &str| {
+                                            impl_block.signals.iter().any(|s| s.name == n)
+                                                || impl_block.variables.iter().any(|v| v.name == n)
+                                        };
+                                        if name_taken(&signal_name) {
+                                            signal_name =
+                                                format!("{}__{}", hir_instance.name, port.name);
+                                            while name_taken(&signal_name) {
+                                                signal_name.push('_');
+                                            }
+                                        }
                                         let signal_type = self.convert_type(&port.port_type);
 
                                         // Use flatten_signal to properly handle struct types
@@ -1565,8 +1614,11 @@ impl<'hir> HirToMir<'hir> {
                         .chain(gen_event_blocks.iter())
                     {
                         let process = self.convert_event_block(event_block);
-                        trace!("[HIR→MIR] Event block -> process kind={:?}, sensitivity={:?}",
-                            process.kind, process.sensitivity);
+                        trace!(
+                            "[HIR→MIR] Event block -> process kind={:?}, sensitivity={:?}",
+                            process.kind,
+                            process.sensitivity
+                        );
                         module.processes.push(process);
                     }
 
@@ -2197,9 +2249,10 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirStatement::Match(match_stmt) => {
                 // Check if any arm has a TupleVariant pattern (enum with payload)
-                let has_payload = match_stmt.arms.iter().any(|arm| {
-                    matches!(arm.pattern, hir::HirPattern::TupleVariant(..))
-                });
+                let has_payload = match_stmt
+                    .arms
+                    .iter()
+                    .any(|arm| matches!(arm.pattern, hir::HirPattern::TupleVariant(..)));
                 if has_payload {
                     self.convert_match_with_payloads(match_stmt)
                 } else {
@@ -2372,17 +2425,19 @@ impl<'hir> HirToMir<'hir> {
                             .entities
                             .iter()
                             .find(|e| e.name == target_entity_name)
-                            .or_else(|| {
-                                hir.entities.iter().find(|e| e.name == resolved_type_name)
-                            });
+                            .or_else(|| hir.entities.iter().find(|e| e.name == resolved_type_name));
                         // If not found in main HIR, search module HIRs (clone to avoid borrow conflict)
                         let module_hir_entity: Option<hir::HirEntity>;
                         let entity = if entity.is_some() {
                             entity
                         } else {
-                            module_hir_entity = self.module_hirs.values()
+                            module_hir_entity = self
+                                .module_hirs
+                                .values()
                                 .flat_map(|h| h.entities.iter())
-                                .find(|e| e.name == target_entity_name || e.name == resolved_type_name)
+                                .find(|e| {
+                                    e.name == target_entity_name || e.name == resolved_type_name
+                                })
                                 .cloned();
                             module_hir_entity.as_ref()
                         };
@@ -2390,7 +2445,10 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(entity) = entity {
                             // Get the module ID for this entity.
                             // Prefer name-based lookup (handles cross-module ID collisions).
-                            let module_id_opt = self.entity_name_to_module.get(&entity.name).copied()
+                            let module_id_opt = self
+                                .entity_name_to_module
+                                .get(&entity.name)
+                                .copied()
                                 .or_else(|| self.entity_map.get(&entity.id).copied());
                             if let Some(module_id) = module_id_opt {
                                 // Create module instance
@@ -5366,6 +5424,31 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // Dot-access output wiring: the instance pre-processing pass creates a wire
+        // `{instance}_{port}` for every output port that is not explicitly bound in
+        // the port map, and registers it in instance_outputs_by_name so that reads
+        // like `instance.port` resolve to it. Connect those wires to the instance
+        // here — without this the wires exist but the instance never drives them
+        // (the emitted SV instance simply omitted its output connections).
+        if let Some(output_ports) = self.instance_outputs_by_name.get(&instance.name) {
+            for (key, sig_id) in output_ports.clone() {
+                // `key` is "port" for scalar outputs or "port__field..." for
+                // flattened struct outputs, matching the child's flattened port name.
+                let base_port = key
+                    .split(FIELD_SEPARATOR)
+                    .next()
+                    .unwrap_or(key.as_str())
+                    .to_string();
+                let explicitly_connected = instance.connections.iter().any(|c| c.port == base_port);
+                if !explicitly_connected && !connections.contains_key(&key) {
+                    connections.insert(
+                        key.clone(),
+                        Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(sig_id))),
+                    );
+                }
+            }
+        }
+
         // Convert safety config from HIR instance to MIR safety context
         let safety_context = instance.safety_config.as_ref().map(convert_safety_config);
 
@@ -5667,10 +5750,7 @@ impl<'hir> HirToMir<'hir> {
     ///
     /// The body can contain arbitrary statements: if/else, match, nested loops,
     /// signal declarations, etc. — all are handled via `substitute_hir_variable_in_stmt`.
-    fn unroll_while_loop(
-        &mut self,
-        while_stmt: &hir::HirWhileStatement,
-    ) -> Option<Statement> {
+    fn unroll_while_loop(&mut self, while_stmt: &hir::HirWhileStatement) -> Option<Statement> {
         // Step 1: Analyze condition to extract (var_name, var_id, comparison_op, bound)
         let (var_name, var_id, bound, is_strict_lt) =
             match self.analyze_while_condition(&while_stmt.condition) {
@@ -5687,8 +5767,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Step 2: Find the update statement and extract the step value.
         // Look for patterns like `var = var + STEP` or `var = var - STEP`.
-        let (step, update_indices) =
-            self.find_while_update(&while_stmt.body, &var_name, var_id);
+        let (step, update_indices) = self.find_while_update(&while_stmt.body, &var_name, var_id);
 
         // Step 3: Determine initial value.
         // Check if the while loop's preceding context set the variable. For now,
@@ -5728,12 +5807,8 @@ impl<'hir> HirToMir<'hir> {
                     continue; // skip the counter update
                 }
 
-                let substituted = Self::substitute_hir_variable_in_stmt(
-                    body_stmt,
-                    var_id,
-                    &var_name,
-                    current,
-                );
+                let substituted =
+                    Self::substitute_hir_variable_in_stmt(body_stmt, var_id, &var_name, current);
 
                 // Convert substituted HIR statement to MIR
                 if let Some(mir_stmt) = self.convert_statement(&substituted) {
@@ -5759,6 +5834,7 @@ impl<'hir> HirToMir<'hir> {
     ///   - `var < CONST`  → (var_name, var_id, CONST, true)
     ///   - `var <= CONST` → (var_name, var_id, CONST, false)
     ///   - `var >= CONST` with step < 0 is also supported
+    ///
     /// Returns (var_name, var_id, bound, is_strict_lt)
     fn analyze_while_condition(
         &self,
@@ -5816,7 +5892,9 @@ impl<'hir> HirToMir<'hir> {
                     // Also check event block bodies for let statements
                     for imp in &hir.implementations {
                         for event_block in &imp.event_blocks {
-                            if let Some(name) = Self::find_variable_name_in_stmts(&event_block.statements, *var_id) {
+                            if let Some(name) =
+                                Self::find_variable_name_in_stmts(&event_block.statements, *var_id)
+                            {
                                 return Some((name, *var_id));
                             }
                         }
@@ -5830,14 +5908,19 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Search a statement list for a Let statement that declares the given VariableId.
-    fn find_variable_name_in_stmts(stmts: &[hir::HirStatement], var_id: hir::VariableId) -> Option<String> {
+    fn find_variable_name_in_stmts(
+        stmts: &[hir::HirStatement],
+        var_id: hir::VariableId,
+    ) -> Option<String> {
         for stmt in stmts {
             match stmt {
                 hir::HirStatement::Let(let_stmt) if let_stmt.id == var_id => {
                     return Some(let_stmt.name.clone());
                 }
                 hir::HirStatement::If(if_stmt) => {
-                    if let Some(name) = Self::find_variable_name_in_stmts(&if_stmt.then_statements, var_id) {
+                    if let Some(name) =
+                        Self::find_variable_name_in_stmts(&if_stmt.then_statements, var_id)
+                    {
                         return Some(name);
                     }
                     if let Some(ref else_stmts) = if_stmt.else_statements {
@@ -5872,7 +5955,8 @@ impl<'hir> HirToMir<'hir> {
         for (idx, stmt) in body.iter().enumerate() {
             if let hir::HirStatement::Assignment(assign) = stmt {
                 // Check if LHS is the loop variable (must be Variable, not Signal)
-                let lhs_is_var = matches!(&assign.lhs, hir::HirLValue::Variable(id) if *id == var_id);
+                let lhs_is_var =
+                    matches!(&assign.lhs, hir::HirLValue::Variable(id) if *id == var_id);
 
                 if lhs_is_var {
                     // Check RHS for var + STEP pattern
@@ -5907,7 +5991,8 @@ impl<'hir> HirToMir<'hir> {
             for imp in &hir.implementations {
                 // Check event block bodies for let statements
                 for event_block in &imp.event_blocks {
-                    if let Some(val) = self.find_let_init_in_stmts(&event_block.statements, var_id) {
+                    if let Some(val) = self.find_let_init_in_stmts(&event_block.statements, var_id)
+                    {
                         return val;
                     }
                 }
@@ -5918,14 +6003,19 @@ impl<'hir> HirToMir<'hir> {
 
     /// Recursively search statements for a Let declaration with the given VariableId
     /// and return its compile-time initial value.
-    fn find_let_init_in_stmts(&self, stmts: &[hir::HirStatement], var_id: hir::VariableId) -> Option<i64> {
+    fn find_let_init_in_stmts(
+        &self,
+        stmts: &[hir::HirStatement],
+        var_id: hir::VariableId,
+    ) -> Option<i64> {
         for stmt in stmts {
             match stmt {
                 hir::HirStatement::Let(let_stmt) if let_stmt.id == var_id => {
                     return self.eval_const_hir_expression(&let_stmt.value);
                 }
                 hir::HirStatement::If(if_stmt) => {
-                    if let Some(val) = self.find_let_init_in_stmts(&if_stmt.then_statements, var_id) {
+                    if let Some(val) = self.find_let_init_in_stmts(&if_stmt.then_statements, var_id)
+                    {
                         return Some(val);
                     }
                     if let Some(ref else_stmts) = if_stmt.else_statements {
@@ -6524,10 +6614,7 @@ impl<'hir> HirToMir<'hir> {
                                     continue;
                                 }
                                 let substituted = Self::substitute_hir_variable_in_stmt(
-                                    body_stmt,
-                                    var_id,
-                                    &var_name,
-                                    current,
+                                    body_stmt, var_id, &var_name, current,
                                 );
                                 // Recursively unroll nested loops
                                 match substituted {
@@ -6637,14 +6724,11 @@ impl<'hir> HirToMir<'hir> {
         let scrutinee = self.convert_expression(&match_stmt.expr, 0)?;
 
         // Find the enum definition from the first TupleVariant or Path pattern
-        let enum_def = match_stmt
-            .arms
-            .iter()
-            .find_map(|arm| match &arm.pattern {
-                hir::HirPattern::TupleVariant(enum_name, _, _)
-                | hir::HirPattern::Path(enum_name, _) => self.find_enum_def(enum_name),
-                _ => None,
-            })?;
+        let enum_def = match_stmt.arms.iter().find_map(|arm| match &arm.pattern {
+            hir::HirPattern::TupleVariant(enum_name, _, _)
+            | hir::HirPattern::Path(enum_name, _) => self.find_enum_def(enum_name),
+            _ => None,
+        })?;
 
         let tag_bits = Self::enum_tag_bits(enum_def.variants.len());
         let tag_mask = (1u64 << tag_bits) - 1;
@@ -6674,10 +6758,7 @@ impl<'hir> HirToMir<'hir> {
                     // Register payload extraction expressions for each binding
                     // so that Variable references in the arm body resolve to the extraction
                     for (i, (_name, hir_var_id)) in bindings.iter().enumerate() {
-                        let variant = enum_def
-                            .variants
-                            .iter()
-                            .find(|v| v.name == *variant_name);
+                        let variant = enum_def.variants.iter().find(|v| v.name == *variant_name);
                         let payload_width = variant
                             .and_then(|v| v.associated_data.as_ref())
                             .and_then(|data| data.get(i))
@@ -6687,39 +6768,30 @@ impl<'hir> HirToMir<'hir> {
                         let payload_mask = (1u64 << payload_width) - 1;
 
                         // Payload extraction: (scrutinee >> tag_bits) & payload_mask
-                        let extraction = Expression::with_unknown_type(
-                            ExpressionKind::Binary {
-                                op: BinaryOp::BitwiseAnd,
-                                left: Box::new(Expression::with_unknown_type(
-                                    ExpressionKind::Binary {
-                                        op: BinaryOp::RightShift,
-                                        left: Box::new(scrutinee.clone()),
-                                        right: Box::new(Expression::with_unknown_type(
-                                            ExpressionKind::Literal(Value::Integer(
-                                                tag_bits as i64,
-                                            )),
-                                        )),
-                                    },
-                                )),
+                        let extraction = Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::RightShift,
+                                left: Box::new(scrutinee.clone()),
                                 right: Box::new(Expression::with_unknown_type(
-                                    ExpressionKind::Literal(Value::Integer(
-                                        payload_mask as i64,
-                                    )),
+                                    ExpressionKind::Literal(Value::Integer(tag_bits as i64)),
                                 )),
-                            },
-                        );
+                            })),
+                            right: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(payload_mask as i64)),
+                            )),
+                        });
 
-                        self.payload_var_expressions
-                            .insert(*hir_var_id, extraction);
+                        self.payload_var_expressions.insert(*hir_var_id, extraction);
                     }
 
                     // Build the arm condition: tag_expr == discriminant
                     let condition = Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left: Box::new(tag_expr.clone()),
-                        right: Box::new(Expression::with_unknown_type(
-                            ExpressionKind::Literal(Value::Integer(discriminant)),
-                        )),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::Integer(discriminant),
+                        ))),
                     });
 
                     // Convert arm body statements
@@ -6752,9 +6824,9 @@ impl<'hir> HirToMir<'hir> {
                     let condition = Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left: Box::new(tag_expr.clone()),
-                        right: Box::new(Expression::with_unknown_type(
-                            ExpressionKind::Literal(Value::Integer(discriminant)),
-                        )),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::Integer(discriminant),
+                        ))),
                     });
 
                     let arm_body = self.convert_statements(&arm.statements);
@@ -7189,7 +7261,9 @@ impl<'hir> HirToMir<'hir> {
                             if let Some(expr) = self.try_resolve_flattened_array_index(base, index)
                             {
                                 result_stack.push(Some(expr));
-                            } else if let Some(expr) = self.try_build_dynamic_array_mux_tree(base, index, depth) {
+                            } else if let Some(expr) =
+                                self.try_build_dynamic_array_mux_tree(base, index, depth)
+                            {
                                 // Dynamic index into flattened array — balanced MUX tree
                                 result_stack.push(Some(expr));
                             } else {
@@ -7446,40 +7520,63 @@ impl<'hir> HirToMir<'hir> {
                             // Try constant evaluation, otherwise use shift/mask.
                             let base_const = match &base.kind {
                                 ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
-                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => {
+                                    Some(*value)
+                                }
                                 _ => None,
                             };
                             let high_const = match &high.kind {
                                 ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
-                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => {
+                                    Some(*value)
+                                }
                                 _ => None,
                             };
                             let low_const = match &low.kind {
                                 ExpressionKind::Literal(Value::Integer(v)) => Some(*v as u64),
-                                ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+                                ExpressionKind::Literal(Value::BitVector { value, .. }) => {
+                                    Some(*value)
+                                }
                                 _ => None,
                             };
 
-                            if let (Some(base_val), Some(high_val), Some(low_val)) = (base_const, high_const, low_const) {
+                            if let (Some(base_val), Some(high_val), Some(low_val)) =
+                                (base_const, high_const, low_const)
+                            {
                                 // All constants — evaluate at compile time
                                 let width = (high_val - low_val + 1) as usize;
-                                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                let mask = if width >= 64 {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << width) - 1
+                                };
                                 let result = (base_val >> low_val) & mask;
                                 result_stack.push(Some(Expression::with_unknown_type(
-                                    ExpressionKind::Literal(Value::BitVector { width, value: result }),
+                                    ExpressionKind::Literal(Value::BitVector {
+                                        width,
+                                        value: result,
+                                    }),
                                 )));
                             } else {
                                 // Dynamic base — use shift/mask: (base >> low) & mask
-                                let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
-                                    op: BinaryOp::RightShift,
-                                    left: Box::new(base),
-                                    right: Box::new(low.clone()),
-                                });
+                                let shifted =
+                                    Expression::with_unknown_type(ExpressionKind::Binary {
+                                        op: BinaryOp::RightShift,
+                                        left: Box::new(base),
+                                        right: Box::new(low.clone()),
+                                    });
                                 if let (Some(h), Some(l)) = (high_const, low_const) {
                                     let width = (h - l + 1) as usize;
-                                    let mask_val = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                    let mask_val = if width >= 64 {
+                                        u64::MAX
+                                    } else {
+                                        (1u64 << width) - 1
+                                    };
                                     let mask = Expression::with_unknown_type(
-                                        ExpressionKind::Literal(Value::BitVector { width, value: mask_val }),
+                                        ExpressionKind::Literal(Value::BitVector {
+                                            width,
+                                            value: mask_val,
+                                        }),
                                     );
                                     result_stack.push(Some(Expression::with_unknown_type(
                                         ExpressionKind::Binary {
@@ -7963,7 +8060,10 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Check const_evaluator bindings (e.g., N bound during trait inlining)
-                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                if let Ok(val) = self
+                    .const_evaluator
+                    .eval(&hir::HirExpression::GenericParam(param_name.clone()))
+                {
                     if let Some(n) = val.as_nat() {
                         return Some(Expression::new(
                             ExpressionKind::Literal(Value::Integer(n as i64)),
@@ -8003,8 +8103,18 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                 }
-                // If not found, return a literal 0 as fallback
-                // This will be properly resolved during monomorphization/type checking
+                // Not resolvable: this identifier does not name any port, signal,
+                // variable, constant, or generic in scope. Emitting 0 here would
+                // silently produce wrong hardware, so record a build-failing error.
+                // (Still return 0 so conversion can continue and report ALL errors.)
+                let entity_name = self.current_entity_name();
+                self.conversion_errors.push((
+                    entity_name.clone(),
+                    format!(
+                        "undefined identifier `{}` in entity `{}`",
+                        param_name, entity_name
+                    ),
+                ));
                 Some(Expression::new(
                     ExpressionKind::Literal(Value::Integer(0)),
                     ty,
@@ -8045,87 +8155,98 @@ impl<'hir> HirToMir<'hir> {
                 // Skip trait resolution when impl_style is Primitive — this is used by
                 // stdlib entity internals (e.g., std_adder) to avoid recursive resolution,
                 // and by users who want direct hardware mapping: #[impl_style::primitive]
-                trace!("[TRAIT_RESOLVE] Binary op={:?}, impl_style={:?}", binary.op, binary.impl_style);
+                trace!(
+                    "[TRAIT_RESOLVE] Binary op={:?}, impl_style={:?}",
+                    binary.op,
+                    binary.impl_style
+                );
                 if binary.impl_style != hir::ImplStyle::Primitive {
-                let resolve_result = self.try_resolve_trait_operator(&binary.op, &binary.left);
-                trace!("[TRAIT_RESOLVE] try_resolve_trait_operator result: {:?}", resolve_result);
-                if let Some((type_name, trait_name, method_name)) = resolve_result
-                {
+                    let resolve_result = self.try_resolve_trait_operator(&binary.op, &binary.left);
                     trace!(
-                        "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
-                        trait_name,
-                        method_name,
-                        type_name,
-                        binary.op
+                        "[TRAIT_RESOLVE] try_resolve_trait_operator result: {:?}",
+                        resolve_result
                     );
-
-                    // BUG #200 DEBUG: Print what the operands look like BEFORE inlining
-                    trace!(
-                        "[BUG #200 TRAIT_OP] left_expr: {:?}",
-                        std::mem::discriminant(&*binary.left)
-                    );
-                    trace!(
-                        "[BUG #200 TRAIT_OP] right_expr: {:?}",
-                        std::mem::discriminant(&*binary.right)
-                    );
-                    // Show more details for specific expression types
-                    if let hir::HirExpression::Variable(var_id) = &*binary.left {
-                        trace!("[BUG #200 TRAIT_OP]   left is Variable({:?})", var_id);
-                    }
-                    if let hir::HirExpression::Cast(c) = &*binary.left {
+                    if let Some((type_name, trait_name, method_name)) = resolve_result {
                         trace!(
-                            "[BUG #200 TRAIT_OP]   left is Cast({:?} -> {:?})",
-                            std::mem::discriminant(&*c.expr),
-                            c.target_type
+                            "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
+                            trait_name,
+                            method_name,
+                            type_name,
+                            binary.op
                         );
-                    }
-                    if let hir::HirExpression::Variable(var_id) = &*binary.right {
-                        trace!("[BUG #200 TRAIT_OP]   right is Variable({:?})", var_id);
-                    }
-                    if let hir::HirExpression::Cast(c) = &*binary.right {
-                        trace!(
-                            "[BUG #200 TRAIT_OP]   right is Cast({:?} -> {:?})",
-                            std::mem::discriminant(&*c.expr),
-                            c.target_type
-                        );
-                    }
 
-                    // Try to inline the trait method body
-                    trace!("[TRAIT_RESOLVE] Attempting inline_trait_method for {}::{}({})", trait_name, method_name, type_name);
-                    if let Some(result) = self.inline_trait_method(
-                        &type_name,
-                        trait_name,
-                        method_name,
-                        &binary.left,
-                        &binary.right,
-                    ) {
+                        // BUG #200 DEBUG: Print what the operands look like BEFORE inlining
                         trace!(
-                            "[TRAIT_OP] Successfully inlined {}::{} for type '{}'",
+                            "[BUG #200 TRAIT_OP] left_expr: {:?}",
+                            std::mem::discriminant(&*binary.left)
+                        );
+                        trace!(
+                            "[BUG #200 TRAIT_OP] right_expr: {:?}",
+                            std::mem::discriminant(&*binary.right)
+                        );
+                        // Show more details for specific expression types
+                        if let hir::HirExpression::Variable(var_id) = &*binary.left {
+                            trace!("[BUG #200 TRAIT_OP]   left is Variable({:?})", var_id);
+                        }
+                        if let hir::HirExpression::Cast(c) = &*binary.left {
+                            trace!(
+                                "[BUG #200 TRAIT_OP]   left is Cast({:?} -> {:?})",
+                                std::mem::discriminant(&*c.expr),
+                                c.target_type
+                            );
+                        }
+                        if let hir::HirExpression::Variable(var_id) = &*binary.right {
+                            trace!("[BUG #200 TRAIT_OP]   right is Variable({:?})", var_id);
+                        }
+                        if let hir::HirExpression::Cast(c) = &*binary.right {
+                            trace!(
+                                "[BUG #200 TRAIT_OP]   right is Cast({:?} -> {:?})",
+                                std::mem::discriminant(&*c.expr),
+                                c.target_type
+                            );
+                        }
+
+                        // Try to inline the trait method body
+                        trace!(
+                            "[TRAIT_RESOLVE] Attempting inline_trait_method for {}::{}({})",
                             trait_name,
                             method_name,
                             type_name
                         );
-                        return Some(result);
-                    }
+                        if let Some(result) = self.inline_trait_method(
+                            &type_name,
+                            trait_name,
+                            method_name,
+                            &binary.left,
+                            &binary.right,
+                        ) {
+                            trace!(
+                                "[TRAIT_OP] Successfully inlined {}::{} for type '{}'",
+                                trait_name,
+                                method_name,
+                                type_name
+                            );
+                            return Some(result);
+                        }
 
-                    // If inlining fails, fall back to primitive binary operation.
-                    // The SIR converter will detect float signal types and use
-                    // FLt/FGt/FEq/FAdd/etc. operations accordingly.
-                    trace!(
-                        "[TRAIT_OP] Failed to inline {}::{}, falling back to Binary",
-                        trait_name,
-                        method_name
-                    );
-                    let left = self.convert_expression(&binary.left, depth + 1)?;
-                    let right = self.convert_expression(&binary.right, depth + 1)?;
-                    let left = Box::new(left);
-                    let right = Box::new(right);
-                    let op = self.convert_binary_op(&binary.op, &binary.left);
-                    return Some(Expression::new(
-                        ExpressionKind::Binary { op, left, right },
-                        ty,
-                    ));
-                }
+                        // If inlining fails, fall back to primitive binary operation.
+                        // The SIR converter will detect float signal types and use
+                        // FLt/FGt/FEq/FAdd/etc. operations accordingly.
+                        trace!(
+                            "[TRAIT_OP] Failed to inline {}::{}, falling back to Binary",
+                            trait_name,
+                            method_name
+                        );
+                        let left = self.convert_expression(&binary.left, depth + 1)?;
+                        let right = self.convert_expression(&binary.right, depth + 1)?;
+                        let left = Box::new(left);
+                        let right = Box::new(right);
+                        let op = self.convert_binary_op(&binary.op, &binary.left);
+                        return Some(Expression::new(
+                            ExpressionKind::Binary { op, left, right },
+                            ty,
+                        ));
+                    }
                 } // end if impl_style != Primitive
 
                 // Fall back to primitive binary operation
@@ -8244,8 +8365,7 @@ impl<'hir> HirToMir<'hir> {
                                 .find(|(_, v)| v.name == variant_name)
                             {
                                 if variant.associated_data.is_some() && !call.args.is_empty() {
-                                    let tag_bits =
-                                        Self::enum_tag_bits(enum_def.variants.len());
+                                    let tag_bits = Self::enum_tag_bits(enum_def.variants.len());
                                     let tag = idx as u64;
 
                                     // Convert the payload argument
@@ -8256,8 +8376,8 @@ impl<'hir> HirToMir<'hir> {
                                     let tag_expr = Expression::with_unknown_type(
                                         ExpressionKind::Literal(Value::Integer(tag as i64)),
                                     );
-                                    let shift_expr = Expression::with_unknown_type(
-                                        ExpressionKind::Binary {
+                                    let shift_expr =
+                                        Expression::with_unknown_type(ExpressionKind::Binary {
                                             op: BinaryOp::LeftShift,
                                             left: Box::new(payload_expr),
                                             right: Box::new(Expression::with_unknown_type(
@@ -8265,8 +8385,7 @@ impl<'hir> HirToMir<'hir> {
                                                     tag_bits as i64,
                                                 )),
                                             )),
-                                        },
-                                    );
+                                        });
                                     return Some(Expression::with_unknown_type(
                                         ExpressionKind::Binary {
                                             op: BinaryOp::BitwiseOr,
@@ -9853,7 +9972,19 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        let struct_def = struct_type?;
+        let Some(struct_def) = struct_type else {
+            // The type name resolves to neither an entity (checked by the Let/assignment
+            // handlers before reaching here) nor a known struct type. Dropping the
+            // expression would silently discard the statement, so fail the build.
+            self.conversion_errors.push((
+                self.current_entity_name(),
+                format!(
+                    "unknown type `{}` in struct literal (not a struct or entity in scope)",
+                    type_name
+                ),
+            ));
+            return None;
+        };
 
         // Convert field values and pack them into a bit vector
         // For now, create a binary expression that concatenates the field values
@@ -9863,7 +9994,16 @@ impl<'hir> HirToMir<'hir> {
         let mut field_exprs = Vec::new();
         for struct_field in &struct_def.fields {
             // Find the corresponding field init
-            let field_init = fields.iter().find(|f| f.name == struct_field.name)?;
+            let Some(field_init) = fields.iter().find(|f| f.name == struct_field.name) else {
+                self.conversion_errors.push((
+                    self.current_entity_name(),
+                    format!(
+                        "missing field `{}` in struct literal `{}`",
+                        struct_field.name, type_name
+                    ),
+                ));
+                return None;
+            };
             let field_expr = self.convert_expression(&field_init.value, 0)?;
             field_exprs.push(field_expr);
         }
@@ -10093,12 +10233,11 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirPattern::TupleVariant(_enum_name, variant_name, bindings) => {
                     // Enum variant with payload in match expression context
                     // Compare tag bits and bind payload variables
-                    if let Some(enum_def) = arms.iter().find_map(|a| {
-                        match &a.pattern {
-                            hir::HirPattern::TupleVariant(en, _, _)
-                            | hir::HirPattern::Path(en, _) => self.find_enum_def(en.as_str()),
-                            _ => None,
+                    if let Some(enum_def) = arms.iter().find_map(|a| match &a.pattern {
+                        hir::HirPattern::TupleVariant(en, _, _) | hir::HirPattern::Path(en, _) => {
+                            self.find_enum_def(en.as_str())
                         }
+                        _ => None,
                     }) {
                         let tag_bits = Self::enum_tag_bits(enum_def.variants.len());
                         let tag_mask = (1u64 << tag_bits) - 1;
@@ -10110,10 +10249,8 @@ impl<'hir> HirToMir<'hir> {
 
                         // Register payload extraction expressions
                         for (i, (_name, hir_var_id)) in bindings.iter().enumerate() {
-                            let variant = enum_def
-                                .variants
-                                .iter()
-                                .find(|v| v.name == *variant_name);
+                            let variant =
+                                enum_def.variants.iter().find(|v| v.name == *variant_name);
                             let payload_width = variant
                                 .and_then(|v| v.associated_data.as_ref())
                                 .and_then(|data| data.get(i))
@@ -10121,20 +10258,18 @@ impl<'hir> HirToMir<'hir> {
                                 .unwrap_or(8);
                             let payload_mask = (1u64 << payload_width) - 1;
 
-                            let extraction = Expression::with_unknown_type(
-                                ExpressionKind::Binary {
+                            let extraction =
+                                Expression::with_unknown_type(ExpressionKind::Binary {
                                     op: BinaryOp::BitwiseAnd,
                                     left: Box::new(Expression::with_unknown_type(
                                         ExpressionKind::Binary {
                                             op: BinaryOp::RightShift,
                                             left: Box::new(match_value_expr.clone()),
-                                            right: Box::new(
-                                                Expression::with_unknown_type(
-                                                    ExpressionKind::Literal(Value::Integer(
-                                                        tag_bits as i64,
-                                                    )),
-                                                ),
-                                            ),
+                                            right: Box::new(Expression::with_unknown_type(
+                                                ExpressionKind::Literal(Value::Integer(
+                                                    tag_bits as i64,
+                                                )),
+                                            )),
                                         },
                                     )),
                                     right: Box::new(Expression::with_unknown_type(
@@ -10142,22 +10277,19 @@ impl<'hir> HirToMir<'hir> {
                                             payload_mask as i64,
                                         )),
                                     )),
-                                },
-                            );
-                            self.payload_var_expressions
-                                .insert(*hir_var_id, extraction);
+                                });
+                            self.payload_var_expressions.insert(*hir_var_id, extraction);
                         }
 
                         // Tag comparison: (scrutinee & tag_mask) == discriminant
-                        let left = Box::new(Expression::with_unknown_type(
-                            ExpressionKind::Binary {
+                        let left =
+                            Box::new(Expression::with_unknown_type(ExpressionKind::Binary {
                                 op: BinaryOp::BitwiseAnd,
                                 left: Box::new(match_value_expr.clone()),
                                 right: Box::new(Expression::with_unknown_type(
                                     ExpressionKind::Literal(Value::Integer(tag_mask as i64)),
                                 )),
-                            },
-                        ));
+                            }));
                         let right = Box::new(Expression::with_unknown_type(
                             ExpressionKind::Literal(Value::Integer(discriminant)),
                         ));
@@ -17326,7 +17458,11 @@ impl<'hir> HirToMir<'hir> {
         }
         // Search module HIRs (stdlib trait definitions like Add, Mul, etc.)
         for (_path, module_hir) in &self.module_hirs {
-            if let Some(def) = module_hir.trait_definitions.iter().find(|t| t.name == trait_name) {
+            if let Some(def) = module_hir
+                .trait_definitions
+                .iter()
+                .find(|t| t.name == trait_name)
+            {
                 return Some(def);
             }
         }
@@ -17446,11 +17582,19 @@ impl<'hir> HirToMir<'hir> {
         // Extract generic binding info before releasing the borrow on self
         let impl_generic_binding: Option<(String, usize)> = if !trait_impl.generics.is_empty() {
             if let Some(width) = Self::extract_bit_width(type_name) {
-                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) = &trait_impl.target {
+                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) =
+                    &trait_impl.target
+                {
                     Some((param_name.clone(), width))
-                } else { None }
-            } else { None }
-        } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         trace!(
             "[TRAIT_INLINE] Found {} parameters and {} body statements",
@@ -17472,17 +17616,28 @@ impl<'hir> HirToMir<'hir> {
         // e.g., `impl<const N: usize> Mul for bit<N>` with type_name="bit[8]" → bind N=8
         let mut bound_generics: Vec<String> = Vec::new();
         if let Some((param_name, width)) = impl_generic_binding {
-            self.const_evaluator.bind(param_name.clone(), ConstValue::Nat(width));
-            trace!("[TRAIT_INLINE] Bound generic {}={} for type '{}'", param_name, width, type_name);
+            self.const_evaluator
+                .bind(param_name.clone(), ConstValue::Nat(width));
+            trace!(
+                "[TRAIT_INLINE] Bound generic {}={} for type '{}'",
+                param_name,
+                width,
+                type_name
+            );
             bound_generics.push(param_name);
         }
         // Fallback: also bind WIDTH for backward compatibility with `impl Mul for bit`
         let mut bound_width = false;
         if bound_generics.is_empty() {
             if let Some(width) = Self::extract_bit_width(type_name) {
-                self.const_evaluator.bind("WIDTH".to_string(), ConstValue::Nat(width));
+                self.const_evaluator
+                    .bind("WIDTH".to_string(), ConstValue::Nat(width));
                 bound_width = true;
-                trace!("[TRAIT_INLINE] Bound WIDTH={} for type '{}'", width, type_name);
+                trace!(
+                    "[TRAIT_INLINE] Bound WIDTH={} for type '{}'",
+                    width,
+                    type_name
+                );
             }
         }
 
@@ -17511,12 +17666,10 @@ impl<'hir> HirToMir<'hir> {
                     // Resolve parameterized types using current const bindings
                     // e.g., bit<N * 2> with N=8 → bit[16]
                     let resolved_type = match &let_stmt.var_type {
-                        hir::HirType::BitExpr(expr) => {
-                            match self.try_eval_const_expr(expr) {
-                                Some(val) => hir::HirType::Bit(val as u32),
-                                None => let_stmt.var_type.clone(),
-                            }
-                        }
+                        hir::HirType::BitExpr(expr) => match self.try_eval_const_expr(expr) {
+                            Some(val) => hir::HirType::Bit(val as u32),
+                            None => let_stmt.var_type.clone(),
+                        },
                         other => other.clone(),
                     };
 
@@ -17535,11 +17688,8 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirStatement::Expression(expr) => {
                     // Substitute parameters in the expression
-                    let substituted = self.substitute_expression_with_var_map(
-                        expr,
-                        &param_map,
-                        &var_id_to_name,
-                    );
+                    let substituted =
+                        self.substitute_expression_with_var_map(expr, &param_map, &var_id_to_name);
                     if let Some(subst_expr) = substituted {
                         if is_last {
                             // Last expression = return value
@@ -17552,11 +17702,8 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 hir::HirStatement::Return(Some(expr)) => {
-                    let substituted = self.substitute_expression_with_var_map(
-                        expr,
-                        &param_map,
-                        &var_id_to_name,
-                    );
+                    let substituted =
+                        self.substitute_expression_with_var_map(expr, &param_map, &var_id_to_name);
                     if let Some(subst_expr) = substituted {
                         result = if let Some(ctx) = module_ctx {
                             self.convert_hir_expr_for_module(&subst_expr, ctx, depth + 1)
@@ -17580,9 +17727,8 @@ impl<'hir> HirToMir<'hir> {
                             assignment_type: assign.assignment_type.clone(),
                             rhs: subst_rhs,
                         };
-                        let _ = self.convert_statement(&hir::HirStatement::Assignment(
-                            substituted_assign,
-                        ));
+                        let _ = self
+                            .convert_statement(&hir::HirStatement::Assignment(substituted_assign));
                     }
                 }
                 hir::HirStatement::Barrier(barrier) => {
@@ -17616,7 +17762,7 @@ impl<'hir> HirToMir<'hir> {
     /// Extract bit width from a type name like "bit[8]" → Some(8)
     fn extract_bit_width(type_name: &str) -> Option<usize> {
         if type_name.starts_with("bit[") && type_name.ends_with(']') {
-            type_name[4..type_name.len()-1].parse().ok()
+            type_name[4..type_name.len() - 1].parse().ok()
         } else {
             None
         }
@@ -17686,11 +17832,19 @@ impl<'hir> HirToMir<'hir> {
         // Extract generic binding info before releasing the borrow on self
         let impl_generic_binding: Option<(String, usize)> = if !trait_impl.generics.is_empty() {
             if let Some(width) = Self::extract_bit_width(type_name) {
-                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) = &trait_impl.target {
+                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) =
+                    &trait_impl.target
+                {
                     Some((param_name.clone(), width))
-                } else { None }
-            } else { None }
-        } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         trace!(
             "[TRAIT_INLINE_UNARY] Found {} parameters and {} body statements",
@@ -17708,7 +17862,8 @@ impl<'hir> HirToMir<'hir> {
         // Bind impl generics for the concrete type
         let mut bound_generics: Vec<String> = Vec::new();
         if let Some((param_name, width)) = impl_generic_binding {
-            self.const_evaluator.bind(param_name.clone(), ConstValue::Nat(width));
+            self.const_evaluator
+                .bind(param_name.clone(), ConstValue::Nat(width));
             bound_generics.push(param_name);
         }
 
@@ -18145,11 +18300,19 @@ impl<'hir> HirToMir<'hir> {
             // The trait impl's body (in stdlib) instantiates the appropriate entity
             // (e.g., std_multiplier<N>) with barrier annotations for NCL/sync support.
             hir::HirType::Bit(width) => {
-                trace!("[TRAIT_OP_DEBUG] Bit({}) -> mapping to 'bit[{}]' for trait lookup", width, width);
+                trace!(
+                    "[TRAIT_OP_DEBUG] Bit({}) -> mapping to 'bit[{}]' for trait lookup",
+                    width,
+                    width
+                );
                 format!("bit[{}]", width)
             }
             hir::HirType::BitParam(param) => {
-                trace!("[TRAIT_OP_DEBUG] BitParam({}) -> mapping to 'bit[{}]' for trait lookup", param, param);
+                trace!(
+                    "[TRAIT_OP_DEBUG] BitParam({}) -> mapping to 'bit[{}]' for trait lookup",
+                    param,
+                    param
+                );
                 format!("bit[{}]", param)
             }
             // Other built-in types use primitive operators
@@ -18424,31 +18587,55 @@ impl<'hir> HirToMir<'hir> {
             }
             // Parametric types - try to resolve via const_evaluator, fall back to BitParam
             hir::HirType::BitParam(param_name) => {
-                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                if let Ok(val) = self
+                    .const_evaluator
+                    .eval(&hir::HirExpression::GenericParam(param_name.clone()))
+                {
                     DataType::Bit(val.as_nat().unwrap_or(8))
                 } else {
-                    DataType::BitParam { param: param_name.clone(), default: 8 }
+                    DataType::BitParam {
+                        param: param_name.clone(),
+                        default: 8,
+                    }
                 }
             }
             hir::HirType::LogicParam(param_name) => {
-                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                if let Ok(val) = self
+                    .const_evaluator
+                    .eval(&hir::HirExpression::GenericParam(param_name.clone()))
+                {
                     DataType::Logic(val.as_nat().unwrap_or(8))
                 } else {
-                    DataType::LogicParam { param: param_name.clone(), default: 8 }
+                    DataType::LogicParam {
+                        param: param_name.clone(),
+                        default: 8,
+                    }
                 }
             }
             hir::HirType::IntParam(param_name) => {
-                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                if let Ok(val) = self
+                    .const_evaluator
+                    .eval(&hir::HirExpression::GenericParam(param_name.clone()))
+                {
                     DataType::Int(val.as_nat().unwrap_or(32))
                 } else {
-                    DataType::IntParam { param: param_name.clone(), default: 32 }
+                    DataType::IntParam {
+                        param: param_name.clone(),
+                        default: 32,
+                    }
                 }
             }
             hir::HirType::NatParam(param_name) => {
-                if let Ok(val) = self.const_evaluator.eval(&hir::HirExpression::GenericParam(param_name.clone())) {
+                if let Ok(val) = self
+                    .const_evaluator
+                    .eval(&hir::HirExpression::GenericParam(param_name.clone()))
+                {
                     DataType::Nat(val.as_nat().unwrap_or(32))
                 } else {
-                    DataType::NatParam { param: param_name.clone(), default: 32 }
+                    DataType::NatParam {
+                        param: param_name.clone(),
+                        default: 32,
+                    }
                 }
             }
             // Expression-based types - need const evaluation
@@ -19284,15 +19471,10 @@ impl<'hir> HirToMir<'hir> {
                                         if let hir::HirType::Reset { polarity, .. } =
                                             &port.port_type
                                         {
-                                            if let Some(&port_id_mir) =
-                                                self.port_map.get(port_id)
-                                            {
-                                                let port_ref =
-                                                    Expression::with_unknown_type(
-                                                        ExpressionKind::Ref(LValue::Port(
-                                                            port_id_mir,
-                                                        )),
-                                                    );
+                                            if let Some(&port_id_mir) = self.port_map.get(port_id) {
+                                                let port_ref = Expression::with_unknown_type(
+                                                    ExpressionKind::Ref(LValue::Port(port_id_mir)),
+                                                );
                                                 // active.high + .active => direct
                                                 // active.high + .inactive => negate
                                                 // active.low + .active => negate
@@ -19300,7 +19482,10 @@ impl<'hir> HirToMir<'hir> {
                                                 let needs_negate = matches!(
                                                     (polarity, field_name),
                                                     (hir::HirResetPolarity::ActiveHigh, "inactive")
-                                                        | (hir::HirResetPolarity::ActiveLow, "active")
+                                                        | (
+                                                            hir::HirResetPolarity::ActiveLow,
+                                                            "active"
+                                                        )
                                                 );
                                                 if needs_negate {
                                                     return Some(Expression::unary(
@@ -20646,10 +20831,7 @@ impl<'hir> HirToMir<'hir> {
     /// Get the total payload width in bits for a specific enum variant
     fn variant_payload_width(variant: &hir::HirEnumVariant) -> u32 {
         if let Some(ref data_types) = variant.associated_data {
-            data_types
-                .iter()
-                .map(|t| Self::hir_type_width_static(t))
-                .sum()
+            data_types.iter().map(Self::hir_type_width_static).sum()
         } else {
             0
         }
@@ -24471,13 +24653,13 @@ impl<'hir> HirToMir<'hir> {
             if group_fields.len() == 1 && group_fields[0].field_path.len() == 1 {
                 let field = &group_fields[0];
                 let elem_expr = if is_signal {
-                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
-                        SignalId(field.id),
-                    )))
+                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(SignalId(
+                        field.id,
+                    ))))
                 } else {
-                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(
-                        PortId(field.id),
-                    )))
+                    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(PortId(
+                        field.id,
+                    ))))
                 };
                 element_exprs.push((*array_idx, elem_expr));
             } else {
@@ -24515,37 +24697,35 @@ impl<'hir> HirToMir<'hir> {
             let select = if let Some(ref lv) = index_lvalue {
                 Expression::with_unknown_type(ExpressionKind::Ref(LValue::BitSelect {
                     base: Box::new(lv.clone()),
-                    index: Box::new(Expression::with_unknown_type(
-                        ExpressionKind::Literal(Value::Integer(bit as i64)),
-                    )),
+                    index: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                        Value::Integer(bit as i64),
+                    ))),
                 }))
             } else {
                 let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::RightShift,
                     left: Box::new(mir_index.clone()),
-                    right: Box::new(Expression::with_unknown_type(
-                        ExpressionKind::Literal(Value::Integer(bit as i64)),
-                    )),
+                    right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                        Value::Integer(bit as i64),
+                    ))),
                 });
                 Expression::with_unknown_type(ExpressionKind::Binary {
                     op: BinaryOp::BitwiseAnd,
                     left: Box::new(shifted),
-                    right: Box::new(Expression::with_unknown_type(
-                        ExpressionKind::Literal(Value::Integer(1)),
-                    )),
+                    right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                        Value::Integer(1),
+                    ))),
                 })
             };
 
             for pair in current_level.chunks(2) {
                 let lo = pair[0].clone();
                 let hi = pair[1].clone();
-                next_level.push(Expression::with_unknown_type(
-                    ExpressionKind::Conditional {
-                        cond: Box::new(select.clone()),
-                        then_expr: Box::new(hi),
-                        else_expr: Box::new(lo),
-                    },
-                ));
+                next_level.push(Expression::with_unknown_type(ExpressionKind::Conditional {
+                    cond: Box::new(select.clone()),
+                    then_expr: Box::new(hi),
+                    else_expr: Box::new(lo),
+                }));
             }
             current_level = next_level;
         }

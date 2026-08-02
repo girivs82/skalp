@@ -118,6 +118,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 imports: hir.imports.clone(),
                 functions: hir.functions.clone(),
                 safety_definitions: hir.safety_definitions.clone(),
+                unresolved_instances: hir.unresolved_instances.clone(),
+                main_entity_names: hir.main_entity_names.clone(),
             };
 
             // Collect instantiations from current state
@@ -437,6 +439,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             imports: hir.imports.clone(),
             functions: hir.functions.clone(),
             safety_definitions: hir.safety_definitions.clone(),
+            unresolved_instances: hir.unresolved_instances.clone(),
+            main_entity_names: hir.main_entity_names.clone(),
         }
     }
 
@@ -705,7 +709,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 // and connections like `a: a` where the right-side `a` is a Port expression
                 // need to be remapped to the specialized entity's port IDs
                 for connection in &mut new_instance.connections {
-                    connection.expr = self.substitute_expr(&connection.expr, &instantiation.const_args);
+                    connection.expr =
+                        self.substitute_expr(&connection.expr, &instantiation.const_args);
                     connection.expr = self.remap_expr_ports(&connection.expr, port_id_map);
                 }
                 // Also remap port IDs in named generic args (they may reference ports)

@@ -97,6 +97,11 @@ pub struct HirBuilderContext {
     next_for_loop_id: u32,
     next_barrier_stage_id: u32,
 
+    /// Instances whose entity name could not be resolved (instance_name, entity_name).
+    /// Tolerated in the first build pass (entity may come from a pending import);
+    /// checked after the final rebuild pass, where any survivor is a compile error.
+    unresolved_instances: Vec<(String, String)>,
+
     /// Symbol table for name resolution
     symbols: SymbolTable,
 
@@ -318,6 +323,7 @@ impl HirBuilderContext {
             next_import_id: 0,
             next_for_loop_id: 0,
             next_barrier_stage_id: 0,
+            unresolved_instances: Vec::new(),
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -570,7 +576,7 @@ impl HirBuilderContext {
                         hir.implementations.push(implementation);
                     }
                     // Drain any type definitions found inside the impl block
-                    hir.user_defined_types.extend(self.pending_impl_udts.drain(..));
+                    hir.user_defined_types.append(&mut self.pending_impl_udts);
                 }
                 SyntaxKind::ProtocolDecl => {
                     if let Some(protocol) = self.build_protocol(&child) {
@@ -763,6 +769,8 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
+
+        hir.unresolved_instances = std::mem::take(&mut self.unresolved_instances);
 
         if self.errors.is_empty() {
             Ok(hir)
@@ -2114,6 +2122,13 @@ impl HirBuilderContext {
     fn build_instance(&mut self, node: &SyntaxNode) -> Option<HirInstance> {
         let id = InstanceId(0); // TODO: Add instance ID generation
 
+        // `inst` form: port map binds inputs only, outputs are read via dot-access.
+        // Legacy `let` form: outputs may also be bound in the port map.
+        let is_inst_form = node
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .any(|t| t.kind() == SyntaxKind::InstKw);
+
         // Get instance name (first identifier after 'let')
         let tokens: Vec<_> = node
             .children_with_tokens()
@@ -2132,8 +2147,15 @@ impl HirBuilderContext {
             .nth(1)
             .map(|t| t.text().to_string())?;
 
-        // Look up entity ID
-        let entity = *self.symbols.entities.get(&entity_name)?;
+        // Look up entity ID. If the entity is unknown, record it: this is tolerated
+        // in the first build pass (the entity may come from an import that hasn't
+        // been merged yet), but after the final rebuild pass any surviving entry
+        // fails the build instead of silently dropping the instance.
+        let Some(&entity) = self.symbols.entities.get(&entity_name) else {
+            self.unresolved_instances
+                .push((name.clone(), entity_name.clone()));
+            return None;
+        };
 
         // Get the entity definition's generic parameters (clone to avoid borrow issues)
         let entity_generics = self
@@ -2222,6 +2244,51 @@ impl HirBuilderContext {
 
         // Consume any pending safety config from preceding #[implements(...)] attribute
         let safety_config = self.pending_safety_config.take();
+
+        // `inst` form contract checks (uses the entity's declared port directions):
+        //  - outputs must NOT appear in the port map (read them via `name.port`)
+        //  - every input must be connected (no silently floating inputs)
+        if is_inst_form {
+            if let Some(entity_def) = self.built_entities.get(&entity_name) {
+                let span = self.make_span(node);
+                for conn in &connections {
+                    if let Some(port) = entity_def.ports.iter().find(|p| p.name == conn.port) {
+                        if matches!(port.direction, HirPortDirection::Output) {
+                            self.errors.push(HirError {
+                                message: format!(
+                                    "output port `{}` cannot be bound in an `inst` port map — read it with `{}.{}` instead",
+                                    conn.port, name, conn.port
+                                ),
+                                span: span.clone(),
+                            });
+                        }
+                    } else {
+                        self.errors.push(HirError {
+                            message: format!(
+                                "entity `{}` has no port named `{}`",
+                                entity_name, conn.port
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
+                for port in &entity_def.ports {
+                    if matches!(
+                        port.direction,
+                        HirPortDirection::Input | HirPortDirection::Bidirectional
+                    ) && !connections.iter().any(|c| c.port == port.name)
+                    {
+                        self.errors.push(HirError {
+                            message: format!(
+                                "input port `{}` of entity `{}` is not connected in `inst {}`",
+                                port.name, entity_name, name
+                            ),
+                            span: span.clone(),
+                        });
+                    }
+                }
+            }
+        }
 
         Some(HirInstance {
             id,
@@ -2472,7 +2539,8 @@ impl HirBuilderContext {
 
         // Extract the actual initial value expression if present (e.g., `signal x: u64 = expr`).
         // Falls back to zero for bare signal declarations without initializers.
-        let value = self.find_initial_value_expr(node)
+        let value = self
+            .find_initial_value_expr(node)
             .unwrap_or_else(|| HirExpression::Literal(HirLiteral::Integer(0)));
 
         Some(HirLetStatement {
@@ -4491,10 +4559,7 @@ impl HirBuilderContext {
 
     /// Build a while loop statement from a WhileStmt node
     /// Parser creates: WhileStmt -> WhileKw -> condition_expr -> LBrace -> [body] -> RBrace
-    fn build_while_statement(
-        &mut self,
-        node: &SyntaxNode,
-    ) -> Option<HirWhileStatement> {
+    fn build_while_statement(&mut self, node: &SyntaxNode) -> Option<HirWhileStatement> {
         // The condition is the first expression child (before LBrace)
         let mut condition = None;
         let mut body = Vec::new();
@@ -6230,8 +6295,7 @@ impl HirBuilderContext {
                 self.symbols.enter_scope();
                 for (name, var_id) in bindings {
                     self.symbols.variables.insert(name.clone(), *var_id);
-                    self.symbols
-                        .add_to_scope(name, SymbolId::Variable(*var_id));
+                    self.symbols.add_to_scope(name, SymbolId::Variable(*var_id));
                 }
             }
         } else {
@@ -6992,7 +7056,8 @@ impl HirBuilderContext {
                                 | SyntaxKind::MatchExpr
                                 | SyntaxKind::TernaryExpr
                                 | SyntaxKind::ConcatExpr
-                                | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                                | SyntaxKind::ReplicateExpr
+                                | SyntaxKind::SizedCastExpr
                         )
                     });
 
@@ -7029,7 +7094,8 @@ impl HirBuilderContext {
                                         | SyntaxKind::CastExpr
                                         | SyntaxKind::TernaryExpr
                                         | SyntaxKind::ConcatExpr
-                                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                                        | SyntaxKind::ReplicateExpr
+                                        | SyntaxKind::SizedCastExpr
                                 )
                             })
                             .and_then(|n| self.build_expression(n))
@@ -7956,7 +8022,10 @@ impl HirBuilderContext {
     /// Becomes: Cast(Literal(value), Bit(width_expr))
     fn build_sized_cast_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // First child should be the width expression (e.g., ParenExpr containing W2)
-        let width_expr = node.children().next().and_then(|n| self.build_expression(&n));
+        let width_expr = node
+            .children()
+            .next()
+            .and_then(|n| self.build_expression(&n));
 
         // Find the Lifetime token which contains base+digits (e.g., "b0", "hFF", "d15")
         let lifetime_text = node
@@ -8398,7 +8467,8 @@ impl HirBuilderContext {
                                         | SyntaxKind::CastExpr
                                         | SyntaxKind::TernaryExpr
                                         | SyntaxKind::ConcatExpr
-                                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                                        | SyntaxKind::ReplicateExpr
+                                        | SyntaxKind::SizedCastExpr
                                         | SyntaxKind::TupleExpr
                                 )
                             })
@@ -8815,7 +8885,8 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                 )
             })
@@ -9570,7 +9641,8 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::StructLiteral
@@ -13811,7 +13883,8 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                         | SyntaxKind::TernaryExpr
                         | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::SizedCastExpr
                         | SyntaxKind::TupleExpr
                 ) {
                     if let Some(arg_expr) = self.build_expression(&child) {
@@ -14343,13 +14416,12 @@ impl HirBuilderContext {
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
         // Extract generic parameters from impl<...> if present
-        let impl_generics = if let Some(generic_list) =
-            node.first_child_of_kind(SyntaxKind::GenericParamList)
-        {
-            self.parse_generic_params(&generic_list)
-        } else {
-            Vec::new()
-        };
+        let impl_generics =
+            if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+                self.parse_generic_params(&generic_list)
+            } else {
+                Vec::new()
+            };
 
         // Push impl generics into scope so the target type can reference them
         // e.g., `impl<const N: usize> Mul for bit<N>` — N must be in scope for bit<N>
@@ -14378,7 +14450,7 @@ impl HirBuilderContext {
         // First ident token is the trait name, but skip any that are generic param names
         let trait_name = ident_tokens
             .iter()
-            .find(|t| !impl_generics.iter().any(|g| g.name == t.text().to_string()))
+            .find(|t| !impl_generics.iter().any(|g| g.name == t.text()))
             .map(|t| t.text().to_string())
             .unwrap_or_else(|| ident_tokens[0].text().to_string());
 

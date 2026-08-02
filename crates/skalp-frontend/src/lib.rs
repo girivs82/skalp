@@ -157,6 +157,11 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
         anyhow::anyhow!("HIR build failed:\n{}", rendered)
     })?;
 
+    // Record which entities are defined in the main file itself — imports have not
+    // been merged yet, so hir.entities is exactly the main file's entity set.
+    // Used later to scope MIR conversion errors to reachable modules.
+    let main_entity_names: Vec<String> = hir.entities.iter().map(|e| e.name.clone()).collect();
+
     // Resolve and load all dependencies
     let dependencies = resolver
         .resolve_dependencies(&hir)
@@ -180,10 +185,27 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     hir = rebuild_instances_for_all_modules(&hir, file_path, &resolver)
         .context("Failed to rebuild instances with imports")?;
 
+    // All imports are merged and instances rebuilt: any instance whose entity is
+    // still unresolved names an entity that does not exist. Silently dropping it
+    // would emit wrong hardware (the instance simply vanishes), so fail instead.
+    if !hir.unresolved_instances.is_empty() {
+        let details = hir
+            .unresolved_instances
+            .iter()
+            .map(|(inst, entity)| format!("`{}` (instance `{}`)", entity, inst))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "unknown entity in instantiation: {} — no entity with this name exists in the design or its imports",
+            details
+        );
+    }
+
     // Monomorphize
     use monomorphization::MonomorphizationEngine;
     let mut engine = MonomorphizationEngine::new();
-    let monomorphized_hir = engine.monomorphize(&hir);
+    let mut monomorphized_hir = engine.monomorphize(&hir);
+    monomorphized_hir.main_entity_names = main_entity_names;
 
     // Extract all loaded module HIRs from the resolver
     let module_hirs: IndexMap<PathBuf, Hir> = resolver
@@ -444,6 +466,11 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
             });
         }
     }
+
+    // The rebuild pass ran with all imported entities pre-registered, so its
+    // unresolved-instance list is authoritative: anything still unresolved here
+    // names an entity that genuinely does not exist anywhere.
+    final_hir.unresolved_instances = rebuilt_hir.unresolved_instances.clone();
 
     Ok(final_hir)
 }
@@ -2431,6 +2458,8 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         imports: Vec::new(),
         functions: Vec::new(),
         safety_definitions: safety_attributes::ModuleSafetyDefinitions::default(),
+        unresolved_instances: Vec::new(),
+        main_entity_names: Vec::new(),
     })
 }
 

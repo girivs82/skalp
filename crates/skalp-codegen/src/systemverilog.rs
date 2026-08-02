@@ -521,7 +521,15 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     sv.push_str(");\n\n");
 
     // Generate internal signal declarations (MIR already has flattened signals)
+    // Track declared signal names: a name collision (e.g. a user `let` binding named
+    // exactly like an auto-created instance-output wire) must not emit two
+    // declarations of the same wire — that is illegal SystemVerilog.
+    let mut declared_signal_names: HashSet<String> = HashSet::new();
     for signal in &mir_module.signals {
+        if !declared_signal_names.insert(signal.name.clone()) {
+            // Duplicate name: keep the first declaration, skip this one.
+            continue;
+        }
         // Check if this is a memory signal with memory_config
         if let Some(mem_config) = &signal.memory_config {
             // Generate memory-inferrable SystemVerilog with synthesis attributes
@@ -703,6 +711,12 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             // Check if this target has already been assigned
             if assigned_targets.contains(&lhs_str) {
                 // Skip duplicate assignment (from duplicate let bindings in match arms)
+                continue;
+            }
+
+            // Skip tautological self-assignments (assign x = x;), which can arise
+            // when a let binding aliases a same-named instance-output wire.
+            if lhs_str == rhs_str {
                 continue;
             }
 
