@@ -1649,6 +1649,85 @@ impl GateNetlistToAig {
                 }
             }
 
+            // Asymmetric 2-input gates. Pin order matches gate_eval.rs:
+            // AndNot(a, b) = a & !b, OrNot(a, b) = a | !b.
+            // These previously fell through to the name-based fallback, where
+            // ANDNOT_X1 matched starts_with("AND") and converted as a plain
+            // AND — silently corrupting the formal reference model (the
+            // "unreachable-state" SAT failures on FSM designs were really
+            // this: gate-side outputs like busy became constants).
+            Some(CellFunction::AndNot) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let result = self.aig.add_and(a, b.invert());
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
+            Some(CellFunction::OrNot) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let result = self.aig.add_or(a, b.invert());
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
+            // Complex AOI/OAI gates. Semantics match gate_eval.rs:
+            // Aoi21(a, b, c) = !((a & b) | c), Oai21(a, b, c) = !((a | b) & c),
+            // Aoi22(a, b, c, d) = !((a & b) | (c & d)),
+            // Oai22(a, b, c, d) = !((a | b) & (c | d)).
+            // Previously unhandled: their outputs were never registered, so
+            // every consumer read constant false.
+            Some(CellFunction::Aoi21) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let c = self.get_net(cell.inputs[2]);
+                let ab = self.aig.add_and(a, b);
+                let result = self.aig.add_or(ab, c).invert();
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
+            Some(CellFunction::Oai21) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let c = self.get_net(cell.inputs[2]);
+                let ab = self.aig.add_or(a, b);
+                let result = self.aig.add_and(ab, c).invert();
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
+            Some(CellFunction::Aoi22) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let c = self.get_net(cell.inputs[2]);
+                let d = self.get_net(cell.inputs[3]);
+                let ab = self.aig.add_and(a, b);
+                let cd = self.aig.add_and(c, d);
+                let result = self.aig.add_or(ab, cd).invert();
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
+            Some(CellFunction::Oai22) => {
+                let a = self.get_net(cell.inputs[0]);
+                let b = self.get_net(cell.inputs[1]);
+                let c = self.get_net(cell.inputs[2]);
+                let d = self.get_net(cell.inputs[3]);
+                let ab = self.aig.add_or(a, b);
+                let cd = self.aig.add_or(c, d);
+                let result = self.aig.add_and(ab, cd).invert();
+                if let Some(out) = output_net {
+                    self.set_net(out, result);
+                }
+            }
+
             Some(CellFunction::Buf) => {
                 let input = self.get_net(cell.inputs[0]);
                 if let Some(out) = output_net {
@@ -1699,6 +1778,80 @@ impl GateNetlistToAig {
                     if !inputs.is_empty() {
                         if let Some(out) = output_net {
                             self.set_net(out, inputs[0].invert());
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("ANDNOT") {
+                    // MUST precede the AND arm: ANDNOT_X1 previously matched
+                    // starts_with("AND") and converted as a plain AND.
+                    // AndNot(a, b) = a & !b (see gate_eval.rs).
+                    if inputs.len() >= 2 {
+                        let result = self.aig.add_and(inputs[0], inputs[1].invert());
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("ORNOT") {
+                    // OrNot(a, b) = a | !b
+                    if inputs.len() >= 2 {
+                        let result = self.aig.add_or(inputs[0], inputs[1].invert());
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("AOI21") {
+                    // Aoi21(a, b, c) = !((a & b) | c)
+                    if inputs.len() >= 3 {
+                        let ab = self.aig.add_and(inputs[0], inputs[1]);
+                        let result = self.aig.add_or(ab, inputs[2]).invert();
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("OAI21") {
+                    // Oai21(a, b, c) = !((a | b) & c)
+                    if inputs.len() >= 3 {
+                        let ab = self.aig.add_or(inputs[0], inputs[1]);
+                        let result = self.aig.add_and(ab, inputs[2]).invert();
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("AOI22") {
+                    // Aoi22(a, b, c, d) = !((a & b) | (c & d))
+                    if inputs.len() >= 4 {
+                        let ab = self.aig.add_and(inputs[0], inputs[1]);
+                        let cd = self.aig.add_and(inputs[2], inputs[3]);
+                        let result = self.aig.add_or(ab, cd).invert();
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("OAI22") {
+                    // Oai22(a, b, c, d) = !((a | b) & (c | d))
+                    if inputs.len() >= 4 {
+                        let ab = self.aig.add_or(inputs[0], inputs[1]);
+                        let cd = self.aig.add_or(inputs[2], inputs[3]);
+                        let result = self.aig.add_and(ab, cd).invert();
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
                         }
                         true
                     } else {

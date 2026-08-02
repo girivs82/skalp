@@ -253,12 +253,23 @@ with a full SAT proof; SpiMaster passes the 100-cycle smoke test (its SAT
 phase still trips OPEN-5's unreachable-state strictness); the whole
 pre-existing `test_bitreverse_mwe` suite (17 tests) went green.
 
-**OPEN 5 — EC SAT phase explores unreachable states.**
-For enum-typed FSMs the symbolic check now fails AFTER the 100-cycle smoke test
-passes: SAT compares transition functions over ALL register states, including
-encodings unreachable from reset (unused enum patterns), where MIR and gates
-legitimately differ. The SAT phase needs reachability constraints or an
-init-state-anchored k-induction.
+**FIXED 5 — "SAT unreachable-state failures" were a corrupt reference model.**
+The diagnosis shifted completely: the transition functions ARE equivalent for
+all states. `GateNetlistToAig::convert_cell` had no arms for
+AndNot/OrNot/Aoi21/Oai21/Aoi22/Oai22 cell functions, and its name-based
+fallback matched `ANDNOT_X1` against `starts_with("AND")` — converting it as a
+plain AND — while `AOI21_X1` matched nothing, leaving its output unregistered
+(consumers read constant false). The SAT miter therefore compared the netlist
+against a corrupted model of itself: fsm_min's gate-side `busy` evaluated as
+constant 1 in the formal AIG while the real netlist was correct. Fix: proper
+CellFunction arms (semantics matched to gate_eval.rs) plus ordered name-based
+fallbacks. All reproducers AND SpiMaster now pass with full SAT proofs
+("Transition functions equivalent for ALL states"). The harness's
+init-constraint machinery remains for genuine don't-care divergences.
+Remaining related item: `test_mwe_lir_gate_equivalence` (BMC on a
+`fault_latched` design) still fails via the LIR-side formal converter
+(`GateNetlistToAig`'s sibling `convert_sequential(lir)`) — likely an analogous
+op-coverage gap on the LIR side, untouched by this fix.
 
 Also noted during triage: `decompose_latches` in `synth/dff_decompose.rs` is
 "TEMPORARILY DISABLED" (returns empty) — dead code path at HEAD; and `skalp ec`
