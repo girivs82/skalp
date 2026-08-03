@@ -67,9 +67,25 @@ codegen gaps; **P3** = hygiene.
 
 ## P1 — missing checks the language promises
 
-8. **No undriven-output diagnostic.** An `out` port never assigned builds silently
-   (this is what let #2 and #3 escalate from warning-material to disaster). Cheap MIR
-   pass; would also have caught most P0s in the tutorial.
+8. **FIXED (2026-08-03). No undriven-output diagnostic.** An `out` port never
+   assigned built silently. Now `crates/skalp-mir/src/undriven.rs` walks every
+   module (continuous assigns, process bodies incl. if/match/loops, generate
+   blocks, child-instance output connections) and the compiler fails the build
+   for undriven outputs in modules reachable from the main design.
+   Unspecialized generic templates (empty-shell modules whose monomorphized
+   specializations carry the real bodies) are skipped, and reachability roots
+   now include specializations of main entities ("TmrCounter_8" for generic
+   "TmrCounter"). Immediately caught two real bugs: the tutorial ch09
+   TmrCounter (tuple-match drop, issue #2 — `count` and `tmr_error` both
+   reported instead of silently emitting a voter-less TMR) and
+   examples/advanced_types.sk, whose union-typed `data_out` was never assigned
+   in the shipped example (now driven via a whole-union passthrough; note that
+   union FIELD assignment to ports panics — pre-existing "Bug #85" guard).
+   Verified: 40-design corpus green, EC proofs intact, golden/sim/equivalence
+   suites green; test_simulation_suite (hierarchical FIFO ordering) and
+   test_tuple_destructuring (2 FP32-tuple panics at the assignment-conversion
+   guard) fail identically WITHOUT this change — pre-existing, need their own
+   triage.
 
 9. **Match exhaustiveness checking does not exist.** `is_match_exhaustive()` in
    `skalp-lint/src/lints/hardware.rs:103` is `#[allow(dead_code)]` and returns

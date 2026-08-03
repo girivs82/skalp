@@ -74,45 +74,18 @@ impl MirCompiler {
         let mut transformer = HirToMir::new_with_modules(module_hirs);
         let mut mir = transformer.transform(hir);
 
+        // Modules reachable from the main design. Silently-wrong-hardware checks
+        // are scoped to these — stdlib entities are monomorphized even when
+        // unused, and a latent problem in an unused stdlib entity must not block
+        // an unrelated design.
+        let reachable_names = Self::reachable_module_names(&mir, hir);
+
         // Fail on conversion errors: these are cases where the converter would
         // otherwise emit silently wrong hardware (unresolved identifiers → 0,
-        // silently dropped struct literals). Only errors in modules REACHABLE from
-        // the main design fail the build — stdlib entities are monomorphized even
-        // when unused, and a latent problem in an unused stdlib entity must not
-        // block an unrelated design.
+        // silently dropped struct literals).
         let conversion_errors = transformer.conversion_errors();
         if !conversion_errors.is_empty() {
-            use std::collections::{HashSet, VecDeque};
-            // Roots: modules for entities defined in the main source file. An empty
-            // main_entity_names means the provenance is unknown (e.g. direct-HIR
-            // callers like the VHDL frontend) — be strict and treat every module
-            // as a root in that case.
-            let mut reachable: HashSet<crate::mir::ModuleId> = if hir.main_entity_names.is_empty() {
-                mir.modules.iter().map(|m| m.id).collect()
-            } else {
-                mir.modules
-                    .iter()
-                    .filter(|m| hir.main_entity_names.iter().any(|n| n == &m.name))
-                    .map(|m| m.id)
-                    .collect()
-            };
-            let mut queue: VecDeque<crate::mir::ModuleId> = reachable.iter().copied().collect();
-            while let Some(mid) = queue.pop_front() {
-                if let Some(module) = mir.modules.iter().find(|m| m.id == mid) {
-                    for inst in &module.instances {
-                        if reachable.insert(inst.module) {
-                            queue.push_back(inst.module);
-                        }
-                    }
-                }
-            }
-            let reachable_names: HashSet<&str> = mir
-                .modules
-                .iter()
-                .filter(|m| reachable.contains(&m.id))
-                .map(|m| m.name.as_str())
-                .collect();
-
+            use std::collections::HashSet;
             let mut seen = HashSet::new();
             let relevant: Vec<&str> = conversion_errors
                 .iter()
@@ -129,6 +102,22 @@ impl MirCompiler {
                     "MIR conversion failed with {} error(s):\n  {}",
                     relevant.len(),
                     relevant.join("\n  ")
+                ));
+            }
+        }
+
+        // Fail on undriven outputs: an output port nothing writes to is a
+        // dropped-statement lowering bug or a design error — the emitted
+        // netlist would drive the port from nothing.
+        {
+            let reachable_refs: std::collections::HashSet<&str> =
+                reachable_names.iter().map(|s| s.as_str()).collect();
+            let undriven = crate::undriven::check_undriven_outputs(&mir, &reachable_refs);
+            if !undriven.is_empty() {
+                return Err(format!(
+                    "undriven output check failed with {} error(s):\n  {}",
+                    undriven.len(),
+                    undriven.join("\n  ")
                 ));
             }
         }
@@ -168,6 +157,51 @@ impl MirCompiler {
     /// Compile HIR to MIR (without codegen - that's handled by skalp-codegen crate)
     pub fn compile(&self, hir: &Hir) -> Result<Mir, String> {
         self.compile_to_mir(hir)
+    }
+
+    /// Names of modules reachable from the main design's entities.
+    ///
+    /// Roots are the modules for entities defined in the main source file
+    /// (`hir.main_entity_names`); an empty list means provenance is unknown
+    /// (e.g. direct-HIR callers like the VHDL frontend) — every module is
+    /// treated as a root in that case. Reachability follows instance edges.
+    fn reachable_module_names(mir: &Mir, hir: &Hir) -> std::collections::HashSet<String> {
+        use std::collections::{HashSet, VecDeque};
+        let mut reachable: HashSet<crate::mir::ModuleId> = if hir.main_entity_names.is_empty() {
+            mir.modules.iter().map(|m| m.id).collect()
+        } else {
+            mir.modules
+                .iter()
+                .filter(|m| {
+                    hir.main_entity_names.iter().any(|n| {
+                        // Exact match, or a monomorphized specialization of a
+                        // main entity (e.g. "TmrCounter_8" for generic entity
+                        // "TmrCounter"). Specialized top modules are not
+                        // instantiated by anything, so they must be roots.
+                        n == &m.name
+                            || (m.name.len() > n.len()
+                                && m.name.starts_with(n.as_str())
+                                && m.name.as_bytes()[n.len()] == b'_')
+                    })
+                })
+                .map(|m| m.id)
+                .collect()
+        };
+        let mut queue: VecDeque<crate::mir::ModuleId> = reachable.iter().copied().collect();
+        while let Some(mid) = queue.pop_front() {
+            if let Some(module) = mir.modules.iter().find(|m| m.id == mid) {
+                for inst in &module.instances {
+                    if reachable.insert(inst.module) {
+                        queue.push_back(inst.module);
+                    }
+                }
+            }
+        }
+        mir.modules
+            .iter()
+            .filter(|m| reachable.contains(&m.id))
+            .map(|m| m.name.clone())
+            .collect()
     }
 
     /// Apply optimization passes based on optimization level

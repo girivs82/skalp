@@ -29,6 +29,7 @@ entity DataProcessor {
     in rst: reset
     in header_in: PacketHeader
     in state_cmd: State
+    in payload_in: DataPayload
     out current_state: State
     out data_out: DataPayload
 }
@@ -61,4 +62,6 @@ impl DataProcessor {
     }
 
     current_state = internal_state
+    // Whole-union passthrough keeps the union-typed output driven
+    data_out = payload_in
 }
