@@ -2608,18 +2608,50 @@ impl HirBuilderContext {
                     continue;
                 }
 
-                // Get the expression for this connection
-                // Look for expression nodes (IdentExpr, CastExpr, etc.)
-                if let Some(expr_node) = connection.children().find(|n| {
-                    matches!(
-                        n.kind(),
-                        SyntaxKind::IdentExpr
-                            | SyntaxKind::CallExpr
-                            | SyntaxKind::LiteralExpr
-                            | SyntaxKind::CastExpr
-                            | SyntaxKind::BinaryExpr
-                    )
-                }) {
+                // Get the expression for this connection.
+                // The filter must cover every expression kind a connection value
+                // can be — a missing kind silently DROPS the connection (the
+                // stdlib Sub impl's `b: ~b` lost its UnaryExpr this way,
+                // leaving the subtractor's b input unconnected).
+                let conn_children: Vec<_> = connection
+                    .children()
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::CastExpr
+                                | SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::IfExpr
+                                | SyntaxKind::MatchExpr
+                        )
+                    })
+                    .collect();
+                // Prefer IndexExpr/FieldExpr/BinaryExpr when the parser split
+                // `data[3:0]` into sibling [IdentExpr, IndexExpr] nodes.
+                let picked = if conn_children.len() > 1 {
+                    conn_children
+                        .iter()
+                        .find(|n| {
+                            matches!(
+                                n.kind(),
+                                SyntaxKind::IndexExpr
+                                    | SyntaxKind::FieldExpr
+                                    | SyntaxKind::BinaryExpr
+                            )
+                        })
+                        .cloned()
+                        .or_else(|| conn_children.first().cloned())
+                } else {
+                    conn_children.first().cloned()
+                };
+                if let Some(expr_node) = picked {
                     if let (Some(name), Some(expr)) =
                         (port_name.clone(), self.build_expression(&expr_node))
                     {

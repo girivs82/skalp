@@ -23,6 +23,12 @@ pub enum OptimizationLevel {
     Full,
 }
 
+/// Pending on-demand specializations recorded by the transform:
+/// specialized name -> (generic entity name, generic-arg bindings in
+/// declaration order).
+type PendingSpecializations =
+    IndexMap<String, (String, Vec<(String, skalp_frontend::const_eval::ConstValue)>)>;
+
 /// MIR compiler
 pub struct MirCompiler {
     /// Optimization level
@@ -70,20 +76,37 @@ impl MirCompiler {
         hir: &Hir,
         module_hirs: &IndexMap<PathBuf, Hir>,
     ) -> Result<Mir, String> {
-        // Step 1: Transform HIR to MIR
-        let mut transformer = HirToMir::new_with_modules(module_hirs);
-        let mut mir = transformer.transform(hir);
+        // Step 1: Transform HIR to MIR.
+        //
+        // Trait-method inlining happens during this transform — AFTER frontend
+        // monomorphization — so an inlined trait body that instantiates a
+        // generic entity (`std_adder<8>` from `impl Add for bit<N>`) may need a
+        // specialization that does not exist yet. The transform records those
+        // as pending; we specialize them at HIR level and re-run the transform
+        // until fixpoint (bounded), so the emitted design contains real
+        // specialized modules instead of dangling generic references.
+        let (mut mir, mut conversion_errors, mut pending) = Self::run_transform(hir, module_hirs);
+        let mut augmented: Option<Hir> = None;
+        for _round in 0..8 {
+            if pending.is_empty() {
+                break;
+            }
+            let mut base: Hir = augmented.take().unwrap_or_else(|| hir.clone());
+            if !Self::apply_pending_specializations(&mut base, &pending, module_hirs) {
+                break;
+            }
+            let (m, ce, p) = Self::run_transform(&base, module_hirs);
+            mir = m;
+            conversion_errors = ce;
+            pending = p;
+            augmented = Some(base);
+        }
 
         // Modules reachable from the main design. Silently-wrong-hardware checks
         // are scoped to these — stdlib entities are monomorphized even when
         // unused, and a latent problem in an unused stdlib entity must not block
         // an unrelated design.
         let reachable_names = Self::reachable_module_names(&mir, hir);
-
-        // Fail on conversion errors: these are cases where the converter would
-        // otherwise emit silently wrong hardware (unresolved identifiers → 0,
-        // silently dropped struct literals).
-        let conversion_errors = transformer.conversion_errors();
         if !conversion_errors.is_empty() {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
@@ -202,6 +225,130 @@ impl MirCompiler {
             .filter(|m| reachable.contains(&m.id))
             .map(|m| m.name.clone())
             .collect()
+    }
+
+    /// One HIR→MIR transform pass, returning owned results so the transformer
+    /// (and its borrow of the HIR) does not outlive the call.
+    #[allow(clippy::type_complexity)]
+    fn run_transform(
+        hir: &Hir,
+        module_hirs: &IndexMap<PathBuf, Hir>,
+    ) -> (
+        Mir,
+        Vec<(String, String)>,
+        IndexMap<
+            String,
+            (
+                String,
+                Vec<(String, skalp_frontend::const_eval::ConstValue)>,
+            ),
+        >,
+    ) {
+        let mut transformer = HirToMir::new_with_modules(module_hirs);
+        let mir = transformer.transform(hir);
+        let conversion_errors = transformer.conversion_errors().to_vec();
+        let pending = transformer.pending_entity_specializations();
+        (mir, conversion_errors, pending)
+    }
+
+    /// Specialize the pending generic entities at HIR level and append the
+    /// specializations to `base`. Returns true if at least one specialization
+    /// was added (i.e. re-running the transform can make progress).
+    ///
+    /// The generic entity + implementation are looked up in `base` first, then
+    /// in each module HIR (entity and impl must come from the SAME Hir — ids
+    /// collide across HIRs). The specialized entity keeps the exact name the
+    /// instantiation site constructed, so the re-run finds it by name.
+    fn apply_pending_specializations(
+        base: &mut Hir,
+        pending: &PendingSpecializations,
+        module_hirs: &IndexMap<PathBuf, Hir>,
+    ) -> bool {
+        use skalp_frontend::monomorphization::{Instantiation, MonomorphizationEngine};
+
+        let mut next_entity_id = base
+            .entities
+            .iter()
+            .map(|e| e.id.0)
+            .chain(
+                module_hirs
+                    .values()
+                    .flat_map(|h| h.entities.iter().map(|e| e.id.0)),
+            )
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut next_port_id: u32 = base
+            .entities
+            .iter()
+            .flat_map(|e| e.ports.iter())
+            .map(|p| p.id.0)
+            .chain(
+                module_hirs
+                    .values()
+                    .flat_map(|h| h.entities.iter().flat_map(|e| e.ports.iter()))
+                    .map(|p| p.id.0),
+            )
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        let mut engine = MonomorphizationEngine::new();
+        let mut added = false;
+        for (specialized_name, (generic_name, const_args)) in pending {
+            if base.entities.iter().any(|e| e.name == *specialized_name) {
+                continue;
+            }
+            // Find the generic entity and its implementation from the same HIR
+            let found = std::iter::once(&*base)
+                .chain(module_hirs.values())
+                .find_map(|h| {
+                    let e = h.entities.iter().find(|e| e.name == *generic_name)?;
+                    let i = h.implementations.iter().find(|i| i.entity == e.id).cloned();
+                    Some((e.clone(), i))
+                });
+            let Some((generic_entity, generic_impl)) = found else {
+                continue;
+            };
+
+            let instantiation = Instantiation {
+                entity_name: generic_entity.name.clone(),
+                entity_id: generic_entity.id,
+                type_args: IndexMap::new(),
+                const_args: const_args.iter().cloned().collect(),
+                intent_args: IndexMap::new(),
+            };
+
+            let (mut spec_entity, port_id_map) = engine.specialize_entity(
+                &generic_entity,
+                &instantiation,
+                skalp_frontend::hir::EntityId(next_entity_id),
+                &mut next_port_id,
+            );
+            next_entity_id += 1;
+            // Keep the exact name the instantiation site will look up — the
+            // engine's mangling sorts params alphabetically, which can differ
+            // from declaration order for multi-parameter entities.
+            spec_entity.name = specialized_name.clone();
+
+            let spec_impl = generic_impl.map(|gi| {
+                let mut si = engine.specialize_implementation(
+                    &gi,
+                    &spec_entity,
+                    &instantiation,
+                    &port_id_map,
+                );
+                si.entity = spec_entity.id;
+                si
+            });
+
+            base.entities.push(spec_entity);
+            if let Some(si) = spec_impl {
+                base.implementations.push(si);
+            }
+            added = true;
+        }
+        added
     }
 
     /// Apply optimization passes based on optimization level

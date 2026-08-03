@@ -153,6 +153,16 @@ impl CompilationCache {
             hasher.update(content);
         }
 
+        // The stdlib search path changes what the compiler resolves (trait
+        // impls, entities), so a SIR compiled with a different stdlib
+        // visibility must not be reused.
+        hasher.update(b"SKALP_STDLIB_PATH=");
+        hasher.update(
+            std::env::var("SKALP_STDLIB_PATH")
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+
         let hash = hasher.finalize();
         Ok(hash.to_hex().to_string())
     }

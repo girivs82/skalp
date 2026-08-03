@@ -1823,7 +1823,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     left: Box::new(left),
                     right: Box::new(right),
                     is_trait_op: bin.is_trait_op,
-                    impl_style: ImplStyle::default(),
+                    // Preserve impl_style — dropping it re-enabled trait
+                    // resolution inside stdlib entity bodies marked
+                    // #[impl_style::primitive], causing infinite std_adder
+                    // specialization recursion (std_adder_8 → _9 → …).
+                    impl_style: bin.impl_style,
                 })
             }
             HirExpression::Unary(unary) => {

@@ -293,6 +293,55 @@ codegen gaps; **P3** = hygiene.
     "Git dependencies not yet implemented"). Documented as a limitation — keep it
     honest in the manifest docs until done.
 
+30. **(found 2026-08-03) generate-for in GENERIC impls is dropped at parse
+    time; bit[N] `*` falls back to primitive Mul until fixed.**
+    `elaborate_generate_for_in_impl` bails silently when the range bounds
+    don't const-evaluate (e.g. `0..WIDTH` with generic WIDTH) — the loop body
+    is simply LOST from the generic impl's HIR, so `std_multiplier`'s
+    shift-add chain never exists and every specialization would emit a
+    multiplier whose product is silently 0. Until generic impls preserve the
+    symbolic generate-for and the specializer elaborates it, trait-operator
+    resolution for `Mul` on bit types returns the primitive op (matches the
+    no-stdlib lowering, EC-verified). Fixing this properly needs: (a)
+    hir_builder keeps un-evaluable generate-fors as symbolic
+    HirStatement::GenerateFor (incl. body signal decls); (b)
+    specialize_implementation elaborates them with iterator substitution and
+    per-iteration signal uniquing. Also blocks std_adder_wide (HALF-split
+    barriers) and any stdlib entity whose impl loops over a generic bound.
+
+31. **FIXED (2026-08-03). Stdlib visibility broke most Testbench-based suites
+    — the test_function_inlining cluster (15/16), counter_example,
+    ergonomic_testbench, cdc_verification, graphics_pipeline_functional,
+    intent_and_numeric, fpmul_entity/nogeneric/debug, and more: 51 suite
+    tests flipped to passing, zero regressions (791/67 vs 740/118).**
+    FIVE stacked defects, all triggered whenever SKALP_STDLIB_PATH was set
+    (which any sibling test in the consolidated suite binary does
+    process-globally):
+    (a) trait-operator resolution (`+` on bit[8] → stdlib `impl Add for
+    bit<N>` → `std_adder<8>`) runs AFTER monomorphization, so the
+    specialized entity never existed — the emitted design referenced an
+    undefined generic module with unresolved WIDTH. Fixed with on-demand
+    specialization: the transform records missing specializations,
+    compiler.rs specializes them at HIR level (MonomorphizationEngine::
+    specialize_entity/implementation) and re-runs the transform to fixpoint.
+    This also fixed FpMul/FpAdd entity instantiation (the fpmul clusters).
+    (b) engine `remap_expr_ports` rebuilt binary exprs with
+    `impl_style: default()`, discarding `#[impl_style::primitive]` — the
+    stdlib adder's own `+` re-trait-resolved, recursing std_adder_8 → _9 → ….
+    (c) assertion conditions (`assert property (… a + b …)`) went through
+    trait resolution and instantiated hardware; now converted with trait
+    resolution disabled (in_assertion flag).
+    (d) `build_instance_as_statements`' Connection filter was missing
+    UnaryExpr (et al.) — the stdlib Sub impl's `b: ~b` connection was
+    silently dropped, leaving the subtractor's b input unconnected (10-3=11).
+    (e) Testbench implicit top-module selection picked "the uninstantiated
+    module with most instances" — with stdlib modules in the MIR it silently
+    simulated a Cordic block instead of the fixture entity; now prefers
+    main_entity_names. The SIR compilation cache also ignored
+    SKALP_STDLIB_PATH, reusing stale artifacts across env changes — the env
+    var value is now part of the cache key.
+    Plus #30's Mul-primitive fallback for the `*` cases.
+
 ## Settled design: `inst` keyword for instantiation (decided 2026-08-02)
 
 Instantiation gets its own statement keyword; `let` stops being overloaded.

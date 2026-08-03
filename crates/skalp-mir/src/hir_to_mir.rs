@@ -145,6 +145,20 @@ pub struct HirToMir<'hir> {
     /// stdlib entities (which are monomorphized regardless of use) don't block
     /// unrelated builds.
     conversion_errors: Vec<(String, String)>,
+    /// Generic entity specializations needed but not present in the HIR.
+    /// Trait-method inlining happens AFTER frontend monomorphization, so an
+    /// inlined trait body instantiating e.g. `std_adder<8>` finds no
+    /// `std_adder_8` entity — the instance would silently reference the
+    /// unspecialized generic module (unresolved WIDTH in the output).
+    /// Keyed by the specialized name; value = (generic entity name,
+    /// generic-arg bindings in declaration order). The compiler specializes
+    /// these at HIR level and re-runs the transform (see compiler.rs).
+    pending_specializations: IndexMap<String, (String, Vec<(String, ConstValue)>)>,
+    /// True while converting an assertion/assume/cover condition. Verification
+    /// expressions must not instantiate hardware through trait-operator
+    /// resolution — the stdlib std_adder's own `assert property (… a + b …)`
+    /// would otherwise recursively specialize adders forever.
+    in_assertion: bool,
     /// All loaded module HIRs for proper scope resolution (Bug #84 fix)
     /// This allows resolving function calls in their original module scope
     module_hirs: IndexMap<PathBuf, Hir>,
@@ -376,6 +390,8 @@ impl<'hir> HirToMir<'hir> {
             clock_domain_map: IndexMap::new(),
             hir: None,
             conversion_errors: Vec::new(),
+            pending_specializations: IndexMap::new(),
+            in_assertion: false,
             module_hirs: module_hirs.clone(),
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
@@ -417,6 +433,31 @@ impl<'hir> HirToMir<'hir> {
     /// Entries are (entity_name, message).
     pub fn conversion_errors(&self) -> &[(String, String)] {
         &self.conversion_errors
+    }
+
+    /// Generic entity specializations that were needed during conversion but
+    /// missing from the HIR (see the `pending_specializations` field docs).
+    /// Keyed by specialized name; value = (generic entity name, generic-arg
+    /// bindings in declaration order).
+    pub fn pending_entity_specializations(
+        &self,
+    ) -> IndexMap<String, (String, Vec<(String, ConstValue)>)> {
+        self.pending_specializations.clone()
+    }
+
+    /// Convert an assertion/assume/cover condition with trait-operator
+    /// resolution disabled (verification expressions must not instantiate
+    /// hardware entities).
+    fn convert_assertion_expression(
+        &mut self,
+        expr: &hir::HirExpression,
+        depth: usize,
+    ) -> Option<Expression> {
+        let saved = self.in_assertion;
+        self.in_assertion = true;
+        let result = self.convert_expression(expr, depth);
+        self.in_assertion = saved;
+        result
     }
 
     /// Name of the entity currently being converted (for error attribution)
@@ -2015,7 +2056,7 @@ impl<'hir> HirToMir<'hir> {
                         match stmt {
                             hir::HirStatement::Assert(assert_stmt) => {
                                 if let Some(condition) =
-                                    self.convert_expression(&assert_stmt.condition, 0)
+                                    self.convert_assertion_expression(&assert_stmt.condition, 0)
                                 {
                                     module.assertions.push(Assertion {
                                         kind: AssertionKind::Assert,
@@ -2027,7 +2068,7 @@ impl<'hir> HirToMir<'hir> {
                             }
                             hir::HirStatement::Assume(assume_stmt) => {
                                 if let Some(condition) =
-                                    self.convert_expression(&assume_stmt.condition, 0)
+                                    self.convert_assertion_expression(&assume_stmt.condition, 0)
                                 {
                                     module.assertions.push(Assertion {
                                         kind: AssertionKind::Assume,
@@ -2040,7 +2081,9 @@ impl<'hir> HirToMir<'hir> {
                             hir::HirStatement::Cover(cover_stmt) => {
                                 // For cover, extract the condition from the property
                                 if let hir::HirProperty::Expression(expr) = &cover_stmt.property {
-                                    if let Some(condition) = self.convert_expression(expr, 0) {
+                                    if let Some(condition) =
+                                        self.convert_assertion_expression(expr, 0)
+                                    {
                                         module.assertions.push(Assertion {
                                             kind: AssertionKind::Cover,
                                             condition,
@@ -2289,7 +2332,9 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirStatement::Assert(assert_stmt) => {
                 // Convert HIR assertion to MIR for SVA generation
-                if let Some(condition) = self.convert_expression(&assert_stmt.condition, 0) {
+                if let Some(condition) =
+                    self.convert_assertion_expression(&assert_stmt.condition, 0)
+                {
                     let severity = match assert_stmt.severity {
                         hir::HirAssertionSeverity::Info => AssertionSeverity::Info,
                         hir::HirAssertionSeverity::Warning => AssertionSeverity::Warning,
@@ -2329,7 +2374,9 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirStatement::Assume(assume_stmt) => {
                 // Convert HIR assume to MIR for SVA generation
-                if let Some(condition) = self.convert_expression(&assume_stmt.condition, 0) {
+                if let Some(condition) =
+                    self.convert_assertion_expression(&assume_stmt.condition, 0)
+                {
                     Some(Statement::Assume(AssumeStatement {
                         condition,
                         message: assume_stmt.message.clone(),
@@ -2436,6 +2483,65 @@ impl<'hir> HirToMir<'hir> {
                         } else {
                             resolved_type_name.clone()
                         };
+
+                        // On-demand specialization: trait-method inlining runs AFTER
+                        // frontend monomorphization, so an inlined trait body that
+                        // instantiates `std_adder<8>` finds no `std_adder_8` entity and
+                        // would silently fall back to the unspecialized generic module
+                        // (unresolved WIDTH in the emitted netlist). Record the missing
+                        // specialization; the compiler specializes it at HIR level and
+                        // re-runs the transform (fixpoint in compiler.rs).
+                        if !resolved_generic_args.is_empty()
+                            && target_entity_name != resolved_type_name
+                            && !self
+                                .pending_specializations
+                                .contains_key(&target_entity_name)
+                        {
+                            let specialized_exists =
+                                hir.entities.iter().any(|e| e.name == target_entity_name)
+                                    || self.module_hirs.values().any(|h| {
+                                        h.entities.iter().any(|e| e.name == target_entity_name)
+                                    });
+                            if !specialized_exists {
+                                let generic_entity = hir
+                                    .entities
+                                    .iter()
+                                    .find(|e| e.name == resolved_type_name)
+                                    .cloned()
+                                    .or_else(|| {
+                                        self.module_hirs
+                                            .values()
+                                            .flat_map(|h| h.entities.iter())
+                                            .find(|e| e.name == resolved_type_name)
+                                            .cloned()
+                                    });
+                                if let Some(gent) = generic_entity {
+                                    if gent.generics.len() == resolved_generic_args.len() {
+                                        let mut const_args: Vec<(String, ConstValue)> = Vec::new();
+                                        for (g, arg_expr) in
+                                            gent.generics.iter().zip(resolved_generic_args.iter())
+                                        {
+                                            if let Ok(v) = self.const_evaluator.eval(arg_expr) {
+                                                const_args.push((g.name.clone(), v));
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        if const_args.len() == gent.generics.len() {
+                                            trace!(
+                                                "[ON_DEMAND_SPEC] Recording pending specialization '{}' of generic '{}'",
+                                                target_entity_name,
+                                                gent.name
+                                            );
+                                            self.pending_specializations.insert(
+                                                target_entity_name.clone(),
+                                                (gent.name.clone(), const_args),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // BUG #207 FIX: Look for specialized entity first, then fall back to generic
                         // Also search module HIRs for stdlib entities (e.g., std_multiplier, FpMul)
@@ -7156,7 +7262,7 @@ impl<'hir> HirToMir<'hir> {
         property: &hir::HirProperty,
     ) -> Option<Expression> {
         match property {
-            hir::HirProperty::Expression(expr) => self.convert_expression(expr, 0),
+            hir::HirProperty::Expression(expr) => self.convert_assertion_expression(expr, 0),
             hir::HirProperty::Sequence(_) => {
                 trace!("[WARN] Sequence properties not yet supported in SVA generation");
                 None
@@ -8252,7 +8358,7 @@ impl<'hir> HirToMir<'hir> {
                     binary.op,
                     binary.impl_style
                 );
-                if binary.impl_style != hir::ImplStyle::Primitive {
+                if binary.impl_style != hir::ImplStyle::Primitive && !self.in_assertion {
                     let resolve_result = self.try_resolve_trait_operator(&binary.op, &binary.left);
                     trace!(
                         "[TRAIT_RESOLVE] try_resolve_trait_operator result: {:?}",
@@ -18466,7 +18572,19 @@ impl<'hir> HirToMir<'hir> {
             // This allows resolution of impl Mul for bit[N], impl Add for bit[N], etc.
             // The trait impl's body (in stdlib) instantiates the appropriate entity
             // (e.g., std_multiplier<N>) with barrier annotations for NCL/sync support.
+            //
+            // TRIAGE #30: Mul stays on the primitive op for bit types. The
+            // stdlib Mul route needs std_multiplier<N>, whose implementation is
+            // a generate-for over the generic WIDTH — hir_builder drops
+            // un-evaluable generate-fors at parse time, so the generic impl has
+            // NO shift-add logic and every specialization would emit a
+            // multiplier whose product is silently 0. Until generate-for in
+            // generic impls survives to specialization, primitive Mul is the
+            // only correct lowering (matches the no-stdlib path, EC-verified).
             hir::HirType::Bit(width) => {
+                if matches!(op, hir::HirBinaryOp::Mul) {
+                    return None;
+                }
                 trace!(
                     "[TRAIT_OP_DEBUG] Bit({}) -> mapping to 'bit[{}]' for trait lookup",
                     width,
@@ -18475,6 +18593,9 @@ impl<'hir> HirToMir<'hir> {
                 format!("bit[{}]", width)
             }
             hir::HirType::BitParam(param) => {
+                if matches!(op, hir::HirBinaryOp::Mul) {
+                    return None;
+                }
                 trace!(
                     "[TRAIT_OP_DEBUG] BitParam({}) -> mapping to 'bit[{}]' for trait lookup",
                     param,

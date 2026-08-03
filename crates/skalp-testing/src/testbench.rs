@@ -1020,31 +1020,59 @@ impl Testbench {
                     .max_by_key(|m| m.signals.len() + m.processes.len())
                     .unwrap()
             }
-        } else if let Some(ref basename) = source_basename {
-            let pascal_basename: String = basename
-                .split('_')
-                .map(|s| {
-                    let mut chars: Vec<char> = s.chars().collect();
-                    if !chars.is_empty() {
-                        chars[0] = chars[0].to_ascii_uppercase();
-                    }
-                    chars.into_iter().collect::<String>()
+        } else {
+            // Prefer entities DEFINED IN THE MAIN SOURCE FILE (or their
+            // monomorphized specializations). Stdlib preloading puts library
+            // modules in the MIR too; picking "the uninstantiated module with
+            // most instances" used to select a stdlib module (e.g. a Cordic
+            // block) and silently simulate the wrong design.
+            let main_names = &context.main_hir.main_entity_names;
+            let is_main_entity = |m: &skalp_mir::mir::Module| {
+                main_names.iter().any(|n| {
+                    n == &m.name
+                        || (m.name.len() > n.len()
+                            && m.name.starts_with(n.as_str())
+                            && m.name.as_bytes()[n.len()] == b'_')
                 })
-                .collect();
+            };
+            let content_score = |m: &skalp_mir::mir::Module| {
+                m.instances.len()
+                    + m.processes.len()
+                    + m.signals.len()
+                    + m.assignments.len()
+                    + m.ports.len()
+            };
 
-            if let Some(m) = mir.modules.iter().find(|m| m.name == pascal_basename) {
+            let pascal_basename: Option<String> = source_basename.as_ref().map(|basename| {
+                basename
+                    .split('_')
+                    .map(|s| {
+                        let mut chars: Vec<char> = s.chars().collect();
+                        if !chars.is_empty() {
+                            chars[0] = chars[0].to_ascii_uppercase();
+                        }
+                        chars.into_iter().collect::<String>()
+                    })
+                    .collect()
+            });
+
+            if let Some(m) = pascal_basename
+                .as_ref()
+                .and_then(|name| mir.modules.iter().find(|m| &m.name == name))
+            {
+                m
+            } else if let Some(m) = uninstantiated
+                .iter()
+                .filter(|m| is_main_entity(m))
+                .max_by_key(|m| content_score(m))
+            {
                 m
             } else {
                 *uninstantiated
                     .iter()
-                    .max_by_key(|m| m.instances.len())
+                    .max_by_key(|m| content_score(m))
                     .unwrap()
             }
-        } else {
-            *uninstantiated
-                .iter()
-                .max_by_key(|m| m.instances.len())
-                .unwrap()
         };
 
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
