@@ -491,78 +491,22 @@ fn emit_vhdl_vendor_ip_wrapper(
     writeln!(out, "end architecture rtl;").unwrap();
 }
 
-/// Emit a VHDL CDC synchronizer for a signal.
+/// TRIAGE #5: `#[cdc]` is a VERIFICATION annotation over the user's
+/// hand-written synchronizer — emit documentation only (see sv_emit).
 fn emit_vhdl_cdc_synchronizer(out: &mut String, signal: &HirSignal, level: usize) {
     let ind = indent(level);
     let Some(ref cdc) = signal.cdc_config else {
         return;
     };
     let name = &signal.name;
-    let stages = cdc.sync_stages;
-    let ty = emit_type(&signal.signal_type);
     let from = cdc.from_domain.as_deref().unwrap_or("src");
     let to = cdc.to_domain.as_deref().unwrap_or("dst");
-
-    writeln!(out, "{ind}-- CDC: {name} ({from} -> {to})").unwrap();
-
-    match cdc.cdc_type {
-        CdcType::TwoFF => {
-            // Declare sync chain signals
-            for i in 0..stages {
-                writeln!(
-                    out,
-                    "{ind}-- attribute ASYNC_REG of {name}_sync_{i} : signal is \"TRUE\";"
-                )
-                .unwrap();
-                writeln!(out, "{ind}signal {name}_sync_{i} : {ty};").unwrap();
-            }
-            writeln!(out, "{ind}{name} <= {name}_sync_{};", stages - 1).unwrap();
-        }
-        CdcType::Gray => {
-            writeln!(out, "{ind}signal {name}_bin_in : {ty};").unwrap();
-            writeln!(out, "{ind}signal {name}_gray : {ty};").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}signal {name}_gray_sync_{i} : {ty};").unwrap();
-            }
-            writeln!(
-                out,
-                "{ind}{name}_gray <= {name}_bin_in xor shift_right({name}_bin_in, 1);"
-            )
-            .unwrap();
-        }
-        CdcType::Pulse => {
-            writeln!(out, "{ind}signal {name}_toggle : std_logic;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}signal {name}_toggle_sync_{i} : std_logic;").unwrap();
-            }
-            writeln!(out, "{ind}signal {name}_toggle_prev : std_logic;").unwrap();
-            writeln!(
-                out,
-                "{ind}{name} <= {name}_toggle_sync_{} xor {name}_toggle_prev;",
-                stages - 1
-            )
-            .unwrap();
-        }
-        CdcType::Handshake => {
-            writeln!(out, "{ind}signal {name}_req : std_logic;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}signal {name}_req_sync_{i} : std_logic;").unwrap();
-            }
-            writeln!(out, "{ind}signal {name}_ack : std_logic;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}signal {name}_ack_sync_{i} : std_logic;").unwrap();
-            }
-            writeln!(out, "{ind}signal {name}_data : {ty};").unwrap();
-            writeln!(out, "{ind}{name} <= {name}_data;").unwrap();
-        }
-        CdcType::AsyncFifo => {
-            writeln!(
-                out,
-                "{ind}-- TODO: Async FIFO synchronizer for {name} requires external module"
-            )
-            .unwrap();
-        }
-    }
+    writeln!(
+        out,
+        "{ind}-- CDC: {name} ({from} -> {to}, type={:?}, sync_stages={}) — synchronizer implemented by user logic",
+        cdc.cdc_type, cdc.sync_stages
+    )
+    .unwrap();
 }
 
 /// Emit VHDL power intent attributes/comments before a signal declaration.

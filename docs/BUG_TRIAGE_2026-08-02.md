@@ -83,10 +83,29 @@ codegen gaps; **P3** = hygiene.
    `mem[ptr]` design fails identically). The gate netlist DOES get the sliced
    4-bit address (`mem_raddr[3:0]`), confirming lowering is right.
 
-5. **`#[cdc(...)]` auto-synchronizer conflicts with user logic.** The generated Gray
-   sync chain drives the same nets as hand-written sync flops (multi-driven
-   `wr_ptr_gray_sync_rd`), and the auto-generated sync registers are never clocked.
-   Repro: tutorial ch08 AsyncFIFO with `#[cdc]` + manual two-flop chain.
+5. **FIXED (2026-08-03). `#[cdc(...)]` auto-synchronizer conflicts with user
+   logic.** The generated Gray sync chain drove the same nets as hand-written
+   sync flops (multi-driven `wr_ptr_gray_sync_rd`), the auto-generated sync
+   registers were never clocked, and the scaffold's binary input was undriven
+   — the whole blob was non-functional AND it re-declared the annotated
+   signal as a wire while the user's `always_ff` non-blocking-assigned it
+   (illegal SV on top of the driver conflict).
+   **Fix:** `#[cdc]` is now what the published tutorial says it is — a
+   VERIFICATION annotation over the user's hand-written synchronizer. All
+   THREE emitters (skalp-codegen SystemVerilog, skalp-hir-codegen SV, and
+   VHDL) declare the signal normally, emit a documenting `// CDC:` comment
+   plus the `(* ASYNC_REG = "TRUE" *)` synthesis attribute, and generate NO
+   hardware; the annotation still feeds MIR CDC analysis. The five scaffold
+   generators (~270 lines: TwoFF/Gray/Pulse/Handshake/AsyncFifo) are
+   deleted. **Verified:** minimal repro emits a single-driver reg with
+   ASYNC_REG; the FULL tutorial ch08 AsyncFIFO (dual-clock, Gray pointers,
+   `#[cdc]` + manual two-flop chains) now builds cleanly AND passes complete
+   EC with SAT proof; 8-design EC sweep green; corpus unchanged; full suite
+   zero regressions. Suite test:
+   `test_triage5_cdc_annotation_does_not_generate_hardware`.
+   NOTE: the tutorial's promised consistency check ("annotate sync_stages=2
+   but only one flop in the chain → error") remains unimplemented — that is
+   #10's CDC-analysis work, not codegen.
 
 6. **`open` port binding lowers to `.z(0)`** — instance output tied to a constant
    (illegal SV, and wrong intent). `_` binding works correctly (connection omitted);

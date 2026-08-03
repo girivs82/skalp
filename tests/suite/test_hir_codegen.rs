@@ -590,13 +590,14 @@ impl CdcCodegenTest {
     );
 
     println!("SV:\n{sv}");
-    assert!(
-        sv.contains("CDC") || sv.contains("Synchronizer"),
-        "Should have CDC comment"
-    );
+    // TRIAGE #5: #[cdc] is a verification annotation — no synthesized
+    // synchronizer scaffold; the signal declares normally with ASYNC_REG.
+    assert!(sv.contains("// CDC:"), "Should have CDC comment");
     assert!(sv.contains("ASYNC_REG"), "Should have ASYNC_REG attribute");
-    assert!(sv.contains("synced_sync_0"), "Should have sync stage 0");
-    assert!(sv.contains("synced_sync_1"), "Should have sync stage 1");
+    assert!(
+        !sv.contains("synced_sync_0"),
+        "Must NOT synthesize sync-stage registers"
+    );
 }
 
 #[test]
@@ -620,17 +621,16 @@ impl CdcGrayTest {
     );
 
     println!("SV:\n{sv}");
+    // TRIAGE #5: annotation-only — no gray scaffold (it multi-drove user
+    // logic and its sync registers were never clocked).
+    assert!(sv.contains("// CDC:"), "Should have CDC comment");
     assert!(
-        sv.contains("CDC") || sv.contains("Synchronizer"),
-        "Should have CDC comment"
+        !sv.contains("gray_synced_bin_in"),
+        "Must NOT synthesize the gray scaffold"
     );
     assert!(
-        sv.contains("gray_synced_gray"),
-        "Should have gray-coded signal"
-    );
-    assert!(
-        sv.contains("gray_synced_bin_in"),
-        "Should have binary input"
+        !sv.contains("gray_synced_gray_sync_0"),
+        "Must NOT synthesize sync-stage registers"
     );
 }
 

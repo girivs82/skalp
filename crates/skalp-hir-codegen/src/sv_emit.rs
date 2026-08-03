@@ -119,6 +119,9 @@ fn emit_module(
         let ind = indent(1);
         emit_comments(out, &signal.comments, "//", &ind);
         emit_sv_power_attributes(out, signal, 1);
+        if signal.cdc_config.is_some() {
+            writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
+        }
         let ty = emit_type(&signal.signal_type);
         if let Some(ref init) = signal.initial_value {
             writeln!(
@@ -190,6 +193,9 @@ fn emit_module(
             emit_comments(out, &signal.comments, "//", &ind);
             // Emit power synthesis attributes before signal
             emit_sv_power_attributes(out, signal, 1);
+            if signal.cdc_config.is_some() {
+                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
+            }
             let ty = emit_type(&signal.signal_type);
             if let Some(ref init) = signal.initial_value {
                 writeln!(
@@ -821,116 +827,26 @@ fn emit_sv_vendor_ip_wrapper(
     writeln!(out, "{ind});").unwrap();
 }
 
-/// Emit a CDC synchronizer chain for a signal.
+/// TRIAGE #5: `#[cdc]` is a VERIFICATION annotation over the user's
+/// hand-written synchronizer — it must not synthesize hardware. The old
+/// emitter declared a sync-reg scaffold (never clocked) and aliased the
+/// signal to its last stage, multi-driving the user's own assignments.
+/// Emit documentation only; the ASYNC_REG attribute is added at the
+/// signal's normal declaration site.
 fn emit_sv_cdc_synchronizer(out: &mut String, signal: &HirSignal, level: usize) {
     let ind = indent(level);
     let Some(ref cdc) = signal.cdc_config else {
         return;
     };
     let name = &signal.name;
-    let stages = cdc.sync_stages;
-    let ty = emit_type(&signal.signal_type);
     let from = cdc.from_domain.as_deref().unwrap_or("src");
     let to = cdc.to_domain.as_deref().unwrap_or("dst");
-
-    writeln!(out, "{ind}// CDC: {name} ({from} -> {to})").unwrap();
-
-    match cdc.cdc_type {
-        CdcType::TwoFF => {
-            // N-stage FF synchronizer chain
-            for i in 0..stages {
-                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
-                writeln!(out, "{ind}{ty} {name}_sync_{i};").unwrap();
-            }
-            // The original signal is aliased to the last sync stage
-            writeln!(out, "{ind}assign {name} = {name}_sync_{};", stages - 1).unwrap();
-        }
-        CdcType::Gray => {
-            // Gray code synchronizer: binary→gray, sync, gray→binary
-            let width = type_width(&signal.signal_type);
-            writeln!(out, "{ind}{ty} {name}_bin_in;").unwrap();
-            writeln!(out, "{ind}{ty} {name}_gray;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
-                writeln!(out, "{ind}{ty} {name}_gray_sync_{i};").unwrap();
-            }
-            // Binary to Gray conversion
-            writeln!(
-                out,
-                "{ind}assign {name}_gray = {name}_bin_in ^ ({name}_bin_in >> 1);"
-            )
-            .unwrap();
-            // Gray to Binary decode (XOR chain)
-            if width > 0 {
-                writeln!(
-                    out,
-                    "{ind}assign {name}[{msb}] = {name}_gray_sync_{last}[{msb}];",
-                    msb = width - 1,
-                    last = stages - 1
-                )
-                .unwrap();
-                for i in (0..width - 1).rev() {
-                    writeln!(
-                        out,
-                        "{ind}assign {name}[{i}] = {name}[{next}] ^ {name}_gray_sync_{last}[{i}];",
-                        next = i + 1,
-                        last = stages - 1
-                    )
-                    .unwrap();
-                }
-            }
-        }
-        CdcType::Pulse => {
-            // Toggle + sync + edge detect
-            writeln!(out, "{ind}logic {name}_toggle;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
-                writeln!(out, "{ind}logic {name}_toggle_sync_{i};").unwrap();
-            }
-            writeln!(out, "{ind}logic {name}_toggle_prev;").unwrap();
-            writeln!(
-                out,
-                "{ind}assign {name} = {name}_toggle_sync_{} ^ {name}_toggle_prev;",
-                stages - 1
-            )
-            .unwrap();
-        }
-        CdcType::Handshake => {
-            // Req/ack synchronizer chains + data holding register
-            writeln!(out, "{ind}logic {name}_req;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
-                writeln!(out, "{ind}logic {name}_req_sync_{i};").unwrap();
-            }
-            writeln!(out, "{ind}logic {name}_ack;").unwrap();
-            for i in 0..stages {
-                writeln!(out, "{ind}(* ASYNC_REG = \"TRUE\" *)").unwrap();
-                writeln!(out, "{ind}logic {name}_ack_sync_{i};").unwrap();
-            }
-            writeln!(out, "{ind}{ty} {name}_data;").unwrap();
-            writeln!(out, "{ind}assign {name} = {name}_data;").unwrap();
-        }
-        CdcType::AsyncFifo => {
-            writeln!(
-                out,
-                "{ind}// TODO: Async FIFO synchronizer for {name} requires external module"
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "{ind}// Instantiate an async FIFO IP or use a parameterized module"
-            )
-            .unwrap();
-        }
-    }
-}
-
-/// Get the bit width of a type (for CDC Gray code computation).
-fn type_width(ty: &HirType) -> usize {
-    match ty {
-        HirType::Bit(n) | HirType::Logic(n) | HirType::Nat(n) | HirType::Int(n) => *n as usize,
-        _ => 1,
-    }
+    writeln!(
+        out,
+        "{ind}// CDC: {name} ({from} -> {to}, type={:?}, sync_stages={}) — synchronizer implemented by user logic",
+        cdc.cdc_type, cdc.sync_stages
+    )
+    .unwrap();
 }
 
 /// Emit synthesis attributes for power intent before a signal declaration.

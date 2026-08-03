@@ -1408,3 +1408,100 @@ impl MemSlice {
         sv
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #5: #[cdc] generated a synchronizer scaffold that
+// multi-drove the user's hand-written sync chain (and whose sync registers
+// were never clocked, with an undriven binary input). Per the published
+// tutorial semantics, #[cdc] is a VERIFICATION annotation over the user's
+// own synchronizer — it must not synthesize hardware.
+// =============================================================================
+
+#[test]
+fn test_triage5_cdc_annotation_does_not_generate_hardware() {
+    let source = r#"
+entity CdcRepro {
+    in wr_clk: clock
+    in rd_clk: clock
+    in rst: reset
+    out val: bit[4]
+}
+
+impl CdcRepro {
+    signal wr_ptr_gray: bit[4] = 0
+
+    #[cdc(cdc_type = gray, sync_stages = 2)]
+    signal wr_ptr_gray_sync_rd: bit[4] = 0
+
+    signal ff1: bit[4] = 0
+
+    on(wr_clk.rise) {
+        if (rst) {
+            wr_ptr_gray = 0
+        } else {
+            wr_ptr_gray = wr_ptr_gray + 1
+        }
+    }
+
+    on(rd_clk.rise) {
+        if (rst) {
+            ff1 = 0
+            wr_ptr_gray_sync_rd = 0
+        } else {
+            ff1 = wr_ptr_gray
+            wr_ptr_gray_sync_rd = ff1
+        }
+    }
+
+    val = wr_ptr_gray_sync_rd
+}
+"#;
+    let sv = compile_to_sv(source).expect("CDC-annotated design should compile");
+
+    // No synthesized scaffold nets. The scaffold suffixed the SIGNAL name
+    // (wr_ptr_gray_sync_rd_gray_sync_0, ..._bin_in) — match those forms, not
+    // the user's own `_gray_sync_`-containing signal name.
+    for forbidden in [
+        "wr_ptr_gray_sync_rd_bin_in",
+        "wr_ptr_gray_sync_rd_gray",
+        "_gray_sync_0",
+        "_gray_sync_1",
+        "_toggle_sync_",
+        "_req_sync_",
+    ] {
+        assert!(
+            !sv.contains(forbidden),
+            "Triage #5: #[cdc] must not synthesize a synchronizer scaffold \
+             (found `{}`):\n{}",
+            forbidden,
+            sv
+        );
+    }
+    // The annotated signal is a normally-declared register (single driver:
+    // the user's clocked chain), carrying the ASYNC_REG synthesis attribute.
+    assert!(
+        sv.contains("reg [3:0] wr_ptr_gray_sync_rd"),
+        "Triage #5: annotated signal must declare as a normal reg:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("(* ASYNC_REG = \"TRUE\" *)"),
+        "Triage #5: registered CDC signal should carry ASYNC_REG:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("// CDC:"),
+        "Triage #5: the CDC annotation comment should be emitted:\n{}",
+        sv
+    );
+    // Exactly one declaration of the annotated signal (the old scaffold
+    // re-declared it as a wire, multi-driving the user's assignments)
+    let decls =
+        sv.matches("wr_ptr_gray_sync_rd;").count() + sv.matches("wr_ptr_gray_sync_rd =").count();
+    assert!(
+        !sv.contains("wire [3:0] wr_ptr_gray_sync_rd"),
+        "Triage #5: annotated signal must not be re-declared as a wire:\n{}",
+        sv
+    );
+    let _ = decls;
+}
