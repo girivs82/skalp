@@ -1352,3 +1352,59 @@ impl Adder {
         "Issue #10: carry_out should access result[8]"
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #4: index-slice on memory subscript silently dropped
+// =============================================================================
+
+#[test]
+fn test_triage4_nested_index_slice_preserved() {
+    // `mem[ptr[3:0]]` parses the outer index's children as SIBLINGS
+    // [IdentExpr(ptr), IndexExpr(3:0)]; every index-building path used to pick
+    // a single child and silently emit `mem[ptr]` — a 5-bit pointer into a
+    // 16-deep memory, out of range after wrap (tutorial ch08 AsyncFIFO).
+    // The slice must survive on BOTH the write side (sequential lvalue) and
+    // the read side (continuous-assign RHS, which flows through
+    // build_index_access_from_parts).
+    let source = r#"
+entity MemSlice {
+    in clk: clock
+    in rst: reset
+    in wr_en: bit
+    in wr_data: bit[8]
+    out rd_data: bit[8]
+}
+
+impl MemSlice {
+    signal mem: [bit[8]; 16]
+    signal ptr: bit[5] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            ptr = 0
+        } else {
+            if (wr_en) {
+                mem[ptr[3:0]] = wr_data
+                ptr = ptr + 1
+            }
+        }
+    }
+
+    rd_data = mem[ptr[3:0]]
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile sliced memory index");
+
+    let sliced_count = sv.matches("mem[ptr[3:0]]").count();
+    assert!(
+        sliced_count >= 2,
+        "Triage #4: expected `mem[ptr[3:0]]` on both write and read sides, found {} occurrence(s) in:\n{}",
+        sliced_count,
+        sv
+    );
+    assert!(
+        !sv.contains("mem[ptr]"),
+        "Triage #4: unsliced `mem[ptr]` means the index slice was dropped:\n{}",
+        sv
+    );
+}

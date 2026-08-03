@@ -3827,19 +3827,11 @@ impl HirBuilderContext {
                 }
             } else {
                 // Single index: signal[index]
-                // BUG#26 FIX: Prefer BinaryExpr over IdentExpr/LiteralExpr
-                // The parser creates children like [IdentExpr(wr_ptr), BinaryExpr(% DEPTH)]
-                // for expressions like `mem[wr_ptr % DEPTH]`. We need to use the BinaryExpr
-                // which contains the full expression tree, not just the first IdentExpr.
-                let index_expr = index_node
-                    .children()
-                    .find(|n| n.kind() == SyntaxKind::BinaryExpr)
-                    .or_else(|| {
-                        index_node.children().find(|n| {
-                            matches!(n.kind(), SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr)
-                        })
-                    })
-                    .and_then(|n| self.build_expression(&n))?;
+                // Handles both complex indices (mem[wr_ptr % DEPTH] — sibling
+                // BinaryExpr) and nested indexed indices (mem[ptr[3:0]] —
+                // sibling IdentExpr + IndexExpr) via build_index_operand.
+                let index_children: Vec<SyntaxNode> = index_node.children().collect();
+                let index_expr = self.build_index_operand(&index_children)?;
 
                 HirLValue::Index(Box::new(base), index_expr)
             }
@@ -4313,16 +4305,11 @@ impl HirBuilderContext {
                 Box::new(low_expr),
             ))
         } else {
-            // Single index: base[index]
-            let index_expr = index_node
-                .children()
-                .find(|n| {
-                    matches!(
-                        n.kind(),
-                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
-                    )
-                })
-                .and_then(|n| self.build_expression(&n))?;
+            // Single index: base[index] — build_index_operand handles both
+            // complex indices (sibling BinaryExpr) and sibling-split nested
+            // indices (mem[ptr[3:0]] = [IdentExpr(ptr), IndexExpr(3:0)]).
+            let index_children: Vec<SyntaxNode> = index_node.children().collect();
+            let index_expr = self.build_index_operand(&index_children)?;
 
             Some(HirExpression::Index(Box::new(base), Box::new(index_expr)))
         }
@@ -6915,8 +6902,9 @@ impl HirBuilderContext {
                     let end_expr = self.build_expression(&index_exprs[1])?;
                     Some(HirLValue::Range(Box::new(base), start_expr, end_expr))
                 } else {
-                    // Single indexing: signal[index]
-                    let index_expr = self.build_expression(&index_exprs[0])?;
+                    // Single indexing: signal[index] — build_index_operand
+                    // handles sibling-split nested indices (signal[ptr[3:0]])
+                    let index_expr = self.build_index_operand(&index_exprs)?;
                     Some(HirLValue::Index(Box::new(base), index_expr))
                 }
             }
@@ -9245,6 +9233,21 @@ impl HirBuilderContext {
             Some(HirExpression::Range(base, start, end))
         } else {
             // Single index access: base[index]
+            // The index may itself be a sibling-split nested index (`mem[ptr[3:0]]`
+            // parses the outer index's children as [IdentExpr(ptr), IndexExpr(3:0)]);
+            // build_index_operand reassembles that shape. The `indices` filter above
+            // drops IndexExpr children, so check the raw children here.
+            let raw_children: Vec<SyntaxNode> = index_node.children().collect();
+            if raw_children.len() >= 2
+                && matches!(
+                    raw_children[0].kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+                )
+                && raw_children[1].kind() == SyntaxKind::IndexExpr
+            {
+                let index_expr = self.build_index_operand(&raw_children)?;
+                return Some(HirExpression::Index(base, Box::new(index_expr)));
+            }
             // Fix for Bug #30: Handle parser quirk where binary expressions are split
             // Parser creates: [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)] for "rd_ptr % DEPTH"
             // The BinaryExpr only contains the operator and right operand; left operand is separate
@@ -9958,6 +9961,40 @@ impl HirBuilderContext {
     }
 
     /// Build index expression
+    /// Build the INDEX operand of an indexing expression from the index node's
+    /// children, handling the parser's sibling split for nested indexed
+    /// expressions.
+    ///
+    /// `mem[ptr[3:0]]` parses the outer index's children as siblings
+    /// `[IdentExpr(ptr), IndexExpr(3:0)]`. Every call site used to pick a
+    /// single child (`BinaryExpr` else first), silently DROPPING the sibling
+    /// slice — `mem[ptr[3:0]]` became `mem[ptr]` (out-of-range indexing after
+    /// pointer wrap; tutorial ch08 AsyncFIFO).
+    fn build_index_operand(&mut self, children: &[SyntaxNode]) -> Option<HirExpression> {
+        if children.is_empty() {
+            return None;
+        }
+        // Sibling pattern: base expression followed by its own IndexExpr —
+        // rebuild the nested index/range with the base attached.
+        if children.len() >= 2
+            && matches!(
+                children[0].kind(),
+                SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+            )
+            && children[1].kind() == SyntaxKind::IndexExpr
+        {
+            let inner_base = self.build_expression(&children[0])?;
+            return self.build_index_expr_with_base(&children[1], inner_base);
+        }
+        // Prefer BinaryExpr over IdentExpr for complex indices
+        // (mem[wr_ptr % DEPTH] parses as [IdentExpr(wr_ptr), BinaryExpr(% DEPTH)])
+        let index_node = children
+            .iter()
+            .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+            .or_else(|| children.first())?;
+        self.build_expression(index_node)
+    }
+
     fn build_index_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         let children: Vec<_> = node.children().collect();
         // Determine if this is a range by checking for colon token
@@ -10039,23 +10076,13 @@ impl HirBuilderContext {
             Some(HirExpression::Range(base, high, low))
         } else {
             // Single index: base[index]
-            // children should be [index]
+            // children should be [index] (or sibling-split nested index)
             if children.is_empty() {
                 return None;
             }
 
             let base = Box::new(self.build_expression(&base_expr)?);
-
-            // Fix for Bug #30: Prefer BinaryExpr over IdentExpr for array indices
-            // When parsing mem[rd_ptr % DEPTH], the children might be [IdentExpr(rd_ptr), BinaryExpr(% DEPTH)]
-            // We want the BinaryExpr (complete expression), not the IdentExpr (first operand)
-            let index_node = children
-                .iter()
-                .find(|n| n.kind() == SyntaxKind::BinaryExpr)
-                .or_else(|| children.first())
-                .expect("At least one child should exist");
-
-            let index = Box::new(self.build_expression(index_node)?);
+            let index = Box::new(self.build_index_operand(&children)?);
             Some(HirExpression::Index(base, index))
         }
     }
@@ -10121,19 +10148,12 @@ impl HirBuilderContext {
             let low = Box::new(self.build_chained_expression(&after_colon)?);
             Some(HirExpression::Range(Box::new(base), high, low))
         } else {
-            // Single index: base[index]
+            // Single index: base[index] (or sibling-split nested index)
             if children.is_empty() {
                 return None;
             }
 
-            // Prefer BinaryExpr over IdentExpr for complex array indices
-            let index_node = children
-                .iter()
-                .find(|n| n.kind() == SyntaxKind::BinaryExpr)
-                .or_else(|| children.first())
-                .expect("At least one child should exist");
-
-            let index = Box::new(self.build_expression(index_node)?);
+            let index = Box::new(self.build_index_operand(&children)?);
             Some(HirExpression::Index(Box::new(base), index))
         }
     }

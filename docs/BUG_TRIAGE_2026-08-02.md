@@ -58,9 +58,30 @@ codegen gaps; **P3** = hygiene.
    `skalp fmt` rewrite of portmap-output style, LSP completion, examples/tutorial
    migration to `inst`.
 
-4. **Index-slice on memory subscript silently dropped.** `mem[wr_ptr[clog2(DEPTH)-1:0]]`
-   emits `mem[wr_ptr]` — 5-bit pointer into 16-deep memory, out of range after wrap.
-   Repro: tutorial ch08 AsyncFIFO.
+4. **FIXED (2026-08-03). Index-slice on memory subscript silently dropped.**
+   `mem[wr_ptr[clog2(DEPTH)-1:0]]` emitted `mem[wr_ptr]` — 5-bit pointer into
+   16-deep memory, out of range after wrap. Repro: tutorial ch08 AsyncFIFO.
+   **Root cause:** the parser splits a nested index into SIBLING nodes — the
+   outer index's children are `[IdentExpr(ptr), IndexExpr(3:0)]`, not a nested
+   tree — and six separate index-building paths in `hir_builder.rs` each picked
+   only the first/BinaryExpr child, silently discarding the slice. **Fix:** a
+   shared `build_index_operand` helper reassembles the sibling-split shape
+   (base then nested IndexExpr → build the inner index on the built base); all
+   six call sites route through it: `build_index_expr`,
+   `build_index_expr_with_base`, the event-block LHS lvalue builder,
+   `build_lvalue`, `build_index_with_base`, and — the path serving impl-level
+   continuous-assign RHS like `rd_data = mem[ptr[3:0]]` —
+   `build_index_access_from_parts` (whose `indices` filter dropped IndexExpr
+   children outright). Verified: repro emits `mem[ptr[3:0]]` on BOTH read and
+   write sides; AsyncFIFO now emits `assign rd_addr = rd_ptr[3:0]` /
+   `wr_addr = wr_ptr[3:0]`; 90-design build corpus byte-compared against
+   baseline (identical pass/fail sets, zero regressions); full test suite green.
+   **Follow-up discovered (see #27):** `skalp ec` cannot verify ANY design with
+   a memory array — the gate-level simulation never models memory writes
+   (`mem_rdata` stays 0 forever), so memory designs fail smoke EC even when
+   the emitted SV is correct. This is independent of the slice fix (a plain
+   `mem[ptr]` design fails identically). The gate netlist DOES get the sliced
+   4-bit address (`mem_raddr[3:0]`), confirming lowering is right.
 
 5. **`#[cdc(...)]` auto-synchronizer conflicts with user logic.** The generated Gray
    sync chain drives the same nets as hand-written sync flops (multi-driven
@@ -118,6 +139,23 @@ codegen gaps; **P3** = hygiene.
     ports to the bare inner type (`TODO: Add proper stream protocol support`). Either
     implement valid/ready lowering or error on `stream` ports until it exists — docs
     claim the compiler "enforces backpressure."
+
+27. **(found 2026-08-03) `skalp ec` cannot verify designs with memory arrays.**
+    The gate-level side of EC never simulates memory writes: the netlist gets
+    memory macro nets (`mem_raddr`/`mem_waddr`/`mem_wdata`/`mem_rdata`) but
+    `mem_rdata` stays 0 forever, so ANY design containing `signal mem: [T; N]`
+    fails smoke EC with `mir=<written value> gate=0` even when the emitted SV is
+    correct. Repro: minimal 16-deep write-then-read design (both with plain
+    `mem[ptr]` and sliced `mem[ptr[3:0]]` — identical failure). Until fixed,
+    memory designs are unverifiable by `skalp ec`; #4's fix was therefore
+    verified via SV inspection + corpus diff instead of SAT.
+
+28. **(found 2026-08-03) `skalp ec` smoke-fails hierarchical designs.**
+    `examples/equivalence_mwe.sk` (4 child entities via `let` instantiation)
+    fails smoke EC at baseline: `counter_out`/`pwm_out`/`pwm_counter` read
+    `mir=<live value> gate=0`. Pre-existing (byte-identical SV and same failure
+    before/after the #4 fix). Likely instance flattening in the gate-side
+    conversion — the previously-fixed SpiMaster cases were all single-module.
 
 ## P2 — semantic / codegen gaps
 
