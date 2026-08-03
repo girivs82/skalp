@@ -201,15 +201,28 @@ codegen gaps; **P3** = hygiene.
     consumes an unaliased child input port) and
     `test_triage28_mwe_sat_equivalent` (full MIR-vs-gates SAT proof).
 
-29. **(found 2026-08-03) `examples/hierarchical_alu.sk` fails EC — generic
-    children.** Smoke mismatch at cycle 6: `result` mir=0x85f00000 vs
-    gate=0x5ccb885f (both live, both nonzero — not an undriven-port problem;
-    unaffected by the #28 fix, identical values at baseline). Distinct from
-    #28: children here are monomorphized generics (`Adder_32`,
-    `Comparator_32`, `Shifter_32`) and the design muxes among their results.
-    Needs its own triage — suspects: monomorphized-child lowering in the
-    hierarchical LIR path, or the `result[WIDTH-1:0]`/`result[WIDTH]`
-    slice-of-widened-add pattern in `Adder`.
+29. **FIXED (2026-08-03). `examples/hierarchical_alu.sk` fails EC — sliced
+    port connections dropped.** Smoke mismatch at cycle 6: `result`
+    mir=0x85f00000 vs gate=0x5ccb885f (both live). The generic-children
+    suspicion was WRONG — monomorphized `Adder_32`/`Comparator_32` lowered
+    fine. **Root cause:** the Shifter's connections `shift_amt: b[4:0]`
+    (Range) and `shift_left: op[0]` (BitSelect) hit the third dropped-
+    connection kind in `flatten()`'s alias pass: `PortConnectionInfo::Range`
+    and `::BitSelect` fell into `_ => continue`, so `top.shifter.shift_amt`
+    and `top.shifter.shift_left` were consumed by the shift logic with no
+    driver (probe showed the Shl/Shr/Mux2 nodes reading undriven nets).
+    Same family as #28 — flatten dropped THREE of six connection kinds
+    (InstancePort fixed in #28; Range/BitSelect here). **Fix:** the alias
+    pass now synthesizes a `RangeSelect` extraction node (bit-select =
+    single-bit range) from the parent signal into the child's flattened port
+    signal, mirroring the existing Constant-connection handling. Output-side
+    Range/BitSelect connections (child output driving a slice of a parent
+    signal) remain unhandled — no known repro; would need read-modify-write
+    insertion. **Verified:** hierarchical_alu passes ALL EC phases (smoke +
+    full SAT proof + self-test); 12-design EC sweep green; corpus unchanged;
+    full suite zero regressions. Suite regression test:
+    `test_triage29_hierarchical_alu_sat_equivalent` (asserts the slice
+    nodes exist + full MIR-vs-gates SAT proof).
 
 ## P2 — semantic / codegen gaps
 

@@ -5176,7 +5176,13 @@ impl HierarchicalMirToLirResult {
                                 .to_string();
                             (base, true)
                         }
-                        _ => continue,
+                        // TRIAGE #29: sliced connections (shift_amt: b[4:0],
+                        // shift_left: op[0]) fell into `continue`, silently
+                        // dropping the connection and leaving the child input
+                        // undriven. They need an extraction node, handled in
+                        // the is_input branch below.
+                        PortConnectionInfo::Range(name, _, _)
+                        | PortConnectionInfo::BitSelect(name, _) => (name.clone(), false),
                     };
 
                     // Find the signal ID in child's LIR for this port
@@ -5229,6 +5235,43 @@ impl HierarchicalMirToLirResult {
                                     reset: None,
                                 };
                                 flat_lir.nodes.push(const_node);
+                            } else if let PortConnectionInfo::Range(..)
+                            | PortConnectionInfo::BitSelect(..) = conn_info
+                            {
+                                // TRIAGE #29: sliced connection — synthesize a
+                                // RangeSelect node extracting the connected bits
+                                // of the parent signal into the child's port.
+                                let (high, low) = match conn_info {
+                                    PortConnectionInfo::Range(_, h, l) => (*h as u32, *l as u32),
+                                    PortConnectionInfo::BitSelect(_, idx) => {
+                                        (*idx as u32, *idx as u32)
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                let parent_signal_name =
+                                    format!("{}{}", parent_prefix, parent_signal_base);
+                                if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                    let child_port_flat_id = signal_id_map
+                                        .get(&(inst_path.clone(), child_port_id))
+                                        .copied()
+                                        .unwrap_or(LirSignalId(0));
+                                    let parent_width =
+                                        flat_lir.signals[parent_sig.0 as usize].width;
+                                    let slice_node = crate::lir::LirNode {
+                                        id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                                        op: LirOp::RangeSelect {
+                                            width: parent_width,
+                                            high,
+                                            low,
+                                        },
+                                        inputs: vec![parent_sig],
+                                        output: child_port_flat_id,
+                                        path: format!("{}.{}_slice", inst_path, port_name),
+                                        clock: None,
+                                        reset: None,
+                                    };
+                                    flat_lir.nodes.push(slice_node);
+                                }
                             }
                         } else if is_output && is_signal_conn {
                             // For output ports, when a child node outputs to this port,

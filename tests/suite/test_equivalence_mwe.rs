@@ -393,3 +393,65 @@ fn test_triage28_mwe_sat_equivalent() {
         result.counterexample
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #29: sliced port connections (shift_amt: b[4:0],
+// shift_left: op[0]) were dropped during flattening — the Range/BitSelect
+// connection kinds fell into `continue` in the alias pass, leaving the
+// child's inputs undriven. examples/hierarchical_alu.sk (Adder_32 /
+// Comparator_32 / Shifter_32 monomorphized children) exercised this via
+// its Shifter and failed EC with live-but-different values.
+// =============================================================================
+
+/// Full SAT equivalence for hierarchical_alu: behavioral MIR vs the
+/// synthesized flat gate netlist (mirrors `skalp ec` Phase 2).
+#[test]
+fn test_triage29_hierarchical_alu_sat_equivalent() {
+    use skalp_formal::{check_sequential_equivalence_sat, MirToAig};
+
+    let path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/hierarchical_alu.sk"
+    ));
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+    let target = mir
+        .modules
+        .iter()
+        .filter(|m| m.name.starts_with("HierarchicalALU"))
+        .max_by_key(|m| m.instances.len() + m.processes.len())
+        .expect("top module");
+
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(&target.name));
+    let flat_lir = hier_lir.flatten();
+
+    // The Shifter's sliced connections must be driven: a RangeSelect node
+    // extracting b[4:0] / op[0] into the child ports.
+    let slice_nodes = flat_lir
+        .nodes
+        .iter()
+        .filter(|n| n.path.contains("shifter") && n.path.ends_with("_slice"))
+        .count();
+    assert!(
+        slice_nodes >= 2,
+        "Triage #29: expected slice-extraction nodes for the shifter's \
+         Range/BitSelect connections, found {}",
+        slice_nodes
+    );
+
+    let library = get_stdlib_library("generic_asic").expect("library");
+    let synth = skalp_lir::synthesize(&flat_lir, &library, skalp_lir::synth::SynthPreset::Quick);
+
+    let mir_aig = MirToAig::new_with_mir(&mir, target).convert_sequential_hierarchical();
+    let gate_aig = GateNetlistToAig::new().convert_sequential(&synth.netlist);
+
+    let result = check_sequential_equivalence_sat(&mir_aig, &gate_aig, false)
+        .expect("SAT equivalence check errored");
+    assert!(
+        result.equivalent,
+        "Triage #29: hierarchical_alu must be SAT-equivalent MIR vs gates; \
+         counterexample: {:?}",
+        result.counterexample
+    );
+}
