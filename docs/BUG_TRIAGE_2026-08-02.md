@@ -107,9 +107,20 @@ codegen gaps; **P3** = hygiene.
    but only one flop in the chain → error") remains unimplemented — that is
    #10's CDC-analysis work, not codegen.
 
-6. **`open` port binding lowers to `.z(0)`** — instance output tied to a constant
-   (illegal SV, and wrong intent). `_` binding works correctly (connection omitted);
-   `open` should do the same or be removed.
+6. **FIXED (2026-08-03). `open` port binding lowers to `.z(0)`** — instance
+   output tied to a constant (illegal SV, and wrong intent). `_` binding
+   worked correctly (connection omitted); `open` built as an identifier
+   expression, which originally lowered to constant 0 and — after the #1
+   undefined-identifier check landed — became a hard error
+   (``undefined identifier `open` ``). **Fix:** `open` is now recognized at
+   all three wildcard-binding sites (`build_connection`,
+   `build_instance_as_statements` — expression side only, so a PORT named
+   `open` still binds — and `build_struct_field_init`) with exactly `_`'s
+   semantics: the connection is skipped and the output gets an auto-wire
+   nothing reads (DCE-able, legal SV). **Verified:** repro builds cleanly
+   with `.carry(adder_carry)` instead of a constant tie and passes full EC
+   with SAT proof; corpus unchanged; full suite zero regressions. Suite
+   test: `test_triage6_open_binding_skips_connection`.
 
 7. **`let x = 0` special-cased as "placeholder signal", assignment skipped.**
    `hir_to_mir.rs` (`is_placeholder_signal`) treats any let-binding of literal 0 as a

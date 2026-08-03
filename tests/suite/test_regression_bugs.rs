@@ -1505,3 +1505,58 @@ impl CdcRepro {
     );
     let _ = decls;
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #6: `open` port binding (the documented VHDL-style
+// unconnected marker) lowered to a constant tie (`.z(0)`) — an instance
+// OUTPUT driven by a constant, which is illegal SV and wrong intent. After
+// the undefined-identifier check landed it became a hard error instead.
+// `open` now behaves exactly like `_`: the connection is skipped (the
+// output gets an auto-wire that nothing reads).
+// =============================================================================
+
+#[test]
+fn test_triage6_open_binding_skips_connection() {
+    let source = r#"
+entity Adder4 {
+    in a: bit[4]
+    in b: bit[4]
+    out sum: bit[4]
+    out carry: bit
+}
+
+impl Adder4 {
+    signal r: bit[5]
+    r = {1'b0, a} + {1'b0, b}
+    sum = r[3:0]
+    carry = r[4]
+}
+
+entity Top {
+    in a: bit[4]
+    in b: bit[4]
+    out s: bit[4]
+}
+
+impl Top {
+    signal sm: bit[4]
+    let adder = Adder4 { a: a, b: b, sum: sm, carry: open }
+    s = sm
+}
+"#;
+    let sv = compile_to_sv(source).expect("`open` binding must compile");
+
+    assert!(
+        !sv.contains(".carry(0)") && !sv.contains(".carry(1'b0)"),
+        "Triage #6: `open` must not tie the output to a constant:\n{}",
+        sv
+    );
+    assert!(
+        !sv.contains("undefined identifier"),
+        "Triage #6: `open` must not resolve as an identifier:\n{}",
+        sv
+    );
+    // The instance is emitted and `sum` is properly connected
+    assert!(sv.contains("Adder4 adder"), "instance must exist:\n{}", sv);
+    assert!(sv.contains(".sum(sm)"), "bound output must connect:\n{}", sv);
+}

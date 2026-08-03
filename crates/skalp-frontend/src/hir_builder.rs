@@ -2424,9 +2424,12 @@ impl HirBuilderContext {
         // (used in entity impl blocks) calls build_connection() which didn't handle them.
         // Without this, `port: _` creates a connection with `_` as an identifier expression,
         // which the MIR treats as constant 0 — corrupting the output port's internal logic.
+        // TRIAGE #6: `open` is the documented VHDL-style unconnected marker —
+        // same semantics as `_` (connection omitted). It used to build as an
+        // identifier expression and lower to constant 0 (`.z(0)` in the SV).
         if expr_node.kind() == SyntaxKind::IdentExpr {
             if let Some(tok) = expr_node.first_token_of_kind(SyntaxKind::Ident) {
-                if tok.text() == "_" {
+                if tok.text() == "_" || tok.text() == "open" {
                     return None;
                 }
             }
@@ -2603,8 +2606,16 @@ impl HirBuilderContext {
                     matches!(e.as_token(), Some(tok) if tok.kind() == SyntaxKind::Ident && tok.text() == "_")
                 });
 
-                if is_wildcard {
-                    // Skip wildcard bindings (output ports we don't care about)
+                // TRIAGE #6: `open` (documented unconnected marker) — the
+                // expression side only, so a PORT named `open` still binds.
+                let is_open = connection
+                    .children()
+                    .find(|n| n.kind() == SyntaxKind::IdentExpr)
+                    .and_then(|n| n.first_token_of_kind(SyntaxKind::Ident))
+                    .is_some_and(|tok| tok.text() == "open");
+
+                if is_wildcard || is_open {
+                    // Skip unconnected bindings (output ports we don't care about)
                     continue;
                 }
 
@@ -8324,9 +8335,11 @@ impl HirBuilderContext {
         if let Some(ref child) = expr_child {
             if child.kind() == SyntaxKind::IdentExpr {
                 if let Some(tok) = child.first_token_of_kind(SyntaxKind::Ident) {
-                    if tok.text() == "_" {
+                    // TRIAGE #6: `open` = documented unconnected marker,
+                    // same skip semantics as `_`.
+                    if tok.text() == "_" || tok.text() == "open" {
                         trace!(
-                            "[HIR_FIELD_DEBUG] StructFieldInit '{}': SKIPPING wildcard binding",
+                            "[HIR_FIELD_DEBUG] StructFieldInit '{}': SKIPPING unconnected binding",
                             name
                         );
                         return None;
