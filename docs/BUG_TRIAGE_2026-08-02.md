@@ -322,15 +322,30 @@ codegen gaps; **P3** = hygiene.
     where the internal 2N+1-bit adds fit the behavioral backend's 64-bit
     arithmetic (N ≤ 31); wider and symbolic-width Muls stay primitive.
 
-32. **(found 2026-08-03) Behavioral simulator C++ backend cannot do
-    arithmetic on values wider than 64 bits.** Signals over 64 bits lower to
-    `uint32_t[N]` arrays in the generated C++, and shift/add on them emits
-    invalid C++ (`invalid operands to binary expression ('uint32_t[3]' …)`),
-    failing compilation of the simulation library. Exposed when 32-bit `*`
-    routed through std_multiplier_32 (64-bit accumulator, 65-bit internal
-    adds). Until wide arithmetic lands in the backend, the Mul trait route is
-    width-gated (see #30) — but any USER design with >64-bit arithmetic hits
-    this today.
+32. **FIXED (2026-08-03, 65-128 bits). Behavioral simulator C++ backend
+    cannot do arithmetic on values wider than 64 bits.** Signals over 64
+    bits lowered to `uint32_t[N]` arrays in the generated C++, and shift/add
+    on them emitted invalid C++, failing compilation of the simulation
+    library. **Fix:** 65-128-bit values now lower to native
+    `unsigned __int128` (clang/GCC on all 64-bit hosts) — ordinary
+    expression emission stays valid; the array-storage threshold moved to
+    >128 bits to match Metal. Follow-on codegen fixes: scalar shift/or
+    concat packing for 65-128-bit outputs (was word-wise array writes);
+    slice extraction masks were CLAMPED at u64::MAX, silently zeroing bits
+    64+ of a 65-128-bit slice (std_adder_80's `sum = extended_sum[79:0]`
+    lost its top 16 bits); wide (65-127-bit) binary results and Not/Neg now
+    mask to signal width via an __int128 mask expression (Not/Neg masking
+    for 33-63 bits was also missing — pre-existing garbage upper bits).
+    The Mul trait-route gate lifted from N≤31 to N≤63 (2N+1 ≤ 128); 32-bit
+    `*` through std_multiplier_32's 65-bit internals now compiles AND
+    computes correctly. **Verified:** new suite tests
+    `test_triage32_wide_concat_shift_add` (80-bit concat/shl/add against
+    u128 reference math, carry into high bits, with and without stdlib
+    visible) and `test_triage32_mul32_through_stdlib_chain`; 7-design EC
+    sweep green; corpus unchanged; full suite zero regressions.
+    REMAINING: >128-bit values still use uint32_t arrays with no arithmetic
+    support (concat/slice work element-wise; +,<<,~ do not) — no known
+    designs hit this; symbolic-width (BitParam) Mul stays primitive.
 
 31. **FIXED (2026-08-03). Stdlib visibility broke most Testbench-based suites
     — the test_function_inlining cluster (15/16), counter_example,

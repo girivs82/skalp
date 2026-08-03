@@ -1,0 +1,15 @@
+entity WideMul32 {
+    in clk: clock
+    in a: bit[32]
+    in b: bit[32]
+    out p: bit[32]
+}
+
+impl WideMul32 {
+    signal prod: bit[32]
+    prod = a * b
+
+    on(clk.rise) {
+        p = prod
+    }
+}

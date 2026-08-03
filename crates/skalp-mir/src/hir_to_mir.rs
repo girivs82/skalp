@@ -18575,11 +18575,11 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Bit(width) => {
                 // TRIAGE #32: the stdlib Mul route expands bit[N] * bit[N]
                 // into a 2N-wide shift-add chain whose internal adders are
-                // 2N+1 bits. The behavioral simulator's C++ backend cannot do
-                // arithmetic on values wider than 64 bits (they lower to
-                // uint32_t arrays), so widths where 2N+1 > 64 stay on the
-                // primitive Mul op until wide arithmetic lands in the backend.
-                if matches!(op, hir::HirBinaryOp::Mul) && *width * 2 + 1 > 64 {
+                // 2N+1 bits. The behavioral simulator's C++ backend supports
+                // native arithmetic up to 128 bits (unsigned __int128); wider
+                // values lower to uint32_t arrays with no operators, so widths
+                // where 2N+1 > 128 stay on the primitive Mul op.
+                if matches!(op, hir::HirBinaryOp::Mul) && *width * 2 + 1 > 128 {
                     return None;
                 }
                 trace!(

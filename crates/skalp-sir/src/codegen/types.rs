@@ -83,8 +83,13 @@ impl TypeMapper {
             0 => ("uint32_t".to_string(), None),
             1..=32 => ("uint32_t".to_string(), None),
             33..=64 => ("uint64_t".to_string(), None),
+            // TRIAGE #32: 65-128 bits use native __int128 so ordinary
+            // arithmetic/shift/compare expression emission stays valid
+            // (uint32_t arrays support no operators). Clang and GCC support
+            // unsigned __int128 on all 64-bit hosts the simulator targets.
+            65..=128 => ("unsigned __int128".to_string(), None),
             _ => {
-                // For very wide signals (>64 bits), use arrays of uint32_t
+                // For very wide signals (>128 bits), use arrays of uint32_t
                 let array_size = width.div_ceil(32);
                 ("uint32_t".to_string(), Some(array_size))
             }

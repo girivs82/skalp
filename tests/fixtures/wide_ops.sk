@@ -1,0 +1,26 @@
+entity WideOps {
+    in clk: clock
+    in a: bit[64]
+    in b: bit[64]
+    out lo: bit[64]
+    out hi: bit[16]
+}
+
+impl WideOps {
+    signal ext: bit[80]
+    ext = {16'b0, a}
+
+    signal shifted: bit[80]
+    shifted = ext << 16
+
+    signal extb: bit[80]
+    extb = {16'b0, b}
+
+    signal sum: bit[80]
+    sum = shifted + extb
+
+    on(clk.rise) {
+        lo = sum[63:0]
+        hi = sum[79:64]
+    }
+}

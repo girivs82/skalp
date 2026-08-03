@@ -328,11 +328,11 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Check if a given bit width uses array storage for the current backend
-    /// C++: > 64 bits uses uint32_t[N] arrays
+    /// C++: > 128 bits uses uint32_t[N] arrays (65-128 uses unsigned __int128)
     /// Metal: > 128 bits uses uint[N] arrays (65-128 uses vector types like uint2/uint4)
     pub fn uses_array_storage(&self, width: usize) -> bool {
         match self.type_mapper.target {
-            BackendTarget::Cpp => width > 64,
+            BackendTarget::Cpp => width > 128,
             BackendTarget::Metal => width > 128,
         }
     }
@@ -1004,6 +1004,19 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Generate binary operation expression
+    /// TRIAGE #32: C++ scalar mask suffix for a value narrower than its
+    /// storage container. Empty when the width exactly fills the container
+    /// (32/64/128 bits) or exceeds 128 (array storage, masked elsewhere).
+    fn cpp_mask_suffix(width: usize) -> String {
+        match width {
+            0 | 32 | 64 => String::new(),
+            w if w < 32 => format!(" & 0x{:X}", (1u32 << w) - 1),
+            w if w < 64 => format!(" & 0x{:X}ULL", (1u64 << w) - 1),
+            w if w < 128 => format!(" & ((((unsigned __int128)1) << {}) - 1)", w),
+            _ => String::new(),
+        }
+    }
+
     pub fn generate_binary_op(&mut self, node: &SirNode, op: &BinaryOperation) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
             return;
@@ -1206,11 +1219,15 @@ impl<'a> SharedCodegen<'a> {
         // from poisoning subsequent comparisons. In hardware, all signals have fixed widths and
         // arithmetic naturally wraps. But in C++ with uint32_t storage, sub/add/shl can produce
         // values wider than the signal's actual width.
-        let needs_mask = output_width < 32 && !is_comparison;
+        // TRIAGE #32: 65-127-bit results live in unsigned __int128 and must
+        // be masked to the signal width just like sub-32-bit results.
+        let is_cpp = matches!(self.type_mapper.target, BackendTarget::Cpp);
+        let needs_mask = !is_comparison
+            && (output_width < 32 || (is_cpp && output_width > 64 && output_width < 128));
         if needs_mask {
-            let mask = (1u64 << output_width) - 1;
+            let mask = Self::cpp_mask_suffix(output_width);
             self.write_indented(&format!(
-                "signals->{} = (signals->{} {} signals->{}) & 0x{:X};\n",
+                "signals->{} = (signals->{} {} signals->{}){};\n",
                 self.sanitize_name(output),
                 self.sanitize_name(left),
                 op_str,
@@ -2154,12 +2171,16 @@ impl<'a> SharedCodegen<'a> {
             }
         } else {
             let output_width = self.get_signal_width(output);
+            // TRIAGE #32: Not/Neg set every container bit above the signal
+            // width — mask whenever the width doesn't exactly fill the
+            // container (previously only <32; 33-63 and 65-127 were left
+            // with garbage upper bits).
+            let mask = Self::cpp_mask_suffix(output_width);
             let needs_mask =
-                output_width < 32 && matches!(op, UnaryOperation::Not | UnaryOperation::Neg);
+                !mask.is_empty() && matches!(op, UnaryOperation::Not | UnaryOperation::Neg);
             if needs_mask {
-                let mask = (1u64 << output_width) - 1;
                 self.write_indented(&format!(
-                    "signals->{} = ({}signals->{}) & 0x{:X};\n",
+                    "signals->{} = ({}signals->{}){};\n",
                     self.sanitize_name(output),
                     op_str,
                     self.sanitize_name(input),
@@ -2607,14 +2628,15 @@ impl<'a> SharedCodegen<'a> {
             if shift >= input_width {
                 self.write_indented(&format!("signals->{} = 0;\n", self.sanitize_name(output)));
             } else {
-                let mask = if width >= 64 {
-                    u64::MAX
+                // TRIAGE #32: slices wider than 64 bits need an __int128 mask
+                // (`& u64::MAX` used to zero bits 64+ of a 65-128-bit slice).
+                let mask = if width == 64 {
+                    " & 0xFFFFFFFFFFFFFFFF".to_string()
                 } else {
-                    (1u64 << width) - 1
+                    Self::cpp_mask_suffix(width)
                 };
-
                 self.write_indented(&format!(
-                    "signals->{} = ({} >> {}) & 0x{:X};\n",
+                    "signals->{} = ({} >> {}){};\n",
                     self.sanitize_name(output),
                     input_base,
                     shift,
@@ -2743,11 +2765,44 @@ impl<'a> SharedCodegen<'a> {
             }
         } else if output_width > 64 {
             // Wide vector concat (65-128 bits)
-            // C++ uses uint32_t[N] arrays, Metal uses uint4 with .x/.y/.z/.w components
+            // C++ uses unsigned __int128 (TRIAGE #32), Metal uses uint4 with
+            // .x/.y/.z/.w components
             let num_elements = output_width.div_ceil(32);
             let mut components = vec!["0".to_string(); num_elements];
             let mut bit_offset = 0;
             let is_cpp = matches!(self.type_mapper.target, BackendTarget::Cpp);
+
+            if is_cpp {
+                // TRIAGE #32: 65-128-bit outputs are scalar unsigned __int128 —
+                // pack with shifts exactly like the 33-64-bit uint64_t path.
+                let mut concat_expr = String::new();
+                let mut shift = 0;
+                for (input_name, width) in input_widths.iter().rev() {
+                    if shift >= output_width {
+                        break;
+                    }
+                    let input_ref = format!(
+                        "(unsigned __int128)signals->{}",
+                        self.sanitize_name(input_name)
+                    );
+                    if !concat_expr.is_empty() {
+                        concat_expr.push_str(" | ");
+                    }
+                    if shift > 0 {
+                        concat_expr.push_str(&format!("({} << {})", input_ref, shift));
+                    } else {
+                        concat_expr.push_str(&input_ref);
+                    }
+                    shift += width;
+                }
+                self.write_indented(&format!(
+                    "signals->{} = {};\n",
+                    self.sanitize_name(output),
+                    concat_expr
+                ));
+                self.concat_recursion_depth -= 1;
+                return;
+            }
 
             for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
