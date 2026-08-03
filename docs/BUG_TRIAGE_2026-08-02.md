@@ -175,12 +175,41 @@ codegen gaps; **P3** = hygiene.
     (gate sim models RamBlock), but `GateNetlistToAig` has no Ram arm. EC
     uses generic_asic, so this only matters for --library ec runs.
 
-28. **(found 2026-08-03) `skalp ec` smoke-fails hierarchical designs.**
+28. **FIXED (2026-08-03). `skalp ec` smoke-fails hierarchical designs.**
     `examples/equivalence_mwe.sk` (4 child entities via `let` instantiation)
-    fails smoke EC at baseline: `counter_out`/`pwm_out`/`pwm_counter` read
-    `mir=<live value> gate=0`. Pre-existing (byte-identical SV and same failure
-    before/after the #4 fix). Likely instance flattening in the gate-side
-    conversion — the previously-fixed SpiMaster cases were all single-module.
+    failed smoke EC: `counter_out`/`pwm_out`/`pwm_counter` read
+    `mir=<live value> gate=0`. **Root cause:** the connection-info extractor
+    in `mir_to_lir.rs` classifies a connection as a virtual instance-output
+    reference (`InstancePort`) whenever the connected name starts with
+    `{instance_name}_` — and instance names can be prefixes of unrelated
+    parent declarations. Instance `counter` + parent port `counter_enable`
+    matched, so `enable: counter_enable` became
+    `InstancePort("counter","enable")` — which `flatten()` did not handle at
+    all (`_ => continue`), silently dropping the connection and leaving the
+    child's input ports undriven. FaultLatch/StateMachine worked only because
+    their port names (`fault_in`, `sm_start`) don't start with the instance
+    names. Diagnosed by dumping the flattened LIR: Counter8's mux read
+    `top.counter.load_value` with no driver, while FaultLatch's nodes
+    referenced parent nets directly. **Fix (two-part):** (1) never classify a
+    name as InstancePort when it names a real parent port/signal/variable;
+    (2) `flatten()` now resolves InstancePort connections to the sibling
+    instance's flattened port signal instead of dropping them. **Verified:**
+    MWE passes ALL EC phases (smoke + full SAT proof + self-test); the entire
+    EC sweep (both memory repros, ec fixtures, async_fifo, counter/alu/fifo/
+    adder/cdc) still passes; corpus + suite byte-identical to baseline. Suite
+    regression tests: `test_triage28_child_input_ports_aliased` (no node
+    consumes an unaliased child input port) and
+    `test_triage28_mwe_sat_equivalent` (full MIR-vs-gates SAT proof).
+
+29. **(found 2026-08-03) `examples/hierarchical_alu.sk` fails EC — generic
+    children.** Smoke mismatch at cycle 6: `result` mir=0x85f00000 vs
+    gate=0x5ccb885f (both live, both nonzero — not an undriven-port problem;
+    unaffected by the #28 fix, identical values at baseline). Distinct from
+    #28: children here are monomorphized generics (`Adder_32`,
+    `Comparator_32`, `Shifter_32`) and the design muxes among their results.
+    Needs its own triage — suspects: monomorphized-child lowering in the
+    hierarchical LIR path, or the `result[WIDTH-1:0]`/`result[WIDTH]`
+    slice-of-widened-add pattern in `Adder`.
 
 ## P2 — semantic / codegen gaps
 

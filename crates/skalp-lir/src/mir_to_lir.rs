@@ -5145,17 +5145,38 @@ impl HierarchicalMirToLirResult {
 
                 // Process port connections
                 for (port_name, conn_info) in &inst.port_connections {
-                    // Get the parent signal base name from connection info
-                    let (parent_signal_base, is_signal_conn) = match conn_info {
-                        PortConnectionInfo::Signal(name) => (name.clone(), true),
-                        PortConnectionInfo::Constant(_) => (String::new(), false),
-                        _ => continue,
-                    };
-
                     let parent_prefix = if parent_path == "top" {
                         "".to_string()
                     } else {
                         format!("{}.", parent_path)
+                    };
+
+                    // Get the parent signal base name from connection info.
+                    // TRIAGE #28: InstancePort (a sibling instance's output,
+                    // e.g. `a.sum` fed straight into another instance) used to
+                    // fall into `continue`, silently dropping the connection.
+                    // Resolve it to the sibling's flattened port signal, which
+                    // lives at "{parent_path}.{sibling}.{port}" — note top's
+                    // own signals are unprefixed but child instances always
+                    // carry the full path prefix.
+                    let (parent_signal_base, is_signal_conn) = match conn_info {
+                        PortConnectionInfo::Signal(name) => (name.clone(), true),
+                        PortConnectionInfo::Constant(_) => (String::new(), false),
+                        PortConnectionInfo::InstancePort(src_inst, src_port) => {
+                            let sibling_signal =
+                                format!("{}.{}.{}", parent_path, src_inst, src_port);
+                            // Strip parent_prefix so the shared
+                            // `format!("{}{}", parent_prefix, base)` sites below
+                            // reconstruct the exact flattened name. For
+                            // parent_path == "top" the prefix is empty, so keep
+                            // the full "top.sibling.port" name.
+                            let base = sibling_signal
+                                .strip_prefix(&parent_prefix)
+                                .unwrap_or(&sibling_signal)
+                                .to_string();
+                            (base, true)
+                        }
+                        _ => continue,
                     };
 
                     // Find the signal ID in child's LIR for this port
@@ -7029,17 +7050,33 @@ fn extract_connection_info(
                         // Check if this signal is an instance output (pattern: {instance}_{port})
                         // If so, convert to InstancePort for proper hierarchical stitching.
                         // Instance output signals are created in HIR→MIR when accessing inst.port.
+                        //
+                        // TRIAGE #28 FIX: only do this when the name is NOT a real
+                        // port/signal/variable of the parent. Instance names can be
+                        // prefixes of unrelated parent declarations (instance `counter`
+                        // vs parent port `counter_enable`) — misclassifying those as
+                        // InstancePort silently dropped the connection during
+                        // flattening, leaving child input ports undriven.
+                        let is_parent_decl =
+                            parent_module.ports.iter().any(|p| p.name == signal_name)
+                                || parent_module.signals.iter().any(|s| s.name == signal_name)
+                                || parent_module
+                                    .variables
+                                    .iter()
+                                    .any(|v| v.name == signal_name);
                         let mut as_instance_port = None;
-                        for inst in &parent_module.instances {
-                            let prefix = format!("{}_", inst.name);
-                            if signal_name.starts_with(&prefix) {
-                                let port_name = &signal_name[prefix.len()..];
-                                if !port_name.is_empty() {
-                                    as_instance_port = Some(PortConnectionInfo::InstancePort(
-                                        inst.name.clone(),
-                                        port_name.to_string(),
-                                    ));
-                                    break;
+                        if !is_parent_decl {
+                            for inst in &parent_module.instances {
+                                let prefix = format!("{}_", inst.name);
+                                if signal_name.starts_with(&prefix) {
+                                    let port_name = &signal_name[prefix.len()..];
+                                    if !port_name.is_empty() {
+                                        as_instance_port = Some(PortConnectionInfo::InstancePort(
+                                            inst.name.clone(),
+                                            port_name.to_string(),
+                                        ));
+                                        break;
+                                    }
                                 }
                             }
                         }
