@@ -964,9 +964,13 @@ fn map_memblock_standalone(
     let (ram_cell, ram_info) = match library.find_ram_cell() {
         Some(info) => info,
         None => {
-            eprintln!(
-                "warning: no RAM cell in library, BRAM at {} will be unimplemented",
-                path
+            // No block RAM in this library (e.g. generic ASIC): decompose the
+            // memory into DFFs + write-select muxes + a read mux tree. This
+            // keeps the memory verifiable — gate-level simulation and the SAT
+            // equivalence AIG both understand plain DFF/MUX cells.
+            decompose_memblock_to_dffs(
+                netlist, library, data_width, addr_width, depth, has_write, inputs, outputs, path,
+                clk,
             );
             return;
         }
@@ -1343,6 +1347,256 @@ fn map_memblock_standalone(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Decompose a MemBlock into DFFs + write-select muxes + a read mux chain.
+///
+/// Used when the library has no block-RAM cell (e.g. the generic ASIC library
+/// EC synthesizes with). Semantics match the RamBlock primitive and MIR:
+/// write on the clock edge when WE is high, transparent combinational read.
+///
+/// Per word w (write side):   word_we_w = WE & (waddr == w)
+///                            din[b]    = word_we_w ? wdata[b] : q_w[b]
+///                            q_w[b]    = DFF(din[b])  (no reset — memories
+///                                        start at zero like RamBlock state)
+/// Read side (per bit b):     rdata[b]  = priority chain of
+///                            (raddr == w) ? q_w[b] : previous
+#[allow(clippy::too_many_arguments)]
+fn decompose_memblock_to_dffs(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    data_width: u32,
+    addr_width: u32,
+    depth: u32,
+    has_write: bool,
+    inputs: &[Vec<GateNetId>],
+    outputs: &[GateNetId],
+    path: &str,
+    clk: GateNetId,
+) {
+    let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
+    let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let mux_ci = lookup_cell(library, CellFunction::Mux2, "MUX2", 0.3);
+    let buf_ci = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+    let dff_ci = lookup_cell(library, CellFunction::Dff, "DFF", 0.5);
+
+    let tie_low = {
+        if let Some(id) = netlist
+            .get_net_id("tie_low")
+            .or_else(|| netlist.get_net_id("gnd"))
+        {
+            id
+        } else {
+            let id = netlist.add_net(GateNet::new(GateNetId(0), "tie_low".to_string()));
+            let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                tie_info.name.clone(),
+                library.name.clone(),
+                tie_info.fit,
+                "tie_low".to_string(),
+                vec![],
+                vec![id],
+            );
+            tie_info.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
+            id
+        }
+    };
+
+    let aw = addr_width as usize;
+    let dw = data_width as usize;
+    let empty = Vec::new();
+    let raddr_nets = inputs.first().unwrap_or(&empty);
+    let waddr_nets = if has_write && inputs.len() > 1 {
+        &inputs[1]
+    } else {
+        &empty
+    };
+    let wdata_nets = if has_write && inputs.len() > 2 {
+        &inputs[2]
+    } else {
+        &empty
+    };
+    let we_net = if has_write && inputs.len() > 3 {
+        inputs[3].first().copied().unwrap_or(tie_low)
+    } else {
+        tie_low
+    };
+
+    // Small builders for one-output comb cells
+    let mk_cell = |netlist: &mut GateNetlist,
+                   ci: &LibraryCellInfo,
+                   cell_inputs: Vec<GateNetId>,
+                   out: GateNetId,
+                   cell_path: String| {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            ci.name.clone(),
+            library.name.clone(),
+            ci.fit,
+            cell_path,
+            cell_inputs,
+            vec![out],
+        );
+        cell.source_op = Some("MemBlock_DffFallback".to_string());
+        ci.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+    };
+
+    // Inverted address bits (shared across word decoders)
+    let invert_bits =
+        |netlist: &mut GateNetlist, bits: &[GateNetId], tag: &str| -> Vec<GateNetId> {
+            (0..aw)
+                .map(|i| {
+                    let src = bits.get(i).copied().unwrap_or(tie_low);
+                    let out = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}_{}inv{}", path, tag, i),
+                    ));
+                    mk_cell(
+                        netlist,
+                        &inv_ci,
+                        vec![src],
+                        out,
+                        format!("{}_{}inv{}", path, tag, i),
+                    );
+                    out
+                })
+                .collect()
+        };
+    let waddr_inv = if has_write {
+        invert_bits(netlist, waddr_nets, "wa")
+    } else {
+        Vec::new()
+    };
+    let raddr_inv = invert_bits(netlist, raddr_nets, "ra");
+
+    // Decode `addr == word` as an AND chain seeded with `seed`
+    let mk_decode = |netlist: &mut GateNetlist,
+                     word: usize,
+                     bits: &[GateNetId],
+                     inv_bits: &[GateNetId],
+                     seed: Option<GateNetId>,
+                     tag: &str|
+     -> GateNetId {
+        let mut acc = seed;
+        for i in 0..aw {
+            let term = if (word >> i) & 1 == 1 {
+                bits.get(i).copied().unwrap_or(tie_low)
+            } else {
+                inv_bits.get(i).copied().unwrap_or(tie_low)
+            };
+            acc = Some(match acc {
+                None => term,
+                Some(prev) => {
+                    let out = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}_w{}_{}sel{}", path, word, tag, i),
+                    ));
+                    mk_cell(
+                        netlist,
+                        &and_ci,
+                        vec![prev, term],
+                        out,
+                        format!("{}_w{}_{}and{}", path, word, tag, i),
+                    );
+                    out
+                }
+            });
+        }
+        acc.unwrap_or(tie_low)
+    };
+
+    // Storage: depth × data_width DFFs with write-select muxes
+    let mut q_nets: Vec<Vec<GateNetId>> = Vec::with_capacity(depth as usize);
+    for word in 0..depth as usize {
+        let word_we = if has_write {
+            mk_decode(netlist, word, waddr_nets, &waddr_inv, Some(we_net), "w")
+        } else {
+            tie_low
+        };
+        let mut word_q = Vec::with_capacity(dw);
+        for b in 0..dw {
+            let q = netlist.add_net(GateNet::new(
+                GateNetId(0),
+                format!("{}_w{}_q{}", path, word, b),
+            ));
+            let din = if has_write {
+                let wbit = wdata_nets.get(b).copied().unwrap_or(tie_low);
+                let din = netlist.add_net(GateNet::new(
+                    GateNetId(0),
+                    format!("{}_w{}_din{}", path, word, b),
+                ));
+                // MUX2 [sel, d0, d1]: word_we ? wdata : q (hold)
+                mk_cell(
+                    netlist,
+                    &mux_ci,
+                    vec![word_we, q, wbit],
+                    din,
+                    format!("{}_w{}_wmux{}", path, word, b),
+                );
+                din
+            } else {
+                q
+            };
+            let mut dff = Cell::new_seq(
+                CellId(0),
+                dff_ci.name.clone(),
+                library.name.clone(),
+                dff_ci.fit,
+                format!("{}_w{}_dff{}", path, word, b),
+                vec![din],
+                vec![q],
+                clk,
+                None,
+            );
+            dff.source_op = Some("MemBlock_DffFallback".to_string());
+            dff_ci.apply_to_cell(&mut dff);
+            netlist.add_cell(dff);
+            word_q.push(q);
+        }
+        q_nets.push(word_q);
+    }
+
+    // Read side: decode each word's read select once, then build a priority
+    // mux chain per output bit. The final stage drives the existing rdata
+    // output net directly.
+    let read_sel: Vec<GateNetId> = (1..depth as usize)
+        .map(|word| mk_decode(netlist, word, raddr_nets, &raddr_inv, None, "r"))
+        .collect();
+    for (b, &out_net) in outputs.iter().enumerate().take(dw) {
+        if depth == 1 {
+            mk_cell(
+                netlist,
+                &buf_ci,
+                vec![q_nets[0][b]],
+                out_net,
+                format!("{}_rbuf{}", path, b),
+            );
+            continue;
+        }
+        let mut acc = q_nets[0][b];
+        for word in 1..depth as usize {
+            let stage_out = if word == depth as usize - 1 {
+                out_net
+            } else {
+                netlist.add_net(GateNet::new(
+                    GateNetId(0),
+                    format!("{}_r{}_b{}", path, word, b),
+                ))
+            };
+            // MUX2 [sel, d0, d1]: (raddr == word) ? q_word : acc
+            mk_cell(
+                netlist,
+                &mux_ci,
+                vec![read_sel[word - 1], acc, q_nets[word][b]],
+                stage_out,
+                format!("{}_rmux_w{}_b{}", path, word, b),
+            );
+            acc = stage_out;
         }
     }
 }

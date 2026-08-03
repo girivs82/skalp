@@ -7723,6 +7723,133 @@ impl<'a> MirToAig<'a> {
         });
     }
 
+    /// If `base` is an array-typed signal/port/variable, return
+    /// (element_width, depth). BitSelect on an array base selects a whole
+    /// element (element_width bits), not a single bit.
+    fn array_element_info(&self, base: &LValue) -> Option<(usize, usize)> {
+        let dt = match base {
+            LValue::Signal(id) => self.find_signal(*id)?.signal_type.clone(),
+            LValue::Port(id) => self.find_port(*id)?.port_type.clone(),
+            LValue::Variable(id) => self.find_variable(*id)?.var_type.clone(),
+            _ => return None,
+        };
+        match dt {
+            DataType::Array(elem, size) => Some((self.get_type_width(&elem), size)),
+            _ => None,
+        }
+    }
+
+    /// Constant bits (LSB first) of `value` at the given width.
+    fn const_lits(&mut self, value: usize, width: usize) -> Vec<AigLit> {
+        (0..width)
+            .map(|i| {
+                if (value >> i) & 1 == 1 {
+                    self.aig.true_lit()
+                } else {
+                    self.aig.false_lit()
+                }
+            })
+            .collect()
+    }
+
+    /// Read `base[index]` where base is an array (whole-element select) or the
+    /// index is dynamic (runtime bit-select). Returns None only for the
+    /// scalar-base + constant-index case, which the legacy 1-bit path handles.
+    fn convert_select_read(&mut self, base: &LValue, index: &Expression) -> Option<Vec<AigLit>> {
+        let (ew, depth) = match self.array_element_info(base) {
+            Some(x) => x,
+            None => {
+                if matches!(&index.kind, ExpressionKind::Literal(Value::Integer(_))) {
+                    return None;
+                }
+                (1, self.get_lvalue_width(base))
+            }
+        };
+        let sig_ref = self.lvalue_to_ref(base)?;
+        if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
+            let idx = *idx as usize;
+            return Some(
+                (0..ew)
+                    .map(|b| {
+                        self.signal_map
+                            .get(&(sig_ref, (idx * ew + b) as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect(),
+            );
+        }
+        // Dynamic index: priority mux over every element.
+        let index_lits = self.convert_expression(index);
+        let index_width = index_lits.len().max(1);
+        let mut result: Vec<AigLit> = vec![self.aig.false_lit(); ew];
+        for word in 0..depth {
+            let word_lits = self.const_lits(word, index_width);
+            let sel = self.build_equality(&index_lits, &word_lits);
+            let word_bits: Vec<AigLit> = (0..ew)
+                .map(|b| {
+                    self.signal_map
+                        .get(&(sig_ref, (word * ew + b) as u32))
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit())
+                })
+                .collect();
+            result = self.build_mux_vector(sel, &word_bits, &result);
+        }
+        Some(result)
+    }
+
+    /// Store `values` into `base[index]` where base is an array (whole-element
+    /// select) or the index is dynamic. Dynamic stores become read-modify-write
+    /// over every element: bit = sel ? new : old, so unaddressed elements keep
+    /// their value. Returns false only for the scalar-base + constant-index
+    /// case, which the legacy path handles.
+    fn assign_select(&mut self, base: &LValue, index: &Expression, values: &[AigLit]) -> bool {
+        let (ew, depth) = match self.array_element_info(base) {
+            Some(x) => x,
+            None => {
+                if matches!(&index.kind, ExpressionKind::Literal(Value::Integer(_))) {
+                    return false;
+                }
+                (1, self.get_lvalue_width(base))
+            }
+        };
+        let Some(sig_ref) = self.lvalue_to_ref(base) else {
+            return false;
+        };
+        if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
+            let idx = *idx as usize;
+            for b in 0..ew {
+                if let Some(v) = values.get(b) {
+                    self.signal_map.insert((sig_ref, (idx * ew + b) as u32), *v);
+                }
+            }
+            return true;
+        }
+        let index_lits = self.convert_expression(index);
+        let index_width = index_lits.len().max(1);
+        for word in 0..depth {
+            let word_lits = self.const_lits(word, index_width);
+            let sel = self.build_equality(&index_lits, &word_lits);
+            for b in 0..ew {
+                let pos = (word * ew + b) as u32;
+                let old = self
+                    .signal_map
+                    .get(&(sig_ref, pos))
+                    .copied()
+                    .unwrap_or_else(|| self.aig.false_lit());
+                let newv = values
+                    .get(b)
+                    .copied()
+                    .unwrap_or_else(|| self.aig.false_lit());
+                // add_mux(sel, a, b) = sel ? b : a — want sel ? newv : old
+                let merged = self.aig.add_mux(sel, old, newv);
+                self.signal_map.insert((sig_ref, pos), merged);
+            }
+        }
+        true
+    }
+
     fn build_equality(&mut self, lhs: &[AigLit], rhs: &[AigLit]) -> AigLit {
         let max_len = lhs.len().max(rhs.len());
         if max_len == 0 {
@@ -7864,7 +7991,14 @@ impl<'a> MirToAig<'a> {
                 }
             }
             LValue::BitSelect { base, index } => {
-                // Single bit assignment
+                // Element select on an array base (mem[idx] — element_width bits,
+                // constant OR dynamic index) and dynamic bit-select on a scalar
+                // base are handled by assign_select. Constant single-bit select
+                // on a scalar base falls through to the legacy path below.
+                if self.assign_select(base, index, values) {
+                    return;
+                }
+                // Single bit assignment (scalar base, constant index)
                 if let Some(sig_ref) = self.lvalue_to_ref(base) {
                     if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
                         if !values.is_empty() {
@@ -7931,7 +8065,10 @@ impl<'a> MirToAig<'a> {
                     1
                 }
             }
-            LValue::BitSelect { .. } => 1,
+            // Array-base select yields a whole element; scalar-base select is 1 bit
+            LValue::BitSelect { base, .. } => {
+                self.array_element_info(base).map(|(ew, _)| ew).unwrap_or(1)
+            }
             LValue::RangeSelect { high, low, .. } => {
                 if let (
                     ExpressionKind::Literal(Value::Integer(hi)),
@@ -7955,7 +8092,17 @@ impl<'a> MirToAig<'a> {
             match &expr.kind {
                 ExpressionKind::Literal(value) => self.convert_literal(value),
 
-                ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
+                ExpressionKind::Ref(lvalue) => {
+                    // Array element reads (mem[idx]) and dynamic bit-selects
+                    // need mux construction (&mut self) — convert_lvalue_ref
+                    // is read-only and constant-index-only.
+                    if let LValue::BitSelect { base, index } = lvalue {
+                        if let Some(bits) = self.convert_select_read(base, index) {
+                            return bits;
+                        }
+                    }
+                    self.convert_lvalue_ref(lvalue)
+                }
 
                 ExpressionKind::Binary { op, left, right } => {
                     let left_lits = self.convert_expression(left);

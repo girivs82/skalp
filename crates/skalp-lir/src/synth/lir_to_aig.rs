@@ -333,6 +333,47 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
+        // Phase 6.5: Export physical-node INPUT signals as AIG outputs.
+        // A physical op's inputs (e.g. a MemBlock's raddr/waddr/wdata/we) are
+        // driven by ordinary LIR logic, but that logic is dead from the AIG's
+        // point of view — nothing else consumes it — so optimization would
+        // sweep it and the merge step would wire the physical cell to
+        // undriven nets. Naming matches merge_physical_nodes_into_netlist's
+        // resolve_signal lookups ("name" / "name[bit]").
+        {
+            let exported: std::collections::HashSet<u32> =
+                self.lir.outputs.iter().map(|s| s.0).collect();
+            let lir_input_set: std::collections::HashSet<u32> =
+                self.lir.inputs.iter().map(|s| s.0).collect();
+            let mut done: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for &phys_idx in &self.physical_nodes {
+                for &input_sig in &self.lir.nodes[phys_idx].inputs {
+                    if exported.contains(&input_sig.0)
+                        || lir_input_set.contains(&input_sig.0)
+                        || phys_output_set.contains(&input_sig.0)
+                        || !done.insert(input_sig.0)
+                    {
+                        // Already a primary output, a primary input (net exists
+                        // in the netlist), another physical node's output (the
+                        // merge step wires those directly), or already exported.
+                        continue;
+                    }
+                    let signal = &self.lir.signals[input_sig.0 as usize];
+                    for bit in 0..signal.width {
+                        let Some(&lit) = self.signal_map.get(&(input_sig.0, bit)) else {
+                            continue;
+                        };
+                        let name = if signal.width == 1 {
+                            signal.name.clone()
+                        } else {
+                            format!("{}[{}]", signal.name, bit)
+                        };
+                        self.aig.add_output(name, lit);
+                    }
+                }
+            }
+        }
+
         LirToAigResult {
             aig: self.aig,
             physical_node_indices: self.physical_nodes.clone(),

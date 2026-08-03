@@ -140,15 +140,40 @@ codegen gaps; **P3** = hygiene.
     implement valid/ready lowering or error on `stream` ports until it exists — docs
     claim the compiler "enforces backpressure."
 
-27. **(found 2026-08-03) `skalp ec` cannot verify designs with memory arrays.**
-    The gate-level side of EC never simulates memory writes: the netlist gets
-    memory macro nets (`mem_raddr`/`mem_waddr`/`mem_wdata`/`mem_rdata`) but
-    `mem_rdata` stays 0 forever, so ANY design containing `signal mem: [T; N]`
-    fails smoke EC with `mir=<written value> gate=0` even when the emitted SV is
-    correct. Repro: minimal 16-deep write-then-read design (both with plain
-    `mem[ptr]` and sliced `mem[ptr[3:0]]` — identical failure). Until fixed,
-    memory designs are unverifiable by `skalp ec`; #4's fix was therefore
-    verified via SV inspection + corpus diff instead of SAT.
+27. **FIXED (2026-08-03). `skalp ec` cannot verify designs with memory arrays.**
+    Any design containing `signal mem: [T; N]` failed smoke EC with
+    `mir=<written value> gate=0` even when the emitted SV was correct.
+    **Root causes (three, stacked):**
+    (a) the generic ASIC library EC synthesizes with has no RAM cell, and
+    `map_memblock_standalone` just warned on stderr and DROPPED the memory —
+    the "falls back to DFF decomposition" doc comment was aspirational;
+    (b) `lir_to_aig` swept the logic cones driving the MemBlock's ports
+    (raddr/waddr/wdata/we) because nothing else in the AIG consumed them, so
+    even a mapped memory would have seen undriven address/enable nets;
+    (c) `MirToAig` (SAT phase) only handled constant-index BitSelect —
+    dynamic element reads (`mem[ptr]`) returned a single false bit and dynamic
+    element writes were silently dropped; constant-index selects on arrays
+    were also wrong (treated as a 1-bit pick instead of an element).
+    **Fixes:** `decompose_memblock_to_dffs` in `tech_mapper.rs` (per-word DFFs
+    + write-select muxes + shared read-decode + per-bit read mux chain —
+    plain cells every downstream consumer already understands);
+    `lir_to_aig` Phase 6.5 exports physical-node input signals as AIG outputs
+    so their cones survive optimization and land as driven nets;
+    `MirToAig` gained `array_element_info`/`convert_select_read`/
+    `assign_select` — element-width selects on array bases with full dynamic
+    index support (priority mux for reads, read-modify-write mux per element
+    for writes, composing with the If-statement snapshot/mux machinery).
+    **Verified:** memplain + memslice repros pass ALL EC phases (smoke 100
+    cycles, SAT proof over all states, 10/10 bug-injection detection —
+    including inverted memory-DFF next-states, proving the memory is really
+    modeled on both sides); `examples/async_fifo.sk` (dual-clock, memory,
+    sliced pointers) passes full EC; counter/alu/fifo/adder/cdc examples all
+    still pass; 90-design corpus and full suite byte-identical to baseline.
+    Suite regression tests: `test_memory_equivalence` (port-nets-driven +
+    128-DFF decomposition + SAT equivalence). CAVEAT: libraries WITH a real
+    RAM cell (iCE40/ECP5 BRAM) still have no SAT-phase model — smoke works
+    (gate sim models RamBlock), but `GateNetlistToAig` has no Ram arm. EC
+    uses generic_asic, so this only matters for --library ec runs.
 
 28. **(found 2026-08-03) `skalp ec` smoke-fails hierarchical designs.**
     `examples/equivalence_mwe.sk` (4 child entities via `let` instantiation)

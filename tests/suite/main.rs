@@ -81,6 +81,7 @@ mod test_l0l1_match;
 mod test_language_features;
 mod test_lir_synthesis;
 mod test_match_expressions;
+mod test_memory_equivalence;
 mod test_match_let_blocker;
 mod test_match_sub_mwe;
 mod test_mcu_flow_sanity;
