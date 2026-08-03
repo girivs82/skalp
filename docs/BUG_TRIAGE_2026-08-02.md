@@ -24,9 +24,20 @@ codegen gaps; **P3** = hygiene.
    rebuild pass if any survive. Verified: both cases exit 1 with named errors;
    14-file tutorial corpus + 10 repo examples regression-clean.
 
-2. **Tuple-match statements are silently dropped.** `count = match (a==b, b==c) {
-   (true,true) => a, ... }` lowers to nothing; `count` is undriven in the emitted SV,
-   exit 0. Repro: tutorial ch09 TmrCounter (the TMR *voter* is the dropped statement).
+2. **FIXED (2026-08-03). Tuple-match statements were silently dropped.** Three
+   stacked frontend/MIR gaps: (a) `build_match_expr`'s scrutinee filter lacked
+   `TupleExpr`, so `match (a==b, b==c)` built to None and the entire enclosing
+   assignment vanished (`build_match_statement`'s filter was even narrower —
+   both broadened); (b) boolean literal patterns `(true, false)` built to
+   `Tuple([])` because the LiteralPattern token filter lacked TrueKw/FalseKw;
+   (c) MIR had no lowering for `HirPattern::Tuple` — expression matches now
+   lower via `build_tuple_pattern_condition` (conjunction of per-element
+   comparisons, wildcards unconstrained), and match STATEMENTS with tuple
+   patterns lower to an if-else chain (`convert_tuple_match_statement`) since
+   CaseStatement can't express them — the old path collapsed every tuple arm
+   into the case default. The ch09 TmrCounter now builds with a real 4-arm
+   voter, sequential `match (wr_en, rd_en)` produces a proper if-chain, and
+   BOTH forms pass `skalp ec` with full SAT proofs. 41-design corpus green.
 
 3. **FIXED (2026-08-02). Dot-notation instance outputs are never wired.**
    `let tx = UartTx { clk: clk, .. }` then `busy = tx.busy` emitted instances with

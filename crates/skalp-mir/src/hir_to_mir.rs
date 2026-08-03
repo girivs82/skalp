@@ -2262,8 +2262,17 @@ impl<'hir> HirToMir<'hir> {
                     .arms
                     .iter()
                     .any(|arm| matches!(arm.pattern, hir::HirPattern::TupleVariant(..)));
+                // Tuple patterns can't be expressed as CaseStatement values —
+                // previously every tuple arm silently collapsed into the case
+                // DEFAULT (last one won). Lower as an if-else chain instead.
+                let has_tuple = match_stmt
+                    .arms
+                    .iter()
+                    .any(|arm| matches!(arm.pattern, hir::HirPattern::Tuple(..)));
                 if has_payload {
                     self.convert_match_with_payloads(match_stmt)
+                } else if has_tuple {
+                    self.convert_tuple_match_statement(match_stmt)
                 } else {
                     self.convert_match_statement(match_stmt)
                         .map(Statement::Case)
@@ -6724,6 +6733,80 @@ impl<'hir> HirToMir<'hir> {
         })
     }
 
+    /// Convert a match statement with tuple patterns to an if-else chain.
+    ///
+    /// `match (wr_en, rd_en) { (true, false) => {...}, ... }` — each arm's
+    /// condition is the conjunction of per-element comparisons (see
+    /// `build_tuple_pattern_condition`); wildcard arms become the trailing
+    /// else. CaseStatement cannot express tuple patterns, and the old path
+    /// silently collapsed every tuple arm into the case default.
+    fn convert_tuple_match_statement(
+        &mut self,
+        match_stmt: &hir::HirMatchStatement,
+    ) -> Option<Statement> {
+        // Build (condition, block) pairs in source order.
+        let mut arms_lowered: Vec<(Option<Expression>, Block)> = Vec::new();
+        for arm in &match_stmt.arms {
+            let block = self.convert_statements(&arm.statements);
+            let condition = match &arm.pattern {
+                hir::HirPattern::Wildcard => None,
+                hir::HirPattern::Tuple(element_patterns) => {
+                    Some(self.build_tuple_pattern_condition(&match_stmt.expr, element_patterns)?)
+                }
+                other => {
+                    // Mixed pattern kinds inside a tuple match: fall back to a
+                    // scrutinee == pattern-value comparison where possible.
+                    let scrutinee = self.convert_expression(&match_stmt.expr, 0)?;
+                    let value = self.convert_pattern_to_expr(other)?;
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(scrutinee),
+                        right: Box::new(value),
+                    }))
+                }
+            };
+            // Apply guard if present
+            let condition = match (&condition, &arm.guard) {
+                (Some(cond), Some(guard_expr)) => {
+                    let guard = self.convert_expression(guard_expr, 0)?;
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::LogicalAnd,
+                        left: Box::new(cond.clone()),
+                        right: Box::new(guard),
+                    }))
+                }
+                (None, Some(guard_expr)) => Some(self.convert_expression(guard_expr, 0)?),
+                _ => condition,
+            };
+            arms_lowered.push((condition, block));
+        }
+
+        // Fold from the last arm backwards into a nested if-else chain.
+        let mut else_block: Option<Block> = None;
+        for (condition, block) in arms_lowered.into_iter().rev() {
+            match condition {
+                None => {
+                    // Unconditional (wildcard) arm: becomes the else branch,
+                    // discarding any later arms it shadows.
+                    else_block = Some(block);
+                }
+                Some(cond) => {
+                    let if_stmt = Statement::If(IfStatement {
+                        condition: cond,
+                        then_block: block,
+                        else_block: else_block.take(),
+                        span: None,
+                    });
+                    else_block = Some(Block {
+                        statements: vec![if_stmt],
+                    });
+                }
+            }
+        }
+
+        else_block.map(Statement::Block)
+    }
+
     /// Convert a match statement on an enum with payload variants to if-else chain.
     /// For each arm, we compare the tag bits and extract payload bindings.
     fn convert_match_with_payloads(
@@ -10138,6 +10221,65 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert match expression to nested conditional expressions
+    /// Build the condition for a tuple pattern arm.
+    ///
+    /// `match (a == b, b == c) { (true, false) => ... }` — the condition is
+    /// the conjunction of per-element comparisons against the pattern's
+    /// literals; wildcard elements are unconstrained. Supported when the
+    /// scrutinee is a tuple literal (the overwhelmingly common form); a
+    /// tuple-typed scrutinee signal would require packed-element slicing and
+    /// returns None (the arm is skipped, and the undriven-output check
+    /// reports the port rather than silently emitting wrong hardware).
+    fn build_tuple_pattern_condition(
+        &mut self,
+        match_value: &hir::HirExpression,
+        element_patterns: &[hir::HirPattern],
+    ) -> Option<Expression> {
+        let elements = match match_value {
+            hir::HirExpression::TupleLiteral(elements) => elements,
+            _ => return None,
+        };
+        if elements.len() != element_patterns.len() {
+            return None;
+        }
+
+        let mut condition: Option<Expression> = None;
+        for (element, pattern) in elements.iter().zip(element_patterns.iter()) {
+            let element_cond = match pattern {
+                hir::HirPattern::Wildcard | hir::HirPattern::Variable(_) => continue,
+                hir::HirPattern::Literal(lit) => {
+                    let element_expr = self.convert_expression(element, 0)?;
+                    let value = match lit {
+                        hir::HirLiteral::Boolean(b) => Value::Integer(if *b { 1 } else { 0 }),
+                        hir::HirLiteral::Integer(i) => Value::Integer(*i as i64),
+                        _ => return None,
+                    };
+                    Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(element_expr),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            value,
+                        ))),
+                    })
+                }
+                _ => return None,
+            };
+            condition = Some(match condition {
+                Some(acc) => Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::LogicalAnd,
+                    left: Box::new(acc),
+                    right: Box::new(element_cond),
+                }),
+                None => element_cond,
+            });
+        }
+
+        // All-wildcard tuple pattern matches everything
+        Some(condition.unwrap_or_else(|| {
+            Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1)))
+        }))
+    }
+
     fn convert_match_to_conditionals(
         &mut self,
         match_value: &hir::HirExpression,
@@ -10310,6 +10452,9 @@ impl<'hir> HirToMir<'hir> {
                     } else {
                         None
                     }
+                }
+                hir::HirPattern::Tuple(element_patterns) => {
+                    self.build_tuple_pattern_condition(match_value, element_patterns)
                 }
                 _ => {
                     // For other patterns, we'll need more complex logic

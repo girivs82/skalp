@@ -6172,6 +6172,13 @@ impl HirBuilderContext {
                         | SyntaxKind::IdentExpr
                         | SyntaxKind::BinaryExpr
                         | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        // Tuple scrutinee: match (wr_en, rd_en) { (true, false) => ... }
+                        | SyntaxKind::TupleExpr
                 )
             })
             .and_then(|n| self.build_expression(&n))?;
@@ -6678,6 +6685,10 @@ impl HirBuilderContext {
                                     | SyntaxKind::BinLiteral
                                     | SyntaxKind::HexLiteral
                                     | SyntaxKind::StringLiteral
+                                    // Boolean literal patterns: (true, false) tuple
+                                    // arms silently built to Tuple([]) without these
+                                    | SyntaxKind::TrueKw
+                                    | SyntaxKind::FalseKw
                             )
                         })
                     }
@@ -6705,6 +6716,8 @@ impl HirBuilderContext {
                             let value = parse_hex(text)?;
                             HirLiteral::Integer(value)
                         }
+                        SyntaxKind::TrueKw => HirLiteral::Boolean(true),
+                        SyntaxKind::FalseKw => HirLiteral::Boolean(false),
                         SyntaxKind::StringLiteral => {
                             let text = token.text();
                             // Remove quotes
@@ -9687,6 +9700,10 @@ impl HirBuilderContext {
                         | SyntaxKind::IfExpr
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::ConcatExpr
+                        // Tuple scrutinee: match (a == b, b == c) { (true, true) => ... }
+                        // Omitting this silently dropped the entire enclosing
+                        // assignment (the match built to None).
+                        | SyntaxKind::TupleExpr
                 )
             })
             .and_then(|n| self.build_expression(&n))?;
