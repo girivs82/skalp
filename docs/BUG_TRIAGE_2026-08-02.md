@@ -293,21 +293,44 @@ codegen gaps; **P3** = hygiene.
     "Git dependencies not yet implemented"). Documented as a limitation — keep it
     honest in the manifest docs until done.
 
-30. **(found 2026-08-03) generate-for in GENERIC impls is dropped at parse
-    time; bit[N] `*` falls back to primitive Mul until fixed.**
-    `elaborate_generate_for_in_impl` bails silently when the range bounds
-    don't const-evaluate (e.g. `0..WIDTH` with generic WIDTH) — the loop body
-    is simply LOST from the generic impl's HIR, so `std_multiplier`'s
-    shift-add chain never exists and every specialization would emit a
-    multiplier whose product is silently 0. Until generic impls preserve the
-    symbolic generate-for and the specializer elaborates it, trait-operator
-    resolution for `Mul` on bit types returns the primitive op (matches the
-    no-stdlib lowering, EC-verified). Fixing this properly needs: (a)
-    hir_builder keeps un-evaluable generate-fors as symbolic
-    HirStatement::GenerateFor (incl. body signal decls); (b)
-    specialize_implementation elaborates them with iterator substitution and
-    per-iteration signal uniquing. Also blocks std_adder_wide (HALF-split
-    barriers) and any stdlib entity whose impl loops over a generic bound.
+30. **FIXED (2026-08-03). generate-for in GENERIC impls is dropped at parse
+    time.** `elaborate_generate_for_in_impl` bailed silently on symbolic
+    bounds (`0..WIDTH`), LOSING the loop body from the generic impl's HIR —
+    `std_multiplier`'s shift-add chain never existed in any specialization.
+    **Fix, two parts:** (a) hir_builder now preserves un-evaluable
+    generate-fors as symbolic `HirStatement::GenerateFor` templates (body
+    signals, assignments, lets built ONCE; barriers skipped); (b)
+    `specialize_implementation` elaborates them once bounds are concrete —
+    per-iteration signal clones (`{name}__g{i}`, fresh IDs), iterator
+    substitution, and SSA-CHAINED accumulator semantics: whole-signal writes
+    to outer signals (`acc = acc + addend`) read the previous iteration's
+    value (a synthesized `acc__ginit` carries the initial value for i=0) and
+    only the last iteration writes the original signal. A naive unroll
+    multi-drives the accumulator with a combinational self-loop — which is
+    exactly what the CONST-bound elaboration path still emits for this shape
+    (pre-existing; only iteration 0 survives — see the /tmp/genmul probe).
+    The bit[N] Mul trait route is re-enabled and verified: 8-bit `*` emits
+    specialized `std_multiplier_8` + `std_adder_16` with a correct chain.
+    **Verified:** generic-accumulator repro emits the exact SSA chain and
+    passes full EC (SAT proof); function_inlining 16/16 with and without
+    stdlib; intent_and_numeric 24/24; full suite net +2 passing vs the #31
+    baseline with zero regressions. Suite tests:
+    `test_triage30_generic_generate_for_elaborated` (chain structure,
+    single driver on the accumulator) and
+    `test_triage30_generic_generate_for_sat_equivalent`.
+    REMAINING (#32 gate): Mul routes through the stdlib only for widths
+    where the internal 2N+1-bit adds fit the behavioral backend's 64-bit
+    arithmetic (N ≤ 31); wider and symbolic-width Muls stay primitive.
+
+32. **(found 2026-08-03) Behavioral simulator C++ backend cannot do
+    arithmetic on values wider than 64 bits.** Signals over 64 bits lower to
+    `uint32_t[N]` arrays in the generated C++, and shift/add on them emits
+    invalid C++ (`invalid operands to binary expression ('uint32_t[3]' …)`),
+    failing compilation of the simulation library. Exposed when 32-bit `*`
+    routed through std_multiplier_32 (64-bit accumulator, 65-bit internal
+    adds). Until wide arithmetic lands in the backend, the Mul trait route is
+    width-gated (see #30) — but any USER design with >64-bit arithmetic hits
+    this today.
 
 31. **FIXED (2026-08-03). Stdlib visibility broke most Testbench-based suites
     — the test_function_inlining cluster (15/16), counter_example,

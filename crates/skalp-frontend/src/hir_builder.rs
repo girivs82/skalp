@@ -4854,21 +4854,6 @@ impl HirBuilderContext {
             None => return,
         };
 
-        // Evaluate range bounds
-        let start_val = match self.try_eval_const_expr(&range.start) {
-            Some(v) => v,
-            None => return,
-        };
-        let end_val = match self.try_eval_const_expr(&range.end) {
-            Some(v) => v,
-            None => return,
-        };
-        let end_exclusive = if range.inclusive {
-            end_val + 1
-        } else {
-            end_val
-        };
-
         // Collect body child nodes (between { and })
         let mut body_children = Vec::new();
         let mut in_body = false;
@@ -4886,6 +4871,95 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
+
+        // Evaluate range bounds
+        let bounds = (
+            self.try_eval_const_expr(&range.start),
+            self.try_eval_const_expr(&range.end),
+        );
+        let (start_val, end_val) = match bounds {
+            (Some(s), Some(e)) => (s, e),
+            _ => {
+                // TRIAGE #30: bounds reference generic parameters (0..WIDTH in
+                // a generic impl) — they cannot be evaluated until the impl is
+                // specialized. Previously the whole loop body was silently
+                // DROPPED here (std_multiplier's shift-add chain never existed
+                // in any specialization). Preserve the loop symbolically: build
+                // the body ONCE into a HirGenerateBody template; the
+                // monomorphization engine elaborates it with concrete bounds
+                // during specialization.
+                let mut body = HirGenerateBody {
+                    signals: Vec::new(),
+                    variables: Vec::new(),
+                    constants: Vec::new(),
+                    instances: Vec::new(),
+                    event_blocks: Vec::new(),
+                    assignments: Vec::new(),
+                    generate_stmts: Vec::new(),
+                };
+                for child_node in &body_children {
+                    match child_node.kind() {
+                        SyntaxKind::SignalDecl => {
+                            if let Some(signal) = self.build_signal(child_node) {
+                                body.signals.push(signal);
+                            }
+                        }
+                        SyntaxKind::AssignmentStmt => {
+                            if let Some(assignment) =
+                                self.build_assignment(child_node, HirAssignmentType::Combinational)
+                            {
+                                body.assignments.push(assignment);
+                            }
+                        }
+                        SyntaxKind::LetStmt => {
+                            for stmt in self.build_let_statements_from_node(child_node) {
+                                if let HirStatement::Let(let_stmt) = stmt {
+                                    body.variables.push(HirVariable {
+                                        id: let_stmt.id,
+                                        name: let_stmt.name.clone(),
+                                        var_type: let_stmt.var_type.clone(),
+                                        initial_value: Some(let_stmt.value.clone()),
+                                        span: None,
+                                        comments: vec![],
+                                    });
+                                    body.assignments.push(HirAssignment {
+                                        id: self.next_assignment_id(),
+                                        lhs: HirLValue::Variable(let_stmt.id),
+                                        assignment_type: HirAssignmentType::Combinational,
+                                        rhs: let_stmt.value,
+                                        comments: vec![],
+                                    });
+                                }
+                            }
+                        }
+                        SyntaxKind::BarrierStmt => {
+                            // Barriers are NCL/pipeline annotations — no-ops in
+                            // combinational elaboration; skip.
+                        }
+                        other => {
+                            trace!(
+                                "[GEN_FOR_SYMBOLIC] Unsupported body node {:?} in \
+                                 symbolic generate-for; skipping",
+                                other
+                            );
+                        }
+                    }
+                }
+                statements.push(HirStatement::GenerateFor(HirGenerateFor {
+                    iterator,
+                    iterator_var_id,
+                    range,
+                    body,
+                    mode: GenerateMode::Elaborate,
+                }));
+                return;
+            }
+        };
+        let end_exclusive = if range.inclusive {
+            end_val + 1
+        } else {
+            end_val
+        };
 
         // For each iteration, process each body child
         for i in start_val..end_exclusive {
@@ -5105,7 +5179,7 @@ impl HirBuilderContext {
     /// Substitute all occurrences of an iterator variable in an HIR expression.
     /// Matches both Variable(id) and GenericParam(name) forms, and constant-folds
     /// binary operations on two integer literals.
-    fn substitute_in_expr(
+    pub(crate) fn substitute_in_expr(
         expr: &HirExpression,
         var_id: VariableId,
         var_name: &str,
@@ -5302,7 +5376,7 @@ impl HirBuilderContext {
     }
 
     /// Substitute all occurrences of an iterator variable in an HIR lvalue.
-    fn substitute_in_lvalue(
+    pub(crate) fn substitute_in_lvalue(
         lvalue: &HirLValue,
         var_id: VariableId,
         var_name: &str,

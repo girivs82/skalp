@@ -138,3 +138,114 @@ fn test_triage27_memory_design_sat_equivalent() {
         result.counterexample
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #30: generate-for in GENERIC impls was dropped at parse
+// time (elaborate_generate_for_in_impl bailed on symbolic bounds like
+// 0..WIDTH), so the loop body never existed in any specialization. The loop
+// is now preserved symbolically and elaborated during specialization with
+// SSA-chained accumulator semantics: iteration i reads the previous
+// iteration's value (acc__ginit for i=0) and only the last iteration writes
+// the original signal — a naive unroll would multi-drive `acc` with a
+// combinational self-loop.
+// =============================================================================
+
+const GENERIC_ACC_SRC: &str = r#"
+entity GAcc<const W: nat> {
+    in a: bit[4]
+    in b: bit[4]
+    out product: bit[8]
+}
+
+impl GAcc {
+    signal acc: bit[8] = 0
+
+    generate for i in 0..W {
+        signal partial: bit[8]
+        partial = {4'b0, a} << i
+
+        signal addend: bit[8]
+        addend = if b[i] { partial } else { 0 }
+
+        acc = acc + addend
+    }
+
+    product = acc
+}
+
+entity GTop {
+    in a: bit[4]
+    in b: bit[4]
+    out p: bit[8]
+}
+
+impl GTop {
+    inst m = GAcc<4> { a: a, b: b }
+    p = m.product
+}
+"#;
+
+/// The specialized impl must contain the fully elaborated, SSA-chained loop.
+#[test]
+fn test_triage30_generic_generate_for_elaborated() {
+    let tree = parse(GENERIC_ACC_SRC);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    let mir = skalp_mir::lower_to_mir(&hir).expect("MIR lowering failed");
+    let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("codegen");
+
+    // Per-iteration signals exist for every iteration
+    for i in 0..4 {
+        assert!(
+            sv.contains(&format!("partial__g{}", i)),
+            "Triage #30: missing per-iteration signal partial__g{} in:\n{}",
+            i,
+            sv
+        );
+    }
+    // The accumulator is an SSA chain seeded by the initial value…
+    assert!(
+        sv.contains("acc__ginit"),
+        "Triage #30: missing accumulator chain seed acc__ginit:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("(acc__ginit + addend__g0)"),
+        "Triage #30: iteration 0 must read the chain seed:\n{}",
+        sv
+    );
+    // …and the ORIGINAL signal is written exactly once (by the last iteration)
+    let acc_drivers = sv.matches("assign acc = ").count();
+    assert_eq!(
+        acc_drivers, 1,
+        "Triage #30: `acc` must have exactly one driver (last chain link), got {}:\n{}",
+        acc_drivers, sv
+    );
+}
+
+/// SAT-level equivalence of the elaborated design, MIR vs synthesized gates.
+#[test]
+fn test_triage30_generic_generate_for_sat_equivalent() {
+    let mir = compile_to_mir(GENERIC_ACC_SRC);
+    let target = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "GTop")
+        .expect("top module");
+    let hier = skalp_lir::lower_mir_hierarchical_with_top(&mir, Some("GTop"));
+    let flat = hier.flatten();
+    let library = get_stdlib_library("generic_asic").expect("library");
+    let synth = synthesize(&flat, &library, skalp_lir::synth::SynthPreset::Quick);
+
+    let mir_aig = MirToAig::new_with_mir(&mir, target).convert_sequential_hierarchical();
+    let gate_aig = GateNetlistToAig::new().convert_sequential(&synth.netlist);
+    let result = check_sequential_equivalence_sat(&mir_aig, &gate_aig, false)
+        .expect("SAT equivalence check errored");
+    assert!(
+        result.equivalent,
+        "Triage #30: elaborated generate-for design must be SAT-equivalent; \
+         counterexample: {:?}",
+        result.counterexample
+    );
+}

@@ -26,8 +26,13 @@ pub enum OptimizationLevel {
 /// Pending on-demand specializations recorded by the transform:
 /// specialized name -> (generic entity name, generic-arg bindings in
 /// declaration order).
-type PendingSpecializations =
-    IndexMap<String, (String, Vec<(String, skalp_frontend::const_eval::ConstValue)>)>;
+type PendingSpecializations = IndexMap<
+    String,
+    (
+        String,
+        Vec<(String, skalp_frontend::const_eval::ConstValue)>,
+    ),
+>;
 
 /// MIR compiler
 pub struct MirCompiler {

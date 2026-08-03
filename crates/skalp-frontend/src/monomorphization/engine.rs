@@ -721,6 +721,19 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
+        // TRIAGE #30: elaborate symbolic generate-fors now that the generic
+        // bounds are concrete (hir_builder preserves un-evaluable loops like
+        // `generate for i in 0..WIDTH` as HirStatement::GenerateFor templates).
+        let mut specialized_signals = specialized_signals;
+        let mut specialized_assignments = specialized_assignments;
+        let specialized_statements = self.elaborate_generate_fors(
+            &impl_block.statements,
+            instantiation,
+            port_id_map,
+            &mut specialized_signals,
+            &mut specialized_assignments,
+        );
+
         // Create specialized implementation
         // BUG #127 FIX: Use the specialized constants from self.current_constants, NOT
         // the original impl_block.constants. The specialized constants have generic params
@@ -737,7 +750,365 @@ impl<'hir> MonomorphizationEngine<'hir> {
             instances: specialized_instances,
             covergroups: impl_block.covergroups.clone(),
             formal_blocks: impl_block.formal_blocks.clone(),
-            statements: impl_block.statements.clone(), // Copy statements including assertions
+            statements: specialized_statements,
+        }
+    }
+
+    /// TRIAGE #30: Elaborate `HirStatement::GenerateFor` templates whose
+    /// bounds become concrete after generic-arg binding.
+    ///
+    /// Per iteration, body-declared signals are cloned with fresh IDs and
+    /// `{name}__g{i}` names. Whole-signal writes to OUTER signals (the
+    /// accumulator pattern `acc = acc + addend`) become an SSA chain:
+    /// iteration i reads the previous iteration's value and writes a fresh
+    /// intermediate (`acc__g{i}`); the LAST iteration writes the original
+    /// signal, and the accumulator's initial value moves to a synthesized
+    /// `{name}__ginit` signal read by iteration 0. Without this, unrolling
+    /// would multi-drive the accumulator with a combinational self-loop.
+    ///
+    /// Statements that are not elaboratable (nested generates, instances,
+    /// event blocks in the body, or still-symbolic bounds) pass through
+    /// unchanged.
+    fn elaborate_generate_fors(
+        &mut self,
+        statements: &[crate::hir::HirStatement],
+        instantiation: &Instantiation,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
+        signals: &mut Vec<crate::hir::HirSignal>,
+        assignments: &mut Vec<crate::hir::HirAssignment>,
+    ) -> Vec<crate::hir::HirStatement> {
+        use crate::hir::{
+            AssignmentId, GenerateMode, HirAssignment, HirAssignmentType, HirLValue, HirSignal,
+            HirStatement, SignalId,
+        };
+        use crate::hir_builder::HirBuilderContext;
+
+        // Fresh-ID allocation above every ID in sight (impl + all templates)
+        let mut max_sig = signals.iter().map(|s| s.id.0).max().unwrap_or(0);
+        let mut max_assign = assignments.iter().map(|a| a.id.0).max().unwrap_or(0);
+        for stmt in statements {
+            if let HirStatement::GenerateFor(gf) = stmt {
+                for s in &gf.body.signals {
+                    max_sig = max_sig.max(s.id.0);
+                }
+                for a in &gf.body.assignments {
+                    max_assign = max_assign.max(a.id.0);
+                }
+            }
+        }
+        let mut next_sig = move || {
+            max_sig += 1;
+            SignalId(max_sig)
+        };
+        let mut next_assign = move || {
+            max_assign += 1;
+            AssignmentId(max_assign)
+        };
+
+        let mut out = Vec::new();
+        'stmts: for stmt in statements {
+            let HirStatement::GenerateFor(gf) = stmt else {
+                out.push(stmt.clone());
+                continue;
+            };
+            if gf.mode != GenerateMode::Elaborate
+                || !gf.body.generate_stmts.is_empty()
+                || !gf.body.variables.is_empty()
+                || !gf.body.instances.is_empty()
+                || !gf.body.event_blocks.is_empty()
+            {
+                out.push(stmt.clone());
+                continue;
+            }
+
+            // Evaluate bounds with generic args bound
+            let start_e = self.substitute_expr(&gf.range.start, &instantiation.const_args);
+            let end_e = self.substitute_expr(&gf.range.end, &instantiation.const_args);
+            let mut evaluator = ConstEvaluator::new();
+            evaluator.bind_all(instantiation.const_args.clone());
+            let (start, end) = match (evaluator.eval(&start_e), evaluator.eval(&end_e)) {
+                (Ok(s), Ok(e)) => match (s.as_nat(), e.as_nat()) {
+                    (Some(s), Some(e)) => (s, e),
+                    _ => {
+                        out.push(stmt.clone());
+                        continue;
+                    }
+                },
+                _ => {
+                    out.push(stmt.clone());
+                    continue;
+                }
+            };
+            let end_exclusive = if gf.range.inclusive { end + 1 } else { end };
+            if end_exclusive <= start {
+                continue; // empty loop — nothing to emit
+            }
+
+            // Pre-substitute generic args + remap ports in the body ONCE
+            let body_signals: Vec<HirSignal> = gf
+                .body
+                .signals
+                .iter()
+                .map(|s| {
+                    let mut ns = s.clone();
+                    ns.signal_type = self.substitute_type(&s.signal_type, instantiation);
+                    ns.initial_value = s
+                        .initial_value
+                        .as_ref()
+                        .map(|e| self.substitute_expr(e, &instantiation.const_args));
+                    ns
+                })
+                .collect();
+            let body_assigns: Vec<HirAssignment> = gf
+                .body
+                .assignments
+                .iter()
+                .map(|a| {
+                    let mut na = a.clone();
+                    na.lhs = self.substitute_lvalue(&a.lhs, &instantiation.const_args);
+                    na.lhs = self.remap_lvalue_ports(&na.lhs, port_id_map);
+                    na.rhs = self.substitute_expr(&a.rhs, &instantiation.const_args);
+                    na.rhs = self.remap_expr_ports(&na.rhs, port_id_map);
+                    na
+                })
+                .collect();
+
+            let body_sig_ids: std::collections::HashSet<u32> =
+                body_signals.iter().map(|s| s.id.0).collect();
+
+            // Accumulators: OUTER signals written whole (not indexed)
+            let mut accs: Vec<SignalId> = Vec::new();
+            for a in &body_assigns {
+                if let HirLValue::Signal(id) = &a.lhs {
+                    if !body_sig_ids.contains(&id.0) && !accs.contains(id) {
+                        accs.push(*id);
+                    }
+                }
+            }
+
+            // Chain seeds: acc's initial value moves to `{name}__ginit`
+            let mut acc_prev: IndexMap<SignalId, SignalId> = IndexMap::new();
+            for acc in &accs {
+                let Some(pos) = signals.iter().position(|s| s.id == *acc) else {
+                    // Accumulator is not an impl signal (e.g. a port) —
+                    // chain semantics undefined; keep the statement symbolic.
+                    out.push(stmt.clone());
+                    continue 'stmts;
+                };
+                let init_expr = signals[pos].initial_value.take();
+                let mut init_sig = signals[pos].clone();
+                init_sig.id = next_sig();
+                init_sig.name = format!("{}__ginit", signals[pos].name);
+                init_sig.initial_value = None;
+                let init_id = init_sig.id;
+                signals.push(init_sig);
+                if let Some(init) = init_expr {
+                    assignments.push(HirAssignment {
+                        id: next_assign(),
+                        lhs: HirLValue::Signal(init_id),
+                        assignment_type: HirAssignmentType::Combinational,
+                        rhs: init,
+                        comments: vec![],
+                    });
+                }
+                acc_prev.insert(*acc, init_id);
+            }
+
+            for i in start..end_exclusive {
+                let is_last = i + 1 == end_exclusive;
+
+                // Clone body signals for this iteration
+                let mut sig_map: IndexMap<SignalId, SignalId> = IndexMap::new();
+                for bs in &body_signals {
+                    let nid = next_sig();
+                    sig_map.insert(bs.id, nid);
+                    let mut ns = bs.clone();
+                    ns.id = nid;
+                    ns.name = format!("{}__g{}", bs.name, i);
+                    ns.initial_value = ns.initial_value.map(|e| {
+                        HirBuilderContext::substitute_in_expr(
+                            &e,
+                            gf.iterator_var_id,
+                            &gf.iterator,
+                            i as i64,
+                        )
+                    });
+                    signals.push(ns);
+                }
+
+                // Reads: body signals via sig_map; accumulators via previous link
+                let mut read_map = sig_map.clone();
+                for (acc, prev) in &acc_prev {
+                    read_map.insert(*acc, *prev);
+                }
+                // Writes: body signals via sig_map; accumulators via fresh
+                // intermediate (or the original signal on the last iteration)
+                let mut write_map = sig_map.clone();
+                for acc in &accs {
+                    let target = if is_last {
+                        *acc
+                    } else {
+                        let (name, ty) = signals
+                            .iter()
+                            .find(|s| s.id == *acc)
+                            .map(|s| (s.name.clone(), s.signal_type.clone()))
+                            .expect("accumulator signal exists");
+                        let mut ns = signals
+                            .iter()
+                            .find(|s| s.id == *acc)
+                            .expect("accumulator signal exists")
+                            .clone();
+                        ns.id = next_sig();
+                        ns.name = format!("{}__g{}", name, i);
+                        ns.signal_type = ty;
+                        ns.initial_value = None;
+                        let nid = ns.id;
+                        signals.push(ns);
+                        nid
+                    };
+                    write_map.insert(*acc, target);
+                    acc_prev.insert(*acc, target);
+                }
+
+                for ba in &body_assigns {
+                    let mut na = ba.clone();
+                    na.id = next_assign();
+                    na.lhs = HirBuilderContext::substitute_in_lvalue(
+                        &na.lhs,
+                        gf.iterator_var_id,
+                        &gf.iterator,
+                        i as i64,
+                    );
+                    na.rhs = HirBuilderContext::substitute_in_expr(
+                        &na.rhs,
+                        gf.iterator_var_id,
+                        &gf.iterator,
+                        i as i64,
+                    );
+                    na.rhs = Self::remap_expr_signals(&na.rhs, &read_map);
+                    na.lhs = Self::remap_lvalue_signals(&na.lhs, &write_map, &read_map);
+                    assignments.push(na);
+                }
+            }
+            // GenerateFor consumed — not pushed to `out`.
+        }
+        out
+    }
+
+    /// Rewrite signal references in an expression per `map` (recursive).
+    fn remap_expr_signals(
+        expr: &HirExpression,
+        map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
+    ) -> HirExpression {
+        use crate::hir::HirExpression as E;
+        let r = |e: &HirExpression| Self::remap_expr_signals(e, map);
+        match expr {
+            E::Signal(id) => E::Signal(map.get(id).copied().unwrap_or(*id)),
+            E::Binary(bin) => E::Binary(crate::hir::HirBinaryExpr {
+                op: bin.op.clone(),
+                left: Box::new(r(&bin.left)),
+                right: Box::new(r(&bin.right)),
+                is_trait_op: bin.is_trait_op,
+                impl_style: bin.impl_style,
+            }),
+            E::Unary(u) => E::Unary(crate::hir::HirUnaryExpr {
+                op: u.op.clone(),
+                operand: Box::new(r(&u.operand)),
+            }),
+            E::Call(c) => {
+                let mut nc = c.clone();
+                nc.args = c.args.iter().map(&r).collect();
+                E::Call(nc)
+            }
+            E::Index(base, idx) => E::Index(Box::new(r(base)), Box::new(r(idx))),
+            E::Range(base, hi, lo) => E::Range(Box::new(r(base)), Box::new(r(hi)), Box::new(r(lo))),
+            E::FieldAccess { base, field } => E::FieldAccess {
+                base: Box::new(r(base)),
+                field: field.clone(),
+            },
+            E::ArrayRepeat { value, count } => E::ArrayRepeat {
+                value: Box::new(r(value)),
+                count: Box::new(r(count)),
+            },
+            E::Concat(es) => E::Concat(es.iter().map(&r).collect()),
+            E::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => E::Ternary {
+                condition: Box::new(r(condition)),
+                true_expr: Box::new(r(true_expr)),
+                false_expr: Box::new(r(false_expr)),
+            },
+            E::TupleLiteral(es) => E::TupleLiteral(es.iter().map(&r).collect()),
+            E::ArrayLiteral(es) => E::ArrayLiteral(es.iter().map(&r).collect()),
+            E::If(if_expr) => {
+                let mut ni = if_expr.clone();
+                ni.condition = Box::new(r(&if_expr.condition));
+                ni.then_expr = Box::new(r(&if_expr.then_expr));
+                ni.else_expr = Box::new(r(&if_expr.else_expr));
+                E::If(ni)
+            }
+            E::Match(m) => {
+                let mut nm = m.clone();
+                nm.expr = Box::new(r(&m.expr));
+                for arm in &mut nm.arms {
+                    arm.expr = r(&arm.expr);
+                }
+                E::Match(nm)
+            }
+            E::Cast(c) => {
+                let mut nc = c.clone();
+                nc.expr = Box::new(r(&c.expr));
+                E::Cast(nc)
+            }
+            E::StructLiteral(sl) => {
+                let mut nsl = sl.clone();
+                for f in &mut nsl.fields {
+                    f.value = r(&f.value);
+                }
+                E::StructLiteral(nsl)
+            }
+            E::Block {
+                statements,
+                result_expr,
+            } => E::Block {
+                // Block statements in expression position are rare (the common
+                // shape is `{ expr }` from if-expression branches) — remap the
+                // result; statements pass through.
+                statements: statements.clone(),
+                result_expr: Box::new(r(result_expr)),
+            },
+            // Leaves: Literal, Port, Variable, Constant, GenericParam,
+            // EnumVariant, AssociatedConstant
+            other => other.clone(),
+        }
+    }
+
+    /// Rewrite signal references in an lvalue: the base (write target) uses
+    /// `write_map`; index/range expressions are READS and use `read_map`.
+    fn remap_lvalue_signals(
+        lv: &crate::hir::HirLValue,
+        write_map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
+        read_map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
+    ) -> crate::hir::HirLValue {
+        use crate::hir::HirLValue as L;
+        match lv {
+            L::Signal(id) => L::Signal(write_map.get(id).copied().unwrap_or(*id)),
+            L::Index(base, idx) => L::Index(
+                Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
+                Self::remap_expr_signals(idx, read_map),
+            ),
+            L::Range(base, lo, hi) => L::Range(
+                Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
+                Self::remap_expr_signals(lo, read_map),
+                Self::remap_expr_signals(hi, read_map),
+            ),
+            L::FieldAccess { base, field } => L::FieldAccess {
+                base: Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
+                field: field.clone(),
+            },
+            other => other.clone(),
         }
     }
 

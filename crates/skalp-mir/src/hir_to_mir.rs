@@ -18572,17 +18572,14 @@ impl<'hir> HirToMir<'hir> {
             // This allows resolution of impl Mul for bit[N], impl Add for bit[N], etc.
             // The trait impl's body (in stdlib) instantiates the appropriate entity
             // (e.g., std_multiplier<N>) with barrier annotations for NCL/sync support.
-            //
-            // TRIAGE #30: Mul stays on the primitive op for bit types. The
-            // stdlib Mul route needs std_multiplier<N>, whose implementation is
-            // a generate-for over the generic WIDTH — hir_builder drops
-            // un-evaluable generate-fors at parse time, so the generic impl has
-            // NO shift-add logic and every specialization would emit a
-            // multiplier whose product is silently 0. Until generate-for in
-            // generic impls survives to specialization, primitive Mul is the
-            // only correct lowering (matches the no-stdlib path, EC-verified).
             hir::HirType::Bit(width) => {
-                if matches!(op, hir::HirBinaryOp::Mul) {
+                // TRIAGE #32: the stdlib Mul route expands bit[N] * bit[N]
+                // into a 2N-wide shift-add chain whose internal adders are
+                // 2N+1 bits. The behavioral simulator's C++ backend cannot do
+                // arithmetic on values wider than 64 bits (they lower to
+                // uint32_t arrays), so widths where 2N+1 > 64 stay on the
+                // primitive Mul op until wide arithmetic lands in the backend.
+                if matches!(op, hir::HirBinaryOp::Mul) && *width * 2 + 1 > 64 {
                     return None;
                 }
                 trace!(
@@ -18593,6 +18590,8 @@ impl<'hir> HirToMir<'hir> {
                 format!("bit[{}]", width)
             }
             hir::HirType::BitParam(param) => {
+                // Symbolic width — cannot check the TRIAGE #32 width bound, so
+                // Mul conservatively stays primitive here.
                 if matches!(op, hir::HirBinaryOp::Mul) {
                     return None;
                 }
