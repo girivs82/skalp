@@ -58,6 +58,9 @@ pub struct CdcAnalyzer {
     signal_domains: IndexMap<crate::mir::SignalId, ClockDomainId>,
     /// Clock domain assignments for each port
     port_domains: IndexMap<crate::mir::PortId, ClockDomainId>,
+    /// TRIAGE #13: human-readable name per domain id (lifetime name or the
+    /// clock port's name) for violation messages.
+    domain_names: IndexMap<ClockDomainId, String>,
 }
 
 impl CdcAnalyzer {
@@ -66,7 +69,17 @@ impl CdcAnalyzer {
         Self {
             signal_domains: IndexMap::new(),
             port_domains: IndexMap::new(),
+            domain_names: IndexMap::new(),
         }
+    }
+
+    /// Human-readable domain name for messages: the lifetime name, the
+    /// clock port's name, or the raw id as a last resort.
+    fn domain_display(&self, d: ClockDomainId) -> String {
+        self.domain_names
+            .get(&d)
+            .cloned()
+            .unwrap_or_else(|| format!("{:?}", d))
     }
 
     /// Analyze a module for CDC violations
@@ -106,6 +119,74 @@ impl CdcAnalyzer {
             if let Some(domain) = self.infer_port_clock_domain(port) {
                 self.port_domains.insert(port.id, domain);
             }
+        }
+
+        // TRIAGE #13/#14: unify domains by lifetime NAME. Names are stamped
+        // from the source annotations (`clock<'dst>`, `bit[8]<'src>`,
+        // `signal x<'clk_a>: T`) and survive monomorphization, unlike the
+        // numeric HIR stamps (see the #10 note above). Two clock ports with
+        // the same lifetime are the SAME domain; a data port or signal
+        // annotated with a lifetime belongs to that domain — including
+        // "foreign" domains with no clock pin in this entity (`bit<'src>`
+        // in an entity that only has clk_dst), which get a fresh id
+        // disjoint from the port-id-based implicit ones.
+        let mut name_to_domain: IndexMap<String, ClockDomainId> = IndexMap::new();
+        // Clock ports first: they anchor each named domain to the same id
+        // the implicit per-port scheme would use.
+        for port in &module.ports {
+            use crate::mir::DataType;
+            if !matches!(port.port_type, DataType::Clock { .. }) {
+                continue;
+            }
+            let Some(name) = &port.clock_domain_name else {
+                continue;
+            };
+            let domain = *name_to_domain
+                .entry(name.clone())
+                .or_insert(crate::mir::ClockDomainId(port.id.0));
+            self.domain_names.insert(domain, format!("'{}", name));
+            self.port_domains.insert(port.id, domain);
+        }
+        // Implicit per-port clock domains display as the clock port's name.
+        for port in &module.ports {
+            use crate::mir::DataType;
+            if matches!(port.port_type, DataType::Clock { .. }) {
+                self.domain_names
+                    .entry(crate::mir::ClockDomainId(port.id.0))
+                    .or_insert_with(|| format!("clock `{}`", port.name));
+            }
+        }
+        // Data ports (and reset ports) with a named domain.
+        let mut next_foreign = 1_000_000u32;
+        for port in &module.ports {
+            use crate::mir::DataType;
+            if matches!(port.port_type, DataType::Clock { .. }) {
+                continue;
+            }
+            let Some(name) = &port.clock_domain_name else {
+                continue;
+            };
+            let domain = *name_to_domain.entry(name.clone()).or_insert_with(|| {
+                let d = crate::mir::ClockDomainId(next_foreign);
+                next_foreign += 1;
+                d
+            });
+            self.domain_names.insert(domain, format!("'{}", name));
+            self.port_domains.insert(port.id, domain);
+        }
+        // Signals with an explicit domain annotation — seeded BEFORE the
+        // process-based inference below so the declaration wins.
+        for signal in &module.signals {
+            let Some(name) = &signal.clock_domain_name else {
+                continue;
+            };
+            let domain = *name_to_domain.entry(name.clone()).or_insert_with(|| {
+                let d = crate::mir::ClockDomainId(next_foreign);
+                next_foreign += 1;
+                d
+            });
+            self.domain_names.insert(domain, format!("'{}", name));
+            self.signal_domains.insert(signal.id, domain);
         }
 
         // TRIAGE #10: clock-typed ports whose domain annotation never reached
@@ -316,9 +397,10 @@ impl CdcAnalyzer {
                                 violation_type: CdcViolationType::DirectCrossing,
                                 severity: CdcSeverity::Critical,
                                 description: format!(
-                                    "assignment to `{}` (domain {:?}) from a process clocked in domain {:?} — needs a synchronizer",
+                                    "assignment to `{}` (domain {}) from a process clocked in domain {} — needs a synchronizer",
                                     Self::lvalue_name(module, &assignment.lhs),
-                                    target_domain, process_domain
+                                    self.domain_display(target_domain),
+                                    self.domain_display(process_domain)
                                 ),
                                 source_domain: Some(process_domain),
                                 target_domain: Some(target_domain),
@@ -366,9 +448,11 @@ impl CdcAnalyzer {
                                     violation_type: CdcViolationType::DirectCrossing,
                                     severity,
                                     description: format!(
-                                        "assignment to `{}` reads a signal from domain {:?} inside a process clocked in domain {:?} — {}",
+                                        "assignment to `{}` reads a signal from domain {} inside a process clocked in domain {} — {}",
                                         Self::lvalue_name(module, &assignment.lhs),
-                                        source_domain, process_domain, hint
+                                        self.domain_display(*source_domain),
+                                        self.domain_display(process_domain),
+                                        hint
                                     ),
                                     source_domain: Some(*source_domain),
                                     target_domain: Some(process_domain),
@@ -454,9 +538,10 @@ impl CdcAnalyzer {
                                     violation_type: CdcViolationType::DirectCrossing,
                                     severity: CdcSeverity::Warning,
                                     description: format!(
-                                        "condition driving `{}` uses a signal from domain {:?} in a process clocked in domain {:?}",
+                                        "condition driving `{}` uses a signal from domain {} in a process clocked in domain {}",
                                         Self::lvalue_name(module, &resolved.target),
-                                        source_domain, process_domain
+                                        self.domain_display(source_domain),
+                                        self.domain_display(process_domain)
                                     ),
                                     source_domain: Some(source_domain),
                                     target_domain: Some(process_domain),
@@ -476,9 +561,10 @@ impl CdcAnalyzer {
                                 violation_type: CdcViolationType::DirectCrossing,
                                 severity: CdcSeverity::Warning,
                                 description: format!(
-                                    "default value driving `{}` uses a signal from domain {:?} in a process clocked in domain {:?}",
+                                    "default value driving `{}` uses a signal from domain {} in a process clocked in domain {}",
                                     Self::lvalue_name(module, &resolved.target),
-                                    source_domain, process_domain
+                                    self.domain_display(source_domain),
+                                    self.domain_display(process_domain)
                                 ),
                                 source_domain: Some(source_domain),
                                 target_domain: Some(process_domain),
@@ -518,9 +604,10 @@ impl CdcAnalyzer {
                         violation_type: CdcViolationType::DirectCrossing,
                         severity: CdcSeverity::Critical,
                         description: format!(
-                            "continuous assignment to `{}` crosses from domain {:?} to {:?} — needs a synchronizer",
+                            "continuous assignment to `{}` crosses from domain {} to {} — needs a synchronizer",
                             Self::lvalue_name(module, &continuous_assign.lhs),
-                            source_domain, target_domain
+                            self.domain_display(source_domain),
+                            self.domain_display(target_domain)
                         ),
                         source_domain: Some(source_domain),
                         target_domain: Some(target_domain),

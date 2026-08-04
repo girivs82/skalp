@@ -4208,6 +4208,7 @@ impl<'a> ParseState<'a> {
                 self.start_node(SyntaxKind::BitType);
                 self.bump();
                 self.parse_width_spec();
+                self.parse_optional_domain_spec();
                 self.finish_node();
             }
             Some(SyntaxKind::BoolKw) => {
@@ -4226,18 +4227,21 @@ impl<'a> ParseState<'a> {
                 self.start_node(SyntaxKind::NatType);
                 self.bump();
                 self.parse_width_spec();
+                self.parse_optional_domain_spec();
                 self.finish_node();
             }
             Some(SyntaxKind::IntKw) => {
                 self.start_node(SyntaxKind::IntType);
                 self.bump();
                 self.parse_width_spec();
+                self.parse_optional_domain_spec();
                 self.finish_node();
             }
             Some(SyntaxKind::LogicKw) => {
                 self.start_node(SyntaxKind::LogicType);
                 self.bump();
                 self.parse_width_spec();
+                self.parse_optional_domain_spec();
                 self.finish_node();
             }
             Some(SyntaxKind::ClockKw) => {
@@ -4409,6 +4413,18 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse width specification [N] or [expr] or <N> or <expr>
+    /// TRIAGE #14: optional clock-domain annotation after a width spec —
+    /// `bit[8]<'a>`, `nat[16]<'clk_w>`. Only consumed when the `<` is
+    /// immediately followed by a lifetime token, so `bit[8] < x` (comparison
+    /// in an expression context that got here) is never eaten.
+    fn parse_optional_domain_spec(&mut self) {
+        if self.at(SyntaxKind::Lt) && self.peek_kind(1) == Some(SyntaxKind::Lifetime) {
+            self.bump(); // consume <
+            self.bump(); // consume 'lifetime
+            self.expect_closing_angle(); // consume >
+        }
+    }
+
     fn parse_width_spec(&mut self) {
         if self.at(SyntaxKind::LBracket) {
             self.start_node(SyntaxKind::WidthSpec);

@@ -343,14 +343,37 @@ codegen gaps; **P3** = hygiene.
 
 ## P2 — semantic / codegen gaps
 
-13. **Clock-domain lifetimes lowered as power domains.** `entity Sync<'src, 'dst>`
-    emits `(* power_domain = "src" *)` attributes on signals — wrong semantic category
-    (and read-domain signals get tagged with the write domain). Clock lifetimes should
-    feed the CDC domain tracker, not the UPF path.
+13. **FIXED (2026-08-04). Clock-domain lifetimes lowered as power domains.**
+    `entity Sync<'src, 'dst>` emitted `(* power_domain = "src" *)` on every
+    impl signal (read-domain signals tagged with the write domain).
+    **Root cause:** `build_generic_param` classified every bare entity
+    lifetime as `HirGenericType::PowerDomain`, and the signal-level
+    `signal x<'d>: T` lifetime was likewise read as a power domain; the
+    entity "default power domain" then leaked onto all impl signals.
+    **Fix:** bare lifetimes register as CLOCK domains (the `'name (default)`
+    marker still selects a power domain explicitly); power domains otherwise
+    come only from `#[power_domain]`/`#[power(...)]` attributes. Clock-domain
+    lifetime NAMES (mono-safe, unlike the numeric ids — see #10) now flow
+    onto HirPort/HirSignal → mir::Port/mir::Signal, and the CDC analyzer
+    unifies domains by name: same-lifetime clock ports share one domain, and
+    a lifetime-annotated data port/signal joins its named domain (foreign
+    domains with no local clock pin get a disjoint id). An annotated
+    cross-domain read with logic is now a named critical:
+    "reads a signal from domain 'src inside a process clocked in domain
+    'dst" — the 2-FF bare-sample synchronizer stays buildable (#10 policy).
+    Violation messages print lifetime/clock-port names instead of raw ids.
 
-14. **`bit[8]<'domain>` (width + lifetime) does not parse**, though the spec, the
-    tutorial (ch08), and the projects page all use it. Decide the surface syntax for
-    domain-annotated vectors and implement or excise it everywhere.
+14. **FIXED (2026-08-04). `bit[8]<'domain>` (width + lifetime) does not
+    parse.** The type parser now accepts an optional `<'lifetime>` after the
+    width spec on bit/nat/int/logic (only consumed when `<` is immediately
+    followed by a lifetime token). `bit<'d>` (domain-only) already parsed —
+    its lifetime was swallowed as a bogus "width" argument and dropped; the
+    domain is now extracted from the type annotation for CDC. Suite
+    regression tests: `test_triage13_lifetimes_are_clock_domains_not_power`,
+    `test_triage14_width_plus_domain_parses`,
+    `test_triage13_annotated_crossing_fails_build`,
+    `test_triage13_synchronizer_still_builds`. Corpus 145/145 unchanged;
+    suite zero regressions.
 
 15. **Declared type of `let` bindings ignored.** `let full_sum: bit[WIDTH+1] = ...`
     infers its own width (observed 10-bit where 9 was declared). Type annotation should

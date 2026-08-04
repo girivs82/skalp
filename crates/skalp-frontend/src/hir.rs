@@ -350,6 +350,12 @@ pub struct HirPort {
     pub direction: HirPortDirection,
     /// Port type
     pub port_type: HirType,
+    /// TRIAGE #13/#14: clock-domain lifetime NAME from the port's type
+    /// annotation (`clock<'dst>`, `bit[8]<'src>`). Names survive
+    /// monomorphization (numeric domain ids do not — see triage #10), so
+    /// the CDC analyzer unifies domains by this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_domain_name: Option<String>,
     /// Physical constraints (pin mapping, I/O characteristics)
     pub physical_constraints: Option<PhysicalConstraints>,
     /// Detection signal configuration (for safety analysis)
@@ -410,6 +416,11 @@ pub struct HirSignal {
     pub initial_value: Option<HirExpression>,
     /// Clock domain this signal belongs to (inferred from assignments)
     pub clock_domain: Option<ClockDomainId>,
+    /// TRIAGE #13: clock-domain lifetime NAME from an explicit annotation —
+    /// `signal gray_cnt<'clk_a>: bit[4]` or a domain-annotated type. This
+    /// was previously misread as a POWER domain (wrong semantic category).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_domain_name: Option<String>,
     /// Source location span (for error reporting)
     pub span: Option<SourceSpan>,
     /// Memory configuration (from #[memory(depth=N)] attribute)

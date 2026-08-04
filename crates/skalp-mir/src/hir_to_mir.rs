@@ -666,6 +666,8 @@ impl<'hir> HirToMir<'hir> {
                 for mut port in flattened_ports {
                     // Propagate the detection config from HIR
                     port.detection_config = hir_port.detection_config.clone();
+                    // TRIAGE #13/#14: propagate the clock-domain lifetime name
+                    port.clock_domain_name = hir_port.clock_domain_name.clone();
                     module.ports.push(port);
                 }
             }
@@ -852,6 +854,7 @@ impl<'hir> HirToMir<'hir> {
                         signal_type: dtype,
                         initial: None,
                         clock_domain: None,
+                        clock_domain_name: None,
                         span: None,
                         memory_config: None,
                         trace_config: None,
@@ -969,7 +972,9 @@ impl<'hir> HirToMir<'hir> {
                     self.port_map.insert(hir_port.id, first_port.id);
                 }
                 self.port_owner.insert(hir_port.id, entity.id);
-                for port in flattened_ports {
+                for mut port in flattened_ports {
+                    // TRIAGE #13/#14: propagate the clock-domain lifetime name
+                    port.clock_domain_name = hir_port.clock_domain_name.clone();
                     module.ports.push(port);
                 }
             }
@@ -1193,6 +1198,9 @@ impl<'hir> HirToMir<'hir> {
                             if hir_signal.cdc_config.is_some() {
                                 signal.cdc_config = hir_signal.cdc_config.clone();
                             }
+                            // TRIAGE #13: propagate the explicit clock-domain
+                            // lifetime name for CDC analysis
+                            signal.clock_domain_name = hir_signal.clock_domain_name.clone();
                             // Propagate breakpoint config from HIR signal to MIR signal
                             if hir_signal.breakpoint_config.is_some() {
                                 signal.breakpoint_config = hir_signal.breakpoint_config.clone();
@@ -1312,6 +1320,7 @@ impl<'hir> HirToMir<'hir> {
                                                 signal_type: dtype,
                                                 initial: None,
                                                 clock_domain: None,
+                                                clock_domain_name: None,
                                                 span: None,
                                                 memory_config: None,
                                                 trace_config: None,
@@ -1974,6 +1983,7 @@ impl<'hir> HirToMir<'hir> {
                                 signal_type: dtype,
                                 initial: None,
                                 clock_domain: None,
+                                clock_domain_name: None,
                                 span: None,
                                 memory_config: None,
                                 trace_config: None,
@@ -23710,6 +23720,7 @@ impl<'hir> HirToMir<'hir> {
                 name: port_name,
                 direction: PortDirection::Input,
                 port_type,
+                clock_domain_name: None,
                 physical_constraints: None,
                 span: None,
                 detection_config: None,
@@ -23740,6 +23751,7 @@ impl<'hir> HirToMir<'hir> {
                         name: port_name,
                         direction: PortDirection::Output,
                         port_type,
+                        clock_domain_name: None,
                         physical_constraints: None,
                         span: None,
                         detection_config: None,
@@ -23759,6 +23771,7 @@ impl<'hir> HirToMir<'hir> {
                     name: "result".to_string(),
                     direction: PortDirection::Output,
                     port_type,
+                    clock_domain_name: None,
                     physical_constraints: None,
                     span: None,
                     detection_config: None,
@@ -23999,6 +24012,7 @@ impl<'hir> HirToMir<'hir> {
                 signal_type: inferred_type.clone(),
                 initial: None,
                 clock_domain: None,
+                clock_domain_name: None,
                 span: None,
                 memory_config: None,
                 trace_config: None,
@@ -24302,6 +24316,7 @@ impl<'hir> HirToMir<'hir> {
                                 signal_type: inferred_type.clone(),
                                 initial: None,
                                 clock_domain: None,
+                                clock_domain_name: None,
                                 span: None,
                                 memory_config: None,
                                 trace_config: None,
@@ -24684,6 +24699,7 @@ impl<'hir> HirToMir<'hir> {
                         signal_type: element_data_type,
                         initial: None,
                         clock_domain: None,
+                        clock_domain_name: None,
                         span: None,
                         memory_config: None,
                         trace_config: None,
@@ -24729,6 +24745,7 @@ impl<'hir> HirToMir<'hir> {
                     signal_type: data_type.clone(),
                     initial: None,
                     clock_domain: None,
+                    clock_domain_name: None,
                     span: None,
                     memory_config: None,
                     trace_config: None,
@@ -24819,6 +24836,7 @@ impl<'hir> HirToMir<'hir> {
                     signal_type,
                     initial: None,
                     clock_domain: None,
+                    clock_domain_name: None,
                     span: None,
                     memory_config: None,
                     trace_config: None,
@@ -24897,6 +24915,7 @@ impl<'hir> HirToMir<'hir> {
                     signal_type,
                     initial: None,
                     clock_domain: None,
+                    clock_domain_name: None,
                     span: None,
                     memory_config: None,
                     trace_config: None,

@@ -477,6 +477,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     comments: port.comments.clone(),
                     direction: port.direction.clone(),
                     port_type: self.substitute_type(&port.port_type, instantiation),
+                    // TRIAGE #13/#14: domain NAMES survive specialization
+                    // verbatim — instantiation sites have no lifetime-binding
+                    // syntax today, so the entity's own names are the truth.
+                    clock_domain_name: port.clock_domain_name.clone(),
                     physical_constraints: port.physical_constraints.clone(),
                     detection_config: port.detection_config.clone(),
                     power_domain_config: port.power_domain_config.clone(),

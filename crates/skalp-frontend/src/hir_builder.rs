@@ -996,6 +996,7 @@ impl HirBuilderContext {
                                     power_config: None,
                                     safety_config: None,
                                     power_domain: self.current_default_power_domain.clone(),
+                                    clock_domain_name: None,
                                     comments: vec![],
                                 };
                                 signals.push(signal);
@@ -1182,6 +1183,14 @@ impl HirBuilderContext {
                 self.extract_hir_type(node)
             };
 
+        // TRIAGE #13/#14: clock-domain lifetime from the port's type
+        // annotation (`clock<'dst>`, `bit[8]<'src>`, `bit<'src>`)
+        // (scan ONLY the type annotation — the Lifetime token kind is also
+        // used for based literals like 'b0101 in initializer expressions)
+        let clock_domain_name = node
+            .first_child_of_kind(SyntaxKind::TypeAnnotation)
+            .and_then(|ty| Self::find_domain_lifetime(&ty));
+
         // Extract physical constraints if present
         let physical_constraints = node
             .first_child_of_kind(SyntaxKind::PhysicalConstraintBlock)
@@ -1203,6 +1212,7 @@ impl HirBuilderContext {
             name,
             direction,
             port_type,
+            clock_domain_name,
             physical_constraints,
             detection_config,
             power_domain_config,
@@ -1429,6 +1439,7 @@ impl HirBuilderContext {
                                     power_config: None,
                                     safety_config: None,
                                     power_domain: self.current_default_power_domain.clone(),
+                                    clock_domain_name: None,
                                     comments: vec![],
                                 };
                                 signals.push(implicit_signal);
@@ -1904,6 +1915,7 @@ impl HirBuilderContext {
                                 power_config: None,
                                 safety_config: None,
                                 power_domain: None,
+                                clock_domain_name: None,
                                 comments: vec![],
                             });
 
@@ -2461,8 +2473,15 @@ impl HirBuilderContext {
         let id = self.next_signal_id();
         let name = self.extract_name(node)?;
 
-        // Extract power domain from signal's lifetime parameter: signal data<'core>: type
-        let signal_power_domain = self.extract_signal_power_domain(node);
+        // TRIAGE #13: a signal-level lifetime (`signal gray_cnt<'clk_a>: T`)
+        // is a CLOCK-domain annotation per the language spec (§CDC), not a
+        // power domain — it previously emitted (* power_domain *) UPF
+        // attributes (wrong semantic category). Power domains come only from
+        // #[power(...)]-family attributes and #[power_domain] configs.
+        let signal_clock_domain = self.extract_signal_power_domain(node).or_else(|| {
+            node.first_child_of_kind(SyntaxKind::TypeAnnotation)
+                .and_then(|ty| Self::find_domain_lifetime(&ty))
+        });
 
         // Get type - look for TypeAnnotation first
         let signal_type =
@@ -2492,12 +2511,9 @@ impl HirBuilderContext {
         // Consume any pending breakpoint config from preceding #[breakpoint] attribute
         let breakpoint_config = self.pending_breakpoint_config.take();
 
-        // Determine final power domain:
-        // 1. Signal's explicit lifetime: signal data<'core>: type
-        // 2. Fall back to entity's default power domain
-        let final_power_domain = signal_power_domain
-            .clone()
-            .or_else(|| self.current_default_power_domain.clone());
+        // Power domain comes ONLY from the entity's default power domain
+        // (#[power_domain] config) — never from lifetimes (TRIAGE #13).
+        let final_power_domain = self.current_default_power_domain.clone();
 
         // Consume any pending power config from preceding #[retention], #[isolation], #[pdc], #[level_shift] attributes
         // Merge with signal_power_domain from lifetime parameter
@@ -2524,8 +2540,18 @@ impl HirBuilderContext {
             power_config,
             safety_config,
             power_domain: final_power_domain,
+            clock_domain_name: signal_clock_domain,
             comments: Self::collect_leading_comments(node),
         })
+    }
+
+    /// TRIAGE #13/#14: first clock-domain lifetime token within a type
+    /// annotation subtree (`clock<'dst>`, `bit[8]<'src>`, `bit<'src>`).
+    fn find_domain_lifetime(ty: &SyntaxNode) -> Option<String> {
+        ty.descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == SyntaxKind::Lifetime)
+            .map(|t| t.text().trim_start_matches('\'').to_string())
     }
 
     /// Build signal declaration as a let statement (for use in trait method inlining)
@@ -14793,15 +14819,33 @@ impl HirBuilderContext {
             }
 
             // Check for (default) marker after the lifetime
-            // Syntax: 'core (default) or 'core(default)
+            // Syntax: 'core (default) or 'core(default) — marks a POWER
+            // domain generic explicitly.
             let is_default = node
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
                 .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "default");
 
+            if is_default {
+                return Some(HirGeneric {
+                    name,
+                    param_type: HirGenericType::PowerDomain { is_default },
+                    default_value: None,
+                });
+            }
+
+            // TRIAGE #13: a bare entity lifetime (`entity Sync<'src, 'dst>`)
+            // is a CLOCK domain per the language spec — it previously became
+            // a POWER domain, so every impl signal inherited a bogus
+            // (* power_domain = "src" *) UPF attribute (and read-domain
+            // signals were tagged with the write domain).
+            if !self.symbols.clock_domains.contains_key(&name) {
+                let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
+                self.symbols.clock_domains.insert(name.clone(), domain_id);
+            }
             Some(HirGeneric {
                 name,
-                param_type: HirGenericType::PowerDomain { is_default },
+                param_type: HirGenericType::ClockDomain,
                 default_value: None,
             })
         }
@@ -14813,9 +14857,14 @@ impl HirBuilderContext {
                 .find(|t| t.kind() == SyntaxKind::Ident)
                 .map(|t| t.text().to_string())?;
 
+            // TRIAGE #13: same as above — bare lifetimes are clock domains.
+            if !self.symbols.clock_domains.contains_key(&name) {
+                let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
+                self.symbols.clock_domains.insert(name.clone(), domain_id);
+            }
             Some(HirGeneric {
                 name,
-                param_type: HirGenericType::PowerDomain { is_default: false },
+                param_type: HirGenericType::ClockDomain,
                 default_value: None,
             })
         }

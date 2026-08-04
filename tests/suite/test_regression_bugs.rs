@@ -1984,3 +1984,152 @@ impl Plain {
         err
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #13/#14: entity/signal clock-domain LIFETIMES were lowered
+// as POWER domains — `entity Sync<'src, 'dst>` stamped every impl signal with
+// a bogus (* power_domain = "src" *) UPF attribute (read-domain signals tagged
+// with the write domain). And `bit[8]<'domain>` (width + lifetime) did not
+// parse at all, though the spec and tutorial use it. Lifetimes now register as
+// clock domains, domain names flow HIR→MIR, and the CDC analyzer unifies
+// domains by name — so an annotated cross-domain read is a real violation.
+// =============================================================================
+
+#[test]
+fn test_triage13_lifetimes_are_clock_domains_not_power() {
+    let source = r#"
+entity Sync<'src, 'dst> {
+    in  clk_dst: clock<'dst>
+    in  rst:     reset
+    in  data_in: bit<'src>
+    out data_out: bit
+}
+
+impl Sync {
+    signal ff1: bit
+    signal ff2: bit
+
+    on(clk_dst.rise) {
+        if rst {
+            ff1 = 0
+            ff2 = 0
+        } else {
+            ff1 = data_in
+            ff2 = ff1
+        }
+    }
+
+    data_out = ff2
+}
+"#;
+    let sv = compile_to_sv(source).expect("Sync must compile");
+    assert!(
+        !sv.contains("power_domain"),
+        "Triage #13: clock lifetimes must NOT emit power_domain UPF attributes:\n{}",
+        sv
+    );
+}
+
+#[test]
+fn test_triage14_width_plus_domain_parses() {
+    let source = r#"
+entity V<'a> {
+    in clk: clock<'a>
+    in d: bit[8]<'a>
+    out q: bit[8]
+}
+
+impl V {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        r = d
+    }
+    q = r
+}
+"#;
+    let sv = compile_to_sv(source).expect("bit[8]<'a> must parse and compile");
+    assert!(
+        sv.contains("[7:0] d"),
+        "Triage #14: domain annotation must not eat the width:\n{}",
+        sv
+    );
+}
+
+#[test]
+fn test_triage13_annotated_crossing_fails_build() {
+    // data_in is annotated 'src but consumed (with logic) in a 'dst-clocked
+    // process with no synchronizer — must be a critical CDC violation.
+    let source = r#"
+entity BadCross<'src, 'dst> {
+    in  clk_dst: clock<'dst>
+    in  rst: reset
+    in  data_in: bit[8]<'src>
+    out data_out: bit[8]
+}
+
+impl BadCross {
+    signal reg_out: bit[8] = 0
+
+    on(clk_dst.rise) {
+        if rst {
+            reg_out = 0
+        } else {
+            reg_out = data_in + 1
+        }
+    }
+
+    data_out = reg_out
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    let err = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .err()
+        .expect("annotated unsynchronized crossing must fail the build");
+    assert!(
+        err.contains("'src") && err.contains("'dst"),
+        "Triage #13: CDC violation must name the lifetimes, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_triage13_synchronizer_still_builds() {
+    // The standard 2-FF synchronizer (bare registered sample) must stay
+    // buildable — only crossings with logic are critical.
+    let source = r#"
+entity GoodSync<'src, 'dst> {
+    in  clk_dst: clock<'dst>
+    in  rst: reset
+    in  data_in: bit<'src>
+    out data_out: bit
+}
+
+impl GoodSync {
+    signal ff1: bit
+    signal ff2: bit
+
+    on(clk_dst.rise) {
+        if rst {
+            ff1 = 0
+            ff2 = 0
+        } else {
+            ff1 = data_in
+            ff2 = ff1
+        }
+    }
+
+    data_out = ff2
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("2-FF synchronizer must build");
+}

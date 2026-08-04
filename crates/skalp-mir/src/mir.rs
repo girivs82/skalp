@@ -181,6 +181,11 @@ pub struct Port {
     pub direction: PortDirection,
     /// Port type
     pub port_type: DataType,
+    /// TRIAGE #13/#14: clock-domain lifetime NAME from the HIR annotation
+    /// (`clock<'dst>`, `bit[8]<'src>`). Names survive monomorphization;
+    /// the CDC analyzer unifies domains by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_domain_name: Option<String>,
     /// Physical constraints (from HIR)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical_constraints: Option<skalp_frontend::hir::PhysicalConstraints>,
@@ -225,6 +230,10 @@ pub struct Signal {
     pub initial: Option<Value>,
     /// Clock domain this signal belongs to (for CDC analysis)
     pub clock_domain: Option<ClockDomainId>,
+    /// TRIAGE #13: explicit clock-domain lifetime NAME
+    /// (`signal gray_cnt<'clk_a>: bit[4]`), unified by name in CDC analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_domain_name: Option<String>,
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,

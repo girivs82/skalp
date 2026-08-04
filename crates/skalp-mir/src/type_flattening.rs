@@ -491,6 +491,7 @@ impl TypeFlattener {
             name: name.to_string(),
             direction,
             port_type: port_type.clone(),
+            clock_domain_name: None, // stamped by hir_to_mir from the HIR annotation
             physical_constraints: physical_constraints.cloned(),
             span,
             detection_config: None, // Will be set by hir_to_mir if annotated
@@ -669,6 +670,7 @@ impl TypeFlattener {
             signal_type: signal_type.clone(),
             initial,
             clock_domain,
+            clock_domain_name: None, // stamped by hir_to_mir from the HIR annotation
             span,
             memory_config: None,
             trace_config: None,
