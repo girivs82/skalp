@@ -466,6 +466,11 @@ pub struct HirVariable {
     pub comments: Vec<String>,
     /// Variable type
     pub var_type: HirType,
+    /// TRIAGE #15: true when var_type came from an explicit annotation
+    /// (`let x: bit[9] = ...`) rather than inference — a declared type is a
+    /// contract and must not be silently widened downstream.
+    #[serde(default)]
+    pub explicit_type: bool,
     /// Initial value
     pub initial_value: Option<HirExpression>,
     /// Source location for error reporting

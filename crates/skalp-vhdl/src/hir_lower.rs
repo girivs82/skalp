@@ -1288,6 +1288,7 @@ impl VhdlHirBuilder {
             id,
             name,
             var_type,
+            explicit_type: true, // VHDL variables always carry a declared type
             initial_value: init,
             span: None,
             comments: collect_leading_comments(node),

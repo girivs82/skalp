@@ -2133,3 +2133,57 @@ impl GoodSync {
         .compile_to_mir(&hir)
         .expect("2-FF synchronizer must build");
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #15: the declared type of a `let` binding was ignored —
+// `let full_sum: bit[9] = a + b` emitted a 10-bit net because the MIR
+// variable conversion unconditionally widened Add/Sub initializers by one bit
+// (a carry-preservation hack meant for INFERRED types). A declared type is a
+// contract; widening now applies only when the type was inferred.
+// =============================================================================
+
+#[test]
+fn test_triage15_declared_let_type_is_respected() {
+    let declared = r#"
+entity Adder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[9]
+}
+
+impl Adder {
+    let full_sum: bit[9] = a + b
+    sum = full_sum
+}
+"#;
+    let sv = compile_to_sv(declared).expect("declared-width let must compile");
+    assert!(
+        sv.contains("[8:0] full_sum"),
+        "Triage #15: declared bit[9] must emit a 9-bit net, got:\n{}",
+        sv
+    );
+    assert!(
+        !sv.contains("[9:0] full_sum"),
+        "Triage #15: declared bit[9] must NOT be widened to 10 bits"
+    );
+
+    // Inferred lets keep the carry-preserving widening.
+    let inferred = r#"
+entity AdderInf {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[9]
+}
+
+impl AdderInf {
+    let full_sum = a + b
+    sum = full_sum
+}
+"#;
+    let sv = compile_to_sv(inferred).expect("inferred let must compile");
+    assert!(
+        sv.contains("[8:0] full_sum"),
+        "Triage #15: inferred a+b must still preserve the carry (9 bits), got:\n{}",
+        sv
+    );
+}

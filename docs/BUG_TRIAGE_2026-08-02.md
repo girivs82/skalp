@@ -375,9 +375,17 @@ codegen gaps; **P3** = hygiene.
     `test_triage13_synchronizer_still_builds`. Corpus 145/145 unchanged;
     suite zero regressions.
 
-15. **Declared type of `let` bindings ignored.** `let full_sum: bit[WIDTH+1] = ...`
-    infers its own width (observed 10-bit where 9 was declared). Type annotation should
-    constrain or error.
+15. **FIXED (2026-08-04). Declared type of `let` bindings ignored.**
+    `let full_sum: bit[9] = a + b` emitted a 10-bit net. **Root cause:** the
+    MIR variable conversion unconditionally applied `widen_type_by_one` to any
+    variable whose initializer contains Add/Sub — a carry-preservation hack
+    meant for INFERRED lets, applied on top of declared types too. **Fix:**
+    `HirVariable.explicit_type` records whether the type came from an
+    annotation; the widening now applies only to inferred types. Declared
+    `bit[9]` emits `[8:0]`; inferred `let s = a + b` still gets the
+    carry-preserving 9 bits; a deliberately narrow declaration truncates as
+    written. EC SAT-proves the repro. Suite regression test:
+    `test_triage15_declared_let_type_is_respected`. Corpus unchanged.
 
 16. **`signal` declared inside `on()` gets wrong width inference** (observed 32-bit
     for a 1-bit condition value). Cosmetic in the observed case but the inference is

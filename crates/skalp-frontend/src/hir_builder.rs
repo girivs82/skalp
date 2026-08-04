@@ -1481,6 +1481,7 @@ impl HirBuilderContext {
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
                                 var_type: let_stmt.var_type.clone(),
+                                explicit_type: Self::node_has_type_annotation(&child),
                                 initial_value: Some(let_stmt.value.clone()),
                                 span: self.make_span(&child),
                                 comments: vec![],
@@ -2882,6 +2883,7 @@ impl HirBuilderContext {
             id,
             name,
             var_type,
+            explicit_type: Self::node_has_type_annotation(node),
             initial_value,
             span: self.make_span(node),
             comments: Self::collect_leading_comments(node),
@@ -4988,6 +4990,7 @@ impl HirBuilderContext {
                                         id: let_stmt.id,
                                         name: let_stmt.name.clone(),
                                         var_type: let_stmt.var_type.clone(),
+                                        explicit_type: Self::node_has_type_annotation(child_node),
                                         initial_value: Some(let_stmt.value.clone()),
                                         span: None,
                                         comments: vec![],
@@ -5110,6 +5113,7 @@ impl HirBuilderContext {
                             id: let_stmt.id,
                             name: let_stmt.name.clone(),
                             var_type: let_stmt.var_type.clone(),
+                            explicit_type: Self::node_has_type_annotation(child_node),
                             initial_value: Some(Self::substitute_in_expr(
                                 &let_stmt.value,
                                 iterator_var_id,
@@ -6157,6 +6161,24 @@ impl HirBuilderContext {
     }
 
     /// Build simple let statement (single identifier pattern)
+    /// TRIAGE #15: does this let/var declaration carry an explicit type
+    /// annotation? (Mirrors build_let_statement's explicit_type detection.)
+    fn node_has_type_annotation(node: &SyntaxNode) -> bool {
+        node.children().any(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::TypeAnnotation
+                    | SyntaxKind::BitType
+                    | SyntaxKind::LogicType
+                    | SyntaxKind::IntType
+                    | SyntaxKind::NatType
+                    | SyntaxKind::CustomType
+                    | SyntaxKind::ArrayType
+                    | SyntaxKind::TupleType
+            )
+        })
+    }
+
     fn build_let_statement(&mut self, node: &SyntaxNode) -> Option<HirLetStatement> {
         // Extract mutability flag (Bug #78 fix)
         let mutable = node

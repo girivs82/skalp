@@ -1397,10 +1397,15 @@ impl<'hir> HirToMir<'hir> {
 
                         let mut mir_var_type = self.convert_type(&hir_var.var_type);
                         // Widen variable type by 1 if its initial value is an addition
-                        // This preserves the carry bit for expressions like `let result = a + b`
-                        if let Some(ref init_expr) = hir_var.initial_value {
-                            if Self::hir_expr_contains_add(init_expr) {
-                                mir_var_type = Self::widen_type_by_one(mir_var_type);
+                        // This preserves the carry bit for expressions like `let result = a + b`.
+                        // TRIAGE #15: only for INFERRED types — an explicit
+                        // annotation (`let x: bit[9] = a + b`) is a contract;
+                        // widening it emitted a 10-bit net where 9 was declared.
+                        if !hir_var.explicit_type {
+                            if let Some(ref init_expr) = hir_var.initial_value {
+                                if Self::hir_expr_contains_add(init_expr) {
+                                    mir_var_type = Self::widen_type_by_one(mir_var_type);
+                                }
                             }
                         }
                         let variable = Variable {
