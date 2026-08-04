@@ -94,28 +94,92 @@ pub entity PartialProductGenerator {
 
 impl PartialProductGenerator {
     // Row 0: a0 × b[0-3]
-    let m00 = Mult6x6 { a: a0, b: b0, product: p00 }
-    let m01 = Mult6x6 { a: a0, b: b1, product: p01 }
-    let m02 = Mult6x6 { a: a0, b: b2, product: p02 }
-    let m03 = Mult6x6 { a: a0, b: b3, product: p03 }
+    inst m00 = Mult6x6 {
+        a: a0,
+        b: b0,
+    }
+    p00 = m00.product
+    inst m01 = Mult6x6 {
+        a: a0,
+        b: b1,
+    }
+    p01 = m01.product
+    inst m02 = Mult6x6 {
+        a: a0,
+        b: b2,
+    }
+    p02 = m02.product
+    inst m03 = Mult6x6 {
+        a: a0,
+        b: b3,
+    }
+    p03 = m03.product
 
     // Row 1: a1 × b[0-3]
-    let m10 = Mult6x6 { a: a1, b: b0, product: p10 }
-    let m11 = Mult6x6 { a: a1, b: b1, product: p11 }
-    let m12 = Mult6x6 { a: a1, b: b2, product: p12 }
-    let m13 = Mult6x6 { a: a1, b: b3, product: p13 }
+    inst m10 = Mult6x6 {
+        a: a1,
+        b: b0,
+    }
+    p10 = m10.product
+    inst m11 = Mult6x6 {
+        a: a1,
+        b: b1,
+    }
+    p11 = m11.product
+    inst m12 = Mult6x6 {
+        a: a1,
+        b: b2,
+    }
+    p12 = m12.product
+    inst m13 = Mult6x6 {
+        a: a1,
+        b: b3,
+    }
+    p13 = m13.product
 
     // Row 2: a2 × b[0-3]
-    let m20 = Mult6x6 { a: a2, b: b0, product: p20 }
-    let m21 = Mult6x6 { a: a2, b: b1, product: p21 }
-    let m22 = Mult6x6 { a: a2, b: b2, product: p22 }
-    let m23 = Mult6x6 { a: a2, b: b3, product: p23 }
+    inst m20 = Mult6x6 {
+        a: a2,
+        b: b0,
+    }
+    p20 = m20.product
+    inst m21 = Mult6x6 {
+        a: a2,
+        b: b1,
+    }
+    p21 = m21.product
+    inst m22 = Mult6x6 {
+        a: a2,
+        b: b2,
+    }
+    p22 = m22.product
+    inst m23 = Mult6x6 {
+        a: a2,
+        b: b3,
+    }
+    p23 = m23.product
 
     // Row 3: a3 × b[0-3]
-    let m30 = Mult6x6 { a: a3, b: b0, product: p30 }
-    let m31 = Mult6x6 { a: a3, b: b1, product: p31 }
-    let m32 = Mult6x6 { a: a3, b: b2, product: p32 }
-    let m33 = Mult6x6 { a: a3, b: b3, product: p33 }
+    inst m30 = Mult6x6 {
+        a: a3,
+        b: b0,
+    }
+    p30 = m30.product
+    inst m31 = Mult6x6 {
+        a: a3,
+        b: b1,
+    }
+    p31 = m31.product
+    inst m32 = Mult6x6 {
+        a: a3,
+        b: b2,
+    }
+    p32 = m32.product
+    inst m33 = Mult6x6 {
+        a: a3,
+        b: b3,
+    }
+    p33 = m33.product
 }
 
 // =============================================================================
@@ -337,31 +401,61 @@ impl PartitionableMantissaMultiplier {
     signal p32: bit[12]
     signal p33: bit[12]
 
-    let ppgen = PartialProductGenerator {
-        a0: a0, a1: a1, a2: a2, a3: a3,
-        b0: b0, b1: b1, b2: b2, b3: b3,
-        p00: p00, p01: p01, p02: p02, p03: p03,
-        p10: p10, p11: p11, p12: p12, p13: p13,
-        p20: p20, p21: p21, p22: p22, p23: p23,
-        p30: p30, p31: p31, p32: p32, p33: p33
+    inst ppgen = PartialProductGenerator {
+        a0: a0,
+        a1: a1,
+        a2: a2,
+        a3: a3,
+        b0: b0,
+        b1: b1,
+        b2: b2,
+        b3: b3,
     }
+    p00 = ppgen.p00
+    p01 = ppgen.p01
+    p02 = ppgen.p02
+    p03 = ppgen.p03
+    p10 = ppgen.p10
+    p11 = ppgen.p11
+    p12 = ppgen.p12
+    p13 = ppgen.p13
+    p20 = ppgen.p20
+    p21 = ppgen.p21
+    p22 = ppgen.p22
+    p23 = ppgen.p23
+    p30 = ppgen.p30
+    p31 = ppgen.p31
+    p32 = ppgen.p32
+    p33 = ppgen.p33
 
     // =========================================================================
     // Partial Product Accumulation
     // =========================================================================
 
-    let accum = PartialProductAccumulator {
-        p00: p00, p01: p01, p02: p02, p03: p03,
-        p10: p10, p11: p11, p12: p12, p13: p13,
-        p20: p20, p21: p21, p22: p22, p23: p23,
-        p30: p30, p31: p31, p32: p32, p33: p33,
+    inst accum = PartialProductAccumulator {
+        p00: p00,
+        p01: p01,
+        p02: p02,
+        p03: p03,
+        p10: p10,
+        p11: p11,
+        p12: p12,
+        p13: p13,
+        p20: p20,
+        p21: p21,
+        p22: p22,
+        p23: p23,
+        p30: p30,
+        p31: p31,
+        p32: p32,
+        p33: p33,
         mode: mode,
-        result: result,
-        prod0: prod0,
-        prod1: prod1,
-        prod2: prod2,
-        prod3: prod3
     }
+    result = accum.result
+    prod0 = accum.prod0
+    prod1 = accum.prod1
+    prod2 = accum.prod2
+    prod3 = accum.prod3
 }
 
 // =============================================================================
@@ -382,16 +476,16 @@ impl FP32MantissaMultiplier {
     signal p2: bit[12]
     signal p3: bit[12]
 
-    let mult = PartitionableMantissaMultiplier {
+    inst mult = PartitionableMantissaMultiplier {
         a: a,
         b: b,
         mode: MultiplierMode::Single,
-        result: result,
-        prod0: p0,
-        prod1: p1,
-        prod2: p2,
-        prod3: p3
     }
+    result = mult.result
+    p0 = mult.prod0
+    p1 = mult.prod1
+    p2 = mult.prod2
+    p3 = mult.prod3
 
     product = result
 }
@@ -416,16 +510,16 @@ impl DualFP16MantissaMultiplier {
     signal p2: bit[12]
     signal p3: bit[12]
 
-    let mult = PartitionableMantissaMultiplier {
+    inst mult = PartitionableMantissaMultiplier {
         a: {a_hi, a_lo},
         b: {b_hi, b_lo},
         mode: MultiplierMode::Dual,
-        result: result,
-        prod0: p0,
-        prod1: p1,
-        prod2: p2,
-        prod3: p3
     }
+    result = mult.result
+    p0 = mult.prod0
+    p1 = mult.prod1
+    p2 = mult.prod2
+    p3 = mult.prod3
 
     product_lo = result[23:0]
     product_hi = result[47:24]
@@ -452,16 +546,16 @@ pub entity QuadFP8MantissaMultiplier {
 impl QuadFP8MantissaMultiplier {
     signal result: bit[48]
 
-    let mult = PartitionableMantissaMultiplier {
+    inst mult = PartitionableMantissaMultiplier {
         a: {a3, a2, a1, a0},
         b: {b3, b2, b1, b0},
         mode: MultiplierMode::Quad,
-        result: result,
-        prod0: product0,
-        prod1: product1,
-        prod2: product2,
-        prod3: product3
     }
+    result = mult.result
+    product0 = mult.prod0
+    product1 = mult.prod1
+    product2 = mult.prod2
+    product3 = mult.prod3
 }
 
 // =============================================================================
@@ -487,16 +581,16 @@ impl TestPartitionableMultiplier {
     signal p2: bit[12]
     signal p3: bit[12]
 
-    let mult = PartitionableMantissaMultiplier {
+    inst mult = PartitionableMantissaMultiplier {
         a: a,
         b: b,
         mode: mode as MultiplierMode,
-        result: res,
-        prod0: p0,
-        prod1: p1,
-        prod2: p2,
-        prod3: p3
     }
+    res = mult.result
+    p0 = mult.prod0
+    p1 = mult.prod1
+    p2 = mult.prod2
+    p3 = mult.prod3
 
     result = res
     prod0 = p0

@@ -152,25 +152,49 @@ impl EccProtectedRegisterFile {
     signal we2: bit = write_en & (write_addr == 2)
     signal we3: bit = write_en & (write_addr == 3)
 
-    let r0 = EccMemory8 {
-        clk: clk, rst: rst, write_en: we0, data_in: write_data,
-        data_out: reg0_out, single_bit_error: sbe0, double_bit_error: dbe0, ecc_error: err0
+    inst r0 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: we0,
+        data_in: write_data,
     }
+    reg0_out = r0.data_out
+    sbe0 = r0.single_bit_error
+    dbe0 = r0.double_bit_error
+    err0 = r0.ecc_error
 
-    let r1 = EccMemory8 {
-        clk: clk, rst: rst, write_en: we1, data_in: write_data,
-        data_out: reg1_out, single_bit_error: sbe1, double_bit_error: dbe1, ecc_error: err1
+    inst r1 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: we1,
+        data_in: write_data,
     }
+    reg1_out = r1.data_out
+    sbe1 = r1.single_bit_error
+    dbe1 = r1.double_bit_error
+    err1 = r1.ecc_error
 
-    let r2 = EccMemory8 {
-        clk: clk, rst: rst, write_en: we2, data_in: write_data,
-        data_out: reg2_out, single_bit_error: sbe2, double_bit_error: dbe2, ecc_error: err2
+    inst r2 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: we2,
+        data_in: write_data,
     }
+    reg2_out = r2.data_out
+    sbe2 = r2.single_bit_error
+    dbe2 = r2.double_bit_error
+    err2 = r2.ecc_error
 
-    let r3 = EccMemory8 {
-        clk: clk, rst: rst, write_en: we3, data_in: write_data,
-        data_out: reg3_out, single_bit_error: sbe3, double_bit_error: dbe3, ecc_error: err3
+    inst r3 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: we3,
+        data_in: write_data,
     }
+    reg3_out = r3.data_out
+    sbe3 = r3.single_bit_error
+    dbe3 = r3.double_bit_error
+    err3 = r3.ecc_error
 
     read_data = if read_addr == 0 { reg0_out }
                 else if read_addr == 1 { reg1_out }
@@ -208,12 +232,18 @@ impl EccTestDesign {
     signal dbe_flag: bit
     signal ecc_flag: bit
 
-    let regfile = EccProtectedRegisterFile {
-        clk: clk, rst: rst,
-        write_en: reg_write_en, write_addr: reg_write_addr, write_data: reg_write_data,
-        read_addr: reg_read_addr, read_data: reg_out,
-        any_sbe: sbe_flag, any_dbe: dbe_flag, ecc_fault: ecc_flag
+    inst regfile = EccProtectedRegisterFile {
+        clk: clk,
+        rst: rst,
+        write_en: reg_write_en,
+        write_addr: reg_write_addr,
+        write_data: reg_write_data,
+        read_addr: reg_read_addr,
     }
+    reg_out = regfile.read_data
+    sbe_flag = regfile.any_sbe
+    dbe_flag = regfile.any_dbe
+    ecc_flag = regfile.ecc_fault
 
     reg_read_data = reg_out
     system_healthy = ~ecc_flag

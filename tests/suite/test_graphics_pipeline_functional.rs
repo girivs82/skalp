@@ -212,18 +212,18 @@ impl FifoTest {
     wr_data_internal.value = write_data
     read_data = rd_data_internal.value
 
-    let fifo = AsyncFifo<SimpleData, 8> {
+    inst fifo = AsyncFifo<SimpleData, 8> {
         wr_clk: wr_clk,
         wr_rst: wr_rst,
         wr_en: write_enable,
         wr_data: wr_data_internal,
-        wr_full: write_full,
         rd_clk: rd_clk,
         rd_rst: rd_rst,
         rd_en: read_enable,
-        rd_data: rd_data_internal,
-        rd_empty: read_empty
     }
+    write_full = fifo.wr_full
+    rd_data_internal = fifo.rd_data
+    read_empty = fifo.rd_empty
 }
         "#;
 
@@ -572,18 +572,18 @@ impl FifoTest {
     wr_data_internal.value = write_data
     read_data = rd_data_internal.value
 
-    let fifo = AsyncFifo<SimpleData, 8> {
+    inst fifo = AsyncFifo<SimpleData, 8> {
         wr_clk: wr_clk,
         wr_rst: wr_rst,
         wr_en: write_enable,
         wr_data: wr_data_internal,
-        wr_full: write_full,
         rd_clk: rd_clk,
         rd_rst: rd_rst,
         rd_en: read_enable,
-        rd_data: rd_data_internal,
-        rd_empty: read_empty
     }
+    write_full = fifo.wr_full
+    rd_data_internal = fifo.rd_data
+    read_empty = fifo.rd_empty
 }
         "#;
 

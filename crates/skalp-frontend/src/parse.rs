@@ -5826,6 +5826,11 @@ impl<'a> ParseState<'a> {
     /// Check if current token is a keyword that can appear as a field name after '.'
     /// (e.g., clock.rise, clock.fall, reset.active, reset.inactive)
     fn at_field_keyword(&self) -> bool {
+        // TRIAGE #11: port/field names may collide with keywords (a port
+        // legally named `output`, `input`, ...). Port-map connections already
+        // accept keyword tokens as port names; dot-access must accept the
+        // same names as field names, or `inst`-style output reads
+        // (`geometry.output`) fail to parse.
         matches!(
             self.current_kind(),
             Some(
@@ -5834,7 +5839,7 @@ impl<'a> ParseState<'a> {
                     | SyntaxKind::ActiveKw
                     | SyntaxKind::InactiveKw
             )
-        )
+        ) || self.current_kind().is_some_and(|k| k.is_keyword())
     }
 
     /// Peek ahead by offset tokens (skipping trivia) and check if it's the given kind

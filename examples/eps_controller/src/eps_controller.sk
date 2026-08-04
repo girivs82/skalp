@@ -67,13 +67,13 @@ impl EpsController<'clk> {
     // Expected DC: 99%+
 
     #[safety_mechanism(type: tmr, covers: torque_sensors)]
-    let tmr = TmrVoterWithHistory<16, 50, 10, 'clk> {
+    inst tmr = TmrVoterWithHistory<16, 50, 10, 'clk> {
         clk: clk,
         reset: reset,
         channel_a: torque_sensor_a,
         channel_b: torque_sensor_b,
         channel_c: torque_sensor_c,
-    };
+    }
 
     // Voted torque is the single-fault-tolerant sensor value
     signal voted_torque: bit[16] = tmr.voted;
@@ -106,11 +106,11 @@ impl EpsController<'clk> {
     // Expected DC: 90%+
 
     #[safety_mechanism(type: watchdog, covers: control_loop)]
-    let watchdog = WatchdogWithSafeState<1000, 'clk> {
+    inst watchdog = WatchdogWithSafeState<1000, 'clk> {
         clk: clk,
         reset: reset,
-        refresh: (ctrl_state != STATE_INIT),  // Refresh in active states
-    };
+        refresh: (ctrl_state != STATE_INIT),
+    }
 
     // ========================================================================
     // Torque Calculation (Primary Datapath)
@@ -276,9 +276,9 @@ impl EpsController<'clk> {
     // Expected DC: 99%+
 
     #[safety_mechanism(type: crc, covers: output_communication)]
-    let crc_gen = CrcGenerator<16> {
+    inst crc_gen = CrcGenerator<16> {
         data: primary_torque,
-    };
+    }
 
     signal torque_with_crc: bit[24] = {primary_torque, crc_gen.crc};
 

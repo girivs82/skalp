@@ -149,31 +149,23 @@ impl FastGraphicsPipeline {
     // Use fp32 for maximum precision
     // Use 5 pipeline stages for maximum throughput
     // Use OptimizeLatency intent for fully parallel architecture
-    let geometry_proc = GeometryProcessor<fp32, 5, OptimizeLatency> {
+    inst geometry_proc = GeometryProcessor<fp32, 5, OptimizeLatency> {
         clk: geom_clk,
         rst: rst,
-
-        // Input from AXI controller (vertex stream)
         vertex_valid: vertex_in_valid,
         vertex: vertex_in_data,
         vertex_ready: vertex_in_ready,
-
-        // Transformation matrices (from AXI registers)
         model_matrix: model_matrix_reg,
         view_matrix: view_matrix_reg,
         proj_matrix: proj_matrix_reg,
-
-        // Lighting parameters (from AXI registers)
         light_dir: light_dir_reg,
         light_color: light_color_reg,
         ambient_color: ambient_color_reg,
         specular_exp: specular_exp_reg,
-
-        // Output to rasterizer (via FIFO)
         output_valid: geom_out_valid,
         output_vertex: geom_out_vertex,
-        output_ready: geom_out_ready
-    };
+        output_ready: geom_out_ready,
+    }
 
     // ========================================================================
     // Geometry-to-Rasterizer FIFO (Deep Buffer)
@@ -225,20 +217,19 @@ impl FastGraphicsPipeline {
 
     // Line buffer FIFO: Holds 1-2 scanlines worth of pixels
     // 1920 pixels/line * 2 lines = 3840 entries, round to 4096
-    let rast_to_video_fifo = AsyncFifo<Pixel, 4096> {
+    inst rast_to_video_fifo = AsyncFifo<Pixel, 4096> {
         wr_clk: rast_clk,
         wr_rst: rst,
         wr_data: rast_out_pixel,
         wr_en: rast_out_valid && !video_fifo_full,
-        wr_full: video_fifo_full,
-
         rd_clk: video_clk,
         rd_rst: rst,
         rd_en: video_timing_active && !video_fifo_empty,
-        rd_data: video_pixel_data,
-        rd_empty: video_fifo_empty,
-        rd_valid: video_pixel_valid
-    };
+        rd_valid: video_pixel_valid,
+    }
+    video_fifo_full = rast_to_video_fifo.wr_full
+    video_pixel_data = rast_to_video_fifo.rd_data
+    video_fifo_empty = rast_to_video_fifo.rd_empty
 
     assign rast_out_ready = !video_fifo_full;
 

@@ -167,12 +167,12 @@ impl IntAddSat<const W: nat, const S: bool> {
     signal sum: Int<W, S>
     signal overflow: bit
 
-    let adder = IntAdd<W, S> {
+    inst adder = IntAdd<W, S> {
         a: a,
         b: b,
-        result: sum,
-        overflow: overflow
     }
+    sum = adder.result
+    overflow = adder.overflow
 
     result = if overflow {
         if S {
@@ -199,12 +199,12 @@ impl IntSubSat<const W: nat, const S: bool> {
     signal diff: Int<W, S>
     signal overflow: bit
 
-    let subber = IntSub<W, S> {
+    inst subber = IntSub<W, S> {
         a: a,
         b: b,
-        result: diff,
-        overflow: overflow
     }
+    diff = subber.result
+    overflow = subber.overflow
 
     result = if overflow {
         if S {
@@ -415,13 +415,11 @@ pub entity IntMin<const W: nat, const S: bool> {
 impl IntMin<const W: nat, const S: bool> {
     signal lt: bit
 
-    let cmp = IntCompare<W, S> {
+    inst cmp = IntCompare<W, S> {
         a: a,
         b: b,
-        lt: lt,
-        eq: _,
-        gt: _
     }
+    lt = cmp.lt
 
     result = lt ? a : b
 }
@@ -436,13 +434,11 @@ pub entity IntMax<const W: nat, const S: bool> {
 impl IntMax<const W: nat, const S: bool> {
     signal gt: bit
 
-    let cmp = IntCompare<W, S> {
+    inst cmp = IntCompare<W, S> {
         a: a,
         b: b,
-        lt: _,
-        eq: _,
-        gt: gt
     }
+    gt = cmp.gt
 
     result = gt ? a : b
 }
@@ -458,17 +454,17 @@ pub entity IntClamp<const W: nat, const S: bool> {
 impl IntClamp<const W: nat, const S: bool> {
     signal clamped_min: Int<W, S>
 
-    let min_op = IntMax<W, S> {
+    inst min_op = IntMax<W, S> {
         a: x,
         b: min_val,
-        result: clamped_min
     }
+    clamped_min = min_op.result
 
-    let max_op = IntMin<W, S> {
+    inst max_op = IntMin<W, S> {
         a: clamped_min,
         b: max_val,
-        result: result
     }
+    result = max_op.result
 }
 
 // ============================================================================

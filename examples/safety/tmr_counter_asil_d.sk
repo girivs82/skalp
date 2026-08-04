@@ -114,57 +114,57 @@ impl TmrCounterAsilD {
     signal combined_fault: bit
 
     // Instantiate three redundant counter channels
-    let ch_a = CounterChannel {
+    inst ch_a = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a
     }
+    count_a = ch_a.count
 
-    let ch_b = CounterChannel {
+    inst ch_b = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b
     }
+    count_b = ch_b.count
 
-    let ch_c = CounterChannel {
+    inst ch_c = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c
     }
+    count_c = ch_c.count
 
     // Dual TMR voters - independent implementations
     // Voter A: Primary voter
-    let voter_a = TmrVoter {
+    inst voter_a = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted_out_a,
-        fault_detected: fault_out_a
     }
+    voted_out_a = voter_a.voted
+    fault_out_a = voter_a.fault_detected
 
     // Voter B: Secondary voter (identical implementation, but independent instance)
     // In a real ASIL-D design, this would ideally have a diverse implementation
-    let voter_b = TmrVoter {
+    inst voter_b = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted_out_b,
-        fault_detected: fault_out_b
     }
+    voted_out_b = voter_b.voted
+    fault_out_b = voter_b.fault_detected
 
     // Voter comparator: SM-of-SM that catches voter failures
-    let voter_check = VoterComparator {
+    inst voter_check = VoterComparator {
         voter_a_out: voted_out_a,
         voter_b_out: voted_out_b,
         voter_a_fault: fault_out_a,
         voter_b_fault: fault_out_b,
-        final_out: final_count,
-        voter_mismatch: voter_mismatch,
-        combined_fault: combined_fault
     }
+    final_count = voter_check.final_out
+    voter_mismatch = voter_check.voter_mismatch
+    combined_fault = voter_check.combined_fault
 
     // Outputs
     count = final_count

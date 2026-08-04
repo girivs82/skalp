@@ -290,60 +290,60 @@ impl MotorControlUnit {
     signal fault_latch: bit
 
     // Command Processor
-    let cmd_proc = CommandProcessor {
+    inst cmd_proc = CommandProcessor {
         clk: clk,
         rst: rst,
         cmd_valid: cmd_valid,
         cmd_throttle: cmd_throttle,
         cmd_enable: cmd_enable,
-        validated_throttle: val_throttle,
-        validated_enable: val_enable,
-        cmd_error: cmd_err
     }
+    val_throttle = cmd_proc.validated_throttle
+    val_enable = cmd_proc.validated_enable
+    cmd_err = cmd_proc.cmd_error
 
     // PWM Generator
-    let pwm_gen = PWMGenerator {
+    inst pwm_gen = PWMGenerator {
         clk: clk,
         rst: rst,
         throttle: val_throttle,
         enable: val_enable,
         force_off: force_off,
-        pwm_out: pwm_signal,
-        pwm_active: pwm_is_active
     }
+    pwm_signal = pwm_gen.pwm_out
+    pwm_is_active = pwm_gen.pwm_active
 
     // Current Monitor
-    let curr_mon = CurrentMonitor {
+    inst curr_mon = CurrentMonitor {
         clk: clk,
         rst: rst,
         current_adc: current_adc,
         threshold: overcurrent_threshold,
-        overcurrent: oc_detected,
-        current_valid: current_ok
     }
+    oc_detected = curr_mon.overcurrent
+    current_ok = curr_mon.current_valid
 
     // Watchdog
-    let watchdog = Watchdog {
+    inst watchdog = Watchdog {
         clk: clk,
         rst: rst,
         kick: watchdog_kick,
         timeout_limit: watchdog_timeout,
-        timeout: wd_timeout,
-        healthy: wd_healthy
     }
+    wd_timeout = watchdog.timeout
+    wd_healthy = watchdog.healthy
 
     // Safe State Controller
-    let safe_ctrl = SafeStateController {
+    inst safe_ctrl = SafeStateController {
         clk: clk,
         rst: rst,
         fault_cmd: cmd_err,
         fault_overcurrent: oc_detected,
         fault_watchdog: wd_timeout,
         fault_clear: fault_clear,
-        safe_state: safe_state,
-        force_motor_off: force_off,
-        fault_latched: fault_latch
     }
+    safe_state = safe_ctrl.safe_state
+    force_off = safe_ctrl.force_motor_off
+    fault_latch = safe_ctrl.fault_latched
 
     // Outputs
     motor_pwm = pwm_signal

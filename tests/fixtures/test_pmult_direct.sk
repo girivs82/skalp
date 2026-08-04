@@ -14,14 +14,14 @@ pub entity TestPMultDirect {
 }
 
 impl TestPMultDirect {
-    let m = PartitionableMantissaMultiplier {
+    inst m = PartitionableMantissaMultiplier {
         a: a,
         b: b,
         mode: mode as MultiplierMode,
-        result: result,
-        prod0: prod0,
-        prod1: prod1,
-        prod2: prod2,
-        prod3: prod3
     }
+    result = m.result
+    prod0 = m.prod0
+    prod1 = m.prod1
+    prod2 = m.prod2
+    prod3 = m.prod3
 }

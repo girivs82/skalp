@@ -194,45 +194,45 @@ impl EquivalenceMwe {
     signal sm_b: bit
     signal sm_c: bit
 
-    let fault_latch = FaultLatch {
+    inst fault_latch = FaultLatch {
         clk: clk,
         rst: rst,
         fault_in: fault_in,
         clear: clear_fault,
         auto_clear_enable: auto_clear,
-        latched: fl_latched,
-        latched_count: fl_count
     }
+    fl_latched = fault_latch.latched
+    fl_count = fault_latch.latched_count
 
-    let counter = Counter8 {
+    inst counter = Counter8 {
         clk: clk,
         rst: rst,
         enable: counter_enable,
         load: counter_load,
         load_value: counter_value,
-        count: cnt_count,
-        overflow: cnt_overflow
     }
+    cnt_count = counter.count
+    cnt_overflow = counter.overflow
 
-    let pwm = PwmGenerator {
+    inst pwm = PwmGenerator {
         clk: clk,
         rst: rst,
         enable: pwm_enable,
         duty: pwm_duty,
         period: 100,
-        pwm_out: pwm_output,
-        counter: pwm_cnt
     }
+    pwm_output = pwm.pwm_out
+    pwm_cnt = pwm.counter
 
-    let state_machine = StateMachine {
+    inst state_machine = StateMachine {
         clk: clk,
         rst: rst,
         start: sm_start,
         done: sm_done,
-        state: sm_st,
-        busy: sm_b,
-        complete: sm_c
     }
+    sm_st = state_machine.state
+    sm_b = state_machine.busy
+    sm_c = state_machine.complete
 
     fault_latched = fl_latched
     fault_count = fl_count

@@ -30,18 +30,12 @@
 /// for wide operands (std_adder_wide splits into halves).
 impl<const N: usize> Add for bit<N> {
     fn add(a: Self, b: Self) -> Self {
-        signal result: Self;
-        signal carry: bit;
-        signal overflow: bit;
-        let adder = std_adder<N> {
+        inst adder = std_adder<N> {
             a: a,
             b: b,
             carry_in: 0,
-            sum: result,
-            carry_out: carry,
-            overflow: overflow,
-        };
-        result
+        }
+        adder.sum
     }
 }
 
@@ -53,18 +47,12 @@ impl<const N: usize> Add for bit<N> {
 /// b is inverted and carry_in=1: a + (~b) + 1.
 impl<const N: usize> Sub for bit<N> {
     fn sub(a: Self, b: Self) -> Self {
-        signal result: Self;
-        signal carry: bit;
-        signal overflow: bit;
-        let subtractor = std_adder<N> {
+        inst subtractor = std_adder<N> {
             a: a,
             b: ~b,
             carry_in: 1,
-            sum: result,
-            carry_out: carry,
-            overflow: overflow,
-        };
-        result
+        }
+        subtractor.sum
     }
 }
 
@@ -78,12 +66,10 @@ impl<const N: usize> Sub for bit<N> {
 /// In sync context: each barrier is a pipeline register.
 impl<const N: usize> Mul for bit<N> {
     fn mul(a: Self, b: Self) -> Self {
-        signal result: bit<N * 2>;
-        let multiplier = std_multiplier<N> {
+        inst multiplier = std_multiplier<N> {
             a: a,
             b: b,
-            product: result,
-        };
-        result
+        }
+        multiplier.product
     }
 }

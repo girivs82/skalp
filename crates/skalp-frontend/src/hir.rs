@@ -287,6 +287,11 @@ pub struct HirImplementation {
 /// Module instance in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirInstance {
+    /// TRIAGE #11: true when instantiated with the `inst` keyword. Legacy
+    /// `let` instantiation is removed — the compiler errors on any reachable
+    /// instance with is_inst == false.
+    #[serde(default)]
+    pub is_inst: bool,
     /// Instance identifier
     pub id: InstanceId,
     /// Instance name

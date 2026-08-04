@@ -83,21 +83,21 @@ impl Sin {
     signal quadrant: bit[2]
 
     // Reduce angle to CORDIC range
-    let reduce = AngleReduce {
+    inst reduce = AngleReduce {
         angle: angle,
-        reduced: reduced_angle,
-        quadrant: quadrant
     }
+    reduced_angle = reduce.reduced
+    quadrant = reduce.quadrant
 
     signal cos_raw: fp32
     signal sin_raw: fp32
 
     // Use CORDIC to compute sin/cos
-    let cordic = CordicRotate16 {
+    inst cordic = CordicRotate16 {
         angle: reduced_angle,
-        cos_out: cos_raw,
-        sin_out: sin_raw
     }
+    cos_raw = cordic.cos_out
+    sin_raw = cordic.sin_out
 
     // Apply quadrant correction
     // Q1 (00): sin(x) = sin_raw
@@ -109,7 +109,10 @@ impl Sin {
 /// Sine function (convenience wrapper)
 pub fn sin(angle: fp32) -> fp32 {
     signal res: fp32
-    let s = Sin { angle: angle, result: res }
+    inst s = Sin {
+        angle: angle,
+    }
+    res = s.result
     res
 }
 
@@ -129,20 +132,20 @@ impl Cos {
     signal reduced_angle: fp32
     signal quadrant: bit[2]
 
-    let reduce = AngleReduce {
+    inst reduce = AngleReduce {
         angle: angle,
-        reduced: reduced_angle,
-        quadrant: quadrant
     }
+    reduced_angle = reduce.reduced
+    quadrant = reduce.quadrant
 
     signal cos_raw: fp32
     signal sin_raw: fp32
 
-    let cordic = CordicRotate16 {
+    inst cordic = CordicRotate16 {
         angle: reduced_angle,
-        cos_out: cos_raw,
-        sin_out: sin_raw
     }
+    cos_raw = cordic.cos_out
+    sin_raw = cordic.sin_out
 
     // Apply quadrant correction
     // Q1 (00): cos(x) = cos_raw
@@ -154,7 +157,10 @@ impl Cos {
 /// Cosine function (convenience wrapper)
 pub fn cos(angle: fp32) -> fp32 {
     signal res: fp32
-    let c = Cos { angle: angle, result: res }
+    inst c = Cos {
+        angle: angle,
+    }
+    res = c.result
     res
 }
 
@@ -176,20 +182,20 @@ impl SinCos {
     signal reduced_angle: fp32
     signal quadrant: bit[2]
 
-    let reduce = AngleReduce {
+    inst reduce = AngleReduce {
         angle: angle,
-        reduced: reduced_angle,
-        quadrant: quadrant
     }
+    reduced_angle = reduce.reduced
+    quadrant = reduce.quadrant
 
     signal cos_raw: fp32
     signal sin_raw: fp32
 
-    let cordic = CordicRotate16 {
+    inst cordic = CordicRotate16 {
         angle: reduced_angle,
-        cos_out: cos_raw,
-        sin_out: sin_raw
     }
+    cos_raw = cordic.cos_out
+    sin_raw = cordic.sin_out
 
     // Apply quadrant corrections
     sin_out = (quadrant == 2'b10) ? -sin_raw : sin_raw
@@ -200,7 +206,11 @@ impl SinCos {
 pub fn sincos(angle: fp32) -> (fp32, fp32) {
     signal s: fp32
     signal c: fp32
-    let sc = SinCos { angle: angle, sin_out: s, cos_out: c }
+    inst sc = SinCos {
+        angle: angle,
+    }
+    s = sc.sin_out
+    c = sc.cos_out
     (s, c)
 }
 
@@ -231,21 +241,21 @@ impl Acos {
     // For sqrt, we use CORDIC or the sqrt function
     // Here we use a simple approach: sqrt via the hyperbolic CORDIC
     signal y: fp32
-    let sqrt_ent = CordicSqrt {
+    inst sqrt_ent = CordicSqrt {
         value: one_minus_x_sq,
-        result: y
     }
+    y = sqrt_ent.result
 
     // Now compute atan2(y, x) using vectoring mode
     signal mag: fp32
     signal angle: fp32
 
-    let vector = CordicVector16 {
+    inst vector = CordicVector16 {
         x_in: x,
         y_in: y,
-        magnitude: mag,
-        angle: angle
     }
+    mag = vector.magnitude
+    angle = vector.angle
 
     // atan2(sqrt(1-x^2), x) gives the angle in [-PI/2, PI/2] for x > 0
     // and needs adjustment for x < 0
@@ -261,7 +271,11 @@ impl Acos {
 pub fn acos(x: fp32) -> fp32 {
     signal res: fp32
     signal v: bit
-    let a = Acos { x: x, result: res, valid: v }
+    inst a = Acos {
+        x: x,
+    }
+    res = a.result
+    v = a.valid
     res
 }
 
@@ -287,21 +301,21 @@ impl Asin {
     signal one_minus_x_sq: fp32 = 1.0fp32 - x_sq
 
     signal y: fp32
-    let sqrt_ent = CordicSqrt {
+    inst sqrt_ent = CordicSqrt {
         value: one_minus_x_sq,
-        result: y
     }
+    y = sqrt_ent.result
 
     // atan2(x, sqrt(1-x^2))
     signal mag: fp32
     signal angle: fp32
 
-    let vector = CordicVector16 {
-        x_in: y,  // Note: swapped compared to acos
+    inst vector = CordicVector16 {
+        x_in: y,
         y_in: x,
-        magnitude: mag,
-        angle: angle
     }
+    mag = vector.magnitude
+    angle = vector.angle
 
     result = angle
 }
@@ -310,7 +324,11 @@ impl Asin {
 pub fn asin(x: fp32) -> fp32 {
     signal res: fp32
     signal v: bit
-    let a = Asin { x: x, result: res, valid: v }
+    inst a = Asin {
+        x: x,
+    }
+    res = a.result
+    v = a.valid
     res
 }
 
@@ -333,12 +351,12 @@ impl Atan {
     signal angle: fp32
 
     // atan(x) = atan2(x, 1)
-    let vector = CordicVector16 {
+    inst vector = CordicVector16 {
         x_in: 1.0fp32,
         y_in: x,
-        magnitude: mag,
-        angle: angle
     }
+    mag = vector.magnitude
+    angle = vector.angle
 
     result = angle
 }
@@ -346,7 +364,10 @@ impl Atan {
 /// Arc tangent function (convenience wrapper)
 pub fn atan(x: fp32) -> fp32 {
     signal res: fp32
-    let a = Atan { x: x, result: res }
+    inst a = Atan {
+        x: x,
+    }
+    res = a.result
     res
 }
 
@@ -357,12 +378,12 @@ pub fn atan2(y: fp32, x: fp32) -> fp32 {
     signal mag: fp32
     signal angle: fp32
 
-    let vector = CordicVector16 {
+    inst vector = CordicVector16 {
         x_in: x,
         y_in: y,
-        magnitude: mag,
-        angle: angle
     }
+    mag = vector.magnitude
+    angle = vector.angle
 
     angle
 }
@@ -384,11 +405,11 @@ impl Tan {
     signal s: fp32
     signal c: fp32
 
-    let sc = SinCos {
+    inst sc = SinCos {
         angle: angle,
-        sin_out: s,
-        cos_out: c
     }
+    s = sc.sin_out
+    c = sc.cos_out
 
     // Check for division by near-zero
     signal cos_near_zero: bit = (c > -0.0001fp32) && (c < 0.0001fp32)
@@ -402,6 +423,10 @@ impl Tan {
 pub fn tan(angle: fp32) -> fp32 {
     signal res: fp32
     signal v: bit
-    let t = Tan { angle: angle, result: res, valid: v }
+    inst t = Tan {
+        angle: angle,
+    }
+    res = t.result
+    v = t.valid
     res
 }

@@ -28,8 +28,24 @@ impl PPGen4 {
     signal b_hi: bit[6] = b[11:6]
 
     // Generate all 4 partial products using multiplier submodules
-    let m00 = Mult6x6 { a: a_lo, b: b_lo, product: p00 }
-    let m01 = Mult6x6 { a: a_lo, b: b_hi, product: p01 }
-    let m10 = Mult6x6 { a: a_hi, b: b_lo, product: p10 }
-    let m11 = Mult6x6 { a: a_hi, b: b_hi, product: p11 }
+    inst m00 = Mult6x6 {
+        a: a_lo,
+        b: b_lo,
+    }
+    p00 = m00.product
+    inst m01 = Mult6x6 {
+        a: a_lo,
+        b: b_hi,
+    }
+    p01 = m01.product
+    inst m10 = Mult6x6 {
+        a: a_hi,
+        b: b_lo,
+    }
+    p10 = m10.product
+    inst m11 = Mult6x6 {
+        a: a_hi,
+        b: b_hi,
+    }
+    p11 = m11.product
 }

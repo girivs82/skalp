@@ -14,9 +14,9 @@ entity FpSqrtSimple {
 impl FpSqrtSimple {
     // Directly instantiate CordicSqrt entity
     signal sqrt_result: fp32
-    let sqrt_op = CordicSqrt {
+    inst sqrt_op = CordicSqrt {
         value: x,
-        result: sqrt_result
     }
+    sqrt_result = sqrt_op.result
     result = sqrt_result
 }

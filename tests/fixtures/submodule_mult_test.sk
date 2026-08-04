@@ -16,5 +16,9 @@ pub entity WrapperMult {
 }
 
 impl WrapperMult {
-    let m = Mult6x6 { a: x, b: y, product: z }
+    inst m = Mult6x6 {
+        a: x,
+        b: y,
+    }
+    z = m.product
 }

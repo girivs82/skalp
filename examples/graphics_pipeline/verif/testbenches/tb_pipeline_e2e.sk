@@ -152,18 +152,18 @@ impl SimplePipelineTop {
     signal input_fifo_rd_data: SimpleVertex
     signal input_fifo_rd_empty: bit
 
-    let input_fifo = AsyncFifo<SimpleVertex, 8> {
+    inst input_fifo = AsyncFifo<SimpleVertex, 8> {
         wr_clk: sys_clk,
         wr_rst: sys_rst,
         wr_en: input_fifo_wr_en,
         wr_data: input_fifo_wr_data,
-        wr_full: input_fifo_wr_full,
         rd_clk: geom_clk,
         rd_rst: geom_rst,
         rd_en: input_fifo_rd_en,
-        rd_data: input_fifo_rd_data,
-        rd_empty: input_fifo_rd_empty
     }
+    input_fifo_wr_full = input_fifo.wr_full
+    input_fifo_rd_data = input_fifo.rd_data
+    input_fifo_rd_empty = input_fifo.rd_empty
 
     // Connect write interface to input FIFO
     input_fifo_wr_en = write_valid && !input_fifo_wr_full
@@ -179,16 +179,16 @@ impl SimplePipelineTop {
     signal geom_output: SimpleVertex
     signal geom_output_ready: bit
 
-    let geometry = SimpleGeometryProcessor {
+    inst geometry = SimpleGeometryProcessor {
         clk: geom_clk,
         rst: geom_rst,
         vertex_valid: geom_vertex_valid,
         vertex_in: input_fifo_rd_data,
-        vertex_ready: geom_vertex_ready,
-        output_valid: geom_output_valid,
-        output: geom_output,
-        output_ready: geom_output_ready
+        output_ready: geom_output_ready,
     }
+    geom_vertex_ready = geometry.vertex_ready
+    geom_output_valid = geometry.output_valid
+    geom_output = geometry.output
 
     // Connect input FIFO to geometry processor
     geom_vertex_valid = !input_fifo_rd_empty
@@ -204,18 +204,18 @@ impl SimplePipelineTop {
     signal output_fifo_rd_data: SimpleVertex
     signal output_fifo_rd_empty: bit
 
-    let output_fifo = AsyncFifo<SimpleVertex, 32> {
+    inst output_fifo = AsyncFifo<SimpleVertex, 32> {
         wr_clk: geom_clk,
         wr_rst: geom_rst,
         wr_en: output_fifo_wr_en,
         wr_data: output_fifo_wr_data,
-        wr_full: output_fifo_wr_full,
         rd_clk: pixel_clk,
         rd_rst: pixel_rst,
         rd_en: output_fifo_rd_en,
-        rd_data: output_fifo_rd_data,
-        rd_empty: output_fifo_rd_empty
     }
+    output_fifo_wr_full = output_fifo.wr_full
+    output_fifo_rd_data = output_fifo.rd_data
+    output_fifo_rd_empty = output_fifo.rd_empty
 
     // Connect geometry processor to output FIFO
     output_fifo_wr_en = geom_output_valid && !output_fifo_wr_full

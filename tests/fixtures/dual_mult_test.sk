@@ -19,6 +19,14 @@ pub entity DualMult {
 }
 
 impl DualMult {
-    let m0 = Mult6x6 { a: a0, b: b0, product: p0 }
-    let m1 = Mult6x6 { a: a1, b: b1, product: p1 }
+    inst m0 = Mult6x6 {
+        a: a0,
+        b: b0,
+    }
+    p0 = m0.product
+    inst m1 = Mult6x6 {
+        a: a1,
+        b: b1,
+    }
+    p1 = m1.product
 }

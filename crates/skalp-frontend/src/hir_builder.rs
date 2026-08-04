@@ -1837,6 +1837,8 @@ impl HirBuilderContext {
         for (sig_id, info) in entity_signal_map.iter() {
             let connections = connections_map.shift_remove(sig_id).unwrap_or_default();
             instances.push(HirInstance {
+                // Entity-typed signal instantiation, not legacy `let` syntax
+                is_inst: true,
                 id: InstanceId(0),
                 name: info.name.clone(),
                 entity: info.entity_id,
@@ -2291,6 +2293,7 @@ impl HirBuilderContext {
         }
 
         Some(HirInstance {
+            is_inst: is_inst_form,
             id,
             name,
             entity,
@@ -2333,6 +2336,16 @@ impl HirBuilderContext {
                         | SyntaxKind::FieldExpr
                         | SyntaxKind::IndexExpr
                         | SyntaxKind::CastExpr // BUG FIX #CAST-PORT: Support cast expressions in port connections
+                        // TRIAGE #11: a missing kind silently DROPS the
+                        // connection (the inst check then reports the port
+                        // unconnected). PathExpr covers enum values like
+                        // `mode: MultiplierMode::Single`.
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::ConcatExpr
                 )
             })
             .collect();
@@ -2573,6 +2586,14 @@ impl HirBuilderContext {
     /// for creating an entity instance and connecting its ports. The "result" we want
     /// is whatever signal is connected to the entity's output port.
     fn build_instance_as_statements(&mut self, node: &SyntaxNode) -> Option<Vec<HirStatement>> {
+        // TRIAGE #11 / legacy-let removal: `let`-instantiation is a hard
+        // error at IMPL level (see compiler.rs). Inside FUNCTION bodies the
+        // legacy output-binding form remains supported for now — the trait
+        // method plumbing (placeholder → entity-output mapping) depends on
+        // it across the behavioral/NCL flows; stdlib fp bodies use it.
+        // Follow-up: make fn-body dot-access sound in every flow, then
+        // extend the removal here.
+
         // Get instance name (first identifier after 'let')
         let tokens: Vec<_> = node
             .children_with_tokens()
@@ -9102,7 +9123,7 @@ impl HirBuilderContext {
                                     | SyntaxKind::InactiveKw
                                     | SyntaxKind::RiseKw
                                     | SyntaxKind::FallKw
-                            )
+                            ) || t.kind().is_keyword()
                         })
                         .map(|t| t.text().to_string());
 
@@ -9141,7 +9162,8 @@ impl HirBuilderContext {
         // Parser creates sibling structure: [IdentExpr, FieldExpr] instead of FieldExpr(IdentExpr)
         // Example: "a_col0.0" becomes siblings [IdentExpr(a_col0), FieldExpr(.0)]
         if children.is_empty() {
-            // Find the field name from tokens
+            // Find the field name from tokens (TRIAGE #11: keyword-named
+            // ports like `output` are valid field names after '.')
             let field_name = node
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
@@ -9154,7 +9176,7 @@ impl HirBuilderContext {
                             | SyntaxKind::InactiveKw
                             | SyntaxKind::RiseKw
                             | SyntaxKind::FallKw
-                    )
+                    ) || t.kind().is_keyword()
                 })
                 .map(|t| t.text().to_string())?;
 

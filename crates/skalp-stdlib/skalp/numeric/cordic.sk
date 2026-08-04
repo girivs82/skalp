@@ -129,12 +129,16 @@ impl CordicRotate16 {
 
     // Unroll 16 CORDIC rotation iterations
     generate for i in 0..16 {
-        let iter = CordicRotateIteration {
-            x: x[i], y: y[i], z: z[i],
+        inst iter = CordicRotateIteration {
+            x: x[i],
+            y: y[i],
+            z: z[i],
             shift_factor: POW2_NEG_TABLE[i],
             atan_val: ATAN_TABLE[i],
-            x_out: x[i + 1], y_out: y[i + 1], z_out: z[i + 1]
         }
+        x[i + 1] = iter.x_out
+        y[i + 1] = iter.y_out
+        z[i + 1] = iter.z_out
     }
 
     // Final results
@@ -199,12 +203,16 @@ impl CordicVector16 {
 
     // Unroll 16 CORDIC vectoring iterations
     generate for i in 0..16 {
-        let iter = CordicVectorIteration {
-            x: x[i], y: y[i], z: z[i],
+        inst iter = CordicVectorIteration {
+            x: x[i],
+            y: y[i],
+            z: z[i],
             shift_factor: POW2_NEG_TABLE[i],
             atan_val: ATAN_TABLE[i],
-            x_out: x[i + 1], y_out: y[i + 1], z_out: z[i + 1]
         }
+        x[i + 1] = iter.x_out
+        y[i + 1] = iter.y_out
+        z[i + 1] = iter.z_out
     }
 
     magnitude = x[16]
@@ -263,109 +271,135 @@ impl CordicSqrt {
     // Note: iterations 4, 13, 40, ... must be repeated for convergence
     signal x1: fp32
     signal y1: fp32
-    let iter1 = CordicHyperbolicIteration {
-        x: x0, y: y0,
-        shift_factor: 0.5fp32,  // 2^-1
-        x_out: x1, y_out: y1
+    inst iter1 = CordicHyperbolicIteration {
+        x: x0,
+        y: y0,
+        shift_factor: 0.5fp32,
     }
+    x1 = iter1.x_out
+    y1 = iter1.y_out
 
     signal x2: fp32
     signal y2: fp32
-    let iter2 = CordicHyperbolicIteration {
-        x: x1, y: y1,
-        shift_factor: 0.25fp32,  // 2^-2
-        x_out: x2, y_out: y2
+    inst iter2 = CordicHyperbolicIteration {
+        x: x1,
+        y: y1,
+        shift_factor: 0.25fp32,
     }
+    x2 = iter2.x_out
+    y2 = iter2.y_out
 
     signal x3: fp32
     signal y3: fp32
-    let iter3 = CordicHyperbolicIteration {
-        x: x2, y: y2,
-        shift_factor: 0.125fp32,  // 2^-3
-        x_out: x3, y_out: y3
+    inst iter3 = CordicHyperbolicIteration {
+        x: x2,
+        y: y2,
+        shift_factor: 0.125fp32,
     }
+    x3 = iter3.x_out
+    y3 = iter3.y_out
 
     // Iteration 4 (first repeat)
     signal x4: fp32
     signal y4: fp32
-    let iter4 = CordicHyperbolicIteration {
-        x: x3, y: y3,
-        shift_factor: 0.0625fp32,  // 2^-4
-        x_out: x4, y_out: y4
+    inst iter4 = CordicHyperbolicIteration {
+        x: x3,
+        y: y3,
+        shift_factor: 0.0625fp32,
     }
+    x4 = iter4.x_out
+    y4 = iter4.y_out
 
     // Repeat iteration 4
     signal x4r: fp32
     signal y4r: fp32
-    let iter4r = CordicHyperbolicIteration {
-        x: x4, y: y4,
+    inst iter4r = CordicHyperbolicIteration {
+        x: x4,
+        y: y4,
         shift_factor: 0.0625fp32,
-        x_out: x4r, y_out: y4r
     }
+    x4r = iter4r.x_out
+    y4r = iter4r.y_out
 
     signal x5: fp32
     signal y5: fp32
-    let iter5 = CordicHyperbolicIteration {
-        x: x4r, y: y4r,
-        shift_factor: 0.03125fp32,  // 2^-5
-        x_out: x5, y_out: y5
+    inst iter5 = CordicHyperbolicIteration {
+        x: x4r,
+        y: y4r,
+        shift_factor: 0.03125fp32,
     }
+    x5 = iter5.x_out
+    y5 = iter5.y_out
 
     signal x6: fp32
     signal y6: fp32
-    let iter6 = CordicHyperbolicIteration {
-        x: x5, y: y5,
-        shift_factor: 0.015625fp32,  // 2^-6
-        x_out: x6, y_out: y6
+    inst iter6 = CordicHyperbolicIteration {
+        x: x5,
+        y: y5,
+        shift_factor: 0.015625fp32,
     }
+    x6 = iter6.x_out
+    y6 = iter6.y_out
 
     signal x7: fp32
     signal y7: fp32
-    let iter7 = CordicHyperbolicIteration {
-        x: x6, y: y6,
-        shift_factor: 0.0078125fp32,  // 2^-7
-        x_out: x7, y_out: y7
+    inst iter7 = CordicHyperbolicIteration {
+        x: x6,
+        y: y6,
+        shift_factor: 0.0078125fp32,
     }
+    x7 = iter7.x_out
+    y7 = iter7.y_out
 
     signal x8: fp32
     signal y8: fp32
-    let iter8 = CordicHyperbolicIteration {
-        x: x7, y: y7,
-        shift_factor: 0.00390625fp32,  // 2^-8
-        x_out: x8, y_out: y8
+    inst iter8 = CordicHyperbolicIteration {
+        x: x7,
+        y: y7,
+        shift_factor: 0.00390625fp32,
     }
+    x8 = iter8.x_out
+    y8 = iter8.y_out
 
     signal x9: fp32
     signal y9: fp32
-    let iter9 = CordicHyperbolicIteration {
-        x: x8, y: y8,
-        shift_factor: 0.001953125fp32,  // 2^-9
-        x_out: x9, y_out: y9
+    inst iter9 = CordicHyperbolicIteration {
+        x: x8,
+        y: y8,
+        shift_factor: 0.001953125fp32,
     }
+    x9 = iter9.x_out
+    y9 = iter9.y_out
 
     signal x10: fp32
     signal y10: fp32
-    let iter10 = CordicHyperbolicIteration {
-        x: x9, y: y9,
-        shift_factor: 0.0009765625fp32,  // 2^-10
-        x_out: x10, y_out: y10
+    inst iter10 = CordicHyperbolicIteration {
+        x: x9,
+        y: y9,
+        shift_factor: 0.0009765625fp32,
     }
+    x10 = iter10.x_out
+    y10 = iter10.y_out
 
     signal x11: fp32
     signal y11: fp32
-    let iter11 = CordicHyperbolicIteration {
-        x: x10, y: y10,
-        shift_factor: 0.00048828125fp32,  // 2^-11
-        x_out: x11, y_out: y11
+    inst iter11 = CordicHyperbolicIteration {
+        x: x10,
+        y: y10,
+        shift_factor: 0.00048828125fp32,
     }
+    x11 = iter11.x_out
+    y11 = iter11.y_out
 
     signal x12: fp32
     signal y12: fp32
-    let iter12 = CordicHyperbolicIteration {
-        x: x11, y: y11,
-        shift_factor: 0.000244140625fp32,  // 2^-12
-        x_out: x12, y_out: y12
+    inst iter12 = CordicHyperbolicIteration {
+        x: x11,
+        y: y11,
+        shift_factor: 0.000244140625fp32,
     }
+    x12 = iter12.x_out
+    y12 = iter12.y_out
 
     // Apply gain correction
     result = x12 * K_H_INV
@@ -380,11 +414,11 @@ pub fn sincos(angle: fp32) -> (fp32, fp32) {
     signal cos_val: fp32
     signal sin_val: fp32
 
-    let cordic = CordicRotate16 {
+    inst cordic = CordicRotate16 {
         angle: angle,
-        cos_out: cos_val,
-        sin_out: sin_val
     }
+    cos_val = cordic.cos_out
+    sin_val = cordic.sin_out
 
     (sin_val, cos_val)
 }
@@ -394,12 +428,12 @@ pub fn atan2(y: fp32, x: fp32) -> fp32 {
     signal mag: fp32
     signal ang: fp32
 
-    let cordic = CordicVector16 {
+    inst cordic = CordicVector16 {
         x_in: x,
         y_in: y,
-        magnitude: mag,
-        angle: ang
     }
+    mag = cordic.magnitude
+    ang = cordic.angle
 
     ang
 }

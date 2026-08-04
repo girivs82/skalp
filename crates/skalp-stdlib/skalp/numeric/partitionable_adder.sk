@@ -168,73 +168,73 @@ impl PartitionableMantissaAdder {
     // Section 0: Always uses cin[0]
     signal sum0: bit[7]
     signal cout0: bit
-    let sec0 = AdderSection7 {
+    inst sec0 = AdderSection7 {
         a: a0,
         b: b0,
         cin: cin[0],
-        sum: sum0,
-        cout: cout0
     }
+    sum0 = sec0.sum
+    cout0 = sec0.cout
 
     // Carry cut 0: between section 0 and 1
     signal cin1: bit
-    let cut0 = CarryCut {
+    inst cut0 = CarryCut {
         carry_from_prev: cout0,
         alternate_cin: cin[1],
         enable: cut0_enable,
-        carry_to_next: cin1
     }
+    cin1 = cut0.carry_to_next
 
     // Section 1
     signal sum1: bit[7]
     signal cout1: bit
-    let sec1 = AdderSection7 {
+    inst sec1 = AdderSection7 {
         a: a1,
         b: b1,
         cin: cin1,
-        sum: sum1,
-        cout: cout1
     }
+    sum1 = sec1.sum
+    cout1 = sec1.cout
 
     // Carry cut 1: between section 1 and 2 (the "middle" cut for FP16 mode)
     signal cin2: bit
-    let cut1 = CarryCut {
+    inst cut1 = CarryCut {
         carry_from_prev: cout1,
         alternate_cin: cin[2],
         enable: cut1_enable,
-        carry_to_next: cin2
     }
+    cin2 = cut1.carry_to_next
 
     // Section 2
     signal sum2: bit[7]
     signal cout2: bit
-    let sec2 = AdderSection7 {
+    inst sec2 = AdderSection7 {
         a: a2,
         b: b2,
         cin: cin2,
-        sum: sum2,
-        cout: cout2
     }
+    sum2 = sec2.sum
+    cout2 = sec2.cout
 
     // Carry cut 2: between section 2 and 3
     signal cin3: bit
-    let cut2 = CarryCut {
+    inst cut2 = CarryCut {
         carry_from_prev: cout2,
         alternate_cin: cin[3],
         enable: cut2_enable,
-        carry_to_next: cin3
     }
+    cin3 = cut2.carry_to_next
 
     // Section 3
     signal sum3: bit[7]
     signal cout3: bit
-    let sec3 = AdderSection7 {
+    inst sec3 = AdderSection7 {
         a: a3,
         b: b3,
         cin: cin3,
-        sum: sum3,
-        cout: cout3
     }
+    sum3 = sec3.sum
+    cout3 = sec3.cout
 
     // =========================================================================
     // Output Assembly
@@ -385,14 +385,14 @@ impl PartitionableMantissaAddSub {
     signal sum_out: bit[28]
     signal cout_out: bit[4]
 
-    let adder = PartitionableMantissaAdder {
+    inst adder = PartitionableMantissaAdder {
         a: a,
         b: b_inv,
-        cin: sub,  // cin=1 for subtract sections
+        cin: sub,
         mode: mode,
-        sum: sum_out,
-        cout: cout_out
     }
+    sum_out = adder.sum
+    cout_out = adder.cout
 
     sum = sum_out
     cout = cout_out

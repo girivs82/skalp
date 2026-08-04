@@ -130,44 +130,44 @@ impl TmrCounterV4 {
     signal fault1: bit
     signal fault2: bit
 
-    let ch_a = CounterChannelA {
+    inst ch_a = CounterChannelA {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a
     }
+    count_a = ch_a.count
 
-    let ch_b = CounterChannelB {
+    inst ch_b = CounterChannelB {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b
     }
+    count_b = ch_b.count
 
-    let ch_c = CounterChannelC {
+    inst ch_c = CounterChannelC {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c
     }
+    count_c = ch_c.count
 
     // First TMR voter
-    let voter1 = TmrVoter {
+    inst voter1 = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted1,
-        channel_fault: fault1
     }
+    voted1 = voter1.voted
+    fault1 = voter1.channel_fault
 
     // Second TMR voter (redundant, for SM-of-SM)
-    let voter2 = TmrVoter {
+    inst voter2 = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted2,
-        channel_fault: fault2
     }
+    voted2 = voter2.voted
+    fault2 = voter2.channel_fault
 
     // Primary output from voter1
     count = voted1

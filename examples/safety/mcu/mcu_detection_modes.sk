@@ -472,73 +472,73 @@ impl MotorControlUnitWithDetection {
     signal stack_ok: bit
 
     // Command Processor (with continuous detection)
-    let cmd_proc = CommandProcessor {
+    inst cmd_proc = CommandProcessor {
         clk: clk,
         rst: rst,
         cmd_valid: cmd_valid,
         cmd_throttle: cmd_throttle,
         cmd_enable: cmd_enable,
-        validated_throttle: val_throttle,
-        validated_enable: val_enable,
-        cmd_error: cmd_err
     }
+    val_throttle = cmd_proc.validated_throttle
+    val_enable = cmd_proc.validated_enable
+    cmd_err = cmd_proc.cmd_error
 
     // PWM Generator
-    let pwm_gen = PWMGenerator {
+    inst pwm_gen = PWMGenerator {
         clk: clk,
         rst: rst,
         throttle: val_throttle,
         enable: val_enable,
         force_off: force_off,
-        pwm_out: pwm_signal,
-        pwm_active: pwm_is_active
     }
+    pwm_signal = pwm_gen.pwm_out
+    pwm_is_active = pwm_gen.pwm_active
 
     // Current Monitor (with continuous detection)
-    let curr_mon = CurrentMonitor {
+    inst curr_mon = CurrentMonitor {
         clk: clk,
         rst: rst,
         current_adc: current_adc,
         threshold: overcurrent_threshold,
-        overcurrent: oc_detected,
-        current_valid: current_ok
     }
+    oc_detected = curr_mon.overcurrent
+    current_ok = curr_mon.current_valid
 
     // Watchdog (with continuous detection)
-    let watchdog = Watchdog {
+    inst watchdog = Watchdog {
         clk: clk,
         rst: rst,
         kick: watchdog_kick,
         timeout_limit: watchdog_timeout,
-        timeout: wd_timeout,
-        healthy: wd_healthy
     }
+    wd_timeout = watchdog.timeout
+    wd_healthy = watchdog.healthy
 
     // BIST Controller (with boot-time detection)
-    let bist = BistController {
+    inst bist = BistController {
         clk: clk,
         rst: rst,
         start_bist: start_bist,
-        bist_complete: bist_complete,
-        bist_pass: bist_pass,
-        ram_check_ok: ram_ok,
-        rom_check_ok: rom_ok
     }
+    bist_complete = bist.bist_complete
+    bist_pass = bist.bist_pass
+    ram_ok = bist.ram_check_ok
+    rom_ok = bist.rom_check_ok
 
     // Periodic Monitor (with periodic detection)
-    let periodic = PeriodicMonitor {
+    inst periodic = PeriodicMonitor {
         clk: clk,
         rst: rst,
         enable: ~safe_state,
-        integrity_check: integrity_ok,
-        stack_check: stack_ok
     }
+    integrity_ok = periodic.integrity_check
+    stack_ok = periodic.stack_check
 
     // BIST fault: BIST complete but failed
     bist_fault = bist_complete & ~bist_pass
 
     // Safe State Controller (with continuous detection)
-    let safe_ctrl = SafeStateController {
+    inst safe_ctrl = SafeStateController {
         clk: clk,
         rst: rst,
         fault_cmd: cmd_err,
@@ -546,10 +546,10 @@ impl MotorControlUnitWithDetection {
         fault_watchdog: wd_timeout,
         fault_bist: bist_fault,
         fault_clear: fault_clear,
-        safe_state: safe_state,
-        force_motor_off: force_off,
-        fault_latched: fault_latch
     }
+    safe_state = safe_ctrl.safe_state
+    force_off = safe_ctrl.force_motor_off
+    fault_latch = safe_ctrl.fault_latched
 
     // Outputs
     motor_pwm = pwm_signal

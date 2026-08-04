@@ -89,29 +89,29 @@ impl HierarchicalALU {
     signal result_comb: bit[WIDTH]
 
     // Instantiate Adder component
-    let adder = Adder<WIDTH> {
+    inst adder = Adder<WIDTH> {
         a: a,
         b: b,
-        sum: add_sum,
-        carry: add_carry
     }
+    add_sum = adder.sum
+    add_carry = adder.carry
 
     // Instantiate Comparator component
-    let comparator = Comparator<WIDTH> {
+    inst comparator = Comparator<WIDTH> {
         a: a,
         b: b,
-        lt: cmp_lt,
-        eq: cmp_eq,
-        gt: cmp_gt
     }
+    cmp_lt = comparator.lt
+    cmp_eq = comparator.eq
+    cmp_gt = comparator.gt
 
     // Instantiate Shifter component
-    let shifter = Shifter<WIDTH> {
+    inst shifter = Shifter<WIDTH> {
         data: a,
         shift_amt: b[4:0],
         shift_left: op[0],
-        result: shift_result
     }
+    shift_result = shifter.result
 
     // SUB is computed inline (could also be a component)
     sub_result = a - b

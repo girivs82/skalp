@@ -5007,6 +5007,11 @@ impl<'hir> HirToMir<'hir> {
             return assigns;
         }
 
+        // TRIAGE #11: whole-struct dot-access on an `inst` output
+        if let Some(assigns) = self.try_expand_instance_struct_output_assignment(assign) {
+            return assigns;
+        }
+
         // Try to expand struct-to-struct assignments
         if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
             return assigns;
@@ -5183,6 +5188,61 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Try to expand a struct continuous assignment into multiple field assignments
+
+    /// TRIAGE #11 migration support: expand `lhs_struct = instance.port`
+    /// where `port` is a flattened STRUCT output of an `inst` — the
+    /// instance-output map stores per-field signals keyed
+    /// "port__field" (FIELD_SEPARATOR), so a whole-struct dot-access must
+    /// expand into per-field assignments.
+    fn try_expand_instance_struct_output_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        let lhs_id = match &assign.lhs {
+            hir::HirLValue::Signal(id) if self.flattened_signals.contains_key(id) => *id,
+            _ => return None,
+        };
+        let (var_id, port) = match &assign.rhs {
+            hir::HirExpression::FieldAccess { base, field } => match base.as_ref() {
+                hir::HirExpression::Variable(v) => (*v, field.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let output_ports = self.entity_instance_outputs.get(&var_id)?.clone();
+        // Whole (non-struct) output? Let the normal path handle it.
+        if output_ports.contains_key(&port) {
+            return None;
+        }
+        let prefix = format!("{}{}", port, FIELD_SEPARATOR);
+        if !output_ports.keys().any(|k| k.starts_with(&prefix)) {
+            return None;
+        }
+        let lhs_fields = self.flattened_signals.get(&lhs_id)?.clone();
+        let mut assigns = Vec::new();
+        for field in &lhs_fields {
+            let key = format!(
+                "{}{}{}",
+                port,
+                FIELD_SEPARATOR,
+                field.field_path.join(FIELD_SEPARATOR)
+            );
+            let Some(&src) = output_ports.get(&key) else {
+                continue;
+            };
+            assigns.push(ContinuousAssign {
+                lhs: LValue::Signal(SignalId(field.id)),
+                rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(src))),
+                span: None,
+            });
+        }
+        if assigns.is_empty() {
+            None
+        } else {
+            Some(assigns)
+        }
+    }
+
     fn try_expand_struct_continuous_assignment(
         &mut self,
         assign: &hir::HirAssignment,

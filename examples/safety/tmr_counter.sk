@@ -72,35 +72,35 @@ impl TmrCounter {
     signal fault_out: bit
 
     // Instantiate three redundant counter channels
-    let ch_a = CounterChannel {
+    inst ch_a = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a
     }
+    count_a = ch_a.count
 
-    let ch_b = CounterChannel {
+    inst ch_b = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b
     }
+    count_b = ch_b.count
 
-    let ch_c = CounterChannel {
+    inst ch_c = CounterChannel {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c
     }
+    count_c = ch_c.count
 
     // TMR voter for fault detection and correction
-    let voter = TmrVoter {
+    inst voter = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted_out,
-        fault_detected: fault_out
     }
+    voted_out = voter.voted
+    fault_out = voter.fault_detected
 
     // Outputs
     count = voted_out

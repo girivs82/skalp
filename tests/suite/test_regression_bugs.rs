@@ -507,7 +507,8 @@ entity Outer {
 }
 
 impl Outer {
-    let inner = Inner {};
+    inst inner = Inner {
+    }
     result = inner.output;  // "output" is a keyword
 }
 "#;
@@ -1540,7 +1541,11 @@ entity Top {
 
 impl Top {
     signal sm: bit[4]
-    let adder = Adder4 { a: a, b: b, sum: sm, carry: open }
+    inst adder = Adder4 {
+        a: a,
+        b: b,
+    }
+    sm = adder.sum
     s = sm
 }
 "#;
@@ -1559,8 +1564,8 @@ impl Top {
     // The instance is emitted and `sum` is properly connected
     assert!(sv.contains("Adder4 adder"), "instance must exist:\n{}", sv);
     assert!(
-        sv.contains(".sum(sm)"),
-        "bound output must connect:\n{}",
+        sv.contains(".sum("),
+        "sum output must be wired (via the dot-access auto-wire):\n{}",
         sv
     );
 }

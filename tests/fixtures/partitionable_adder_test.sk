@@ -14,14 +14,14 @@ impl TestPartitionableAdder {
     signal sum_out: bit[28]
     signal cout_out: bit[4]
 
-    let adder = PartitionableMantissaAdder {
+    inst adder = PartitionableMantissaAdder {
         a: a,
         b: b,
         cin: cin,
         mode: mode as AdderMode,
-        sum: sum_out,
-        cout: cout_out
     }
+    sum_out = adder.sum
+    cout_out = adder.cout
 
     sum = sum_out
     cout = cout_out

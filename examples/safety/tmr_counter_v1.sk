@@ -116,49 +116,49 @@ impl TmrCounterV1 {
     signal parity_error: bit
 
     // Three counter channels with parity
-    let ch_a = CounterChannelParity {
+    inst ch_a = CounterChannelParity {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a,
-        parity: parity_a
     }
+    count_a = ch_a.count
+    parity_a = ch_a.parity
 
-    let ch_b = CounterChannelParity {
+    inst ch_b = CounterChannelParity {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b,
-        parity: parity_b
     }
+    count_b = ch_b.count
+    parity_b = ch_b.parity
 
-    let ch_c = CounterChannelParity {
+    inst ch_c = CounterChannelParity {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c,
-        parity: parity_c
     }
+    count_c = ch_c.count
+    parity_c = ch_c.parity
 
     // TMR voter with parity
-    let voter = TmrVoterParity {
+    inst voter = TmrVoterParity {
         a: count_a,
         b: count_b,
         c: count_c,
         pa: parity_a,
         pb: parity_b,
         pc: parity_c,
-        voted: voted_out,
-        voted_parity: voted_parity,
-        fault_detected: tmr_fault
     }
+    voted_out = voter.voted
+    voted_parity = voter.voted_parity
+    tmr_fault = voter.fault_detected
 
     // Parity checker on voter output
-    let checker = ParityChecker {
+    inst checker = ParityChecker {
         data: voted_out,
         expected_parity: voted_parity,
-        parity_error: parity_error
     }
+    parity_error = checker.parity_error
 
     count = voted_out
     fault = tmr_fault | parity_error

@@ -126,31 +126,23 @@ impl SmallGraphicsPipeline {
     // Use fp16 for half-precision (saves ~50% multiplier area)
     // Use 2 pipeline stages (minimal)
     // Use OptimizeArea intent for resource sharing
-    let geometry_proc = GeometryProcessor<fp16, 2, OptimizeArea> {
+    inst geometry_proc = GeometryProcessor<fp16, 2, OptimizeArea> {
         clk: clk,
         rst: rst,
-
-        // Input vertex stream (simplified format)
         vertex_valid: vertex_valid,
         vertex: vertex_in,
         vertex_ready: vertex_ready,
-
-        // Transformation matrices (stored in small register file)
         model_matrix: model_matrix_reg,
         view_matrix: view_matrix_reg,
         proj_matrix: proj_matrix_reg,
-
-        // Simple lighting (single directional light)
         light_dir: light_dir_reg,
-        light_color: light_color_white,  // Fixed white light
-        ambient_color: ambient_color_gray,  // Fixed 20% ambient
-        specular_exp: specular_exp_zero,  // No specular (save resources)
-
-        // Output to rasterizer
+        light_color: light_color_white,
+        ambient_color: ambient_color_gray,
+        specular_exp: specular_exp_zero,
         output_valid: geom_out_valid,
         output_vertex: geom_out_vertex,
-        output_ready: geom_out_ready
-    };
+        output_ready: geom_out_ready,
+    }
 
     // Pack input vertex from individual signals
     assign vertex_in = Vertex<fp16> {

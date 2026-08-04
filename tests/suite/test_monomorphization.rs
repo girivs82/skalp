@@ -28,10 +28,10 @@ fn test_simple_const_generic() {
         impl Top {
             signal buf_out: bit[8]
 
-            let buffer = Buffer<16> {
+            inst buffer = Buffer<16> {
                 data: x,
-                stored: buf_out
             }
+            buf_out = buffer.stored
 
             y = buf_out
         }
@@ -75,17 +75,17 @@ fn test_multiple_instantiations_same_args() {
             signal s1: bit[8]
             signal s2: bit[8]
 
-            let adder1 = Adder<8> {
+            inst adder1 = Adder<8> {
                 a: x1,
                 b: y1,
-                sum: s1
             }
+            s1 = adder1.sum
 
-            let adder2 = Adder<8> {
+            inst adder2 = Adder<8> {
                 a: x2,
                 b: y2,
-                sum: s2
             }
+            s2 = adder2.sum
 
             sum1 = s1
             sum2 = s2
@@ -127,17 +127,17 @@ fn test_multiple_instantiations_different_args() {
             signal s1: bit[8]
             signal s2: bit[16]
 
-            let adder8 = Adder<8> {
+            inst adder8 = Adder<8> {
                 a: x1,
                 b: y1,
-                sum: s1
             }
+            s1 = adder8.sum
 
-            let adder16 = Adder<16> {
+            inst adder16 = Adder<16> {
                 a: x2,
                 b: y2,
-                sum: s2
             }
+            s2 = adder16.sum
 
             sum1 = s1
             sum2 = s2
@@ -173,10 +173,10 @@ fn test_default_parameter_values() {
         impl Top {
             signal buf_out: bit[8]
 
-            let buffer = Buffer {
+            inst buffer = Buffer {
                 data: x,
-                stored: buf_out
             }
+            buf_out = buffer.stored
 
             y = buf_out
         }
@@ -208,11 +208,11 @@ fn test_parametric_with_reference() {
         impl TopLevel<const W: nat = 32> {
             signal s: bit[W]
 
-            let adder = Adder<W> {
+            inst adder = Adder<W> {
                 a: x,
                 b: y,
-                sum: s
             }
+            s = adder.sum
 
             result = s
         }
@@ -256,17 +256,17 @@ fn test_nested_generic_instantiation() {
             signal stage0: bit[WIDTH]
             signal stage1: bit[WIDTH]
 
-            let reg0 = Register<WIDTH> {
+            inst reg0 = Register<WIDTH> {
                 clk: clk,
                 d: data_in,
-                q: stage0
             }
+            stage0 = reg0.q
 
-            let reg1 = Register<WIDTH> {
+            inst reg1 = Register<WIDTH> {
                 clk: clk,
                 d: stage0,
-                q: stage1
             }
+            stage1 = reg1.q
 
             data_out = stage1
         }
@@ -301,11 +301,11 @@ fn test_const_expression_in_arg() {
         impl Top<const W: nat = 8> {
             signal s: bit[W]
 
-            let adder = Adder<W> {
+            inst adder = Adder<W> {
                 a: x,
                 b: y,
-                sum: s
             }
+            s = adder.sum
 
             result = s
         }
@@ -342,12 +342,12 @@ fn test_multiple_const_parameters() {
         impl Top {
             signal rd: bit[32]
 
-            let mem = Memory<10, 32> {
+            inst mem = Memory<10, 32> {
                 addr: address,
                 data_in: write_data,
                 we: write_en,
-                data_out: rd
             }
+            rd = mem.data_out
 
             read_data = rd
         }
@@ -382,11 +382,11 @@ fn test_entity_with_no_generics() {
         impl Top {
             signal s: bit[8]
 
-            let adder = SimpleAdder {
+            inst adder = SimpleAdder {
                 a: x,
                 b: y,
-                sum: s
             }
+            s = adder.sum
 
             result = s
         }
@@ -439,17 +439,17 @@ fn test_mixed_generic_and_non_generic() {
             signal sum: bit[8]
             signal reg_out: bit[8]
 
-            let adder = GenericAdder<8> {
+            inst adder = GenericAdder<8> {
                 a: x,
                 b: y,
-                sum: sum
             }
+            sum = adder.sum
 
-            let reg = SimpleReg {
+            inst reg = SimpleReg {
                 clk: clk,
                 d: sum,
-                q: reg_out
             }
+            reg_out = reg.q
 
             result = reg_out
         }

@@ -286,68 +286,68 @@ impl TmrSafeStateController {
     signal disagree_fl: bit
 
     // Three channels of safe state controller
-    let ch_a = SafeStateChannel {
+    inst ch_a = SafeStateChannel {
         clk: clk,
         rst: rst,
         fault_cmd: fault_cmd,
         fault_overcurrent: fault_overcurrent,
         fault_watchdog: fault_watchdog,
         fault_clear: fault_clear,
-        safe_state: ss_a,
-        force_motor_off: fmo_a,
-        fault_latched: fl_a
     }
+    ss_a = ch_a.safe_state
+    fmo_a = ch_a.force_motor_off
+    fl_a = ch_a.fault_latched
 
-    let ch_b = SafeStateChannel {
+    inst ch_b = SafeStateChannel {
         clk: clk,
         rst: rst,
         fault_cmd: fault_cmd,
         fault_overcurrent: fault_overcurrent,
         fault_watchdog: fault_watchdog,
         fault_clear: fault_clear,
-        safe_state: ss_b,
-        force_motor_off: fmo_b,
-        fault_latched: fl_b
     }
+    ss_b = ch_b.safe_state
+    fmo_b = ch_b.force_motor_off
+    fl_b = ch_b.fault_latched
 
-    let ch_c = SafeStateChannel {
+    inst ch_c = SafeStateChannel {
         clk: clk,
         rst: rst,
         fault_cmd: fault_cmd,
         fault_overcurrent: fault_overcurrent,
         fault_watchdog: fault_watchdog,
         fault_clear: fault_clear,
-        safe_state: ss_c,
-        force_motor_off: fmo_c,
-        fault_latched: fl_c
     }
+    ss_c = ch_c.safe_state
+    fmo_c = ch_c.force_motor_off
+    fl_c = ch_c.fault_latched
 
     // Voter for safe_state
-    let voter_ss = SafeStateVoter {
+    inst voter_ss = SafeStateVoter {
         a: ss_a,
         b: ss_b,
         c: ss_c,
-        voted: voted_ss,
-        disagreement: disagree_ss
     }
+    voted_ss = voter_ss.voted
+    disagree_ss = voter_ss.disagreement
 
     // Voter for force_motor_off
-    let voter_fmo = SafeStateVoter {
+    inst voter_fmo = SafeStateVoter {
         a: fmo_a,
         b: fmo_b,
         c: fmo_c,
-        voted: voted_fmo,
-        disagreement: disagree_fmo
     }
+    voted_fmo = voter_fmo.voted
+    disagree_fmo = voter_fmo.disagreement
 
     // Voter for fault_latched
-    let voter_fl = SafeStateVoter {
+    inst voter_fl = SafeStateVoter {
         a: fl_a,
         b: fl_b,
         c: fl_c,
-        voted: voted_fl,
-        disagreement: disagree_fl
     }
+    voted_fl = voter_fl.voted
+    disagree_fl = voter_fl.disagreement
 
     // Outputs
     safe_state = voted_ss
@@ -398,58 +398,58 @@ impl MotorControlUnitV2 {
     signal fault_latch: bit
     signal tmr_err: bit
 
-    let cmd_proc = CommandProcessor {
+    inst cmd_proc = CommandProcessor {
         clk: clk,
         rst: rst,
         cmd_valid: cmd_valid,
         cmd_throttle: cmd_throttle,
         cmd_enable: cmd_enable,
-        validated_throttle: val_throttle,
-        validated_enable: val_enable,
-        cmd_error: cmd_err
     }
+    val_throttle = cmd_proc.validated_throttle
+    val_enable = cmd_proc.validated_enable
+    cmd_err = cmd_proc.cmd_error
 
-    let pwm_gen = PWMGenerator {
+    inst pwm_gen = PWMGenerator {
         clk: clk,
         rst: rst,
         throttle: val_throttle,
         enable: val_enable,
         force_off: force_off,
-        pwm_out: pwm_signal,
-        pwm_active: pwm_is_active
     }
+    pwm_signal = pwm_gen.pwm_out
+    pwm_is_active = pwm_gen.pwm_active
 
-    let curr_mon = CurrentMonitor {
+    inst curr_mon = CurrentMonitor {
         clk: clk,
         rst: rst,
         current_adc: current_adc,
         threshold: overcurrent_threshold,
-        overcurrent: oc_detected,
-        current_valid: current_ok
     }
+    oc_detected = curr_mon.overcurrent
+    current_ok = curr_mon.current_valid
 
-    let watchdog = Watchdog {
+    inst watchdog = Watchdog {
         clk: clk,
         rst: rst,
         kick: watchdog_kick,
         timeout_limit: watchdog_timeout,
-        timeout: wd_timeout,
-        healthy: wd_healthy
     }
+    wd_timeout = watchdog.timeout
+    wd_healthy = watchdog.healthy
 
     // TMR Safe State Controller (replaces single channel)
-    let safe_ctrl = TmrSafeStateController {
+    inst safe_ctrl = TmrSafeStateController {
         clk: clk,
         rst: rst,
         fault_cmd: cmd_err,
         fault_overcurrent: oc_detected,
         fault_watchdog: wd_timeout,
         fault_clear: fault_clear,
-        safe_state: safe_state,
-        force_motor_off: force_off,
-        fault_latched: fault_latch,
-        tmr_fault: tmr_err
     }
+    safe_state = safe_ctrl.safe_state
+    force_off = safe_ctrl.force_motor_off
+    fault_latch = safe_ctrl.fault_latched
+    tmr_err = safe_ctrl.tmr_fault
 
     motor_pwm = pwm_signal
     motor_active = pwm_is_active

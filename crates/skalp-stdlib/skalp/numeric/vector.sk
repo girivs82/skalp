@@ -193,11 +193,11 @@ pub entity VecLength<T: Numeric, const N: nat> {
 impl VecLength<T: Numeric, const N: nat> {
     signal dot_result: T
 
-    let dot = VecDot<T, N> {
+    inst dot = VecDot<T, N> {
         a: v,
         b: v,
-        result: dot_result
     }
+    dot_result = dot.result
 
     // TODO: Re-enable when trait method inlining with entity instances works (Bug #184)
     // length = dot_result.sqrt()
@@ -214,11 +214,11 @@ pub entity VecLengthSq<T: Numeric, const N: nat> {
 }
 
 impl VecLengthSq<T: Numeric, const N: nat> {
-    let dot = VecDot<T, N> {
+    inst dot = VecDot<T, N> {
         a: v,
         b: v,
-        result: length_sq
     }
+    length_sq = dot.result
 }
 
 /// Vector normalization (unit vector)
@@ -233,10 +233,10 @@ pub entity VecNormalize<T: Numeric, const N: nat> {
 impl VecNormalize<T: Numeric, const N: nat> {
     signal len: T
 
-    let length = VecLength<T, N> {
+    inst length = VecLength<T, N> {
         v: v,
-        length: len
     }
+    len = length.length
 
     // Check for zero length
     valid = len != T::ZERO
@@ -245,11 +245,11 @@ impl VecNormalize<T: Numeric, const N: nat> {
     signal inv_len: T = T::ONE.div(len)
 
     // Scale
-    let scale = VecScale<T, N> {
+    inst scale = VecScale<T, N> {
         v: v,
         scalar: inv_len,
-        result: result
     }
+    result = scale.result
 
     // If zero length, return zero vector
     for i in 0..N {
@@ -268,20 +268,20 @@ pub entity VecNormalizeFast<T: Numeric, const N: nat> {
 impl VecNormalizeFast<T: Numeric, const N: nat> {
     signal len_sq: T
 
-    let length_sq = VecLengthSq<T, N> {
+    inst length_sq = VecLengthSq<T, N> {
         v: v,
-        length_sq: len_sq
     }
+    len_sq = length_sq.length_sq
 
     // Fast inverse sqrt (Quake III algorithm for FP)
     signal inv_sqrt: T = fast_inv_sqrt(len_sq)
 
     // Scale
-    let scale = VecScale<T, N> {
+    inst scale = VecScale<T, N> {
         v: v,
         scalar: inv_sqrt,
-        result: result
     }
+    result = scale.result
 }
 
 // ============================================================================
@@ -300,16 +300,16 @@ pub entity VecDistance<T: Numeric, const N: nat> {
 impl VecDistance<T: Numeric, const N: nat> {
     signal diff: vec<T, N>
 
-    let sub = VecSub<T, N> {
+    inst sub = VecSub<T, N> {
         a: b,
         b: a,
-        result: diff
     }
+    diff = sub.result
 
-    let length = VecLength<T, N> {
+    inst length = VecLength<T, N> {
         v: diff,
-        length: distance
     }
+    distance = length.length
 }
 
 /// Squared distance (avoids sqrt)
@@ -322,16 +322,16 @@ pub entity VecDistanceSq<T: Numeric, const N: nat> {
 impl VecDistanceSq<T: Numeric, const N: nat> {
     signal diff: vec<T, N>
 
-    let sub = VecSub<T, N> {
+    inst sub = VecSub<T, N> {
         a: b,
         b: a,
-        result: diff
     }
+    diff = sub.result
 
-    let length_sq = VecLengthSq<T, N> {
+    inst length_sq = VecLengthSq<T, N> {
         v: diff,
-        length_sq: distance_sq
     }
+    distance_sq = length_sq.length_sq
 }
 
 // ============================================================================
@@ -352,23 +352,23 @@ impl VecLerp<T: Numeric, const N: nat> {
     signal diff: vec<T, N>
     signal scaled: vec<T, N>
 
-    let sub = VecSub<T, N> {
+    inst sub = VecSub<T, N> {
         a: b,
         b: a,
-        result: diff
     }
+    diff = sub.result
 
-    let scale = VecScale<T, N> {
+    inst scale = VecScale<T, N> {
         v: diff,
         scalar: t,
-        result: scaled
     }
+    scaled = scale.result
 
-    let add = VecAdd<T, N> {
+    inst add = VecAdd<T, N> {
         a: a,
         b: scaled,
-        result: result
     }
+    result = add.result
 }
 
 /// Spherical linear interpolation (for unit vectors)
@@ -384,11 +384,11 @@ pub entity VecSlerp<T: Numeric, const N: nat> {
 impl VecSlerp<T: Numeric, const N: nat> {
     signal dot_ab: T
 
-    let dot = VecDot<T, N> {
+    inst dot = VecDot<T, N> {
         a: a,
         b: b,
-        result: dot_ab
     }
+    dot_ab = dot.result
 
     // Angle between vectors
     signal theta: T = acos(dot_ab)
@@ -404,23 +404,23 @@ impl VecSlerp<T: Numeric, const N: nat> {
     signal scaled_a: vec<T, N>
     signal scaled_b: vec<T, N>
 
-    let scale_a = VecScale<T, N> {
+    inst scale_a = VecScale<T, N> {
         v: a,
         scalar: coeff_a,
-        result: scaled_a
     }
+    scaled_a = scale_a.result
 
-    let scale_b = VecScale<T, N> {
+    inst scale_b = VecScale<T, N> {
         v: b,
         scalar: coeff_b,
-        result: scaled_b
     }
+    scaled_b = scale_b.result
 
-    let add = VecAdd<T, N> {
+    inst add = VecAdd<T, N> {
         a: scaled_a,
         b: scaled_b,
-        result: result
     }
+    result = add.result
 }
 
 // ============================================================================
@@ -440,25 +440,25 @@ impl VecProject<T: Numeric, const N: nat> {
     signal dot_ab: T
     signal dot_bb: T
 
-    let dot1 = VecDot<T, N> {
+    inst dot1 = VecDot<T, N> {
         a: a,
         b: b,
-        result: dot_ab
     }
+    dot_ab = dot1.result
 
-    let dot2 = VecDot<T, N> {
+    inst dot2 = VecDot<T, N> {
         a: b,
         b: b,
-        result: dot_bb
     }
+    dot_bb = dot2.result
 
     signal scalar: T = dot_ab.div(dot_bb)
 
-    let scale = VecScale<T, N> {
+    inst scale = VecScale<T, N> {
         v: b,
         scalar: scalar,
-        result: result
     }
+    result = scale.result
 }
 
 /// Reflect vector a across normal n
@@ -473,26 +473,26 @@ pub entity VecReflect<T: Numeric, const N: nat> {
 impl VecReflect<T: Numeric, const N: nat> {
     signal dot_an: T
 
-    let dot = VecDot<T, N> {
+    inst dot = VecDot<T, N> {
         a: a,
         b: n,
-        result: dot_an
     }
+    dot_an = dot.result
 
     signal two_dot: T = dot_an.add(dot_an)  // 2 * dot
     signal scaled: vec<T, N>
 
-    let scale = VecScale<T, N> {
+    inst scale = VecScale<T, N> {
         v: n,
         scalar: two_dot,
-        result: scaled
     }
+    scaled = scale.result
 
-    let sub = VecSub<T, N> {
+    inst sub = VecSub<T, N> {
         a: a,
         b: scaled,
-        result: result
     }
+    result = sub.result
 }
 
 // ============================================================================
@@ -527,11 +527,11 @@ pub entity VecApproxEqual<T: Numeric, const N: nat> {
 impl VecApproxEqual<T: Numeric, const N: nat> {
     signal diff: vec<T, N>
 
-    let sub = VecSub<T, N> {
+    inst sub = VecSub<T, N> {
         a: a,
         b: b,
-        result: diff
     }
+    diff = sub.result
 
     signal components_close: bit[N]
 
@@ -674,11 +674,11 @@ fn acos<T>(x: T) -> T {
 /// result = a - b (component-wise)
 pub fn vec3_sub(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
     signal res: vec3<fp32>;
-    let sub = VecSub<fp32, 3> {
+    inst sub = VecSub<fp32, 3> {
         a: a,
         b: b,
-        result: res
     }
+    res = sub.result
     res
 }
 
@@ -687,11 +687,11 @@ pub fn vec3_sub(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
 /// result = a.x*b.x + a.y*b.y + a.z*b.z
 pub fn vec3_dot(a: vec3<fp32>, b: vec3<fp32>) -> fp32 {
     signal res: fp32
-    let dot = VecDot<fp32, 3> {
+    inst dot = VecDot<fp32, 3> {
         a: a,
         b: b,
-        result: res
     }
+    res = dot.result
     res
 }
 
@@ -700,11 +700,11 @@ pub fn vec3_dot(a: vec3<fp32>, b: vec3<fp32>) -> fp32 {
 /// result = a × b
 pub fn vec3_cross(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
     signal res: vec3<fp32>;
-    let cross_op = Vec3Cross<fp32> {
+    inst cross_op = Vec3Cross<fp32> {
         a: a,
         b: b,
-        result: res
     }
+    res = cross_op.result
     res
 }
 
@@ -713,11 +713,11 @@ pub fn vec3_cross(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
 /// result = a + b (component-wise)
 pub fn vec3_add(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
     signal res: vec3<fp32>;
-    let add = VecAdd<fp32, 3> {
+    inst add = VecAdd<fp32, 3> {
         a: a,
         b: b,
-        result: res
     }
+    res = add.result
     res
 }
 
@@ -726,11 +726,11 @@ pub fn vec3_add(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
 /// result = v * scalar (component-wise)
 pub fn vec3_scale(v: vec3<fp32>, scalar: fp32) -> vec3<fp32> {
     signal res: vec3<fp32>;
-    let scale = VecScale<fp32, 3> {
+    inst scale = VecScale<fp32, 3> {
         v: v,
         scalar: scalar,
-        result: res
     }
+    res = scale.result
     res
 }
 
@@ -739,16 +739,16 @@ pub fn vec3_scale(v: vec3<fp32>, scalar: fp32) -> vec3<fp32> {
 /// Uses CORDIC for sqrt internally
 pub fn vec3_length(v: vec3<fp32>) -> fp32 {
     signal dot_res: fp32
-    let dot = VecDot<fp32, 3> {
+    inst dot = VecDot<fp32, 3> {
         a: v,
         b: v,
-        result: dot_res
     }
+    dot_res = dot.result
     // Use CORDIC sqrt for synthesizable hardware
     signal sqrt_res: fp32
-    let sqrt = CordicSqrt {
+    inst sqrt = CordicSqrt {
         value: dot_res,
-        result: sqrt_res
     }
+    sqrt_res = sqrt.result
     sqrt_res
 }

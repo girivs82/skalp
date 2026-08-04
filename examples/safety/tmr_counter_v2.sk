@@ -138,22 +138,22 @@ impl DualVoterWithComparator {
     signal disagree_2: bit
 
     // Voter 1 (primary)
-    let voter1 = TmrVoterUnit {
+    inst voter1 = TmrVoterUnit {
         a: a,
         b: b,
         c: c,
-        voted: voted_1,
-        disagreement: disagree_1
     }
+    voted_1 = voter1.voted
+    disagree_1 = voter1.disagreement
 
     // Voter 2 (redundant) - same inputs, should produce same output
-    let voter2 = TmrVoterUnit {
+    inst voter2 = TmrVoterUnit {
         a: a,
         b: b,
         c: c,
-        voted: voted_2,
-        disagreement: disagree_2
     }
+    voted_2 = voter2.voted
+    disagree_2 = voter2.disagreement
 
     // Use voter 1 output as primary
     voted = voted_1
@@ -186,36 +186,36 @@ impl TmrCounterV2 {
     signal channel_fault: bit
 
     // Three DIVERSE counter channels
-    let ch_a = CounterChannelA {
+    inst ch_a = CounterChannelA {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a
     }
+    count_a = ch_a.count
 
-    let ch_b = CounterChannelB {
+    inst ch_b = CounterChannelB {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b
     }
+    count_b = ch_b.count
 
-    let ch_c = CounterChannelC {
+    inst ch_c = CounterChannelC {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c
     }
+    count_c = ch_c.count
 
     // Dual voter with comparator (SM-of-SM)
-    let dual_voter = DualVoterWithComparator {
+    inst dual_voter = DualVoterWithComparator {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted_out,
-        voter_fault: voter_fault,
-        channel_fault: channel_fault
     }
+    voted_out = dual_voter.voted
+    voter_fault = dual_voter.voter_fault
+    channel_fault = dual_voter.channel_fault
 
     count = voted_out
     fault = voter_fault | channel_fault

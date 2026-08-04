@@ -323,19 +323,19 @@ impl Pipeline2 {
 
     data_out = stage2_out
 
-    let stage1 = Register {
+    inst stage1 = Register {
         clk: clk,
         rst: rst,
         data_in: data_in,
-        data_out: stage1_out
     }
+    stage1_out = stage1.data_out
 
-    let stage2 = Register {
+    inst stage2 = Register {
         clk: clk,
         rst: rst,
         data_in: stage1_out,
-        data_out: stage2_out
     }
+    stage2_out = stage2.data_out
 }
 "#;
 
@@ -436,19 +436,19 @@ impl Pipeline2 {
 
     data_out = stage2_out
 
-    let stage1 = Register {
+    inst stage1 = Register {
         clk: clk,
         rst: rst,
         data_in: data_in,
-        data_out: stage1_out
     }
+    stage1_out = stage1.data_out
 
-    let stage2 = Register {
+    inst stage2 = Register {
         clk: clk,
         rst: rst,
         data_in: stage1_out,
-        data_out: stage2_out
     }
+    stage2_out = stage2.data_out
 }
 "#;
 
@@ -752,12 +752,12 @@ entity FifoWrapper {
 }
 
 impl FifoWrapper {
-    let fifo = SimpleFifo {
-        clk:     clk,
-        rst:     rst,
-        wr_en:   wr_en,
+    inst fifo = SimpleFifo {
+        clk: clk,
+        rst: rst,
+        wr_en: wr_en,
         wr_data: wr_data,
-        rd_en:   rd_en
+        rd_en: rd_en,
     }
 
     rd_data = fifo.rd_data

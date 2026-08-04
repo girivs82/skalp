@@ -134,6 +134,73 @@ impl MirCompiler {
             }
         }
 
+        // TRIAGE #11 + legacy-let removal (reachability-scoped): every
+        // reachable instance must use `inst`, and every input port of the
+        // instantiated entity must be connected — the docs promise
+        // "forgetting a port is a compile error". Cross-file and generic
+        // (post-monomorphization) instances are covered here; the
+        // hir_builder check only sees same-file entities.
+        {
+            use skalp_frontend::hir::HirPortDirection;
+            let mut inst_errors: Vec<String> = Vec::new();
+            for implementation in &hir.implementations {
+                let Some(owner) = hir.entities.iter().find(|e| e.id == implementation.entity)
+                else {
+                    continue;
+                };
+                if !reachable_names.contains(&owner.name) {
+                    continue;
+                }
+                for instance in &implementation.instances {
+                    let target = hir.entities.iter().find(|e| e.id == instance.entity);
+                    let target_name = target.map(|e| e.name.as_str()).unwrap_or("<unknown>");
+                    if !instance.is_inst {
+                        inst_errors.push(format!(
+                            "entity instantiation with `let` was removed — use `inst {n} = {t} {{ inputs... }}` and read outputs via `{n}.<port>` (in entity `{o}`)",
+                            n = instance.name,
+                            t = target_name,
+                            o = owner.name
+                        ));
+                        continue;
+                    }
+                    let Some(target) = target else { continue };
+                    if !target.generics.is_empty() {
+                        // Generic template — the monomorphized specialization
+                        // (also present post-mono) carries the real ports.
+                        continue;
+                    }
+                    for port in &target.ports {
+                        if matches!(
+                            port.direction,
+                            HirPortDirection::Input | HirPortDirection::Bidirectional
+                        ) && !instance.connections.iter().any(|c| c.port == port.name)
+                        {
+                            inst_errors.push(format!(
+                                "input port `{p}` of `{t}` is not connected in `inst {n}` (in entity `{o}`)",
+                                p = port.name,
+                                t = target_name,
+                                n = instance.name,
+                                o = owner.name
+                            ));
+                        }
+                    }
+                }
+            }
+            if !inst_errors.is_empty() {
+                let mut seen = std::collections::HashSet::new();
+                let unique: Vec<&String> = inst_errors.iter().filter(|m| seen.insert(*m)).collect();
+                return Err(format!(
+                    "instance check failed with {} error(s):\n  {}",
+                    unique.len(),
+                    unique
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                ));
+            }
+        }
+
         // Fail on undriven outputs: an output port nothing writes to is a
         // dropped-statement lowering bug or a design error — the emitted
         // netlist would drive the port from nothing.
@@ -147,6 +214,29 @@ impl MirCompiler {
                     undriven.len(),
                     undriven.join("\n  ")
                 ));
+            }
+        }
+
+        // Normalization: a signal driven by a CONTINUOUS assignment is a
+        // wire — its declaration initializer is dead. Keeping both made the
+        // behavioral SIR simulator prefer the initial value (output stuck at
+        // the init) while gates used the assign, and emitted redundant
+        // `logic x = 0; assign x = ...` SV. Exposed by inst dot-access
+        // wiring, which assigns onto user signals that carry `= 0` inits.
+        for module in &mut mir.modules {
+            use std::collections::HashSet;
+            let assigned: HashSet<crate::mir::SignalId> = module
+                .assignments
+                .iter()
+                .filter_map(|a| match &a.lhs {
+                    crate::mir::LValue::Signal(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            for signal in &mut module.signals {
+                if signal.initial.is_some() && assigned.contains(&signal.id) {
+                    signal.initial = None;
+                }
             }
         }
 

@@ -172,29 +172,49 @@ impl EccRegister32 {
     signal din_2: bit[8] = (data_in >> 16) as bit[8]
     signal din_3: bit[8] = (data_in >> 24) as bit[8]
 
-    let byte0 = EccMemory8 {
-        clk: clk, rst: rst, write_en: write_en,
-        data_in: din_0, data_out: data_out_0,
-        single_bit_error: sbe_0, double_bit_error: dbe_0, ecc_error: err_0
+    inst byte0 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: write_en,
+        data_in: din_0,
     }
+    data_out_0 = byte0.data_out
+    sbe_0 = byte0.single_bit_error
+    dbe_0 = byte0.double_bit_error
+    err_0 = byte0.ecc_error
 
-    let byte1 = EccMemory8 {
-        clk: clk, rst: rst, write_en: write_en,
-        data_in: din_1, data_out: data_out_1,
-        single_bit_error: sbe_1, double_bit_error: dbe_1, ecc_error: err_1
+    inst byte1 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: write_en,
+        data_in: din_1,
     }
+    data_out_1 = byte1.data_out
+    sbe_1 = byte1.single_bit_error
+    dbe_1 = byte1.double_bit_error
+    err_1 = byte1.ecc_error
 
-    let byte2 = EccMemory8 {
-        clk: clk, rst: rst, write_en: write_en,
-        data_in: din_2, data_out: data_out_2,
-        single_bit_error: sbe_2, double_bit_error: dbe_2, ecc_error: err_2
+    inst byte2 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: write_en,
+        data_in: din_2,
     }
+    data_out_2 = byte2.data_out
+    sbe_2 = byte2.single_bit_error
+    dbe_2 = byte2.double_bit_error
+    err_2 = byte2.ecc_error
 
-    let byte3 = EccMemory8 {
-        clk: clk, rst: rst, write_en: write_en,
-        data_in: din_3, data_out: data_out_3,
-        single_bit_error: sbe_3, double_bit_error: dbe_3, ecc_error: err_3
+    inst byte3 = EccMemory8 {
+        clk: clk,
+        rst: rst,
+        write_en: write_en,
+        data_in: din_3,
     }
+    data_out_3 = byte3.data_out
+    sbe_3 = byte3.single_bit_error
+    dbe_3 = byte3.double_bit_error
+    err_3 = byte3.ecc_error
 
     // Combine output bytes
     data_out = (data_out_3 as bit[32]) * 16777216 + (data_out_2 as bit[32]) * 65536 +

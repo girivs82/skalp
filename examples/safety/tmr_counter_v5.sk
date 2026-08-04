@@ -148,40 +148,40 @@ impl TmrCounterV5 {
     signal voter_fault: bit
     signal gen_parity: bit
 
-    let ch_a = CounterChannelA {
+    inst ch_a = CounterChannelA {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_a
     }
+    count_a = ch_a.count
 
-    let ch_b = CounterChannelB {
+    inst ch_b = CounterChannelB {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_b
     }
+    count_b = ch_b.count
 
-    let ch_c = CounterChannelC {
+    inst ch_c = CounterChannelC {
         clk: clk,
         rst: rst,
         enable: enable,
-        count: count_c
     }
+    count_c = ch_c.count
 
-    let voter = TmrVoter {
+    inst voter = TmrVoter {
         a: count_a,
         b: count_b,
         c: count_c,
-        voted: voted,
-        channel_fault: voter_fault
     }
+    voted = voter.voted
+    voter_fault = voter.channel_fault
 
     // Generate parity from voted output
-    let parity_gen = ParityGen {
+    inst parity_gen = ParityGen {
         data: voted,
-        parity: gen_parity
     }
+    gen_parity = parity_gen.parity
 
     // Outputs
     count = voted
@@ -189,10 +189,10 @@ impl TmrCounterV5 {
 
     // Check parity matches between original and regenerated
     signal check_parity: bit
-    let parity_check = ParityGen {
+    inst parity_check = ParityGen {
         data: count,
-        parity: check_parity
     }
+    check_parity = parity_check.parity
 
     // Parity error if generated != checked (detects output path errors)
     signal parity_error: bit = if gen_parity == check_parity { 0 } else { 1 }

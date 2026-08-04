@@ -28,23 +28,23 @@ impl FpMAC<const F: FloatFormat> {
     signal product_flags: bit[5]
 
     // Multiply a * b
-    let multiplier = FpMul<F> {
+    inst multiplier = FpMul<F> {
         a: a,
         b: b,
-        result: product,
-        flags: product_flags
     }
+    product = multiplier.result
+    product_flags = multiplier.flags
 
     signal sum: fp<F>
     signal sum_flags: bit[5]
 
     // Add c
-    let adder = FpAdd<F> {
+    inst adder = FpAdd<F> {
         a: product,
         b: c,
-        result: sum,
-        flags: sum_flags
     }
+    sum = adder.result
+    sum_flags = adder.flags
 
     // Register output
     signal accumulator: fp<F> = fp<F>::ZERO
@@ -75,11 +75,11 @@ impl LightingPipeline<T: Numeric> {
     signal dot_result: T
 
     // Calculate N · L (diffuse component)
-    let dot = VecDot<T, 3> {
+    inst dot = VecDot<T, 3> {
         a: normal,
         b: light_dir,
-        result: dot_result
     }
+    dot_result = dot.result
 
     // Clamp to [0, 1]
     signal diffuse: T = (dot_result < T::ZERO) ? T::ZERO : dot_result
@@ -121,11 +121,11 @@ impl Particle<T: Numeric> {
     }
 
     signal new_vel: vec3<T>
-    let vel_update = VecAdd<T, 3> {
+    inst vel_update = VecAdd<T, 3> {
         a: vel,
         b: scaled_force,
-        result: new_vel
     }
+    new_vel = vel_update.result
 
     // p' = p + v * dt
     signal scaled_vel: vec3<T>
@@ -134,11 +134,11 @@ impl Particle<T: Numeric> {
     }
 
     signal new_pos: vec3<T>
-    let pos_update = VecAdd<T, 3> {
+    inst pos_update = VecAdd<T, 3> {
         a: pos,
         b: scaled_vel,
-        result: new_pos
     }
+    new_pos = pos_update.result
 
     on(clk.rise) {
         if reset {
@@ -175,13 +175,13 @@ impl FIR<const NUM_TAPS: nat> {
     signal product_overflow: bit[NUM_TAPS]
 
     for i in 0..NUM_TAPS {
-        let multiplier = FixedMul<32, 16, true> {
+        inst multiplier = FixedMul<32, 16, true> {
             a: delays[i],
             b: coeffs[i],
             saturate: true,
-            result: products[i],
-            overflow: product_overflow[i]
         }
+        products[i] = multiplier.result
+        product_overflow[i] = multiplier.overflow
     }
 
     // Sum all products
@@ -265,12 +265,11 @@ entity HeterogeneousPipeline {
 impl HeterogeneousPipeline {
     // Stage 1: FP preprocessing
     signal fp_squared: fp32
-    let squarer = FpMul<IEEE754_32> {
+    inst squarer = FpMul<IEEE754_32> {
         a: fp_input,
         b: fp_input,
-        result: fp_squared,
-        flags: _
     }
+    fp_squared = squarer.result
 
     // Stage 2: Convert to fixed-point
     // (This would use a proper conversion entity in real code)
@@ -278,23 +277,22 @@ impl HeterogeneousPipeline {
 
     // Stage 3: Fixed-point FIR filter
     signal filtered: q16_16
-    let fir = FIR<8> {
+    inst fir = FIR<8> {
         clk: clk,
         sample: fixed_input,
         coeffs: fixed_coeffs,
-        filtered: filtered
     }
+    filtered = fir.filtered
 
     // Stage 4: Convert back to FP
     signal fp_output: fp32 = filtered as fp32
 
     // Stage 5: FP square root
     signal sqrt_result: fp32
-    let sqrt = FpSqrt<IEEE754_32> {
+    inst sqrt = FpSqrt<IEEE754_32> {
         x: fp_output,
-        result: sqrt_result,
-        flags: _
     }
+    sqrt_result = sqrt.result
 
     result = enable ? sqrt_result : fp32::ZERO
 }
@@ -316,101 +314,93 @@ entity RaySphereIntersect {
 impl RaySphereIntersect {
     // Calculate ray origin - sphere center
     signal oc: vec3<fp32>
-    let sub = VecSub<fp32, 3> {
+    inst sub = VecSub<fp32, 3> {
         a: ray_origin,
         b: sphere_center,
-        result: oc
     }
+    oc = sub.result
 
     // a = dot(ray_dir, ray_dir) = 1 (normalized)
     signal a: fp32 = 1.0
 
     // b = 2 * dot(oc, ray_dir)
     signal dot_oc_dir: fp32
-    let dot1 = VecDot<fp32, 3> {
+    inst dot1 = VecDot<fp32, 3> {
         a: oc,
         b: ray_dir,
-        result: dot_oc_dir
     }
+    dot_oc_dir = dot1.result
 
     signal b: fp32
-    let b_calc = FpAdd<IEEE754_32> {
+    inst b_calc = FpAdd<IEEE754_32> {
         a: dot_oc_dir,
         b: dot_oc_dir,
-        result: b,
-        flags: _
     }
+    b = b_calc.result
 
     // c = dot(oc, oc) - radius^2
     signal dot_oc_oc: fp32
-    let dot2 = VecDot<fp32, 3> {
+    inst dot2 = VecDot<fp32, 3> {
         a: oc,
         b: oc,
-        result: dot_oc_oc
     }
+    dot_oc_oc = dot2.result
 
     signal radius_sq: fp32
-    let radius_sq_calc = FpMul<IEEE754_32> {
+    inst radius_sq_calc = FpMul<IEEE754_32> {
         a: sphere_radius,
         b: sphere_radius,
-        result: radius_sq,
-        flags: _
     }
+    radius_sq = radius_sq_calc.result
 
     signal c: fp32
-    let c_calc = FpSub<IEEE754_32> {
+    inst c_calc = FpSub<IEEE754_32> {
         a: dot_oc_oc,
         b: radius_sq,
-        result: c,
-        flags: _
     }
+    c = c_calc.result
 
     // discriminant = b^2 - 4*a*c = b^2 - 4*c
     signal b_sq: fp32
-    let b_sq_calc = FpMul<IEEE754_32> {
+    inst b_sq_calc = FpMul<IEEE754_32> {
         a: b,
         b: b,
-        result: b_sq,
-        flags: _
     }
+    b_sq = b_sq_calc.result
 
     signal four_c: fp32 = c * 4.0  // Would use FpMul in real code
 
     signal discriminant: fp32
-    let disc_calc = FpSub<IEEE754_32> {
+    inst disc_calc = FpSub<IEEE754_32> {
         a: b_sq,
         b: four_c,
-        result: discriminant,
-        flags: _
     }
+    discriminant = disc_calc.result
 
     // Hit if discriminant >= 0
     hit = (discriminant >= 0.0)
 
     // Distance = (-b - sqrt(discriminant)) / 2a = (-b - sqrt(disc)) / 2
     signal sqrt_disc: fp32
-    let sqrt_calc = FpSqrt<IEEE754_32> {
+    inst sqrt_calc = FpSqrt<IEEE754_32> {
         x: discriminant,
-        result: sqrt_disc,
-        flags: _
     }
+    sqrt_disc = sqrt_calc.result
 
     signal neg_b: fp32 = -b
     signal numerator: fp32
-    let numer_calc = FpSub<IEEE754_32> {
+    inst numer_calc = FpSub<IEEE754_32> {
         a: neg_b,
         b: sqrt_disc,
-        result: numerator,
-        flags: _
     }
+    numerator = numer_calc.result
 
     signal dist_raw: fp32
-    let dist_calc = FpDiv<IEEE754_32> {
+    inst dist_calc = FpDiv<IEEE754_32> {
         a: numerator,
         b: 2.0,
-        result: dist_raw,
-        flags: _
     }
+    dist_raw = dist_calc.result
 
     distance = hit ? dist_raw : 3.4028235e38  // fp32 max value
 }
@@ -451,14 +441,14 @@ entity StdlibShowcase {
 
 impl StdlibShowcase {
     // FP32 MAC
-    let mac = FpMAC<IEEE754_32> {
+    inst mac = FpMAC<IEEE754_32> {
         clk: clk,
         a: mac_a,
         b: mac_b,
         c: mac_c,
         enable: !reset,
-        result: mac_result
     }
+    mac_result = mac.result
 
     // Lighting
     signal ambient: fp32 = 0.1
@@ -472,24 +462,23 @@ impl StdlibShowcase {
 
     // Physics (FP32 version)
     signal dt: fp32 = 0.016  // ~60 FPS
-    let particle = Particle<fp32> {
+    inst particle = Particle<fp32> {
         clk: clk,
         reset: reset,
         force: force,
         dt: dt,
-        position: particle_pos,
-        velocity: _
     }
+    particle_pos = particle.position
 
     // Ray tracing
-    let ray_intersect = RaySphereIntersect {
+    inst ray_intersect = RaySphereIntersect {
         ray_origin: ray_origin,
         ray_dir: ray_dir,
         sphere_center: sphere_center,
         sphere_radius: sphere_radius,
-        hit: ray_hit,
-        distance: ray_distance
     }
+    ray_hit = ray_intersect.hit
+    ray_distance = ray_intersect.distance
 }
 
 // ============================================================================

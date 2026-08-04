@@ -99,22 +99,34 @@ impl DualCommandProcessor {
     signal checked_throttle: bit[8]
     signal throttle_mismatch: bit
 
-    let ch_a = CommandChannel {
-        clk: clk, rst: rst,
-        cmd_valid: cmd_valid, cmd_throttle: cmd_throttle, cmd_enable: cmd_enable,
-        validated_throttle: throttle_a, validated_enable: enable_a, cmd_error: error_a
+    inst ch_a = CommandChannel {
+        clk: clk,
+        rst: rst,
+        cmd_valid: cmd_valid,
+        cmd_throttle: cmd_throttle,
+        cmd_enable: cmd_enable,
     }
+    throttle_a = ch_a.validated_throttle
+    enable_a = ch_a.validated_enable
+    error_a = ch_a.cmd_error
 
-    let ch_b = CommandChannel {
-        clk: clk, rst: rst,
-        cmd_valid: cmd_valid, cmd_throttle: cmd_throttle, cmd_enable: cmd_enable,
-        validated_throttle: throttle_b, validated_enable: enable_b, cmd_error: error_b
+    inst ch_b = CommandChannel {
+        clk: clk,
+        rst: rst,
+        cmd_valid: cmd_valid,
+        cmd_throttle: cmd_throttle,
+        cmd_enable: cmd_enable,
     }
+    throttle_b = ch_b.validated_throttle
+    enable_b = ch_b.validated_enable
+    error_b = ch_b.cmd_error
 
-    let throttle_cmp = ByteComparator {
-        a: throttle_a, b: throttle_b,
-        matched: checked_throttle, mismatch: throttle_mismatch
+    inst throttle_cmp = ByteComparator {
+        a: throttle_a,
+        b: throttle_b,
     }
+    checked_throttle = throttle_cmp.matched
+    throttle_mismatch = throttle_cmp.mismatch
 
     validated_throttle = checked_throttle
     validated_enable = enable_a
@@ -187,15 +199,25 @@ impl DualPWMGenerator {
     signal active_a: bit
     signal active_b: bit
 
-    let ch_a = PWMChannel {
-        clk: clk, rst: rst, throttle: throttle, enable: enable, force_off: force_off,
-        pwm_out: pwm_a, pwm_active: active_a
+    inst ch_a = PWMChannel {
+        clk: clk,
+        rst: rst,
+        throttle: throttle,
+        enable: enable,
+        force_off: force_off,
     }
+    pwm_a = ch_a.pwm_out
+    active_a = ch_a.pwm_active
 
-    let ch_b = PWMChannel {
-        clk: clk, rst: rst, throttle: throttle, enable: enable, force_off: force_off,
-        pwm_out: pwm_b, pwm_active: active_b
+    inst ch_b = PWMChannel {
+        clk: clk,
+        rst: rst,
+        throttle: throttle,
+        enable: enable,
+        force_off: force_off,
     }
+    pwm_b = ch_b.pwm_out
+    active_b = ch_b.pwm_active
 
     pwm_out = pwm_a
     pwm_active = active_a
@@ -297,12 +319,45 @@ impl TmrCurrentMonitor {
     signal fault_oc: bit
     signal fault_valid: bit
 
-    let ch_a = CurrentChannel { clk: clk, rst: rst, current_adc: current_adc, threshold: threshold, overcurrent: oc_a, current_valid: valid_a }
-    let ch_b = CurrentChannel { clk: clk, rst: rst, current_adc: current_adc, threshold: threshold, overcurrent: oc_b, current_valid: valid_b }
-    let ch_c = CurrentChannel { clk: clk, rst: rst, current_adc: current_adc, threshold: threshold, overcurrent: oc_c, current_valid: valid_c }
+    inst ch_a = CurrentChannel {
+        clk: clk,
+        rst: rst,
+        current_adc: current_adc,
+        threshold: threshold,
+    }
+    oc_a = ch_a.overcurrent
+    valid_a = ch_a.current_valid
+    inst ch_b = CurrentChannel {
+        clk: clk,
+        rst: rst,
+        current_adc: current_adc,
+        threshold: threshold,
+    }
+    oc_b = ch_b.overcurrent
+    valid_b = ch_b.current_valid
+    inst ch_c = CurrentChannel {
+        clk: clk,
+        rst: rst,
+        current_adc: current_adc,
+        threshold: threshold,
+    }
+    oc_c = ch_c.overcurrent
+    valid_c = ch_c.current_valid
 
-    let voter_oc = BitVoter { a: oc_a, b: oc_b, c: oc_c, voted: voted_oc, fault: fault_oc }
-    let voter_valid = BitVoter { a: valid_a, b: valid_b, c: valid_c, voted: voted_valid, fault: fault_valid }
+    inst voter_oc = BitVoter {
+        a: oc_a,
+        b: oc_b,
+        c: oc_c,
+    }
+    voted_oc = voter_oc.voted
+    fault_oc = voter_oc.fault
+    inst voter_valid = BitVoter {
+        a: valid_a,
+        b: valid_b,
+        c: valid_c,
+    }
+    voted_valid = voter_valid.voted
+    fault_valid = voter_valid.fault
 
     overcurrent = voted_oc
     current_valid = voted_valid
@@ -367,8 +422,22 @@ impl DualWatchdog {
     signal healthy_a: bit
     signal healthy_b: bit
 
-    let wd_a = WatchdogChannel { clk: clk, rst: rst, kick: kick, timeout_limit: timeout_limit, timeout: timeout_a, healthy: healthy_a }
-    let wd_b = WatchdogChannel { clk: clk, rst: rst, kick: kick, timeout_limit: timeout_limit, timeout: timeout_b, healthy: healthy_b }
+    inst wd_a = WatchdogChannel {
+        clk: clk,
+        rst: rst,
+        kick: kick,
+        timeout_limit: timeout_limit,
+    }
+    timeout_a = wd_a.timeout
+    healthy_a = wd_a.healthy
+    inst wd_b = WatchdogChannel {
+        clk: clk,
+        rst: rst,
+        kick: kick,
+        timeout_limit: timeout_limit,
+    }
+    timeout_b = wd_b.timeout
+    healthy_b = wd_b.healthy
 
     timeout = timeout_a
     healthy = healthy_a
@@ -484,13 +553,61 @@ impl TmrSafeStateController {
     // Combined fault input includes SM faults
     signal combined_fault: bit = fault_cmd | fault_sm
 
-    let ch_a = SafeStateChannel { clk: clk, rst: rst, fault_cmd: combined_fault, fault_overcurrent: fault_overcurrent, fault_watchdog: fault_watchdog, fault_clear: fault_clear, safe_state: ss_a, force_motor_off: fmo_a, fault_latched: fl_a }
-    let ch_b = SafeStateChannel { clk: clk, rst: rst, fault_cmd: combined_fault, fault_overcurrent: fault_overcurrent, fault_watchdog: fault_watchdog, fault_clear: fault_clear, safe_state: ss_b, force_motor_off: fmo_b, fault_latched: fl_b }
-    let ch_c = SafeStateChannel { clk: clk, rst: rst, fault_cmd: combined_fault, fault_overcurrent: fault_overcurrent, fault_watchdog: fault_watchdog, fault_clear: fault_clear, safe_state: ss_c, force_motor_off: fmo_c, fault_latched: fl_c }
+    inst ch_a = SafeStateChannel {
+        clk: clk,
+        rst: rst,
+        fault_cmd: combined_fault,
+        fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog,
+        fault_clear: fault_clear,
+    }
+    ss_a = ch_a.safe_state
+    fmo_a = ch_a.force_motor_off
+    fl_a = ch_a.fault_latched
+    inst ch_b = SafeStateChannel {
+        clk: clk,
+        rst: rst,
+        fault_cmd: combined_fault,
+        fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog,
+        fault_clear: fault_clear,
+    }
+    ss_b = ch_b.safe_state
+    fmo_b = ch_b.force_motor_off
+    fl_b = ch_b.fault_latched
+    inst ch_c = SafeStateChannel {
+        clk: clk,
+        rst: rst,
+        fault_cmd: combined_fault,
+        fault_overcurrent: fault_overcurrent,
+        fault_watchdog: fault_watchdog,
+        fault_clear: fault_clear,
+    }
+    ss_c = ch_c.safe_state
+    fmo_c = ch_c.force_motor_off
+    fl_c = ch_c.fault_latched
 
-    let voter_ss = SafeStateVoterDual { a: ss_a, b: ss_b, c: ss_c, voted: voted_ss, fault: fault_ss }
-    let voter_fmo = SafeStateVoterDual { a: fmo_a, b: fmo_b, c: fmo_c, voted: voted_fmo, fault: fault_fmo }
-    let voter_fl = SafeStateVoterDual { a: fl_a, b: fl_b, c: fl_c, voted: voted_fl, fault: fault_fl }
+    inst voter_ss = SafeStateVoterDual {
+        a: ss_a,
+        b: ss_b,
+        c: ss_c,
+    }
+    voted_ss = voter_ss.voted
+    fault_ss = voter_ss.fault
+    inst voter_fmo = SafeStateVoterDual {
+        a: fmo_a,
+        b: fmo_b,
+        c: fmo_c,
+    }
+    voted_fmo = voter_fmo.voted
+    fault_fmo = voter_fmo.fault
+    inst voter_fl = SafeStateVoterDual {
+        a: fl_a,
+        b: fl_b,
+        c: fl_c,
+    }
+    voted_fl = voter_fl.voted
+    fault_fl = voter_fl.fault
 
     safe_state = voted_ss
     force_motor_off = voted_fmo
@@ -547,38 +664,62 @@ impl MotorControlUnitV4 {
     // All SM faults aggregated
     signal all_sm_faults: bit = cmd_fault | pwm_err | curr_tmr_err | wd_err
 
-    let cmd_proc = DualCommandProcessor {
-        clk: clk, rst: rst,
-        cmd_valid: cmd_valid, cmd_throttle: cmd_throttle, cmd_enable: cmd_enable,
-        validated_throttle: val_throttle, validated_enable: val_enable,
-        cmd_error: cmd_err, cmd_fault: cmd_fault
+    inst cmd_proc = DualCommandProcessor {
+        clk: clk,
+        rst: rst,
+        cmd_valid: cmd_valid,
+        cmd_throttle: cmd_throttle,
+        cmd_enable: cmd_enable,
     }
+    val_throttle = cmd_proc.validated_throttle
+    val_enable = cmd_proc.validated_enable
+    cmd_err = cmd_proc.cmd_error
+    cmd_fault = cmd_proc.cmd_fault
 
-    let pwm_gen = DualPWMGenerator {
-        clk: clk, rst: rst,
-        throttle: val_throttle, enable: val_enable, force_off: force_off,
-        pwm_out: pwm_signal, pwm_active: pwm_is_active, pwm_fault: pwm_err
+    inst pwm_gen = DualPWMGenerator {
+        clk: clk,
+        rst: rst,
+        throttle: val_throttle,
+        enable: val_enable,
+        force_off: force_off,
     }
+    pwm_signal = pwm_gen.pwm_out
+    pwm_is_active = pwm_gen.pwm_active
+    pwm_err = pwm_gen.pwm_fault
 
-    let curr_mon = TmrCurrentMonitor {
-        clk: clk, rst: rst,
-        current_adc: current_adc, threshold: overcurrent_threshold,
-        overcurrent: oc_detected, current_valid: current_ok, tmr_fault: curr_tmr_err
+    inst curr_mon = TmrCurrentMonitor {
+        clk: clk,
+        rst: rst,
+        current_adc: current_adc,
+        threshold: overcurrent_threshold,
     }
+    oc_detected = curr_mon.overcurrent
+    current_ok = curr_mon.current_valid
+    curr_tmr_err = curr_mon.tmr_fault
 
-    let watchdog = DualWatchdog {
-        clk: clk, rst: rst,
-        kick: watchdog_kick, timeout_limit: watchdog_timeout,
-        timeout: wd_timeout, healthy: wd_healthy, watchdog_fault: wd_err
+    inst watchdog = DualWatchdog {
+        clk: clk,
+        rst: rst,
+        kick: watchdog_kick,
+        timeout_limit: watchdog_timeout,
     }
+    wd_timeout = watchdog.timeout
+    wd_healthy = watchdog.healthy
+    wd_err = watchdog.watchdog_fault
 
-    let safe_ctrl = TmrSafeStateController {
-        clk: clk, rst: rst,
-        fault_cmd: cmd_err, fault_overcurrent: oc_detected, fault_watchdog: wd_timeout,
-        fault_sm: all_sm_faults, fault_clear: fault_clear,
-        safe_state: safe_state, force_motor_off: force_off,
-        fault_latched: fault_latch, tmr_fault: ss_tmr_err
+    inst safe_ctrl = TmrSafeStateController {
+        clk: clk,
+        rst: rst,
+        fault_cmd: cmd_err,
+        fault_overcurrent: oc_detected,
+        fault_watchdog: wd_timeout,
+        fault_sm: all_sm_faults,
+        fault_clear: fault_clear,
     }
+    safe_state = safe_ctrl.safe_state
+    force_off = safe_ctrl.force_motor_off
+    fault_latch = safe_ctrl.fault_latched
+    ss_tmr_err = safe_ctrl.tmr_fault
 
     motor_pwm = pwm_signal
     motor_active = pwm_is_active

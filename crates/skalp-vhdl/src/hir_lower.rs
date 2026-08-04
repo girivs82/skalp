@@ -2810,6 +2810,8 @@ impl VhdlHirBuilder {
         }
 
         Some(HirInstance {
+            // VHDL component instantiation, not skalp legacy `let` syntax
+            is_inst: true,
             id: self.alloc_instance_id(),
             name: instance_name,
             entity: entity_id,

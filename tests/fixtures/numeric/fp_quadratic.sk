@@ -20,10 +20,10 @@ impl FpQuadratic {
 
     // Directly instantiate CordicSqrt entity
     signal sqrt_disc: fp32
-    let sqrt_op = CordicSqrt {
+    inst sqrt_op = CordicSqrt {
         value: discriminant,
-        result: sqrt_disc
     }
+    sqrt_disc = sqrt_op.result
 
     // (-b + sqrt(discriminant)) / (2a)
     signal neg_b: fp32 = -b
