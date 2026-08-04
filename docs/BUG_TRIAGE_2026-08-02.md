@@ -169,11 +169,32 @@ codegen gaps; **P3** = hygiene.
    missing value falls into the last arm. Published docs (design-choices blog, tutorial
    ch07, projects page) all claim this is a compile error.
 
-10. **CDC diagnostics stripped.** `report_cdc_violations` in
-    `skalp-mir/src/compiler.rs:149` computes severity strings and counts, then prints
-    nothing (`// Violation details removed`, `// Summary removed`). Critical violations
-    fail the build with only a count — no signal names, no locations. Restore the
-    rendering; this is the headline safety feature.
+10. **FIXED (2026-08-04). CDC diagnostics stripped — and the analysis was
+    vacuous.** `report_cdc_violations` computed severity strings then printed
+    nothing, and critical failures reported only a count. Restoring the
+    rendering exposed the deeper problem: NO design ever produced a
+    violation, because no signal ever had a clock domain — hir_to_mir never
+    populated `signal.clock_domain`, and the stamps hir_builder DID write
+    used pre-monomorphization port IDs (stale after specialization remaps
+    them; consulting them produced false CRITICALs on the tutorial
+    AsyncFIFO). **Fixes (self-contained in the CDC analyzer):** rendering
+    restored with per-violation details; descriptions name the offending
+    signal; clock ports without MIR domains (triage #13's lifetime gap) get
+    implicit port-ID-keyed domains matching hir_builder's scheme; signal
+    domains inferred from the assigning process (stale HIR stamps ignored);
+    domains propagate through combinational assignments to fixpoint (Gray
+    encodes of registered pointers are analyzed); severity policy —
+    crossings through LOGIC = CRITICAL (fails the build with details), bare
+    registered samples (synchronizer first stages) = WARNING, samples into
+    #[cdc]-annotated targets = INFO. **Verified:** tutorial ch08 AsyncFIFO
+    reports exactly its two true crossings as warnings and builds + passes
+    full EC; arithmetic crossing fails the build naming the signal;
+    single-clock designs silent; EC sweep green; corpus unchanged; suite
+    zero regressions. Tests: test_triage10_cdc_critical_fails_build_with_
+    details / _bare_sample_and_annotation_build /
+    _comb_derived_domain_propagates. REMAINING follow-ups: sync_stages-vs-
+    chain-depth consistency check; #13 lifetime plumbing so 'wr/'rd names
+    appear instead of numeric domain ids.
 
 11. **No missing-port-connection check.** Unconnected instance inputs are silent
     (`unconnected`/`nc`/`open` attribute exists but absence of a connection is not an

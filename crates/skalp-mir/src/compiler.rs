@@ -164,9 +164,17 @@ impl MirCompiler {
                 .collect();
 
             if !critical_violations.is_empty() {
+                let details: Vec<String> = critical_violations
+                    .iter()
+                    .map(|v| {
+                        let module = v.location.as_deref().unwrap_or("?");
+                        format!("[{}] {}", module, v.description)
+                    })
+                    .collect();
                 return Err(format!(
-                    "Compilation failed due to {} critical CDC violations",
-                    critical_violations.len()
+                    "Compilation failed due to {} critical CDC violation(s):\n  {}",
+                    critical_violations.len(),
+                    details.join("\n  ")
                 ));
             }
         }
@@ -383,7 +391,13 @@ impl MirCompiler {
 
         for module in &mir.modules {
             let mut analyzer = CdcAnalyzer::new();
-            let violations = analyzer.analyze_module(module);
+            let mut violations = analyzer.analyze_module(module);
+            // Carry the module name for diagnostics (TRIAGE #10)
+            for v in &mut violations {
+                if v.location.is_none() {
+                    v.location = Some(module.name.clone());
+                }
+            }
             all_violations.extend(violations);
         }
 
@@ -396,7 +410,11 @@ impl MirCompiler {
             return;
         }
 
-        for (i, violation) in violations.iter().enumerate() {
+        // TRIAGE #10: the rendering below had been stripped ("Violation
+        // details removed") — critical violations failed the build with only
+        // a count. Restored: one line per violation with severity, type,
+        // module (carried in `location`), and the analyzer's description.
+        for violation in violations.iter() {
             let severity_str = match violation.severity {
                 CdcSeverity::Critical => "CRITICAL",
                 CdcSeverity::Warning => "WARNING",
@@ -405,16 +423,24 @@ impl MirCompiler {
 
             let violation_type_str = match violation.violation_type {
                 crate::cdc_analysis::CdcViolationType::DirectCrossing => {
-                    "Direct Clock Domain Crossing"
+                    "direct clock-domain crossing"
                 }
                 crate::cdc_analysis::CdcViolationType::CombinationalMixing => {
-                    "Combinational Logic Mixing"
+                    "combinational logic mixing"
                 }
-                crate::cdc_analysis::CdcViolationType::AsyncResetCrossing => "Async Reset Crossing",
-                crate::cdc_analysis::CdcViolationType::ArithmeticMixing => "Arithmetic Mixing",
+                crate::cdc_analysis::CdcViolationType::AsyncResetCrossing => "async reset crossing",
+                crate::cdc_analysis::CdcViolationType::ArithmeticMixing => "arithmetic mixing",
             };
 
-            // Violation details removed
+            let where_str = violation
+                .location
+                .as_deref()
+                .map(|l| format!(" [{}]", l))
+                .unwrap_or_default();
+            eprintln!(
+                "CDC {}: {}{}: {}",
+                severity_str, violation_type_str, where_str, violation.description
+            );
         }
 
         // Summary
@@ -431,7 +457,10 @@ impl MirCompiler {
             .filter(|v| v.severity == CdcSeverity::Info)
             .count();
 
-        // Summary removed
+        eprintln!(
+            "CDC analysis: {} critical, {} warning(s), {} info",
+            critical_count, warning_count, info_count
+        );
     }
 }
 

@@ -93,17 +93,126 @@ impl CdcAnalyzer {
 
     /// Collect clock domain information from signals and ports
     fn collect_clock_domains(&mut self, module: &Module) {
-        // Collect signal clock domains
-        for signal in &module.signals {
-            if let Some(domain) = signal.clock_domain {
-                self.signal_domains.insert(signal.id, domain);
-            }
-        }
+        // TRIAGE #10: signal.clock_domain stamps from hir_builder are keyed
+        // by PRE-monomorphization port IDs — specialization remaps port IDs,
+        // so the stamps go stale and mismatch the analyzer's port-keyed
+        // scheme (false criticals on every specialized multi-clock design,
+        // e.g. the tutorial AsyncFIFO). The process-based inference below
+        // recomputes the same information consistently, so the stale stamps
+        // are intentionally NOT consulted.
 
         // Infer port clock domains from their types
         for port in &module.ports {
             if let Some(domain) = self.infer_port_clock_domain(port) {
                 self.port_domains.insert(port.id, domain);
+            }
+        }
+
+        // TRIAGE #10: clock-typed ports whose domain annotation never reached
+        // MIR (the clock<'x> lifetimes currently lower with domain: None —
+        // triage #13) each get an IMPLICIT domain keyed by the PORT ID —
+        // the SAME scheme hir_builder's infer_clock_domains uses for signal
+        // domains (`ClockDomainId(port_id.0)`), so process domains line up
+        // with the signal domains already stamped in HIR. Physically,
+        // distinct clock pins are distinct domains unless proven otherwise;
+        // single-clock designs stay single-domain.
+        for port in &module.ports {
+            use crate::mir::DataType;
+            if matches!(port.port_type, DataType::Clock { domain: None })
+                && !self.port_domains.contains_key(&port.id)
+            {
+                self.port_domains
+                    .insert(port.id, crate::mir::ClockDomainId(port.id.0));
+            }
+        }
+
+        // TRIAGE #10 (propagation, applied after process inference below):
+        // see the fixpoint loop at the end of this function.
+
+        // TRIAGE #10: infer signal domains from the process that assigns
+        // them. hir_to_mir never populates signal.clock_domain, so without
+        // this the analysis was vacuous — no signal ever had a domain and no
+        // crossing was ever reported. A signal written in a process clocked
+        // by domain D belongs to D (the standard CDC inference).
+        for process in &module.processes {
+            let Some(process_domain) = self.get_process_clock_domain(process) else {
+                continue;
+            };
+            let mut targets: Vec<crate::mir::SignalId> = Vec::new();
+            Self::collect_assigned_signals(&process.body.statements, &mut targets);
+            for sig in targets {
+                self.signal_domains.entry(sig).or_insert(process_domain);
+            }
+        }
+
+        // TRIAGE #10: propagate domains through combinational (continuous)
+        // assignments to fixpoint. A comb-derived signal like
+        // `wr_ptr_gray = wr_ptr ^ (wr_ptr >> 1)` belongs to its source's
+        // domain; without this, synchronizer first stages sampling such
+        // signals went completely unanalyzed. Only single-domain sources
+        // propagate — mixed-domain expressions are themselves flagged by
+        // the continuous-assign analysis.
+        loop {
+            let mut changed = false;
+            for assign in &module.assignments {
+                let LValue::Signal(target) = &assign.lhs else {
+                    continue;
+                };
+                if self.signal_domains.contains_key(target) {
+                    continue;
+                }
+                let src_domains = self.get_expression_clock_domains(&assign.rhs);
+                if src_domains.len() == 1 {
+                    let d = *src_domains.iter().next().unwrap();
+                    self.signal_domains.insert(*target, d);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Collect every signal assigned (whole or partial) in a statement list.
+    fn collect_assigned_signals(statements: &[Statement], out: &mut Vec<crate::mir::SignalId>) {
+        fn lvalue_base_signal(lv: &LValue) -> Option<crate::mir::SignalId> {
+            match lv {
+                LValue::Signal(id) => Some(*id),
+                LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
+                    lvalue_base_signal(base)
+                }
+                _ => None,
+            }
+        }
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(a) => {
+                    if let Some(id) = lvalue_base_signal(&a.lhs) {
+                        out.push(id);
+                    }
+                }
+                Statement::If(i) => {
+                    Self::collect_assigned_signals(&i.then_block.statements, out);
+                    if let Some(e) = &i.else_block {
+                        Self::collect_assigned_signals(&e.statements, out);
+                    }
+                }
+                Statement::Case(c) => {
+                    for item in &c.items {
+                        Self::collect_assigned_signals(&item.block.statements, out);
+                    }
+                    if let Some(d) = &c.default {
+                        Self::collect_assigned_signals(&d.statements, out);
+                    }
+                }
+                Statement::Block(b) => Self::collect_assigned_signals(&b.statements, out),
+                Statement::ResolvedConditional(rc) => {
+                    if let Some(id) = lvalue_base_signal(&rc.target) {
+                        out.push(id);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -207,7 +316,8 @@ impl CdcAnalyzer {
                                 violation_type: CdcViolationType::DirectCrossing,
                                 severity: CdcSeverity::Critical,
                                 description: format!(
-                                    "Assignment to signal in domain {:?} from process in domain {:?}",
+                                    "assignment to `{}` (domain {:?}) from a process clocked in domain {:?} — needs a synchronizer",
+                                    Self::lvalue_name(module, &assignment.lhs),
                                     target_domain, process_domain
                                 ),
                                 source_domain: Some(process_domain),
@@ -217,16 +327,48 @@ impl CdcAnalyzer {
                         }
                     }
 
-                    // Check for cross-domain reads in source expression
+                    // Check for cross-domain reads in source expression.
+                    //
+                    // TRIAGE #10 severity policy: a synchronizer's FIRST stage
+                    // legitimately samples a foreign-domain signal — a bare
+                    // registered copy (`ff1 = foreign`) is the standard 2-flop
+                    // pattern and must not fail the build. Bare samples are
+                    // WARNING (single-flop chains still deserve eyes), and
+                    // Info when the target signal carries a #[cdc] annotation
+                    // (documented intent). Crossings through LOGIC (arith,
+                    // comparisons, muxes on foreign signals) stay CRITICAL.
+                    let is_bare_sample = matches!(
+                        &assignment.rhs.kind,
+                        crate::mir::ExpressionKind::Ref(LValue::Signal(_) | LValue::Port(_))
+                    );
+                    let target_has_cdc_annotation = match &assignment.lhs {
+                        LValue::Signal(id) => module
+                            .signals
+                            .iter()
+                            .find(|s| s.id == *id)
+                            .is_some_and(|s| s.cdc_config.is_some()),
+                        _ => false,
+                    };
                     for source_domain in source_domains.iter() {
                         if let Some(process_domain) = process_domain {
                             if *source_domain != process_domain {
+                                let (severity, hint) = if target_has_cdc_annotation {
+                                    (CdcSeverity::Info, "#[cdc]-annotated synchronizer")
+                                } else if is_bare_sample {
+                                    (
+                                        CdcSeverity::Warning,
+                                        "registered sample — ensure a >=2-stage chain or add #[cdc]",
+                                    )
+                                } else {
+                                    (CdcSeverity::Critical, "needs a synchronizer")
+                                };
                                 violations.push(CdcViolation {
                                     violation_type: CdcViolationType::DirectCrossing,
-                                    severity: CdcSeverity::Critical,
+                                    severity,
                                     description: format!(
-                                        "Reading signal from domain {:?} in process from domain {:?}",
-                                        source_domain, process_domain
+                                        "assignment to `{}` reads a signal from domain {:?} inside a process clocked in domain {:?} — {}",
+                                        Self::lvalue_name(module, &assignment.lhs),
+                                        source_domain, process_domain, hint
                                     ),
                                     source_domain: Some(*source_domain),
                                     target_domain: Some(process_domain),
@@ -242,7 +384,8 @@ impl CdcAnalyzer {
                             violation_type: CdcViolationType::CombinationalMixing,
                             severity: CdcSeverity::Warning,
                             description: format!(
-                                "Expression mixes signals from {} different clock domains",
+                                "expression assigned to `{}` mixes signals from {} different clock domains",
+                                Self::lvalue_name(module, &assignment.lhs),
                                 source_domains.len()
                             ),
                             source_domain: None,
@@ -311,7 +454,8 @@ impl CdcAnalyzer {
                                     violation_type: CdcViolationType::DirectCrossing,
                                     severity: CdcSeverity::Warning,
                                     description: format!(
-                                        "Condition in resolved conditional uses signal from domain {:?} in process domain {:?}",
+                                        "condition driving `{}` uses a signal from domain {:?} in a process clocked in domain {:?}",
+                                        Self::lvalue_name(module, &resolved.target),
                                         source_domain, process_domain
                                     ),
                                     source_domain: Some(source_domain),
@@ -332,7 +476,8 @@ impl CdcAnalyzer {
                                 violation_type: CdcViolationType::DirectCrossing,
                                 severity: CdcSeverity::Warning,
                                 description: format!(
-                                    "Default value in resolved conditional uses signal from domain {:?} in process domain {:?}",
+                                    "default value driving `{}` uses a signal from domain {:?} in a process clocked in domain {:?}",
+                                    Self::lvalue_name(module, &resolved.target),
                                     source_domain, process_domain
                                 ),
                                 source_domain: Some(source_domain),
@@ -357,7 +502,7 @@ impl CdcAnalyzer {
     fn analyze_continuous_assign(
         &self,
         continuous_assign: &crate::mir::ContinuousAssign,
-        _module: &Module,
+        module: &Module,
     ) -> Vec<CdcViolation> {
         let mut violations = Vec::new();
 
@@ -373,7 +518,8 @@ impl CdcAnalyzer {
                         violation_type: CdcViolationType::DirectCrossing,
                         severity: CdcSeverity::Critical,
                         description: format!(
-                            "Continuous assignment crosses from domain {:?} to {:?}",
+                            "continuous assignment to `{}` crosses from domain {:?} to {:?} — needs a synchronizer",
+                            Self::lvalue_name(module, &continuous_assign.lhs),
                             source_domain, target_domain
                         ),
                         source_domain: Some(source_domain),
@@ -388,6 +534,42 @@ impl CdcAnalyzer {
     }
 
     /// Get the clock domain of an LValue
+    /// Resolve an lvalue to a human-readable name for diagnostics (TRIAGE #10).
+    fn lvalue_name(module: &Module, lvalue: &LValue) -> String {
+        match lvalue {
+            LValue::Signal(id) => module
+                .signals
+                .iter()
+                .find(|s| s.id == *id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| format!("signal#{}", id.0)),
+            LValue::Port(id) => module
+                .ports
+                .iter()
+                .find(|p| p.id == *id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| format!("port#{}", id.0)),
+            LValue::Variable(id) => module
+                .variables
+                .iter()
+                .find(|v| v.id == *id)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("var#{}", id.0)),
+            LValue::BitSelect { base, .. } => format!("{}[...]", Self::lvalue_name(module, base)),
+            LValue::RangeSelect { base, .. } => {
+                format!("{}[..:..]", Self::lvalue_name(module, base))
+            }
+            LValue::Concat(parts) => format!(
+                "{{{}}}",
+                parts
+                    .iter()
+                    .map(|p| Self::lvalue_name(module, p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
     fn get_lvalue_clock_domain(&self, lvalue: &LValue) -> Option<ClockDomainId> {
         match lvalue {
             LValue::Signal(signal_id) => self.signal_domains.get(signal_id).copied(),

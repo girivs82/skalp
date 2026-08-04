@@ -1626,3 +1626,171 @@ impl LetZeroComb {
         sv
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #10: CDC diagnostics were stripped (report computed
+// severities then printed nothing) AND the analysis itself was vacuous —
+// no signal ever had a clock domain (hir_to_mir never populated them, and
+// the HIR stamps that did exist used pre-monomorphization port IDs).
+// Restored: implicit per-clock-port domains, process-based signal-domain
+// inference, propagation through combinational assignments, and a severity
+// policy — CRITICAL for crossings through logic (fails the build with
+// details), WARNING for bare registered samples (synchronizer first
+// stages), INFO when the target carries #[cdc].
+// =============================================================================
+
+#[test]
+fn test_triage10_cdc_critical_fails_build_with_details() {
+    let source = r#"
+entity CdcCrit {
+    in fast_clk: clock
+    in slow_clk: clock
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl CdcCrit {
+    signal fast_reg: bit[8] = 0
+    signal slow_reg: bit[8] = 0
+
+    on(fast_clk.rise) {
+        fast_reg = d
+    }
+
+    on(slow_clk.rise) {
+        slow_reg = fast_reg + 1
+    }
+
+    q = slow_reg
+}
+"#;
+    // compile_to_sv bypasses MirCompiler (and with it the CDC step) — use
+    // the compiler pipeline directly, like the CLI does.
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    let compiler = skalp_mir::MirCompiler::new();
+    let err = compiler
+        .compile_to_mir(&hir)
+        .err()
+        .expect("crossing through logic must fail the build");
+    assert!(
+        err.contains("critical CDC violation"),
+        "Triage #10: error must identify CDC: {}",
+        err
+    );
+    assert!(
+        err.contains("slow_reg"),
+        "Triage #10: error must name the offending signal: {}",
+        err
+    );
+}
+
+#[test]
+fn test_triage10_bare_sample_and_annotation_build() {
+    // Bare registered sample (synchronizer first stage): WARNING, builds.
+    let sample = r#"
+entity CdcSample {
+    in fast_clk: clock
+    in slow_clk: clock
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl CdcSample {
+    signal fast_reg: bit[8] = 0
+    signal ff1: bit[8] = 0
+    signal ff2: bit[8] = 0
+
+    on(fast_clk.rise) {
+        fast_reg = d
+    }
+
+    on(slow_clk.rise) {
+        ff1 = fast_reg
+        ff2 = ff1
+    }
+
+    q = ff2
+}
+"#;
+    let mir_of = |source: &str| {
+        let tree = parse(source);
+        let hir = build_hir(&tree).expect("HIR building failed");
+        let mut engine = MonomorphizationEngine::new();
+        let hir = engine.monomorphize(&hir);
+        skalp_mir::MirCompiler::new().compile_to_mir(&hir)
+    };
+    mir_of(sample).expect("bare registered sample must build (warning only)");
+
+    // #[cdc]-annotated target: INFO, builds.
+    let annotated = r#"
+entity CdcAnno {
+    in fast_clk: clock
+    in slow_clk: clock
+    in d: bit[4]
+    out q: bit[4]
+}
+
+impl CdcAnno {
+    signal fast_gray: bit[4] = 0
+
+    #[cdc(cdc_type = gray, sync_stages = 2)]
+    signal sync1: bit[4] = 0
+    signal sync2: bit[4] = 0
+
+    on(fast_clk.rise) {
+        fast_gray = d ^ (d >> 1)
+    }
+
+    on(slow_clk.rise) {
+        sync1 = fast_gray
+        sync2 = sync1
+    }
+
+    q = sync2
+}
+"#;
+    mir_of(annotated).expect("#[cdc]-annotated synchronizer must build (info only)");
+}
+
+#[test]
+fn test_triage10_comb_derived_domain_propagates() {
+    // The crossing samples a COMBINATIONALLY-derived signal (gray encode of
+    // a registered pointer) — domain propagation must still detect it as a
+    // legitimate sample (build succeeds), and single-clock designs must
+    // stay silent (no domains crossed).
+    let source = r#"
+entity CombDerived {
+    in wr_clk: clock
+    in rd_clk: clock
+    out q: bit[4]
+}
+
+impl CombDerived {
+    signal wr_ptr: bit[4] = 0
+    signal wr_gray: bit[4]
+    signal ff1: bit[4] = 0
+
+    on(wr_clk.rise) {
+        wr_ptr = wr_ptr + 1
+    }
+
+    wr_gray = wr_ptr ^ (wr_ptr >> 1)
+
+    on(rd_clk.rise) {
+        ff1 = wr_gray
+    }
+
+    q = ff1
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("comb-derived sample must build (warning only)");
+}
