@@ -5187,8 +5187,6 @@ impl<'hir> HirToMir<'hir> {
         Some(assigns)
     }
 
-    /// Try to expand a struct continuous assignment into multiple field assignments
-
     /// TRIAGE #11 migration support: expand `lhs_struct = instance.port`
     /// where `port` is a flattened STRUCT output of an `inst` — the
     /// instance-output map stores per-field signals keyed
@@ -5243,6 +5241,7 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Try to expand a struct continuous assignment into multiple field assignments
     fn try_expand_struct_continuous_assignment(
         &mut self,
         assign: &hir::HirAssignment,

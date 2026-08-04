@@ -213,9 +213,23 @@ codegen gaps; **P3** = hygiene.
     chain-depth consistency check; #13 lifetime plumbing so 'wr/'rd names
     appear instead of numeric domain ids.
 
-11. **No missing-port-connection check.** Unconnected instance inputs are silent
-    (`unconnected`/`nc`/`open` attribute exists but absence of a connection is not an
-    error). Docs claim "forgetting a port is a compile error."
+11. **FIXED (2026-08-04) — and legacy `let`-instantiation REMOVED.** Per the
+    user's decision, impl-level `let x = Entity {...}` is now a hard error
+    (reachability-scoped in compiler.rs, with an `inst` fix-it); every input
+    port of an instantiated entity must be connected (checked cross-file and
+    post-monomorphization). ~530 in-repo sites across 64 files migrated to
+    `inst` + dot-access. Exposed and fixed along the way: build_connection
+    silently dropped PathExpr/ConcatExpr/CallExpr/ParenExpr/IfExpr/MatchExpr
+    connection values; the stdlib PartitionableMantissaMultiplier sites were
+    genuinely missing `mode`; keyword-named ports (`output`) now valid after
+    `.`; signals with BOTH a decl initializer and a continuous assign kept
+    the init in behavioral SIR (stuck outputs) — MIR clears dead
+    wire-initializers. fn-BODY `let` remains supported (trait plumbing;
+    stdlib fp bodies need output-binding across behavioral/NCL). KNOWN
+    REMAINING (2 suite tests, next up): graphics multi_clock struct output
+    on a keyword port reads zeros; test_mwe_lir_gate_equivalence
+    (LirToAig-vs-gate BMC) mismatches though full `skalp ec` proves the
+    migrated MWE.
 
 12. **`stream<T>` generates no handshaking.** `hir_to_mir.rs:18270` lowers stream
     ports to the bare inner type (`TODO: Add proper stream protocol support`). Either
