@@ -1552,6 +1552,14 @@ impl<'hir> HirToMir<'hir> {
                                         let name_taken = |n: &str| {
                                             impl_block.signals.iter().any(|s| s.name == n)
                                                 || impl_block.variables.iter().any(|v| v.name == n)
+                                                // Entity PORTS collide too: instance `pwm` +
+                                                // port `counter` auto-wires "pwm_counter",
+                                                // which may equal a top-level port name —
+                                                // duplicate LIR signal names break every
+                                                // name-keyed lookup downstream (flatten's
+                                                // name_to_signal, gate-net matching).
+                                                || module.ports.iter().any(|p| p.name == n)
+                                                || module.signals.iter().any(|s| s.name == n)
                                         };
                                         if name_taken(&signal_name) {
                                             signal_name =

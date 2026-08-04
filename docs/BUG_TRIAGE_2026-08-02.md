@@ -225,11 +225,22 @@ codegen gaps; **P3** = hygiene.
     `.`; signals with BOTH a decl initializer and a continuous assign kept
     the init in behavioral SIR (stuck outputs) — MIR clears dead
     wire-initializers. fn-BODY `let` remains supported (trait plumbing;
-    stdlib fp bodies need output-binding across behavioral/NCL). KNOWN
-    REMAINING (2 suite tests, next up): graphics multi_clock struct output
-    on a keyword port reads zeros; test_mwe_lir_gate_equivalence
-    (LirToAig-vs-gate BMC) mismatches though full `skalp ec` proves the
-    migrated MWE.
+    stdlib fp bodies need output-binding across behavioral/NCL).
+    **Follow-up fixes (2026-08-04), both remaining suite failures closed:**
+    (a) graphics multi_clock read zeros because `geom_output = geometry.output`
+    was SILENTLY DROPPED at HIR build — five FieldExpr name-extraction sites
+    (build_assignment LHS walk, build_field_access_from_parts, chained-RHS
+    method/field walks, postfix walk) only accepted Ident/IntLiteral tokens,
+    so a keyword-named port (`output`) made the extraction return None and
+    the whole assignment vanish; all five now also accept keyword tokens.
+    (b) test_mwe_lir_gate_equivalence mismatched because the auto-wire for
+    `inst pwm` + port `counter` was named "pwm_counter" — IDENTICAL to the
+    top-level output port `pwm_counter`. Duplicate LIR signal names break the
+    hierarchical flatten's name-keyed maps (name_to_signal), so the LIR-side
+    AIG and the gate-side AIG resolved different nets. The instance auto-wire
+    collision check now also treats entity port names (and already-created
+    MIR signals) as taken, renaming to "pwm__counter". Full `skalp ec` still
+    SAT-proves the MWE and hierarchical_alu.
 
 12. **`stream<T>` generates no handshaking.** `hir_to_mir.rs:18270` lowers stream
     ports to the bare inner type (`TODO: Add proper stream protocol support`). Either

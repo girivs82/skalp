@@ -3923,7 +3923,11 @@ impl HirBuilderContext {
                 let field_name = expr
                     .children_with_tokens()
                     .filter_map(|e| e.into_token())
-                    .filter(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+                    .filter(|t| {
+                        t.kind() == SyntaxKind::Ident
+                            || t.kind() == SyntaxKind::IntLiteral
+                            || t.kind().is_keyword()
+                    })
                     .last()
                     .map(|t| t.text().to_string())?;
 
@@ -4143,7 +4147,9 @@ impl HirBuilderContext {
                             .children_with_tokens()
                             .filter_map(|elem| elem.into_token())
                             .find(|t| {
-                                t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                                t.kind() == SyntaxKind::Ident
+                                    || t.kind() == SyntaxKind::IntLiteral
+                                    || t.kind().is_keyword()
                             })
                             .map(|t| t.text().to_string())?;
 
@@ -4240,7 +4246,9 @@ impl HirBuilderContext {
                             .children_with_tokens()
                             .filter_map(|elem| elem.into_token())
                             .find(|t| {
-                                t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                                t.kind() == SyntaxKind::Ident
+                                    || t.kind() == SyntaxKind::IntLiteral
+                                    || t.kind().is_keyword()
                             })
                             .map(|t| t.text().to_string())?;
 
@@ -9287,7 +9295,11 @@ impl HirBuilderContext {
         let field_name = field_node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
-            .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
+            .find(|t| {
+                t.kind() == SyntaxKind::Ident
+                    || t.kind() == SyntaxKind::IntLiteral
+                    || t.kind().is_keyword()
+            })
             .map(|t| t.text().to_string())?;
 
         Some(HirExpression::FieldAccess {
@@ -14018,7 +14030,9 @@ impl HirBuilderContext {
                         .children_with_tokens()
                         .filter_map(|e| e.into_token())
                         .find(|t| {
-                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                            t.kind() == SyntaxKind::Ident
+                                || t.kind() == SyntaxKind::IntLiteral
+                                || t.kind().is_keyword()
                         })
                         .map(|t| t.text().to_string())?;
 
