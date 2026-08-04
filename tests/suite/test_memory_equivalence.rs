@@ -249,3 +249,57 @@ fn test_triage30_generic_generate_for_sat_equivalent() {
         result.counterexample
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #33: tie cells (TIE_HIGH/TIE_LOW with cell.function set)
+// hit the `_ => Buf` fallthrough in the gate simulator's cell-function
+// dispatch — a zero-input buffer evaluates false, so const_1 nets read 0
+// and any register fed by them held the wrong value on the EC gate side.
+// Repro: `on(clk.rise) { let base: bit[8] = 0  z = base + 1 }` — the AIG
+// constant-folds z's next-state to const_1; gate smoke sim gave z=0.
+// =============================================================================
+
+#[tokio::test]
+async fn test_triage33_tie_cells_simulate_as_constants() {
+    use skalp_formal::SimBasedEquivalenceChecker;
+
+    let source = r#"
+entity LetZero {
+    in clk: clock
+    in rst: reset
+    in a: bit[8]
+    out y: bit[8]
+    out z: bit[8]
+}
+
+impl LetZero {
+    on(clk.rise) {
+        let zero = 0
+        let base: bit[8] = 0
+        y = a + zero
+        z = base + 1
+    }
+}
+"#;
+    let mir = compile_to_mir(source);
+    let target = &mir.modules[0];
+    let hier = skalp_lir::lower_mir_hierarchical_with_top(&mir, Some("LetZero"));
+    let flat = hier.flatten();
+    let library = get_stdlib_library("generic_asic").expect("library");
+    let synth = synthesize(&flat, &library, skalp_lir::synth::SynthPreset::Quick);
+
+    let checker = SimBasedEquivalenceChecker::new()
+        .with_cycles(20)
+        .with_reset("rst", 2)
+        .with_coverage(false);
+    let result = checker
+        .check_mir_vs_gate(&mir, target, &synth.netlist)
+        .await
+        .expect("smoke check errored");
+    assert!(
+        result.equivalent,
+        "Triage #33: MIR and gate smoke sim must agree (tie cells as \
+         constants); mismatch at cycle {:?} output {:?}: {:?} vs {:?}",
+        result.mismatch_cycle, result.mismatch_output, result.value_1, result.value_2
+    );
+}

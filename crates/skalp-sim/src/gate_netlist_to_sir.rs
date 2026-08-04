@@ -480,6 +480,13 @@ impl GateNetlistToSirConverter {
             CellFunction::FpGe32 => PrimitiveType::Fp32Ge,
 
             // Sequential
+            // TRIAGE #33: tie cells MUST map to constants. The `_ => Buf`
+            // fallthrough turned them into zero-input buffers that evaluate
+            // to false — TIE_HIGH nets read 0, so any register fed (directly
+            // or through logic) by const_1 was stuck at the wrong value on
+            // the EC gate side. (const_0 was accidentally correct.)
+            CellFunction::TieHigh => PrimitiveType::Constant { value: true },
+            CellFunction::TieLow => PrimitiveType::Constant { value: false },
             CellFunction::Dff => PrimitiveType::DffP,
             CellFunction::DffR => PrimitiveType::DffSR, // DFF with sync reset to 0
             CellFunction::DffE => PrimitiveType::DffE,  // DFF with enable

@@ -391,14 +391,25 @@ codegen gaps; **P3** = hygiene.
     support (concat/slice work element-wise; +,<<,~ do not) — no known
     designs hit this; symbolic-width (BitParam) Mul stays primitive.
 
-33. **(found 2026-08-04) Event-block `let` bindings mis-lower on the EC gate
-    side.** Repro: `on(clk.rise) { let base: bit[8] = 0  z = base + 1 }` —
-    MIR/behavioral gives z=1, the synthesized gate netlist gives z=0 (the
-    blocking let-assignment's value doesn't reach the register's next-state
-    logic). PRE-EXISTING (identical failure before the #7 fix, when `base`
-    was undriven and read 0 by accident). Combinational (impl-level) lets
-    are fine — EC-proven. Needs its own triage of the MIR→LIR event-block
-    variable lowering.
+33. **FIXED (2026-08-04). Event-block `let` bindings "mis-lower" on the EC
+    gate side — actually: TIE cells simulated as 0.** The initial suspicion
+    (MIR→LIR event-block variable lowering) was WRONG: probing showed the
+    LIR and the synthesized netlist both correct (z's DFF D-input =
+    `const_1`). **Root cause:** the gate simulator's cell-FUNCTION dispatch
+    (`cell_function_to_primitive`) had no TieHigh/TieLow arms — the
+    `_ => Buf` fallthrough turned tie cells into zero-input buffers that
+    evaluate false. TIE_HIGH nets read 0, so any register fed (directly or
+    through constant-folded logic) by const_1 held the wrong value in smoke
+    EC. const_0 was accidentally correct, which is why most tie-using
+    designs (memory decomposition WE seeds etc.) never tripped it. The SAT
+    phase was unaffected (its converter matches tie cells by NAME in the
+    fallback). **Fix:** explicit
+    `CellFunction::TieHigh/TieLow → PrimitiveType::Constant` arms.
+    **Verified:** the letzero repro passes ALL EC phases (smoke + full SAT
+    proof); 14-design EC sweep green; corpus unchanged; full suite zero
+    regressions. Suite test:
+    `test_triage33_tie_cells_simulate_as_constants` (smoke-level, the layer
+    that broke).
 
 31. **FIXED (2026-08-03). Stdlib visibility broke most Testbench-based suites
     — the test_function_inlining cluster (15/16), counter_example,
