@@ -201,6 +201,70 @@ impl MirCompiler {
             }
         }
 
+        // TRIAGE #12 (reachability-scoped): `stream<T>` has NO lowering — the
+        // type converter strips it to the bare inner type, so a "stream" port
+        // is just wires with no valid/ready handshaking, while the docs claim
+        // the compiler enforces backpressure. Until real protocol lowering
+        // exists, reject it instead of silently building non-backpressured
+        // hardware.
+        {
+            fn contains_stream(ty: &skalp_frontend::hir::HirType) -> bool {
+                use skalp_frontend::hir::HirType;
+                match ty {
+                    HirType::Stream(_) => true,
+                    HirType::Array(inner, _) => contains_stream(inner),
+                    _ => false,
+                }
+            }
+            let mut stream_errors: Vec<String> = Vec::new();
+            for entity in &hir.entities {
+                if !reachable_names.contains(&entity.name) {
+                    continue;
+                }
+                for port in &entity.ports {
+                    if contains_stream(&port.port_type) {
+                        stream_errors.push(format!(
+                            "port `{p}` of entity `{e}`: `stream<T>` is not implemented — no valid/ready handshaking is generated; declare explicit `data`/`valid`/`ready` ports instead",
+                            p = port.name,
+                            e = entity.name
+                        ));
+                    }
+                }
+            }
+            for implementation in &hir.implementations {
+                let Some(owner) = hir.entities.iter().find(|e| e.id == implementation.entity)
+                else {
+                    continue;
+                };
+                if !reachable_names.contains(&owner.name) {
+                    continue;
+                }
+                for signal in &implementation.signals {
+                    if contains_stream(&signal.signal_type) {
+                        stream_errors.push(format!(
+                            "signal `{s}` in entity `{e}`: `stream<T>` is not implemented — no valid/ready handshaking is generated; declare explicit `data`/`valid`/`ready` signals instead",
+                            s = signal.name,
+                            e = owner.name
+                        ));
+                    }
+                }
+            }
+            if !stream_errors.is_empty() {
+                let mut seen = std::collections::HashSet::new();
+                let unique: Vec<&String> =
+                    stream_errors.iter().filter(|m| seen.insert(*m)).collect();
+                return Err(format!(
+                    "stream type check failed with {} error(s):\n  {}",
+                    unique.len(),
+                    unique
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                ));
+            }
+        }
+
         // Fail on undriven outputs: an output port nothing writes to is a
         // dropped-statement lowering bug or a design error — the emitted
         // netlist would drive the port from nothing.

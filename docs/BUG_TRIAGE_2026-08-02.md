@@ -242,10 +242,20 @@ codegen gaps; **P3** = hygiene.
     MIR signals) as taken, renaming to "pwm__counter". Full `skalp ec` still
     SAT-proves the MWE and hierarchical_alu.
 
-12. **`stream<T>` generates no handshaking.** `hir_to_mir.rs:18270` lowers stream
-    ports to the bare inner type (`TODO: Add proper stream protocol support`). Either
-    implement valid/ready lowering or error on `stream` ports until it exists — docs
-    claim the compiler "enforces backpressure."
+12. **FIXED (2026-08-04) — by rejection. `stream<T>` generates no handshaking.**
+    The type converter lowered `Stream(T)` to the bare inner type
+    (`TODO: Add proper stream protocol support`), so a "stream" port was plain
+    wires with no valid/ready while the docs claim enforced backpressure.
+    Zero in-repo designs use `stream<`, so nothing relied on the silent
+    stripping. **Resolution:** reachability-scoped hard error in
+    `compiler.rs` (same scoping as the #11 instance checks) on any entity
+    port or impl signal whose type contains `stream<T>` (including arrays of
+    streams): "`stream<T>` is not implemented — no valid/ready handshaking is
+    generated; declare explicit `data`/`valid`/`ready` ports instead". Real
+    protocol lowering (typed valid/ready bundle + backpressure semantics) is
+    a language-design task, deliberately not attempted here. Suite
+    regression test: `test_triage12_stream_type_fails_build` (port + signal
+    forms). Corpus 145/145 unchanged.
 
 27. **FIXED (2026-08-03). `skalp ec` cannot verify designs with memory arrays.**
     Any design containing `signal mem: [T; N]` failed smoke EC with

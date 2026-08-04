@@ -1919,3 +1919,68 @@ impl Sel {
     compile(complete).expect("full 2-bit enumeration must build");
     compile(wildcarded).expect("wildcard arm must satisfy exhaustiveness");
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #12: `stream<T>` had NO lowering — the type converter
+// stripped it to the bare inner type, so a "stream" port was plain wires with
+// no valid/ready handshaking while the docs claim enforced backpressure.
+// Until real protocol lowering exists, stream types are a hard build error.
+// =============================================================================
+
+#[test]
+fn test_triage12_stream_type_fails_build() {
+    let port_form = r#"
+entity StreamProducer {
+    in clk: clock
+    out data: stream<bit[8]>
+}
+
+impl StreamProducer {
+    signal cnt: bit[8] = 0
+    on(clk.rise) {
+        cnt = cnt + 1
+    }
+    data = cnt
+}
+"#;
+    let signal_form = r#"
+entity Plain {
+    in clk: clock
+    out o: bit[8]
+}
+
+impl Plain {
+    signal buf: stream<bit[8]>
+    signal cnt: bit[8] = 0
+    on(clk.rise) {
+        cnt = cnt + 1
+    }
+    buf = cnt
+    o = buf
+}
+"#;
+    let compile = |source: &str| {
+        let tree = parse(source);
+        let hir = build_hir(&tree).expect("HIR building failed");
+        let mut engine = MonomorphizationEngine::new();
+        let hir = engine.monomorphize(&hir);
+        skalp_mir::MirCompiler::new().compile_to_mir(&hir)
+    };
+
+    let err = compile(port_form)
+        .err()
+        .expect("stream port must fail the build");
+    assert!(
+        err.contains("stream") && err.contains("not implemented") && err.contains("`data`"),
+        "Triage #12: error must name the stream port: {}",
+        err
+    );
+    let err = compile(signal_form)
+        .err()
+        .expect("stream signal must fail the build");
+    assert!(
+        err.contains("stream") && err.contains("`buf`"),
+        "Triage #12: error must name the stream signal: {}",
+        err
+    );
+}
