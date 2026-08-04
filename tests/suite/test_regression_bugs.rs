@@ -1558,5 +1558,71 @@ impl Top {
     );
     // The instance is emitted and `sum` is properly connected
     assert!(sv.contains("Adder4 adder"), "instance must exist:\n{}", sv);
-    assert!(sv.contains(".sum(sm)"), "bound output must connect:\n{}", sv);
+    assert!(
+        sv.contains(".sum(sm)"),
+        "bound output must connect:\n{}",
+        sv
+    );
+}
+
+// =============================================================================
+// TRIAGE 2026-08-02 #7: `let x = 0` was special-cased as a "placeholder
+// signal" — hir_to_mir treated ANY let-binding of literal 0 as an
+// entity-output placeholder and silently dropped its initializing
+// assignment, leaving the variable undriven. Placeholders are now marked
+// explicitly (bare `signal x: T;` declarations in trait-method bodies);
+// user-written zero bindings keep their assignments.
+// =============================================================================
+
+#[test]
+fn test_triage7_let_zero_keeps_assignment() {
+    let source = r#"
+entity LetZero {
+    in clk: clock
+    in a: bit[8]
+    out y: bit[8]
+    out z: bit[8]
+}
+
+impl LetZero {
+    on(clk.rise) {
+        let zero = 0
+        let base: bit[8] = 0
+        y = a + zero
+        z = base + 1
+    }
+}
+"#;
+    let sv = compile_to_sv(source).expect("let-zero design must compile");
+    assert!(
+        sv.contains("zero = 0;"),
+        "Triage #7: `let zero = 0` must keep its initializing assignment:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("base = 0;"),
+        "Triage #7: typed `let base: bit[8] = 0` must keep its assignment:\n{}",
+        sv
+    );
+}
+
+#[test]
+fn test_triage7_impl_level_let_zero() {
+    let source = r#"
+entity LetZeroComb {
+    in a: bit[8]
+    out y: bit[8]
+}
+
+impl LetZeroComb {
+    let zero = 0
+    y = a | zero
+}
+"#;
+    let sv = compile_to_sv(source).expect("impl-level let-zero must compile");
+    assert!(
+        sv.contains("assign zero = 0;"),
+        "Triage #7: impl-level `let zero = 0` must drive the binding:\n{}",
+        sv
+    );
 }

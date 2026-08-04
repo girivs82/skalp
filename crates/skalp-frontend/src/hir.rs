@@ -1533,6 +1533,14 @@ pub struct HirLetStatement {
     pub var_type: HirType,
     /// Initializer expression
     pub value: HirExpression,
+    /// TRIAGE #7: true ONLY for compiler-synthesized placeholder bindings —
+    /// a bare `signal x: T;` in a trait-method body lowered to `let x = 0`
+    /// whose value comes from an entity output, not the initializer. MIR
+    /// skips the initializing assignment for these. User-written
+    /// `let x = 0` keeps its assignment (the old heuristic keyed on the
+    /// literal 0 value and silently dropped it).
+    #[serde(default)]
+    pub is_placeholder: bool,
 }
 
 /// Match statement in HIR

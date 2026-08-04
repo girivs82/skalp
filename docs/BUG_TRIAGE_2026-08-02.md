@@ -122,10 +122,24 @@ codegen gaps; **P3** = hygiene.
    with SAT proof; corpus unchanged; full suite zero regressions. Suite
    test: `test_triage6_open_binding_skips_connection`.
 
-7. **`let x = 0` special-cased as "placeholder signal", assignment skipped.**
-   `hir_to_mir.rs` (`is_placeholder_signal`) treats any let-binding of literal 0 as a
-   placeholder and suppresses the assignment. A user writing `let zero = 0` gets an
-   undriven node. Replace the literal-0 heuristic with an explicit placeholder marker.
+7. **FIXED (2026-08-04). `let x = 0` special-cased as "placeholder signal",
+   assignment skipped.** `hir_to_mir.rs` treated ANY let-binding of literal 0
+   as an entity-output placeholder and suppressed the initializing
+   assignment — a user's `let zero = 0` got an undriven node (which happened
+   to read 0, masking the drop until the value was used non-trivially).
+   **Fix:** exactly what the triage prescribed — an explicit
+   `is_placeholder: bool` field on `HirLetStatement` (serde-default false),
+   set ONLY by `build_signal_as_let` for BARE `signal x: T;` declarations in
+   trait-method bodies (whose value comes from an entity output). All 24
+   construction sites audited: substitution/clone paths copy the flag,
+   synthesis sites set false. The MIR heuristic now reads the flag.
+   **Verified:** `let zero = 0` / `let base: bit[8] = 0` keep their
+   assignments in both event-block and impl-level (combinational) contexts;
+   the impl-level case passes full EC with SAT proof; stdlib trait bodies
+   (whose placeholders motivated the heuristic) still work — corpus
+   unchanged, full suite zero regressions. Suite tests:
+   `test_triage7_let_zero_keeps_assignment` and
+   `test_triage7_impl_level_let_zero`.
 
 ## P1 — missing checks the language promises
 
@@ -376,6 +390,15 @@ codegen gaps; **P3** = hygiene.
     REMAINING: >128-bit values still use uint32_t arrays with no arithmetic
     support (concat/slice work element-wise; +,<<,~ do not) — no known
     designs hit this; symbolic-width (BitParam) Mul stays primitive.
+
+33. **(found 2026-08-04) Event-block `let` bindings mis-lower on the EC gate
+    side.** Repro: `on(clk.rise) { let base: bit[8] = 0  z = base + 1 }` —
+    MIR/behavioral gives z=1, the synthesized gate netlist gives z=0 (the
+    blocking let-assignment's value doesn't reach the register's next-state
+    logic). PRE-EXISTING (identical failure before the #7 fix, when `base`
+    was undriven and read 0 by accident). Combinational (impl-level) lets
+    are fine — EC-proven. Needs its own triage of the MIR→LIR event-block
+    variable lowering.
 
 31. **FIXED (2026-08-03). Stdlib visibility broke most Testbench-based suites
     — the test_function_inlining cluster (15/16), counter_example,

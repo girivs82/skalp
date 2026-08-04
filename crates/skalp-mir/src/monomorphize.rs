@@ -177,6 +177,7 @@ impl TypeSubstitution {
                 hir::HirStatement::Expression(self.substitute_expression(expr))
             }
             hir::HirStatement::Let(let_stmt) => hir::HirStatement::Let(hir::HirLetStatement {
+                is_placeholder: let_stmt.is_placeholder,
                 id: let_stmt.id,
                 name: let_stmt.name.clone(),
                 mutable: let_stmt.mutable,
@@ -1196,6 +1197,7 @@ impl Monomorphizer {
                 new_ctx.add_variable_id(let_stmt.id, let_stmt.var_type.clone());
 
                 let new_stmt = hir::HirStatement::Let(hir::HirLetStatement {
+                    is_placeholder: let_stmt.is_placeholder,
                     id: let_stmt.id,
                     name: let_stmt.name.clone(),
                     mutable: let_stmt.mutable,
@@ -1235,6 +1237,7 @@ impl Monomorphizer {
             hir::HirStatement::Let(let_stmt) => {
                 // For this non-context-returning version, just process the expression
                 hir::HirStatement::Let(hir::HirLetStatement {
+                    is_placeholder: let_stmt.is_placeholder,
                     id: let_stmt.id,
                     name: let_stmt.name.clone(),
                     mutable: let_stmt.mutable,

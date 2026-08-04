@@ -2396,12 +2396,12 @@ impl<'hir> HirToMir<'hir> {
                     trace!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
                 }
 
-                // Check if this is a placeholder signal - these are output wires that receive values from entity outputs
-                // They still need to be registered as variables, but should NOT generate an assignment
-                let is_placeholder_signal = matches!(
-                    &let_stmt.value,
-                    hir::HirExpression::Literal(hir::HirLiteral::Integer(0))
-                );
+                // TRIAGE #7: placeholder signals (bare `signal x: T;` in trait
+                // method bodies, wired to entity outputs) are now EXPLICITLY
+                // marked by hir_builder. The old heuristic treated ANY
+                // let-binding of literal 0 as a placeholder, silently dropping
+                // a user's `let zero = 0` initializing assignment.
+                let is_placeholder_signal = let_stmt.is_placeholder;
                 if is_placeholder_signal {
                     trace!(
                         "[PLACEHOLDER_SIGNAL] Signal '{}' is placeholder, will register but skip assignment",
@@ -6571,6 +6571,7 @@ impl<'hir> HirToMir<'hir> {
                 })
             }
             hir::HirStatement::Let(let_stmt) => hir::HirStatement::Let(hir::HirLetStatement {
+                is_placeholder: let_stmt.is_placeholder,
                 id: let_stmt.id,
                 name: let_stmt.name.clone(),
                 mutable: let_stmt.mutable,
@@ -11595,6 +11596,7 @@ impl<'hir> HirToMir<'hir> {
                             // Use a placeholder type - typically bit[32] for bit operations
                             // The actual type will be inferred from usage during downstream processing
                             let_bindings.push(hir::HirLetStatement {
+                                is_placeholder: false,
                                 id: *var_id,
                                 name: format!("__init_var_{}", var_id.0),
                                 mutable: true, // Assume mutable since it was an assignment
@@ -13157,6 +13159,7 @@ impl<'hir> HirToMir<'hir> {
                             }
                             substituted_statements.push(hir::HirStatement::Let(
                                 hir::HirLetStatement {
+                                    is_placeholder: let_stmt.is_placeholder,
                                     id: let_stmt.id,
                                     name: let_stmt.name.clone(),
                                     mutable: let_stmt.mutable, // Bug #78: Preserve mutability
@@ -14902,6 +14905,7 @@ impl<'hir> HirToMir<'hir> {
                                 )
                                 .unwrap_or_else(|| let_stmt.value.clone());
                             substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                is_placeholder: let_stmt.is_placeholder,
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
                                 value: rhs_sub,
@@ -15194,6 +15198,7 @@ impl<'hir> HirToMir<'hir> {
                                 }
                                 substituted_stmts.push(hir::HirStatement::Let(
                                     hir::HirLetStatement {
+                                        is_placeholder: let_stmt.is_placeholder,
                                         name: let_stmt.name.clone(),
                                         id: let_stmt.id,
                                         var_type: let_stmt.var_type.clone(),
@@ -15490,6 +15495,7 @@ impl<'hir> HirToMir<'hir> {
                     )?;
                     local_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
                     result.push(hir::HirStatement::Let(hir::HirLetStatement {
+                        is_placeholder: let_stmt.is_placeholder,
                         name: let_stmt.name.clone(),
                         id: let_stmt.id,
                         var_type: let_stmt.var_type.clone(),
@@ -15751,6 +15757,7 @@ impl<'hir> HirToMir<'hir> {
 
                             // Add to substituted statements
                             substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                is_placeholder: let_stmt.is_placeholder,
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
                                 mutable: let_stmt.mutable,
@@ -16123,6 +16130,7 @@ impl<'hir> HirToMir<'hir> {
                             local_var_id_map.insert(let_stmt.id, sub_value.clone());
 
                             substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                is_placeholder: let_stmt.is_placeholder,
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
                                 var_type: let_stmt.var_type.clone(),
@@ -16577,6 +16585,7 @@ impl<'hir> HirToMir<'hir> {
                 let mut sub_value = self.substitute_hir_expr_with_map(&let_stmt.value, name_map);
                 sub_value = self.substitute_var_ids_in_expr(&sub_value, var_id_map);
                 hir::HirStatement::Let(hir::HirLetStatement {
+                    is_placeholder: let_stmt.is_placeholder,
                     id: let_stmt.id,
                     name: let_stmt.name.clone(),
                     mutable: let_stmt.mutable,
@@ -16639,6 +16648,7 @@ impl<'hir> HirToMir<'hir> {
                     var_id_to_name,
                 )?;
                 Some(hir::HirStatement::Let(hir::HirLetStatement {
+                    is_placeholder: let_stmt.is_placeholder,
                     id: let_stmt.id,
                     name: let_stmt.name.clone(),
                     mutable: let_stmt.mutable,
@@ -17304,6 +17314,7 @@ impl<'hir> HirToMir<'hir> {
             // Create a temporary Let statement and process via convert_statement
             // This will create the entity instance and set up placeholder mappings
             let temp_let = hir::HirLetStatement {
+                is_placeholder: false,
                 id: hir::VariableId(u32::MAX), // Dummy ID
                 name,
                 value: hir::HirExpression::StructLiteral(struct_lit.clone()),
@@ -17948,6 +17959,7 @@ impl<'hir> HirToMir<'hir> {
 
                     // Create a substituted Let statement
                     let substituted_let = hir::HirLetStatement {
+                        is_placeholder: let_stmt.is_placeholder,
                         id: let_stmt.id,
                         name: let_stmt.name.clone(),
                         mutable: let_stmt.mutable,
@@ -22842,6 +22854,7 @@ impl<'hir> HirToMir<'hir> {
                                 // Delegate to convert_statement which properly handles entity instantiation
                                 // This will create the entity instance and set up placeholder mappings
                                 let temp_let = hir::HirLetStatement {
+                                    is_placeholder: let_stmt.is_placeholder,
                                     id: let_stmt.id,
                                     name: let_stmt.name.clone(),
                                     value: substituted_value.clone(),
@@ -23151,6 +23164,7 @@ impl<'hir> HirToMir<'hir> {
 
                     // Create a synthetic let statement to trigger entity instantiation
                     let temp_let = hir::HirLetStatement {
+                        is_placeholder: false,
                         id: temp_var_id,
                         name: format!("__entity_inline_tmp_{}", temp_var_raw),
                         value: expr.clone(),

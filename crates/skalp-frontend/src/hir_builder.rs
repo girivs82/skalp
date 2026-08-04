@@ -2542,11 +2542,14 @@ impl HirBuilderContext {
 
         // Extract the actual initial value expression if present (e.g., `signal x: u64 = expr`).
         // Falls back to zero for bare signal declarations without initializers.
-        let value = self
-            .find_initial_value_expr(node)
-            .unwrap_or_else(|| HirExpression::Literal(HirLiteral::Integer(0)));
+        let init = self.find_initial_value_expr(node);
+        // TRIAGE #7: a BARE declaration is a placeholder (its value comes
+        // from an entity output); an explicit `= 0` initializer is real.
+        let is_placeholder = init.is_none();
+        let value = init.unwrap_or_else(|| HirExpression::Literal(HirLiteral::Integer(0)));
 
         Some(HirLetStatement {
+            is_placeholder,
             id,
             name,
             mutable: false, // Signals are not mutable in the traditional sense
@@ -2760,6 +2763,7 @@ impl HirBuilderContext {
             .add_to_scope(&result_name, SymbolId::Variable(result_var_id));
 
         let inst_stmt = HirStatement::Let(HirLetStatement {
+            is_placeholder: false,
             id: result_var_id,
             name: result_name.clone(),
             mutable: false,
@@ -5462,6 +5466,7 @@ impl HirBuilderContext {
                 mux_style: match_stmt.mux_style,
             }),
             HirStatement::Let(let_stmt) => HirStatement::Let(HirLetStatement {
+                is_placeholder: let_stmt.is_placeholder,
                 id: let_stmt.id,
                 name: let_stmt.name.clone(),
                 mutable: let_stmt.mutable,
@@ -6036,6 +6041,7 @@ impl HirBuilderContext {
 
         // Create let statement for temporary: let _tuple_tmp_N = expr
         statements.push(HirStatement::Let(HirLetStatement {
+            is_placeholder: false,
             id: tmp_id,
             name: tmp_name.clone(),
             mutable, // Inherit mutability from original let statement
@@ -6083,6 +6089,7 @@ impl HirBuilderContext {
 
             // Create let statement: let var = _tuple_tmp_N.index
             statements.push(HirStatement::Let(HirLetStatement {
+                is_placeholder: false,
                 id: var_id,
                 name: var_name.clone(),
                 mutable, // Inherit mutability from original let statement
@@ -6256,6 +6263,7 @@ impl HirBuilderContext {
         self.symbols.variable_types.insert(id, var_type.clone());
 
         Some(HirLetStatement {
+            is_placeholder: false,
             id,
             name,
             mutable,
