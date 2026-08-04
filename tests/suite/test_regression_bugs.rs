@@ -1794,3 +1794,123 @@ impl CombDerived {
         .compile_to_mir(&hir)
         .expect("comb-derived sample must build (warning only)");
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #9: match exhaustiveness checking did not exist — a
+// match missing an enum arm built clean and the missing value fell into the
+// last arm, while the published docs promise a compile error. Implemented
+// as a conversion error (reachability-scoped): enum scrutinees need every
+// variant or a catch-all; N-bit scrutinees need all 2^N values or a
+// catch-all (N > 20 always requires one). Guarded arms never count.
+// =============================================================================
+
+#[test]
+fn test_triage9_nonexhaustive_enum_match_fails() {
+    let source = r#"
+enum State {
+    Idle,
+    Run,
+    Done,
+}
+
+entity Fsm {
+    in clk: clock
+    in start: bit
+    out busy: bit
+}
+
+impl Fsm {
+    signal st: State = State::Idle
+
+    on(clk.rise) {
+        match st {
+            State::Idle => {
+                if start {
+                    st = State::Run
+                }
+            }
+            State::Run => {
+                st = State::Done
+            }
+        }
+    }
+
+    busy = if st == State::Run { 1 } else { 0 }
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    let err = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .err()
+        .expect("non-exhaustive enum match must fail the build");
+    assert!(
+        err.contains("non-exhaustive match") && err.contains("`Done`"),
+        "Triage #9: error must name the missing variant: {}",
+        err
+    );
+}
+
+#[test]
+fn test_triage9_bit_match_coverage() {
+    let missing = r#"
+entity Sel {
+    in s: bit[2]
+    out y: bit[4]
+}
+
+impl Sel {
+    y = match s {
+        0b00 => 1,
+        0b01 => 2,
+        0b10 => 4,
+    }
+}
+"#;
+    let complete = r#"
+entity Sel {
+    in s: bit[2]
+    out y: bit[4]
+}
+
+impl Sel {
+    y = match s {
+        0b00 => 1,
+        0b01 => 2,
+        0b10 => 4,
+        0b11 => 8,
+    }
+}
+"#;
+    let wildcarded = r#"
+entity Sel {
+    in s: bit[8]
+    out y: bit[4]
+}
+
+impl Sel {
+    y = match s {
+        0 => 1,
+        _ => 0,
+    }
+}
+"#;
+    let compile = |source: &str| {
+        let tree = parse(source);
+        let hir = build_hir(&tree).expect("HIR building failed");
+        let mut engine = MonomorphizationEngine::new();
+        let hir = engine.monomorphize(&hir);
+        skalp_mir::MirCompiler::new().compile_to_mir(&hir)
+    };
+
+    let err = compile(missing).err().expect("3/4 coverage must fail");
+    assert!(
+        err.contains("non-exhaustive match") && err.contains("3 of 4"),
+        "Triage #9: {}",
+        err
+    );
+    compile(complete).expect("full 2-bit enumeration must build");
+    compile(wildcarded).expect("wildcard arm must satisfy exhaustiveness");
+}

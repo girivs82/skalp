@@ -2300,6 +2300,20 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirStatement::Match(match_stmt) => {
+                // TRIAGE #9: exhaustiveness check (docs promise a compile
+                // error for non-exhaustive matches). Recorded as a conversion
+                // error — reachability-scoped like the other checks.
+                {
+                    let arms: Vec<(&hir::HirPattern, bool)> = match_stmt
+                        .arms
+                        .iter()
+                        .map(|a| (&a.pattern, a.guard.is_some()))
+                        .collect();
+                    if let Some(msg) = self.check_match_exhaustiveness(&match_stmt.expr, &arms) {
+                        let entity = self.current_entity_name();
+                        self.conversion_errors.push((entity, msg));
+                    }
+                }
                 // Check if any arm has a TupleVariant pattern (enum with payload)
                 let has_payload = match_stmt
                     .arms
@@ -6789,6 +6803,108 @@ impl<'hir> HirToMir<'hir> {
         result
     }
 
+    /// TRIAGE #9: match exhaustiveness. Returns Some(message) when the match
+    /// provably misses values and has no catch-all arm. Guarded arms never
+    /// count toward coverage (the guard can be false).
+    ///
+    /// Covered: enum scrutinees (all variants or catch-all required) and
+    /// integer-typed scrutinees (all 2^N values or catch-all; N > 20 always
+    /// requires a catch-all). Tuple/struct scrutinees and unresolvable types
+    /// are skipped — no false positives.
+    fn check_match_exhaustiveness(
+        &mut self,
+        scrutinee: &hir::HirExpression,
+        arms: &[(&hir::HirPattern, bool)],
+    ) -> Option<String> {
+        use hir::HirPattern as P;
+
+        // An unguarded wildcard or variable binding catches everything.
+        if arms
+            .iter()
+            .any(|(p, guarded)| !guarded && matches!(p, P::Wildcard | P::Variable(_)))
+        {
+            return None;
+        }
+
+        // Enum matches: identified by Path/TupleVariant patterns.
+        let enum_def = arms.iter().find_map(|(p, _)| match p {
+            P::Path(enum_name, _) | P::TupleVariant(enum_name, _, _) => {
+                self.find_enum_def(enum_name)
+            }
+            _ => None,
+        });
+        if let Some(def) = enum_def {
+            let covered: std::collections::HashSet<&str> = arms
+                .iter()
+                .filter(|(_, guarded)| !guarded)
+                .filter_map(|(p, _)| match p {
+                    P::Path(_, v) | P::TupleVariant(_, v, _) => Some(v.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let missing: Vec<String> = def
+                .variants
+                .iter()
+                .map(|v| v.name.as_str())
+                .filter(|v| !covered.contains(v))
+                .map(|v| format!("`{}`", v))
+                .collect();
+            if missing.is_empty() {
+                return None;
+            }
+            return Some(format!(
+                "non-exhaustive match on enum `{}`: missing variant(s) {} — add the missing arm(s) or a `_` arm",
+                def.name,
+                missing.join(", ")
+            ));
+        }
+
+        // Integer-typed scrutinees: count distinct unguarded literal values.
+        let width = match self.infer_hir_type(scrutinee)? {
+            hir::HirType::Bit(w)
+            | hir::HirType::Logic(w)
+            | hir::HirType::Nat(w)
+            | hir::HirType::Int(w) => w,
+            hir::HirType::Bool => 1,
+            _ => return None, // tuples/structs/unknown: skip (no false positives)
+        };
+        if width == 0 {
+            return None;
+        }
+        if width > 20 {
+            return Some(format!(
+                "non-exhaustive match on a {}-bit value: enumerating 2^{} values is infeasible — add a `_` arm",
+                width, width
+            ));
+        }
+        let needed: u64 = 1u64 << width;
+        let covered: std::collections::HashSet<u64> = arms
+            .iter()
+            .filter(|(_, guarded)| !guarded)
+            .filter_map(|(p, _)| match p {
+                P::Literal(hir::HirLiteral::Integer(v)) => Some(*v & (needed - 1)),
+                P::Literal(hir::HirLiteral::Boolean(b)) => Some(*b as u64),
+                // Binary/hex literals parse as bit vectors (LSB-first)
+                P::Literal(hir::HirLiteral::BitVector(bits)) => Some(
+                    bits.iter()
+                        .enumerate()
+                        .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i))
+                        & (needed - 1),
+                ),
+                _ => None,
+            })
+            .collect();
+        if (covered.len() as u64) >= needed {
+            return None;
+        }
+        Some(format!(
+            "non-exhaustive match on a {}-bit value: {} of {} value(s) covered — add the missing arm(s) or a `_` arm",
+            width,
+            covered.len(),
+            needed
+        ))
+    }
+
     /// Convert HIR match statement to MIR case statement
     fn convert_match_statement(
         &mut self,
@@ -9881,6 +9997,18 @@ impl<'hir> HirToMir<'hir> {
                 ))
             }
             hir::HirExpression::Match(match_expr) => {
+                // TRIAGE #9: exhaustiveness check for match expressions.
+                {
+                    let arms: Vec<(&hir::HirPattern, bool)> = match_expr
+                        .arms
+                        .iter()
+                        .map(|a| (&a.pattern, a.guard.is_some()))
+                        .collect();
+                    if let Some(msg) = self.check_match_exhaustiveness(&match_expr.expr, &arms) {
+                        let entity = self.current_entity_name();
+                        self.conversion_errors.push((entity, msg));
+                    }
+                }
                 // Convert match-expression to conditionals
                 // Choice of priority (nested ternary) vs parallel (OR of ANDs) based on mux_style
                 trace!(

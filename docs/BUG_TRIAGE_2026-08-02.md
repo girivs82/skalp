@@ -163,11 +163,28 @@ codegen gaps; **P3** = hygiene.
    guard) fail identically WITHOUT this change — pre-existing, need their own
    triage.
 
-9. **Match exhaustiveness checking does not exist.** `is_match_exhaustive()` in
-   `skalp-lint/src/lints/hardware.rs:103` is `#[allow(dead_code)]` and returns
-   `false`; the lint site is a TODO. A match missing an enum arm builds clean and the
-   missing value falls into the last arm. Published docs (design-choices blog, tutorial
-   ch07, projects page) all claim this is a compile error.
+9. **FIXED (2026-08-04). Match exhaustiveness checking does not exist.**
+   A match missing an enum arm built clean and the missing value fell into
+   the last arm; published docs promise a compile error. **Implemented** as
+   a conversion error in hir_to_mir (`check_match_exhaustiveness`, hooked at
+   both the match-statement dispatcher and the match-expression converter;
+   reachability-scoped like the other build-failing checks — latent stdlib
+   issues can't block unrelated designs):
+   - unguarded `_` or variable-binding arm ⇒ exhaustive;
+   - ENUM scrutinee (identified via Path/TupleVariant patterns): every
+     variant covered or error naming the missing variant(s);
+   - integer scrutinee (bit/logic/nat/int/bool): all 2^N distinct literal
+     values (Integer/Boolean/BitVector literals normalized) or error with
+     the coverage count; N > 20 always requires a catch-all;
+   - guarded arms never count toward coverage (the guard can be false);
+   - tuple/struct/unresolvable scrutinees are SKIPPED (no false positives)
+     — tuple-product checking is a follow-up.
+   **Verified:** enum repro errors naming `Done`; 3-of-4 bit repro errors
+   with the count; complete enumeration and wildcard forms build; 90-design
+   corpus unchanged and full suite has ZERO new failures — no existing
+   design relied on non-exhaustive matches. EC sweep green. Suite tests:
+   `test_triage9_nonexhaustive_enum_match_fails`,
+   `test_triage9_bit_match_coverage`.
 
 10. **FIXED (2026-08-04). CDC diagnostics stripped — and the analysis was
     vacuous.** `report_cdc_violations` computed severity strings then printed
