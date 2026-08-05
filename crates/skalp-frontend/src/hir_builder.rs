@@ -486,11 +486,6 @@ impl HirBuilderContext {
     /// This ensures imported distinct types like `fp32` resolve to `HirType::Custom("fp32")`
     /// instead of falling back to hardcoded `HirType::Float32`
     pub fn preregister_distinct_type(&mut self, distinct: &crate::hir::HirDistinctType) {
-        trace!(
-            "📦 Pre-registering distinct type '{}' -> Custom(\"{}\")",
-            distinct.name,
-            distinct.name
-        );
         self.symbols.user_types.insert(
             distinct.name.clone(),
             HirType::Custom(distinct.name.clone()),
@@ -1071,11 +1066,6 @@ impl HirBuilderContext {
 
         // Consume pending safety mechanism config (from #[safety_mechanism(...)] attribute)
         let safety_mechanism_config = self.pending_safety_mechanism_config.take();
-        trace!(
-            "🔍 [BUILD_ENTITY] Entity '{}' - safety_mechanism_config = {:?}",
-            name,
-            safety_mechanism_config
-        );
 
         // Consume pending SEooC config (from #[seooc(...)] attribute)
         // and merge any pending assumed mechanisms (from #[assumed_mechanism(...)] attributes)
@@ -1087,14 +1077,6 @@ impl HirBuilderContext {
                 // If we have assumed mechanisms, ensure we have a seooc_config
                 let config = config.get_or_insert_with(Default::default);
                 config.assumed_mechanisms.extend(assumed_mechanisms);
-            }
-
-            if config.is_some() {
-                trace!(
-                    "🔍 [BUILD_ENTITY] Entity '{}' - seooc_config = {:?}",
-                    name,
-                    config
-                );
             }
 
             config
@@ -3408,10 +3390,6 @@ impl HirBuilderContext {
                     if let Some(assignment) = self.build_assignment(&child, assignment_type) {
                         trace!("[HIR_COLLECT] ✓ build_assignment succeeded, added to statements");
                         statements.push(HirStatement::Assignment(assignment));
-                    } else {
-                        trace!(
-                            "[HIR_COLLECT] ❌ build_assignment returned None, assignment DROPPED!"
-                        );
                     }
                 }
                 SyntaxKind::IfStmt => {
@@ -6060,11 +6038,6 @@ impl HirBuilderContext {
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
                     });
-                trace!(
-                    "🔍 TUPLE TYPE INFERENCE: Variable({}) -> {:?}",
-                    var_id.0,
-                    var_type
-                );
                 var_type
             } else if let HirExpression::Call(ref call_expr) = value {
                 // BUG FIX #69: If RHS is a function call, look up its return type from function_return_types
@@ -6078,11 +6051,6 @@ impl HirBuilderContext {
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
                     });
-                trace!(
-                    "🔍 TUPLE TYPE INFERENCE: Call({}) -> {:?}",
-                    call_expr.function,
-                    func_return_type
-                );
                 func_return_type
             } else {
                 // Fallback: Create tuple type with Nat(32) placeholders for each element
@@ -6123,13 +6091,6 @@ impl HirBuilderContext {
             };
 
             // DEBUG: Log element type assignment for tuple destructuring
-            trace!(
-                "🔍 TUPLE DESTRUCTURE: var='{}', index={}, element_type={:?}, tuple_type={:?}",
-                var_name,
-                index,
-                element_type,
-                tmp_type
-            );
 
             // Create field access expression: _tuple_tmp_N.index
             let field_access = HirExpression::FieldAccess {
@@ -12577,13 +12538,6 @@ impl HirBuilderContext {
             .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "safety_mechanism");
 
         // Debug: show all tokens in the attribute
-        trace!(
-            "🔍 [ATTR] Checking attribute tokens: {:?}",
-            tokens
-                .iter()
-                .map(|t| (t.kind(), t.text()))
-                .collect::<Vec<_>>()
-        );
 
         if !has_safety_mechanism {
             return None;
@@ -12708,12 +12662,6 @@ impl HirBuilderContext {
         }
 
         // Only return Some if we found at least the mechanism type
-        trace!(
-            "🔍 [ATTR] Parsed: mechanism_type={:?}, dc={:?}, lc={:?}",
-            mechanism_type,
-            dc,
-            lc
-        );
         if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
             Some(SafetyMechanismConfig {
                 mechanism_type,

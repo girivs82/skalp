@@ -464,9 +464,19 @@ codegen gaps; **P3** = hygiene.
     (assignment in expression), `assert property (count = DEPTH)`, mixed `=`/`<=`,
     angle-bracket widths. Migrate or delete.
 
-24. **Debug residue in hot paths.** Emoji trace lines (`🟠🟠🟠`), a hardcoded trace for
-    `_tuple_tmp_66`, bug-number archaeology comments throughout
-    `hir_to_mir.rs` / `hir_builder.rs`.
+24. **FIXED (2026-08-05, scoped). Debug residue in hot paths.** Removed from
+    `hir_to_mir.rs` / `hir_builder.rs`: 184 emoji-bracketed trace! calls
+    (🟠🟠🟠 BUG #127 DEBUG …), 9 hardcoded-name debug blocks
+    (`_tuple_tmp_66`, `AsyncFifo_8` — one was a no-op loop), the vestigial
+    empty-if skeletons they left behind, and the two `[DEBUG SYNTH]` /
+    `[DEBUG PHASE3B]` writes that printed to stderr on EVERY build
+    (now trace!). Kept: `⏱️ [PERF]` timing traces, `[skalp] warning:`
+    user diagnostics, and the Bug #85 panic banner. Behavior-neutral by
+    construction (log-only changes) and verified: corpus 145/145 identical,
+    suite zero delta, EC spot proofs green, clippy 0 on stable+beta.
+    NOT addressed here: bug-number archaeology comments — they are the
+    codebase's institutional memory and cross-reference this triage doc;
+    removing them loses information. Declared in-scope residue done.
 
 25. **CLI/manifest mismatches with docs.** `skalp build <file>` positional arg is
     rejected (needs `-s`) though README/tutorial use it; `skalp new` emits `Cargo.toml`
