@@ -530,14 +530,32 @@ codegen gaps; **P3** = hygiene.
     async_fifo) stays green; corpus unchanged; suite zero delta. Suite
     regression tests: `test_triage35_*` (SAT equivalence for guard shapes +
     netlist.clocks/DFF-clocking assertions).
-    **KNOWN REMAINING (#36):** memories inside hierarchically-INLINED child
-    instances (`inst f = std_fifo<8,16>` then EC on the parent) are
-    flattened by the behavioral converter into per-element scalars
-    (f.mem_0..f.mem_15) with NO dynamic-index write path — writes are lost
-    (count updates, rdata stays 0) while the gate side is correct
-    (deterministic gate-sim probe reads back written data). The EC smoke
-    for /tmp-style hierarchical FIFO tops still false-fails on this;
-    fix belongs in mir_to_sir's instance inlining of array signals.
+    Follow-up #36 (below) closed the remaining hierarchical case.
+
+36. **FIXED (2026-08-05). Hierarchically-inlined child memories and
+    self-read output ports.** `inst f = ChildFifo {...}` then EC on the
+    parent failed two ways:
+    (a) **Behavioral model dropped child memory writes entirely** —
+    `collect_assignment_targets_for_instance` ignored `BitSelect`
+    (dynamic array write) targets, so NO flip-flops were created for the
+    child's flattened memory elements; and the branch-level finder, once
+    reachable, set the write data with no per-element index guard. Fixed:
+    the collector extracts the array base (expanded per element by the
+    caller), and the branch finder synthesizes
+    `(index == element_idx) ? data : <running default>` per element —
+    behavioral FIFO round-trip (write A→read A→empty) now correct.
+    (b) **Gate side: read-on-empty underflowed count** — the child reads
+    its OWN output ports (`read_enable && !empty`), and the hierarchical
+    LIR flatten redirected output-port DRIVERS to the parent signal while
+    internal READERS stayed on the undriven child-local port signal
+    (always 0, so `!empty` was 1 forever). Same family as #28/#29 —
+    fourth dropped case in the flatten's port plumbing. Fixed: node input
+    mapping now consults `output_remap_map` so readers follow the driver.
+    **Verified:** the hierarchical FIFO passes FULL EC with SAT proof;
+    9-design EC sweep green (all #35 repros + MWE + hierarchical_alu +
+    async_fifo); corpus unchanged; suite zero delta. Suite regression
+    test: `test_triage36_hierarchical_child_memory` (full SAT proof of a
+    memory-bearing child that reads back its own flags).
 
 26. **Package manager: git dependencies stubbed** (`resolver.rs:172` returns
     "Git dependencies not yet implemented"). Documented as a limitation — keep it

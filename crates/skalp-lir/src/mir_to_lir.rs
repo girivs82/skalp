@@ -5526,6 +5526,18 @@ impl HierarchicalMirToLirResult {
                             if let Some(&aliased) = port_alias_map.get(&(inst_path.clone(), old_id))
                             {
                                 aliased
+                            } else if let Some(&remapped) =
+                                output_remap_map.get(&(inst_path.clone(), old_id))
+                            {
+                                // TRIAGE #36: a child reading its OWN output
+                                // port (a FIFO consuming its empty/full flags
+                                // in `read_enable && !empty`). The port's
+                                // DRIVER was redirected to the parent signal,
+                                // so internal READERS must follow — otherwise
+                                // they read the undriven child-local port
+                                // signal (always 0: read-on-empty underflowed
+                                // because !empty evaluated 1 forever).
+                                remapped
                             } else {
                                 signal_id_map
                                     .get(&(inst_path.clone(), old_id))

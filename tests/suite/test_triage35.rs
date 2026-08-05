@@ -180,3 +180,98 @@ impl MemOnly {
         dffs_on_clk
     );
 }
+
+// =============================================================================
+// TRIAGE #36: memories and self-read output ports inside hierarchically-
+// INLINED child instances. Two bugs:
+// (a) mir_to_sir's collect_assignment_targets_for_instance ignored BitSelect
+//     targets, so NO flip-flops were created for the child's flattened
+//     memory elements — every write was lost (and the branch finder, once
+//     reachable, lacked the per-element index guard).
+// (b) mir_to_lir's hierarchical flatten redirected child output-port DRIVERS
+//     to the parent signal but left internal READERS on the undriven
+//     child-local signal — a FIFO consuming its own empty/full flags read 0
+//     forever, so read-on-empty underflowed count on the gate side.
+// =============================================================================
+
+/// Full SAT equivalence for a parent instantiating a memory-bearing FIFO
+/// child that reads back its own empty/full output ports.
+#[test]
+fn test_triage36_hierarchical_child_memory() {
+    ec_sat(
+        r#"
+entity ChildFifo {
+    in clk: clock
+    in rst: reset(active_high)
+    in write_data: bit[8]
+    in write_enable: bit
+    in read_enable: bit
+    out read_data: bit[8]
+    out full: bit
+    out empty: bit
+}
+
+impl ChildFifo {
+    signal mem: [bit[8]; 16]
+    signal write_ptr: bit[4] = 0
+    signal read_ptr: bit[4] = 0
+    signal count: bit[5] = 0
+
+    on(clk.rise) {
+        if rst {
+            write_ptr = 0
+            read_ptr = 0
+            count = 0
+        } else {
+            match (write_enable && !full, read_enable && !empty) {
+                (true, true) => {
+                    mem[write_ptr] = write_data
+                    write_ptr = write_ptr + 1
+                    read_ptr = read_ptr + 1
+                }
+                (true, false) => {
+                    mem[write_ptr] = write_data
+                    write_ptr = write_ptr + 1
+                    count = count + 1
+                }
+                (false, true) => {
+                    read_ptr = read_ptr + 1
+                    count = count - 1
+                }
+                (false, false) => {}
+            }
+        }
+    }
+
+    read_data = mem[read_ptr]
+    full = (count == 16)
+    empty = (count == 0)
+}
+
+entity FifoParent {
+    in clk: clock
+    in rst: reset(active_high)
+    in wdata: bit[8]
+    in wen: bit
+    in ren: bit
+    out rdata: bit[8]
+    out full: bit
+    out empty: bit
+}
+
+impl FifoParent {
+    inst f = ChildFifo {
+        clk: clk,
+        rst: rst,
+        write_data: wdata,
+        write_enable: wen,
+        read_enable: ren,
+    }
+    rdata = f.read_data
+    full = f.full
+    empty = f.empty
+}
+"#,
+        "FifoParent",
+    );
+}

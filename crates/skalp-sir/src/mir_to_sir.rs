@@ -8176,6 +8176,14 @@ impl<'a> MirToSirConverter<'a> {
                         .iter()
                         .find(|p| p.id == *port_id)
                         .map(|port| format!("{}.{}", inst_prefix, port.name)),
+                    // TRIAGE #36: dynamic array-element writes (mem[ptr] = x)
+                    // were NEVER collected, so no flip-flops were created for
+                    // the flattened elements — child memories silently lost
+                    // every write. Collect the array BASE; the caller expands
+                    // it to the per-element targets.
+                    LValue::BitSelect { base, .. } => self
+                        .extract_base_signal_for_instance(base, inst_prefix, child_module)
+                        .map(|b| self.strip_flattened_index_suffix(&b)),
                     _ => None,
                 };
 
@@ -8262,6 +8270,11 @@ impl<'a> MirToSirConverter<'a> {
                         .iter()
                         .find(|p| p.id == *port_id)
                         .map(|port| format!("{}.{}", inst_prefix, port.name)),
+                    // TRIAGE #36: same as the Assignment arm — collect the
+                    // array base for dynamic element writes.
+                    LValue::BitSelect { base, .. } => self
+                        .extract_base_signal_for_instance(base, inst_prefix, child_module)
+                        .map(|b| self.strip_flattened_index_suffix(&b)),
                     _ => None,
                 };
                 if let Some(sig_name) = lhs_signal {
@@ -8596,6 +8609,68 @@ impl<'a> MirToSirConverter<'a> {
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
+                    // TRIAGE #36: a dynamic array-element write in a branch
+                    // (mem[ptr] = x) must synthesize, PER ELEMENT:
+                    //   result = (ptr == element_idx) ? x : <running default>
+                    // The old code set result = x with NO index guard — every
+                    // element would have captured the write data (and before
+                    // the collect fix this arm was unreachable anyway).
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        let extracted =
+                            self.extract_base_signal_for_instance(base, inst_prefix, child_module);
+                        if let Some(base_name) = extracted {
+                            let stripped_base = self.strip_flattened_index_suffix(&base_name);
+                            let stripped_target = self.strip_flattened_index_suffix(target);
+                            if stripped_base == stripped_target {
+                                if let Some(element_idx) = self.extract_element_index(target) {
+                                    let index_node = self
+                                        .create_expression_node_for_instance_with_context(
+                                            index,
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
+                                    let index_width = self.get_node_output_width(index_node);
+                                    let index_width =
+                                        if index_width == 0 { 32 } else { index_width };
+                                    let const_idx =
+                                        self.create_constant_node(element_idx as u64, index_width);
+                                    let cond_node = self.create_binary_op_node(
+                                        &BinaryOp::Equal,
+                                        index_node,
+                                        const_idx,
+                                    );
+                                    let value_node = self
+                                        .create_expression_node_for_instance_with_context(
+                                            &assign.rhs,
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
+                                    let current_node = result.unwrap_or_else(|| {
+                                        self.create_signal_ref_for_instance(
+                                            target,
+                                            inst_prefix,
+                                            port_mapping,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        )
+                                    });
+                                    result = Some(self.create_mux_node(
+                                        cond_node,
+                                        value_node,
+                                        current_node,
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     let lhs_signal = match &assign.lhs {
                         LValue::Signal(sig_id) => child_module
                             .signals
@@ -8607,28 +8682,11 @@ impl<'a> MirToSirConverter<'a> {
                             .iter()
                             .find(|p| p.id == *port_id)
                             .map(|port| format!("{}.{}", inst_prefix, port.name)),
-                        LValue::BitSelect { base, .. } => {
-                            let extracted = self.extract_base_signal_for_instance(
-                                base,
-                                inst_prefix,
-                                child_module,
-                            );
-                            extracted
-                                .as_ref()
-                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
-                        }
                         _ => None,
                     };
 
                     if let Some(lhs) = lhs_signal {
-                        let matches = if matches!(assign.lhs, LValue::Signal(_) | LValue::Port(_)) {
-                            lhs == target
-                        } else {
-                            let target_stripped = self.strip_flattened_index_suffix(target);
-                            lhs == target_stripped
-                        };
-
-                        if matches {
+                        if lhs == target {
                             result = Some(self.create_expression_node_for_instance_with_context(
                                 &assign.rhs,
                                 inst_prefix,
