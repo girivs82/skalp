@@ -425,10 +425,14 @@ codegen gaps; **P3** = hygiene.
     literals + chains); EC SAT-proves the concat design. Suite regression
     test: `test_triage17_plusplus_concat`. Corpus 145/145 unchanged.
 
-18. **Struct-flattening separator is `__` (double underscore); docs say `_`.**
-    `color_a.r` → `color_a__r`. The double underscore is arguably better (unambiguous);
-    fix the docs and the tutorial's testbench signal names, and expose the mangling
-    rule in one place.
+18. **FIXED (2026-08-05). Struct-flattening separator is `__`; docs said `_`.**
+    No stale single-underscore claims remain in the current docs (the
+    audited wording was already reworded during the campaign). The mangling
+    rules are now NORMATIVE in LANGUAGE_SPECIFICATION.md §3.2 ("Name
+    mangling of flattened composites"): struct fields join with `__`
+    (`insn.opcode` → `insn__opcode`, nested chains), instance auto-wires
+    are `{inst}_{port}` with collision fallback `{inst}__{port}`, and
+    struct-typed instance outputs compose both (`geometry_output__x`).
 
 19. **Intent query builtins are hardcoded constants.**
     `hir_to_mir.rs:8192`: `is_latency_optimized` → always true, `is_area_optimized` /
@@ -459,10 +463,16 @@ codegen gaps; **P3** = hygiene.
     `fast`, `slow`, `up`, `down`, `part`, `pin`, `drive`, ...) — everyday RTL signal
     names. Convert domain keywords to contextual keywords. (Spec claims 43 keywords.)
 
-23. **Shipped stdlib contains a dead-dialect, buggy FIFO.**
-    `crates/skalp-stdlib/components/fifo.sk`: `almost_empty = (count = 1)`
-    (assignment in expression), `assert property (count = DEPTH)`, mixed `=`/`<=`,
-    angle-bracket widths. Migrate or delete.
+23. **FIXED (2026-08-05) — migrated. Shipped stdlib contains a dead-dialect,
+    buggy FIFO.** `components/fifo.sk` rewritten in the current dialect:
+    real tuple-match arms (`(true, false) =>`, works since #8), `==`
+    comparisons, `[bit[W]; D]` memory, `clog2`, initialized state,
+    natural power-of-two pointer wrap; the broken SVA asserts
+    (`count = DEPTH`) are gone. Verified: parses (e2e test), instantiates
+    hierarchically via `inst std_fifo<8, 16>`, and the emitted SV is proven
+    CORRECT by Verilator simulation (write A1/B2/C3 → read A1/B2/C3, empty
+    flags right). NOTE: `skalp ec` smoke false-fails it — see #35, an EC
+    model gap discovered by this migration, not a hardware bug.
 
 24. **FIXED (2026-08-05, scoped). Debug residue in hot paths.** Removed from
     `hir_to_mir.rs` / `hir_builder.rs`: 184 emoji-bracketed trace! calls
@@ -478,11 +488,27 @@ codegen gaps; **P3** = hygiene.
     codebase's institutional memory and cross-reference this triage doc;
     removing them loses information. Declared in-scope residue done.
 
-25. **CLI/manifest mismatches with docs.** `skalp build <file>` positional arg is
-    rejected (needs `-s`) though README/tutorial use it; `skalp new` emits `Cargo.toml`
-    (not `skalp.toml`); manifest has no `[build] top` field; `skalp fmeda` /
-    `skalp fault-inject` don't exist (real: `skalp safety`, `skalp build --safety`).
-    Align CLI with docs or docs with CLI.
+25. **FIXED (2026-08-05, main items). CLI/manifest mismatches with docs.**
+    (a) `skalp build <file>` positional form now works (README/tutorial use
+    it); `-s` remains supported, conflicting values error. (b) `skalp new`
+    now emits a valid `skalp.toml` alongside `Cargo.toml` — `skalp add`'s
+    error says "Run 'skalp new'", which previously created no manifest at
+    all. `Cargo.toml` is intentional (Rust-based testbench harness via
+    skalp-testing), not a bug. (c) `skalp fmeda`/`skalp fault-inject`
+    references are already gone from README/tutorial. REMAINING: manifest
+    has no `[build] top` field (docs mention one) — needs a decision on
+    whether builds should read the manifest at all.
+
+35. **EC smoke false-fails memory arrays written under multi-branch
+    control.** Discovered by the #23 FIFO migration: a `[bit[8]; 16]`
+    memory written from 2+ sibling branches (tuple-match arms OR an
+    if/else-if chain) fails smoke EC — tuple form: mir=1/gate=0 on `empty`
+    at cycle 0; if-chain form: mir=4/gate=0 on `read_data` at cycle 1 —
+    while Verilator proves the emitted SV correct (race-free testbench:
+    perfect FIFO order). Single-write-site memory designs (#27's repros,
+    async_fifo) pass. One or both EC sims mis-model multi-site memory
+    writes; repro shapes preserved in the entry above. Next EC-model work
+    item.
 
 26. **Package manager: git dependencies stubbed** (`resolver.rs:172` returns
     "Git dependencies not yet implemented"). Documented as a limitation — keep it

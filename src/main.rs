@@ -74,6 +74,11 @@ enum Commands {
 
     /// Build the design
     Build {
+        /// Source file, positional form: `skalp build design.sk`
+        /// (TRIAGE #25: README/tutorial use the positional form)
+        #[arg(value_name = "SOURCE")]
+        source_pos: Option<PathBuf>,
+
         /// Source file (defaults to src/main.sk)
         #[arg(short, long)]
         source: Option<PathBuf>,
@@ -651,6 +656,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Build {
+            source_pos,
             source,
             target,
             output,
@@ -672,7 +678,21 @@ fn main() -> Result<()> {
             architecture,
             emit,
         } => {
-            let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
+            // TRIAGE #25: accept the positional form the docs use
+            // (`skalp build design.sk`); `-s` remains supported. If both are
+            // given they must agree.
+            if let (Some(p), Some(s)) = (&source_pos, &source) {
+                if p != s {
+                    anyhow::bail!(
+                        "conflicting source files: positional `{}` vs -s `{}`",
+                        p.display(),
+                        s.display()
+                    );
+                }
+            }
+            let source_file = source_pos
+                .or(source)
+                .unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
             // Build safety options
             let safety_options = if safety {
@@ -998,6 +1018,18 @@ tokio = {{ version = "1", features = ["full", "test-util"] }}
     };
     fs::write(format!("{}/Cargo.toml", name), cargo_toml)?;
 
+    // TRIAGE #25: `skalp add` requires a skalp.toml and its error says
+    // "Run 'skalp new'" — so `new` must actually create one.
+    let skalp_toml = format!(
+        r#"[package]
+name = "{name}"
+version = "0.1.0"
+
+[dependencies]
+"#
+    );
+    fs::write(format!("{}/skalp.toml", name), skalp_toml)?;
+
     // Create main.sk with a simple example
     let main_sk = r#"// Main SKALP design file
 
@@ -1055,6 +1087,7 @@ skalpc synth src/main.sk --device ice40-hx8k
     println!("📁 Project structure:");
     println!("   {}/", name);
     println!("   ├── Cargo.toml");
+    println!("   ├── skalp.toml");
     println!("   ├── README.md");
     println!("   ├── src/");
     println!("   │   └── main.sk");

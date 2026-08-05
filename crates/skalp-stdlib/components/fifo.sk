@@ -1,64 +1,70 @@
-// Standard library FIFO component  
-entity std_fifo<const WIDTH: usize, const DEPTH: usize> {
-    in clk: clock;
-    in rst: reset;
-    
+// Standard library synchronous FIFO
+//
+// Single-clock FIFO with full/empty/almost-full/almost-empty status and a
+// fill counter. DEPTH should be a power of two: the read/write pointers are
+// clog2(DEPTH) bits wide and wrap naturally on increment.
+//
+// TRIAGE #23: rewritten in the current dialect — the previous version used
+// the dead pre-1.0 dialect (brace-tuple match arms, `=` as comparison,
+// Array<T, N>, mixed blocking/non-blocking) and never compiled.
+
+entity std_fifo<const WIDTH: nat = 8, const DEPTH: nat = 16> {
+    in clk: clock
+    in rst: reset(active_high)
+
     // Write interface
-    in write_data: bit<WIDTH>;
-    in write_enable: bit;
-    out full: bit;
-    out almost_full: bit;
-    
+    in write_data: bit[WIDTH]
+    in write_enable: bit
+    out full: bit
+    out almost_full: bit
+
     // Read interface
-    out read_data: bit<WIDTH>;
-    in read_enable: bit;
-    out empty: bit;
-    out almost_empty: bit;
-    
+    out read_data: bit[WIDTH]
+    in read_enable: bit
+    out empty: bit
+    out almost_empty: bit
+
     // Status
-    out fill_count: bit<log2(DEPTH+1)>;
+    out fill_count: bit[clog2(DEPTH + 1)]
 }
 
 impl std_fifo {
-    signal memory: Array<bit<WIDTH>, DEPTH>;
-    signal write_ptr: bit<log2(DEPTH)>;
-    signal read_ptr: bit<log2(DEPTH)>;
-    signal count: bit<log2(DEPTH+1)>;
-    
+    signal mem: [bit[WIDTH]; DEPTH]
+    signal write_ptr: bit[clog2(DEPTH)] = 0
+    signal read_ptr: bit[clog2(DEPTH)] = 0
+    signal count: bit[clog2(DEPTH + 1)] = 0
+
     on(clk.rise) {
-        if rst.active {
-            write_ptr = 0;
-            read_ptr = 0;
-            count = 0;
+        if rst {
+            write_ptr = 0
+            read_ptr = 0
+            count = 0
         } else {
-            match {write_enable && !full, read_enable && !empty} {
-                {true, true} => {
-                    memory[write_ptr] = write_data;
-                    write_ptr <= (write_ptr + 1) % DEPTH;
-                    read_ptr <= (read_ptr + 1) % DEPTH;
-                },
-                {true, false} => {
-                    memory[write_ptr] = write_data;
-                    write_ptr <= (write_ptr + 1) % DEPTH;
-                    count = count + 1;
-                },
-                {false, true} => {
-                    read_ptr <= (read_ptr + 1) % DEPTH;
-                    count = count - 1;
-                },
-                {false, false} => {}
+            match (write_enable && !full, read_enable && !empty) {
+                (true, true) => {
+                    // Simultaneous read+write: count unchanged
+                    mem[write_ptr] = write_data
+                    write_ptr = write_ptr + 1
+                    read_ptr = read_ptr + 1
+                }
+                (true, false) => {
+                    mem[write_ptr] = write_data
+                    write_ptr = write_ptr + 1
+                    count = count + 1
+                }
+                (false, true) => {
+                    read_ptr = read_ptr + 1
+                    count = count - 1
+                }
+                (false, false) => {}
             }
         }
     }
-    
-    read_data = memory[read_ptr];
-    full = (count == DEPTH);
-    empty = (count == 0);
-    almost_full = (count >= DEPTH - 1);
-    almost_empty = (count = 1);
-    fill_count = count;
-    
-    assert property (write_enable -> !full) @(posedge clk);
-    assert property (read_enable -> !empty) @(posedge clk);
-    assert property (count = DEPTH) @(posedge clk);
+
+    read_data = mem[read_ptr]
+    full = (count == DEPTH)
+    empty = (count == 0)
+    almost_full = (count >= DEPTH - 1)
+    almost_empty = (count == 1)
+    fill_count = count
 }

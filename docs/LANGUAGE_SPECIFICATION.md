@@ -433,6 +433,24 @@ entity Decoder {
 }
 ```
 
+##### Name mangling of flattened composites
+
+Struct-typed ports and signals are flattened to per-field scalars in the
+generated netlist. The mangling rules (normative — testbenches and external
+tooling may rely on them):
+
+- **Struct fields** join with a DOUBLE underscore: `insn.opcode` becomes
+  `insn__opcode`; nested fields chain (`vertex.pos.x` → `vertex__pos__x`).
+  The double underscore keeps the mapping unambiguous even when field or
+  signal names themselves contain underscores.
+- **Instance output auto-wires** are named `{instance}_{port}` (single
+  underscore): `inst pwm = Pwm {...}` with output `counter` creates
+  `pwm_counter`. If that name collides with an existing port, signal, or
+  variable, the compiler renames the auto-wire to `{instance}__{port}`
+  (all internal references follow the rename).
+- A struct-typed instance output combines both rules:
+  `geometry.output`'s field `x` lives on the wire `geometry_output__x`.
+
 #### Enumerations (Named Values)
 Enumerations provide named constants for state machines and opcodes.
 
