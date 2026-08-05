@@ -853,24 +853,25 @@ impl<'a> MirToSirConverter<'a> {
                         if self.is_lvalue_typed_array(base)
                             || self.evaluate_constant_expression(index).is_none()
                         {
-                            // Dynamic array write with conditional: array[index] <= mux(conds, values)
+                            // Dynamic array write with conditional.
+                            // TRIAGE #35: the old "simplified approach" wrote
+                            // the priority-mux VALUE unconditionally every
+                            // cycle — no write enable at all, so the array
+                            // was clobbered (with the mux default) on cycles
+                            // where NO branch wrote. Route through the
+                            // if-statement machinery instead: `original`
+                            // preserves the full chain, and
+                            // handle_array_writes_in_if_with_list composes
+                            // nested guards into a proper write enable with
+                            // an old-value keep path.
                             let array_name = self.lvalue_to_string(base);
-
-                            // For array writes, we need to create ArrayWrite for each branch
-                            // Then mux between them based on conditions
-                            // For now, use a simplified approach: evaluate the mux value, then write to array
-                            let old_array = self.create_lvalue_ref_node(base);
-                            let index_node = self.create_expression_node(index);
-                            let mux_value = self.create_priority_mux_node(&resolved.resolved);
-
-                            // Create ArrayWrite node
-                            let array_write =
-                                self.create_array_write_node(old_array, index_node, mux_value);
-
-                            // Create flip-flop to register the new array state
-                            let ff_node =
-                                self.create_flipflop_with_input(array_write, clock, edge.clone());
-                            self.connect_node_to_signal(ff_node, &array_name);
+                            let _ = index; // index comes from the write sites
+                            self.handle_array_writes_in_if_with_list(
+                                &resolved.original,
+                                clock,
+                                edge.clone(),
+                                vec![((**base).clone(), array_name)],
+                            );
                         } else {
                             // Static bit select
                             let target = self.lvalue_to_string(&resolved.target);

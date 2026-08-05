@@ -1212,116 +1212,22 @@ impl MirToLirTransform {
                         }
                     }
 
-                    // Handle memory BitSelect writes with proper conditional write enable.
-                    // Build BRAM write enable from the enclosing if-condition.
-                    if let LValue::BitSelect { base, index } = target {
+                    // TRIAGE #35: memory BitSelect writes — lower ALL sites in
+                    // this if-statement's subtree with their FULL guard
+                    // conjunctions (we = OR of guards, last-write-wins muxes
+                    // on waddr/wdata). The previous special-case used only
+                    // the outermost condition, so nested guards were DROPPED
+                    // (`if !rst { if a { mem[p]=d } }` wrote every non-reset
+                    // cycle — a real miscompile that EC couldn't see because
+                    // the MIR-side AIG shared the bug).
+                    if let LValue::BitSelect { base, .. } = target {
                         if let Some(mem_signal_id) = self.get_memory_signal_id(base) {
-                            // Find the write data expression from whichever branch has it
-                            let write_rhs = Self::find_assignment_expr(&all_then_assigns, target)
-                                .or_else(|| Self::find_assignment_expr(&all_else_assigns, target));
-
-                            if let Some(rhs_expr) = write_rhs {
-                                let mem_info = self.memory_signals[&mem_signal_id].clone();
-
-                                // Set the MemBlock clock
-                                if let Some(clk) = clock_signal {
-                                    self.lir.set_node_clock(mem_info.node_id, clk);
-                                }
-
-                                // Wire write address combinationally
-                                let addr_signal =
-                                    self.transform_expression(index, mem_info.addr_width);
-                                let path_waddr = self.unique_node_path("mem_waddr");
-                                self.lir.add_node(
-                                    LirOp::Buf {
-                                        width: mem_info.addr_width,
-                                    },
-                                    vec![addr_signal],
-                                    mem_info.waddr_signal,
-                                    path_waddr,
-                                );
-
-                                // Wire write data combinationally
-                                let data_signal =
-                                    self.transform_expression(rhs_expr, mem_info.element_width);
-                                let path_wdata = self.unique_node_path("mem_wdata");
-                                self.lir.add_node(
-                                    LirOp::Buf {
-                                        width: mem_info.element_width,
-                                    },
-                                    vec![data_signal],
-                                    mem_info.wdata_signal,
-                                    path_wdata,
-                                );
-
-                                // Build write enable from the enclosing conditions:
-                                // The memory write occurs only when NOT in reset AND the
-                                // inner condition is true. Build: !rst & condition
-                                let cond_signal = self.transform_expression(&if_stmt.condition, 1);
-
-                                // Determine the inner condition (e.g., `we == 1`)
-                                // If the write is in the else branch (condition is reset),
-                                // we need: !reset & inner_condition
-                                if is_reset_condition {
-                                    // Write is in else branch — find the inner if condition
-                                    let inner_cond =
-                                        if let Some(ref else_block) = if_stmt.else_block {
-                                            Self::find_condition_for_target(else_block, target)
-                                        } else {
-                                            None
-                                        };
-
-                                    let we_signal_val = if let Some(inner) = inner_cond {
-                                        // we = !rst & inner_condition
-                                        let not_rst = self.alloc_temp_signal(1);
-                                        let path = self.unique_node_path("not_rst");
-                                        self.lir.add_node(
-                                            LirOp::Not { width: 1 },
-                                            vec![cond_signal],
-                                            not_rst,
-                                            path,
-                                        );
-                                        let inner_sig = self.transform_expression(&inner, 1);
-                                        let we_and = self.alloc_temp_signal(1);
-                                        let path = self.unique_node_path("mem_we_and");
-                                        self.lir.add_node(
-                                            LirOp::And { width: 1 },
-                                            vec![not_rst, inner_sig],
-                                            we_and,
-                                            path,
-                                        );
-                                        we_and
-                                    } else {
-                                        // No inner condition: we = !rst
-                                        let not_rst = self.alloc_temp_signal(1);
-                                        let path = self.unique_node_path("not_rst");
-                                        self.lir.add_node(
-                                            LirOp::Not { width: 1 },
-                                            vec![cond_signal],
-                                            not_rst,
-                                            path,
-                                        );
-                                        not_rst
-                                    };
-
-                                    let path_we = self.unique_node_path("mem_we");
-                                    self.lir.add_node(
-                                        LirOp::Buf { width: 1 },
-                                        vec![we_signal_val],
-                                        mem_info.we_signal,
-                                        path_we,
-                                    );
-                                } else {
-                                    // Write is in then branch: we = condition
-                                    let path_we = self.unique_node_path("mem_we");
-                                    self.lir.add_node(
-                                        LirOp::Buf { width: 1 },
-                                        vec![cond_signal],
-                                        mem_info.we_signal,
-                                        path_we,
-                                    );
-                                }
-
+                            let scope = [Statement::If(if_stmt.clone())];
+                            if self.lower_memory_writes_in_scope(
+                                mem_signal_id,
+                                &scope,
+                                clock_signal,
+                            ) {
                                 handled_targets.push(target.clone());
                             }
                             continue;
@@ -4634,6 +4540,275 @@ impl MirToLirTransform {
     /// Wires the index to waddr, the data to wdata, and asserts we.
     /// Uses combinational (Buf) connections because the BRAM primitive
     /// (e.g., SB_RAM256x16) has internal registers on all ports.
+    /// TRIAGE #35: collect every write site for `mem_signal_id` in a
+    /// statement tree, carrying the FULL guard conjunction from the scope
+    /// root. The old lowering used only the outermost if-condition (plus
+    /// one special-cased reset-else level), so `if !rst { if a { mem[p]=d } }`
+    /// synthesized we = !rst — writing EVERY non-reset cycle.
+    /// Returns (guard, addr, data) per site; guard None means unconditional.
+    #[allow(clippy::type_complexity)]
+    fn collect_memory_write_sites(
+        &mut self,
+        statements: &[Statement],
+        mem_signal_id: SignalId,
+        guard: Option<LirSignalId>,
+        out: &mut Vec<(Option<LirSignalId>, LirSignalId, LirSignalId)>,
+    ) {
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if !matches!(assign.kind, AssignmentKind::NonBlocking) {
+                        continue;
+                    }
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        if self.get_memory_signal_id(base) == Some(mem_signal_id) {
+                            let addr = self.transform_expression(index, mem_info.addr_width);
+                            let data =
+                                self.transform_expression(&assign.rhs, mem_info.element_width);
+                            out.push((guard, addr, data));
+                        }
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    let cond = self.transform_expression(&if_stmt.condition, 1);
+                    let then_guard = Some(self.and_guard(guard, cond));
+                    self.collect_memory_write_sites(
+                        &if_stmt.then_block.statements,
+                        mem_signal_id,
+                        then_guard,
+                        out,
+                    );
+                    if let Some(else_block) = &if_stmt.else_block {
+                        let not_cond = self.alloc_temp_signal(1);
+                        let path = self.unique_node_path("mem_guard_not");
+                        self.lir
+                            .add_node(LirOp::Not { width: 1 }, vec![cond], not_cond, path);
+                        let else_guard = Some(self.and_guard(guard, not_cond));
+                        self.collect_memory_write_sites(
+                            &else_block.statements,
+                            mem_signal_id,
+                            else_guard,
+                            out,
+                        );
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    let scrutinee_width = self.infer_expression_width(&case_stmt.expr).max(1);
+                    let scrutinee = self.transform_expression(&case_stmt.expr, scrutinee_width);
+                    let mut item_conds: Vec<LirSignalId> = Vec::new();
+                    for item in &case_stmt.items {
+                        // Item matches when scrutinee equals ANY of its values
+                        let mut eq_any: Option<LirSignalId> = None;
+                        for value in &item.values {
+                            let v = self.transform_expression(value, scrutinee_width);
+                            let eq = self.alloc_temp_signal(1);
+                            let path = self.unique_node_path("mem_guard_eq");
+                            self.lir.add_node(
+                                LirOp::Eq {
+                                    width: scrutinee_width,
+                                },
+                                vec![scrutinee, v],
+                                eq,
+                                path,
+                            );
+                            eq_any = Some(match eq_any {
+                                None => eq,
+                                Some(prev) => {
+                                    let or = self.alloc_temp_signal(1);
+                                    let path = self.unique_node_path("mem_guard_or");
+                                    self.lir.add_node(
+                                        LirOp::Or { width: 1 },
+                                        vec![prev, eq],
+                                        or,
+                                        path,
+                                    );
+                                    or
+                                }
+                            });
+                        }
+                        let Some(item_cond) = eq_any else { continue };
+                        item_conds.push(item_cond);
+                        let item_guard = Some(self.and_guard(guard, item_cond));
+                        self.collect_memory_write_sites(
+                            &item.block.statements,
+                            mem_signal_id,
+                            item_guard,
+                            out,
+                        );
+                    }
+                    if let Some(default_block) = &case_stmt.default {
+                        // Default fires when NO item matched
+                        let mut any: Option<LirSignalId> = None;
+                        for c in &item_conds {
+                            any = Some(match any {
+                                None => *c,
+                                Some(prev) => {
+                                    let or = self.alloc_temp_signal(1);
+                                    let path = self.unique_node_path("mem_guard_or");
+                                    self.lir.add_node(
+                                        LirOp::Or { width: 1 },
+                                        vec![prev, *c],
+                                        or,
+                                        path,
+                                    );
+                                    or
+                                }
+                            });
+                        }
+                        let default_guard = match any {
+                            None => guard,
+                            Some(any_sig) => {
+                                let none_matched = self.alloc_temp_signal(1);
+                                let path = self.unique_node_path("mem_guard_not");
+                                self.lir.add_node(
+                                    LirOp::Not { width: 1 },
+                                    vec![any_sig],
+                                    none_matched,
+                                    path,
+                                );
+                                Some(self.and_guard(guard, none_matched))
+                            }
+                        };
+                        self.collect_memory_write_sites(
+                            &default_block.statements,
+                            mem_signal_id,
+                            default_guard,
+                            out,
+                        );
+                    }
+                }
+                Statement::Block(block) => {
+                    self.collect_memory_write_sites(&block.statements, mem_signal_id, guard, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// AND an optional accumulated guard with a new condition signal.
+    fn and_guard(&mut self, guard: Option<LirSignalId>, cond: LirSignalId) -> LirSignalId {
+        match guard {
+            None => cond,
+            Some(g) => {
+                let out = self.alloc_temp_signal(1);
+                let path = self.unique_node_path("mem_guard_and");
+                self.lir
+                    .add_node(LirOp::And { width: 1 }, vec![g, cond], out, path);
+                out
+            }
+        }
+    }
+
+    /// TRIAGE #35: lower ALL write sites for one memory within a statement
+    /// scope: we = OR of the per-site guards; waddr/wdata are priority
+    /// muxes with the LAST site winning (sequential last-write-wins).
+    /// Returns true when at least one site was lowered.
+    fn lower_memory_writes_in_scope(
+        &mut self,
+        mem_signal_id: SignalId,
+        statements: &[Statement],
+        clock_signal: Option<LirSignalId>,
+    ) -> bool {
+        let mut sites: Vec<(Option<LirSignalId>, LirSignalId, LirSignalId)> = Vec::new();
+        self.collect_memory_write_sites(statements, mem_signal_id, None, &mut sites);
+        if sites.is_empty() {
+            return false;
+        }
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
+        if let Some(clk) = clock_signal {
+            self.lir.set_node_clock(mem_info.node_id, clk);
+        }
+
+        // Write enable: OR of all site guards (an unconditional site → 1)
+        let mut we: Option<LirSignalId> = None;
+        let mut unconditional = false;
+        for (guard, _, _) in &sites {
+            match guard {
+                None => unconditional = true,
+                Some(g) => {
+                    we = Some(match we {
+                        None => *g,
+                        Some(prev) => {
+                            let or = self.alloc_temp_signal(1);
+                            let path = self.unique_node_path("mem_we_or");
+                            self.lir
+                                .add_node(LirOp::Or { width: 1 }, vec![prev, *g], or, path);
+                            or
+                        }
+                    });
+                }
+            }
+        }
+        let we_signal = if unconditional {
+            self.create_constant_value(1, 1)
+        } else {
+            we.expect("non-empty sites")
+        };
+        let path_we = self.unique_node_path("mem_we");
+        self.lir.add_node(
+            LirOp::Buf { width: 1 },
+            vec![we_signal],
+            mem_info.we_signal,
+            path_we,
+        );
+
+        // Address/data: priority mux, LAST site wins when guards overlap
+        let (_, mut addr_acc, mut data_acc) = sites[0];
+        for (guard, addr, data) in sites.iter().skip(1) {
+            match guard {
+                None => {
+                    // Unconditional later write always wins
+                    addr_acc = *addr;
+                    data_acc = *data;
+                }
+                Some(g) => {
+                    let a = self.alloc_temp_signal(mem_info.addr_width);
+                    let path = self.unique_node_path("mem_waddr_mux");
+                    self.lir.add_node(
+                        LirOp::Mux2 {
+                            width: mem_info.addr_width,
+                        },
+                        vec![*g, addr_acc, *addr],
+                        a,
+                        path,
+                    );
+                    addr_acc = a;
+                    let d = self.alloc_temp_signal(mem_info.element_width);
+                    let path = self.unique_node_path("mem_wdata_mux");
+                    self.lir.add_node(
+                        LirOp::Mux2 {
+                            width: mem_info.element_width,
+                        },
+                        vec![*g, data_acc, *data],
+                        d,
+                        path,
+                    );
+                    data_acc = d;
+                }
+            }
+        }
+        let path_waddr = self.unique_node_path("mem_waddr");
+        self.lir.add_node(
+            LirOp::Buf {
+                width: mem_info.addr_width,
+            },
+            vec![addr_acc],
+            mem_info.waddr_signal,
+            path_waddr,
+        );
+        let path_wdata = self.unique_node_path("mem_wdata");
+        self.lir.add_node(
+            LirOp::Buf {
+                width: mem_info.element_width,
+            },
+            vec![data_acc],
+            mem_info.wdata_signal,
+            path_wdata,
+        );
+        true
+    }
+
     fn handle_memory_write(
         &mut self,
         mem_signal_id: SignalId,

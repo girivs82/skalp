@@ -2606,11 +2606,28 @@ fn merge_physical_nodes_into_netlist(
                 has_write,
                 ..
             } => {
+                // TRIAGE #35: the clock input net may not EXIST yet — when
+                // the memory is the design's only sequential element, no comb
+                // logic references clk and the input-net sweep drops it, so
+                // get_net_id misses and the fallback silently clocked every
+                // memory DFF with TIE_LOW (a memory that never writes; the
+                // gate SIM exposed it, SAT couldn't — GateNetlistToAig treats
+                // DFF clocking implicitly). Get-or-CREATE the clock input net.
                 let clk_net = node
                     .clock
-                    .and_then(|clk_sig| {
-                        let clk_name = &lir.signals[clk_sig.0 as usize].name;
-                        netlist.get_net_id(clk_name)
+                    .map(|clk_sig| {
+                        let clk_name = lir.signals[clk_sig.0 as usize].name.clone();
+                        let id = netlist
+                            .get_net_id(&clk_name)
+                            .unwrap_or_else(|| netlist.add_clock(clk_name.clone()));
+                        // The SIR conversion derives the sequential block's
+                        // clock from netlist.clocks — an unregistered clock
+                        // silently falls back to SirSignalId(0) and the
+                        // memory DFFs never see an edge.
+                        if !netlist.clocks.contains(&id) {
+                            netlist.clocks.push(id);
+                        }
+                        id
                     })
                     .unwrap_or_else(|| get_tie_low(netlist));
                 map_memblock_standalone(

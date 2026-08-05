@@ -499,16 +499,45 @@ codegen gaps; **P3** = hygiene.
     has no `[build] top` field (docs mention one) — needs a decision on
     whether builds should read the manifest at all.
 
-35. **EC smoke false-fails memory arrays written under multi-branch
-    control.** Discovered by the #23 FIFO migration: a `[bit[8]; 16]`
-    memory written from 2+ sibling branches (tuple-match arms OR an
-    if/else-if chain) fails smoke EC — tuple form: mir=1/gate=0 on `empty`
-    at cycle 0; if-chain form: mir=4/gate=0 on `read_data` at cycle 1 —
-    while Verilator proves the emitted SV correct (race-free testbench:
-    perfect FIFO order). Single-write-site memory designs (#27's repros,
-    async_fifo) pass. One or both EC sims mis-model multi-site memory
-    writes; repro shapes preserved in the entry above. Next EC-model work
-    item.
+35. **FIXED (2026-08-05, three stacked bugs — one a REAL MISCOMPILE).
+    EC smoke false-fails memory arrays written under multi-branch control.**
+    Root-causing the FIFO repros found three independent bugs that were
+    masking each other:
+    (a) **MIR→LIR guard truncation (real hardware miscompile).** The memory
+    write-enable used only the OUTERMOST if-condition (plus one
+    special-cased reset-else level): `if !rst { if a { mem[p] = d } }`
+    synthesized `we = !rst` — writing EVERY non-reset cycle. The emitted SV
+    was correct; the LIR/synthesis netlist was wrong, and EC couldn't see it
+    because MirToAig shared the truncation. Fix: a guard-aware recursive
+    collector (`collect_memory_write_sites`) conjoins the FULL condition
+    path (if/else polarity, case-item equality, blocks) per write site;
+    multiple sites OR their guards into `we` with last-write-wins Mux2
+    chains on waddr/wdata (`lower_memory_writes_in_scope`).
+    (b) **Behavioral EC model: ResolvedConditional array writes were
+    UNCONDITIONAL** — the "simplified approach" wrote the priority-mux
+    value every cycle with no enable. Now routed through
+    `handle_array_writes_in_if_with_list` via the preserved `original`
+    if-chain (proper guards + old-value keep path).
+    (c) **Memory-only designs lost their clock.** When the memory is the
+    only sequential element, no comb logic references clk, the AIG-derived
+    netlist has no clk net, and the DFF-decomposition fallback silently
+    clocked every memory row with TIE_LOW; the netlist→SIR conversion then
+    fell back to `SirSignalId(0)` for the sequential block clock. The clock
+    net is now get-or-created AND registered in `netlist.clocks`.
+    **Verified:** all five flat repros (nested-guard, 2-site else/else-if/
+    sequential-ifs, different-data) + both flat FIFO forms now pass FULL EC
+    with SAT proofs; the EC regression sweep (MWE, hierarchical_alu,
+    async_fifo) stays green; corpus unchanged; suite zero delta. Suite
+    regression tests: `test_triage35_*` (SAT equivalence for guard shapes +
+    netlist.clocks/DFF-clocking assertions).
+    **KNOWN REMAINING (#36):** memories inside hierarchically-INLINED child
+    instances (`inst f = std_fifo<8,16>` then EC on the parent) are
+    flattened by the behavioral converter into per-element scalars
+    (f.mem_0..f.mem_15) with NO dynamic-index write path — writes are lost
+    (count updates, rdata stays 0) while the gate side is correct
+    (deterministic gate-sim probe reads back written data). The EC smoke
+    for /tmp-style hierarchical FIFO tops still false-fails on this;
+    fix belongs in mir_to_sir's instance inlining of array signals.
 
 26. **Package manager: git dependencies stubbed** (`resolver.rs:172` returns
     "Git dependencies not yet implemented"). Documented as a limitation — keep it

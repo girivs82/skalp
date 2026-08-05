@@ -131,6 +131,7 @@ mod test_trait_method_literal;
 mod test_trait_method_registry;
 mod test_trait_method_with_params;
 mod test_traits;
+mod test_triage35;
 mod test_tuple_destructuring;
 mod test_tuple_destructuring_sim;
 mod test_unified_simulation;
