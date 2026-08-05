@@ -240,12 +240,45 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             Some(total_width)
         }
         skalp_mir::ExpressionKind::Binary { op, left, right } => {
-            // For binary ops, use the wider of the two operands
-            let left_width = compute_expression_width(left, mir_module)?;
-            let right_width = compute_expression_width(right, mir_module)?;
-            let base_width = left_width.max(right_width);
+            use skalp_mir::BinaryOp as B;
+            // TRIAGE #16: comparisons and boolean logic produce a SINGLE
+            // bit regardless of operand widths — treating them as
+            // max(operands) "widened" a declared 1-bit condition variable
+            // to 32 bits (the integer-literal default made it worse).
+            if matches!(
+                op,
+                B::Equal
+                    | B::NotEqual
+                    | B::Less
+                    | B::LessEqual
+                    | B::Greater
+                    | B::GreaterEqual
+                    | B::LogicalAnd
+                    | B::LogicalOr
+            ) {
+                return Some(1);
+            }
+            // TRIAGE #16: a bare integer literal is context-determined in
+            // SV — its default 32-bit width must not poison max(). When one
+            // side is a literal and the other has a real width, use the
+            // real width.
+            let is_int_literal = |e: &skalp_mir::Expression| {
+                matches!(
+                    e.kind,
+                    skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(_))
+                )
+            };
+            let base_width = match (is_int_literal(left), is_int_literal(right)) {
+                (true, false) => compute_expression_width(right, mir_module)?,
+                (false, true) => compute_expression_width(left, mir_module)?,
+                _ => {
+                    let left_width = compute_expression_width(left, mir_module)?;
+                    let right_width = compute_expression_width(right, mir_module)?;
+                    left_width.max(right_width)
+                }
+            };
             // WidenAdd produces a result one bit wider than the widest operand
-            if matches!(op, skalp_mir::BinaryOp::WidenAdd) {
+            if matches!(op, B::WidenAdd) {
                 Some(base_width + 1)
             } else {
                 Some(base_width)

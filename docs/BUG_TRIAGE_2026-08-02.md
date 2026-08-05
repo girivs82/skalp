@@ -387,9 +387,29 @@ codegen gaps; **P3** = hygiene.
     written. EC SAT-proves the repro. Suite regression test:
     `test_triage15_declared_let_type_is_respected`. Corpus unchanged.
 
-16. **`signal` declared inside `on()` gets wrong width inference** (observed 32-bit
-    for a 1-bit condition value). Cosmetic in the observed case but the inference is
-    unsound.
+16. **FIXED (2026-08-04). `signal` declared inside `on()` gets wrong width
+    inference** — `signal tick: bit = (cnt == 15)` emitted `logic [31:0]`.
+    **Root cause:** the SV emitter's width-override pass (BUG FIX #8, meant
+    to widen variables assigned concats) computed EVERY binary op as
+    max(operand widths): a comparison is not operand-width (it is 1 bit),
+    and the bare integer literal's default 32-bit width poisoned the max, so
+    the declared 1-bit variable was "widened" to 32. Arithmetic with a bare
+    literal (`cnt + 1` on bit[4]) was likewise inflated to 32. **Fix:**
+    comparisons/boolean ops compute 1 bit; context-determined integer
+    literals defer to the other operand's width. HIR/MIR were never wrong —
+    the declared type flowed correctly; only the emitter's override was
+    unsound. Suite regression test: `test_triage16_on_block_signal_width`.
+    **Follow-up discovered (#34):** EC smoke-fails BOTH repros identically
+    at HEAD (pre-existing, independent of this fix) — see #34.
+
+34. **MIR-behavioral sim never computes `on()`-local signal bindings.**
+    For `on(clk.rise) { signal tick: bit = (cnt == 15); ... q = tick }` the
+    gate side correctly drives q=1 when cnt reaches 15, but the
+    MIR-behavioral simulation holds q=0 forever — smoke EC fails with
+    mir=0/gate=1 at the wrap cycle (same family as #33, but on the
+    behavioral side rather than the LIR side; both /tmp-style repros for #16
+    reproduce it at HEAD). The emitted SV is correct; only the EC reference
+    model is wrong.
 
 17. **`++` concatenation does not parse** though tutorial ch07 uses it
     (`command_data[7:0] ++ 8'h00`). Implement or remove from docs; `{a, b}` SV-style

@@ -2187,3 +2187,75 @@ impl AdderInf {
         sv
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #16: a `signal` declared inside `on()` got an unsound
+// width — the SV emitter's width-override pass computed binary-op widths as
+// max(operand widths), so `(cnt == 15)` was "32 bits" (comparison ≠ operand
+// width, and the bare integer literal's default 32 poisoned the max) and the
+// declared 1-bit variable was widened to logic [31:0]. Comparisons/boolean
+// ops now compute 1 bit, and context-determined integer literals defer to
+// the other operand's width.
+// =============================================================================
+
+#[test]
+fn test_triage16_on_block_signal_width() {
+    let comparison = r#"
+entity Tick {
+    in clk: clock
+    in rst: reset
+    out q: bit
+}
+
+impl Tick {
+    signal cnt: bit[4] = 0
+
+    on(clk.rise) {
+        signal tick: bit = (cnt == 15)
+        if rst {
+            cnt = 0
+        } else {
+            cnt = cnt + 1
+        }
+        q = tick
+    }
+}
+"#;
+    let sv = compile_to_sv(comparison).expect("on()-local signal must compile");
+    assert!(
+        sv.contains("logic tick;"),
+        "Triage #16: declared 1-bit condition must stay 1 bit, got:\n{}",
+        sv
+    );
+    assert!(
+        !sv.contains("[31:0] tick"),
+        "Triage #16: comparison result must not be widened to 32 bits"
+    );
+
+    let literal_arith = r#"
+entity Tick2 {
+    in clk: clock
+    in rst: reset
+    out q: bit[4]
+}
+
+impl Tick2 {
+    signal cnt: bit[4] = 0
+    on(clk.rise) {
+        signal nxt: bit[4] = cnt + 1
+        if rst {
+            cnt = 0
+        } else {
+            cnt = nxt
+        }
+        q = cnt
+    }
+}
+"#;
+    let sv = compile_to_sv(literal_arith).expect("literal arithmetic must compile");
+    assert!(
+        sv.contains("[3:0] nxt"),
+        "Triage #16: integer literal must not poison the width to 32, got:\n{}",
+        sv
+    );
+}
