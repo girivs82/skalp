@@ -614,6 +614,32 @@ impl NclSimulator {
                 if let Some(&new_value) = outputs.get(i) {
                     let old_value = self.get_net(*output_net);
                     if new_value != old_value {
+                        if std::env::var("NCL_OSC_DEBUG").is_ok() && self.stats.iterations > 50 {
+                            let net_name = self
+                                .netlist
+                                .nets
+                                .iter()
+                                .find(|n| n.id == *output_net)
+                                .map(|n| n.name.as_str())
+                                .unwrap_or("?");
+                            let cell_path = self
+                                .netlist
+                                .cells
+                                .iter()
+                                .find(|c| c.id == cell_id)
+                                .map(|c| c.path.as_str())
+                                .unwrap_or("?");
+                            eprintln!(
+                                "[NCL_OSC] iter={} cell={} ({}) net {} {}->{} inputs={:?}",
+                                self.stats.iterations,
+                                cell_path,
+                                cell_type,
+                                net_name,
+                                old_value,
+                                new_value,
+                                inputs
+                            );
+                        }
                         self.set_net(*output_net, new_value);
                         changes += 1;
                     }

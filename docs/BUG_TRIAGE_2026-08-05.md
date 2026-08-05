@@ -37,43 +37,47 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
 
 ## P0 — the NCL/async flow is broken end-to-end
 
-1. **NCL gate-level simulation returns NULL outputs (36 tests).** Every
-   `async entity` compiled through the NCL path fails CPU gate simulation in
-   one of two ways:
-   - **Small designs stabilize with NULL outputs:** dual-rail wavefront
-     "converges" (`iterations: 2, stable: true`) but every output stays
-     NULL/invalid — `test_ncl_cle_patterns` (13: completion detect, mux
-     chains, comparator, ALU pipeline, FSM step, handshake ack, …),
-     `test_ncl_std_cell_mode` (4), `test_l0_l5_ops` (14: add/sub/and/or/
-     xor/shl/shr/eq/lt 8-bit, popcount, parity, bitreverse, fp32 ops),
-     `test_hierarchical_ncl`, `test_wide_ncl_256bit_add`.
-   - **Large designs never converge:** `test_fp32_gate_sim` (2) runs to the
-     10000-iteration cap with `stable=false`.
-   Both signatures say the completion/acknowledge topology produced by
-   synthesis no longer propagates a wavefront the simulator can complete.
-   **Prime suspect:** the f9345f2 rework ("Rework NCL timing closure to
-   ready-signal-delay") — it changed the completion structure from per-fork
-   data-path balancing to delayed ready signals, and the same commit stubbed
-   `decompose_latches` "temporarily" (still stubbed today; its 4 unit tests
-   are `#[ignore]`d). The whole NCL test population has failed since at
-   least the start of the 2026-08-02 campaign. Triage this FIRST: fixing the
-   wavefront-completion regression likely flips ~36 tests at once.
-   Representative repro: `test_l0_l5_ops::test_l0_add_8bit` (8-bit adder,
-   5/5 vectors return None).
+1. **FIXED (2026-08-06). NCL gate-level simulation returns NULL outputs
+    (36 tests → 0).** THREE stacked bugs, none of them the suspected
+    f9345f2 rework logic itself:
+    (a) **Completion AND-tree name collision (the oscillator).** The
+    NclComplete mapping named tree-reduction nets `and_tree_{i}` PER LEVEL;
+    the hierarchical flatten merges nets BY NAME, so level-2's and_tree_0
+    collapsed onto level-1's — two AND2 cells drove one net with different
+    inputs and the completion signal toggled forever: every large NCL sim
+    reported `stable=false` with CORRECT data (the 8-bit adder computed 8
+    while "oscillating"). Fix: level-indexed names (`and_tree_l{L}_{i}`).
+    This alone flipped the 14 l0_l5 basic-op tests.
+    (b) **Physical-net A/B split in the non-flattened path.** When a
+    physical (NCL encode/complete) net is also a module output, aig_writer
+    creates a SECOND net with the same name plus an `aig.phys_buf_*`
+    between them. `merge_physical_nodes_into_netlist` resolved drivers via
+    net_map (LAST-registered) — physical cells drove the copy while the
+    AIG cone read the original, undriven net. Fix: resolve to the FIRST
+    net with the name, so drivers land on the net the cone reads and the
+    buf carries the value to the output copy.
+    (c) **NCL runtime name grouping.** The GpuNclRuntime groups dual-rail
+    nets by base name: duplicate full names (the A/B pairs) corrupted
+    groups (an 8-bit rail group collected 24 nets → every read NULL), and
+    flattened netlists carry `top.` prefixes while tests address bare
+    names (`set_dual_rail_value("t", …)` silently set NOTHING). Fix:
+    duplicate-name groups keep only the port-flagged net, and lookups
+    tolerate hierarchy prefixes (exact → `top.{name}` → `.{name}` suffix).
+    NOTE: an earlier attempt renamed the internal net (`__phys__` prefix)
+    instead — it fixed the CLI path but broke the flatten path's name
+    merging (9 fp/vec tests regressed); the runtime-side dedupe handles
+    both, netlists untouched. **Verified:** the ENTIRE NCL family is green
+    — 102 test_ncl_* + 22 l0_l5 + 4 fp32_gate_sim + wide + hierarchical —
+    including the GPU/Metal tests (item 2) which had the same
+    name-resolution failure.
 
-2. **NCL GPU (Metal) runtime fails independently (4 tests).**
-   `test_ncl_async_simulation::test_ncl_gpu_{inverter,add_8bit,and_8bit,
-   vs_cpu_consistency}`. Cannot be meaningfully triaged until the CPU NCL
-   path (item 1) is green — the vs-CPU consistency test needs a working
-   reference. Re-run after item 1.
+2. **FIXED (2026-08-06) — same root cause as item 1(c).** The GPU tests
+    failed on the identical name-grouping/prefix-resolution bugs, not on
+    Metal execution; all 4 pass (including CPU-vs-GPU consistency).
 
-3. **`async_sta_fix` timing buffers have no `CellFunction` (1 test, real
-   bug regardless of item 1).** `insert_timing_buffers` creates buffer
-   cells with `function: None` (async_sta_fix.rs:646 and three sibling
-   construction sites at 462/885/904); `gpu_ncl_runtime` panics:
-   `cell 'top.a_dec[0].timing_fix_buf0' (type 'BUF_X1') has no CellFunction
-   — all cells must have function set`. Mechanical fix: set
-   `Some(CellFunction::Buf)` (and audit the other three sites).
+3. **FIXED (2026-08-06). `async_sta_fix` timing buffers have no
+    `CellFunction`.** Both real construction sites now set
+    `Some(CellFunction::Buf)`; test_async_sta_fix 6/6.
 
 ## P1 — wrong results in specific features
 

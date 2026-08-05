@@ -455,11 +455,13 @@ fn insert_delay_on_net(
         };
 
         // Create the buffer cell
+        // AUDIT-2 #3: function must be set — the NCL runtime requires a
+        // CellFunction on every cell and panicked on these timing buffers.
         let buffer_cell = Cell {
             id: buffer_cell_id,
             cell_type: config.buffer_cell_type.clone(),
             library: config.library_name.clone(),
-            function: None,
+            function: Some(crate::tech_library::CellFunction::Buf),
             fit: 0.0,
             failure_modes: Vec::new(),
             inputs: vec![current_input_net],
@@ -639,11 +641,12 @@ fn fix_single_violation(
         };
 
         // Create the buffer cell
+        // AUDIT-2 #3: function must be set (see above).
         let buffer_cell = Cell {
             id: CellId(*next_cell_id),
             cell_type: config.buffer_cell_type.clone(),
             library: config.library_name.clone(),
-            function: None,
+            function: Some(crate::tech_library::CellFunction::Buf),
             fit: 0.0, // Buffer FIT is typically negligible
             failure_modes: Vec::new(),
             inputs: vec![current_input_net],

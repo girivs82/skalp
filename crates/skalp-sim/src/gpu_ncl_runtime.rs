@@ -230,7 +230,12 @@ impl GpuNclRuntime {
 
         // Try to compile GPU shaders
         if let Err(_e) = runtime.compile_shaders() {
+            if std::env::var("NCL_GPU_DEBUG").is_ok() {
+                eprintln!("[NCL_GPU] shader compile failed: {}; using CPU", _e);
+            }
             runtime.use_gpu = false;
+        } else if std::env::var("NCL_GPU_DEBUG").is_ok() {
+            eprintln!("[NCL_GPU] shaders compiled; using GPU");
         }
 
         Ok(runtime)
@@ -239,9 +244,37 @@ impl GpuNclRuntime {
     /// Initialize the runtime from the GateNetlist
     fn initialize(&mut self) -> Result<(), String> {
         // Build net mappings
+        //
+        // AUDIT-2 #1: netlists from the non-flattened path can contain TWO
+        // nets with the SAME full name — the physical pseudo-input net and
+        // the `aig.phys_buf_*` output copy (the flattened path merges them
+        // by name). Grouping both corrupts dual-rail groups (an 8-bit rail
+        // group collected 24 nets and every output read NULL). On duplicate
+        // full names, keep only the PORT-flagged net (is_input/is_output) —
+        // that is the copy testbenches address.
+        let mut chosen_by_name: IndexMap<&str, &skalp_lir::gate_netlist::GateNet> = IndexMap::new();
+        for net in self.netlist.nets.iter() {
+            match chosen_by_name.get(net.name.as_str()) {
+                None => {
+                    chosen_by_name.insert(net.name.as_str(), net);
+                }
+                Some(prev) => {
+                    let prev_flagged = prev.is_input || prev.is_output;
+                    let this_flagged = net.is_input || net.is_output;
+                    if this_flagged && !prev_flagged {
+                        chosen_by_name.insert(net.name.as_str(), net);
+                    }
+                }
+            }
+        }
+        let chosen_ids: std::collections::HashSet<u32> =
+            chosen_by_name.values().map(|n| n.id.0).collect();
         for (i, net) in self.netlist.nets.iter().enumerate() {
             self.net_to_index.insert(net.id.0, i);
 
+            if !chosen_ids.contains(&net.id.0) {
+                continue; // duplicate-name shadow net — not addressable
+            }
             // Group nets by base name (strip bit suffix like [0], _t0, etc.)
             let base_name = strip_bit_suffix(&net.name);
             self.signal_name_to_nets
@@ -880,9 +913,28 @@ kernel void eval_ncl(
         None
     }
 
+    /// AUDIT-2 #1: resolve a signal group name tolerant of hierarchy
+    /// prefixes. Netlists from the flattened path name nets `top.t_t[0]`
+    /// while callers say "t" (and vice versa) — try the name as given,
+    /// then with the `top.` prefix, then as a suffix match `.{name}`.
+    fn resolve_signal_group(&self, name: &str) -> Option<&Vec<GateNetId>> {
+        if let Some(nets) = self.signal_name_to_nets.get(name) {
+            return Some(nets);
+        }
+        let prefixed = format!("top.{}", name);
+        if let Some(nets) = self.signal_name_to_nets.get(&prefixed) {
+            return Some(nets);
+        }
+        let dotted = format!(".{}", name);
+        self.signal_name_to_nets
+            .iter()
+            .find(|(k, _)| k.ends_with(&dotted))
+            .map(|(_, v)| v)
+    }
+
     /// Get the nets for a specific signal (for debugging)
     pub fn signal_nets(&self, name: &str) -> Option<Vec<GateNetId>> {
-        self.signal_name_to_nets.get(name).cloned()
+        self.resolve_signal_group(name).cloned()
     }
 
     /// Get all net values (for debugging)
@@ -910,7 +962,7 @@ kernel void eval_ncl(
     ///
     /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn set_dual_rail_value(&mut self, name: &str, value: u64, width: usize) {
-        if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+        if let Some(nets) = self.resolve_signal_group(name).cloned() {
             // Determine actual width from signal nets (t rails + f rails)
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
@@ -938,7 +990,7 @@ kernel void eval_ncl(
 
     /// Set a dual-rail input value from u128 (for signals up to 128 bits)
     pub fn set_dual_rail_value_u128(&mut self, name: &str, value: u128, width: usize) {
-        if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+        if let Some(nets) = self.resolve_signal_group(name).cloned() {
             // Determine actual width from signal nets (t rails + f rails)
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
@@ -967,7 +1019,7 @@ kernel void eval_ncl(
     /// Set a dual-rail input value from two u128s (for signals up to 256 bits)
     /// low = bits [127:0], high = bits [255:128]
     pub fn set_dual_rail_value_u256(&mut self, name: &str, low: u128, high: u128, width: usize) {
-        if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+        if let Some(nets) = self.resolve_signal_group(name).cloned() {
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
 
@@ -996,7 +1048,7 @@ kernel void eval_ncl(
     ///
     /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn set_null(&mut self, name: &str, width: usize) {
-        if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+        if let Some(nets) = self.resolve_signal_group(name).cloned() {
             // Determine actual width from signal nets
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
@@ -1020,7 +1072,7 @@ kernel void eval_ncl(
     ///
     /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn get_dual_rail_value(&self, name: &str, width: usize) -> Option<u64> {
-        let nets = match self.signal_name_to_nets.get(name) {
+        let nets = match self.resolve_signal_group(name) {
             Some(n) => n,
             None => {
                 return None;

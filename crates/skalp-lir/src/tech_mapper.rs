@@ -1643,7 +1643,19 @@ fn merge_physical_nodes_into_netlist(
                 } else {
                     format!("{}[{}]", sig.name, bit)
                 };
-                if let Some(id) = netlist.get_net_id(&name) {
+                // AUDIT-2 #1 FIX: resolve to the FIRST net with this name,
+                // not net_map's last-registered one. When a physical net is
+                // also a module output, aig_writer creates a SECOND net with
+                // the same name plus an `aig.phys_buf_*` buffer between them
+                // (pseudo-input → output). The AIG logic cone reads the
+                // FIRST (pseudo-input) net; resolving physical drivers to
+                // the last-registered duplicate left the cone's net undriven
+                // — in the non-flattened CLI path every NCL output read NULL
+                // (the hierarchical flatten masked this by merging
+                // same-named nets, turning the buf into a self-loop).
+                // Driving the FIRST net lets phys_buf carry the value to
+                // the output copy: pseudo-input → buf → output.
+                if let Some(id) = netlist.nets.iter().find(|n| n.name == name).map(|n| n.id) {
                     id
                 } else if is_lir_input {
                     // Module input not in AIG netlist (only consumed by physical nodes).
@@ -2447,9 +2459,17 @@ fn merge_physical_nodes_into_netlist(
                     }
                 }
                 debug_assert_eq!(bit_idx, *width as usize, "NclComplete: bit count mismatch");
-                // AND-reduce: tree reduction
+                // AND-reduce: tree reduction.
+                // AUDIT-2 #1 FIX: net/cell names must be unique across tree
+                // LEVELS — `and_tree_{i}` repeated per level, and the
+                // hierarchical flatten merges nets BY NAME, so level-2's
+                // and_tree_0 collapsed onto level-1's net: two AND2 cells
+                // drove one net with different inputs and the completion
+                // signal oscillated forever (every NCL sim reported
+                // stable=false with correct data). Include the level index.
                 let out = output_nets.first().copied().unwrap_or(GateNetId(0));
                 let mut current = valid_nets;
+                let mut level = 0usize;
                 while current.len() > 1 {
                     let mut next = Vec::new();
                     for pair in current.chunks(2) {
@@ -2459,7 +2479,7 @@ fn merge_physical_nodes_into_netlist(
                             } else {
                                 netlist.add_net(GateNet::new(
                                     GateNetId(0),
-                                    format!("{}.and_tree_{}", path, next.len()),
+                                    format!("{}.and_tree_l{}_{}", path, level, next.len()),
                                 ))
                             };
                             let mut ac = Cell::new_comb(
@@ -2467,7 +2487,7 @@ fn merge_physical_nodes_into_netlist(
                                 and2_cell.name.clone(),
                                 library.name.clone(),
                                 and2_cell.fit,
-                                format!("{}.and_tree_{}", path, next.len()),
+                                format!("{}.and_tree_l{}_{}", path, level, next.len()),
                                 vec![pair[0], pair[1]],
                                 vec![intermediate],
                             );
@@ -2479,6 +2499,7 @@ fn merge_physical_nodes_into_netlist(
                         }
                     }
                     current = next;
+                    level += 1;
                 }
                 if current.len() == 1 && current[0] != out {
                     // Single valid bit → buffer to output
