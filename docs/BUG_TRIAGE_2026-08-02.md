@@ -411,9 +411,14 @@ codegen gaps; **P3** = hygiene.
     reproduce it at HEAD). The emitted SV is correct; only the EC reference
     model is wrong.
 
-17. **`++` concatenation does not parse** though tutorial ch07 uses it
-    (`command_data[7:0] ++ 8'h00`). Implement or remove from docs; `{a, b}` SV-style
-    concat appears in examples too — pick one.
+17. **FIXED (2026-08-04) — implemented. `++` concatenation does not parse.**
+    Tutorial ch07's `command_data[7:0] ++ 8'h00` is now real: `++` is lexed
+    as its own token and `a ++ b ++ c` parses into the SAME ConcatExpr node
+    as `{a, b, c}` (binding loosest of all operators), so HIR building,
+    width computation, and codegen are entirely shared. Both spellings stay
+    valid. Verified in continuous and sequential contexts (slices + sized
+    literals + chains); EC SAT-proves the concat design. Suite regression
+    test: `test_triage17_plusplus_concat`. Corpus 145/145 unchanged.
 
 18. **Struct-flattening separator is `__` (double underscore); docs say `_`.**
     `color_a.r` → `color_a__r`. The double underscore is arguably better (unambiguous);

@@ -2259,3 +2259,43 @@ impl Tick2 {
         sv
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #17: `++` concatenation did not parse though tutorial
+// ch07 uses it (`command_data[7:0] ++ 8'h00`). Now lexed as its own token and
+// parsed into the SAME ConcatExpr node as `{a, b}`, so HIR building, width
+// computation, and codegen are shared. Binds loosest of all operators.
+// =============================================================================
+
+#[test]
+fn test_triage17_plusplus_concat() {
+    let source = r#"
+entity Cat3 {
+    in clk: clock
+    in command_data: bit[16]
+    in c: bit[4]
+    out y: bit[24]
+    out z: bit[16]
+}
+
+impl Cat3 {
+    signal r: bit[16] = 0
+    y = command_data[7:0] ++ 8'h00 ++ c ++ c
+    on(clk.rise) {
+        r = command_data[15:8] ++ 8'hff
+    }
+    z = r
+}
+"#;
+    let sv = compile_to_sv(source).expect("++ concat must compile");
+    assert!(
+        sv.contains("{command_data[7:0], 8'b00000000, c, c}"),
+        "Triage #17: ++ chain must lower to a single concat, got:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("{command_data[15:8], 8'b11111111}"),
+        "Triage #17: sequential ++ must lower to concat, got:\n{}",
+        sv
+    );
+}

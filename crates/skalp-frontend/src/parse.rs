@@ -4657,6 +4657,20 @@ impl<'a> ParseState<'a> {
         let checkpoint = self.builder.checkpoint();
         self.parse_ternary_expr();
 
+        // TRIAGE #17: `a ++ b ++ c` concatenation (tutorial ch07) — lowers
+        // to the SAME ConcatExpr node as `{a, b, c}`, so everything
+        // downstream (HIR building, width computation, codegen) is shared.
+        // Binds loosest of all operators.
+        if self.at(SyntaxKind::PlusPlus) {
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::ConcatExpr as u16));
+            while self.at(SyntaxKind::PlusPlus) {
+                self.bump(); // consume '++'
+                self.parse_ternary_expr();
+            }
+            self.builder.finish_node();
+        }
+
         // Check for 'with intent::name' postfix
         if self.at(SyntaxKind::WithKw) {
             // Look ahead to see if this is 'with intent::'

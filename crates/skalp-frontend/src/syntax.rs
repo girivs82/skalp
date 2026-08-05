@@ -211,6 +211,7 @@ pub enum SyntaxKind {
     Le,               // <=
     Ge,               // >=
     Plus,             // +
+    PlusPlus,         // ++ (concatenation, tutorial ch07)
     WidenAdd,         // +:
     Minus,            // -
     Star,             // *
@@ -613,6 +614,7 @@ impl SyntaxKind {
                 | Le
                 | Ge
                 | Plus
+                | PlusPlus
                 | WidenAdd
                 | Minus
                 | Star
@@ -840,6 +842,7 @@ impl SyntaxKind {
             Le => "'<='",
             Ge => "'>='",
             Plus => "'+'",
+            PlusPlus => "'++'",
             Minus => "'-'",
             Star => "'*'",
             Slash => "'/'",
@@ -1045,6 +1048,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::LessEqual => Le,
             Token::GreaterEqual => Ge,
             Token::Plus => Plus,
+            Token::PlusPlus => PlusPlus,
             Token::WidenAdd => WidenAdd,
             Token::Minus => Minus,
             Token::Star => Star,

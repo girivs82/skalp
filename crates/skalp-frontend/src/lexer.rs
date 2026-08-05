@@ -403,6 +403,9 @@ pub enum Token {
     #[token("+:")]
     WidenAdd,
 
+    #[token("++")]
+    PlusPlus,
+
     #[token("+")]
     Plus,
 
