@@ -402,14 +402,19 @@ codegen gaps; **P3** = hygiene.
     **Follow-up discovered (#34):** EC smoke-fails BOTH repros identically
     at HEAD (pre-existing, independent of this fix) — see #34.
 
-34. **MIR-behavioral sim never computes `on()`-local signal bindings.**
-    For `on(clk.rise) { signal tick: bit = (cnt == 15); ... q = tick }` the
-    gate side correctly drives q=1 when cnt reaches 15, but the
-    MIR-behavioral simulation holds q=0 forever — smoke EC fails with
-    mir=0/gate=1 at the wrap cycle (same family as #33, but on the
-    behavioral side rather than the LIR side; both /tmp-style repros for #16
-    reproduce it at HEAD). The emitted SV is correct; only the EC reference
-    model is wrong.
+34. **FIXED (2026-08-05). MIR-behavioral EC model registered `on()`-local
+    signal bindings.** For `on(clk.rise) { signal tick: bit = (cnt == 15);
+    ... q = tick }` smoke EC failed mir=0/gate=1 at the counter-wrap cycle.
+    **Root cause:** `convert_sequential_block` (mir_to_sir) created a
+    flip-flop for EVERY unconditional assignment target — but an on()-local
+    binding is a per-cycle temporary that SV emits as a BLOCKING assign
+    (`q <= tick` samples it the same cycle), so registering it skewed the
+    behavioral reference one cycle behind the gates. **Fix:** non-state
+    targets (not in `state_elements`) connect combinationally, mirroring the
+    BUG #227 fix that already did this for variables inside `if` branches.
+    Both #16 repros now pass FULL EC (SAT proof); the 5-design EC sweep
+    (MWE, hierarchical_alu, async_fifo, ++concat, declared-let) stays green.
+    Suite regression test: `test_triage34_on_local_binding_not_registered`.
 
 17. **FIXED (2026-08-04) — implemented. `++` concatenation does not parse.**
     Tutorial ch07's `command_data[7:0] ++ 8'h00` is now real: `++` is lexed

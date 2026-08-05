@@ -2299,3 +2299,70 @@ impl Cat3 {
         sv
     );
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #34: the MIR-behavioral EC reference model registered
+// on()-local signal bindings. `signal tick: bit = (cnt == 15)` inside on()
+// is a per-cycle temporary — SV emits a blocking assign, so `q <= tick`
+// samples it the SAME cycle — but convert_sequential_block created a
+// flip-flop for every unconditional assignment target, skewing the
+// behavioral model one cycle behind the gates (smoke EC: mir=0 vs gate=1 at
+// the counter-wrap cycle). Non-state targets now connect combinationally,
+// mirroring the BUG #227 fix for variables inside `if`.
+// =============================================================================
+
+#[test]
+fn test_triage34_on_local_binding_not_registered() {
+    use skalp_sir::convert_mir_to_sir_with_hierarchy;
+
+    let source = r#"
+entity Tick {
+    in clk: clock
+    in rst: reset
+    out q: bit
+}
+
+impl Tick {
+    signal cnt: bit[4] = 0
+
+    on(clk.rise) {
+        signal tick: bit = (cnt == 15)
+        if rst {
+            cnt = 0
+        } else {
+            cnt = cnt + 1
+        }
+        q = tick
+    }
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building failed");
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("MIR compile failed");
+    let top = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "Tick")
+        .expect("top module");
+    let sir = convert_mir_to_sir_with_hierarchy(&mir, top);
+
+    // `tick` must NOT be a state element — registering it skews the
+    // behavioral model one cycle behind the gates.
+    for (name, _) in &sir.state_elements {
+        let user = sir
+            .name_registry
+            .get_entry_by_internal(name)
+            .map(|e| e.hierarchical_path.clone())
+            .unwrap_or_else(|| name.clone());
+        assert!(
+            !user.contains("tick"),
+            "Triage #34: on()-local binding `tick` must not be registered (state element {} -> {})",
+            name,
+            user
+        );
+    }
+}

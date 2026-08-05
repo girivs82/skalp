@@ -826,10 +826,24 @@ impl<'a> MirToSirConverter<'a> {
                         if targets_with_conditionals.contains(&target) {
                             self.sequential_defaults.insert(target.clone(), value);
                         } else {
-                            // Create flip-flop directly (no conditional overrides this)
-                            let ff_node =
-                                self.create_flipflop_with_input(value, clock, edge.clone());
-                            self.connect_node_to_signal(ff_node, &target);
+                            // TRIAGE #34 (same principle as BUG #227): an
+                            // on()-local binding (`signal tick: bit = expr` /
+                            // let) is a per-cycle TEMPORARY — SV emits it as a
+                            // blocking assign, so later non-blocking reads see
+                            // it the SAME cycle. Registering it here skewed
+                            // the behavioral model one cycle behind the gates
+                            // (EC smoke: mir=0 vs gate=1 at the wrap cycle).
+                            // Non-state targets connect combinationally.
+                            let internal_target = self.translate_to_internal_name(&target);
+                            let is_state = self.sir.state_elements.contains_key(&internal_target);
+                            if is_state {
+                                // Create flip-flop directly (no conditional overrides this)
+                                let ff_node =
+                                    self.create_flipflop_with_input(value, clock, edge.clone());
+                                self.connect_node_to_signal(ff_node, &target);
+                            } else {
+                                self.connect_node_to_signal(value, &target);
+                            }
                         }
                     }
                 }
