@@ -1,5 +1,12 @@
 # Compiler bug triage — 2026-08-02 audit
 
+> **STATUS: CAMPAIGN COMPLETE (2026-08-05).** All 36 items below are closed
+> (fixed, fixed-by-rejection, or documented limitation). The suite went from
+> 118 failures to 59 over the campaign. The remaining 59 failures are
+> clustered and root-caused in the SECOND audit:
+> [`BUG_TRIAGE_2026-08-05.md`](BUG_TRIAGE_2026-08-05.md).
+
+
 Source: full-project design review (spec/frontend read-through + compile-testing all
 published tutorial examples against a fresh `cargo build --release --bin skalp`).
 Priorities: **P0** = tool reports success while producing wrong hardware or hiding
