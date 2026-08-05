@@ -442,10 +442,17 @@ codegen gaps; **P3** = hygiene.
 
 ## P3 — hygiene / build health
 
-21. **`cargo check --workspace --all-targets` fails at HEAD.** Unit-test targets in
-    skalp-mir, skalp-frontend, skalp-lir, skalp-formal broken by un-propagated struct
-    fields (`is_from_main_source`, `impl_style`); root `test_const_eval` too. Gate CI
-    on `--all-targets`.
+21. **FIXED (2026-08-05). `cargo check --workspace --all-targets` fails at
+    HEAD.** Test targets aren't compiled by plain builds, so struct-field
+    additions repeatedly missed `#[cfg(test)]` construction sites — the
+    check now passes with ZERO warnings across the workspace (all Port/
+    Signal/HirPort test literals updated for `clock_domain_name`). This
+    also surfaced 4 unit tests in `skalp-lir::synth::dff_decompose` that
+    assert on `decompose_latches`, which has been deliberately stubbed to
+    return empty since f9345f2 (2026-03-18, NCL timing rework) — they are
+    now `#[ignore]`d with that reason rather than silently failing;
+    un-ignore when the decomposition is re-enabled. All other workspace
+    unit-test targets pass (391 lir / 279 safety / 37 formal+mir).
 
 22. **~150 globally reserved keywords.** The lexer reserves the entire safety and
     physical-constraint vocabularies (`area`, `bank`, `region`, `device`, `group`,

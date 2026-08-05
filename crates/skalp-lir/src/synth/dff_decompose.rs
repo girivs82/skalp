@@ -431,6 +431,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_enable_detection() {
         let mut aig = make_mux_enable_aig();
         let decomps = decompose_latches(&mut aig);
@@ -442,6 +443,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_deeply_nested_enable() {
         // Build: F = MUX(c1, MUX(c2, D, Q), Q)
         // Equivalent to: MUX(c1 & c2, D, Q)
@@ -484,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_three_level_nested_enable() {
         // F = MUX(c1, MUX(c2, MUX(c3, D, Q), Q), Q)
         // Enable = c1 & c2 & c3
@@ -513,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_enable_with_multiple_data_paths() {
         // F = MUX(c1, D1, MUX(c2, D2, Q))
         // Enable = c1 | c2, Data = MUX(c1, D1, D2) when enabled
