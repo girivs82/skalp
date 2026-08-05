@@ -24,6 +24,10 @@ pub struct Dependency {
     pub version: Option<String>,
 
     /// Git repository URL
+    ///
+    /// NOTE (triage #26): git dependencies parse but resolution is NOT
+    /// yet implemented — the resolver errors with "Git dependencies not
+    /// yet implemented". Use registry versions or path dependencies.
     #[serde(default)]
     pub git: Option<String>,
 

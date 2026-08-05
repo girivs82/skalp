@@ -508,9 +508,13 @@ codegen gaps; **P3** = hygiene.
     error says "Run 'skalp new'", which previously created no manifest at
     all. `Cargo.toml` is intentional (Rust-based testbench harness via
     skalp-testing), not a bug. (c) `skalp fmeda`/`skalp fault-inject`
-    references are already gone from README/tutorial. REMAINING: manifest
-    has no `[build] top` field (docs mention one) — needs a decision on
-    whether builds should read the manifest at all.
+    references are already gone from README/tutorial. The manifest
+    question is CLOSED (2026-08-05): the manifest crate already had a
+    `[build]` section (`main`, `src_dirs`, `out_dir`) that the CLI never
+    read — `skalp build` with no source argument now consults skalp.toml's
+    `[build].main` / `[build].out_dir` (explicit arguments always win), and
+    `skalp new` emits the section. No `top` field exists and no current doc
+    claims one (the audited wording drifted).
 
 35. **FIXED (2026-08-05, three stacked bugs — one a REAL MISCOMPILE).
     EC smoke false-fails memory arrays written under multi-branch control.**
@@ -570,9 +574,12 @@ codegen gaps; **P3** = hygiene.
     test: `test_triage36_hierarchical_child_memory` (full SAT proof of a
     memory-bearing child that reads back its own flags).
 
-26. **Package manager: git dependencies stubbed** (`resolver.rs:172` returns
-    "Git dependencies not yet implemented"). Documented as a limitation — keep it
-    honest in the manifest docs until done.
+26. **CLOSED as documented limitation (2026-08-05). Package manager: git
+    dependencies stubbed** (`resolver.rs` returns "Git dependencies not yet
+    implemented" — the error was already honest). Now also documented at the
+    source of truth: the `DependencySpec.git` field's doc comment states the
+    limitation, and the `skalp new` manifest template says git sources are
+    unsupported (registry + path only). Implementation remains future work.
 
 30. **FIXED (2026-08-03). generate-for in GENERIC impls is dropped at parse
     time.** `elaborate_generate_for_in_impl` bailed silently on symbolic

@@ -690,9 +690,31 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            // TRIAGE #25 (manifest): with no source argument, consult
+            // skalp.toml's [build] section (main / out-dir) before falling
+            // back to src/main.sk — `skalp new` emits a manifest, so builds
+            // inside a project should honor it.
+            let manifest_build = skalp_manifest::from_path("skalp.toml")
+                .ok()
+                .and_then(|m| m.build);
             let source_file = source_pos
                 .or(source)
+                .or_else(|| {
+                    manifest_build
+                        .as_ref()
+                        .and_then(|b| b.main.clone())
+                        .map(PathBuf::from)
+                })
                 .unwrap_or_else(|| PathBuf::from("src/main.sk"));
+            let output = if output == std::path::Path::new("build") {
+                manifest_build
+                    .as_ref()
+                    .and_then(|b| b.out_dir.clone())
+                    .map(PathBuf::from)
+                    .unwrap_or(output)
+            } else {
+                output
+            };
 
             // Build safety options
             let safety_options = if safety {
@@ -1025,7 +1047,14 @@ tokio = {{ version = "1", features = ["full", "test-util"] }}
 name = "{name}"
 version = "0.1.0"
 
+# Dependencies: registry ("1.0") and path ({{ path = "../lib" }}) sources
+# are supported. Git dependencies are NOT yet implemented (triage #26).
 [dependencies]
+
+# Build defaults used by `skalp build` when no source argument is given.
+[build]
+main = "src/main.sk"
+out_dir = "build"
 "#
     );
     fs::write(format!("{}/skalp.toml", name), skalp_toml)?;
