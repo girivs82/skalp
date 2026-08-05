@@ -458,10 +458,23 @@ codegen gaps; **P3** = hygiene.
     un-ignore when the decomposition is re-enabled. All other workspace
     unit-test targets pass (391 lir / 279 safety / 37 formal+mir).
 
-22. **~150 globally reserved keywords.** The lexer reserves the entire safety and
-    physical-constraint vocabularies (`area`, `bank`, `region`, `device`, `group`,
-    `fast`, `slow`, `up`, `down`, `part`, `pin`, `drive`, ...) — everyday RTL signal
-    names. Convert domain keywords to contextual keywords. (Spec claims 43 keywords.)
+22. **FIXED (2026-08-05, the everyday-name tier). ~150 globally reserved
+    keywords.** The 12 vocabulary words that collide with everyday RTL names
+    — `area`, `bank`, `region`, `device`, `group`, `fast`, `slow`, `up`,
+    `down`, `part`, `pin`, `drive` — are now CONTEXTUAL: they lex as plain
+    identifiers (usable as signal/port/variable names, verified for all 12),
+    and the constraint/safety parsers recognize them BY TEXT
+    (`at_ident_text`) and re-emit the token with its keyword kind
+    (`bump_as_kind`), so the syntax tree and hir_builder are unchanged —
+    `pull: up`, `slew: fast`, `pin: "A1"`, `device {}`, `bank`/`region`/
+    `group` blocks and safety `part:` keys all still parse and are captured
+    (verified in HIR: PullUp/Fast/pin locations present). Also flushed a
+    real corpus win: graphics_pipeline/lib/numeric/matrix.sk now BUILDS
+    (it used a freed name). Suite regression test:
+    `test_triage22_domain_keywords_are_contextual`. The REMAINING reserved
+    vocabulary (safety/intent/power keywords that are less collision-prone)
+    can be converted with the same `at_ident_text`/`bump_as_kind` pattern
+    as collisions surface.
 
 23. **FIXED (2026-08-05) — migrated. Shipped stdlib contains a dead-dialect,
     buggy FIFO.** `components/fifo.sk` rewritten in the current dialect:

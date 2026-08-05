@@ -6016,6 +6016,39 @@ impl<'a> ParseState<'a> {
         self.eat_trivia();
     }
 
+    /// TRIAGE #22: contextual keywords. Domain vocabulary (device, bank,
+    /// region, group, area, part, pin, drive, fast, slow, up, down) lexes as
+    /// plain Ident so everyday RTL names work; the constraint/safety parsers
+    /// recognize them BY TEXT here and re-emit the token with its keyword
+    /// kind so the syntax tree (and hir_builder) are unchanged.
+    fn at_ident_text(&self, text: &str) -> bool {
+        if self.current_kind() != Some(SyntaxKind::Ident) {
+            return false;
+        }
+        self.current_token()
+            .map(|t| &self.source[t.span.clone()] == text)
+            .unwrap_or(false)
+    }
+
+    /// Consume the current Ident token, emitting it as `kind` in the tree.
+    fn bump_as_kind(&mut self, kind: SyntaxKind) {
+        if let Some(token) = self.current_token() {
+            let text = &self.source[token.span.clone()];
+            self.builder.token(rowan::SyntaxKind(kind as u16), text);
+            self.current += 1;
+        }
+        self.eat_trivia();
+    }
+
+    /// Expect a contextual keyword: Ident with the given text, emitted as `kind`.
+    fn expect_ctx_kw(&mut self, text: &str, kind: SyntaxKind) {
+        if self.at_ident_text(text) {
+            self.bump_as_kind(kind);
+        } else {
+            self.error(&format!("expected '{}'", text));
+        }
+    }
+
     /// Consume current token as an identifier, even if it's a keyword
     /// This allows keywords to be used as identifiers in unambiguous contexts
     fn bump_as_ident(&mut self) {
@@ -6204,8 +6237,8 @@ impl<'a> ParseState<'a> {
 
             // Parse constraint statements
             match self.current_kind() {
-                Some(SyntaxKind::DeviceKw) => self.parse_device_spec(),
-                Some(SyntaxKind::BankKw) => self.parse_bank_block(),
+                Some(SyntaxKind::Ident) if self.at_ident_text("device") => self.parse_device_spec(),
+                Some(SyntaxKind::Ident) if self.at_ident_text("bank") => self.parse_bank_block(),
                 Some(SyntaxKind::FloorplanKw) => self.parse_floorplan_block(),
                 Some(SyntaxKind::IoDefaultsKw) => self.parse_io_defaults_block(),
                 _ => {
@@ -6297,15 +6330,32 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw) => {
                 self.bump(); // Boolean value
             }
-            Some(SyntaxKind::FastKw) | Some(SyntaxKind::SlowKw) | Some(SyntaxKind::MediumKw) => {
+            Some(SyntaxKind::MediumKw) => {
                 self.start_node(SyntaxKind::SlewRate);
                 self.bump();
                 self.finish_node();
             }
-            Some(SyntaxKind::UpKw)
-            | Some(SyntaxKind::DownKw)
-            | Some(SyntaxKind::NoneKw)
-            | Some(SyntaxKind::KeeperKw) => {
+            Some(SyntaxKind::Ident) if self.at_ident_text("fast") => {
+                self.start_node(SyntaxKind::SlewRate);
+                self.bump_as_kind(SyntaxKind::FastKw);
+                self.finish_node();
+            }
+            Some(SyntaxKind::Ident) if self.at_ident_text("slow") => {
+                self.start_node(SyntaxKind::SlewRate);
+                self.bump_as_kind(SyntaxKind::SlowKw);
+                self.finish_node();
+            }
+            Some(SyntaxKind::Ident) if self.at_ident_text("up") => {
+                self.start_node(SyntaxKind::Termination);
+                self.bump_as_kind(SyntaxKind::UpKw);
+                self.finish_node();
+            }
+            Some(SyntaxKind::Ident) if self.at_ident_text("down") => {
+                self.start_node(SyntaxKind::Termination);
+                self.bump_as_kind(SyntaxKind::DownKw);
+                self.finish_node();
+            }
+            Some(SyntaxKind::NoneKw) | Some(SyntaxKind::KeeperKw) => {
                 self.start_node(SyntaxKind::Termination);
                 self.bump();
                 self.finish_node();
@@ -6345,7 +6395,7 @@ impl<'a> ParseState<'a> {
     fn parse_device_spec(&mut self) {
         self.start_node(SyntaxKind::DeviceSpec);
 
-        self.expect(SyntaxKind::DeviceKw);
+        self.expect_ctx_kw("device", SyntaxKind::DeviceKw);
         self.expect(SyntaxKind::Colon);
         self.expect(SyntaxKind::StringLiteral);
 
@@ -6356,7 +6406,7 @@ impl<'a> ParseState<'a> {
     fn parse_bank_block(&mut self) {
         self.start_node(SyntaxKind::BankBlock);
 
-        self.expect(SyntaxKind::BankKw);
+        self.expect_ctx_kw("bank", SyntaxKind::BankKw);
         self.expect(SyntaxKind::IntLiteral); // Bank number
 
         self.expect(SyntaxKind::LBrace);
@@ -6393,9 +6443,9 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
-            if self.at(SyntaxKind::RegionKw) {
+            if self.at_ident_text("region") {
                 self.parse_region_block();
-            } else if self.at(SyntaxKind::GroupKw) {
+            } else if self.at_ident_text("group") {
                 self.parse_group_block();
             } else {
                 self.error_and_bump("expected 'region' or 'group'");
@@ -6410,7 +6460,7 @@ impl<'a> ParseState<'a> {
     fn parse_region_block(&mut self) {
         self.start_node(SyntaxKind::RegionBlock);
 
-        self.expect(SyntaxKind::RegionKw);
+        self.expect_ctx_kw("region", SyntaxKind::RegionKw);
         self.expect(SyntaxKind::StringLiteral); // Region name
 
         self.expect(SyntaxKind::LBrace);
@@ -6437,7 +6487,7 @@ impl<'a> ParseState<'a> {
     fn parse_group_block(&mut self) {
         self.start_node(SyntaxKind::GroupBlock);
 
-        self.expect(SyntaxKind::GroupKw);
+        self.expect_ctx_kw("group", SyntaxKind::GroupKw);
         self.expect(SyntaxKind::StringLiteral); // Group name
 
         self.expect(SyntaxKind::LBrace);
@@ -7238,7 +7288,15 @@ impl ParseState<'_> {
             self.skip_trivia();
 
             match self.current_kind() {
-                Some(SyntaxKind::LibraryKw) | Some(SyntaxKind::PartKw) => {
+                Some(SyntaxKind::Ident) if self.at_ident_text("part") => {
+                    self.bump_as_kind(SyntaxKind::PartKw);
+                    self.expect(SyntaxKind::Colon);
+                    self.parse_safety_kv_value();
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+                Some(SyntaxKind::LibraryKw) => {
                     self.bump();
                     self.expect(SyntaxKind::Colon);
                     self.parse_safety_kv_value();
@@ -7451,7 +7509,15 @@ impl ParseState<'_> {
                 while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
                     self.skip_trivia();
                     match self.current_kind() {
-                        Some(SyntaxKind::LibraryKw) | Some(SyntaxKind::PartKw) => {
+                        Some(SyntaxKind::Ident) if self.at_ident_text("part") => {
+                            self.bump_as_kind(SyntaxKind::PartKw);
+                            self.expect(SyntaxKind::Colon);
+                            self.parse_safety_kv_value();
+                            if self.at(SyntaxKind::Comma) {
+                                self.bump();
+                            }
+                        }
+                        Some(SyntaxKind::LibraryKw) => {
                             self.bump();
                             self.expect(SyntaxKind::Colon);
                             self.parse_safety_kv_value();

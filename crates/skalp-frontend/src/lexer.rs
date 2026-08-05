@@ -271,8 +271,6 @@ pub enum Token {
     Component,
     #[token("library")]
     Library,
-    #[token("part")]
-    Part,
     #[token("exclude")]
     Exclude,
     #[token("max_latency")]
@@ -289,8 +287,6 @@ pub enum Token {
     Constraint,
     #[token("physical")]
     Physical,
-    #[token("pin")]
-    Pin,
     #[token("pins")]
     Pins,
     #[token("pin_p")]
@@ -299,8 +295,6 @@ pub enum Token {
     PinN,
     #[token("io_standard")]
     IoStandard,
-    #[token("drive")]
-    Drive,
     #[token("slew")]
     Slew,
     #[token("pull")]
@@ -309,14 +303,8 @@ pub enum Token {
     DiffTerm,
     #[token("schmitt")]
     Schmitt,
-    #[token("bank")]
-    Bank,
     #[token("floorplan")]
     Floorplan,
-    #[token("region")]
-    Region,
-    #[token("area")]
-    Area,
     #[token("instances")]
     Instances,
     #[token("boundary")]
@@ -329,24 +317,12 @@ pub enum Token {
     IoDefaults,
     // NOTE: 'voltage' removed as reserved keyword - now parsed as identifier
     // to allow use as port/signal names (common in power electronics designs)
-    #[token("device")]
-    Device,
-    #[token("group")]
-    Group,
 
     // Slew Rate Values (3)
-    #[token("fast")]
-    Fast,
-    #[token("slow")]
-    Slow,
     #[token("medium")]
     Medium,
 
     // Termination Values (4)
-    #[token("up")]
-    Up,
-    #[token("down")]
-    Down,
     #[token("none")]
     None,
     #[token("keeper")]
@@ -929,8 +905,10 @@ entity Counter {
         assert!(tokens.contains(&Token::Intent));
         assert!(tokens.contains(&Token::Identifier("target_freq".to_string())));
         assert!(tokens.contains(&Token::Identifier("optimization".to_string())));
-        // 'area' is now a keyword for physical constraints, not an identifier
-        assert!(tokens.contains(&Token::Area));
+        // TRIAGE #22: 'area' is a CONTEXTUAL keyword — it lexes as a plain
+        // identifier so everyday RTL names work; the constraint parser
+        // recognizes it by text.
+        assert!(tokens.contains(&Token::Identifier("area".to_string())));
     }
 
     #[test]

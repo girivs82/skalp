@@ -2366,3 +2366,92 @@ impl Tick {
         );
     }
 }
+
+// =============================================================================
+// TRIAGE 2026-08-02 #22: the lexer globally reserved the physical-constraint
+// vocabulary — `area`, `bank`, `region`, `device`, `group`, `fast`, `slow`,
+// `up`, `down`, `part`, `pin`, `drive` — all everyday RTL names. They now lex
+// as plain identifiers; the constraint/safety parsers recognize them BY TEXT
+// and re-emit the token with its keyword kind (bump_as_kind), so constraint
+// blocks and hir_builder are unchanged.
+// =============================================================================
+
+#[test]
+fn test_triage22_domain_keywords_are_contextual() {
+    // Every previously-reserved domain word works as a signal name...
+    for name in [
+        "area", "bank", "region", "device", "group", "fast", "slow", "up", "down", "part", "pin",
+        "drive",
+    ] {
+        let source = format!(
+            r#"
+entity T {{
+    in clk: clock
+    out q: bit[8]
+}}
+
+impl T {{
+    signal {name}: bit[8] = 0
+    on(clk.rise) {{
+        {name} = {name} + 1
+    }}
+    q = {name}
+}}
+"#
+        );
+        compile_to_sv(&source)
+            .unwrap_or_else(|e| panic!("`{}` must be usable as a signal name: {}", name, e));
+    }
+
+    // ...while the constraint vocabulary still parses in constraint blocks
+    // (pull: up, slew: fast) alongside signals of the same names.
+    let source = r#"
+entity LedBlinker {
+    in clk: clock @ {
+        pin: "A1",
+        io_standard: "LVCMOS33"
+    }
+    in rst: reset(active_high) @ {
+        pin: "B2",
+        pull: up,
+        schmitt: true
+    }
+    out leds: bit[8] @ {
+        pins: ["C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4"],
+        slew: fast
+    }
+}
+
+impl LedBlinker {
+    signal area: bit[8] = 0
+    signal fast: bit = 0
+    on(clk.rise) {
+        if rst {
+            area = 0
+        } else {
+            area = area + 1
+            fast = area[7]
+        }
+    }
+    leds = area
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("constraints + keyword-named signals must build");
+    let entity = &hir.entities[0];
+    let rst_port = entity.ports.iter().find(|p| p.name == "rst").unwrap();
+    let pc = rst_port
+        .physical_constraints
+        .as_ref()
+        .expect("rst must carry physical constraints");
+    assert!(
+        pc.termination.is_some(),
+        "Triage #22: `pull: up` must still be captured contextually"
+    );
+    let leds_port = entity.ports.iter().find(|p| p.name == "leds").unwrap();
+    let pc = leds_port.physical_constraints.as_ref().unwrap();
+    assert!(
+        pc.slew_rate.is_some(),
+        "Triage #22: `slew: fast` must still be captured contextually"
+    );
+}
