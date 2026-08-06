@@ -1,5 +1,14 @@
 # Compiler bug triage — 2026-08-05 audit (second pass)
 
+> **✅ AUDIT COMPLETE (2026-08-06).** All 9 clusters (59 tests) are FIXED.
+> The full suite is GREEN — **0 failures** (down from 118 at the start of
+> the 2026-08-02 campaign). Genuine hardware miscompiles found and fixed
+> in this audit: sync-reset emitted as async DFFR, nonzero async reset
+> values resetting to 0, FPGA LUT cells wired in eval-pin order against a
+> leaf-order INIT (every ice40 mux read the wrong pins), and FP entity
+> operands dropped/captured during trait-method inlining (the quadratic
+> solver divided garbage).
+
 Source: clustering + root-causing the 59 suite failures remaining after the
 2026-08-02 campaign closed all 36 items of the first audit
 (`BUG_TRIAGE_2026-08-02.md`; suite went 118 → 59 failures over that campaign).
@@ -125,11 +134,29 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
    literals never resolved and the bindings vanished; rewritten with
    plain 96-bit lanes preserving its 288-bit-tuple intent. PASSES.
    `test_tuple_fp32_quadratic_no_real_roots` PASSES.
-   **RECLASSIFIED, still open:** `test_tuple_fp32_quadratic_solver` now
-   compiles and simulates but computes denormal garbage instead of the
-   roots — a NUMERICAL bug in the synthesized-function simulation of the
-   fp sqrt/div path (early-return mux logic or fp op wiring), no longer a
-   tuple/conversion issue.
+   **RECLASSIFIED then FIXED (2026-08-06):**
+   `test_tuple_fp32_quadratic_solver`'s "denormal garbage" was not
+   numerical at all — the FP entity instances inside the synthesized
+   function were MISWIRED by trait-method inlining. Two HIR→MIR bugs:
+   (d) **Entity operand connections silently dropped.** Trait bodies
+   like `impl Div for fp32` instantiate `FpDiv { a: <param>, b: <param> }`;
+   `inline_trait_method_with_ctx` substituted the params with
+   caller-context HIR (a call to a module-synthesized fn, or a
+   caller-scope Variable) and routed the Let through `convert_statement`,
+   which cannot convert those — both divider inputs were dropped and the
+   hardware divided garbage. Fix: operands are pre-converted to MIR in
+   the ctx-aware scope and overlaid into `pending_mir_param_subs` under
+   the trait parameter names; entity-literal fields keep their
+   GenericParam refs and resolve through the overlay at conversion time.
+   (e) **Trait param captured by the enclosing function's parameter.**
+   `substitute_hir_expr_recursively` had NO arm for struct literals, so
+   `FpSqrt { x: a as .. }` kept `GenericParam("a")` through inlining and
+   the leaked name resolved via the enclosing function's param map —
+   `sqrt(a)` instead of `sqrt(discriminant)` (only coincidentally right
+   for a=1). Fix: entity struct literals substitute params in their
+   fields (params only — placeholder output Variables stay untouched).
+   The solver now computes exact roots (2.0, 3.0). **This closed the
+   LAST suite failure.**
 
 ## P2 — inference and classification gaps
 

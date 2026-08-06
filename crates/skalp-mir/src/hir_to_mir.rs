@@ -15221,6 +15221,34 @@ impl<'hir> HirToMir<'hir> {
             }
 
             // For literals and other leaf nodes, return as-is
+            // AUDIT-2 quadratic_solver: entity struct literals had NO arm here and
+            // fell into the clone-as-is default, so a trait-method parameter
+            // reference inside an entity port connection (FpSqrt { x: a as .. })
+            // survived inlining verbatim. At instantiation time the leaked name
+            // resolved through the enclosing function's param_to_port map — the
+            // sqrt input got wired to the enclosing function's same-named
+            // parameter instead of the call argument. Substitute parameters
+            // (GenericParam refs) inside the fields; placeholder Variables
+            // (result/flags output wires) must stay untouched (BUG #200).
+            hir::HirExpression::StructLiteral(struct_lit)
+                if self.is_entity_or_alias(&struct_lit.type_name) =>
+            {
+                let ref_map: IndexMap<String, &hir::HirExpression> =
+                    params.iter().map(|(k, v)| (k.clone(), v)).collect();
+                let fields = struct_lit
+                    .fields
+                    .iter()
+                    .map(|f| hir::HirStructFieldInit {
+                        name: f.name.clone(),
+                        value: self.substitute_generic_params_only(&f.value, &ref_map),
+                    })
+                    .collect();
+                Some(hir::HirExpression::StructLiteral(hir::HirStructLiteral {
+                    type_name: struct_lit.type_name.clone(),
+                    generic_args: struct_lit.generic_args.clone(),
+                    fields,
+                }))
+            }
             _ => Some(expr.clone()),
         }
     }
@@ -17681,6 +17709,47 @@ impl<'hir> HirToMir<'hir> {
         let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
+        // AUDIT-2 quadratic_solver: entity instantiations inside the trait body
+        // (let divider = FpDiv { a: <param>, b: <param>, .. }) are processed via
+        // convert_statement, which cannot convert caller-context HIR (a call to a
+        // module-synthesized function, or a caller-scope Variable) — those operand
+        // connections were silently DROPPED and the divider ran with unconnected
+        // inputs. Pre-convert the operands to MIR in the CURRENT (ctx-aware)
+        // scope and overlay them into pending_mir_param_subs under the trait
+        // parameter names: entity-literal fields keep their GenericParam refs
+        // (see the Let arm below) and resolve through this overlay at
+        // conversion time, which convert_expression checks FIRST (BUG #178).
+        let mut operand_overlay: Vec<(String, Option<Expression>)> = Vec::new();
+        {
+            let mut converted: Vec<(String, Expression)> = Vec::new();
+            let mut all_ok = true;
+            for (idx, opnd) in [(0usize, left_expr), (1usize, right_expr)] {
+                if params.len() > idx {
+                    let mir = if let Some(ctx) = module_ctx {
+                        self.convert_hir_expr_for_module(opnd, ctx, depth + 1)
+                    } else {
+                        self.convert_expression(opnd, 0)
+                    };
+                    match mir {
+                        Some(m) => converted.push((params[idx].name.clone(), m)),
+                        None => {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if all_ok {
+                for (name, mir) in converted {
+                    operand_overlay.push((
+                        name.clone(),
+                        self.pending_mir_param_subs.shift_remove(&name),
+                    ));
+                    self.pending_mir_param_subs.insert(name, mir);
+                }
+            }
+        }
+
         // Process body statements directly, handling side effects (entity instantiation,
         // signal declarations) that the old convert_body_to_expression approach lost.
         // This fixes trait method bodies that instantiate entities (e.g., FpMul, std_multiplier).
@@ -17690,12 +17759,26 @@ impl<'hir> HirToMir<'hir> {
             let is_last = i == body.len() - 1;
             match stmt {
                 hir::HirStatement::Let(let_stmt) => {
-                    // Substitute parameters in the value expression
-                    let substituted_value = self.substitute_expression_with_var_map(
+                    // AUDIT-2 quadratic_solver: when the operand overlay is
+                    // installed, entity struct literals keep their GenericParam
+                    // refs — HIR substitution would inject caller-context HIR
+                    // that convert_statement cannot convert (dropping the
+                    // connection); the overlay resolves the params to the
+                    // pre-converted MIR instead.
+                    let is_entity_lit = matches!(
                         &let_stmt.value,
-                        &param_map,
-                        &var_id_to_name,
+                        hir::HirExpression::StructLiteral(sl)
+                            if self.is_entity_or_alias(&sl.type_name)
                     );
+                    let substituted_value = if is_entity_lit && !operand_overlay.is_empty() {
+                        None
+                    } else {
+                        self.substitute_expression_with_var_map(
+                            &let_stmt.value,
+                            &param_map,
+                            &var_id_to_name,
+                        )
+                    };
                     let substituted_value =
                         substituted_value.unwrap_or_else(|| let_stmt.value.clone());
 
@@ -17775,6 +17858,18 @@ impl<'hir> HirToMir<'hir> {
                 _ => {
                     // Other statement types: process as-is
                     let _ = self.convert_statement(stmt);
+                }
+            }
+        }
+
+        // Restore the operand overlay (reverse order restores shadowed entries)
+        for (name, old) in operand_overlay.into_iter().rev() {
+            match old {
+                Some(prev) => {
+                    self.pending_mir_param_subs.insert(name, prev);
+                }
+                None => {
+                    self.pending_mir_param_subs.shift_remove(&name);
                 }
             }
         }
