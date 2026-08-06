@@ -145,6 +145,10 @@ pub struct HirToMir<'hir> {
     /// stdlib entities (which are monomorphized regardless of use) don't block
     /// unrelated builds.
     conversion_errors: Vec<(String, String)>,
+    /// AUDIT-2 #5: converted results of tuple-returning function calls,
+    /// keyed by the variable holding the call — the call is converted ONCE
+    /// and `.0`/`.1`/... extract elements from the cached Concat.
+    tuple_call_results: std::collections::HashMap<hir::VariableId, Expression>,
     /// Generic entity specializations needed but not present in the HIR.
     /// Trait-method inlining happens AFTER frontend monomorphization, so an
     /// inlined trait body instantiating e.g. `std_adder<8>` finds no
@@ -390,6 +394,7 @@ impl<'hir> HirToMir<'hir> {
             clock_domain_map: IndexMap::new(),
             hir: None,
             conversion_errors: Vec::new(),
+            tuple_call_results: std::collections::HashMap::new(),
             pending_specializations: IndexMap::new(),
             in_assertion: false,
             module_hirs: module_hirs.clone(),
@@ -983,6 +988,14 @@ impl<'hir> HirToMir<'hir> {
         // Second pass: add implementations
         for impl_block in &hir.implementations {
             let impl_start = Instant::now();
+            // AUDIT-2 #5: instance maps are keyed by BARE VariableId, which
+            // restarts per impl block — stale entries from an earlier impl
+            // (e.g. stdlib fp) collided with a later impl's variables:
+            // `.0` on a tuple-fn result hit a stdlib instance's ports
+            // (x_out/y_out) and failed conversion. Reset per impl.
+            self.entity_instance_outputs.clear();
+            self.entity_instance_info.clear();
+            self.tuple_call_results.clear();
             // Debug: Find entity name
             let impl_entity_name = hir
                 .entities
@@ -19607,12 +19620,109 @@ impl<'hir> HirToMir<'hir> {
                                     LValue::Signal(signal_id),
                                 )));
                             }
+                            // AUDIT-2 #5: tuple element access on a
+                            // MODULE-SYNTHESIZED function result. The
+                            // synthesized module exposes tuple elements as
+                            // `result_{i}` output ports (single results as
+                            // `result`), so `.0`/`.1`/... map onto those.
+                            if field_name.chars().all(|c| c.is_ascii_digit()) {
+                                if let Some(&signal_id) =
+                                    output_ports.get(&format!("result_{}", field_name))
+                                {
+                                    return Some(Expression::with_unknown_type(
+                                        ExpressionKind::Ref(LValue::Signal(signal_id)),
+                                    ));
+                                }
+                                if field_name == "0" {
+                                    if let Some(&signal_id) = output_ports.get("result") {
+                                        return Some(Expression::with_unknown_type(
+                                            ExpressionKind::Ref(LValue::Signal(signal_id)),
+                                        ));
+                                    }
+                                }
+                            }
                             trace!(
                                 "[DEBUG] Entity instance field '{}' not found. Available: {:?}",
                                 field_name,
                                 output_ports.keys().collect::<Vec<_>>()
                             );
                             return None;
+                        }
+                    }
+
+                    // AUDIT-2 #5: tuple element access on a variable that
+                    // HOLDS a function-call result (`let (v, r1, r2) = f(..)`
+                    // desugars to `let _tmp = f(..); let v = _tmp.0; ...`).
+                    // The bit-range path below bails with `?` on tuple
+                    // types, so this must run FIRST for module-synthesized
+                    // calls (the Bug #85 panic case). Resolve the variable's
+                    // initializer: if it is a Call, convert it ONCE (cached —
+                    // a second conversion would instantiate the synthesized
+                    // function module again) and extract the element from
+                    // the Concat of result signals (BUG #110 convention).
+                    if field_name.chars().all(|c| c.is_ascii_digit()) {
+                        let cached = self.tuple_call_results.get(var_id).cloned();
+                        let call_result = if let Some(c) = cached {
+                            Some(c)
+                        } else {
+                            let init = self.hir.and_then(|hir| {
+                                hir.implementations
+                                    .iter()
+                                    .flat_map(|ib| ib.variables.iter())
+                                    .find(|v| v.id == *var_id)
+                                    .and_then(|v| v.initial_value.clone())
+                            });
+                            if let Some(hir::HirExpression::Call(call)) = init {
+                                // Only for MODULE-SYNTHESIZED functions (too
+                                // complex to inline — same threshold as the
+                                // BUG #110 Call-base path). Simple calls are
+                                // handled by the existing inline machinery.
+                                let is_module_synthesized = self
+                                    .hir
+                                    .and_then(|hir| {
+                                        hir.functions
+                                            .iter()
+                                            .find(|f| f.name == call.function)
+                                            .or_else(|| {
+                                                hir.implementations
+                                                    .iter()
+                                                    .flat_map(|ib| ib.functions.iter())
+                                                    .find(|f| f.name == call.function)
+                                            })
+                                    })
+                                    .map(|f| {
+                                        let calls: usize = f
+                                            .body
+                                            .iter()
+                                            .map(|st| self.count_calls_in_statement(st))
+                                            .sum();
+                                        calls > MAX_INLINE_CALL_COUNT
+                                    })
+                                    .unwrap_or(false);
+                                if is_module_synthesized {
+                                    let converted =
+                                        self.convert_expression(&hir::HirExpression::Call(call), 0);
+                                    if let Some(ref expr) = converted {
+                                        self.tuple_call_results.insert(*var_id, expr.clone());
+                                    }
+                                    converted
+                                } else {
+                                    None // simple call — existing inline paths handle it
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(result) = call_result {
+                            if let Ok(index) = field_name.parse::<usize>() {
+                                if let ExpressionKind::Concat(elements) = &result.kind {
+                                    if index < elements.len() {
+                                        return Some(elements[index].clone());
+                                    }
+                                } else if index == 0 {
+                                    return Some(result);
+                                }
+                            }
                         }
                     }
 
@@ -19665,6 +19775,7 @@ impl<'hir> HirToMir<'hir> {
                             },
                         )));
                     }
+
                     return None;
                 }
                 hir::HirExpression::StructLiteral(struct_lit) => {

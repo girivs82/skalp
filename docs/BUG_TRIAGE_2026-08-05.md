@@ -106,15 +106,30 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
    All 13 test_async_reset tests pass; EC sweep (register-heavy designs)
    still SAT-proves; corpus unchanged.
 
-5. **Tuple-returning function results break MIR conversion (3 tests).**
-   `test_tuple_fp32_quadratic_{solver,no_real_roots}` die in the Bug #85
-   panic: `Assignment: variable_13 = FieldAccess(Variable(12).0)` fails to
-   convert — element access on a variable holding a tuple-typed function
-   result. `test_bug71_metal_288bit_tuple_generation` is the same family
-   surfaced differently: `undefined identifier v1/v2/v3` (the tuple
-   destructure of a 288-bit-tuple function result loses its bindings).
-   The scalar/tuple-literal paths work (test_tuple_destructuring's other
-   tests pass); the FUNCTION-RESULT path is what's broken.
+5. **FIXED (2026-08-06, 2 of 3 + reclassification). Tuple-returning
+   function results break MIR conversion.** Root causes found:
+   (a) **Instance maps collide across impl blocks** — `entity_instance_
+   outputs` is keyed by BARE VariableId, which restarts per impl block;
+   stale entries from earlier impls (the stdlib fp impls) collided with
+   later variables, so `.0` on a tuple-fn result hit a stdlib instance's
+   ports (x_out/y_out), missed, and the Bug #85 panic fired. The maps are
+   now cleared per impl block.
+   (b) **`.N` on module-synthesized results had no port mapping** — the
+   synthesized function module exposes tuple elements as `result_{i}`
+   output ports; the entity-instance field lookup now maps numeric fields
+   onto them (plus `result` for `.0` of single-return fns). A cached
+   fallback also converts a call-holding variable's initializer once
+   (module-synthesized calls only) and extracts elements from the Concat.
+   (c) **test_bug71_metal was a broken TEST** — it used `vec3<fp32>`
+   with `parse_and_build_hir` (no stdlib context), so the struct
+   literals never resolved and the bindings vanished; rewritten with
+   plain 96-bit lanes preserving its 288-bit-tuple intent. PASSES.
+   `test_tuple_fp32_quadratic_no_real_roots` PASSES.
+   **RECLASSIFIED, still open:** `test_tuple_fp32_quadratic_solver` now
+   compiles and simulates but computes denormal garbage instead of the
+   roots — a NUMERICAL bug in the synthesized-function simulation of the
+   fp sqrt/div path (early-return mux logic or fp op wiring), no longer a
+   tuple/conversion issue.
 
 ## P2 — inference and classification gaps
 

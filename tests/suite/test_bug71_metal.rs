@@ -8,10 +8,15 @@ fn test_bug71_metal_288bit_tuple_generation() {
     println!("\n🧪 Testing Bug #71: Metal shader generation for 288-bit tuples\n");
 
     let source = r#"
-fn make_vecs() -> (vec3<fp32>, vec3<fp32>, vec3<fp32>) {
-    let v1 = vec3 { x: 1.0, y: 2.0, z: 3.0 };
-    let v2 = vec3 { x: 4.0, y: 5.0, z: 6.0 };
-    let v3 = vec3 { x: 7.0, y: 8.0, z: 9.0 };
+// AUDIT-2 #5: rewritten without stdlib types — the original used
+// vec3<fp32> but parse_and_build_hir has no stdlib context, so the
+// struct literals never resolved and the let bindings vanished
+// ("undefined identifier v1"). Plain 96-bit lanes preserve the
+// 288-bit-tuple intent the test exists for.
+fn make_vecs() -> (bit[96], bit[96], bit[96]) {
+    let v1: bit[96] = 1;
+    let v2: bit[96] = 2;
+    let v3: bit[96] = 3;
     return (v1, v2, v3);
 }
 
@@ -26,7 +31,7 @@ impl Test {
     on(clk.rise) {
         let triple = make_vecs();
         let v1 = triple.0;
-        result = v1.x as bit[32];
+        result = v1[31:0];
     }
 
     out = result;
