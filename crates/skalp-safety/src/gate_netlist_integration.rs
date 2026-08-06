@@ -233,7 +233,23 @@ pub fn gate_netlist_to_fmea(
 
         // Find coverage from annotations and detection signals
         let coverage =
-            find_coverage_for_cell(&cell.path, &annotation_map, &dc_map, &detection_coverage);
+            find_coverage_for_cell(&cell.path, &annotation_map, &dc_map, &detection_coverage)
+                // AUDIT-2 safety: cells from the flat synthesis path carry
+                // internal names (aig.n19, aig.latch11) with NO module
+                // prefix, so instance-path prefix matching can never hit —
+                // every cell read "not covered" and measured DC was never
+                // applied (residual FIT == raw FIT). An annotation whose
+                // instance path names the NETLIST's module covers the whole
+                // netlist.
+                .or_else(|| {
+                    annotation_map
+                        .iter()
+                        .find(|(path, _)| {
+                            path.as_str() == netlist.name
+                                || config.base_path.ends_with(path.as_str())
+                        })
+                        .map(|(_, annotation)| annotation_to_coverage(annotation, &dc_map))
+                });
 
         // Convert cell failure modes to FMEA failure modes
         let mut failure_modes_for_sm: Vec<FailureMode> = Vec::new();

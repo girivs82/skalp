@@ -228,6 +228,48 @@ pub fn synthesize(
         result.netlist.rebuild_cache();
     }
 
+    // Step 3.7 (AUDIT-2 safety): apply the MODULE-level safety
+    // classification to cells. #[safety_mechanism]-annotated entities carry
+    // LirSafetyInfo on the LIR, but the AIG synthesis path never consumed
+    // it — every cell stayed Functional and FMEA/PMHF analyses saw no
+    // safety-mechanism hardware at all. Cells that already carry a more
+    // specific classification (from per-signal annotations) are preserved.
+    if let Some(ref info) = lir.module_safety_info {
+        if info.mechanism_name.is_some() || info.is_sm_of_sm {
+            let mechanism_name = info
+                .mechanism_name
+                .clone()
+                .unwrap_or_else(|| "unnamed".to_string());
+            let goal_name = info
+                .goal_name
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string());
+            let classification = if info.is_sm_of_sm {
+                crate::gate_netlist::CellSafetyClassification::SafetyMechanismOfSm {
+                    protected_sm_name: info
+                        .protected_sm_name
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    goal_name,
+                    mechanism_name,
+                }
+            } else {
+                crate::gate_netlist::CellSafetyClassification::SafetyMechanism {
+                    goal_name,
+                    mechanism_name,
+                }
+            };
+            for cell in &mut result.netlist.cells {
+                if matches!(
+                    cell.safety_classification,
+                    crate::gate_netlist::CellSafetyClassification::Functional
+                ) {
+                    cell.safety_classification = classification.clone();
+                }
+            }
+        }
+    }
+
     // Step 4: LUT post-mapping optimization for FPGA targets
     if library.is_fpga() {
         crate::gate_lut_opt::optimize_luts(&mut result.netlist);

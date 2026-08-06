@@ -152,14 +152,23 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
    (b) the tests re-target the NETLIST (no RAM/EBR cells; small memory
    register-decomposed) instead of the obsolete LIR-level assertion.
 
-8. **Safety classification and FMEA DC (5 tests).**
-   `test_safety_annotation_pipeline` (3): entities declared as safety
-   mechanisms get `SafetyMechanismOfSm: 0` classified cells — the
-   `#[implements]`/mechanism classification doesn't reach gate-netlist
-   cells. `test_safety_tech_mapping_flow` (2): FMEA with measured
-   diagnostic coverage does not reduce residual FIT (`Residual FIT should
-   be less than raw FIT when DC is applied`) — DC application in the FMEA
-   rollup is a no-op.
+8. **FIXED (2026-08-06). Safety classification and FMEA DC (5 tests) —
+   two independent metadata-drop bugs:**
+   (a) **Classification never reached the netlist.** `#[safety_mechanism]`
+   entities carry `LirSafetyInfo` on the LIR, but the AIG synthesis path
+   never consumed it — every cell came out `Functional`. `synthesize()`
+   now has a Step 3.7 that applies the module-level safety info to all
+   cells (`SafetyMechanism` / `SafetyMechanismOfSm` with goal + mechanism
+   names). All 14 test_safety_annotation_pipeline tests pass.
+   (b) **FMEA measured-DC was a no-op because zero cells matched the
+   annotation.** Cells from the flat synthesis path carry internal names
+   (`aig.n19`, `aig.latch11`) with no module prefix, so the instance-path
+   prefix matching in `find_coverage_for_cell` could never hit ("48 cells
+   not covered"), the measured DC was never applied, and residual FIT
+   equalled raw FIT. Fix: an annotation whose instance path names the
+   netlist's module (or is a suffix of the configured base path) now
+   covers the whole netlist as a fallback. All 9 test_safety_tech_mapping
+   flow tests pass; skalp-safety unit tests 279/279.
 
 ## P3 — single-test issues
 
