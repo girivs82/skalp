@@ -77,6 +77,9 @@ pub struct HirBuilderContext {
     next_signal_id: u32,
     next_variable_id: u32,
     next_constant_id: u32,
+    /// AUDIT-2 #8: constant values by id so generate-if/const contexts can
+    /// resolve `const X: bool = true` references at build time.
+    constant_value_exprs: std::collections::HashMap<ConstantId, HirExpression>,
     /// BUG #179 FIX: Track current impl entity name for generating unique constant IDs
     /// When building constants inside `impl FpAdd<F> { const W = ... }`, this is "FpAdd"
     /// When building top-level constants, this is None (global namespace)
@@ -307,6 +310,7 @@ impl HirBuilderContext {
             next_signal_id: 0,
             next_variable_id: 0,
             next_constant_id: 0,
+            constant_value_exprs: std::collections::HashMap::new(),
             current_impl_entity_name: None,
             next_function_id: 0,
             next_block_id: 0,
@@ -2885,6 +2889,8 @@ impl HirBuilderContext {
         // Register in symbol table
         self.symbols.constants.insert(name.clone(), id);
         self.symbols.add_to_scope(&name, SymbolId::Constant(id));
+        // AUDIT-2 #8: remember the value for compile-time evaluation
+        self.constant_value_exprs.insert(id, value.clone());
 
         Some(HirConstant {
             id,
@@ -3395,6 +3401,17 @@ impl HirBuilderContext {
                 SyntaxKind::IfStmt => {
                     if let Some(if_stmt) = self.build_if_statement(&child) {
                         statements.push(HirStatement::If(if_stmt));
+                    }
+                }
+                // AUDIT-2 #8: generate-if/match/for inside on() blocks were
+                // silently SKIPPED — this walker had no arm for them, so
+                // the selected branch's assignments never existed and the
+                // undriven-output check fired downstream.
+                SyntaxKind::GenerateIfStmt
+                | SyntaxKind::GenerateMatchStmt
+                | SyntaxKind::GenerateForStmt => {
+                    if let Some(stmt) = self.build_statement(&child) {
+                        statements.push(stmt);
                     }
                 }
                 SyntaxKind::ForStmt => {
@@ -5570,7 +5587,39 @@ impl HirBuilderContext {
 
     /// Try to evaluate a constant expression at compile time
     fn try_eval_const_expr(&self, expr: &HirExpression) -> Option<i64> {
-        Self::eval_const_expr_impl(expr)
+        // AUDIT-2 #8: resolve constant references through the value table
+        if let HirExpression::Constant(id) = expr {
+            let value = self.constant_value_exprs.get(id)?.clone();
+            return self.try_eval_const_expr(&value);
+        }
+        match expr {
+            HirExpression::Binary(bin) => {
+                // Recurse through self so const references in operands
+                // resolve; then apply the operator directly.
+                let left = self.try_eval_const_expr(&bin.left)?;
+                let right = self.try_eval_const_expr(&bin.right)?;
+                match bin.op {
+                    HirBinaryOp::Add | HirBinaryOp::WidenAdd => Some(left + right),
+                    HirBinaryOp::Sub => Some(left - right),
+                    HirBinaryOp::Mul => Some(left * right),
+                    HirBinaryOp::Div if right != 0 => Some(left / right),
+                    HirBinaryOp::Mod if right != 0 => Some(left % right),
+                    HirBinaryOp::Equal => Some((left == right) as i64),
+                    HirBinaryOp::NotEqual => Some((left != right) as i64),
+                    HirBinaryOp::Less => Some((left < right) as i64),
+                    HirBinaryOp::LessEqual => Some((left <= right) as i64),
+                    HirBinaryOp::Greater => Some((left > right) as i64),
+                    HirBinaryOp::GreaterEqual => Some((left >= right) as i64),
+                    HirBinaryOp::And => Some(left & right),
+                    HirBinaryOp::Or => Some(left | right),
+                    HirBinaryOp::Xor => Some(left ^ right),
+                    HirBinaryOp::LogicalAnd => Some((left != 0 && right != 0) as i64),
+                    HirBinaryOp::LogicalOr => Some((left != 0 || right != 0) as i64),
+                    _ => None,
+                }
+            }
+            _ => Self::eval_const_expr_impl(expr),
+        }
     }
 
     /// Implementation of constant expression evaluation (static to avoid only_used_in_recursion warning)
@@ -5737,6 +5786,15 @@ impl HirBuilderContext {
     fn try_eval_const_bool(&self, expr: &HirExpression) -> Option<bool> {
         match expr {
             HirExpression::Literal(HirLiteral::Boolean(b)) => Some(*b),
+            // AUDIT-2 #8: `generate if ENABLE_PIPELINE` — a bare reference
+            // to `const X: bool = ...` fell to the None arm, the error was
+            // only PUSHED (not fatal), and the whole generate-if silently
+            // vanished (caught downstream as an undriven output).
+            HirExpression::Constant(id) => {
+                let value = self.constant_value_exprs.get(id)?.clone();
+                self.try_eval_const_bool(&value)
+                    .or_else(|| self.try_eval_const_expr(&value).map(|v| v != 0))
+            }
             HirExpression::Binary(bin) => match bin.op {
                 HirBinaryOp::Equal => {
                     let left = self.try_eval_const_expr(&bin.left)?;

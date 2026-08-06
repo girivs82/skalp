@@ -127,11 +127,15 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
    LUT4 INIT generation or the gate-sim LUT evaluation is wrong for the
    ice40 library.
 
-7. **Memory BRAM-inference threshold inverted (2 tests).** An 8x4 (32-bit)
-   memory with `auto` style INFERS BRAM though the test asserts it must
-   stay in registers (`test_auto_inference_small_memory`,
-   `test_auto_inference_no_bram_target`). Size/target gating in the
-   inference heuristic doesn't match the documented policy.
+7. **FIXED (2026-08-06). Memory BRAM-inference threshold (2 tests).**
+   The tests asserted "no MemBlock in LIR" — but since the 2026-08-02 #27
+   memory work, the LIR MemBlock is the CANONICAL memory form (required so
+   dynamic writes survive lowering); BRAM-vs-DFF is the TECH MAPPER's
+   decision. Two changes: (a) the mapper now applies the documented
+   256-bit floor — memories under 256 bits decompose to DFFs even when
+   the target has block RAM (don't burn a 4096-bit EBR on 32 bits);
+   (b) the tests re-target the NETLIST (no RAM/EBR cells; small memory
+   register-decomposed) instead of the obsolete LIR-level assertion.
 
 8. **Safety classification and FMEA DC (5 tests).**
    `test_safety_annotation_pipeline` (3): entities declared as safety
@@ -144,15 +148,19 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
 
 ## P3 — single-test issues
 
-9. **generate-if body dropped (1 test).**
-   `test_generate_blocks::test_generate_if_basic`: HIR builds, but the
-   selected generate-if branch's assignments never reach MIR — caught by
-   the (campaign-added) undriven-output check: `output port data_out of
-   ConditionalPipeline is never driven`. Same family as the fixed #30
-   (generate-FOR in generic impls); the generate-IF elaboration path needs
-   the same treatment. Before the undriven check this would have been
-   silent wrong hardware, so arguably P1 by nature — kept here because it
-   is one known construct.
+9. **FIXED (2026-08-06). generate-if body dropped (1 test) — two stacked
+   frontend gaps:**
+   (a) `build_statements` (the on()-block statement walker) had NO arm for
+   GenerateIfStmt/GenerateMatchStmt/GenerateForStmt — a generate construct
+   inside an event block was silently SKIPPED (never even built). Routed
+   through build_statement now.
+   (b) `try_eval_const_bool` could not resolve a bare constant reference
+   (`generate if ENABLE_PIPELINE` where `const ENABLE_PIPELINE: bool =
+   true`) — the "must be evaluable" error was pushed non-fatally and the
+   construct vanished. The builder now keeps a ConstantId → value table
+   (populated in build_constant) and both const evaluators resolve
+   references through it (numeric operators re-implemented on resolved
+   operands). All 14 test_generate_blocks tests pass.
 
 ---
 

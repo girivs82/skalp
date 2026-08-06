@@ -960,12 +960,26 @@ fn map_memblock_standalone(
     path: &str,
     clk: GateNetId,
 ) {
+    // AUDIT-2 #7: small memories must NOT burn a block-RAM tile — the
+    // documented Auto policy keeps memories under 256 bits in registers
+    // even when the target has BRAM (an iCE40 EBR is 4096 bits; spending
+    // one on 32 bits wastes a scarce resource). The LIR MemBlock is the
+    // canonical memory form; THIS is where BRAM-vs-DFF is decided.
+    const BRAM_MIN_BITS: u32 = 256;
+    let total_bits = data_width * depth;
+
     // Query library for RAM cell
-    let (ram_cell, ram_info) = match library.find_ram_cell() {
+    let ram_lookup = if total_bits < BRAM_MIN_BITS {
+        None
+    } else {
+        library.find_ram_cell()
+    };
+    let (ram_cell, ram_info) = match ram_lookup {
         Some(info) => info,
         None => {
-            // No block RAM in this library (e.g. generic ASIC): decompose the
-            // memory into DFFs + write-select muxes + a read mux tree. This
+            // No block RAM in this library (e.g. generic ASIC), or the
+            // memory is below the BRAM threshold: decompose the memory
+            // into DFFs + write-select muxes + a read mux tree. This
             // keeps the memory verifiable — gate-level simulation and the SAT
             // equivalence AIG both understand plain DFF/MUX cells.
             decompose_memblock_to_dffs(

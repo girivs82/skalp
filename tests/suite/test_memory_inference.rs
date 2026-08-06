@@ -373,7 +373,9 @@ impl RegMemTest {
 // LIR-Level Memory Inference Tests
 // =============================================================================
 
-use skalp_lir::{lower_mir_module_to_lir, lower_mir_module_to_lir_with_bram, LirOp};
+use skalp_lir::{
+    get_stdlib_library, lower_mir_module_to_lir, lower_mir_module_to_lir_with_bram, LirOp,
+};
 use skalp_mir::MirCompiler;
 
 fn compile_to_mir_module(source: &str) -> skalp_mir::mir::Module {
@@ -589,18 +591,34 @@ impl AutoSmallTest {
 
     let module = compile_to_mir_module(source);
 
-    // With BRAM target: 8x4 = 32 bits < 256 → stays as LUTs
+    // AUDIT-2 #7: the LIR MemBlock is the canonical memory form (needed so
+    // dynamic writes survive lowering); BRAM-vs-DFF is decided by the TECH
+    // MAPPER. With a BRAM target, 8x4 = 32 bits < 256 → the mapper must
+    // DECOMPOSE to DFFs rather than burn a block-RAM tile.
     let lir_result = lower_mir_module_to_lir_with_bram(&module);
     let lir = &lir_result.lir;
-
-    let memblock_count = lir
-        .nodes
+    let library = get_stdlib_library("ice40").expect("ice40 library");
+    let synth = skalp_lir::synthesize(lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let ram_cells = synth
+        .netlist
+        .cells
         .iter()
-        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .filter(|c| c.cell_type.contains("RAM") || c.cell_type.contains("EBR"))
         .count();
     assert_eq!(
-        memblock_count, 0,
-        "Auto style with 8x4 (32 bits) should NOT infer BRAM"
+        ram_cells, 0,
+        "Auto style with 8x4 (32 bits) must not use block RAM"
+    );
+    let seq_cells = synth
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.is_sequential())
+        .count();
+    assert!(
+        seq_cells >= 32,
+        "small memory must be register-decomposed (got {} sequential cells)",
+        seq_cells
     );
 }
 
@@ -631,17 +649,22 @@ impl AutoNoBramTest {
 
     let module = compile_to_mir_module(source);
 
-    // Without BRAM target, even large memories stay as LUTs for auto
+    // AUDIT-2 #7: without a BRAM target the mapper must decompose to DFFs
+    // (the LIR still carries a MemBlock — that is the canonical memory
+    // form, required so dynamic writes survive lowering; see triage
+    // 2026-08-02 #27).
     let lir_result = lower_mir_module_to_lir(&module);
     let lir = &lir_result.lir;
-
-    let memblock_count = lir
-        .nodes
+    let library = get_stdlib_library("generic_asic").expect("library");
+    let synth = skalp_lir::synthesize(lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    let ram_cells = synth
+        .netlist
+        .cells
         .iter()
-        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .filter(|c| c.cell_type.contains("RAM") || c.cell_type.contains("EBR"))
         .count();
     assert_eq!(
-        memblock_count, 0,
-        "Auto style without BRAM target should NOT produce MemBlock"
+        ram_cells, 0,
+        "Auto style without BRAM target must not use block RAM"
     );
 }
