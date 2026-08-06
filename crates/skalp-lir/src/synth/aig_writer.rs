@@ -540,6 +540,7 @@ impl AigWriterState<'_> {
         // eval_pin_order tells us what order gate_eval expects those pins in.
         // We place each leaf's net at the position its functional pin occupies
         // in the eval order — driven by pin function, not alphabetical sorting.
+        let leaf_order_nets = raw_input_nets.clone();
         let input_nets: Vec<GateNetId> = if let Some(ref pm) = mapped.pin_mapping {
             let eval_order = self
                 .lookup_cell_function(&mapped.cell_type)
@@ -587,8 +588,15 @@ impl AigWriterState<'_> {
 
                 let lut_init = expand_truth_table_to_lut4(adjusted_tt, num_inputs);
 
-                // Pad inputs to 4 for LUT4 (unused inputs connected to first input)
-                let mut padded_inputs = input_nets.clone();
+                // AUDIT-2 #6b: the truth table is indexed by CUT-LEAF order
+                // (adjusted_tt complements leaf i, the simulator forms the
+                // LUT address positionally), so the LUT cell must be wired
+                // in leaf order too. The eval-pin-order reorder above is for
+                // ASIC cells whose function primitive fixes the pin meaning
+                // — applying it here left an asymmetric cell (MUX2: init
+                // 0xCACA = [d0,d1,sel]) wired [sel,d0,d1], and every ice40
+                // gate-level mux read the wrong pins.
+                let mut padded_inputs = leaf_order_nets;
                 while padded_inputs.len() < 4 {
                     padded_inputs.push(padded_inputs[0]);
                 }

@@ -133,14 +133,18 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
 
 ## P2 — inference and classification gaps
 
-6. **ECP5 DSP inference never fires + ice40 gate-sim mux reads zero
-   (5 tests).** `MULT18X18D` count is 0 where 1 is expected for 8x8/18x18/
-   signed/wide multiplies (`test_ecp5_dsp_multiply_*`, 4 tests) — the DSP
-   inference pass doesn't map `*` to the ECP5 DSP cell in the current synth
-   path. Separately `test_ice40_gate_level_mux` simulates an ice40-mapped
-   (SB_LUT4) mux netlist and reads 0x00 where 0x55 is expected — either
-   LUT4 INIT generation or the gate-sim LUT evaluation is wrong for the
-   ice40 library.
+6. **FIXED (2026-08-06). ECP5 DSP inference + ice40 gate-sim mux
+   (5 tests).** The 4 `test_ecp5_dsp_multiply_*` tests flipped as a side
+   effect of earlier campaign fixes (no dedicated change needed). The
+   ice40 mux was a real miscompile in `emit_mapped_cell`: for FPGA LUT
+   cells the truth table (`lut_init`) is computed in CUT-LEAF order and
+   the simulator forms the LUT address positionally, but the inputs were
+   wired in eval-pin order — the reorder that ASIC primitive evaluation
+   needs. Symmetric functions (AND/XOR) masked it; MUX2 is asymmetric,
+   so `INIT 0xCACA` (= `[d0,d1,sel]`) got wired `[sel,d0,d1]` and every
+   ice40-mapped mux read the wrong pins. LUT cells are now wired in leaf
+   order (the eval-order reorder still applies to ASIC cells). All 62
+   ice40 tests pass.
 
 7. **FIXED (2026-08-06). Memory BRAM-inference threshold (2 tests).**
    The tests asserted "no MemBlock in LIR" — but since the 2026-08-02 #27
