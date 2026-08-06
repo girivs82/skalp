@@ -418,6 +418,38 @@ impl HirBuilderContext {
         comments
     }
 
+    /// A bare comparison as a statement inside an on() block is the
+    /// SystemVerilog non-blocking-assignment habit (`r <= d`): it parses as a
+    /// discarded comparison and synthesizes NOTHING (an empty always block).
+    /// Hard error with a fix-it instead of silently dropping the state update.
+    /// Function bodies are exempt — a trailing expression there is the return
+    /// value, not a discarded statement.
+    fn check_discarded_comparison(&mut self, expr: &HirExpression, node: &SyntaxNode) {
+        if !self.is_inside_event_block() || self.is_inside_function_body() {
+            return;
+        }
+        if let HirExpression::Binary(bin) = expr {
+            let op_txt = match bin.op {
+                HirBinaryOp::LessEqual => "<=",
+                HirBinaryOp::Less => "<",
+                HirBinaryOp::GreaterEqual => ">=",
+                HirBinaryOp::Greater => ">",
+                HirBinaryOp::Equal => "==",
+                HirBinaryOp::NotEqual => "!=",
+                _ => return,
+            };
+            self.errors.push(HirError {
+                message: format!(
+                    "statement discards the result of `{op}` — this comparison produces no hardware. \
+                     Assignments in SKALP use `=` (registered inside on(), continuous at impl level); \
+                     `{op}` is comparison only",
+                    op = op_txt
+                ),
+                span: self.make_span(node),
+            });
+        }
+    }
+
     // ========== Context Stack Methods (for unified assignment operator) ==========
 
     /// Push a context onto the stack (e.g., when entering an on() block)
@@ -3774,32 +3806,30 @@ impl HirBuilderContext {
                 // Fall back to original logic if no function call pattern found
                 // Search children in reverse to prioritize complex expressions like BinaryExpr
                 // over simple ones like IdentExpr (which may not be in scope yet)
-                let expr = children
-                    .into_iter()
-                    .rev()
-                    .find(|n| {
-                        matches!(
-                            n.kind(),
-                            SyntaxKind::BinaryExpr
-                                | SyntaxKind::UnaryExpr
-                                | SyntaxKind::CallExpr
-                                | SyntaxKind::IfExpr
-                                | SyntaxKind::MatchExpr
-                                | SyntaxKind::FieldExpr
-                                | SyntaxKind::IndexExpr
-                                | SyntaxKind::ParenExpr
-                                | SyntaxKind::ArrayLiteral
-                                | SyntaxKind::PathExpr
-                                | SyntaxKind::LiteralExpr
-                                | SyntaxKind::IdentExpr
-                                | SyntaxKind::TupleExpr // Bug #85 fix: Support tuple expressions for implicit returns
-                                | SyntaxKind::CastExpr // BUG #212 fix: Support cast expressions
-                                | SyntaxKind::ConcatExpr // BUG #212 fix: Support concat expressions
-                                | SyntaxKind::TernaryExpr // BUG #212 fix: Support ternary expressions
-                                | SyntaxKind::StructLiteral // BUG #212 fix: Support struct literals
-                        )
-                    })
-                    .and_then(|n| self.build_expression(&n))?;
+                let expr_node = children.into_iter().rev().find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::ArrayLiteral
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::TupleExpr // Bug #85 fix: Support tuple expressions for implicit returns
+                            | SyntaxKind::CastExpr // BUG #212 fix: Support cast expressions
+                            | SyntaxKind::ConcatExpr // BUG #212 fix: Support concat expressions
+                            | SyntaxKind::TernaryExpr // BUG #212 fix: Support ternary expressions
+                            | SyntaxKind::StructLiteral // BUG #212 fix: Support struct literals
+                    )
+                })?;
+                let expr = self.build_expression(&expr_node)?;
+                self.check_discarded_comparison(&expr, &expr_node);
                 Some(HirStatement::Expression(expr))
             }
             SyntaxKind::BlockStmt => {
@@ -3865,6 +3895,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr // BUG #182 FIX: Support replication expressions in assignments (e.g., result = {8{1'b1}})
                         | SyntaxKind::TernaryExpr // BUG #180 FIX: Support ternary expressions in assignments (e.g., result = cond ? a : b)
                         | SyntaxKind::StructLiteral // BUG FIX: Support struct literal assignments (e.g., faults = FaultFlags { ov: x, ... })
+                        | SyntaxKind::WithIntentExpr // `q = match ... with intent::x` — the intent suffix wraps the RHS; without this the whole assignment was silently dropped
                 )
             })
             .collect();

@@ -8233,6 +8233,29 @@ impl<'hir> HirToMir<'hir> {
                     ));
                 }
 
+                // A port of the CURRENT entity referenced by name. Impls built
+                // from separately-parsed module HIRs (the CLI's stdlib path)
+                // can carry port references as GenericParam("x") instead of
+                // HirExpression::Port — the specialized entity's ports ARE
+                // registered in port_map, so resolve by name against the
+                // current entity. Without this, every port read in such an
+                // impl was "undefined identifier" (FpSqrt_fp32 via skalp
+                // build failed while the merged-HIR test path succeeded).
+                if let Some(entity_id) = self.current_entity_id {
+                    if let Some(port) = self
+                        .hir
+                        .and_then(|h| h.entities.iter().find(|e| e.id == entity_id))
+                        .and_then(|e| e.ports.iter().find(|p| p.name == *param_name))
+                    {
+                        if let Some(&mir_port) = self.port_map.get(&port.id) {
+                            return Some(Expression::new(
+                                ExpressionKind::Ref(LValue::Port(mir_port)),
+                                ty,
+                            ));
+                        }
+                    }
+                }
+
                 // Check const_evaluator bindings (e.g., N bound during trait inlining)
                 if let Ok(val) = self
                     .const_evaluator

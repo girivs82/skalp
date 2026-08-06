@@ -2769,12 +2769,29 @@ impl<'a> ParseState<'a> {
     /// Parse bins values (ranges, sets, etc.)
     fn parse_bins_values(&mut self) {
         if self.at(SyntaxKind::LBrace) {
-            // Set of values: { 1, 2, 3 }
+            // Set of values and/or ranges: { 1, 2, [0:127] }
             self.bump(); // consume {
             while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
-                self.parse_expression();
+                let before = self.current;
+                if self.at(SyntaxKind::LBracket) {
+                    // Range element: [lo:hi]
+                    self.bump(); // consume [
+                    self.parse_expression();
+                    if self.at(SyntaxKind::Colon) {
+                        self.bump(); // consume :
+                        self.parse_expression();
+                    }
+                    self.expect(SyntaxKind::RBracket);
+                } else {
+                    self.parse_expression();
+                }
                 if self.at(SyntaxKind::Comma) {
                     self.bump();
+                }
+                // A value that consumed no tokens would loop forever; force
+                // progress so malformed input degrades to errors, not a hang.
+                if self.current == before {
+                    self.error_and_bump("expected bins value");
                 }
             }
             self.expect(SyntaxKind::RBrace);
