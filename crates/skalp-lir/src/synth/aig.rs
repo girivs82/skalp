@@ -160,6 +160,9 @@ pub enum AigNode {
         clock: Option<AigNodeId>,
         /// Reset input node
         reset: Option<AigNodeId>,
+        /// AUDIT-2 #4: reset is SYNCHRONOUS — must fold into D (Dff +
+        /// ResetMux), never the async reset pin of a DFFR.
+        sync_reset: bool,
     },
 
     /// Power domain barrier (optimization boundary)
@@ -580,6 +583,7 @@ impl Aig {
             init,
             clock,
             reset,
+            sync_reset: false,
         });
 
         // Copy safety from data input
@@ -608,9 +612,29 @@ impl Aig {
             init,
             clock,
             reset,
+            sync_reset: false,
         });
         self.safety_info.push(safety);
         id
+    }
+
+    /// Mark a latch's reset as SYNCHRONOUS (stored ON the node so it
+    /// survives optimization passes that rebuild the AIG).
+    pub fn mark_latch_sync_reset(&mut self, latch_id: AigNodeId) {
+        if let Some(AigNode::Latch { sync_reset, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
+            *sync_reset = true;
+        }
+    }
+
+    /// Is this latch's reset synchronous?
+    pub fn is_latch_sync_reset(&self, latch_id: AigNodeId) -> bool {
+        matches!(
+            self.nodes.get(latch_id.0 as usize),
+            Some(AigNode::Latch {
+                sync_reset: true,
+                ..
+            })
+        )
     }
 
     /// Update the data input of an existing latch node

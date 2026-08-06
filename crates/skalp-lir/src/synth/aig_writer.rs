@@ -367,6 +367,7 @@ impl AigWriterState<'_> {
                     init,
                     clock,
                     reset,
+                    sync_reset: _,
                 } => {
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
                 }
@@ -718,9 +719,12 @@ impl AigWriterState<'_> {
 
             // Create SDFFE cell with enable input
             // Inputs: [D, E] where D is the new data and E is the enable
-            let cell = Cell::new_seq_with_enable(
+            // AUDIT-2 #4: function must be set — analyses (and the DffR/Dff
+            // counting in tests) key off CellFunction, and the NCL runtime
+            // rejects function-less cells.
+            let mut cell = Cell::new_seq_with_enable(
                 CellId(self.next_cell_id),
-                cell_type,
+                cell_type.clone(),
                 self.library.name.clone(),
                 cell_fit,
                 format!("aig.latch{}", id.0),
@@ -731,36 +735,157 @@ impl AigWriterState<'_> {
                 reset_net,
             )
             .with_safety_classification(safety);
+            if let Some(func) = self.lookup_cell_function(&cell_type) {
+                cell = cell.with_function(func);
+            }
 
             self.next_cell_id += 1;
             self.netlist.add_cell(cell);
         } else {
-            // No enable pattern found, use regular DFFR
             let data_net = self.get_or_create_lit_net(aig, data);
+            let sync_reset = reset_net.is_some() && aig.is_latch_sync_reset(id);
+            let reset_to_one = reset_net.is_some() && !sync_reset && _init == Some(true);
 
-            // Find appropriate cell from library
-            let (cell_type, cell_fit) = if reset_net.is_some() {
-                self.find_dffr_cell()
+            if sync_reset {
+                // AUDIT-2 #4: SYNC reset — plain DFF with the reset folded
+                // into the D input: D_eff = reset ? reset_value : data.
+                // Using DFFR here would reset ASYNCHRONOUSLY — different
+                // hardware than the source semantics.
+                let init_lit = if _init == Some(true) {
+                    AigLit::true_lit()
+                } else {
+                    AigLit::false_lit()
+                };
+                let init_net = self.get_or_create_lit_net(aig, init_lit);
+                let mux_out = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("latch{}_rstmux", id.0)));
+                let (mux_type, mux_fit) = self.find_mux2_cell();
+                let mut mux = Cell::new_comb(
+                    CellId(self.next_cell_id),
+                    mux_type.clone(),
+                    self.library.name.clone(),
+                    mux_fit,
+                    format!("aig.latch{}_rstmux", id.0),
+                    // Mux2 inputs: [sel, d0 (sel=0), d1 (sel=1)]
+                    vec![reset_net.unwrap(), data_net, init_net],
+                    vec![mux_out],
+                );
+                mux.source_op = Some("ResetMux".to_string());
+                if let Some(func) = self.lookup_cell_function(&mux_type) {
+                    mux = mux.with_function(func);
+                }
+                self.next_cell_id += 1;
+                self.netlist.add_cell(mux);
+
+                let (cell_type, cell_fit) = self.find_dff_cell();
+                let mut cell = Cell::new_seq(
+                    CellId(self.next_cell_id),
+                    cell_type.clone(),
+                    self.library.name.clone(),
+                    cell_fit,
+                    format!("aig.latch{}", id.0),
+                    vec![mux_out],
+                    vec![output_net],
+                    clock_net.unwrap_or(GateNetId(0)),
+                    None, // sync reset lives in the mux, not on a reset pin
+                )
+                .with_safety_classification(safety);
+                if let Some(func) = self.lookup_cell_function(&cell_type) {
+                    cell = cell.with_function(func);
+                }
+                self.next_cell_id += 1;
+                self.netlist.add_cell(cell);
+            } else if reset_to_one {
+                // AUDIT-2 #4: async reset to ONE — DFFR cells reset to 0, so
+                // store the INVERTED value: INV on D going in, INV on Q
+                // coming out. Reset drives the internal latch to 0, which
+                // reads back as 1 through the output inverter.
+                let (inv_type, inv_fit) = self.find_inv_cell();
+                let d_inv = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("latch{}_dinv", id.0)));
+                let mut invd = Cell::new_comb(
+                    CellId(self.next_cell_id),
+                    inv_type.clone(),
+                    self.library.name.clone(),
+                    inv_fit,
+                    format!("aig.latch{}_dinv", id.0),
+                    vec![data_net],
+                    vec![d_inv],
+                );
+                invd.source_op = Some("AsyncResetInvD".to_string());
+                if let Some(func) = self.lookup_cell_function(&inv_type) {
+                    invd = invd.with_function(func);
+                }
+                self.next_cell_id += 1;
+                self.netlist.add_cell(invd);
+
+                let q_int = self
+                    .netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("latch{}_qint", id.0)));
+                let (cell_type, cell_fit) = self.find_dffr_cell();
+                let mut cell = Cell::new_seq(
+                    CellId(self.next_cell_id),
+                    cell_type.clone(),
+                    self.library.name.clone(),
+                    cell_fit,
+                    format!("aig.latch{}", id.0),
+                    vec![d_inv],
+                    vec![q_int],
+                    clock_net.unwrap_or(GateNetId(0)),
+                    reset_net,
+                )
+                .with_safety_classification(safety);
+                if let Some(func) = self.lookup_cell_function(&cell_type) {
+                    cell = cell.with_function(func);
+                }
+                self.next_cell_id += 1;
+                self.netlist.add_cell(cell);
+
+                let mut invq = Cell::new_comb(
+                    CellId(self.next_cell_id),
+                    inv_type.clone(),
+                    self.library.name.clone(),
+                    inv_fit,
+                    format!("aig.latch{}_qinv", id.0),
+                    vec![q_int],
+                    vec![output_net],
+                );
+                invq.source_op = Some("AsyncResetInvQ".to_string());
+                if let Some(func) = self.lookup_cell_function(&inv_type) {
+                    invq = invq.with_function(func);
+                }
+                self.next_cell_id += 1;
+                self.netlist.add_cell(invq);
             } else {
-                self.find_dff_cell()
-            };
+                // Async reset to 0 (or no reset): DFFR/DFF directly.
+                let (cell_type, cell_fit) = if reset_net.is_some() {
+                    self.find_dffr_cell()
+                } else {
+                    self.find_dff_cell()
+                };
 
-            // Create cell
-            let cell = Cell::new_seq(
-                CellId(self.next_cell_id),
-                cell_type,
-                self.library.name.clone(),
-                cell_fit,
-                format!("aig.latch{}", id.0),
-                vec![data_net],
-                vec![output_net],
-                clock_net.unwrap_or(GateNetId(0)),
-                reset_net,
-            )
-            .with_safety_classification(safety);
+                // Create cell (AUDIT-2 #4: with CellFunction — see above)
+                let mut cell = Cell::new_seq(
+                    CellId(self.next_cell_id),
+                    cell_type.clone(),
+                    self.library.name.clone(),
+                    cell_fit,
+                    format!("aig.latch{}", id.0),
+                    vec![data_net],
+                    vec![output_net],
+                    clock_net.unwrap_or(GateNetId(0)),
+                    reset_net,
+                )
+                .with_safety_classification(safety);
+                if let Some(func) = self.lookup_cell_function(&cell_type) {
+                    cell = cell.with_function(func);
+                }
 
-            self.next_cell_id += 1;
-            self.netlist.add_cell(cell);
+                self.next_cell_id += 1;
+                self.netlist.add_cell(cell);
+            }
         }
 
         // Note: node_to_net and lit_to_net are already set in pre_create_latch_nets
@@ -1168,6 +1293,13 @@ impl AigWriterState<'_> {
     /// Find an inverter cell in the library
     ///
     /// Panics if the library doesn't contain an INV cell.
+    fn find_mux2_cell(&self) -> (String, f64) {
+        self.library
+            .find_best_cell(&crate::tech_library::CellFunction::Mux2)
+            .map(|c| (c.name.clone(), c.fit))
+            .unwrap_or_else(|| ("MUX2_X1".to_string(), 0.3))
+    }
+
     fn find_inv_cell(&self) -> (String, f64) {
         let inv_cells = self.library.find_cells_by_function(&CellFunction::Inv);
         if let Some(cell) = inv_cells.first() {

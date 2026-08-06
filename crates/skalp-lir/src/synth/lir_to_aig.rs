@@ -181,7 +181,11 @@ impl<'a> LirToSynthAig<'a> {
         for &reg_idx in &register_indices {
             let node = &self.lir.nodes[reg_idx];
             if let LirOp::Reg {
-                width, reset_value, ..
+                width,
+                reset_value,
+                has_reset,
+                async_reset,
+                ..
             } = &node.op
             {
                 let reset_val = reset_value.unwrap_or(0);
@@ -200,6 +204,11 @@ impl<'a> LirToSynthAig<'a> {
                         clock_node,
                         reset_node,
                     );
+                    // AUDIT-2 #4: a SYNC reset must not use the DFFR async
+                    // reset pin — mark it so the writer folds it into D.
+                    if *has_reset && !*async_reset {
+                        self.aig.mark_latch_sync_reset(latch_id);
+                    }
                     let lit = AigLit::new(latch_id);
                     self.signal_map.insert((node.output.0, bit), lit);
                     latch_node_ids.insert((node.output.0, bit), latch_id);

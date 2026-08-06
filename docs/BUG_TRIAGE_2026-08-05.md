@@ -81,16 +81,30 @@ rework (2026-03-18) which also left `decompose_latches` stubbed
 
 ## P1 — wrong results in specific features
 
-4. **Async-reset processes synthesize ZERO sequential cells (3 tests).**
-   `on(clk.rise, rst.active)` with the standard reset-if pattern produces a
-   netlist with `0 DffR and 0 Dff` (`test_async_reset_synthesis_uses_dffr`,
-   `..._nonzero_value_synthesis`, and the sync-reset variant expecting
-   Dff+mux gets no ResetMux either). The register is dropped entirely in
-   the `synthesize()` AIG path for async-reset sensitivity lists. Likely
-   related to the stubbed `decompose_latches` and/or the AIG path not
-   modeling async-reset DFFs. Note: EC never covers async-reset designs, so
-   this is invisible to the equivalence flow — silent wrong hardware for
-   `rst.active` users.
+4. **FIXED (2026-08-06). Async-reset synthesis (3 tests) — the audit's
+   "zero registers" was wrong, but two REAL wrong-hardware bugs hid
+   behind it:**
+   - The DFFR hardware was actually being synthesized all along — the
+     latch cells just had `function: None`, so every CellFunction-keyed
+     count (and analysis) saw zero registers. Both aig_writer latch
+     construction paths now set the function (same metadata bug class as
+     the STA-fix buffers, item 3).
+   - **SYNC reset emitted as async DFFR (real semantic bug):** a plain
+     `on(clk.rise)` reset-if produced DFFR cells — hardware that resets
+     ASYNCHRONOUSLY where the source demands synchronous. LirOp::Reg
+     carried `async_reset: false` correctly; the AIG path ignored it.
+     Fixed end-to-end: `sync_reset` is now a field ON `AigNode::Latch`
+     (it must survive the optimizer passes, which rebuild the AIG — a
+     side-table keyed by node id was tried first and silently emptied),
+     every rebuild pass propagates it, and the writer folds sync resets
+     into the D input (plain DFF + MUX2 tagged `source_op="ResetMux"`).
+   - **Nonzero async reset values silently reset to 0 (real bug):**
+     `reset(5)`-style registers used plain DFFR (resets to 0) for every
+     bit. Bits that reset to 1 now store the INVERTED value: INV on D
+     (`AsyncResetInvD`) and INV on Q (`AsyncResetInvQ`) around a DFFR,
+     so the async reset drives the internal 0 that reads back as 1.
+   All 13 test_async_reset tests pass; EC sweep (register-heavy designs)
+   still SAT-proves; corpus unchanged.
 
 5. **Tuple-returning function results break MIR conversion (3 tests).**
    `test_tuple_fp32_quadratic_{solver,no_real_roots}` die in the Bug #85

@@ -426,11 +426,12 @@ impl Retiming {
                 init,
                 clock,
                 reset,
-            }) => (*data, *init, *clock, *reset),
+                sync_reset,
+            }) => (*data, *init, *clock, *reset, *sync_reset),
             _ => return false,
         };
 
-        let (data, init, clock, reset) = latch_node;
+        let (data, init, clock, reset, _sync_reset) = latch_node;
 
         // Get all gates that this latch feeds
         let fanouts = self.get_fanout(aig, latch_id);
