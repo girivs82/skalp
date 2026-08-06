@@ -101,10 +101,9 @@ impl Encoder4to2 {
         _ => 0b00
     }
 
-    valid = match in {
-        0b0001 | 0b0010 | 0b0100 | 0b1000 => 1,
-        _ => 0
-    }
+    // One-hot means exactly one bit set
+    valid = if (in == 0b0001) || (in == 0b0010) ||
+               (in == 0b0100) || (in == 0b1000) { 1 } else { 0 }
 }
 ```
 
@@ -574,9 +573,9 @@ impl GrayToBinary8 {
 ## See Also
 
 - [Sequential Patterns](sequential.md) - Registers, counters, shift registers
-- [State Machine Patterns](state-machines.md) - FSM patterns
+- [Memory Patterns](memories.md) - RAMs, ROMs, FIFOs
 - [Syntax Reference](../reference/syntax.md) - Language syntax
-- [Examples](../examples/) - Complete designs
+- [Examples](../../examples/README.md) - Complete designs
 
 ---
 

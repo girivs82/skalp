@@ -84,13 +84,7 @@ impl uart_tx {
         TxState::StopBit => 1         // Stop bit high
     };
 
-    // Verification properties
-    assert property (start && !busy |=> busy)
-        @(posedge clk);
-
-    assert property (state == TxState::StartBit |=> tx == 0)
-        @(posedge clk);
-
-    assert property (state == TxState::StopBit |=> tx == 1)
-        @(posedge clk);
+    // Immediate assertions for verification (checked every cycle in simulation)
+    assert(!(state == TxState::StartBit) || (tx == 0), "start bit must drive tx low");
+    assert(!(state == TxState::StopBit) || (tx == 1), "stop bit must drive tx high");
 }

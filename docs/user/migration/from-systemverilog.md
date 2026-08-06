@@ -20,7 +20,7 @@ This guide shows you how to translate SystemVerilog patterns to SKALP idioms.
 | **Wire** | `wire [7:0] sum` | `signal sum: bit[8]` | No distinction in SKALP |
 | **Sequential** | `always_ff @(posedge clk)` | `on(clk.rise)` | Cleaner syntax |
 | **Combinational** | `assign out = in` | `out = in` | No `assign` keyword |
-| **Non-blocking** | `counter <= counter + 1` | `counter <= counter + 1` | Same! |
+| **Non-blocking** | `counter <= counter + 1` | `counter = counter + 1` | `=` inside `on()` is registered; `<=` is comparison only |
 | **Blocking** | `temp = a + b` | Not in sequential blocks | Use signals instead |
 | **Case** | `case (op) ... endcase` | `match op { ... }` | Expression-based |
 | **Ternary** | `out = sel ? a : b` | `out = if sel { a } else { b }` | If-expressions |
@@ -67,9 +67,9 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            counter <= 0
+            counter = 0
         } else {
-            counter <= counter + 1
+            counter = counter + 1
         }
     }
 
@@ -175,7 +175,7 @@ impl Mux4 {
 ### Key Differences:
 1. **Pattern matching** - Much cleaner than nested ternaries
 2. **Expression-based** - `match` returns a value
-3. **Exhaustiveness checking** - Compiler warns if you miss a case
+3. **Exhaustiveness checking** - Compiler *errors* if you miss a case (cover all values or add `_`)
 4. **Binary literals** - `0b00` instead of `2'b00`
 
 ---
@@ -248,18 +248,32 @@ impl UART_TX {
 
     on(clk.rise) {
         if (rst) {
-            state <= State::Idle
+            state = State::Idle
+            bit_index = 0
         } else {
-            state <= match state {
+            state = match state {
                 State::Idle => if start { State::Start } else { State::Idle },
                 State::Start => State::Data,
                 State::Data => if bit_index == 7 { State::Stop } else { State::Data },
                 State::Stop => State::Idle
             }
+
+            bit_index = match state {
+                State::Data => bit_index + 1,
+                _ => 0
+            }
         }
     }
 
-    // ... rest of logic
+    // Output logic (the "rest of logic" from the SV version)
+    tx = match state {
+        State::Idle => 1,
+        State::Start => 0,
+        State::Data => data_in[bit_index],
+        State::Stop => 1
+    }
+
+    busy = state != State::Idle
 }
 ```
 
@@ -333,8 +347,8 @@ impl ALU {
     }
 
     on(clk.rise) {
-        result <= result_comb
-        zero <= if result_comb == 0 { 1 } else { 0 }
+        result = result_comb
+        zero = if result_comb == 0 { 1 } else { 0 }
     }
 }
 ```
@@ -418,16 +432,16 @@ impl FIFO {
 
     on(clk.rise) {
         if (rst) {
-            wr_ptr <= 0
-            rd_ptr <= 0
-            count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            count = 0
         } else {
             if (wr_en && !full) {
-                memory[wr_ptr] <= wr_data
-                wr_ptr <= (wr_ptr + 1) % DEPTH
+                memory[wr_ptr] = wr_data
+                wr_ptr = (wr_ptr + 1) % DEPTH
             }
             if (rd_en && !empty) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
+                rd_ptr = (rd_ptr + 1) % DEPTH
             }
             // Count update logic...
         }
@@ -492,9 +506,9 @@ end
 // SKALP
 on(clk.rise) {
     if (rst) {
-        counter <= 0
+        counter = 0
     } else {
-        counter <= counter + 1
+        counter = counter + 1
     }
 }
 ```
@@ -561,7 +575,7 @@ out = match op {
 
 1. **Automatic width calculation** - `nat[clog2(DEPTH)]`
 2. **Expression-based syntax** - `match`, `if` return values
-3. **Exhaustiveness checking** - Compiler warns on incomplete match
+3. **Exhaustiveness checking** - Compiler errors on incomplete match
 4. **Struct support** - First-class structured types
 5. **Type-safe clock/reset** - `clock` and `reset` types
 6. **CDC analysis** - Built-in at compile time
@@ -604,7 +618,9 @@ impl MyModule {
 
 ### 4. Translate Sequential Logic
 - `always_ff @(posedge clk)` → `on(clk.rise)`
-- Keep `<=` for non-blocking
+- Convert `<=` to `=` — inside `on()` blocks, `=` *is* the registered
+  (non-blocking) assignment. In SKALP `<=` is the less-or-equal comparison
+  only; a statement-position `<=` produces no hardware
 
 ### 5. Translate Combinational Logic
 - Remove `assign`

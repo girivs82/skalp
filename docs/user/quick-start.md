@@ -25,7 +25,7 @@ skalp --version
 
 Expected output:
 ```
-skalp 0.1.0
+skalp 0.2.0
 ```
 
 ---
@@ -44,6 +44,7 @@ ls -la
 You'll see:
 ```
 my_counter/
+├── skalp.toml          # SKALP manifest (package, dependencies, build defaults)
 ├── Cargo.toml          # Rust project config (for tests)
 ├── README.md           # Project documentation
 ├── src/
@@ -72,9 +73,9 @@ impl Counter {
 
     on(clk.rise) {                  // On rising clock edge
         if (rst) {
-            count_reg <= 0          // Reset to 0
+            count_reg = 0          // Reset to 0
         } else {
-            count_reg <= count_reg + 1  // Increment
+            count_reg = count_reg + 1  // Increment
         }
     }
 
@@ -87,7 +88,7 @@ impl Counter {
 - `impl Counter` - Implements the counter logic
 - `signal count_reg` - Internal 8-bit register
 - `on(clk.rise)` - Sequential logic triggered on clock rising edge
-- `count_reg <= ...` - Non-blocking assignment (sequential)
+- `count_reg = ...` - Inside `on()`, `=` is a registered (non-blocking) assignment
 - `count = count_reg` - Combinational assignment
 
 ---
@@ -176,11 +177,11 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (load) {
-            count_reg <= load_value  // Load new value
+            count_reg = load_value  // Load new value
         } else {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
@@ -229,18 +230,18 @@ SKALP comes with real-world examples:
 cd ../skalp/examples
 
 # Build a FIFO
-skalp build -s fifo.sk -o /tmp/fifo_build
+skalp build fifo.sk -o /tmp/fifo_build
 
 # Build an ALU
-skalp build -s alu.sk -o /tmp/alu_build
+skalp build alu.sk -o /tmp/alu_build
 
 # Build a counter
-skalp build -s counter.sk -o /tmp/counter_build
+skalp build counter.sk -o /tmp/counter_build
 ```
 
 Explore more examples:
 ```bash
-ls examples/real_world/
+ls real_world/
 ```
 
 You'll find:
@@ -269,21 +270,18 @@ In 5 minutes, you:
 ## Where to Go Next
 
 ### Learn More SKALP:
-- 📘 [**Tutorial**](../tutorial/01-first-design.md) - Step-by-step guide to all language features
-- 📖 [**Reference Manual**](../reference/syntax.md) - Complete syntax reference
-- 👨‍🍳 [**Cookbook**](../cookbook/README.md) - Design patterns and recipes
-- 🧪 [**Testing Guide**](../guides/testbench.md) - How to test your designs
+- 📘 [**Tutorial**](../tutorial.md) - Step-by-step guide to all language features
+- 📖 [**Reference Manual**](reference/syntax.md) - Complete syntax reference
+- 👨‍🍳 [**Cookbook**](cookbook/README.md) - Design patterns and recipes
+- 🧪 [**Testing Guide**](guides/testbench.md) - How to test your designs
 
 ### Coming from SystemVerilog?
-- 🔄 [**Migration Guide**](../migration/from-systemverilog.md) - Translate SV to SKALP
+- 🔄 [**Migration Guide**](migration/from-systemverilog.md) - Translate SV to SKALP
 
 ### Ready for Real Designs?
-- 💡 [**Examples**](../examples/README.md) - Complete working designs
-- 🎯 [**FIFO Tutorial**](../tutorial/03-sequential.md#fifo) - Build a production FIFO
-
-### Want to Understand Why SKALP?
-- 🎯 [**Why SKALP?**](../../comparison/why-skalp.md) - Comparison with SystemVerilog
-- ⚖️ [**SKALP vs Veryl**](../../comparison/skalp-vs-veryl.md) - Feature comparison
+- 💡 [**Examples**](../../examples/) - Complete working designs, including
+  [`examples/real_world/`](../../examples/real_world/) (FIFO, UART, SPI, I2C,
+  AXI4-Lite, memory arbiter, register file, ALU)
 
 ---
 
@@ -320,8 +318,11 @@ skalp build -o output_dir
 
 # Build to other formats
 skalp build -t vhdl    # VHDL output
-skalp build -t lir     # Low-level IR
 skalp build -t mir     # Mid-level IR
+skalp build -t gates   # Gate-level netlist
+
+# Simulate
+skalp sim src/main.sk -d 100
 
 # Get help
 skalp --help
@@ -332,4 +333,4 @@ skalp build --help
 
 **🎉 Congratulations! You've compiled your first SKALP design.**
 
-**Next:** [Start the tutorial →](../tutorial/01-first-design.md)
+**Next:** [Start the tutorial →](../tutorial.md)

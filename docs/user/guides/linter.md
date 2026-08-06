@@ -2,6 +2,13 @@
 
 The SKALP linter is a static analyzer that catches common mistakes, suggests improvements, and enforces hardware design best practices.
 
+> **Status: library only — CLI not yet wired up.** The lints in this guide are
+> implemented in the `skalp-lint` crate, but there is currently **no
+> `skalp lint` subcommand** and the LSP does not yet surface these lints. The
+> `skalp lint` invocations below show the *planned* command-line interface.
+> (Note that several checks described here — e.g. undriven outputs and CDC
+> violations — are enforced by the compiler itself on every `skalp build`.)
+
 ---
 
 ## Quick Start
@@ -398,7 +405,8 @@ skalp-lint:
 
 ## IDE Integration
 
-The SKALP LSP server automatically runs lint checks and displays them in your editor.
+> **Planned.** The SKALP LSP server does not yet run these lint checks; when
+> the integration lands, results will appear in your editor as described below.
 
 **VSCode:**
 - Warnings appear with yellow squiggles

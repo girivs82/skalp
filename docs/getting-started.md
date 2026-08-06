@@ -5,8 +5,8 @@ This guide will get you up and running with SKALP in under 30 minutes.
 ## Installation
 
 ### Prerequisites
-- Rust 1.70+ 
-- Metal-compatible GPU (for simulation)
+- Rust 1.70+
+- Optional: Metal-compatible GPU (for `skalp sim --gpu`)
 - Optional: VSCode for IDE support
 
 ### Install SKALP
@@ -27,7 +27,7 @@ export PATH=$PATH:$(pwd)/target/release
 
 ```bash
 skalp --version
-# Should output: SKALP 0.1.0
+# Should output: skalp 0.2.0
 ```
 
 ## Your First SKALP Design
@@ -46,9 +46,9 @@ impl counter {
 
     on(clk.rise) {
         if rst.active {
-            counter_reg <= 0;
+            counter_reg = 0;
         } else {
-            counter_reg <= counter_reg + 1;
+            counter_reg = counter_reg + 1;
         }
     }
 
@@ -60,17 +60,15 @@ impl counter {
 
 ```bash
 # Build to SystemVerilog (for synthesis)
-skalp build -s counter.sk -o build -t sv
+skalp build counter.sk -o build
 
-# Build to MIR (for simulation)
-skalp build -s counter.sk -o build -t mir
-
-# Run GPU-accelerated simulation
-skalp sim build/design.mir --duration 100
+# Simulate directly from source (writes a .skw.gz waveform)
+skalp sim counter.sk --duration 100
 
 # Build to other formats
-skalp build -s counter.sk -o build -t vhdl  # VHDL output
-skalp build -s counter.sk -o build -t lir   # LIR output
+skalp build counter.sk -o build -t vhdl   # VHDL output
+skalp build counter.sk -o build -t mir    # Mid-level IR (debugging)
+skalp build counter.sk -o build -t gates  # Gate-level netlist
 
 # Format the code
 skalp fmt counter.sk
@@ -80,6 +78,9 @@ skalp synth counter.sk --device ice40-hx8k
 
 # Program the FPGA device (if connected)
 skalp program bitstream.bin
+
+# Formal equivalence check (RTL vs synthesized gates)
+skalp ec counter.sk
 ```
 
 ## IDE Setup
@@ -102,21 +103,21 @@ The LSP server provides:
 
 - [Language Tutorial](tutorial.md) - Learn SKALP syntax and concepts
 - [Examples](examples/) - Explore example designs
-- [Language Specification](language-spec.md) - Complete reference
+- [Syntax Reference](user/reference/syntax.md) - Complete reference
 
 ## Common Issues
 
 ### GPU Simulation Not Working
-- Ensure you have a Metal-compatible GPU
-- Check that Metal development tools are installed
-- Try CPU simulation with `--cpu` flag
+- GPU acceleration is opt-in: pass `--gpu` to `skalp sim`
+- Ensure you have a Metal-compatible GPU (macOS)
+- The default is CPU simulation, which always works
 
 ### Compilation Errors
-- Check syntax against the [language specification](language-spec.md)
+- Check syntax against the [syntax reference](user/reference/syntax.md)
 - Ensure all signals and entities are properly declared
-- Use `skalp check` for detailed error information
+- Every declared output must be driven — an undriven output is a compile error
+- Run with `skalp -v build` for detailed phase-by-phase information
 
 ### Performance Issues
-- Large designs may need optimization passes
-- Consider using `--opt-level 2` for better performance
-- See [Performance Guide](performance.md) for tuning tips
+- Synthesis optimization presets: `skalp build --optimize <quick|balanced|full|timing|area>`
+- `--no-synth-opt` disables synthesis optimization for debugging

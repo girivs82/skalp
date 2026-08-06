@@ -26,9 +26,9 @@ impl Register {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else {
-            reg <= data_in
+            reg = data_in
         }
     }
 
@@ -57,9 +57,9 @@ impl RegisterEn {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else if (enable) {
-            reg <= data_in
+            reg = data_in
         }
     }
 
@@ -89,11 +89,11 @@ impl RegisterLoad {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else if (load) {
-            reg <= load_value
+            reg = load_value
         } else {
-            reg <= data_in
+            reg = data_in
         }
     }
 
@@ -122,9 +122,9 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
@@ -152,9 +152,9 @@ impl CounterEn {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (enable) {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
@@ -183,12 +183,12 @@ impl UpDownCounter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (enable) {
             if (up) {
-                count_reg <= count_reg + 1
+                count_reg = count_reg + 1
             } else {
-                count_reg <= count_reg - 1
+                count_reg = count_reg - 1
             }
         }
     }
@@ -219,11 +219,11 @@ impl CounterLoad {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (load) {
-            count_reg <= load_value
+            count_reg = load_value
         } else if (enable) {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
@@ -252,12 +252,12 @@ impl ModuloCounter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (enable) {
             if (count_reg == MODULO - 1) {
-                count_reg <= 0
+                count_reg = 0
             } else {
-                count_reg <= count_reg + 1
+                count_reg = count_reg + 1
             }
         }
     }
@@ -291,9 +291,9 @@ impl ShiftRegisterLeft {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else if (enable) {
-            reg <= (reg << 1) | shift_in
+            reg = (reg << 1) | shift_in
         }
     }
 
@@ -324,9 +324,9 @@ impl ShiftRegisterRight {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else if (enable) {
-            reg <= (shift_in << (WIDTH - 1)) | (reg >> 1)
+            reg = (shift_in << (WIDTH - 1)) | (reg >> 1)
         }
     }
 
@@ -358,11 +358,11 @@ impl ParallelShiftRegister {
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            reg = 0
         } else if (load) {
-            reg <= load_data
+            reg = load_data
         } else if (shift) {
-            reg <= (reg << 1) | shift_in
+            reg = (reg << 1) | shift_in
         }
     }
 
@@ -390,10 +390,10 @@ impl LFSR8 {
 
     on(clk.rise) {
         if (rst) {
-            lfsr <= 1
+            lfsr = 1
         } else if (enable) {
             signal feedback: bit = lfsr[7] ^ lfsr[5] ^ lfsr[4] ^ lfsr[3]
-            lfsr <= (lfsr << 1) | feedback
+            lfsr = (lfsr << 1) | feedback
         }
     }
 
@@ -423,9 +423,9 @@ impl RisingEdgeDetector {
 
     on(clk.rise) {
         if (rst) {
-            prev <= 0
+            prev = 0
         } else {
-            prev <= signal_in
+            prev = signal_in
         }
     }
 
@@ -453,9 +453,9 @@ impl FallingEdgeDetector {
 
     on(clk.rise) {
         if (rst) {
-            prev <= 0
+            prev = 0
         } else {
-            prev <= signal_in
+            prev = signal_in
         }
     }
 
@@ -483,9 +483,9 @@ impl EdgeDetector {
 
     on(clk.rise) {
         if (rst) {
-            prev <= 0
+            prev = 0
         } else {
-            prev <= signal_in
+            prev = signal_in
         }
     }
 
@@ -516,17 +516,17 @@ impl Debouncer {
 
     on(clk.rise) {
         if (rst) {
-            counter <= 0
-            button_state <= 0
+            counter = 0
+            button_state = 0
         } else {
             if (button_in != button_state) {
-                counter <= counter + 1
+                counter = counter + 1
                 if (counter == (1 << COUNTER_WIDTH) - 1) {
-                    button_state <= button_in
-                    counter <= 0
+                    button_state = button_in
+                    counter = 0
                 }
             } else {
-                counter <= 0
+                counter = 0
             }
         }
     }
@@ -557,11 +557,11 @@ impl OneShotPulse {
 
     on(clk.rise) {
         if (rst) {
-            triggered <= 0
+            triggered = 0
         } else if (trigger && !triggered) {
-            triggered <= 1
+            triggered = 1
         } else if (!trigger) {
-            triggered <= 0
+            triggered = 0
         }
     }
 
@@ -585,27 +585,29 @@ entity PulseWidthGenerator<const WIDTH: nat = 10> {
 }
 
 impl PulseWidthGenerator {
+    // Note: `active` is a reserved word (used as `rst.active`),
+    // so the state flag is named `running` here
     signal counter: nat[clog2(WIDTH+1)] = 0
-    signal active: bit = 0
+    signal running: bit = 0
 
     on(clk.rise) {
         if (rst) {
-            counter <= 0
-            active <= 0
-        } else if (trigger && !active) {
-            active <= 1
-            counter <= 1
-        } else if (active) {
+            counter = 0
+            running = 0
+        } else if (trigger && !running) {
+            running = 1
+            counter = 1
+        } else if (running) {
             if (counter == WIDTH) {
-                active <= 0
-                counter <= 0
+                running = 0
+                counter = 0
             } else {
-                counter <= counter + 1
+                counter = counter + 1
             }
         }
     }
 
-    pulse = active
+    pulse = running
 }
 ```
 
@@ -632,13 +634,13 @@ impl Delay {
     on(clk.rise) {
         if (rst) {
             // Reset all stages
-            for i in 0..STAGES {
-                regs[i] <= 0
+            generate for i in 0..STAGES {
+                regs[i] = 0
             }
         } else {
-            regs[0] <= data_in
-            for i in 1..STAGES {
-                regs[i] <= regs[i-1]
+            regs[0] = data_in
+            generate for i in 1..STAGES {
+                regs[i] = regs[i-1]
             }
         }
     }
@@ -647,9 +649,9 @@ impl Delay {
 }
 ```
 
-**Note:** For loop syntax is conceptual; actual implementation uses explicit assignments.
+**Note:** `generate for` is unrolled at compile time — because `=` inside `on(clk.rise)` is a registered assignment, `regs[i] = regs[i-1]` correctly shifts every stage in parallel.
 
-**Practical 3-stage delay:**
+**Explicit 3-stage delay (equivalent, no generics):**
 ```skalp
 entity Delay3<const WIDTH: nat = 8> {
     in clk: clock
@@ -665,13 +667,13 @@ impl Delay3 {
 
     on(clk.rise) {
         if (rst) {
-            stage1 <= 0
-            stage2 <= 0
-            stage3 <= 0
+            stage1 = 0
+            stage2 = 0
+            stage3 = 0
         } else {
-            stage1 <= data_in
-            stage2 <= stage1
-            stage3 <= stage2
+            stage1 = data_in
+            stage2 = stage1
+            stage3 = stage2
         }
     }
 
@@ -702,11 +704,11 @@ impl Synchronizer2FF {
 
     on(clk.rise) {
         if (rst) {
-            ff1 <= 0
-            ff2 <= 0
+            ff1 = 0
+            ff2 = 0
         } else {
-            ff1 <= async_in
-            ff2 <= ff1
+            ff1 = async_in
+            ff2 = ff1
         }
     }
 
@@ -738,13 +740,13 @@ impl Synchronizer3FF {
 
     on(clk.rise) {
         if (rst) {
-            ff1 <= 0
-            ff2 <= 0
-            ff3 <= 0
+            ff1 = 0
+            ff2 = 0
+            ff3 = 0
         } else {
-            ff1 <= async_in
-            ff2 <= ff1
-            ff3 <= ff2
+            ff1 = async_in
+            ff2 = ff1
+            ff3 = ff2
         }
     }
 
@@ -779,11 +781,11 @@ impl Pipeline2Stage {
 
     on(clk.rise) {
         if (rst) {
-            stage1 <= 0
-            stage2 <= 0
+            stage1 = 0
+            stage2 = 0
         } else {
-            stage1 <= comb1
-            stage2 <= comb2
+            stage1 = comb1
+            stage2 = comb2
         }
     }
 
@@ -814,9 +816,9 @@ impl Accumulator {
 
     on(clk.rise) {
         if (rst) {
-            accumulator <= 0
+            accumulator = 0
         } else if (enable) {
-            accumulator <= accumulator + data_in
+            accumulator = accumulator + data_in
         }
     }
 
@@ -847,13 +849,13 @@ impl AccumulatorSat {
 
     on(clk.rise) {
         if (rst) {
-            accumulator <= 0
+            accumulator = 0
         } else if (enable) {
             signal new_sum: bit[WIDTH+1] = accumulator + data_in
             if (new_sum > max_val) {
-                accumulator <= max_val  // Saturate
+                accumulator = max_val  // Saturate
             } else {
-                accumulator <= new_sum[WIDTH-1:0]
+                accumulator = new_sum[WIDTH-1:0]
             }
         }
     }
@@ -886,14 +888,13 @@ impl AccumulatorSat {
 ## See Also
 
 - [Combinational Patterns](combinational.md) - Muxes, adders, comparators
-- [State Machine Patterns](state-machines.md) - FSM patterns
 - [Memory Patterns](memories.md) - RAMs, ROMs, FIFOs
 - [Syntax Reference](../reference/syntax.md) - Language syntax
 
 ---
 
 **Key Takeaways:**
-- Always use `<=` for sequential assignments
+- Use `=` inside `on(clk.rise)` blocks — there it is a registered (non-blocking) assignment; `<=` is comparison only
 - Reset handling is mandatory for registers
 - Edge detectors need previous state
 - Synchronizers are critical for CDC

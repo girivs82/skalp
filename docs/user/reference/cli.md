@@ -48,12 +48,17 @@ skalp --version             # Show version
 | Command | Purpose | Example |
 |---------|---------|---------|
 | `new` | Create new project | `skalp new counter` |
-| `build` | Compile design | `skalp build -s main.sk` |
-| `sim` | Simulate design | `skalp sim build/design.lir` |
-| `synth` | Synthesize for FPGA | `skalp synth --device ice40` |
+| `build` | Compile design | `skalp build design.sk` |
+| `sim` | Simulate design | `skalp sim design.sk -d 100` |
+| `synth` | Synthesize for FPGA | `skalp synth design.sk --device ice40-hx8k` |
 | `program` | Program FPGA | `skalp program bitstream.bin` |
 | `fmt` | Format source files | `skalp fmt src/*.sk` |
 | `test` | Run tests | `skalp test` |
+| `ec` | Formal equivalence check (RTL vs gates) | `skalp ec design.sk` |
+
+Run `skalp --help` for the full command list (including `pnr`, `analyze`,
+`safety`, package management, and more) and `skalp <command> --help` for every
+option of a command.
 
 ---
 
@@ -84,12 +89,27 @@ cd my_counter
 **Creates:**
 ```
 my_counter/
+├── skalp.toml          # SKALP manifest ([package], [dependencies], [build])
 ├── Cargo.toml          # Rust project config (for testbenches)
 ├── README.md           # Project documentation
 ├── src/
 │   └── main.sk         # Main SKALP source (counter example)
 ├── tests/              # Test directory
 └── examples/           # Examples directory
+```
+
+**Generated `skalp.toml`:**
+```toml
+[package]
+name = "my_counter"
+version = "0.1.0"
+
+[dependencies]
+
+# Build defaults used by `skalp build` when no source argument is given.
+[build]
+main = "src/main.sk"
+out_dir = "build"
 ```
 
 **Generated `src/main.sk`:**
@@ -105,9 +125,9 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
@@ -123,62 +143,64 @@ Compile SKALP source to SystemVerilog, VHDL, or intermediate representations.
 
 ### Usage
 ```bash
-skalp build [OPTIONS]
+skalp build [OPTIONS] [SOURCE]
 ```
 
-### Options
-- `-s, --source <SOURCE>` - Source file (default: `src/main.sk`)
+The positional form `skalp build design.sk` is the usual way to build a single
+file. With no source argument, `skalp build` reads the `[build]` section of
+`skalp.toml` (falling back to `src/main.sk`).
+
+### Common Options
+- `[SOURCE]` - Source file, positional form: `skalp build design.sk`
+- `-s, --source <SOURCE>` - Source file (default: `src/main.sk` / `skalp.toml` `[build] main`)
 - `-t, --target <TARGET>` - Target output format (default: `sv`)
-- `-o, --output <OUTPUT>` - Output directory (default: `build`)
-- `-h, --help` - Print help
-- `-V, --version` - Print version
+- `-o, --output <OUTPUT>` - Output directory (default: `build` / `skalp.toml` `[build] out_dir`)
+- `--emit <STAGE>` - Dump an intermediate representation and exit (`hir`, `mir`, `lir`)
+- `--optimize <PRESET>` - Synthesis optimization preset (default: `compress2`)
+- `--no-synth-opt` - Disable synthesis optimization entirely
+- `-h, --help` - Print help (see `skalp build --help` for the full list,
+  including safety analysis, ML-guided optimization, and library options)
 
 ### Target Formats
 
 | Target | Description | Output File |
 |--------|-------------|-------------|
 | `sv` | SystemVerilog (default) | `design.sv` |
-| `vhdl` | VHDL | `design.vhd` |
-| `verilog` | Verilog-2001 | `design.v` |
+| `vhdl` | VHDL | `<entity>.vhd` |
 | `mir` | Mid-level IR (for debugging) | `design.mir` |
-| `sir` | Structural IR (for debugging) | `design.sir` |
-| `lir` | Low-level IR (for simulation) | `design.lir` |
+| `gates` | Gate-level netlist | `design_gates.v` + `design_gates.json` |
+
+(`verilog` and `lir` targets are currently disabled — use `sv` and `mir`.)
 
 ### Examples
 
-**Build to SystemVerilog (default):**
+**Build a file (positional form):**
 ```bash
-skalp build
+skalp build design.sk
 # Output: build/design.sv
 ```
 
-**Build specific file:**
+**Build using the project manifest:**
 ```bash
-skalp build -s examples/fifo.sk
-# Output: build/design.sv
+skalp build
+# Uses skalp.toml [build] main / out_dir
 ```
 
 **Build to VHDL:**
 ```bash
-skalp build -s src/main.sk -t vhdl
-# Output: build/design.vhd
+skalp build src/main.sk -t vhdl
+# Output: build/<entity>.vhd
 ```
 
 **Build to custom output directory:**
 ```bash
-skalp build -o output/
+skalp build design.sk -o output/
 # Output: output/design.sv
-```
-
-**Build to LIR for simulation:**
-```bash
-skalp build -t lir -o build/
-# Output: build/design.lir
 ```
 
 **Verbose build (see compiler phases):**
 ```bash
-skalp -v build
+skalp -v build design.sk
 ```
 
 ### Compiler Phases
@@ -221,7 +243,7 @@ Error: Type mismatch: expected bit[8], found bit[16]
 
 ## `skalp sim` - Simulate Design
 
-Run GPU-accelerated simulation of your design.
+Simulate your design directly from source.
 
 ### Usage
 ```bash
@@ -229,44 +251,45 @@ skalp sim [OPTIONS] <DESIGN>
 ```
 
 ### Arguments
-- `<DESIGN>` - Design file to simulate (`.lir` file)
+- `<DESIGN>` - Design file to simulate (a `.sk` source file)
 
 ### Options
-- `-d, --duration <DURATION>` - Simulation duration in cycles
+- `-d, --duration <DURATION>` - Simulation duration (cycles)
+- `-o, --output <OUTPUT>` - Output waveform file (`.skw.gz`); defaults to `<name>.skw.gz` next to the source
+- `--gate-level` - Gate-level simulation (HIR→MIR→LIR→SIR) instead of behavioral
+- `--gpu` - Use GPU acceleration (Metal on macOS)
+- `--ncl` - Simulate as NCL (Null Convention Logic) async circuit
 - `-h, --help` - Print help
-- `-V, --version` - Print version
 
 ### Examples
 
 **Simulate for 100 cycles:**
 ```bash
-# First build to LIR
-skalp build -t lir
-
-# Then simulate
-skalp sim build/design.lir -d 100
+skalp sim design.sk -d 100
 ```
 
-**Quick simulation workflow:**
+**Simulate and write a waveform file:**
 ```bash
-skalp build -t lir && skalp sim build/design.lir -d 1000
+skalp sim design.sk -d 1000 -o waves.skw.gz
+```
+
+**Gate-level simulation:**
+```bash
+skalp sim design.sk --gate-level -d 100
 ```
 
 ### Output
 
 Simulation produces:
-- Console output with signal values
-- VCD waveform file (future feature)
-- Coverage reports (future feature)
+- Console output with design statistics and signal values
+- A compressed waveform file (`.skw.gz`)
 
 ### GPU Acceleration
 
-SKALP automatically uses GPU acceleration (Metal on macOS) if available.
+GPU acceleration (Metal on macOS) is opt-in with the `--gpu` flag:
 
-**Check GPU support:**
 ```bash
-skalp -v sim build/design.lir -d 10
-# Will show: "Using GPU acceleration: YES" or "Using CPU fallback"
+skalp sim design.sk -d 1000 --gpu
 ```
 
 ---
@@ -277,12 +300,15 @@ Synthesize design for FPGA targets (using open-source tools).
 
 ### Usage
 ```bash
-skalp synth [OPTIONS] <SOURCE>
+skalp synth [OPTIONS] --device <DEVICE> <SOURCE>
 ```
 
 ### Options
-- `--device <DEVICE>` - Target FPGA device
-- `-o, --output <OUTPUT>` - Output bitstream file
+- `-d, --device <DEVICE>` - Target FPGA device (required)
+- `-f, --full-flow` - Full flow (place, route, bitstream)
+- `-o, --output <OUTPUT>` - Output directory (default: `build`)
+- `--optimize <PRESET>` - Synthesis optimization preset
+- `--pnr-preset <PRESET>` - P&R quality preset (`fast`, `default`, `high_quality`)
 - `-h, --help` - Print help
 
 ### Supported Devices
@@ -302,9 +328,9 @@ skalp synth [OPTIONS] <SOURCE>
 skalp synth src/main.sk --device ice40-hx8k
 ```
 
-**Custom output:**
+**Full flow (place, route, bitstream) to a custom directory:**
 ```bash
-skalp synth src/main.sk --device ice40-hx8k -o counter.bin
+skalp synth src/main.sk --device ice40-hx8k --full-flow -o out/
 ```
 
 ### Requirements
@@ -332,11 +358,16 @@ Program FPGA device with bitstream.
 
 ### Usage
 ```bash
-skalp program <BITSTREAM>
+skalp program [OPTIONS] [BITSTREAM]
 ```
 
 ### Arguments
-- `<BITSTREAM>` - Bitstream file to program
+- `[BITSTREAM]` - Bitstream file to program (`.bin`)
+
+### Options
+- `-b, --board <BOARD>` - Target board (`icebreaker`, `icebreaker-bitsy`, `hx8k-breakout`, `upduino3`, `auto`; default `auto`)
+- `--reset-only` - Reset the FPGA without programming
+- `--list` - List detected boards and exit
 
 ### Examples
 
@@ -414,7 +445,7 @@ SKALP formatter applies:
 ```skalp
 entity Counter{in clk:clock in rst:reset out count:bit[8]}
 impl Counter{signal c:bit[8]=0
-on(clk.rise){if(rst){c<=0}else{c<=c+1}}count=c}
+on(clk.rise){if(rst){c=0}else{c=c+1}}count=c}
 ```
 
 **After:**
@@ -430,9 +461,9 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            c <= 0
+            c = 0
         } else {
-            c <= c + 1
+            c = c + 1
         }
     }
 
@@ -444,17 +475,15 @@ impl Counter {
 
 ## `skalp test` - Run Tests
 
-Run project tests (future feature).
+Run project tests.
 
 ### Usage
 ```bash
-skalp test [OPTIONS]
+skalp test [FILTER]
 ```
 
-### Options
-- `--all` - Run all tests
-- `--test <NAME>` - Run specific test
-- `-h, --help` - Print help
+### Arguments
+- `[FILTER]` - Optional test name filter
 
 ### Examples
 
@@ -463,9 +492,9 @@ skalp test [OPTIONS]
 skalp test
 ```
 
-**Run specific test:**
+**Run tests matching a filter:**
 ```bash
-skalp test --test counter_test
+skalp test counter
 ```
 
 ---
@@ -488,8 +517,7 @@ skalp build
 skalp fmt
 
 # 5. Simulate
-skalp build -t lir
-skalp sim build/design.lir -d 100
+skalp sim src/main.sk -d 100
 ```
 
 ### FPGA Workflow
@@ -507,13 +535,13 @@ skalp program bitstream.bin
 ### Multi-Target Build
 ```bash
 # SystemVerilog for Vivado/Quartus
-skalp build -t sv -o build/sv/
+skalp build design.sk -t sv -o build/sv/
 
 # VHDL for legacy tools
-skalp build -t vhdl -o build/vhdl/
+skalp build design.sk -t vhdl -o build/vhdl/
 
-# LIR for simulation
-skalp build -t lir -o build/sim/
+# Gate-level netlist
+skalp build design.sk -t gates -o build/gates/
 ```
 
 ---
@@ -524,15 +552,14 @@ SKALP respects these environment variables:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `SKALP_TARGET` | Default build target | `sv` |
-| `SKALP_OUTPUT` | Default output directory | `build` |
+| `SKALP_STDLIB_PATH` | Location of the SKALP standard library | (bundled) |
 | `RUST_LOG` | Logging level | (none) |
 
 **Example:**
 ```bash
-export SKALP_TARGET=vhdl
+export SKALP_STDLIB_PATH=/path/to/skalp/crates/skalp-stdlib
 export RUST_LOG=debug
-skalp build  # Builds to VHDL with debug logging
+skalp build design.sk
 ```
 
 ---
@@ -555,7 +582,7 @@ Error: Could not read source file
 ```
 Error: Invalid design file
 ```
-→ Build to LIR first: `skalp build -t lir`
+→ `skalp sim` takes a `.sk` source file: `skalp sim design.sk -d 100`
 
 ### Permission denied (macOS)
 ```
@@ -569,8 +596,7 @@ Error: Permission denied
 
 - [Quick Start Guide](../quick-start.md) - Getting started tutorial
 - [Syntax Reference](syntax.md) - Language syntax
-- [Examples](../examples/) - Complete working examples
-- [Troubleshooting](../guides/troubleshooting.md) - Common errors and solutions
+- [Examples](../../../examples/) - Complete working examples
 
 ---
 
@@ -580,7 +606,7 @@ Error: Permission denied
 # Create, build, simulate
 skalp new project && cd project
 skalp build
-skalp build -t lir && skalp sim build/design.lir -d 100
+skalp sim src/main.sk -d 100
 
 # Format and check
 skalp fmt

@@ -66,13 +66,66 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 }
 ```
+
+---
+
+## Entity Instantiation
+
+Instantiate one entity inside another with `inst`. Connect **inputs only** in
+the braces; read outputs with dot access on the instance name.
+
+### Syntax
+```skalp
+impl Top {
+    inst <name> = <EntityName> {
+        <input_port>: <expr>,
+        ...
+    }
+
+    // outputs via dot access
+    <signal_or_output> = <name>.<output_port>
+}
+```
+
+### Example
+```skalp
+entity Adder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+}
+
+impl Adder {
+    sum = a + b
+}
+
+entity Top {
+    in x: bit[8]
+    in y: bit[8]
+    out result: bit[8]
+}
+
+impl Top {
+    inst my_adder = Adder {
+        a: x,
+        b: y
+    }
+
+    result = my_adder.sum
+}
+```
+
+> **Note:** the legacy `let x = Entity { ... }` instantiation form is a hard
+> error — use `inst`. See the
+> [Hierarchical Design cookbook](../cookbook/hierarchical.md) for more
+> patterns, including generics.
 
 ---
 
@@ -233,9 +286,9 @@ on(<clock>.<edge>) {
 ```skalp
 on(clk.rise) {
     if (rst) {
-        counter <= 0
+        counter = 0
     } else {
-        counter <= counter + 1
+        counter = counter + 1
     }
 }
 ```
@@ -244,9 +297,9 @@ on(clk.rise) {
 ```skalp
 on(clk.rise) {
     if (rst) {
-        state <= State::Idle
+        state = State::Idle
     } else {
-        state <= match state {
+        state = match state {
             State::Idle => if start { State::Running } else { State::Idle },
             State::Running => if done { State::Done } else { State::Running },
             State::Done => State::Idle
@@ -259,11 +312,11 @@ on(clk.rise) {
 ```skalp
 on(clk.rise) {
     if (rst) {
-        reg_a <= 0
-        reg_b <= 0
+        reg_a = 0
+        reg_b = 0
     } else {
-        reg_a <= in_a
-        reg_b <= in_b
+        reg_a = in_a
+        reg_b = in_b
     }
 }
 ```
@@ -308,11 +361,18 @@ on(clk.rise) {
 | `\|\|` | Logical OR | `error \|\| timeout` |
 | `!` | Logical NOT | `!ready` |
 
-### Assignment Operators
+### Assignment Operator
+
+SKALP has a single assignment operator, `=`. Its meaning depends on context:
+
 | Operator | Context | Meaning |
 |----------|---------|---------|
-| `=` | Outside `on()` | Combinational assignment |
-| `<=` | Inside `on()` | Non-blocking assignment (register) |
+| `=` | Impl level (outside `on()`) | Continuous (combinational) assignment |
+| `=` | Inside `on(clk.rise)` | Registered (non-blocking) assignment |
+
+> **Note:** `<=` is the less-or-equal *comparison* operator only. A
+> statement-position `<=` is parsed as a comparison expression and produces
+> **no hardware** — do not use it for assignment.
 
 ---
 
@@ -330,6 +390,17 @@ signal lsb: bit = data[0]      // LSB
 signal data: bit[16]
 signal upper: bit[8] = data[15:8]   // Upper byte
 signal lower: bit[8] = data[7:0]    // Lower byte
+```
+
+### Concatenation
+
+Both `{a, b}` braces and the `++` operator concatenate bit vectors:
+
+```skalp
+signal a: bit[8]
+signal b: bit[8]
+signal x: bit[16] = {a, b}    // a in the high bits, b in the low bits
+signal y: bit[16] = a ++ b    // equivalent
 ```
 
 ### Array Indexing
@@ -552,11 +623,11 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else if (load) {
-            count_reg <= load_value
+            count_reg = load_value
         } else if (enable) {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 }
@@ -611,23 +682,23 @@ impl FIFO {
 
     on(clk.rise) {
         if (rst) {
-            wr_ptr <= 0
-            rd_ptr <= 0
-            count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            count = 0
         } else {
             if (wr_en && !full) {
-                memory[wr_ptr] <= wr_data
-                wr_ptr <= (wr_ptr + 1) % DEPTH
+                memory[wr_ptr] = wr_data
+                wr_ptr = (wr_ptr + 1) % DEPTH
             }
 
             if (rd_en && !empty) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
+                rd_ptr = (rd_ptr + 1) % DEPTH
             }
 
             if (wr_en && !rd_en && !full) {
-                count <= count + 1
+                count = count + 1
             } else if (!wr_en && rd_en && !empty) {
-                count <= count - 1
+                count = count - 1
             }
         }
     }
@@ -642,11 +713,12 @@ impl FIFO {
 |-----------|--------|---------|
 | **Entity** | `entity Name { ports }` | `entity Counter { in clk: clock }` |
 | **Impl** | `impl Name { body }` | `impl Counter { signal c: bit[8] }` |
+| **Instance** | `inst n = Entity { inputs }` | `inst u = Adder { a: x, b: y }` (outputs: `u.sum`) |
 | **Generic** | `entity Name<const P: nat>` | `entity FIFO<const WIDTH: nat>` |
 | **Signal** | `signal name: type` | `signal data: bit[8]` |
 | **Combinational** | `out = expr` | `sum = a + b` |
-| **Sequential** | `on(clk.rise) { stmts }` | `on(clk.rise) { r <= r + 1 }` |
-| **If (stmt)** | `if (cond) { } else { }` | `if (rst) { r <= 0 }` |
+| **Sequential** | `on(clk.rise) { stmts }` | `on(clk.rise) { r = r + 1 }` |
+| **If (stmt)** | `if (cond) { } else { }` | `if (rst) { r = 0 }` |
 | **If (expr)** | `if cond { a } else { b }` | `out = if sel { 1 } else { 0 }` |
 | **Match** | `match x { p => v }` | `match op { 0 => a, _ => b }` |
 | **For loop** | `for i in 0..N { body }` | `for i in 0..8 { acc ^= x[i] }` |
@@ -682,9 +754,9 @@ out = match sel {
 ```skalp
 on(clk.rise) {
     if (rst) {
-        reg <= 0
+        reg = 0
     } else if (enable) {
-        reg <= data_in
+        reg = data_in
     }
 }
 ```
@@ -693,9 +765,9 @@ on(clk.rise) {
 ```skalp
 on(clk.rise) {
     if (rst) {
-        shift_reg <= 0
+        shift_reg = 0
     } else {
-        shift_reg <= (shift_reg << 1) | data_in
+        shift_reg = (shift_reg << 1) | data_in
     }
 }
 ```
@@ -813,16 +885,14 @@ For complete attribute documentation, see [Attributes Reference](attributes.md).
 ## See Also
 
 - [Attributes Reference](attributes.md) - Complete attribute documentation
-- [Type System Reference](types.md) - Detailed type information
-- [Operators Reference](operators.md) - Operator precedence and details
-- [Built-in Functions](builtins.md) - All built-in functions
-- [Tutorial](../tutorial/01-first-design.md) - Learn by example
-- [Examples](../examples/) - Complete working designs
+- [CLI Reference](cli.md) - All `skalp` commands
+- [Tutorial](../../tutorial.md) - Learn by example
+- [Examples](../../../examples/) - Complete working designs
 
 ---
 
 **Quick Tips:**
-- Use `=` for combinational, `<=` for sequential
+- `=` is the only assignment: continuous at impl level, registered inside `on()` (`<=` is comparison only)
 - `match` is an expression (returns value)
 - Slicing is `[high:low]` inclusive
 - No semicolons needed at end of statements

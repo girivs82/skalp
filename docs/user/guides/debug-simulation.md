@@ -333,56 +333,63 @@ entity CompleteDebug {
 ### Running Simulation
 
 ```bash
-# Compile with debug enabled (default)
-skalp build my_design.sk --output sim_design.sv
+# Compile the design (debug attributes are kept in the build)
+skalp build my_design.sk -o build/
 
-# Compile for synthesis (strips debug)
-skalp build my_design.sk --output synth_design.sv --release
+# Run the built-in simulator, writing a waveform file
+skalp sim my_design.sk -o waves.skw.gz
 
-# Run simulation
-skalp sim my_design.sk --testbench tb_my_design.sk
+# Gate-level simulation instead of behavioral
+skalp sim my_design.sk --gate-level
 ```
 
 ### Testbench Integration
 
-```skalp
-// Design under test
-entity Counter {
-    in clk: clock,
-    in reset: bit,
-    in enable: bit,
-    out count: bit[8],
+Testbenches are written in Rust against the `skalp_testing` testbench API — see the
+[Testbench Guide](testbench.md) for the full API. The design under test is
+plain Skalp with debug attributes:
 
+```skalp
+// Design under test (counter.sk)
+entity Counter {
+    in clk: clock;
+    in rst: reset;
+    in enable: bit;
+    out count: bit[8];
+}
+
+impl Counter {
     #[breakpoint(condition = "counter == 255")]
     #[trace(group = "counter", display_name = "Counter Value")]
-    signal counter: bit[8],
+    signal counter: bit[8] = 0;
+
+    on(clk.rise) {
+        if rst {
+            counter = 0;
+        } else if enable {
+            counter = counter + 1;
+        }
+    }
+
+    count = counter;
 }
+```
 
-// Testbench
-entity tb_Counter {
-    // Test signals
-    signal clk: clock,
-    signal reset: bit,
-    signal enable: bit,
-    signal count: bit[8],
+The testbench drives it from Rust:
 
-    // DUT instance
-    dut: Counter,
-}
+```rust
+use skalp_testing::testbench::Testbench;
 
-impl tb_Counter {
-    // Clock generation
-    clk = !clk after 5ns;
+#[tokio::test]
+async fn test_counter() {
+    let mut tb = Testbench::new("counter.sk").await.unwrap();
 
-    // Stimulus
-    reset = 1 for 20ns then 0;
-    enable = 0 for 30ns then 1;
+    // Reset for 2 cycles, then count for 10
+    tb.reset(2).await;
+    tb.set("enable", 1u8);
+    tb.clock(10).await;
 
-    // Connect DUT
-    dut.clk = clk;
-    dut.reset = reset;
-    dut.enable = enable;
-    count = dut.count;
+    tb.expect("count", 10u8).await;
 }
 ```
 
@@ -548,34 +555,43 @@ Add debug probes when integrating third-party IP:
 ```skalp
 entity IPDebugWrapper {
     // External IP interface
-    in clk: clock,
-    in ip_data_in: bit[64],
-    out ip_data_out: bit[64],
-
-    // Debug probes on IP boundary
-    #[trace(group = "ip_input")]
-    #[breakpoint(condition = "ip_data_in == 64'hFFFF_FFFF_FFFF_FFFF")]
-    signal probe_in: bit[64],
-
-    #[trace(group = "ip_output")]
-    signal probe_out: bit[64],
-
-    #[trace(group = "ip_timing")]
-    signal probe_latency_counter: bit[16],
+    in clk: clock;
+    in ip_data_in: bit[64];
+    out ip_data_out: bit[64];
 }
 
 impl IPDebugWrapper {
-    probe_in = ip_data_in;
-    probe_out = ip_data_out;
+    // Debug probes on the IP boundary
+    #[trace(group = "ip_input")]
+    #[breakpoint(condition = "ip_data_in == 64'hFFFF_FFFF_FFFF_FFFF")]
+    signal probe_in: bit[64];
 
-    // Measure IP latency
-    if ip_data_in != 0 && probe_latency_counter == 0 {
-        probe_latency_counter = 1;
-    } else if probe_latency_counter > 0 && ip_data_out == 0 {
-        probe_latency_counter = probe_latency_counter + 1;
-    } else {
-        probe_latency_counter = 0;
+    #[trace(group = "ip_output")]
+    signal probe_out: bit[64];
+
+    #[trace(group = "ip_timing")]
+    signal probe_latency_counter: bit[16] = 0;
+
+    // The wrapped IP would drive ip_data_out; a registered
+    // pass-through stands in for it in this example
+    signal ip_result: bit[64] = 0;
+
+    on(clk.rise) {
+        ip_result = ip_data_in;
+
+        // Measure IP latency
+        if ip_data_in != 0 && probe_latency_counter == 0 {
+            probe_latency_counter = 1;
+        } else if probe_latency_counter > 0 && ip_result == 0 {
+            probe_latency_counter = probe_latency_counter + 1;
+        } else {
+            probe_latency_counter = 0;
+        }
     }
+
+    probe_in = ip_data_in;
+    probe_out = ip_result;
+    ip_data_out = ip_result;
 }
 ```
 

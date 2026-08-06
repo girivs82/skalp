@@ -37,9 +37,9 @@ impl led_blinker {
     
     on(clk.rise) {
         if rst.active {
-            counter <= 0;
+            counter = 0;
         } else {
-            counter <= counter + 1;
+            counter = counter + 1;
         }
     }
     
@@ -92,9 +92,9 @@ signal current_state: State;
 on(clk.rise) {
     if enable {
         if mode == Mode::Fast {
-            counter <= counter + 4;
+            counter = counter + 4;
         } else {
-            counter <= counter + 1;
+            counter = counter + 1;
         }
     }
 }
@@ -139,20 +139,39 @@ protocol AXI4Lite {
 
 ### Using Protocols
 
+> **Status:** protocol *declarations* parse today, but protocol-typed entity
+> ports (`master axi: AXI4Lite` / `slave axi: AXI4Lite`) are **not yet
+> implemented** — using them in an entity is a compile error. Until they land,
+> declare the channel signals as ordinary ports:
+
 ```skalp
-entity axi_master {
+entity axi_write_master {
     in clk: clock;
     in rst: reset;
-    master axi: AXI4Lite;  // Protocol instance
+    in start_write: bit;
+    in target_address: bit<32>;
+    in awready: bit;
+    out awaddr: bit<32>;
+    out awvalid: bit;
 }
 
-impl axi_master {
+impl axi_write_master {
+    signal addr_reg: bit<32> = 0;
+    signal valid_reg: bit = 0;
+
     on(clk.rise) {
-        if start_write {
-            axi.awaddr <= target_address;
-            axi.awvalid <= 1;
+        if rst {
+            valid_reg = 0;
+        } else if start_write {
+            addr_reg = target_address;
+            valid_reg = 1;
+        } else if awready {
+            valid_reg = 0;
         }
     }
+
+    awaddr = addr_reg;
+    awvalid = valid_reg;
 }
 ```
 
@@ -160,83 +179,108 @@ impl axi_master {
 
 ### Clock Domain Safety
 
-SKALP prevents clock domain crossing (CDC) errors at compile time:
+SKALP detects clock domain crossing (CDC) errors at compile time. Every clock
+input port defines a clock domain, and every `on(clk.rise)` process belongs to
+the domain of its clock — no annotations required. An unsynchronized
+cross-domain read that feeds logic is a critical violation and fails the build.
 
 ```skalp
-entity dual_clock_fifo<'clk_w, 'clk_r> {
-    in clk_write<'clk_w>: clock;
-    in clk_read<'clk_r>: clock;
+entity dual_clock_fifo {
+    in clk_write: clock;   // defines the write clock domain
+    in clk_read: clock;    // defines the read clock domain
     in rst: reset;
-    
-    in write_data<'clk_w>: bit<32>;
-    in write_enable<'clk_w>: bit;
-    
-    out read_data<'clk_r>: bit<32>;
-    in read_enable<'clk_r>: bit;
+
+    in write_data: bit<32>;
+    in write_enable: bit;
+
+    out read_data: bit<32>;
+    in read_enable: bit;
 }
 ```
+
+Signals can also name their domain explicitly with a lifetime annotation, e.g.
+`signal src: logic<'clk_write>[32]`.
 
 ### Safe CDC Crossing
 
+You write synchronizers explicitly; the `#[cdc]` attribute marks your
+hand-written synchronizer register so the CDC analysis knows the crossing is
+intentional (the compiler does not insert synchronizers for you). A Gray-coded
+pointer crossing looks like this:
+
 ```skalp
-impl dual_clock_fifo {
-    // Write domain signals
-    signal write_ptr<'clk_w>: bit<4>;
-    signal memory<'clk_w>: Array<bit<32>, 16>;
-    
-    // Read domain signals  
-    signal read_ptr<'clk_r>: bit<4>;
-    
-    // Safe crossing with gray code
-    signal write_ptr_gray<'clk_w>: bit<4>;
-    signal write_ptr_sync<'clk_r>: bit<4>;
-    
+entity ptr_sync {
+    in clk_write: clock;
+    in clk_read: clock;
+    in write_ptr: bit<4>;
+    out read_side_ptr: bit<4>;
+}
+
+impl ptr_sync {
+    // Gray-code the pointer in the write domain
+    signal write_ptr_gray: bit<4> = 0;
+
+    // Explicit 2-stage synchronizer in the read domain
+    #[cdc]
+    signal gray_meta: bit<4> = 0;
+    signal gray_sync: bit<4> = 0;
+
     on(clk_write.rise) {
-        if write_enable && !full {
-            memory[write_ptr] <= write_data;
-            write_ptr <= write_ptr + 1;
-            write_ptr_gray <= binary_to_gray(write_ptr + 1);
-        }
+        write_ptr_gray = write_ptr ^ (write_ptr >> 1);
     }
-    
+
     on(clk_read.rise) {
-        write_ptr_sync <= synchronize(write_ptr_gray);
+        gray_meta = write_ptr_gray;
+        gray_sync = gray_meta;
     }
+
+    // Gray -> binary
+    read_side_ptr = gray_sync ^ (gray_sync >> 1) ^ (gray_sync >> 2) ^ (gray_sync >> 3);
 }
 ```
+
+See the [CDC Guide](user/guides/clock-domain-crossing.md) for all the
+synchronizer patterns and the analysis severities.
 
 ## Chapter 6: Verification
 
 ### Assertions
 
+`assert property (expr)` states a boolean invariant over the design's signals:
+
 ```skalp
 impl fifo {
-    // Safety property: never overflow
-    assert property (write_enable -> !full)
-        @(posedge clk_write);
-    
-    // Liveness property: data eventually flows
-    assert property (write_enable |=> eventually read_enable)
-        @(posedge clk_write);
+    // Safety property: never write while full
+    assert property (!(write_enable && full));
 }
 ```
 
+Temporal operators (implication `|=>`, `eventually`, explicit `@(posedge ...)`
+clocking) are **not yet supported** — properties are boolean expressions over
+current signal values.
+
+For end-to-end verification, `skalp ec design.sk` runs formal equivalence
+checking (SAT-based) between the RTL and the synthesized gate-level netlist.
+
 ### Coverage
 
-```skalp
+> **Status: planned, not yet implemented.** `covergroup` is a reserved
+> construct; the syntax below is the design sketch and does not compile today.
+
+```text
 covergroup fifo_coverage @(posedge clk) {
     fill_level: coverpoint ptr_diff {
         bins empty = {0};
         bins partial = {[1:14]};
         bins full = {15};
     }
-    
+
     operations: coverpoint {write_enable, read_enable} {
         bins write_only = {2'b10};
         bins read_only = {2'b01};
         bins simultaneous = {2'b11};
     }
-    
+
     level_ops: cross fill_level, operations;
 }
 ```
@@ -292,48 +336,67 @@ impl Serializable for Packet {
 
 ## Chapter 8: Performance and Optimization
 
-### Intent Declarations
+### Intent Attributes
+
+Synthesis intent is expressed with attributes. The intents the compiler acts
+on today are `mux_style`, `pipeline_style`, `impl_style`, and `#[unroll]`:
 
 ```skalp
-@intent("Low latency arithmetic unit")
 entity alu {
-    @intent("Pipeline for high frequency")
-    signal pipeline_stage1: bit<32>;
-    signal pipeline_stage2: bit<32>;
-    
-    @intent("Optimize for area")
-    signal temp_storage: bit<128>;
+    in clk: clock;
+    in sel: bit[2];
+    in a: bit<32>;
+    in b: bit<32>;
+    out result: bit<32>;
+}
+
+impl alu {
+    // Ask for a parallel (one-hot) mux rather than a priority chain
+    #[mux_style::parallel]
+    result = match sel {
+        0b00 => a + b,
+        0b01 => a - b,
+        0b10 => a & b,
+        _ => a | b
+    };
 }
 ```
 
 ### Design Optimization
 
+Pipelining is written explicitly with registered assignments — each `=` inside
+`on(clk.rise)` infers a register stage:
+
 ```skalp
-impl alu {
-    // Pipeline for performance
+entity pipelined_add {
+    in clk: clock;
+    in operand_a: bit<32>;
+    in operand_b: bit<32>;
+    out result: bit<32>;
+}
+
+impl pipelined_add {
+    signal stage1: bit<32> = 0;
+    signal stage2: bit<32> = 0;
+
     on(clk.rise) {
-        // Stage 1: Input registration
-        pipeline_stage1 <= operand_a + operand_b;
-        
-        // Stage 2: Output registration  
-        result <= pipeline_stage1;
+        // Stage 1: compute and register
+        stage1 = operand_a + operand_b;
+
+        // Stage 2: output register
+        stage2 = stage1;
     }
-    
-    // Parallel execution for throughput
-    match operation {
-        Op::Add => result = adder_unit(operand_a, operand_b),
-        Op::Mul => result = multiplier_unit(operand_a, operand_b),
-        Op::Div => result = divider_unit(operand_a, operand_b)
-    }
+
+    result = stage2;
 }
 ```
 
 ## Next Steps
 
 - Explore [Examples](examples/) for complete designs
-- Read the [Language Specification](language-spec.md) for complete syntax
-- Try [GPU Simulation](gpu-simulation.md) for high-performance testing
-- Learn about [Safety Features](safety.md) for mission-critical designs
+- Read the [Syntax Reference](user/reference/syntax.md) for complete syntax
+- Try [GPU Simulation](GPU_SIMULATION.md) for high-performance testing
+- Learn about the [Testbench API](user/guides/testbench.md) for testing your designs
 
 ## Exercise: Build a UART
 

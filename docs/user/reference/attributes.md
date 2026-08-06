@@ -163,7 +163,19 @@ arithmetic/
 
 ### #[cdc]
 
-Configures clock domain crossing synchronization for signals that cross between clock domains. Skalp automatically generates appropriate synchronizer circuits.
+Marks a hand-written synchronizer register at a clock domain crossing. `#[cdc]`
+is a **verification annotation**: it does **not** generate synchronizer
+circuits. It tells the compile-time CDC analysis that the crossing is
+intentional (downgrading the report for that crossing from WARNING to INFO),
+and emits an `(* ASYNC_REG = "TRUE" *)` placement attribute on the annotated
+register in the generated SystemVerilog. You write the flip-flop stages
+yourself — see the [CDC Guide](../guides/clock-domain-crossing.md) for the
+patterns.
+
+The CDC analysis itself runs on every build and needs no annotations: clock
+domains are keyed by the clock port that drives each process, and an
+unsynchronized cross-domain read that feeds logic is a CRITICAL violation that
+fails the build.
 
 **Syntax:**
 ```skalp
@@ -173,15 +185,16 @@ Configures clock domain crossing synchronization for signals that cross between 
 #[cdc(cdc_type = two_ff | gray | pulse | handshake | async_fifo)]
 ```
 
-**Parameters:**
+**Parameters** (recorded as metadata in the output; they describe the
+synchronizer you wrote, they do not create one):
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `sync_stages` | u32 | 2 | Number of synchronizer flip-flops |
+| `sync_stages` | u32 | 2 | Number of synchronizer flip-flops you implemented |
 | `from` | lifetime | None | Source clock domain |
 | `to` | lifetime | None | Destination clock domain |
-| `cdc_type` | enum | two_ff | Synchronization strategy |
+| `cdc_type` | enum | two_ff | Synchronization strategy you implemented |
 
-**CDC Types:**
+**CDC Types** (declared strategy — see the [CDC Guide](../guides/clock-domain-crossing.md) for how to write each one):
 | Type | Use Case | Width |
 |------|----------|-------|
 | `two_ff` | Single-bit asynchronous signals | 1 bit |
@@ -231,31 +244,27 @@ entity ClockCrossingExample {
 }
 ```
 
-**Generated SystemVerilog (two_ff):**
-```systemverilog
-// CDC Synchronizer: button_sync (2-stage)
-(* ASYNC_REG = "TRUE" *)
-reg button_sync_meta;
-(* ASYNC_REG = "TRUE" *)
-reg button_sync_sync;
+**Generated SystemVerilog:** the annotated register gets an `ASYNC_REG`
+placement attribute and a metadata comment; the flip-flop chain is the one you
+wrote in the `impl`:
 
-always @(posedge clk_slow or posedge reset) begin
-    if (reset) begin
-        button_sync_meta <= 1'b0;
-        button_sync_sync <= 1'b0;
-    end else begin
-        button_sync_meta <= async_input;
-        button_sync_sync <= button_sync_meta;
+```systemverilog
+    // CDC: async -> sync, type=TwoFF, sync_stages=2
+    (* ASYNC_REG = "TRUE" *)
+    reg meta = 0;
+    reg sync = 0;
+
+    always_ff @(posedge clk_dst) begin
+        meta <= async_in;
+        sync <= meta;
     end
-end
-assign button_sync = button_sync_sync;
 ```
 
 ---
 
 ## Power Intent
 
-Power intent attributes allow you to specify power management requirements directly in your HDL code, eliminating the need for separate UPF files. These attributes generate both synthesis constraints and optional UPF output.
+Power intent attributes allow you to specify power management requirements directly in your HDL code, eliminating the need for separate UPF files. These attributes emit synthesis attributes (e.g. `RETAIN`, `DONT_TOUCH`) on the affected registers in the generated SystemVerilog. (UPF file generation is planned but not yet implemented.)
 
 ### #[retention]
 
@@ -658,9 +667,17 @@ entity CustomPLL {
 
 ## Synthesis Hints
 
+The synthesis intent attributes that affect generated hardware today are
+`mux_style`, `pipeline_style`, `impl_style`, and `#[unroll]`. The others in
+this section parse and are recorded, but do not yet change the output.
+
 ### #[pipeline]
 
-Adds pipeline stages for timing optimization.
+> **Status: recorded, not acted on.** `#[pipeline(stages = N)]` parses and is
+> stored as metadata, but the compiler does **not** insert pipeline registers —
+> the generated hardware is unchanged. Write pipeline stages explicitly with
+> registered assignments in `on(clk.rise)` blocks. Automatic retiming from this
+> attribute is planned.
 
 ```skalp
 #[pipeline(stages = 3)]
@@ -669,14 +686,6 @@ entity PipelinedMultiplier<WIDTH: 32> {
     in a: bit[WIDTH],
     in b: bit[WIDTH],
     out result: bit[WIDTH * 2],
-}
-
-#[pipeline(stages = 4, target_freq = 200_000_000)]
-entity HighSpeedAdder {
-    in clk: clock,
-    in a: bit[64],
-    in b: bit[64],
-    out sum: bit[64],
 }
 ```
 
@@ -702,7 +711,8 @@ impl BitwiseOps {
 
 ### #[parallel]
 
-Hints for parallel implementation.
+Hints for parallel implementation. Prefer the real intent attribute
+`impl_style = parallel`, which the compiler acts on.
 
 ```skalp
 #[parallel]
@@ -731,7 +741,7 @@ impl ParallelProcessor {
 | `#[xilinx_ip]` | entity | Xilinx IP wrapper |
 | `#[intel_ip]` | entity | Intel IP wrapper |
 | `#[vendor_ip]` | entity | Generic vendor IP |
-| `#[pipeline]` | entity/impl | Pipeline stages |
+| `#[pipeline]` | entity/impl | Pipeline stages (recorded only; not yet acted on) |
 | `#[unroll]` | for loop | Loop unrolling |
 | `#[parallel]` | impl | Parallel execution |
 

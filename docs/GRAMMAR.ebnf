@@ -1,339 +1,444 @@
-(* SKALP Formal Grammar Specification *)
+(* SKALP Formal Grammar *)
 (* Extended Backus-Naur Form (EBNF) *)
-(* Version 1.0 *)
+(*
+   This grammar describes the language accepted by the SKALP compiler
+   (crates/skalp-frontend/src/parse.rs). The compiler is the source of
+   truth; where this file and the compiler disagree, the compiler wins.
+
+   Notes on notation:
+     [x]   optional
+     {x}   zero or more
+     (a|b) alternatives
+     ?...? prose description
+*)
 
 (* ============================================ *)
 (*                 Top Level                    *)
 (* ============================================ *)
 
-program = { pragma | import | type_def | constant | entity | impl | protocol | package } ;
+source_file = { item } ;
+
+item = [ visibility ] ( use_decl | module_decl | entity_decl | entity_alias
+                      | impl_block | trait_def | trait_impl | struct_decl
+                      | enum_decl | union_decl | type_alias | distinct_type
+                      | constant_decl | function_decl | intent_decl
+                      | requirement_decl | global_constraint ) ;
+
+visibility = "pub" ;
+
+use_decl = "use" use_path ";" ;
+use_path = identifier { "::" identifier } [ "::" ( "*" | "{" identifier { "," identifier } "}" ) ] ;
+
+module_decl = "mod" identifier ( ";" | "{" { item } "}" ) ;
 
 (* ============================================ *)
 (*              Lexical Elements                *)
 (* ============================================ *)
 
-identifier = letter { letter | digit | "_" } ;
-type_identifier = upper_letter { letter | digit | "_" } ;
-lifetime = "'" identifier ;
+identifier = ( letter | "_" ) { letter | digit | "_" } ;
+lifetime = "'" identifier ;            (* clock-domain lifetime, e.g. 'a, 'clk *)
 
-letter = upper_letter | lower_letter ;
-upper_letter = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" 
-             | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" 
-             | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-lower_letter = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" 
-             | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" 
-             | "u" | "v" | "w" | "x" | "y" | "z" ;
-digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-hex_digit = digit | "A" | "B" | "C" | "D" | "E" | "F" 
-                  | "a" | "b" | "c" | "d" | "e" | "f" ;
-bin_digit = "0" | "1" ;
-
-(* Numbers *)
-integer_literal = decimal_literal | hex_literal | bin_literal | oct_literal ;
+(* Numbers. All numeric literals allow "_" separators. There is no octal. *)
+integer_literal = decimal_literal | hex_literal | bin_literal | sized_literal ;
 decimal_literal = digit { digit | "_" } ;
-hex_literal = "0x" hex_digit { hex_digit | "_" } ;
-bin_literal = "0b" bin_digit { bin_digit | "_" } ;
-oct_literal = "0o" digit { digit | "_" } ;
+hex_literal     = "0x" hex_digit { hex_digit | "_" } ;
+bin_literal     = "0b" bin_digit { bin_digit | "_" } ;
 
-float_literal = digit { digit } "." digit { digit } [ "e" [ "+" | "-" ] digit { digit } ] ;
+(* Verilog-style sized literals: 8'hFF, 4'b1010, 4'd15 (bases b, h, d only) *)
+sized_literal = decimal_literal "'" ( "b" bin_digit { bin_digit | "_" }
+                                    | "h" hex_digit { hex_digit | "_" }
+                                    | "d" digit { digit | "_" } ) ;
 
-(* Strings *)
-string_literal = '"' { string_char } '"' ;
-string_char = ? any character except '"' and '\' ? | escape_sequence ;
-escape_sequence = "\\" ( '"' | "\\" | "n" | "r" | "t" | "0" ) ;
+(* Floats: 1.0, 3.14, 1.5e-10, optionally suffixed f / f16 / f32 / f64 /
+   fp16 / fp32 / fp64 *)
+float_literal = digit { digit | "_" } "." digit { digit | "_" }
+                [ ("e"|"E") [ "+" | "-" ] digit { digit } ]
+                [ "f" | "f16" | "f32" | "f64" | "fp16" | "fp32" | "fp64" ] ;
 
-(* Comments *)
-comment = line_comment | block_comment ;
+string_literal = '"' { ? any char except '"' and '\' ? | escape } '"' ;
+escape = "\\" ( '"' | "\\" | "n" | "t" ) ;
+
+bool_literal = "true" | "false" ;
+
 line_comment = "//" { ? any character except newline ? } ;
 block_comment = "/*" { ? any character ? } "*/" ;
 
 (* ============================================ *)
-(*                  Pragmas                     *)
+(*                 Attributes                   *)
 (* ============================================ *)
 
-pragma = "#[" pragma_content "]" ;
-pragma_content = identifier [ "(" pragma_args ")" ] ;
-pragma_args = pragma_arg { "," pragma_arg } ;
-pragma_arg = identifier "=" literal ;
+(* Attributes may precede entities, impl items, functions, signals, ports
+   and for-loops.  Implemented attributes include #[unroll], #[unroll(N)],
+   #[cdc(...)], #[safety_mechanism(...)], #[implements(...)],
+   #[detection_signal], and references to user intent declarations
+   (#[my_intent]). Unknown attributes are accepted and ignored. *)
+attribute = "#[" attribute_content "]" ;
+attribute_content = identifier [ "(" attr_args ")" ] [ "::" identifier ] ;
+attr_args = attr_arg { "," attr_arg } ;
+attr_arg = identifier [ "=" ( literal | identifier ) ] | literal ;
 
-(* ============================================ *)
-(*                  Imports                     *)
-(* ============================================ *)
-
-import = "use" import_path [ "as" identifier ] ";" ;
-import_path = identifier { "::" identifier } [ "::" ( "*" | "{" import_list "}" ) ] ;
-import_list = identifier { "," identifier } ;
+literal = integer_literal | float_literal | string_literal | bool_literal ;
 
 (* ============================================ *)
 (*                   Types                      *)
 (* ============================================ *)
 
-type = basic_type | array_type | struct_type | enum_type | stream_type | protocol_type ;
+type = base_type { "[" expression "]" } ;   (* postfix array: bit[8][4] *)
 
-basic_type = logic_type | wire_type | reg_type | signed_type | unsigned_type 
-           | integer_type | real_type | time_type | bool_type ;
+base_type = bit_type | nat_type | int_type | logic_type
+          | bool_type | string_type
+          | clock_type | reset_type
+          | array_type | tuple_type
+          | named_type | self_type
+          | inline_struct_type | inline_enum_type | inline_union_type
+          | stream_type ;                    (* parses; rejected at compile *)
 
-logic_type = "logic" [ lifetime ] [ width ] ;
-wire_type = "wire" [ lifetime ] [ width ] ;
-reg_type = "reg" [ lifetime ] [ width ] ;
-signed_type = "signed" [ width ] ;
-unsigned_type = "unsigned" [ width ] ;
-integer_type = "int" | "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" ;
-real_type = "real" | "f32" | "f64" ;
-time_type = "time" ;
-bool_type = "bool" ;
+(* Width may be a bracketed or angle-bracketed const expression.
+   Optional clock-domain lifetime follows the width. *)
+bit_type   = "bit"   [ width_spec ] [ domain_spec ] ;
+nat_type   = "nat"   [ width_spec ] [ domain_spec ] ;
+int_type   = "int"   [ width_spec ] [ domain_spec ] ;
+logic_type = "logic" [ width_spec ] [ domain_spec ] ;
+width_spec = "[" expression "]" | "<" expression [ "," expression ] ">" ;
+domain_spec = "<" lifetime ">" ;
 
-width = "[" expression "]" | "[" expression ":" expression "]" ;
+bool_type   = "bool" ;
+string_type = "string" ;                     (* testbench/simulation only *)
 
-array_type = type "[" expression { "," expression } "]" ;
+clock_type = "clock" [ "<" lifetime ">" | "(" identifier ")" ] ;
+reset_type = "reset" [ "(" ( "active_high" | "active_low" ) ")" ] ;
 
-struct_type = "struct" [ lifetime ] "{" struct_fields "}" ;
-struct_fields = struct_field { "," struct_field } [ "," ] ;
-struct_field = identifier ":" type ;
+array_type = "[" type ";" expression "]" ;
+tuple_type = "(" [ type { "," type } ] ")" ;
 
-enum_type = "enum" [ width ] "{" enum_variants "}" ;
-enum_variants = enum_variant { "," enum_variant } [ "," ] ;
-enum_variant = identifier [ "=" expression ] ;
+named_type = identifier [ generic_args ] ;   (* fp32, vec3<fp32>, MyStruct, ... *)
+self_type  = "Self" [ "::" identifier ] ;
 
-stream_type = "stream" [ lifetime ] "[" expression "]" ;
+inline_struct_type = "struct" "{" struct_fields "}" ;
+inline_enum_type   = "enum"   "{" enum_variants "}" ;
+inline_union_type  = "union"  "{" struct_fields "}" ;
 
-protocol_type = identifier [ "<" lifetime ">" ] ;
+(* NOT IMPLEMENTED: stream<T> parses but is rejected with a hard error. *)
+stream_type = "stream" [ "<" type ">" ] ;
 
-(* Type definitions *)
-type_def = "type" type_identifier [ generic_params ] "=" type ";" ;
+type_alias = "type" identifier [ generic_params ] "=" type [ ";" ] ;
+distinct_type = "distinct" "type" identifier "=" type [ ";" ] ;
+
+(* ============================================ *)
+(*          Generics and Trait Bounds           *)
+(* ============================================ *)
 
 generic_params = "<" generic_param { "," generic_param } ">" ;
-generic_param = lifetime | type_identifier [ ":" trait_bounds ] ;
+generic_param = lifetime [ ":" frequency ]
+              | "intent" identifier [ ":" type ] [ "=" type_arg_expr ]
+              | "const" identifier ":" type [ "=" type_arg_expr ]
+              | identifier ":" ( type [ "=" type_arg_expr ] | trait_bounds ) ;
+frequency = decimal_literal identifier ;     (* e.g. 100MHz, 48KHz *)
 trait_bounds = trait_bound { "+" trait_bound } ;
-trait_bound = identifier [ "<" generic_args ">" ] ;
-generic_args = generic_arg { "," generic_arg } ;
-generic_arg = lifetime | type | expression ;
+trait_bound = identifier [ generic_args ] ;
 
-(* ============================================ *)
-(*                 Constants                    *)
-(* ============================================ *)
+generic_args = "<" generic_arg { "," generic_arg } ">" ;
+generic_arg = lifetime | type | const_expr ;
+const_expr = expression ;                    (* must be const-evaluable *)
+type_arg_expr = expression ;
 
-constant = "const" identifier ":" type "=" expression ";" ;
+where_clause = "where" where_predicate { "," where_predicate } ;
+where_predicate = ( identifier | type ) ":" trait_bounds ;
 
 (* ============================================ *)
 (*                  Entities                    *)
 (* ============================================ *)
 
-entity = "entity" identifier [ generic_params ] "{" entity_body "}" [ "with" intent_block ] ;
+entity_decl = { attribute } [ "pub" ] [ "async" ] "entity" identifier
+              [ generic_params ] [ where_clause ] [ intent_ref ]
+              "{" port_list "}" ;
 
-entity_body = { port_declaration | signal_declaration | parameter } ;
+(* entity alias: entity Fast = Foo::<N>;
+   NOTE: parsed and stored, but aliases cannot currently be instantiated. *)
+entity_alias = [ "pub" ] [ "async" ] "entity" identifier "=" identifier
+               [ generic_args ] [ ";" ] ;
 
-port_declaration = port_direction identifier ":" port_type ;
-port_direction = "in" | "out" | "inout" ;
-port_type = type | protocol_type | stream_type ;
+port_list = { port_decl [ "," | ";" ] } ;
+port_decl = { attribute } port_direction port_name ":" type
+            [ "@" physical_constraint_block ] ;
+port_direction = "in" | "out" | "inout" | "port" ;
+port_name = identifier | keyword_as_name ;
+keyword_as_name = ? any keyword; keywords are allowed as port names ? ;
 
-signal_declaration = "signal" identifier ":" type [ "=" expression ] ";" ;
-
-parameter = "param" identifier ":" type [ "=" expression ] ";" ;
-
-intent_block = "intent" "{" intent_specs "}" ;
-intent_specs = intent_spec { "," intent_spec } [ "," ] ;
-intent_spec = intent_key ":" intent_value ;
-intent_key = "throughput" | "latency" | "area" | "power" | "architecture" 
-           | "optimization" | "pipeline" | "unroll" | identifier ;
-intent_value = expression | identifier | intent_func ;
-intent_func = identifier "(" intent_args ")" ;
-intent_args = intent_arg { "," intent_arg } ;
-intent_arg = identifier ":" expression ;
+physical_constraint_block = "{" constraint_pair { "," constraint_pair } "}" ;
+constraint_pair = identifier ":" constraint_value ;
+constraint_value = literal | identifier
+                 | "[" literal { "," literal } "]" ;
 
 (* ============================================ *)
 (*               Implementation                 *)
 (* ============================================ *)
 
-impl = "impl" [ generic_params ] identifier [ "for" type ] "{" impl_body "}" ;
+impl_block = "impl" ( entity_impl | trait_impl_body ) ;
+entity_impl = [ generic_params ] identifier [ generic_params ]
+              [ where_clause ] "{" { impl_item } "}" ;
+trait_impl = "impl" [ generic_params ] identifier [ generic_args ]
+             "for" type "{" { trait_impl_item } "}" ;
+trait_impl_body = ? see trait_impl ? ;
 
-impl_body = { function | process | flow | always_block | initial_block | method } ;
+impl_item = { attribute }
+          ( signal_decl | variable_decl | constant_decl | function_decl
+          | struct_decl | enum_decl | union_decl
+          | instance_decl | let_binding
+          | event_block | assignment | tuple_assignment
+          | if_statement | match_statement | for_stmt
+          | generate_stmt | with_intent_block | barrier_stmt
+          | assert_stmt | assume_stmt | cover_stmt
+          | covergroup_decl | formal_block | invariant_decl | prove_stmt
+          | block_stmt ) ;
 
-(* Functions *)
-function = [ "pure" ] "fn" identifier [ generic_params ] "(" [ parameters ] ")" 
-          [ "->" type ] ( ";" | block ) ;
+signal_decl   = "signal" identifier [ domain_spec ] ":" type [ "=" expression ] [ ";" ] ;
+variable_decl = "var" identifier ":" type [ "=" expression ] [ ";" ] ;
+constant_decl = "const" identifier ":" type "=" expression [ ";" ] ;
 
-parameters = parameter_decl { "," parameter_decl } ;
-parameter_decl = identifier ":" type ;
+function_decl = [ "pub" ] [ "const" ] "fn" identifier [ generic_params ]
+                "(" [ parameter { "," parameter } ] ")" [ "->" type ]
+                block_stmt ;
+parameter = identifier ":" type ;
 
-(* Processes *)
-process = "process" [ "(" sensitivity_list ")" ] block ;
-sensitivity_list = sensitivity { "," sensitivity } ;
-sensitivity = "posedge" identifier | "negedge" identifier | identifier ;
+(* Instantiation: inputs only in the port map; outputs read via dot access.
+   `open` (or `_`) marks an intentionally unconnected OUTPUT port.
+   `let name = Entity { ... }` still parses but is a hard compile error. *)
+instance_decl = "inst" identifier "=" identifier
+                [ [ "::" ] generic_args ] "{" connection_list "}" ;
+connection_list = [ connection { "," connection } [ "," ] ] ;
+connection = port_name ":" ( expression | "open" | "_" ) ;
 
-(* Flow blocks *)
-flow = "flow" [ identifier ] "{" flow_statements "}" ;
-flow_statements = flow_statement { flow_statement } ;
-flow_statement = identifier "=" flow_expression ";" ;
-
-flow_expression = flow_term { flow_operator flow_term } ;
-flow_term = identifier | flow_call | "(" flow_expression ")" ;
-flow_operator = "|>" | "||" | "<>" | ">>" | "<<" ;
-flow_call = identifier "(" [ flow_args ] ")" ;
-flow_args = flow_arg { "," flow_arg } ;
-flow_arg = expression | identifier ;
-
-(* Always blocks *)
-always_block = "always" [ "_ff" | "_comb" | "_latch" ] [ "(" sensitivity_list ")" ] block ;
-
-(* Initial blocks *)
-initial_block = "initial" block ;
-
-(* Methods *)
-method = "method" identifier [ generic_params ] "(" [ parameters ] ")" 
-        [ "->" type ] block ;
-
-(* ============================================ *)
-(*                 Protocols                    *)
-(* ============================================ *)
-
-protocol = "protocol" identifier [ generic_params ] "{" protocol_body "}" ;
-
-protocol_body = { protocol_signal | protocol_rule | protocol_method } ;
-
-protocol_signal = signal_role identifier ":" type ";" ;
-signal_role = "master" | "slave" | "required" | "provided" ;
-
-protocol_rule = "rule" identifier ":" rule_expression ";" ;
-rule_expression = temporal_expression | boolean_expression ;
-
-protocol_method = "fn" identifier "(" [ parameters ] ")" [ "->" type ] ";" ;
+let_binding = "let" ( identifier [ ":" type ] | tuple_pattern )
+              "=" expression [ ";" ] ;
 
 (* ============================================ *)
-(*                 Packages                     *)
+(*         Sequential Logic (on-blocks)         *)
 (* ============================================ *)
 
-package = "package" identifier "{" { package_item } "}" ;
-package_item = type_def | constant | function | entity | impl | protocol ;
+(* Empty trigger list (`on()`) is only meaningful in async (NCL) entities. *)
+event_block = "on" "(" [ event_trigger { ( "|" | "," ) event_trigger } ] ")"
+              block_stmt ;
+event_trigger = identifier [ "." edge ] ;
+edge = "rise" | "fall" | "active" | "inactive" ;
 
 (* ============================================ *)
-(*                Statements                    *)
+(*                 Statements                   *)
 (* ============================================ *)
 
-statement = assignment | if_statement | case_statement | match_statement 
-          | for_loop | while_loop | loop_statement | break_statement 
-          | continue_statement | return_statement | assert_statement 
-          | assume_statement | cover_statement | block | expression_statement ;
+block_stmt = "{" { statement } "}" ;
 
-assignment = lvalue assignment_op expression ";" ;
-lvalue = identifier { selector } ;
-selector = "[" expression "]" | "[" expression ":" expression "]" | "." identifier ;
-assignment_op = "=" | "<=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" 
-              | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+statement = { attribute }
+          ( let_binding | signal_decl | variable_decl | constant_decl
+          | assignment | tuple_assignment | expression_statement
+          | if_statement | match_statement | for_stmt
+          | generate_stmt | with_intent_block
+          | assert_stmt | assume_stmt | cover_stmt
+          | return_stmt | block_stmt ) ;
 
-if_statement = "if" expression block [ "else" ( if_statement | block ) ] ;
+(* THE assignment operator is `=`.  Its semantics are inferred from
+   context: registered (non-blocking) inside on-blocks, continuous at
+   impl level.  `<=` is ALWAYS the less-or-equal comparison. *)
+assignment = lvalue "=" expression [ ";" ] ;
+lvalue = expression ;    (* identifier, index, slice, or field expression *)
+tuple_assignment = "(" identifier { "," identifier } ")" "=" expression [ ";" ] ;
 
-case_statement = "case" expression "{" case_items "}" ;
-case_items = case_item { case_item } [ default_item ] ;
-case_item = expression_list "=>" statement ;
-default_item = "default" "=>" statement ;
-expression_list = expression { "," expression } ;
+expression_statement = expression [ ";" ] ;
 
-match_statement = "match" expression "{" match_arms "}" ;
-match_arms = match_arm { match_arm } ;
-match_arm = pattern "=>" ( expression | block ) [ "," ] ;
+if_statement = "if" expression block_stmt
+               [ "else" ( if_statement | block_stmt ) ] ;
 
-pattern = literal_pattern | identifier_pattern | wildcard_pattern 
-        | tuple_pattern | struct_pattern | enum_pattern | range_pattern ;
-literal_pattern = literal ;
-identifier_pattern = identifier [ "@" pattern ] ;
+match_statement = "match" expression "{" { match_arm } "}" ;
+match_arm = pattern [ match_guard ] ( "=>" | "->" ) ( statement | block_stmt ) [ "," ] ;
+match_guard = "if" expression ;
+
+(* Matches must be exhaustive: cover all enum variants or all 2^N values
+   of an N-bit scrutinee, or end with a `_` arm.  Guarded arms do not
+   count toward coverage. *)
+
+pattern = literal_pattern | wildcard_pattern | path_pattern
+        | tuple_pattern | ident_pattern ;
+literal_pattern = integer_literal | string_literal | bool_literal ;
 wildcard_pattern = "_" ;
+path_pattern = identifier { "::" identifier } [ "(" [ pattern { "," pattern } ] ")" ] ;
 tuple_pattern = "(" [ pattern { "," pattern } ] ")" ;
-struct_pattern = type_identifier "{" [ field_patterns ] "}" ;
-field_patterns = field_pattern { "," field_pattern } [ "," ".." ] ;
-field_pattern = identifier [ ":" pattern ] ;
-enum_pattern = type_identifier "::" identifier [ "(" [ pattern { "," pattern } ] ")" ] ;
-range_pattern = expression ".." [ "=" ] expression ;
+ident_pattern = identifier ;
 
-for_loop = "for" identifier "in" expression block ;
-while_loop = "while" expression block ;
-loop_statement = "loop" block ;
+for_stmt = "for" identifier "in" range_expr block_stmt ;
+range_expr = expression ( ".." | "..=" ) expression ;
 
-break_statement = "break" [ expression ] ";" ;
-continue_statement = "continue" ";" ;
-return_statement = "return" [ expression ] ";" ;
+return_stmt = "return" [ expression ] [ ";" ] ;
 
-assert_statement = "assert" expression [ ":" string_literal ] ";" ;
-assume_statement = "assume" expression [ ":" string_literal ] ";" ;
-cover_statement = "cover" expression [ ":" string_literal ] ";" ;
-
-expression_statement = expression ";" ;
-
-block = "{" { statement } "}" ;
+barrier_stmt = "barrier" [ ";" ] ;          (* NCL pipeline stage boundary *)
 
 (* ============================================ *)
-(*               Expressions                    *)
+(*              Generate Constructs             *)
 (* ============================================ *)
 
-expression = primary_expression { binary_operator primary_expression } ;
+(* Conditions, ranges, and scrutinees must be const-evaluable
+   (const generics and const declarations resolve). Valid at impl level
+   and inside on-blocks. *)
+generate_stmt = generate_for | generate_if | generate_match ;
+generate_for = "generate" "for" identifier "in" range_expr
+               [ "step" expression ] "{" generate_body "}" ;
+generate_if = "generate" "if" expression "{" generate_body "}"
+              [ "else" ( "if" expression "{" generate_body "}"
+                       | "{" generate_body "}" ) ] ;
+generate_match = "generate" "match" expression "{" { generate_match_arm } "}" ;
+generate_match_arm = pattern ( "=>" | "->" ) "{" generate_body "}" [ "," ] ;
+generate_body = { impl_item } ;
 
-primary_expression = literal | identifier | "(" expression ")" 
-                   | unary_expression | call_expression | index_expression 
-                   | field_expression | cast_expression | if_expression 
-                   | array_expression | struct_expression | range_expression
-                   | temporal_expression ;
+(* ============================================ *)
+(*                   Intents                    *)
+(* ============================================ *)
 
-literal = integer_literal | float_literal | string_literal | bool_literal 
-        | time_literal | bit_literal ;
+(* Implemented intent properties: mux_style, pipeline_style, impl_style
+   (plus the #[unroll] attribute). Other property names parse but have
+   no synthesis effect. *)
+intent_decl = "intent" identifier [ "for" identifier ]
+              ( "=" intent_value ";"
+              | "{" { intent_constraint [ "," ] } "}" ) ;
+intent_value = intent_term { "+" intent_term } ;
+intent_term = identifier [ "::" identifier ] ;
+intent_constraint = identifier ":" intent_value ;
 
-bool_literal = "true" | "false" ;
-time_literal = integer_literal time_unit ;
-time_unit = "ps" | "ns" | "us" | "ms" | "s" ;
-bit_literal = integer_literal "'" ( "b" bin_digit { bin_digit } 
-                                   | "h" hex_digit { hex_digit }
-                                   | "d" digit { digit } ) ;
+(* `with intent::name` may follow an entity header, a let-bound
+   expression, or open a block: *)
+intent_ref = "with" "intent" "::" identifier
+             { "+" "intent" "::" identifier } ;
+with_intent_block = intent_ref "{" { impl_item } "}" ;
 
-unary_expression = unary_operator primary_expression ;
-unary_operator = "!" | "~" | "-" | "+" | "&" | "|" | "^" | "~&" | "~|" | "~^" ;
+(* ============================================ *)
+(*                Expressions                   *)
+(* ============================================ *)
 
-binary_operator = "&&" | "||" | "==" | "!=" | "<" | "<=" | ">" | ">=" 
-                | "+" | "-" | "*" | "/" | "%" | "**" 
-                | "&" | "|" | "^" | "<<" | ">>" | "<<<" | ">>>" ;
+(* Binding, loosest to tightest:
+     1. ++            (concatenation; lowers to the same node as {a, b})
+     2. ?:            (ternary, right-associative)
+     3. ||
+     4. &&
+     5. == !=
+     6. < > <= >=     (<= is comparison, never assignment)
+     7. |
+     8. ^
+     9. &
+    10. << >>
+    11. + - +:        (+: is the widening add: bit[N] +: bit[N] -> bit[N+1])
+    12. * / %
+    13. unary  ! ~ - & ^   (& and ^ are reduction operators)
+    14. as Type      (cast)
+    15. postfix: call, index, slice, field access, method call
+*)
 
-call_expression = identifier [ generic_args ] "(" [ arguments ] ")" ;
+expression = concat_chain ;
+concat_chain = ternary_expr { "++" ternary_expr } [ intent_ref ] ;
+ternary_expr = or_expr [ "?" or_expr ":" ternary_expr ] ;
+or_expr = and_expr { "||" and_expr } ;
+and_expr = eq_expr { "&&" eq_expr } ;
+eq_expr = rel_expr { ( "==" | "!=" ) rel_expr } ;
+rel_expr = bitor_expr { ( "<" | ">" | "<=" | ">=" ) bitor_expr } ;
+bitor_expr = bitxor_expr { "|" bitxor_expr } ;
+bitxor_expr = bitand_expr { "^" bitand_expr } ;
+bitand_expr = shift_expr { "&" shift_expr } ;
+shift_expr = add_expr { ( "<<" | ">>" ) add_expr } ;
+add_expr = mul_expr { ( "+" | "-" | "+:" ) mul_expr } ;
+mul_expr = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
+unary_expr = ( "!" | "~" | "-" | "&" | "^" ) unary_expr | cast_expr ;
+cast_expr = postfix_expr [ "as" type ] ;
+
+postfix_expr = primary_expr { postfix } ;
+postfix = "(" [ expression { "," expression } ] ")"        (* call *)
+        | "[" expression [ ":" expression ] "]"            (* index / slice *)
+        | "." identifier [ "(" [ arguments ] ")" ] ;       (* field / method *)
 arguments = expression { "," expression } ;
 
-index_expression = primary_expression "[" expression "]" ;
-field_expression = primary_expression "." identifier ;
+primary_expr = literal
+             | path_expr
+             | "(" expression ")"
+             | tuple_expr
+             | if_expr
+             | match_expr
+             | concat_expr
+             | replicate_expr
+             | array_literal
+             | struct_literal
+             | call_expr ;
 
-cast_expression = expression "as" type ;
+path_expr = identifier { "::" identifier } ;
+call_expr = path_expr [ [ "::" ] generic_args ] "(" [ arguments ] ")" ;
 
-if_expression = "if" expression block "else" block ;
+tuple_expr = "(" ")" | "(" expression "," [ expression { "," expression } ] ")" ;
 
-array_expression = "[" [ expression { "," expression } ] "]" ;
+if_expr = "if" expression block_expr "else" ( if_expr | block_expr ) ;
+block_expr = "{" { statement } expression "}" ;
 
-struct_expression = type_identifier "{" [ field_inits ] "}" ;
-field_inits = field_init { "," field_init } [ "," ] ;
+match_expr = "match" expression "{" { match_expr_arm } "}" ;
+match_expr_arm = pattern [ match_guard ] ( "=>" | "->" )
+                 ( expression | block_expr ) [ "," ] ;
+
+(* {a, b, c} concatenation and {N{x}} replication *)
+concat_expr = "{" [ expression { "," expression } ] "}" ;
+replicate_expr = "{" expression "{" expression "}" "}" ;
+
+array_literal = "[" [ expression { "," expression } ] "]" ;
+
+struct_literal = identifier [ [ "::" ] generic_args ]
+                 "{" [ field_init { "," field_init } ] "}" ;
 field_init = identifier ":" expression ;
 
-range_expression = expression ".." [ "=" ] expression ;
-
 (* ============================================ *)
-(*            Temporal Expressions              *)
+(*             Traits and Trait Impls           *)
 (* ============================================ *)
 
-temporal_expression = sequence | property ;
-
-sequence = sequence_expr { sequence_operator sequence_expr } ;
-sequence_expr = expression | "(" sequence ")" | sequence_repetition ;
-sequence_operator = "##" integer_literal | "##" "[" range "]" | "##" "[*]" | "##" "[+]" ;
-sequence_repetition = sequence_expr "[*" range "]" | sequence_expr "[+]" | sequence_expr "[*]" ;
-range = expression [ ":" expression ] ;
-
-property = implication | sequence ;
-implication = antecedent implication_operator consequent ;
-antecedent = sequence ;
-consequent = sequence | property ;
-implication_operator = "|->" | "|=>" ;
+trait_def = [ "pub" ] "trait" identifier [ generic_params ] [ where_clause ]
+            "{" { trait_item } "}" ;
+trait_item = trait_type | trait_const | trait_method | trait_signal ;
+trait_type = "type" identifier [ ":" trait_bounds ] [ "=" type ] [ ";" ] ;
+trait_const = "const" identifier ":" type [ "=" expression ] [ ";" ] ;
+trait_method = "fn" identifier [ generic_params ]
+               "(" [ parameter { "," parameter } ] ")" [ "->" type ]
+               ( ";" | block_stmt ) ;
+trait_signal = "signal" identifier ":" type [ ";" ] ;
+trait_impl_item = trait_type | trait_const | trait_method ;
 
 (* ============================================ *)
-(*             Timing Constraints               *)
+(*          Verification Constructs             *)
 (* ============================================ *)
 
-timing_constraint = "timing" "{" timing_specs "}" ;
-timing_specs = timing_spec { timing_spec } ;
-timing_spec = constraint_type ":" timing_value ";" ;
-constraint_type = "setup" | "hold" | "period" | "pulse_width" 
-                | "recovery" | "removal" | "skew" ;
-timing_value = time_literal | identifier | timing_expression ;
-timing_expression = "from" identifier "to" identifier ":" time_literal ;
+assert_stmt = "assert" "(" expression [ "," string_literal ] ")" [ ";" ]
+            | "assert" temporal_block ;
+assume_stmt = "assume" "(" expression [ "," string_literal ] ")" [ ";" ] ;
+cover_stmt  = "cover"  "(" expression [ "," string_literal ] ")" [ ";" ] ;
+prove_stmt  = "prove" identifier "{" temporal_expression "}" ;
+temporal_block = "{" temporal_expression "}" ;
+
+(* SVA-style temporal layer (property / sequence / covergroup / formal
+   blocks) is accepted by the parser; see the language specification for
+   the currently supported surface. *)
+temporal_expression = ? SVA-style property expression:
+                        |->  |=>  ##N  [*N]  [+]  always  eventually
+                        until  throughout  ? ;
+
+covergroup_decl = "covergroup" identifier "{" { coverpoint_decl | cross_decl } "}" ;
+coverpoint_decl = "coverpoint" identifier "{" { bins_decl } "}" ;
+bins_decl = ( "bins" | "ignore_bins" | "illegal_bins" ) identifier
+            "=" bins_values [ ";" ] ;
+bins_values = ? value list or range ? ;
+cross_decl = "cross" identifier { "," identifier } [ ";" ] ;
+
+formal_block = "formal" "{" { invariant_decl | prove_stmt } "}" ;
+invariant_decl = "invariant" identifier "{" expression "}" ;
+
+(* ============================================ *)
+(*          Requirements (safety flow)          *)
+(* ============================================ *)
+
+requirement_decl = "requirement" identifier "{" { requirement_property } "}" ;
+requirement_property = identifier ":" ( literal | identifier ) [ "," | ";" ] ;
+
+(* ============================================ *)
+(*        Global Physical Constraints           *)
+(* ============================================ *)
+
+global_constraint = "constraint" "physical" "{" { constraint_item } "}" ;
+constraint_item = ? device / bank / io_defaults / floorplan entries ? ;

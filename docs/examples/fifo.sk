@@ -30,26 +30,27 @@ impl sync_fifo {
             read_ptr = 0;
             count = 0;
         } else {
-            // Handle simultaneous read/write
+            // Handle simultaneous read/write: concatenate the two
+            // qualified strobes into a 2-bit value and match on it
             match {write_enable && !full, read_enable && !empty} {
-                {true, true} => {
+                0b11 => {
                     // Read and write - count unchanged
                     memory[write_ptr] = write_data;
                     write_ptr = write_ptr + 1;
                     read_ptr = read_ptr + 1;
                 },
-                {true, false} => {
+                0b10 => {
                     // Write only
                     memory[write_ptr] = write_data;
                     write_ptr = write_ptr + 1;
                     count = count + 1;
                 },
-                {false, true} => {
+                0b01 => {
                     // Read only
                     read_ptr = read_ptr + 1;
                     count = count - 1;
                 },
-                {false, false} => {
+                _ => {
                     // No operation
                 }
             }
@@ -62,13 +63,8 @@ impl sync_fifo {
     empty = (count == 0);
     fill_count = count;
 
-    // Assertions for verification
-    assert property (write_enable -> !full)
-        @(posedge clk);
-
-    assert property (read_enable -> !empty)
-        @(posedge clk);
-
-    assert property (count = DEPTH)
-        @(posedge clk);
+    // Immediate assertions for verification (checked every cycle in simulation)
+    assert(!(write_enable && full), "write while full");
+    assert(!(read_enable && empty), "read while empty");
+    assert(count <= DEPTH, "count within capacity");
 }

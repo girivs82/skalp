@@ -11,17 +11,20 @@ Hierarchical design is essential for building complex systems from reusable comp
 SKALP uses a clean, type-safe syntax for instantiating sub-modules:
 
 ```skalp
-let instance_name = ModuleName<generics> {
-    port_name: signal_expr,
-    port_name2: signal_expr2,
+inst instance_name = ModuleName<generics> {
+    input_port: signal_expr,
+    input_port2: signal_expr2,
     ...
 }
+
+// Outputs are read with dot access:
+some_signal = instance_name.output_port
 ```
 
 **Key features:**
-- `let` introduces an instance
-- Curly braces `{}` for port connections
-- Named port mapping (order independent)
+- `inst` introduces an instance
+- Curly braces `{}` connect **inputs only** (named, order independent)
+- Outputs are read with dot access: `instance.output_port`
 - Type-checked connections
 
 ---
@@ -30,7 +33,7 @@ let instance_name = ModuleName<generics> {
 
 ### Simple Module Instantiation
 
-**Child module:**
+**Child and parent modules:**
 ```skalp
 entity Adder {
     in a: bit[8]
@@ -41,10 +44,7 @@ entity Adder {
 impl Adder {
     sum = a + b
 }
-```
 
-**Parent module:**
-```skalp
 entity Calculator {
     in x: bit[8]
     in y: bit[8]
@@ -52,16 +52,14 @@ entity Calculator {
 }
 
 impl Calculator {
-    signal internal_sum: bit[8]
-
-    // Instantiate the adder
-    let my_adder = Adder {
+    // Instantiate the adder: braces bind the inputs...
+    inst my_adder = Adder {
         a: x,
-        b: y,
-        sum: internal_sum
+        b: y
     }
 
-    result = internal_sum
+    // ...and the output is read with dot access
+    result = my_adder.sum
 }
 ```
 
@@ -72,16 +70,16 @@ module Calculator (
     input [7:0] y,
     output [7:0] result
 );
-    wire [7:0] internal_sum;
+    wire [7:0] my_adder_sum;
 
     // Instantiate adder
     Adder my_adder (
         .a(x),
         .b(y),
-        .sum(internal_sum)
+        .sum(my_adder_sum)
     );
 
-    assign result = internal_sum;
+    assign result = my_adder_sum;
 endmodule
 ```
 
@@ -91,7 +89,10 @@ endmodule
 
 ### Parameterized Modules
 
-**Generic child:**
+Generic arguments are passed **positionally** in angle brackets: `Register<8>`,
+`Fifo<8, 16>`.
+
+**Generic child with parents at two widths:**
 ```skalp
 entity Register<const WIDTH: nat = 8> {
     in clk: clock
@@ -101,22 +102,19 @@ entity Register<const WIDTH: nat = 8> {
 }
 
 impl Register {
-    signal reg: bit[WIDTH] = 0
+    signal value: bit[WIDTH] = 0
 
     on(clk.rise) {
         if (rst) {
-            reg <= 0
+            value = 0
         } else {
-            reg <= data_in
+            value = data_in
         }
     }
 
-    data_out = reg
+    data_out = value
 }
-```
 
-**Parent with multiple widths:**
-```skalp
 entity DataPath {
     in clk: clock
     in rst: reset
@@ -127,27 +125,22 @@ entity DataPath {
 }
 
 impl DataPath {
-    signal byte_reg_out: bit[8]
-    signal word_reg_out: bit[32]
-
     // 8-bit register
-    let byte_reg = Register<WIDTH = 8> {
+    inst byte_reg = Register<8> {
         clk: clk,
         rst: rst,
-        data_in: byte_in,
-        data_out: byte_reg_out
+        data_in: byte_in
     }
 
     // 32-bit register
-    let word_reg = Register<WIDTH = 32> {
+    inst word_reg = Register<32> {
         clk: clk,
         rst: rst,
-        data_in: word_in,
-        data_out: word_reg_out
+        data_in: word_in
     }
 
-    byte_out = byte_reg_out
-    word_out = word_reg_out
+    byte_out = byte_reg.data_out
+    word_out = word_reg.data_out
 }
 ```
 
@@ -157,8 +150,33 @@ impl DataPath {
 
 ### Instantiating Multiple Copies
 
+A parent generic can be passed straight through to child instances
+(`Register<WIDTH>` below). Reading `stageN.data_out` chains the stages —
+no intermediate signals needed.
+
 **Pipeline with multiple stages:**
 ```skalp
+entity Register<const WIDTH: nat = 8> {
+    in clk: clock
+    in rst: reset
+    in data_in: bit[WIDTH]
+    out data_out: bit[WIDTH]
+}
+
+impl Register {
+    signal value: bit[WIDTH] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            value = 0
+        } else {
+            value = data_in
+        }
+    }
+
+    data_out = value
+}
+
 entity Pipeline3Stage<const WIDTH: nat = 8> {
     in clk: clock
     in rst: reset
@@ -167,32 +185,25 @@ entity Pipeline3Stage<const WIDTH: nat = 8> {
 }
 
 impl Pipeline3Stage {
-    signal stage1_out: bit[WIDTH]
-    signal stage2_out: bit[WIDTH]
-    signal stage3_out: bit[WIDTH]
-
-    let stage1 = Register<WIDTH> {
+    inst stage1 = Register<WIDTH> {
         clk: clk,
         rst: rst,
-        data_in: data_in,
-        data_out: stage1_out
+        data_in: data_in
     }
 
-    let stage2 = Register<WIDTH> {
+    inst stage2 = Register<WIDTH> {
         clk: clk,
         rst: rst,
-        data_in: stage1_out,
-        data_out: stage2_out
+        data_in: stage1.data_out
     }
 
-    let stage3 = Register<WIDTH> {
+    inst stage3 = Register<WIDTH> {
         clk: clk,
         rst: rst,
-        data_in: stage2_out,
-        data_out: stage3_out
+        data_in: stage2.data_out
     }
 
-    data_out = stage3_out
+    data_out = stage3.data_out
 }
 ```
 
@@ -202,7 +213,6 @@ impl Pipeline3Stage {
 
 ### Complete ALU from Components
 
-**Component modules:**
 ```skalp
 // Adder module
 entity Adder<const WIDTH: nat = 32> {
@@ -246,10 +256,8 @@ impl Shifter {
         data >> shift_amt
     }
 }
-```
 
-**Top-level ALU:**
-```skalp
+// Top-level ALU
 entity ALU<const WIDTH: nat = 32> {
     in clk: clock
     in a: bit[WIDTH]
@@ -260,53 +268,42 @@ entity ALU<const WIDTH: nat = 32> {
 }
 
 impl ALU {
-    // Internal signals
-    signal add_sum: bit[WIDTH]
-    signal add_carry: bit
-    signal cmp_lt: bit
-    signal cmp_eq: bit
-    signal shift_result: bit[WIDTH]
     signal result_comb: bit[WIDTH]
 
-    // Instantiate components
-    let adder = Adder<WIDTH> {
+    // Instantiate components (inputs only in the braces)
+    inst adder = Adder<WIDTH> {
         a: a,
-        b: b,
-        sum: add_sum,
-        carry: add_carry
+        b: b
     }
 
-    let comparator = Comparator<WIDTH> {
+    inst comparator = Comparator<WIDTH> {
         a: a,
-        b: b,
-        lt: cmp_lt,
-        eq: cmp_eq
+        b: b
     }
 
-    let shifter = Shifter<WIDTH> {
+    inst shifter = Shifter<WIDTH> {
         data: a,
         shift_amt: b[4:0],
-        left: op[0],
-        result: shift_result
+        left: op[0]
     }
 
-    // Select result based on operation
+    // Select result based on operation; component outputs
+    // are read with dot access
     result_comb = match op {
-        0b000 => add_sum,           // ADD
-        0b001 => a - b,             // SUB (inline)
-        0b010 => a & b,             // AND (inline)
-        0b011 => a | b,             // OR (inline)
-        0b100 => a ^ b,             // XOR (inline)
-        0b101 => shift_result,      // SHIFT (use shifter)
-        0b110 => if cmp_lt { 1 } else { 0 },  // SLT (use comparator)
-        0b111 => if cmp_eq { 1 } else { 0 },  // SEQ (use comparator)
-        _ => 0
+        0b000 => adder.sum,          // ADD
+        0b001 => a - b,              // SUB (inline)
+        0b010 => a & b,              // AND (inline)
+        0b011 => a | b,              // OR (inline)
+        0b100 => a ^ b,              // XOR (inline)
+        0b101 => shifter.result,     // SHIFT (use shifter)
+        0b110 => if comparator.lt { 1 } else { 0 },  // SLT (use comparator)
+        0b111 => if comparator.eq { 1 } else { 0 }   // SEQ (use comparator)
     }
 
-    // Register output
+    // Register output: inside on(clk.rise), `=` is a registered assignment
     on(clk.rise) {
-        result <= result_comb
-        zero <= if result_comb == 0 { 1 } else { 0 }
+        result = result_comb
+        zero = if result_comb == 0 { 1 } else { 0 }
     }
 }
 ```
@@ -317,14 +314,14 @@ impl ALU {
 
 ### Direct Connection
 ```skalp
-let instance = Module {
+inst instance = Module {
     port: signal
 }
 ```
 
 ### Expression Connection
 ```skalp
-let instance = Module {
+inst instance = Module {
     port: signal1 + signal2,
     enable: !reset && valid
 }
@@ -332,7 +329,7 @@ let instance = Module {
 
 ### Constant Connection
 ```skalp
-let instance = Module {
+inst instance = Module {
     mode: 0b10,
     size: 16
 }
@@ -340,10 +337,16 @@ let instance = Module {
 
 ### Bit Slicing Connection
 ```skalp
-let instance = Module {
+inst instance = Module {
     upper: data[31:16],
     lower: data[15:0]
 }
+```
+
+### Reading Outputs
+```skalp
+// Outputs are never listed in the braces — read them with dot access
+signal total: bit[8] = instance.sum
 ```
 
 ---
@@ -368,9 +371,9 @@ impl DualPortRAM {
 
     on(clk.rise) {
         if (we) {
-            memory[waddr] <= wdata
+            memory[waddr] = wdata
         }
-        rdata_reg <= memory[raddr]
+        rdata_reg = memory[raddr]
     }
 
     rdata = rdata_reg
@@ -379,8 +382,33 @@ impl DualPortRAM {
 
 ### Composite FIFO
 
+(The RAM definition is repeated so the example is self-contained.)
+
 ```skalp
-entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
+entity DualPortRAM<const WIDTH: nat = 8, const DEPTH: nat = 16> {
+    in clk: clock
+    in we: bit
+    in waddr: nat[clog2(DEPTH)]
+    in wdata: bit[WIDTH]
+    in raddr: nat[clog2(DEPTH)]
+    out rdata: bit[WIDTH]
+}
+
+impl DualPortRAM {
+    signal memory: [bit[WIDTH]; DEPTH]
+    signal rdata_reg: bit[WIDTH] = 0
+
+    on(clk.rise) {
+        if (we) {
+            memory[waddr] = wdata
+        }
+        rdata_reg = memory[raddr]
+    }
+
+    rdata = rdata_reg
+}
+
+entity Fifo<const WIDTH: nat = 8, const DEPTH: nat = 16> {
     in clk: clock
     in rst: reset
     in wr_en: bit
@@ -391,7 +419,7 @@ entity FIFO<const WIDTH: nat = 8, const DEPTH: nat = 16> {
     out empty: bit
 }
 
-impl FIFO {
+impl Fifo {
     // Control signals
     signal wr_ptr: nat[clog2(DEPTH)] = 0
     signal rd_ptr: nat[clog2(DEPTH)] = 0
@@ -402,37 +430,38 @@ impl FIFO {
     full = (count == DEPTH)
 
     // Instantiate dual-port RAM for storage
-    let ram = DualPortRAM<WIDTH, DEPTH> {
+    inst ram = DualPortRAM<WIDTH, DEPTH> {
         clk: clk,
         we: wr_en && !full,
         waddr: wr_ptr,
         wdata: wr_data,
-        raddr: rd_ptr,
-        rdata: rd_data
+        raddr: rd_ptr
     }
+
+    rd_data = ram.rdata
 
     // Pointer and count management
     on(clk.rise) {
         if (rst) {
-            wr_ptr <= 0
-            rd_ptr <= 0
-            count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            count = 0
         } else {
-            signal wr_ok: bit = wr_en && !full
-            signal rd_ok: bit = rd_en && !empty
+            let wr_ok = wr_en && !full
+            let rd_ok = rd_en && !empty
 
             if (wr_ok) {
-                wr_ptr <= (wr_ptr + 1) % DEPTH
+                wr_ptr = (wr_ptr + 1) % DEPTH
             }
 
             if (rd_ok) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
+                rd_ptr = (rd_ptr + 1) % DEPTH
             }
 
             if (wr_ok && !rd_ok) {
-                count <= count + 1
+                count = count + 1
             } else if (!wr_ok && rd_ok) {
-                count <= count - 1
+                count = count - 1
             }
         }
     }
@@ -444,6 +473,9 @@ impl FIFO {
 ## Complete Example: CPU Datapath
 
 ### CPU with Hierarchical Components
+
+Note that instances may reference each other's outputs freely — `regfile`
+reads `alu.result` even though the ALU is instantiated later in the file.
 
 ```skalp
 // Register file component
@@ -463,12 +495,33 @@ impl RegisterFile {
 
     on(clk.rise) {
         if (we && waddr != 0) {  // R0 is hardwired to 0
-            regs[waddr] <= wdata
+            regs[waddr] = wdata
         }
     }
 
     rdata1 = if raddr1 == 0 { 0 } else { regs[raddr1] }
     rdata2 = if raddr2 == 0 { 0 } else { regs[raddr2] }
+}
+
+// Combinational ALU component
+entity SimpleALU<const WIDTH: nat = 32> {
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    in op: bit[3]
+    out result: bit[WIDTH]
+    out zero: bit
+}
+
+impl SimpleALU {
+    result = match op {
+        0b000 => a + b,
+        0b001 => a - b,
+        0b010 => a & b,
+        0b011 => a | b,
+        0b100 => a ^ b,
+        _ => 0
+    }
+    zero = if result == 0 { 1 } else { 0 }
 }
 
 // Simple CPU datapath
@@ -486,39 +539,29 @@ impl CPU {
     signal rd: nat[5] = instruction[15:11]
     signal opcode: bit[6] = instruction[31:26]
 
-    // Internal signals
-    signal reg_rd1: bit[32]
-    signal reg_rd2: bit[32]
-    signal alu_result: bit[32]
-    signal alu_zero: bit
     signal reg_write_en: bit
 
     // Instantiate register file
-    let regfile = RegisterFile<WIDTH = 32, REGS = 32> {
+    inst regfile = RegisterFile<32, 32> {
         clk: clk,
         we: reg_write_en,
         waddr: rd,
-        wdata: alu_result,
+        wdata: alu.result,
         raddr1: rs,
-        rdata1: reg_rd1,
-        raddr2: rt,
-        rdata2: reg_rd2
+        raddr2: rt
     }
 
     // Instantiate ALU
-    let alu = ALU<WIDTH = 32> {
-        clk: clk,
-        a: reg_rd1,
-        b: reg_rd2,
-        op: opcode[2:0],
-        result: alu_result,
-        zero: alu_zero
+    inst alu = SimpleALU<32> {
+        a: regfile.rdata1,
+        b: regfile.rdata2,
+        op: opcode[2:0]
     }
 
     // Control logic
     reg_write_en = if opcode[5:3] == 0b000 { 1 } else { 0 }
 
-    result = alu_result
+    result = alu.result
 }
 ```
 
@@ -530,37 +573,34 @@ impl CPU {
 
 ```skalp
 // Good: Descriptive instance names
-let input_buffer = FIFO<WIDTH = 8, DEPTH = 16> { ... }
-let output_buffer = FIFO<WIDTH = 8, DEPTH = 16> { ... }
+inst input_buffer = Fifo<8, 16> { ... }
+inst output_buffer = Fifo<8, 16> { ... }
 
 // Avoid: Generic names
-let fifo1 = FIFO<WIDTH = 8, DEPTH = 16> { ... }
-let fifo2 = FIFO<WIDTH = 8, DEPTH = 16> { ... }
+inst fifo1 = Fifo<8, 16> { ... }
+inst fifo2 = Fifo<8, 16> { ... }
 ```
 
-### 2. Group Related Signals
+### 2. Read Outputs Where You Use Them
 
 ```skalp
-// Declare connection signals near instantiation
-signal alu_a: bit[32]
-signal alu_b: bit[32]
-signal alu_result: bit[32]
-
-let alu = ALU {
-    a: alu_a,
-    b: alu_b,
-    result: alu_result
+// Dot access means no boilerplate connection signals
+inst alu = ALU {
+    a: operand_a,
+    b: operand_b
 }
+
+result = alu.result
+overflow_flag = alu.overflow
 ```
 
 ### 3. Use Named Connections
 
 ```skalp
-// Good: All connections explicit
-let adder = Adder {
+// Good: All input connections explicit
+inst adder = Adder {
     a: input_a,
-    b: input_b,
-    sum: output_sum
+    b: input_b
 }
 
 // No positional connection in SKALP - always named!
@@ -571,12 +611,12 @@ let adder = Adder {
 ```skalp
 // Pass clock to all sub-modules
 impl TopLevel {
-    let module1 = Module1 {
+    inst module1 = Module1 {
         clk: clk,  // Same clock
         ...
     }
 
-    let module2 = Module2 {
+    inst module2 = Module2 {
         clk: clk,  // Same clock
         ...
     }
@@ -588,7 +628,7 @@ impl TopLevel {
 ```skalp
 // Distribute reset properly
 impl TopLevel {
-    let module1 = Module1 {
+    inst module1 = Module1 {
         clk: clk,
         rst: rst,  // Synchronous reset
         ...
@@ -604,6 +644,51 @@ impl TopLevel {
 
 **Separate datapath and control:**
 ```skalp
+entity Controller {
+    in clk: clock
+    in rst: reset
+    in start: bit
+    in done: bit
+    out enable: bit
+}
+
+impl Controller {
+    signal running: bit = 0
+
+    on(clk.rise) {
+        if (rst) {
+            running = 0
+        } else if (start) {
+            running = 1
+        } else if (done) {
+            running = 0
+        }
+    }
+
+    enable = running
+}
+
+entity Datapath {
+    in clk: clock
+    in rst: reset
+    in enable: bit
+    out done: bit
+}
+
+impl Datapath {
+    signal counter: bit[4] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else if (enable) {
+            counter = counter + 1
+        }
+    }
+
+    done = (counter == 15)
+}
+
 entity System {
     in clk: clock
     in rst: reset
@@ -612,25 +697,20 @@ entity System {
 }
 
 impl System {
-    signal control_enable: bit
-    signal datapath_done: bit
-
-    let controller = Controller {
+    inst controller = Controller {
         clk: clk,
         rst: rst,
         start: start,
-        enable: control_enable,
-        done: datapath_done
+        done: datapath.done
     }
 
-    let datapath = Datapath {
+    inst datapath = Datapath {
         clk: clk,
         rst: rst,
-        enable: control_enable,
-        done: datapath_done
+        enable: controller.enable
     }
 
-    done = datapath_done
+    done = datapath.done
 }
 ```
 
@@ -639,14 +719,12 @@ impl System {
 **Chain of processing stages:**
 ```skalp
 impl Pipeline {
-    signal s0_to_s1: bit[WIDTH]
-    signal s1_to_s2: bit[WIDTH]
-    signal s2_to_s3: bit[WIDTH]
+    inst stage0 = Stage { d: input_data }
+    inst stage1 = Stage { d: stage0.q }
+    inst stage2 = Stage { d: stage1.q }
+    inst stage3 = Stage { d: stage2.q }
 
-    let stage0 = Stage { in: input, out: s0_to_s1 }
-    let stage1 = Stage { in: s0_to_s1, out: s1_to_s2 }
-    let stage2 = Stage { in: s1_to_s2, out: s2_to_s3 }
-    let stage3 = Stage { in: s2_to_s3, out: output }
+    output_data = stage3.q
 }
 ```
 
@@ -655,20 +733,13 @@ impl Pipeline {
 **Multiple clients, one arbiter:**
 ```skalp
 impl System {
-    signal client0_req: bit
-    signal client0_grant: bit
-    signal client1_req: bit
-    signal client1_grant: bit
-
-    let arbiter = Arbiter {
-        req0: client0_req,
-        req1: client1_req,
-        grant0: client0_grant,
-        grant1: client1_grant
+    inst arbiter = Arbiter {
+        req0: client0.req,
+        req1: client1.req
     }
 
-    let client0 = Client { grant: client0_grant, req: client0_req }
-    let client1 = Client { grant: client1_grant, req: client1_req }
+    inst client0 = Client { grant: arbiter.grant0 }
+    inst client1 = Client { grant: arbiter.grant1 }
 }
 ```
 
@@ -710,20 +781,21 @@ When targeting gate-level output (`--target gates`), SKALP automatically detects
 All connection patterns work with gate-level synthesis:
 
 ```skalp
-let shifter = Shifter {
+inst shifter = Shifter {
     data: a,              // Signal connection
     shift_amt: b[4:0],    // Range slice connection
     shift_left: op[0],    // Bit-select connection
-    enable: 1,            // Constant connection
-    result: shift_out
+    enable: 1             // Constant connection
 }
+
+shift_out = shifter.result
 ```
 
 ### Usage
 
 ```bash
 # Build with gate-level target (hierarchical auto-detected)
-skalp build -s design.sk --target gates -o output/
+skalp build design.sk --target gates -o output/
 
 # Example output:
 # [STITCH] Instance 'top.shifter' has 4 port connections
@@ -739,13 +811,13 @@ skalp build -s design.sk --target gates -o output/
 - [Sequential Patterns](sequential.md) - Registers and counters
 - [Memory Patterns](memories.md) - RAMs and FIFOs
 - [Syntax Reference](../reference/syntax.md) - Language syntax
-- [What's New](../../WHATS_NEW.md) - Latest features including hierarchical synthesis
 
 ---
 
 **Key Takeaways:**
-- Use `let instance = Module { ... }` syntax
-- Always use named port connections
+- Use `inst instance = Module { ... }` syntax; braces bind inputs only
+- Read outputs with dot access: `instance.output_port`
+- Generic arguments are positional: `Fifo<8, 16>`
 - Pass clocks and resets explicitly
 - Build complex systems from simple, reusable components
 - Use hierarchical design for maintainability and reusability

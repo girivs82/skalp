@@ -244,7 +244,7 @@ See [Testbench Guide](../guides/testbench.md) for testing patterns.
 - Pipeline long combinational paths
 
 ### Sequential Logic
-- Always use `<=` in `on(clk.rise)` blocks
+- Use `=` in `on(clk.rise)` blocks — inside a clocked block it is a registered (non-blocking) assignment
 - Always include reset handling
 - Use enable signals for conditional updates
 - Consider power-of-2 for modulo counters
@@ -267,8 +267,8 @@ See [Testbench Guide](../guides/testbench.md) for testing patterns.
 
 - [Syntax Reference](../reference/syntax.md) - Language syntax
 - [Testbench Guide](../guides/testbench.md) - How to test designs
-- [Examples](../examples/) - Complete working designs
-- [Tutorial](../tutorial/) - Step-by-step learning
+- [Examples](../../examples/README.md) - Complete working designs
+- [Quick Start](../quick-start.md) - Step-by-step learning
 
 ---
 
@@ -293,7 +293,7 @@ See [Testbench Guide](../guides/testbench.md) for testing patterns.
 Have a useful pattern to share? We welcome contributions!
 
 **Pattern Template:**
-```markdown
+```text
 ### Pattern Name
 
 **Problem:** Brief description of what problem this solves.
@@ -308,7 +308,7 @@ impl MyPattern { ... }
 **Use cases:** When to use this pattern.
 ```
 
-See [Contributing Guide](../../developer/contributing/workflow.md) for details.
+Follow the pattern template above and make sure every complete snippet builds with `skalp build`.
 
 ---
 

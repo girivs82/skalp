@@ -26,9 +26,9 @@ impl SinglePortRAM {
 
     on(clk.rise) {
         if (we) {
-            memory[addr] <= din
+            memory[addr] = din
         }
-        dout_reg <= memory[addr]
+        dout_reg = memory[addr]
     }
 
     dout = dout_reg
@@ -76,10 +76,10 @@ impl ByteEnableRAM {
         }
 
         if (we != 0) {
-            memory[addr] <= word
+            memory[addr] = word
         }
 
-        dout_reg <= memory[addr]
+        dout_reg = memory[addr]
     }
 
     dout = dout_reg
@@ -120,15 +120,15 @@ impl DualPortRAM {
     on(clk.rise) {
         // Port A
         if (we_a) {
-            memory[addr_a] <= din_a
+            memory[addr_a] = din_a
         }
-        dout_a_reg <= memory[addr_a]
+        dout_a_reg = memory[addr_a]
 
         // Port B
         if (we_b) {
-            memory[addr_b] <= din_b
+            memory[addr_b] = din_b
         }
-        dout_b_reg <= memory[addr_b]
+        dout_b_reg = memory[addr_b]
     }
 
     dout_a = dout_a_reg
@@ -161,9 +161,9 @@ impl SimpleDualPortRAM {
 
     on(clk.rise) {
         if (we) {
-            memory[waddr] <= din
+            memory[waddr] = din
         }
-        dout_reg <= memory[raddr]
+        dout_reg = memory[raddr]
     }
 
     dout = dout_reg
@@ -200,7 +200,7 @@ impl ROM {
     signal dout_reg: bit[WIDTH] = 0
 
     on(clk.rise) {
-        dout_reg <= memory[addr]
+        dout_reg = memory[addr]
     }
 
     dout = dout_reg
@@ -267,26 +267,26 @@ impl SyncFIFO {
 
     on(clk.rise) {
         if (rst) {
-            wr_ptr <= 0
-            rd_ptr <= 0
-            count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            count = 0
         } else {
             signal wr_ok: bit = wr_en && !full
             signal rd_ok: bit = rd_en && !empty
 
             if (wr_ok) {
-                memory[wr_ptr] <= wr_data
-                wr_ptr <= (wr_ptr + 1) % DEPTH
+                memory[wr_ptr] = wr_data
+                wr_ptr = (wr_ptr + 1) % DEPTH
             }
 
             if (rd_ok) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
+                rd_ptr = (rd_ptr + 1) % DEPTH
             }
 
             if (wr_ok && !rd_ok) {
-                count <= count + 1
+                count = count + 1
             } else if (!wr_ok && rd_ok) {
-                count <= count - 1
+                count = count - 1
             }
         }
     }
@@ -333,26 +333,26 @@ impl FIFOWithThreshold {
 
     on(clk.rise) {
         if (rst) {
-            wr_ptr <= 0
-            rd_ptr <= 0
-            count <= 0
+            wr_ptr = 0
+            rd_ptr = 0
+            count = 0
         } else {
             signal wr_ok: bit = wr_en && !full
             signal rd_ok: bit = rd_en && !empty
 
             if (wr_ok) {
-                memory[wr_ptr] <= wr_data
-                wr_ptr <= (wr_ptr + 1) % DEPTH
+                memory[wr_ptr] = wr_data
+                wr_ptr = (wr_ptr + 1) % DEPTH
             }
 
             if (rd_ok) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
+                rd_ptr = (rd_ptr + 1) % DEPTH
             }
 
             if (wr_ok && !rd_ok) {
-                count <= count + 1
+                count = count + 1
             } else if (!wr_ok && rd_ok) {
-                count <= count - 1
+                count = count - 1
             }
         }
     }
@@ -405,19 +405,19 @@ impl AsyncFIFO {
     // Write clock domain
     on(wr_clk.rise) {
         if (wr_rst) {
-            wr_ptr <= 0
-            wr_ptr_gray <= 0
-            rd_ptr_gray_sync1 <= 0
-            rd_ptr_gray_sync2 <= 0
+            wr_ptr = 0
+            wr_ptr_gray = 0
+            rd_ptr_gray_sync1 = 0
+            rd_ptr_gray_sync2 = 0
         } else {
             // Synchronize read pointer
-            rd_ptr_gray_sync1 <= rd_ptr_gray
-            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1
+            rd_ptr_gray_sync1 = rd_ptr_gray
+            rd_ptr_gray_sync2 = rd_ptr_gray_sync1
 
             if (wr_en && !full) {
-                memory[wr_ptr] <= wr_data
-                wr_ptr <= (wr_ptr + 1) % DEPTH
-                wr_ptr_gray <= wr_ptr_gray_next
+                memory[wr_ptr] = wr_data
+                wr_ptr = (wr_ptr + 1) % DEPTH
+                wr_ptr_gray = wr_ptr_gray_next
             }
         }
     }
@@ -425,18 +425,18 @@ impl AsyncFIFO {
     // Read clock domain
     on(rd_clk.rise) {
         if (rd_rst) {
-            rd_ptr <= 0
-            rd_ptr_gray <= 0
-            wr_ptr_gray_sync1 <= 0
-            wr_ptr_gray_sync2 <= 0
+            rd_ptr = 0
+            rd_ptr_gray = 0
+            wr_ptr_gray_sync1 = 0
+            wr_ptr_gray_sync2 = 0
         } else {
             // Synchronize write pointer
-            wr_ptr_gray_sync1 <= wr_ptr_gray
-            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1
+            wr_ptr_gray_sync1 = wr_ptr_gray
+            wr_ptr_gray_sync2 = wr_ptr_gray_sync1
 
             if (rd_en && !empty) {
-                rd_ptr <= (rd_ptr + 1) % DEPTH
-                rd_ptr_gray <= rd_ptr_gray_next
+                rd_ptr = (rd_ptr + 1) % DEPTH
+                rd_ptr_gray = rd_ptr_gray_next
             }
         }
     }
@@ -486,11 +486,11 @@ impl RegisterFile {
 
     on(clk.rise) {
         if (rst) {
-            for i in 0..NUM_REGS {
-                regs[i] <= 0
+            generate for i in 0..NUM_REGS {
+                regs[i] = 0
             }
         } else if (we) {
-            regs[waddr] <= wdata
+            regs[waddr] = wdata
         }
     }
 
@@ -527,11 +527,11 @@ impl RegisterFileRISC {
 
     on(clk.rise) {
         if (rst) {
-            for i in 0..NUM_REGS {
-                regs[i] <= 0
+            generate for i in 0..NUM_REGS {
+                regs[i] = 0
             }
         } else if (we && waddr != 0) {  // Don't write to R0
-            regs[waddr] <= wdata
+            regs[waddr] = wdata
         }
     }
 
@@ -571,12 +571,12 @@ impl CAM4 {
 
     on(clk.rise) {
         if (rst) {
-            entries[0] <= 0
-            entries[1] <= 0
-            entries[2] <= 0
-            entries[3] <= 0
+            entries[0] = 0
+            entries[1] = 0
+            entries[2] = 0
+            entries[3] = 0
         } else if (we) {
-            entries[waddr] <= wdata
+            entries[waddr] = wdata
         }
     }
 
@@ -642,9 +642,9 @@ For async FIFOs:
 ## See Also
 
 - [Sequential Patterns](sequential.md) - Registers, counters
-- [CDC Patterns](cdc.md) - Clock domain crossing (future)
+- [Clock Domain Crossing Guide](../guides/clock-domain-crossing.md) - CDC analysis and patterns
 - [Syntax Reference](../reference/syntax.md) - Language syntax
-- [Examples](../examples/) - Complete designs
+- [Examples](../../examples/README.md) - Complete designs
 
 ---
 

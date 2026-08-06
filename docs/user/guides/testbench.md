@@ -21,7 +21,7 @@ SKALP includes a built-in testbench API that lets you write hardware tests in Ru
 In your SKALP project, create `tests/counter_test.rs`:
 
 ```rust
-use skalp_testbench::Testbench;
+use skalp_testing::testbench::Testbench;
 
 #[tokio::test]
 async fn test_counter() {
@@ -45,7 +45,7 @@ In your project's `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-skalp-testbench = { path = "../skalp/crates/skalp-testbench" }
+skalp-testing = { path = "../skalp/crates/skalp-testing" }
 tokio = { version = "1", features = ["full"] }
 ```
 
