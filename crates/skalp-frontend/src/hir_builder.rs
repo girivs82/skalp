@@ -1031,6 +1031,7 @@ impl HirBuilderContext {
 
             let mut voltage: Option<String> = None;
             let mut io_standard: Option<String> = None;
+            let mut domain: Option<String> = None;
             for pair in bank_node
                 .children()
                 .filter(|n| n.kind() == SyntaxKind::ConstraintPair)
@@ -1055,6 +1056,7 @@ impl HirBuilderContext {
                 match key.as_str() {
                     "voltage" => voltage = Some(value),
                     "io_standard" => io_standard = Some(value),
+                    "domain" => domain = Some(value),
                     _ => {}
                 }
             }
@@ -1063,6 +1065,7 @@ impl HirBuilderContext {
                     bank_id,
                     voltage,
                     io_standard,
+                    domain,
                 }));
         }
     }

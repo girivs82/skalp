@@ -51,12 +51,59 @@ fn parse_voltage_mv(text: &str) -> Option<u32> {
 pub fn check_bank_io_compatibility(hir: &Hir) -> Vec<String> {
     let mut errors = Vec::new();
 
+    // A domain's rail voltage: its `on` state, else its single stated voltage.
+    let domain_voltage = |name: &str| -> Option<u32> {
+        let d = hir.power_domain_decls.iter().find(|d| d.name == name)?;
+        d.states
+            .iter()
+            .find(|s| s.name == "on")
+            .and_then(|s| s.voltage_mv)
+            .or_else(|| {
+                let volts: Vec<u32> = d.states.iter().filter_map(|s| s.voltage_mv).collect();
+                if volts.len() == 1 {
+                    Some(volts[0])
+                } else {
+                    None
+                }
+            })
+    };
+
     let banks: Vec<(u32, Option<u32>)> = hir
         .global_constraints
         .iter()
         .filter_map(|c| match c {
             GlobalConstraint::Bank(b) => {
-                Some((b.bank_id, b.voltage.as_deref().and_then(parse_voltage_mv)))
+                let lit = b.voltage.as_deref().and_then(parse_voltage_mv);
+                let dom = b.domain.as_deref().and_then(|name| {
+                    if !hir.power_domain_decls.iter().any(|d| d.name == name) {
+                        errors.push(format!(
+                            "bank {}: `domain: {}` references an undeclared power domain",
+                            b.bank_id, name
+                        ));
+                        return None;
+                    }
+                    let v = domain_voltage(name);
+                    if v.is_none() {
+                        errors.push(format!(
+                            "bank {}: power domain `{}` declares no usable rail voltage (add an `on` state with a voltage)",
+                            b.bank_id, name
+                        ));
+                    }
+                    v
+                });
+                // A literal voltage and a domain-derived one must not disagree.
+                if let (Some(l), Some(d)) = (lit, dom) {
+                    if l != d {
+                        errors.push(format!(
+                            "bank {}: literal voltage {:.1} V disagrees with domain `{}`'s rail {:.1} V — remove one or make them match",
+                            b.bank_id,
+                            l as f64 / 1000.0,
+                            b.domain.as_deref().unwrap_or("?"),
+                            d as f64 / 1000.0
+                        ));
+                    }
+                }
+                Some((b.bank_id, dom.or(lit)))
             }
             _ => None,
         })

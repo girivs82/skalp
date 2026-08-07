@@ -1514,6 +1514,13 @@ bank/VCCIO compatibility check failed with 1 error(s):
 Known standards cover the LVCMOS/LVTTL/SSTL/HSTL/LVDS families; unknown
 standards are skipped rather than flagged.
 
+A bank's rail may also be fed by a **declared power domain** instead of a
+literal voltage — `bank 0 { domain: vddio_a }` takes the rail voltage from
+`vddio_a`'s `on` state, unifying the bank system with the supply tree.
+Referencing an undeclared domain, a domain with no usable rail voltage, or
+declaring a literal `voltage:` that disagrees with the named domain's rail
+are all build errors.
+
 **Power stubbing for ASIC prototyping.** `switched(...)` and
 `regulated(...)` domains are unimplementable in fabric. `skalp synth` on an
 FPGA device refuses such designs by default:
@@ -1558,9 +1565,13 @@ or a signal of the top itself. Two checks run on the resolved domain:
   when the target needs switching, and recommends an always-on domain.
   (Per-state PST-liveness analysis is future work — Section 21.1.)
 
-A control path that does not resolve to an instance or signal of the top
-entity produces a warning: the cone cannot be checked, but the design may
-resolve at a different top.
+Control paths resolve **deeply**: each leading segment that names an
+instance is followed through the hierarchy (`soc.pmu.gpu_sleep` walks
+Top → `soc` → `pmu`), with containment inheritance at every hop;
+resolution stops at the first segment that is not an instance — the
+remainder is a signal or port of the entity reached. A path whose first
+segment resolves to nothing produces a warning: the cone cannot be
+checked, but the design may resolve at a different top.
 
 ### 18.9 The System Power State Table
 
@@ -1749,11 +1760,11 @@ the coarse domain-crossing warning, and UPF emission from the checked
 model. The following recorded pieces remain **future work** and must not
 be relied on:
 
-1. *Deep control-path resolution.* No-self-power, controller liveness,
-   and full per-state PST-liveness are implemented (Sections 18.8,
-   18.9). Still future: resolving control paths deeper than the top
-   entity's immediate instances, and modeling state TRANSITIONS (the
-   liveness rule is conservatively per-state, not per-edge).
+1. *State-transition modeling.* No-self-power, controller liveness,
+   full per-state PST-liveness, and deep control-path resolution are
+   implemented (Sections 18.8, 18.9). Still future: a transition graph
+   between system states, which would sharpen liveness from per-state
+   to per-edge and allow sequencing-order checks.
 
 2. *Pin-level supply compatibility.* Comparing a control driver's domain
    voltage against each switch/macro pin's related supply (Liberty
@@ -1785,11 +1796,11 @@ be relied on:
 7. *Instance-level rebinding.* Binding is per-entity; rebinding one
    `inst` of an entity to a different domain is not implemented.
 
-8. *FPGA bank/domain linkage.* The bank/VCCIO compatibility check and
-   `--power-stub` prototyping report are implemented (Section 18.7).
-   Still future: naming a declared power domain as a bank's rail (today
-   bank voltages are literals), and modeling device supply trees
-   (VCCINT as an implicit external domain for fabric logic).
+8. *Implicit device supply trees.* Bank/VCCIO checking, `--power-stub`,
+   and domain-named bank rails (`bank 0 { domain: vddio_a }`) are
+   implemented (Section 18.7). Still future: modeling device supply
+   trees — VCCINT as an implicit external domain for fabric logic, so
+   the same-fabric CCF truth needs no user modeling.
 
 **Vocabulary note.** `intent` declarations (Section 15) are *advisory*
 to synthesis. `#[cdc]`, the safety attributes, and power-domain binding

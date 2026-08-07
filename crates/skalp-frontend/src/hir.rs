@@ -3305,6 +3305,11 @@ pub struct BankConstraint {
     pub voltage: Option<String>,
     /// Default I/O standard for the bank
     pub io_standard: Option<String>,
+    /// Power domain feeding this bank's rail (`bank 0 { domain: vddio_a }`).
+    /// The rail voltage then comes from the domain's `on` state; a literal
+    /// `voltage:` and a `domain:` may not disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 /// Floorplan constraint

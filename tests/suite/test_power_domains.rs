@@ -548,3 +548,102 @@ mod power_state_table {
         );
     }
 }
+
+#[cfg(test)]
+mod bank_domain_and_deep_paths {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn compile_checked(src: &str) -> Result<skalp_mir::Mir, String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+    }
+
+    fn design(io_std: &str, pmu_domain: &str) -> String {
+        format!(
+            r#"
+            power_domain vdd_aon: external, states = {{ on: 0.9V }};
+            power_domain vddio_a: external, states = {{ on: 3.3V }};
+            power_domain vreg: external;
+            power_domain vdd_core = regulated(vreg, macro = u_ldo, states = {{ on: 0.9V, off }});
+            power_domain vdd_gpu = switched(vdd_core, on_when = !soc.pmu.gpu_sleep, states = {{ on: 0.9V, off }});
+
+            constraint physical {{
+                bank 0 {{ domain: vddio_a }}
+            }}
+
+            #[power_domain({pmu_domain})]
+            entity Pmu {{
+                in clk: clock
+                out gpu_sleep: bit
+            }}
+
+            impl Pmu {{
+                signal s: bit = 0
+                on(clk.rise) {{ s = !s }}
+                gpu_sleep = s
+            }}
+
+            entity Soc {{
+                in clk: clock
+                out slp: bit
+            }}
+
+            impl Soc {{
+                inst pmu = Pmu {{ clk: clk }}
+                slp = pmu.gpu_sleep
+            }}
+
+            entity Top {{
+                in clk: clock @ {{ pin: "A1", io_standard: "{io_std}", bank: 0 }}
+                out slp: bit
+            }}
+
+            impl Top {{
+                inst soc = Soc {{ clk: clk }}
+                slp = soc.slp
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn domain_fed_bank_and_deep_path_pass() {
+        compile_checked(&design("LVCMOS33", "vdd_aon")).expect("valid design must build");
+    }
+
+    #[test]
+    fn domain_fed_bank_drives_the_vccio_check() {
+        // Bank 0's rail comes from vddio_a's `on` state (3.3V), no literal.
+        let err = compile_checked(&design("LVCMOS18", "vdd_aon"))
+            .expect_err("1.8V pin on domain-fed 3.3V bank");
+        assert!(err.contains("VCCIO mismatch"), "wrong error: {err}");
+    }
+
+    #[test]
+    fn deep_control_path_resolves_for_no_self_power() {
+        // Two hops: Top -> soc -> pmu; PMU bound inside the gated domain.
+        let err = compile_checked(&design("LVCMOS33", "vdd_gpu"))
+            .expect_err("deep self-powered control must fail");
+        assert!(
+            err.contains("no-self-power") && err.contains("soc.pmu.gpu_sleep"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_bank_domain_is_an_error() {
+        let src = design("LVCMOS33", "vdd_aon").replace("domain: vddio_a", "domain: nope");
+        let err = compile_checked(&src).expect_err("undeclared bank domain");
+        assert!(err.contains("undeclared power domain"), "wrong error: {err}");
+    }
+
+    #[test]
+    fn literal_vs_domain_voltage_disagreement_is_an_error() {
+        let src = design("LVCMOS33", "vdd_aon")
+            .replace("domain: vddio_a", "voltage: 1.8, domain: vddio_a");
+        let err = compile_checked(&src).expect_err("1.8 literal vs 3.3 domain");
+        assert!(err.contains("disagrees with domain"), "wrong error: {err}");
+    }
+}

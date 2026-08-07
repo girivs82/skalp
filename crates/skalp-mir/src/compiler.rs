@@ -523,26 +523,41 @@ impl MirCompiler {
                     .or_else(|| uninstantiated.first().copied())
             };
 
-            // Resolve a control path's driving DOMAIN at the root.
+            // Resolve a control path's driving DOMAIN at the root, walking
+            // as many leading segments as name instances (deep paths like
+            // `soc.pmu.gpu_sleep`), with containment inheritance at each
+            // hop. Resolution stops at the first segment that is not an
+            // instance — the remainder is a signal/port of the entity
+            // reached so far.
             let resolve_ctrl_domain = |ctrl: &HirPowerCtrl| -> Option<String> {
                 let root = root_entity?;
-                let root_domain = root
+                let mut entity = root;
+                let mut eff_domain = root
                     .power_domain_config
                     .as_ref()
                     .map(|c| c.domain_name.clone());
-                let first = ctrl.path.first()?;
-                let root_impl = hir.implementations.iter().find(|i| i.entity == root.id)?;
-                if let Some(inst) = root_impl.instances.iter().find(|i| &i.name == first) {
-                    let child = hir.entities.iter().find(|e| e.id == inst.entity)?;
-                    child
+                for (hops, segment) in ctrl.path.iter().enumerate() {
+                    if hops > 64 {
+                        break;
+                    }
+                    let Some(imp) = hir.implementations.iter().find(|i| i.entity == entity.id)
+                    else {
+                        break;
+                    };
+                    let Some(inst) = imp.instances.iter().find(|i| &i.name == segment) else {
+                        break; // remainder is a signal/port of `entity`
+                    };
+                    let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                        break;
+                    };
+                    eff_domain = child
                         .power_domain_config
                         .as_ref()
                         .map(|c| c.domain_name.clone())
-                        .or(root_domain)
-                } else {
-                    // Bare signal / port of the root itself
-                    root_domain
+                        .or(eff_domain);
+                    entity = child;
                 }
+                eff_domain
             };
 
             for decl in &hir.power_domain_decls {
