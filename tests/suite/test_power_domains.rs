@@ -379,3 +379,71 @@ mod fpga_leg {
         assert!(fpga_power_posture(&ext_only, false).expect("ok").is_none());
     }
 }
+
+#[cfg(test)]
+mod control_cone {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn compile_checked(src: &str) -> Result<skalp_mir::Mir, String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+    }
+
+    fn design(pmu_domain: &str) -> String {
+        format!(
+            r#"
+            power_domain vdd_aon: external, states = {{ on: 0.9V }};
+            power_domain vreg: external;
+            power_domain vdd_core = regulated(vreg, macro = u_ldo, states = {{ on: 0.9V, off }});
+            power_domain vdd_gpu = switched(vdd_core, on_when = !pmu.gpu_sleep, states = {{ on: 0.9V, off }});
+
+            #[power_domain({pmu_domain})]
+            entity Pmu {{
+                in clk: clock
+                out gpu_sleep: bit
+            }}
+
+            impl Pmu {{
+                signal s: bit = 0
+                on(clk.rise) {{ s = !s }}
+                gpu_sleep = s
+            }}
+
+            entity Top {{
+                in clk: clock
+                out slp: bit
+            }}
+
+            impl Top {{
+                inst pmu = Pmu {{ clk: clk }}
+                slp = pmu.gpu_sleep
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn always_on_controller_passes() {
+        compile_checked(&design("vdd_aon")).expect("AON controller must pass");
+    }
+
+    #[test]
+    fn self_powered_control_is_an_error() {
+        // The PMU inside the domain it switches: a domain cannot switch its
+        // own supply back on.
+        let err = compile_checked(&design("vdd_gpu")).expect_err("no-self-power must fail");
+        assert!(
+            err.contains("no-self-power") && err.contains("vdd_gpu"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn switchable_controller_warns_but_builds() {
+        // vdd_core can power off (declares an `off` state): liveness warning
+        // only — the build succeeds.
+        compile_checked(&design("vdd_core")).expect("liveness is a warning, not an error");
+    }
+}

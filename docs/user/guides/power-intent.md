@@ -387,9 +387,10 @@ language specification's "Domain Lifetimes Are Clock-Only" design note.
 These parts of the recorded power-domain design are **not implemented**;
 do not rely on them:
 
-- **Control-cone resolution** for `on_when`/`ack_on`: the no-self-power
-  check (a domain must not gate its own supply) and PST-liveness (the
-  controlling domain must be ON whenever the target transitions).
+- **Full PST-liveness for switch controls.** No-self-power (a domain
+  must not gate its own supply — build error) and a simplified
+  controller-liveness warning (the controller should be always-on) ARE
+  implemented; per-state liveness analysis needs the PST legality layer.
 - **Pin-level related-supply compatibility** (Liberty
   `related_power_pin`; needs per-pin data in `.sklib`).
 - **Port-granular isolation / level-shifter strategies and inference.**

@@ -1537,6 +1537,31 @@ The NOTE is the dependent-failure reality on FPGAs: a same-fabric safety
 mechanism can claim other independence classes (timing, design diversity),
 but never supply independence. External-only supply trees need no stubbing.
 
+### 18.8 Control-Cone Checks for Switched Domains
+
+The `on_when` / `ack_on` paths of a `switched(...)` domain are resolved
+against the hierarchy root: the first path segment names an instance in
+the top entity (the control's domain is that instance's effective domain)
+or a signal of the top itself. Two checks run on the resolved domain:
+
+- **No-self-power (error).** The control/ack driver must not live in the
+  switched domain or any of its descendants — a domain cannot switch its
+  own supply back on:
+
+  ```text
+  power_domain `vdd_gpu`: on_when control `!pmu.gpu_sleep` is driven from domain `vdd_gpu`, which is `vdd_gpu` itself or a descendant — a domain cannot switch its own supply (no-self-power)
+  ```
+
+- **Controller liveness (warning, simplified).** The controller should be
+  always-on. If the resolved domain is itself switched or declares an
+  `off` state, the build warns that the controller may be down exactly
+  when the target needs switching, and recommends an always-on domain.
+  (Per-state PST-liveness analysis is future work — Section 21.1.)
+
+A control path that does not resolve to an instance or signal of the top
+entity produces a warning: the cone cannot be checked, but the design may
+resolve at a different top.
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1679,14 +1704,13 @@ the coarse domain-crossing warning, and UPF emission from the checked
 model. The following recorded pieces remain **future work** and must not
 be relied on:
 
-1. *Resolution of `on_when` / `ack_on` control cones.* Today the paths
-   are recorded and exported to UPF but not resolved against the design,
-   so the two derived checks do not run yet:
-   - **No-self-power:** the control/ack cone must not pass through the
-     switched domain or its descendants (a domain cannot switch its own
-     supply back on).
-   - **PST-liveness:** the controlling domain must be ON in every power
-     state in which the target domain transitions.
+1. *Full PST-liveness for switch controls.* No-self-power and the
+   simplified controller-liveness warning are implemented
+   (Section 18.8). Still future: per-state analysis — the controlling
+   domain must be ON in every power state in which the target domain
+   transitions, which requires the PST legality layer (item 6). Also
+   future: resolving control paths deeper than the top entity's
+   immediate instances.
 
 2. *Pin-level supply compatibility.* Comparing a control driver's domain
    voltage against each switch/macro pin's related supply (Liberty

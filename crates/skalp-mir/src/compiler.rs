@@ -472,6 +472,119 @@ impl MirCompiler {
             .flat_map(|i| i.instances.iter().map(|inst| inst.entity))
             .collect();
 
+        // Control-cone checks for switched domains (spec §18): resolve the
+        // on_when/ack_on path's FIRST segment against the hierarchy root —
+        // an instance name (its entity's effective domain) or a root-local
+        // signal (the root's own domain).
+        //
+        // - No-self-power (ERROR): the control/ack driver must not live in
+        //   the switched domain or any of its descendants — a domain cannot
+        //   switch its own supply back on.
+        // - Controller liveness (WARNING, simplified): the controller should
+        //   be always-on. A controller in a domain that is itself switched
+        //   or declares an `off` state may be down exactly when the target
+        //   needs switching. Full PST-liveness (per-state analysis) is
+        //   future work.
+        {
+            use skalp_frontend::hir::HirPowerCtrl;
+
+            let descendants_of = |root_name: &str| -> HashSet<String> {
+                // Domains whose ancestor chain contains root_name
+                hir.power_domain_decls
+                    .iter()
+                    .filter(|d| ancestors(&d.name).contains(root_name))
+                    .map(|d| d.name.clone())
+                    .collect()
+            };
+            let domain_can_power_off = |name: &str| -> bool {
+                hir.power_domain_decls.iter().any(|d| {
+                    d.name == name
+                        && (matches!(d.derivation, HirPowerDerivation::Switched { .. })
+                            || d.states.iter().any(|s| s.voltage_mv.is_none()))
+                })
+            };
+
+            // Hierarchy root: prefer a declared main entity nothing instantiates.
+            let root_entity = {
+                let uninstantiated: Vec<_> = hir
+                    .entities
+                    .iter()
+                    .filter(|e| {
+                        !hir.implementations
+                            .iter()
+                            .flat_map(|i| i.instances.iter())
+                            .any(|inst| inst.entity == e.id)
+                    })
+                    .collect();
+                hir.main_entity_names
+                    .iter()
+                    .find_map(|n| uninstantiated.iter().find(|e| &e.name == n))
+                    .copied()
+                    .or_else(|| uninstantiated.first().copied())
+            };
+
+            // Resolve a control path's driving DOMAIN at the root.
+            let resolve_ctrl_domain = |ctrl: &HirPowerCtrl| -> Option<String> {
+                let root = root_entity?;
+                let root_domain = root
+                    .power_domain_config
+                    .as_ref()
+                    .map(|c| c.domain_name.clone());
+                let first = ctrl.path.first()?;
+                let root_impl = hir.implementations.iter().find(|i| i.entity == root.id)?;
+                if let Some(inst) = root_impl.instances.iter().find(|i| &i.name == first) {
+                    let child = hir.entities.iter().find(|e| e.id == inst.entity)?;
+                    child
+                        .power_domain_config
+                        .as_ref()
+                        .map(|c| c.domain_name.clone())
+                        .or(root_domain)
+                } else {
+                    // Bare signal / port of the root itself
+                    root_domain
+                }
+            };
+
+            for decl in &hir.power_domain_decls {
+                let HirPowerDerivation::Switched {
+                    on_when, ack_on, ..
+                } = &decl.derivation
+                else {
+                    continue;
+                };
+                let forbidden = descendants_of(&decl.name);
+                for (what, ctrl) in [("on_when", on_when), ("ack_on", ack_on)] {
+                    let Some(ctrl) = ctrl else { continue };
+                    let path_str = format!(
+                        "{}{}",
+                        if ctrl.inverted { "!" } else { "" },
+                        ctrl.path.join(".")
+                    );
+                    match resolve_ctrl_domain(ctrl) {
+                        Some(ctrl_domain) => {
+                            if forbidden.contains(&ctrl_domain) {
+                                errors.push(format!(
+                                    "power_domain `{}`: {} control `{}` is driven from domain `{}`, which is `{}` itself or a descendant — a domain cannot switch its own supply (no-self-power)",
+                                    decl.name, what, path_str, ctrl_domain, decl.name
+                                ));
+                            } else if domain_can_power_off(&ctrl_domain) {
+                                warnings.push(format!(
+                                    "power_domain `{}`: {} control `{}` is driven from domain `{}`, which can itself power off — the controller may be down when `{}` needs switching; drive switch controls from an always-on domain",
+                                    decl.name, what, path_str, ctrl_domain, decl.name
+                                ));
+                            }
+                        }
+                        None => {
+                            warnings.push(format!(
+                                "power_domain `{}`: {} control `{}` does not resolve to an instance or signal of the top entity — the control cone cannot be checked",
+                                decl.name, what, path_str
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // Top-down containment walk; per-instance-edge checks.
         let mut stack: Vec<(skalp_frontend::hir::EntityId, Option<String>, Vec<&str>)> = hir
             .entities
