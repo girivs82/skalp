@@ -595,6 +595,11 @@ impl HirBuilderContext {
                     // Process top-level attributes (like #[pipeline(stages=N)] before entities/functions)
                     self.process_attribute(&child);
                 }
+                SyntaxKind::PowerDomainDecl => {
+                    if let Some(decl) = self.build_power_domain_decl(&child) {
+                        hir.power_domain_decls.push(decl);
+                    }
+                }
                 SyntaxKind::EntityDecl => {
                     if let Some(mut entity) = self.build_entity(&child) {
                         // Apply pending visibility
@@ -807,10 +812,284 @@ impl HirBuilderContext {
 
         hir.unresolved_instances = std::mem::take(&mut self.unresolved_instances);
 
+        self.validate_power_domain_decls(&hir);
+
         if self.errors.is_empty() {
             Ok(hir)
         } else {
             Err(self.errors.clone())
+        }
+    }
+
+    /// Build a HirPowerDomainDecl from a PowerDomainDecl syntax node.
+    ///
+    /// Token layout (validated by the parser):
+    ///   power_domain NAME ':' external [fields] ';'
+    ///   power_domain NAME '=' (regulated|switched) '(' PARENT [fields] ')' ';'
+    /// where fields are `, key = [!] path` at this token level; `states`
+    /// content lives in a nested PowerStateList node.
+    fn build_power_domain_decl(&mut self, node: &SyntaxNode) -> Option<HirPowerDomainDecl> {
+        use crate::hir::{HirPowerCtrl, HirPowerDerivation, HirPowerState};
+
+        let toks: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+
+        // Name = first Ident after the power_domain keyword
+        let name = toks
+            .iter()
+            .skip_while(|t| t.kind() != SyntaxKind::PowerDomainKw)
+            .skip(1)
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Kind word: "external" | "regulated" | "switched"
+        let kind_word = toks
+            .iter()
+            .find(|t| {
+                t.kind() == SyntaxKind::Ident
+                    && matches!(t.text(), "external" | "regulated" | "switched")
+            })
+            .map(|t| t.text().to_string());
+
+        // Parent = first Ident after '(' (regulated/switched forms)
+        let parent = toks
+            .iter()
+            .skip_while(|t| t.kind() != SyntaxKind::LParen)
+            .skip(1)
+            .find(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string());
+
+        // key = [!] path fields at this token level (macro / on_when / ack_on)
+        let mut macro_name: Option<String> = None;
+        let mut on_when: Option<HirPowerCtrl> = None;
+        let mut ack_on: Option<HirPowerCtrl> = None;
+        let mut i = 0;
+        while i < toks.len() {
+            if toks[i].kind() == SyntaxKind::Ident
+                && matches!(toks[i].text(), "macro" | "on_when" | "ack_on")
+                && i + 1 < toks.len()
+                && toks[i + 1].kind() == SyntaxKind::Assign
+            {
+                let key = toks[i].text().to_string();
+                let mut j = i + 2;
+                let inverted = j < toks.len() && toks[j].kind() == SyntaxKind::Bang;
+                if inverted {
+                    j += 1;
+                }
+                let mut path = Vec::new();
+                while j < toks.len() && toks[j].kind() == SyntaxKind::Ident {
+                    path.push(toks[j].text().to_string());
+                    if j + 1 < toks.len() && toks[j + 1].kind() == SyntaxKind::Dot {
+                        j += 2;
+                    } else {
+                        j += 1;
+                        break;
+                    }
+                }
+                if !path.is_empty() {
+                    match key.as_str() {
+                        "macro" => macro_name = Some(path.join(".")),
+                        "on_when" => on_when = Some(HirPowerCtrl { path, inverted }),
+                        "ack_on" => ack_on = Some(HirPowerCtrl { path, inverted }),
+                        _ => unreachable!(),
+                    }
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+
+        // States from the nested PowerStateList node
+        let mut states = Vec::new();
+        if let Some(list) = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::PowerStateList)
+        {
+            let st: Vec<_> = list
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .collect();
+            let mut k = 0;
+            while k < st.len() {
+                if st[k].kind() == SyntaxKind::Ident {
+                    let state_name = st[k].text().to_string();
+                    let mut voltage_mv = None;
+                    if k + 2 < st.len() && st[k + 1].kind() == SyntaxKind::Colon {
+                        let val = st[k + 2].text().replace('_', "");
+                        let unit = st
+                            .get(k + 3)
+                            .filter(|t| t.kind() == SyntaxKind::Ident)
+                            .map(|t| t.text().to_string());
+                        voltage_mv = match unit.as_deref() {
+                            Some("mV") => val.parse::<f64>().ok().map(|v| v as u32),
+                            // volts (explicit V or bare number)
+                            _ => val.parse::<f64>().ok().map(|v| (v * 1000.0).round() as u32),
+                        };
+                        k += if unit.is_some() { 4 } else { 3 };
+                    } else {
+                        k += 1;
+                    }
+                    states.push(HirPowerState {
+                        name: state_name,
+                        voltage_mv,
+                    });
+                    if k < st.len() && st[k].kind() == SyntaxKind::Comma {
+                        k += 1;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+        }
+
+        let derivation = match kind_word.as_deref() {
+            Some("external") => HirPowerDerivation::External,
+            Some("regulated") => {
+                let Some(parent) = parent else {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power_domain `{}`: regulated(...) requires a parent domain",
+                            name
+                        ),
+                        span: self.make_span(node),
+                    });
+                    return None;
+                };
+                HirPowerDerivation::Regulated { parent, macro_name }
+            }
+            Some("switched") => {
+                let Some(parent) = parent else {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power_domain `{}`: switched(...) requires a parent domain",
+                            name
+                        ),
+                        span: self.make_span(node),
+                    });
+                    return None;
+                };
+                HirPowerDerivation::Switched {
+                    parent,
+                    on_when,
+                    ack_on,
+                }
+            }
+            _ => {
+                // Parser already reported the syntax error; skip the decl.
+                return None;
+            }
+        };
+
+        Some(HirPowerDomainDecl {
+            name,
+            derivation,
+            states,
+            span: self.make_span(node),
+        })
+    }
+
+    /// Validate the supply tree and every `#[power_domain(...)]` reference.
+    /// Runs only when declarations exist — designs without them keep the
+    /// legacy annotation-only behavior.
+    fn validate_power_domain_decls(&mut self, hir: &Hir) {
+        use crate::hir::HirPowerDerivation;
+        use std::collections::{HashMap, HashSet};
+
+        if hir.power_domain_decls.is_empty() {
+            return;
+        }
+
+        let mut by_name: HashMap<&str, &crate::hir::HirPowerDomainDecl> = HashMap::new();
+        for decl in &hir.power_domain_decls {
+            if by_name.insert(decl.name.as_str(), decl).is_some() {
+                self.errors.push(HirError {
+                    message: format!("duplicate power_domain declaration `{}`", decl.name),
+                    span: decl.span.clone(),
+                });
+            }
+        }
+
+        for decl in &hir.power_domain_decls {
+            let parent = match &decl.derivation {
+                HirPowerDerivation::External => None,
+                HirPowerDerivation::Regulated { parent, .. }
+                | HirPowerDerivation::Switched { parent, .. } => Some(parent.as_str()),
+            };
+            if let Some(parent) = parent {
+                if !by_name.contains_key(parent) {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power_domain `{}`: unknown parent domain `{}`",
+                            decl.name, parent
+                        ),
+                        span: decl.span.clone(),
+                    });
+                }
+            }
+            // Duplicate state names within a domain
+            let mut seen_states = HashSet::new();
+            for st in &decl.states {
+                if !seen_states.insert(st.name.as_str()) {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power_domain `{}`: duplicate state `{}`",
+                            decl.name, st.name
+                        ),
+                        span: decl.span.clone(),
+                    });
+                }
+            }
+        }
+
+        // Cycle detection: walk parents with a visited set
+        for decl in &hir.power_domain_decls {
+            let mut visited = HashSet::new();
+            let mut cur = decl.name.as_str();
+            loop {
+                if !visited.insert(cur) {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power_domain `{}`: supply tree contains a cycle through `{}`",
+                            decl.name, cur
+                        ),
+                        span: decl.span.clone(),
+                    });
+                    break;
+                }
+                let Some(d) = by_name.get(cur) else { break };
+                match &d.derivation {
+                    HirPowerDerivation::External => break,
+                    HirPowerDerivation::Regulated { parent, .. }
+                    | HirPowerDerivation::Switched { parent, .. } => {
+                        if by_name.contains_key(parent.as_str()) {
+                            cur = parent.as_str();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Checked references: every #[power_domain(name)] on an entity must
+        // name a declared domain.
+        for entity in &hir.entities {
+            if let Some(cfg) = &entity.power_domain_config {
+                if !by_name.contains_key(cfg.domain_name.as_str()) {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "entity `{}`: #[power_domain({})] references an undeclared power domain — declare it with `power_domain {}: ...;`",
+                            entity.name, cfg.domain_name, cfg.domain_name
+                        ),
+                        span: entity.span.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -11925,16 +12204,40 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Extract the domain name from the first string literal
+        // Extract the domain name: first string literal (legacy form) or the
+        // first bare identifier after the attribute name (checked-reference
+        // form, `#[power_domain(vdd_core)]`). `allow_shared_supply` is the
+        // dependent-failure justification flag and is not a domain name.
         let mut domain_name = String::new();
         let mut voltage: Option<f64> = None;
         let mut is_always_on = false;
+        let mut allow_shared_supply = false;
+        let mut seen_attr_name = false;
 
         let mut i = 0;
         while i < tokens.len() {
             // Look for string literals (domain name)
             if tokens[i].kind() == SyntaxKind::StringLiteral && domain_name.is_empty() {
                 domain_name = tokens[i].text().trim_matches('"').to_string();
+            }
+
+            if (tokens[i].kind() == SyntaxKind::Ident
+                || tokens[i].kind() == SyntaxKind::PowerDomainKw)
+                && tokens[i].text() == "power_domain"
+            {
+                seen_attr_name = true;
+            } else if tokens[i].kind() == SyntaxKind::Ident
+                && tokens[i].text() == "allow_shared_supply"
+            {
+                allow_shared_supply = true;
+            } else if seen_attr_name
+                && domain_name.is_empty()
+                && tokens[i].kind() == SyntaxKind::Ident
+                && !matches!(tokens[i].text(), "voltage" | "always_on")
+                && (i + 1 >= tokens.len() || tokens[i + 1].kind() != SyntaxKind::Assign)
+            {
+                // Bare identifier form: a checked reference to a declared domain
+                domain_name = tokens[i].text().to_string();
             }
 
             // Look for voltage parameter: voltage = 3.3
@@ -11969,6 +12272,7 @@ impl HirBuilderContext {
             domain_name,
             voltage,
             is_always_on,
+            allow_shared_supply,
         })
     }
 

@@ -540,6 +540,10 @@ pub enum SyntaxKind {
     PathSegment,
     Visibility,
 
+    // Power-domain declarations (spec §20.1 implemented subset)
+    PowerDomainDecl,
+    PowerStateList,
+
     // Placeholder for the end
     __Last,
 }

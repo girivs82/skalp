@@ -10,6 +10,7 @@ This document provides a comprehensive reference for all attributes available in
 - [Clock Domain Crossing](#clock-domain-crossing)
   - [#[cdc]](#cdc)
 - [Power Intent](#power-intent)
+  - [#[power_domain]](#power_domain)
   - [#[retention]](#retention)
   - [#[isolation]](#isolation)
   - [#[level_shift]](#level_shift)
@@ -264,7 +265,103 @@ wrote in the `impl`:
 
 ## Power Intent
 
-Power intent attributes allow you to specify power management requirements directly in your HDL code, eliminating the need for separate UPF files. These attributes emit synthesis attributes (e.g. `RETAIN`, `DONT_TOUCH`) on the affected registers in the generated SystemVerilog. (UPF file generation is planned but not yet implemented.)
+Power intent lives in the language, not in a side file. Top-level
+`power_domain` declarations describe the supply tree, `#[power_domain]`
+binds entities to it, and `skalp build` checks the result (supply
+independence of safety mechanisms, domain crossings) and emits IEEE 1801
+UPF (`design.upf`) from the checked model whenever declarations exist. See
+the [Power Intent Guide](../guides/power-intent.md) and the language
+specification's Power Domains section for the full model.
+
+The signal-level attributes below (`#[retention]`, `#[isolation]`,
+`#[level_shift]`, `#[pdc]`) are at various stages: `#[retention]` emits
+synthesis attributes (e.g. `RETAIN`, `DONT_TOUCH`) on the affected
+registers, and `#[isolation]` participates in the domain-crossing check;
+their full semantics (retention sequencing, cell insertion, port-granular
+strategies) are still future work.
+
+### #[power_domain]
+
+Binds an entity — and, by containment, its whole instance subtree — to a
+power domain declared with a top-level `power_domain` declaration. A child
+entity carrying its own `#[power_domain]` rebinds its subtree; everything
+else inherits the domain of its instantiating context.
+
+**Syntax:**
+```skalp
+#[power_domain(name)]
+#[power_domain(name, allow_shared_supply)]
+#[power_domain("name")]     // legacy string form
+```
+
+**Behavior:**
+
+- **Checked reference.** When any `power_domain` declarations exist in the
+  design, the argument must name a declared domain. An undeclared name is
+  a build error with a fix-it:
+
+  ```text
+  error: entity `Foo`: #[power_domain(vdd_cor)] references an undeclared
+  power domain — declare it with `power_domain vdd_cor: ...;`
+  ```
+
+- **Dependent-failure (CCF) check.** A `#[safety_mechanism]` entity whose
+  effective domain shares a supply ancestor with its instantiating
+  context's domain fails the build with a common-cause-failure error
+  (supply independence means disjoint ancestor chains in the supply tree).
+  `allow_shared_supply` is the justified escape hatch: it downgrades the
+  error to a `PDC warning: ... [downgraded: allow_shared_supply]`.
+
+- **Legacy string form.** `#[power_domain("name")]` still parses and is
+  checked against the declarations in exactly the same way. In a design
+  with **no** `power_domain` declarations, both forms are legacy
+  annotation-only: no checking, no UPF emission.
+
+**Example:**
+
+```skalp
+power_domain vdd_core: external;
+power_domain vdd_mon: external;
+
+#[power_domain(vdd_mon)]
+#[safety_mechanism(type = watchdog)]
+entity Watchdog {
+    in clk: clock
+    in kick: bit
+    out timeout: bit
+}
+
+impl Watchdog {
+    signal cnt: bit[8] = 0
+    on(clk.rise) {
+        if kick {
+            cnt = 0
+        } else {
+            cnt = cnt + 1
+        }
+    }
+    timeout = cnt == 255
+}
+
+#[power_domain(vdd_core)]
+entity Controller {
+    in clk: clock
+    in kick: bit
+    out wd_timeout: bit
+}
+
+impl Controller {
+    inst wd = Watchdog { clk: clk, kick: kick }
+    wd_timeout = wd.timeout
+}
+```
+
+`Watchdog` monitors logic in `vdd_core` but is bound to the independent
+supply path `vdd_mon`, so the dependent-failure check passes. Binding it
+to `vdd_core` (or any domain sharing an ancestor with it) would fail the
+build.
+
+---
 
 ### #[retention]
 
@@ -340,6 +437,13 @@ reg [3:0] fsm_state;
 ### #[isolation]
 
 Specifies isolation cell requirements for signals crossing power domain boundaries. When the source domain is powered down, the signal is clamped to a safe value.
+
+Declaring an `#[isolation]` signal also feeds the power-domain crossing
+check: an instantiation edge between two different power domains draws a
+`PDC warning: nets cross power domains ...` unless at least one side of
+the edge declares an `#[isolation]` signal. The check is coarse
+(presence-only); port-granular strategies and isolation-cell insertion
+are future work.
 
 **Syntax:**
 ```skalp
@@ -733,6 +837,7 @@ impl ParallelProcessor {
 | `#[breakpoint]` | signal | Debug breakpoint |
 | `#[trace]` | signal | Waveform tracing |
 | `#[cdc]` | signal | Clock domain crossing |
+| `#[power_domain]` | entity | Checked power-domain binding (containment) |
 | `#[retention]` | signal | Power retention |
 | `#[isolation]` | signal | Power isolation |
 | `#[level_shift]` | signal | Voltage level shifting |

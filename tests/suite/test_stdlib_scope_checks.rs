@@ -14,11 +14,8 @@ mod stdlib_scope_checks {
 
     fn compile(source: &str, tag: &str) -> Result<skalp_mir::Mir, String> {
         std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
-        let temp = std::env::temp_dir().join(format!(
-            "stdlib_scope_{}_{}.sk",
-            tag,
-            std::process::id()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("stdlib_scope_{}_{}.sk", tag, std::process::id()));
         let mut f = std::fs::File::create(&temp).expect("temp file");
         f.write_all(source.as_bytes()).expect("write");
         let ctx = parse_and_build_compilation_context(&temp).expect("parse + modules");

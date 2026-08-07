@@ -120,6 +120,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 safety_definitions: hir.safety_definitions.clone(),
                 unresolved_instances: hir.unresolved_instances.clone(),
                 main_entity_names: hir.main_entity_names.clone(),
+                power_domain_decls: hir.power_domain_decls.clone(),
             };
 
             // Collect instantiations from current state
@@ -441,6 +442,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             safety_definitions: hir.safety_definitions.clone(),
             unresolved_instances: hir.unresolved_instances.clone(),
             main_entity_names: hir.main_entity_names.clone(),
+            power_domain_decls: hir.power_domain_decls.clone(),
         }
     }
 

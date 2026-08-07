@@ -39,6 +39,17 @@ skalp build uart.sk -o build/uart
 skalp sim uart.sk
 ```
 
+### [power_domains.sk](../../examples/power_domains.sk)
+- **Purpose**: Power-domain modeling — supply tree, checked binding, UPF output
+- **Features**: `power_domain` declarations (`external` / `regulated` / `switched`), `#[power_domain]` containment binding, dependent-failure (CCF) check on a `#[safety_mechanism]`, UPF emission
+- **Concepts**: Supply-tree independence, common-cause failure, power intent as checked language model
+- **Location**: repository `examples/` directory
+
+```bash
+# Emits build/design.sv and build/design.upf (power intent)
+skalp build examples/power_domains.sk -o build
+```
+
 ## Running Examples
 
 ### Build and Simulate

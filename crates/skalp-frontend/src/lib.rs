@@ -2460,6 +2460,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         safety_definitions: safety_attributes::ModuleSafetyDefinitions::default(),
         unresolved_instances: Vec::new(),
         main_entity_names: Vec::new(),
+        power_domain_decls: Vec::new(),
     })
 }
 

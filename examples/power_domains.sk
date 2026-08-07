@@ -1,0 +1,58 @@
+// Power domains: supply-tree declarations, checked #[power_domain] binding,
+// the dependent-failure (CCF) check, and UPF emission.
+//
+// The supply tree records HOW each rail is derived. Independence for the
+// CCF check is ancestry: vdd_core and vdd_gpu both descend from vreg_main,
+// so they are NOT independent of each other; vdd_mon is a separate supply
+// path.
+//
+// Build emits design.upf alongside design.sv:
+//   skalp build examples/power_domains.sk -o build
+
+power_domain vreg_main: external;
+power_domain vdd_core = regulated(vreg_main, macro = u_ldo_core,
+                                  states = { on: 0.9V, ret: 0.6V, off });
+power_domain vdd_gpu  = switched(vdd_core, on_when = !pmu_gpu_sleep,
+                                 ack_on = pmu_gpu_ack,
+                                 states = { on: 0.9V, off });
+power_domain vdd_mon: external;
+
+// The watchdog monitors Controller. Binding it to vdd_mon (an independent
+// supply path) satisfies the dependent-failure check; binding it to
+// vdd_core — or anything else under vreg_main — would FAIL the build with
+// a common-cause-failure error.
+#[power_domain(vdd_mon)]
+#[safety_mechanism(type = watchdog)]
+entity Watchdog {
+    in clk: clock
+    in kick: bit
+    out timeout: bit
+}
+
+impl Watchdog {
+    signal cnt: bit[8] = 0
+    on(clk.rise) {
+        if kick {
+            cnt = 0
+        } else {
+            cnt = cnt + 1
+        }
+    }
+    timeout = cnt == 255
+}
+
+#[power_domain(vdd_core)]
+entity Controller {
+    in clk: clock
+    in kick: bit
+    out wd_timeout: bit
+    out q: bit[8]
+}
+
+impl Controller {
+    inst wd = Watchdog { clk: clk, kick: kick }
+    signal c: bit[8] = 0
+    on(clk.rise) { c = c + 1 }
+    q = c
+    wd_timeout = wd.timeout
+}

@@ -1364,6 +1364,36 @@ fn build_design(
                 info!("Timing constraints written to {:?}", constraints_path);
             }
 
+            // Emit UPF from the checked power-domain model (one backend of
+            // the in-IR model; the native flow consumes the model directly)
+            // Top = a module nothing instantiates (the hierarchy root),
+            // preferring declared main entities.
+            let top_for_upf = {
+                use std::collections::HashSet;
+                let instantiated: HashSet<_> = mir
+                    .modules
+                    .iter()
+                    .flat_map(|m| m.instances.iter().map(|i| i.module))
+                    .collect();
+                let roots: Vec<&str> = mir
+                    .modules
+                    .iter()
+                    .filter(|m| !instantiated.contains(&m.id))
+                    .map(|m| m.name.as_str())
+                    .collect();
+                hir.main_entity_names
+                    .iter()
+                    .find(|n| roots.contains(&n.as_str()))
+                    .cloned()
+                    .or_else(|| roots.first().map(|s| s.to_string()))
+                    .unwrap_or_default()
+            };
+            if let Some(upf) = skalp_mir::upf::generate_upf(&hir, &mir, &top_for_upf) {
+                let upf_path = output_dir.join("design.upf");
+                fs::write(&upf_path, upf)?;
+                println!("📄 Power intent: {:?}", upf_path);
+            }
+
             output_path
         }
         "v" | "verilog" => {

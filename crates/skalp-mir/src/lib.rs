@@ -19,6 +19,7 @@ pub mod ssa_conversion;
 pub mod timing;
 pub mod transform;
 pub mod undriven;
+pub mod upf;
 
 // Shared utility modules for consistent transformations
 pub mod name_registry;

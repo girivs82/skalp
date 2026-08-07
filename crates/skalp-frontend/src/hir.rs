@@ -65,6 +65,11 @@ pub struct PowerDomainConfig {
     /// True if this is an always-on domain (cannot be power-gated)
     #[serde(default)]
     pub is_always_on: bool,
+    /// Justified shared-supply exception: downgrades the dependent-failure
+    /// (CCF) check from error to warning for this entity
+    /// (`#[power_domain(x, allow_shared_supply)]`)
+    #[serde(default)]
+    pub allow_shared_supply: bool,
 }
 
 // ============================================================================
@@ -160,6 +165,9 @@ pub struct Hir {
     /// Empty means "unknown" — treat every module as reachable (strict mode).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub main_entity_names: Vec<String>,
+    /// Top-level power-domain declarations (supply tree; spec §20.1)
+    #[serde(default)]
+    pub power_domain_decls: Vec<HirPowerDomainDecl>,
 }
 
 /// Entity in HIR
@@ -1233,6 +1241,72 @@ pub struct HirPowerDomain {
     /// Supply network name (e.g., VDD_CORE)
     pub supply: Option<String>,
     /// Voltage in millivolts (e.g., 900 for 0.9V)
+    pub voltage_mv: Option<u32>,
+}
+
+/// A top-level power-domain declaration (spec §20.1 implemented subset).
+///
+/// ```text
+/// power_domain vreg_main: external;
+/// power_domain vdd_core = regulated(vreg_main, macro = u_ldo_core,
+///                                   states = { on: 0.9V, ret: 0.6V, off });
+/// power_domain vdd_gpu  = switched(vdd_core, on_when = !pmu.gpu_sleep,
+///                                  ack_on = pmu.gpu_ack);
+/// ```
+///
+/// The supply tree these declarations form is the basis of the
+/// dependent-failure (CCF) independence check: two domains are
+/// independent iff their ancestor chains are disjoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPowerDomainDecl {
+    /// Domain name (referenced by `#[power_domain(name)]`)
+    pub name: String,
+    /// How the domain's supply is derived
+    pub derivation: HirPowerDerivation,
+    /// Declared supply states (empty means always-on at unspecified voltage)
+    pub states: Vec<HirPowerState>,
+    /// Source span for diagnostics
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<crate::span::SourceSpan>,
+}
+
+/// How a declared power domain's supply is produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HirPowerDerivation {
+    /// A chip supply port; regulation is off-die (board/PMIC)
+    External,
+    /// New voltage from an on-die regulator referenced as a black-box macro
+    Regulated {
+        parent: String,
+        /// Instance name of the regulator hard macro (analog IP); the
+        /// language never models regulation itself
+        macro_name: Option<String>,
+    },
+    /// Same voltage as the parent, gated by power-switch cells
+    Switched {
+        parent: String,
+        /// Boolean control: switch is ON when this (optionally negated)
+        /// signal path is true. Polarity is expressed by negation, not a flag.
+        on_when: Option<HirPowerCtrl>,
+        /// Acknowledge: high when the domain is up (optionally negated)
+        ack_on: Option<HirPowerCtrl>,
+    },
+}
+
+/// An optionally-negated hierarchical signal reference used as switch
+/// control/ack (`!pmu.gpu_sleep`). Recorded structurally in this phase;
+/// resolution-based checks (no-self-power, PST-liveness) are future work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPowerCtrl {
+    pub path: Vec<String>,
+    pub inverted: bool,
+}
+
+/// A declared supply state of a power domain (`on: 0.9V`, `off`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPowerState {
+    pub name: String,
+    /// Voltage in millivolts; None for `off`
     pub voltage_mv: Option<u32>,
 }
 
@@ -2351,6 +2425,7 @@ impl HirBuilder {
         // Stub implementation - will be expanded in Week 4
         Hir {
             name: "main".to_string(),
+            power_domain_decls: Vec::new(),
             comments: vec![],
             entities: Vec::new(),
             entity_aliases: Vec::new(),
@@ -2467,6 +2542,7 @@ impl Hir {
             safety_definitions: ModuleSafetyDefinitions::default(),
             unresolved_instances: Vec::new(),
             main_entity_names: Vec::new(),
+            power_domain_decls: Vec::new(),
         }
     }
 }

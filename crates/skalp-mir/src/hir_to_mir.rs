@@ -17773,6 +17773,18 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // Trait-body entity instantiations register themselves in the
+        // instance maps under the STDLIB impl's bare VariableIds — which
+        // collide with the USER impl's variable numbering. Inlining `c + 1`
+        // (impl Add -> std_adder, let id 0) mid-impl clobbered the entry for
+        // a user's `inst wd` (also id 0), so a later `wd.timeout` resolved
+        // to the adder's ports and the assignment conversion panicked
+        // (Bug #85 guard). The inlined entries are only needed WHILE the
+        // body converts (its result is already MIR afterwards) — snapshot
+        // and restore, same discipline as the BUG #260 placeholder-map save.
+        let saved_instance_outputs = self.entity_instance_outputs.clone();
+        let saved_instance_info = self.entity_instance_info.clone();
+
         // Process body statements directly, handling side effects (entity instantiation,
         // signal declarations) that the old convert_body_to_expression approach lost.
         // This fixes trait method bodies that instantiate entities (e.g., FpMul, std_multiplier).
@@ -17884,6 +17896,10 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
         }
+
+        // Restore the instance maps clobbered by trait-body instantiation
+        self.entity_instance_outputs = saved_instance_outputs;
+        self.entity_instance_info = saved_instance_info;
 
         // Restore the operand overlay (reverse order restores shadowed entries)
         for (name, old) in operand_overlay.into_iter().rev() {

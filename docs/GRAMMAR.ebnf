@@ -22,7 +22,8 @@ item = [ visibility ] ( use_decl | module_decl | entity_decl | entity_alias
                       | impl_block | trait_def | trait_impl | struct_decl
                       | enum_decl | union_decl | type_alias | distinct_type
                       | constant_decl | function_decl | intent_decl
-                      | requirement_decl | global_constraint ) ;
+                      | requirement_decl | global_constraint
+                      | power_domain_decl ) ;
 
 visibility = "pub" ;
 
@@ -30,6 +31,33 @@ use_decl = "use" use_path ";" ;
 use_path = identifier { "::" identifier } [ "::" ( "*" | "{" identifier { "," identifier } "}" ) ] ;
 
 module_decl = "mod" identifier ( ";" | "{" { item } "}" ) ;
+
+(* Power-domain supply-tree declarations (parse.rs:
+   parse_power_domain_decl / parse_power_domain_field /
+   parse_power_state_list). "external", "regulated", "switched",
+   "states", "macro", "on_when", and "ack_on" are contextual
+   identifiers, not keywords — they are matched by text here only. *)
+power_domain_decl = "power_domain" identifier
+                    ( ":" "external" { "," power_domain_field }
+                    | "=" ( "regulated" | "switched" )
+                      "(" identifier { "," power_domain_field } ")"
+                    ) ";" ;
+
+power_domain_field = "states" "=" power_state_list
+                   | identifier "=" power_control_path ;
+                     (* field keys: "macro", "on_when", "ack_on" *)
+
+(* Optionally-negated hierarchical path; polarity is the "!". *)
+power_control_path = [ "!" ] identifier { "." identifier } ;
+
+(* Comma separators are accepted between and after states. "on" is a
+   keyword elsewhere but is accepted as a state name here. *)
+power_state_list = "{" { power_state [ "," ] } "}" ;
+power_state = ( identifier | "on" ) [ ":" power_voltage ] ;
+
+(* Voltage: number plus unit identifier V or mV (e.g. 0.9V, 900mV);
+   stored in millivolts. *)
+power_voltage = ( integer_literal | float_literal ) [ identifier ] ;
 
 (* ============================================ *)
 (*              Lexical Elements                *)
@@ -70,8 +98,11 @@ block_comment = "/*" { ? any character ? } "*/" ;
 (* Attributes may precede entities, impl items, functions, signals, ports
    and for-loops.  Implemented attributes include #[unroll], #[unroll(N)],
    #[cdc(...)], #[safety_mechanism(...)], #[implements(...)],
-   #[detection_signal], and references to user intent declarations
-   (#[my_intent]). Unknown attributes are accepted and ignored. *)
+   #[detection_signal], #[power_domain(name)] /
+   #[power_domain(name, allow_shared_supply)] (also the legacy string
+   form #[power_domain("name")]), and references to user intent
+   declarations (#[my_intent]). Unknown attributes are accepted and
+   ignored. *)
 attribute = "#[" attribute_content "]" ;
 attribute_content = identifier [ "(" attr_args ")" ] [ "::" identifier ] ;
 attr_args = attr_arg { "," attr_arg } ;

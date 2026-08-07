@@ -5,7 +5,7 @@ This document specifies the SKALP language **as implemented by the SKALP
 compiler**. The compiler is the source of truth: every syntax form described
 here is either exercised by the example corpus (`examples/`, `tests/`) or has
 been verified to compile with `skalp build`. Constructs that are planned but
-not implemented are collected in [Section 20](#20-future--not-implemented)
+not implemented are collected in [Section 21](#21-future--not-implemented)
 and are clearly marked; they must not be used in designs.
 
 The formal grammar lives in [GRAMMAR.ebnf](GRAMMAR.ebnf).
@@ -29,9 +29,10 @@ The formal grammar lives in [GRAMMAR.ebnf](GRAMMAR.ebnf).
 15. [The Intent System](#15-the-intent-system)
 16. [Attributes](#16-attributes)
 17. [Physical Constraints](#17-physical-constraints)
-18. [Asynchronous (NCL) Entities](#18-asynchronous-ncl-entities)
-19. [Safety and Verification](#19-safety-and-verification)
-20. [Future / Not Implemented](#20-future--not-implemented)
+18. [Power Domains](#18-power-domains)
+19. [Asynchronous (NCL) Entities](#19-asynchronous-ncl-entities)
+20. [Safety and Verification](#20-safety-and-verification)
+21. [Future / Not Implemented](#21-future--not-implemented)
 
 Appendix A: [Operator Precedence](#appendix-a-operator-precedence)
 Appendix B: [Name Mangling of Flattened Composites](#appendix-b-name-mangling-of-flattened-composites)
@@ -115,7 +116,10 @@ RTL names usable. Contextual (non-reserved) words include:
 
 `area`, `bank`, `pin`, `voltage`, `target`, `fast`, `slow`, `up`, `down`,
 `drive`, `frequency`, `region`, `device`, `open`, `active_high`,
-`active_low`, `mux_style`, `pipeline_style`, `impl_style`.
+`active_low`, `mux_style`, `pipeline_style`, `impl_style`, and the
+power-domain declaration words `external`, `regulated`, `switched`,
+`states`, `macro`, `on_when`, `ack_on` (recognized only inside a
+`power_domain` declaration — see [Section 18](#18-power-domains)).
 
 For example, `signal area: bit[16]` and `in up: bit` are legal.
 
@@ -395,8 +399,9 @@ readability: two tick-kinds distinguishable only by naming convention,
 ordering/default questions, and two inference systems sharing one
 syntactic position. Rust's lifetimes stay readable because there is exactly
 one kind of them; this specification preserves that property. Power
-domains bind structurally via attributes instead — see Section 20.1 for
-the recorded design. Signal-level power *exceptions* (retention registers,
+domains bind structurally via attributes instead — see Section 18 for the
+implemented model and Section 21.1 for the parts that remain future
+work. Signal-level power *exceptions* (retention registers,
 always-on straps in a gated block) are expressed as attributes on the
 specific declarations, which is the natural syntax for exceptions to a
 regional default.
@@ -474,7 +479,7 @@ A `where` clause may follow the parameter list.
 ### 5.3 Async Entities
 
 `async entity` declares a clockless NCL entity — see
-[Section 18](#18-asynchronous-ncl-entities).
+[Section 19](#19-asynchronous-ncl-entities).
 
 ## 6. Implementations, Signals, and Assignment
 
@@ -1134,7 +1139,7 @@ plus the `#[unroll]` / `#[unroll(N)]` loop attribute (Section 11.1).
 
 Anything beyond this — intent as a first-class type, hierarchical intent
 propagation, intent profiles, latency/area/power constraint solving — is
-**future work** (Section 20). Unknown intent property names parse but have
+**future work** (Section 21). Unknown intent property names parse but have
 no synthesis effect.
 
 ### 15.2 Intent Declarations
@@ -1198,8 +1203,10 @@ signals, functions, and `for` loops. Attributes with defined semantics:
 |-----------|-------|--------|
 | `#[unroll]`, `#[unroll(N)]` | `for` loops | Full / partial loop unrolling (Section 11.1) |
 | `#[cdc(...)]` | signals | CDC verification annotation; no hardware (Section 4.3) |
-| `#[safety_mechanism(...)]` | entities | Marks a safety mechanism for FMEA/FMEDA (Section 19) |
+| `#[safety_mechanism(...)]` | entities | Marks a safety mechanism for FMEA/FMEDA (Section 20) |
 | `#[implements(GoalPath)]` | entities | Links a mechanism to a safety goal/requirement |
+| `#[power_domain(name)]` | entities | Binds the entity's instance subtree to a declared power domain; checked reference when any `power_domain` declarations exist (Section 18) |
+| `#[power_domain(name, allow_shared_supply)]` | entities | Same binding; downgrades the dependent-failure error to a documented warning (Section 18.4) |
 | `#[detection_signal]` | output ports | Marks a fault-detection output for diagnostic-coverage measurement |
 | `#[intent_name]` | entities, functions | Applies a declared intent (Section 15.3) |
 
@@ -1235,7 +1242,240 @@ voltages, `io_defaults`, floorplan regions) is parsed at top level.
 There is no CLI flag for merging external constraint files (PCF/XDC);
 inline constraints are the mechanism.
 
-## 18. Asynchronous (NCL) Entities
+## 18. Power Domains
+
+Power domains are modeled **in-language**: the supply tree is declared at
+top level, entities bind to domains by attribute, and the compiler checks
+the result on every `skalp build` — the ISO 26262 dependent-failure
+(supply-independence) check and a domain-crossing check run on the
+instance tree, and IEEE 1801 (UPF) power intent is emitted from the
+checked model. UPF is an *export backend* of the in-compiler model; the
+native flow consumes the model directly and never re-imports the UPF.
+
+See [Section 4.4](#44-design-decision-domain-lifetimes-are-clock-only) for
+why power domains bind structurally via attributes instead of the clock
+lifetime syntax, and [Section 21.1](#211-power-domains-remaining-future-work)
+for the parts of the recorded design that are **not** yet implemented
+(control-cone checks, pin-level supply compatibility, port-granular
+isolation/level-shifter strategies, `#[retention]` semantics, power-fault
+injection, the PST legality table, and the FPGA leg).
+
+### 18.1 Supply-Tree Declarations
+
+A top-level `power_domain` declaration names a rail and records **how it
+is derived** — independence for the safety checks is a property of the
+supply tree, so naming a domain is not enough:
+
+```text
+power_domain NAME : external [, states = { ... }] ;
+power_domain NAME = regulated( PARENT [, macro = IDENT]
+                               [, states = { ... }] ) ;
+power_domain NAME = switched( PARENT [, on_when = [!] PATH]
+                              [, ack_on = [!] PATH]
+                              [, states = { ... }] ) ;
+```
+
+- `external` — a chip supply port. Regulation is the board/PMIC's concern
+  and out of scope.
+- `regulated(parent, macro = ...)` — a new voltage level produced by an
+  on-die analog block (LDO, buck). The regulator is a **black-box
+  hard-macro instance** referenced by name; the language never models its
+  analog behavior.
+- `switched(parent, on_when = ..., ack_on = ...)` — the same voltage,
+  gated by power-switch cells. `on_when` (switch enable) and `ack_on`
+  (acknowledge) each take an **optionally-negated hierarchical path**
+  (`!pmu_gpu_sleep`, `pmu.gpu_ack`): active-low polarity is expressed by
+  the `!`, never by a separate flag.
+
+`states = { ... }` lists the domain's supply states: a state is a name
+with an optional voltage, e.g. `on: 0.9V`, `ret: 600mV`, `off`. Voltages
+accept both volt (`0.9V`) and millivolt (`900mV`) forms and are stored in
+millivolts. `on` is accepted as a state name even though it is a keyword
+elsewhere.
+
+`external`, `regulated`, `switched`, `states`, `macro`, `on_when`, and
+`ack_on` are **contextual identifiers, not keywords**
+([Section 2.2](#22-contextual-keywords)): `in external: bit` and
+`signal states: bit[4]` remain legal everywhere else.
+
+Declarations are validated at build time. Each of the following is a hard
+error: a duplicate domain name, an unknown parent domain, a cycle in the
+supply tree, and a duplicate state name within a domain.
+
+### 18.2 Binding by Containment
+
+`#[power_domain(name)]` on an entity binds that entity — and its **whole
+instance subtree** — to the named domain. A child entity carrying its own
+`#[power_domain]` attribute rebinds its subtree; everything else
+inherits. (Rebinding an individual *instance* at the `inst` site is not
+yet implemented — see Section 21.1.)
+
+When any `power_domain` declarations exist in the design, the attribute
+argument is a **checked reference**: naming an undeclared domain fails
+the build with a fix-it:
+
+```text
+error: entity `Foo`: #[power_domain(vdd_cor)] references an undeclared
+power domain — declare it with `power_domain vdd_cor: ...;`
+```
+
+The legacy string form `#[power_domain("name")]` still parses and is
+checked against the declarations in exactly the same way. In a design
+with **no** `power_domain` declarations, both forms degrade to the legacy
+annotation-only behavior: no checking, no UPF emission.
+
+`#[power_domain(name, allow_shared_supply)]` is the justified
+shared-supply escape hatch for the dependent-failure check
+(Section 18.4).
+
+### 18.3 A Complete Example
+
+The following design (see `examples/power_domains.sk`) declares a supply
+tree and binds a safety mechanism to an independent rail:
+
+```skalp
+// power_domains.sk
+power_domain vreg_main: external;
+power_domain vdd_core = regulated(vreg_main, macro = u_ldo_core,
+                                  states = { on: 0.9V, ret: 0.6V, off });
+power_domain vdd_gpu  = switched(vdd_core, on_when = !pmu_gpu_sleep,
+                                 ack_on = pmu_gpu_ack,
+                                 states = { on: 0.9V, off });
+power_domain vdd_mon: external;
+
+#[power_domain(vdd_mon)]
+#[safety_mechanism(type = watchdog)]
+entity Watchdog {
+    in clk: clock
+    in kick: bit
+    out timeout: bit
+}
+
+impl Watchdog {
+    signal cnt: bit[8] = 0
+    on(clk.rise) {
+        if kick {
+            cnt = 0
+        } else {
+            cnt = cnt + 1
+        }
+    }
+    timeout = cnt == 255
+}
+
+#[power_domain(vdd_core)]
+entity Controller {
+    in clk: clock
+    in kick: bit
+    out wd_timeout: bit
+}
+
+impl Controller {
+    inst wd = Watchdog { clk: clk, kick: kick }
+    wd_timeout = wd.timeout
+}
+```
+
+`Watchdog` is bound to `vdd_mon` (a separate supply path), so the
+dependent-failure check passes. The `vdd_core` → `vdd_mon` instantiation
+edge draws the domain-crossing warning of Section 18.5 unless one side
+declares an `#[isolation]` signal.
+
+### 18.4 The Dependent-Failure (CCF) Check
+
+ISO 26262 dependent-failure analysis requires a safety mechanism to be
+*supply-independent* of the element it monitors — a mechanism sharing a
+rail with its monitored function dies with it (common-cause failure).
+Because the supply tree is in-language, this check runs in the build
+pipeline instead of degenerating to manual UPF review.
+
+**Independence is ancestry**: two domains are independent iff their
+supply-ancestor chains are disjoint. Two rails regulated off one
+`vreg_main` are **not** independent of each other — an LDO filters its
+parent, it does not survive it — and derivation kind does not affect
+independence.
+
+The check: a `#[safety_mechanism]` entity whose effective domain shares a
+supply ancestor with its instantiating context's domain **fails the
+build**. Binding `Watchdog` above to a domain under `vreg_main` produces:
+
+```text
+Error: Failed to compile HIR to MIR with CDC analysis: power-domain
+dependent-failure check failed with 1 error(s):
+  safety mechanism `Watchdog` (instance `wd` in `Controller`) is in power
+  domain `vdd_periph`, which shares a supply ancestor with its context's
+  domain `vdd_core` — not supply-independent from the logic it monitors
+  (common-cause failure) — bind it to an independent supply, or justify
+  with #[power_domain(vdd_periph, allow_shared_supply)]
+```
+
+Where the standard permits a justified shared supply,
+`#[power_domain(name, allow_shared_supply)]` downgrades the error to a
+documented warning:
+
+```text
+PDC warning: safety mechanism `Watchdog` (instance `wd` in `Controller`)
+is in power domain `vdd_periph`, which shares a supply ancestor with its
+context's domain `vdd_core` — not supply-independent from the logic it
+monitors (common-cause failure) [downgraded: allow_shared_supply]
+```
+
+### 18.5 The Domain-Crossing Warning
+
+A net crossing an instantiation edge between two different domains needs
+an isolation strategy at the boundary. The current check is **coarse**:
+if neither the instantiating entity nor the instantiated entity declares
+any `#[isolation]` signal, the build emits a warning (it never fails the
+build):
+
+```text
+PDC warning: nets cross power domains `vdd_core` -> `vdd_mon` (instance
+`wd` of `Watchdog` in `Controller`) with no #[isolation] strategy
+declared on either side
+```
+
+Declaring an `#[isolation(...)]` signal on either side of the edge
+records that the crossing is handled and suppresses the warning.
+Port-granular isolation/level-shifter strategies and inference are future
+work (Section 21.1).
+
+### 18.6 UPF Emission
+
+Whenever `power_domain` declarations exist, `skalp build` writes
+`design.upf` next to `design.sv` (reported as `📄 Power intent: ...`).
+The file contains, per declaration and binding:
+
+- `create_supply_port` / `create_supply_net` (ports only for `external`
+  rails; a `regulated` net is annotated with its driving macro instance),
+- `create_power_domain` with `-elements` listing the **bound instance
+  roots** only — containment makes listing the subtree redundant,
+- `create_supply_set` per domain,
+- `create_power_switch` for each `switched` domain, with `on_state` /
+  `off_state` Boolean expressions derived from `on_when` and an
+  `-ack_port` from `ack_on`,
+- `add_power_state` per declared supply state (voltages from the
+  declaration, `OFF` for voltage-less `off` states).
+
+For the example above, the switch and state-table portion is:
+
+```text
+create_power_switch SW_vdd_gpu -domain PD_vdd_gpu\
+    -input_supply_port {sw_in VDD_CORE}\
+    -output_supply_port {sw_out VDD_GPU}\
+    -control_port {sw_ctrl pmu_gpu_sleep}\
+    -on_state {on_s sw_in {!pmu_gpu_sleep}}\
+    -off_state {off_s {pmu_gpu_sleep}}\
+    -ack_port {sw_ack pmu_gpu_ack {pmu_gpu_ack}}
+
+add_power_state SS_vdd_core -state on {-supply_expr {power == `{FULL_ON, 0.90}`}}
+add_power_state SS_vdd_core -state ret {-supply_expr {power == `{FULL_ON, 0.60}`}}
+add_power_state SS_vdd_core -state off {-supply_expr {power == `{OFF}`}}
+```
+
+The emitted UPF carries a header marking it generated; the checked
+in-language model is authoritative and the file must not be hand-edited.
+
+## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
 synthesized to dual-rail encoding with threshold gates and is
@@ -1265,9 +1505,9 @@ impl NclStage {
   structures. See `examples/ncl/` and NCL_ASYNC_CIRCUITS.md.
 - Async timing analysis runs during build (disable with `--no-async-sta`).
 
-## 19. Safety and Verification
+## 20. Safety and Verification
 
-### 19.1 Safety Annotations and FMEA
+### 20.1 Safety Annotations and FMEA
 
 Safety mechanisms are ordinary entities marked with attributes; the safety
 flow (`skalp build --safety`, `skalp safety`) uses them for fault-injection
@@ -1299,7 +1539,7 @@ goal. `requirement NAME { key: value, ... }` blocks declare requirements
 and safety goals; see `examples/safety/` for complete, compiling designs
 and the ISO 26262 work-product generation options on `skalp build`.
 
-### 19.2 Assertions
+### 20.2 Assertions
 
 Immediate assertions compile in designs and are checked in simulation /
 formal flows:
@@ -1323,7 +1563,7 @@ impl Checked {
 
 `assume(...)` and `cover(...)` take the same form.
 
-### 19.3 Temporal and Formal Layer
+### 20.3 Temporal and Formal Layer
 
 The parser accepts an SVA-style temporal layer — `property`, `sequence`,
 `##N` delays, `[*N]` repetition, `|->` / `|=>` implication, `covergroup` /
@@ -1334,7 +1574,7 @@ unaffected by these constructs. Consult `docs/` verification guides and
 `tests/` for currently supported forms before relying on a specific
 temporal idiom.
 
-### 19.4 Testbenches
+### 20.4 Testbenches
 
 Testbenches are written in **Rust** against the `skalp-testing` `Testbench`
 API (two-language approach): SKALP for synthesizable hardware, Rust
@@ -1342,7 +1582,7 @@ async/await for stimulus and checking, with CPU or GPU (Metal) simulation.
 See `examples/testbench_guide/`. There is no SKALP-language `#[testbench]`
 construct.
 
-## 20. Future / Not Implemented
+## 21. Future / Not Implemented
 
 The following appear in older drafts of this specification or remain
 reserved in the grammar, but are **not implemented**. Using them is either
@@ -1360,147 +1600,67 @@ a hard error or has no effect. They must not appear in designs.
 | Inline timing constraint blocks (`with timing`, `path(...)`, `timing_budget`) | Not implemented |
 | External constraint file merging (`--constraints board.pcf`) | No such CLI option; use inline constraints (Section 17) |
 | `process` / `always` blocks, sensitivity lists | Never part of this dialect; use `on(event)` |
-| `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 18) |
-| Memory/power/debug attribute semantics (`#[memory]`, `#[retention]`, `#[isolation]`, `#[trace]`, `#[breakpoint]`, vendor-IP attributes) | Parse-accepted annotations only; no defined synthesis behavior. For the recorded power-domain design see Section 20.1 |
+| `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 19) |
+| Memory/debug attribute semantics (`#[memory]`, `#[trace]`, `#[breakpoint]`, vendor-IP attributes) | Parse-accepted annotations only; no defined synthesis behavior |
+| `#[retention]` / `#[isolation]` semantics | Parse-accepted; `#[retention]` emits synthesis attributes (`RETAIN`/`DONT_TOUCH`) and `#[isolation]` presence feeds the coarse domain-crossing check (Section 18.5), but retention sequencing, isolation-cell insertion, and port-granular strategies are future (Section 21.1) |
 | `while` loops in synthesizable code | Not synthesizable; use bounded `for` |
 | Entity aliases (`entity Fast = Foo::<N>;`) | Parsed and stored, but an alias cannot yet be instantiated (`unknown entity in instantiation`) |
 | Octal literals (`0o52`) | Not lexed; use decimal/hex/binary |
 
-### 20.1 Power Domains (design recorded, NOT implemented)
+### 21.1 Power Domains: Remaining Future Work
 
-**Status: design decision recorded 2026-08-07. None of this section is
-implemented** — today `#[power_domain("...")]` is a parse-accepted
-annotation carrying a free string, with no checking and no synthesis
-behavior. This section records the settled design so it is not
-relitigated; see Section 4.4 for why power does **not** use the clock
-lifetime syntax.
+The core of the recorded power-domain design (decision 2026-08-07) is now
+implemented and specified in [Section 18](#18-power-domains): supply-tree
+declarations with derivation kinds and states, checked containment
+binding, the dependent-failure (CCF) check with `allow_shared_supply`,
+the coarse domain-crossing warning, and UPF emission from the checked
+model. The following recorded pieces remain **future work** and must not
+be relied on:
 
-**Motivation.** ISO 26262 dependent-failure analysis requires a safety
-mechanism to be *independent* of the element it monitors, and supply
-independence is a primary requirement — a mechanism sharing a rail with
-its monitored function dies with it (common-cause failure). Traditional
-flows cannot check this in-language because power intent lives in a side
-file (UPF); the check degenerates to manual review. SKALP's doctrine —
-the same one behind `#[cdc]` and the safety attributes — is that the
-language *models and verifies* such properties without turning them into
-simulated data. Power is not a port: a supply carries no functional
-waveform, and threading VDD pins through every instantiation would
-pollute designs while still not expressing independence.
-
-**Design.**
-
-1. *Domain declarations with supply parentage AND derivation kind* (top
-   level). Naming a domain is not enough — two domains fed by one
-   regulator share a common-cause ancestor. Independence is a property
-   of the supply tree, and each derivation edge carries HOW it is
-   implemented, because the digital flow, the FMEDA, and codegen treat
-   the three kinds differently:
-
-   ```text
-   power_domain vddio: external;                 // chip supply port (PMIC is off-die)
-   power_domain vreg_main: external;
-   power_domain vdd_aon = regulated(vreg_main, macro = u_ldo_aon,
-                                    states = { on: 0.9V });
-   power_domain vdd_core = regulated(vreg_main, macro = u_ldo_core,
-                                     states = { on: 0.9V, ret: 0.6V, off });
-   power_domain vdd_gpu  = switched(vdd_core,
-                                    on_when = !pmu.gpu_sleep,
-                                    ack_on  = pmu.gpu_ack,
-                                    states = { on: 0.9V, off });
-   power_domain vdd_mon: external;               // independent supply path
-   ```
-
-   - `external` — a chip supply port; regulation is the board/PMIC's
-     concern and out of scope.
-   - `regulated(parent, macro = ...)` — a new voltage level produced by
-     an on-die analog block (LDO, buck). The regulator itself is a
-     **black-box hard-macro instance** referenced by the declaration,
-     never modeled by the language: dropout, PSRR, and loop dynamics
-     live in the analog flow. Its enable/pgood pins are ordinary ports.
-     This mirrors ASIC practice, where UPF sees only "supply net driven
-     by pin VOUT of instance u_ldo" and the regulator is an IP block.
-   - `switched(parent, on_when = ..., ack_on = ...)` — the same voltage,
-     gated by power-switch cells (the UPF `create_power_switch` case).
-     Forces isolation on the region's outputs, permits `#[retention]`,
-     and adds an `off` state to the power state table.
-
-   Two domains are independent iff they share no ancestor below their
-   independence boundaries. Derivation kind does NOT affect
-   independence — an LDO filters its parent, it does not survive it —
-   but it does refine the FMEDA: each kind contributes an enumerable
-   failure-mode set (regulator fail-high = an OVERVOLTAGE hazard that
-   pure loss analysis cannot see; switch stuck-off = domain loss;
-   stuck-on = failure to shed).
-
-2. *States and the power state table.* Each domain declares its supply
-   states with voltages (`on: 0.9V`, `ret: 0.6V`, `off`). Legal
-   combinations across domains form the power state table (PST), which
-   drives isolation/retention/level-shifter inference, multi-voltage
-   timing corners, and the liveness check below.
-
-3. *Switch control: polarity is an expression, domains are inferred.*
-   `on_when` / `ack_on` bind **Boolean expressions**, not raw nets —
-   active-low is ordinary language-level negation (`!pmu.gpu_sleep`),
-   and multi-enable switches (staggered wake) are conjunctions. Glue
-   logic implied by the expression synthesizes into the CONTROLLING
-   domain. No annotation states the control signal's domain: the
-   compiler already knows it from the driver's containment, enabling
-   two checks that side-file flows do by manual review:
+1. *Resolution of `on_when` / `ack_on` control cones.* Today the paths
+   are recorded and exported to UPF but not resolved against the design,
+   so the two derived checks do not run yet:
    - **No-self-power:** the control/ack cone must not pass through the
      switched domain or its descendants (a domain cannot switch its own
      supply back on).
    - **PST-liveness:** the controlling domain must be ON in every power
      state in which the target domain transitions.
 
-4. *Pin-level supply compatibility.* Switch cells and regulator macros
-   declare each pin's related supply (from Liberty
-   `related_power_pin` for library cells; declared on the hard-macro
-   wrapper for analog IP). The compiler compares the control driver's
-   domain voltage — per the declared states — against the pin's
-   expected rail in every shared power state; a mismatch requires a
-   level-shifter strategy, reusing the crossing machinery. Dependency:
-   this requires the `.sklib` technology-library format to carry
-   per-pin related-supply data, which it does not today.
+2. *Pin-level supply compatibility.* Comparing a control driver's domain
+   voltage against each switch/macro pin's related supply (Liberty
+   `related_power_pin`) in every shared power state. Dependency: the
+   `.sklib` technology-library format does not yet carry per-pin
+   related-supply data.
 
-5. *Regional binding by containment.* `#[power_domain(vdd_core)]` on an
-   entity or instance binds the whole region; contained instances
-   inherit unless rebound. The argument becomes a **checked reference**
-   to a declared domain, not a free string — referencing an undeclared
-   domain is a compile error.
+3. *Port-granular isolation and level-shifter strategies and their
+   inference.* The implemented crossing check is coarse
+   (Section 18.5): it only tests for the *presence* of `#[isolation]`
+   signals on either side of an edge. Per-port strategies, clamp-value
+   checking, and level-shifter insertion driven by the PST are future.
 
-6. *Signal-level attributes are for exceptions only* — `#[retention]`,
-   always-on straps — the cases where one declaration genuinely deviates
-   from its region's default.
+4. *`#[retention]` semantics* — retention strategy selection,
+   save/restore sequencing, and PST-driven retention inference. Today
+   the attribute emits synthesis attributes (`RETAIN`, `DONT_TOUCH`) on
+   the register and nothing more.
 
-7. *Two compile-time checks on the instance tree:*
-   - **Dependent-failure (CCF) check:** a `#[safety_mechanism]` entity
-     whose bound domain shares a supply ancestor with the element it
-     `#[implements]` protection for fails the build. Graded like CDC:
-     an explicitly annotated, justified shared domain downgrades to a
-     documented warning where the standard permits it.
-   - **Isolation check:** a net crossing domain regions without an
-     isolation/level-shift strategy at the boundary port is flagged.
+5. *Power-fault injection classes* — whole-domain loss, switch
+   stuck-off/stuck-on, regulator output collapse, overvoltage —
+   evidencing the FMEDA's independence claim beyond per-gate stuck-ats.
 
-8. *UPF is codegen output, not input.* Supply nets/sets, PST,
-   `create_power_switch` (with `on_state`/`off_state` Booleans and ack
-   from the declared expressions), and isolation/level-shift/retention
-   strategies are all emitted from the checked model, so the
-   implementation flow cannot drift from the analyzed design. The power
-   sequencing controller (the PMU) is ordinary SKALP RTL in an
-   always-on domain — sequencing logic is just digital design.
+6. *The power state table (PST) legality layer.* Declared states are
+   validated for name/voltage well-formedness and exported via
+   `add_power_state`, but legal cross-domain state *combinations* are
+   not yet modeled.
 
-9. *Fault-injection extension:* with domains and derivation kinds
-   modeled, power faults become injectable classes beyond per-gate
-   stuck-ats — whole-domain loss, switch stuck-off/stuck-on, regulator
-   output collapse, and overvoltage — directly evidencing the FMEDA's
-   independence claim and the derivation elements' failure modes.
+7. *Instance-level rebinding.* Binding is per-entity; rebinding one
+   `inst` of an entity to a different domain is not implemented.
 
-**Scope line.** The recorded design deliberately stops at: topology +
-states, derivation kind with macro reference, polarity-as-expression,
-the control-domain checks, and pin-level related-supply checking.
-Switch segmentation, rush-current staggering schedules, ack delays, and
-retention sequencing order are implementation-flow concerns, as they
-are in UPF-based flows.
+8. *The FPGA leg.* On FPGA targets the useful checkable property is
+   bank/VCCIO-versus-`io_standard` compatibility, plus stub-with-report
+   behavior for prototyping ASIC designs. `switched` and `regulated`
+   domains are unimplementable in FPGA fabric — logic in the same
+   fabric is never supply-independent, which the CCF check correctly
+   reports.
 
 **Vocabulary note.** `intent` declarations (Section 15) are *advisory*
 to synthesis. `#[cdc]`, the safety attributes, and power-domain binding

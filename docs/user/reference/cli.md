@@ -172,6 +172,17 @@ file. With no source argument, `skalp build` reads the `[build]` section of
 
 (`verilog` and `lir` targets are currently disabled — use `sv` and `mir`.)
 
+When the design contains top-level `power_domain` declarations, the `sv`
+target additionally writes IEEE 1801 power intent to `design.upf` next to
+`design.sv`, reported as:
+
+```
+📄 Power intent: "build/design.upf"
+```
+
+See the [Power Intent Guide](../guides/power-intent.md). Designs without
+`power_domain` declarations produce no UPF file.
+
 ### Examples
 
 **Build a file (positional form):**

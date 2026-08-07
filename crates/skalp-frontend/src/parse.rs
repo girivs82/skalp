@@ -80,6 +80,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
                 Some(SyntaxKind::ConstraintKw) => self.parse_global_constraint_block(),
+                Some(SyntaxKind::PowerDomainKw) => self.parse_power_domain_decl(),
                 Some(SyntaxKind::ConstKw) => {
                     // Check if this is 'const fn' or just 'const'
                     if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
@@ -6591,6 +6592,113 @@ pub fn parse_with_errors(source: &str) -> (SyntaxNode, Vec<ParseError>) {
 }
 
 impl ParseState<'_> {
+    /// Parse a top-level power-domain declaration (spec power-domain subset):
+    ///   power_domain NAME : external [, states = { ... }] ;
+    ///   power_domain NAME = regulated ( PARENT [, macro = IDENT] [, states = { ... }] ) ;
+    ///   power_domain NAME = switched ( PARENT [, on_when = [!] PATH]
+    ///                                  [, ack_on = [!] PATH] [, states = { ... }] ) ;
+    /// `external`/`regulated`/`switched`/`states`/`macro`/`on_when`/`ack_on`
+    /// are contextual identifiers, not keywords.
+    fn parse_power_domain_decl(&mut self) {
+        self.start_node(SyntaxKind::PowerDomainDecl);
+        self.expect(SyntaxKind::PowerDomainKw);
+        self.expect(SyntaxKind::Ident); // domain name
+
+        if self.at(SyntaxKind::Colon) {
+            self.bump(); // ':'
+            if self.at_ident_text("external") {
+                self.bump();
+            } else {
+                self.error("expected 'external' after ':' in power_domain declaration");
+            }
+            while self.at(SyntaxKind::Comma) {
+                self.bump();
+                self.parse_power_domain_field();
+            }
+        } else if self.at(SyntaxKind::Assign) {
+            self.bump(); // '='
+            if self.at_ident_text("regulated") || self.at_ident_text("switched") {
+                self.bump();
+            } else {
+                self.error(
+                    "expected 'regulated' or 'switched' after '=' in power_domain declaration",
+                );
+            }
+            self.expect(SyntaxKind::LParen);
+            self.expect(SyntaxKind::Ident); // parent domain
+            while self.at(SyntaxKind::Comma) {
+                self.bump();
+                self.parse_power_domain_field();
+            }
+            self.expect(SyntaxKind::RParen);
+        } else {
+            self.error("expected ':' or '=' after power_domain name");
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.finish_node();
+    }
+
+    /// One `key = value` field of a power_domain declaration.
+    fn parse_power_domain_field(&mut self) {
+        if self.at_ident_text("states") {
+            self.bump();
+            self.expect(SyntaxKind::Assign);
+            self.parse_power_state_list();
+        } else if self.at(SyntaxKind::Ident) {
+            self.bump(); // key: macro / on_when / ack_on
+            self.expect(SyntaxKind::Assign);
+            // Optionally-negated hierarchical path: [!] IDENT (. IDENT)*
+            if self.at(SyntaxKind::Bang) {
+                self.bump();
+            }
+            self.expect(SyntaxKind::Ident);
+            while self.at(SyntaxKind::Dot) {
+                self.bump();
+                self.expect(SyntaxKind::Ident);
+            }
+        } else {
+            self.error_and_bump("expected power_domain field (states/macro/on_when/ack_on)");
+        }
+    }
+
+    /// `{ name [: voltage], ... }` — voltage is a number followed by a unit
+    /// identifier (V / mV). `on` is a keyword elsewhere; accept it as a state
+    /// name here.
+    fn parse_power_state_list(&mut self) {
+        self.start_node(SyntaxKind::PowerStateList);
+        self.expect(SyntaxKind::LBrace);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            let before = self.current;
+            if self.at(SyntaxKind::Ident) {
+                self.bump();
+            } else if self.at(SyntaxKind::OnKw) {
+                self.bump_as_ident();
+            } else {
+                self.error_and_bump("expected power state name");
+            }
+            if self.at(SyntaxKind::Colon) {
+                self.bump();
+                if self.at(SyntaxKind::FloatLiteral) || self.at(SyntaxKind::IntLiteral) {
+                    self.bump();
+                } else {
+                    self.error("expected voltage value after ':'");
+                }
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // unit: V / mV
+                }
+            }
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+            // Force progress so malformed input degrades to errors, not a hang.
+            if self.current == before {
+                self.error_and_bump("expected power state");
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
     /// Parse a use declaration
     fn parse_use_decl(&mut self) {
         self.start_node(SyntaxKind::UseDecl);

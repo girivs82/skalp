@@ -298,6 +298,23 @@ impl MirCompiler {
             }
         }
 
+        // Power-domain checks (spec power-domain subset). Run only when the
+        // design declares a supply tree; legacy annotation-only designs are
+        // untouched.
+        if !hir.power_domain_decls.is_empty() {
+            let (ccf_errors, pdc_warnings) = Self::check_power_domains(hir);
+            for w in &pdc_warnings {
+                eprintln!("PDC warning: {}", w);
+            }
+            if !ccf_errors.is_empty() {
+                return Err(format!(
+                    "power-domain dependent-failure check failed with {} error(s):\n  {}",
+                    ccf_errors.len(),
+                    ccf_errors.join("\n  ")
+                ));
+            }
+        }
+
         // Normalization: a signal driven by a CONTINUOUS assignment is a
         // wire — its declaration initializer is dead. Keeping both made the
         // behavioral SIR simulator prefer the initial value (output stuck at
@@ -372,6 +389,161 @@ impl MirCompiler {
     /// (`hir.main_entity_names`); an empty list means provenance is unknown
     /// (e.g. direct-HIR callers like the VHDL frontend) — every module is
     /// treated as a root in that case. Reachability follows instance edges.
+    /// Dependent-failure (CCF) + isolation checks over the declared supply
+    /// tree (spec power-domain subset).
+    ///
+    /// - CCF: a `#[safety_mechanism]` entity instantiated in a context whose
+    ///   effective power domain shares a supply ancestor with the mechanism's
+    ///   own effective domain is NOT supply-independent from the logic it
+    ///   monitors — a common-cause failure. Error, downgraded to a warning by
+    ///   `#[power_domain(x, allow_shared_supply)]` (the ISO 26262 "justified
+    ///   and documented" escape hatch).
+    /// - Isolation (coarse, v1): an instantiation edge that crosses power
+    ///   domains is flagged as a warning when neither side declares any
+    ///   `#[isolation]` strategy. Port-granular checking is future work.
+    ///
+    /// Effective domain = the entity's own `#[power_domain]` binding, else
+    /// inherited from the instantiating context (containment).
+    fn check_power_domains(hir: &Hir) -> (Vec<String>, Vec<String>) {
+        use skalp_frontend::hir::HirPowerDerivation;
+        use std::collections::{HashMap, HashSet};
+
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        // Supply-tree ancestry (validated acyclic at HIR build; guard anyway)
+        let parent_of: HashMap<&str, Option<&str>> = hir
+            .power_domain_decls
+            .iter()
+            .map(|d| {
+                let p = match &d.derivation {
+                    HirPowerDerivation::External => None,
+                    HirPowerDerivation::Regulated { parent, .. }
+                    | HirPowerDerivation::Switched { parent, .. } => Some(parent.as_str()),
+                };
+                (d.name.as_str(), p)
+            })
+            .collect();
+        let ancestors = |name: &str| -> HashSet<String> {
+            let mut set = HashSet::new();
+            let mut cur = Some(name);
+            while let Some(n) = cur {
+                if !set.insert(n.to_string()) {
+                    break;
+                }
+                cur = parent_of.get(n).copied().flatten();
+            }
+            set
+        };
+        let independent = |a: &str, b: &str| -> bool { ancestors(a).is_disjoint(&ancestors(b)) };
+
+        let entity_by_id: HashMap<_, _> = hir.entities.iter().map(|e| (e.id, e)).collect();
+        let impl_of: HashMap<_, _> = hir.implementations.iter().map(|i| (i.entity, i)).collect();
+        let has_isolation = |entity_id| -> bool {
+            impl_of
+                .get(&entity_id)
+                .map(|im| {
+                    im.signals.iter().any(|s| {
+                        s.power_config
+                            .as_ref()
+                            .is_some_and(|pc| pc.isolation.is_some())
+                    })
+                })
+                .unwrap_or(false)
+        };
+
+        // Roots: entities nothing instantiates (covers main entities).
+        let instantiated: HashSet<_> = hir
+            .implementations
+            .iter()
+            .flat_map(|i| i.instances.iter().map(|inst| inst.entity))
+            .collect();
+
+        // Top-down containment walk; per-instance-edge checks.
+        let mut stack: Vec<(skalp_frontend::hir::EntityId, Option<String>, Vec<&str>)> = hir
+            .entities
+            .iter()
+            .filter(|e| !instantiated.contains(&e.id))
+            .map(|e| {
+                (
+                    e.id,
+                    e.power_domain_config
+                        .as_ref()
+                        .map(|c| c.domain_name.clone()),
+                    vec![e.name.as_str()],
+                )
+            })
+            .collect();
+        let mut warned_edges: HashSet<(String, String)> = HashSet::new();
+
+        while let Some((eid, eff, path)) = stack.pop() {
+            if path.len() > 64 {
+                continue; // recursion guard
+            }
+            let Some(implementation) = impl_of.get(&eid) else {
+                continue;
+            };
+            for inst in &implementation.instances {
+                let Some(child) = entity_by_id.get(&inst.entity) else {
+                    continue;
+                };
+                let child_cfg = child.power_domain_config.as_ref();
+                let child_eff = child_cfg
+                    .map(|c| c.domain_name.clone())
+                    .or_else(|| eff.clone());
+
+                // CCF: safety mechanism vs the domain of the context it lives in
+                if child.safety_mechanism_config.is_some() {
+                    if let (Some(mech_domain), Some(ctx_domain)) = (&child_eff, &eff) {
+                        if !independent(mech_domain, ctx_domain) {
+                            let allow = child_cfg.map(|c| c.allow_shared_supply).unwrap_or(false);
+                            let msg = format!(
+                                "safety mechanism `{}` (instance `{}` in `{}`) is in power domain `{}`, which shares a supply ancestor with its context's domain `{}` — not supply-independent from the logic it monitors (common-cause failure)",
+                                child.name,
+                                inst.name,
+                                path.join("."),
+                                mech_domain,
+                                ctx_domain
+                            );
+                            if allow {
+                                warnings.push(format!("{} [downgraded: allow_shared_supply]", msg));
+                            } else {
+                                errors.push(format!(
+                                    "{} — bind it to an independent supply, or justify with #[power_domain({}, allow_shared_supply)]",
+                                    msg, mech_domain
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Isolation (coarse): flag cross-domain edges with no strategy
+                if let (Some(cd), Some(pd)) = (&child_eff, &eff) {
+                    if cd != pd
+                        && !has_isolation(child.id)
+                        && !has_isolation(eid)
+                        && warned_edges.insert((pd.clone(), cd.clone()))
+                    {
+                        warnings.push(format!(
+                            "nets cross power domains `{}` -> `{}` (instance `{}` of `{}` in `{}`) with no #[isolation] strategy declared on either side",
+                            pd,
+                            cd,
+                            inst.name,
+                            child.name,
+                            path.join(".")
+                        ));
+                    }
+                }
+
+                let mut child_path = path.clone();
+                child_path.push(child.name.as_str());
+                stack.push((child.id, child_eff, child_path));
+            }
+        }
+
+        (errors, warnings)
+    }
+
     fn reachable_module_names(
         mir: &Mir,
         hir: &Hir,
