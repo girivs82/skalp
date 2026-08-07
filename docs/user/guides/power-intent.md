@@ -204,9 +204,15 @@ PDC warning: safety mechanism `Watchdog` (instance `wd` in `Controller`) is in p
 
 Note for FPGA prototyping: `switched` and `regulated` domains are
 unimplementable in FPGA fabric, and logic in the same fabric is never
-supply-independent — the CCF check correctly reports this. The planned
-FPGA leg (bank/VCCIO-vs-`io_standard` checking, stub-with-report) is
-future work.
+supply-independent. `skalp synth` on an FPGA device therefore refuses
+such designs unless you pass `--power-stub`, which prototypes the ASIC
+power intent as always-on and prints a report of every stubbed element
+(switches always-on, regulators assumed externally supplied) plus the
+shared-VCCINT independence caveat. Separately, when a
+`constraint physical` block declares bank voltages, every port's
+`io_standard` is checked against its bank's rail at compile time — an
+LVCMOS33 pin on a 1.8 V bank is a build error (`VCCIO mismatch`). See
+the spec's Section 18.7.
 
 ## Domain-Crossing Warnings
 
@@ -392,8 +398,9 @@ do not rely on them:
   stuck-off/stuck-on, regulator collapse, overvoltage.
 - **The PST legality table** (legal cross-domain state combinations).
 - **Instance-level rebinding** (`inst`-site `#[power_domain]`).
-- **The FPGA leg**: bank/VCCIO-vs-`io_standard` checking and
-  stub-with-report prototyping.
+- **FPGA bank/domain linkage**: naming a declared power domain as a
+  bank's rail (bank voltages are literals today), and modeling device
+  supply trees (VCCINT as an implicit external domain).
 
 ## Best Practices
 

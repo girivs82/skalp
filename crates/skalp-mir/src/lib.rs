@@ -10,6 +10,7 @@
 
 pub mod cdc_analysis;
 pub mod compiler;
+pub mod fpga_power;
 pub mod hir_to_mir;
 pub mod mir;
 pub mod mir_validation;

@@ -595,6 +595,9 @@ impl HirBuilderContext {
                     // Process top-level attributes (like #[pipeline(stages=N)] before entities/functions)
                     self.process_attribute(&child);
                 }
+                SyntaxKind::GlobalConstraintBlock => {
+                    self.build_global_constraints(&child, &mut hir);
+                }
                 SyntaxKind::PowerDomainDecl => {
                     if let Some(decl) = self.build_power_domain_decl(&child) {
                         hir.power_domain_decls.push(decl);
@@ -991,6 +994,66 @@ impl HirBuilderContext {
             states,
             span: self.make_span(node),
         })
+    }
+
+    /// Lower a `constraint physical { ... }` block's bank sub-blocks into
+    /// `GlobalConstraint::Bank`. (Bank blocks previously parsed but were
+    /// never lowered — the bank/VCCIO compatibility check needs them.)
+    fn build_global_constraints(&mut self, node: &SyntaxNode, hir: &mut Hir) {
+        use crate::hir::{BankConstraint, GlobalConstraint};
+        for bank_node in node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::BankBlock)
+        {
+            let toks: Vec<_> = bank_node
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .collect();
+            let Some(bank_id) = toks
+                .iter()
+                .find(|t| t.kind() == SyntaxKind::IntLiteral)
+                .and_then(|t| t.text().parse::<u32>().ok())
+            else {
+                continue;
+            };
+
+            let mut voltage: Option<String> = None;
+            let mut io_standard: Option<String> = None;
+            for pair in bank_node
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::ConstraintPair)
+            {
+                let ptoks: Vec<_> = pair
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| !t.kind().is_trivia())
+                    .collect();
+                let Some(key) = ptoks.first().map(|t| t.text().to_string()) else {
+                    continue;
+                };
+                // Value = everything after the ':' joined (covers `3.3`,
+                // `3.3V`, `"LVCMOS33"`)
+                let value: String = ptoks
+                    .iter()
+                    .skip_while(|t| t.kind() != SyntaxKind::Colon)
+                    .skip(1)
+                    .map(|t| t.text().trim_matches('"').to_string())
+                    .collect::<Vec<_>>()
+                    .join("");
+                match key.as_str() {
+                    "voltage" => voltage = Some(value),
+                    "io_standard" => io_standard = Some(value),
+                    _ => {}
+                }
+            }
+            hir.global_constraints
+                .push(GlobalConstraint::Bank(BankConstraint {
+                    bank_id,
+                    voltage,
+                    io_standard,
+                }));
+        }
     }
 
     /// Validate the supply tree and every `#[power_domain(...)]` reference.

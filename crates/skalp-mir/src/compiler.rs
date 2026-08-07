@@ -298,6 +298,19 @@ impl MirCompiler {
             }
         }
 
+        // Bank/VCCIO compatibility: an io_standard on a port must match its
+        // bank's declared rail voltage. Runs whenever bank constraints exist.
+        {
+            let bank_errors = crate::fpga_power::check_bank_io_compatibility(hir);
+            if !bank_errors.is_empty() {
+                return Err(format!(
+                    "bank/VCCIO compatibility check failed with {} error(s):\n  {}",
+                    bank_errors.len(),
+                    bank_errors.join("\n  ")
+                ));
+            }
+        }
+
         // Power-domain checks (spec power-domain subset). Run only when the
         // design declares a supply tree; legacy annotation-only designs are
         // untouched.

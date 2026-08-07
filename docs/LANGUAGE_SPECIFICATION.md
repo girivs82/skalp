@@ -1475,6 +1475,68 @@ add_power_state SS_vdd_core -state off {-supply_expr {power == `{OFF}`}}
 The emitted UPF carries a header marking it generated; the checked
 in-language model is authoritative and the file must not be hand-edited.
 
+### 18.7 FPGA Targets: Bank/VCCIO Check and Power Stubbing
+
+Commodity FPGA fabric has no user-partitionable power islands — VCCINT is
+one grid. The FPGA leg of the power model therefore consists of the two
+things that ARE real on FPGAs:
+
+**Bank/VCCIO compatibility.** Each I/O bank has its own rail. When a
+`constraint physical` block declares bank voltages and a port names a bank,
+the port's `io_standard` must match the bank's rail — checked at compile
+time for every build:
+
+```skalp
+constraint physical {
+    bank 0 { voltage: 1.8, io_standard: "LVCMOS18" }
+    bank 1 { voltage: 3.3, io_standard: "LVCMOS33" }
+}
+
+entity Blink {
+    in clk: clock @ { pin: "A1", io_standard: "LVCMOS18", bank: 0 }
+    out led: bit @ { pin: "B2", io_standard: "LVCMOS33", bank: 1 }
+}
+
+impl Blink {
+    signal c: bit = 0
+    on(clk.rise) { c = !c }
+    led = c
+}
+```
+
+An `LVCMOS33` pin on the 1.8 V bank fails the build:
+
+```text
+bank/VCCIO compatibility check failed with 1 error(s):
+  port `clk` of `Blink`: io_standard LVCMOS33 requires a 3.3 V rail, but bank 0 declares 1.8 V (VCCIO mismatch)
+```
+
+Known standards cover the LVCMOS/LVTTL/SSTL/HSTL/LVDS families; unknown
+standards are skipped rather than flagged.
+
+**Power stubbing for ASIC prototyping.** `switched(...)` and
+`regulated(...)` domains are unimplementable in fabric. `skalp synth` on an
+FPGA device refuses such designs by default:
+
+```text
+Error: design declares power domains that FPGA fabric cannot implement:
+`vdd_core` (regulated), `vdd_gpu` (switched). ... re-run with --power-stub
+```
+
+`--power-stub` requests prototyping semantics, and every stubbed element is
+reported — never silent:
+
+```text
+⚡ FPGA power-stub report (ASIC power intent prototyped as always-on):
+   `vdd_core`: regulator `u_ldo_core` on `vreg_main` NOT instantiated — rail assumed externally supplied at its `on` voltage
+   `vdd_gpu`: power switch from `vdd_core` STUBBED — always-on; no isolation clamps, no retention loss, off/retention states unreachable
+   NOTE: all fabric logic shares VCCINT — safety mechanisms on this FPGA are NOT supply-independent from what they monitor, regardless of declared domains.
+```
+
+The NOTE is the dependent-failure reality on FPGAs: a same-fabric safety
+mechanism can claim other independence classes (timing, design diversity),
+but never supply independence. External-only supply trees need no stubbing.
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1655,12 +1717,11 @@ be relied on:
 7. *Instance-level rebinding.* Binding is per-entity; rebinding one
    `inst` of an entity to a different domain is not implemented.
 
-8. *The FPGA leg.* On FPGA targets the useful checkable property is
-   bank/VCCIO-versus-`io_standard` compatibility, plus stub-with-report
-   behavior for prototyping ASIC designs. `switched` and `regulated`
-   domains are unimplementable in FPGA fabric — logic in the same
-   fabric is never supply-independent, which the CCF check correctly
-   reports.
+8. *FPGA bank/domain linkage.* The bank/VCCIO compatibility check and
+   `--power-stub` prototyping report are implemented (Section 18.7).
+   Still future: naming a declared power domain as a bank's rail (today
+   bank voltages are literals), and modeling device supply trees
+   (VCCINT as an implicit external domain for fabric logic).
 
 **Vocabulary note.** `intent` declarations (Section 15) are *advisory*
 to synthesis. `#[cdc]`, the safety attributes, and power-domain binding

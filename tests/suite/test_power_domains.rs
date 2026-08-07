@@ -267,10 +267,8 @@ mod instance_output_vs_trait_inline {
             wd_timeout = wd.timeout
         }
         "#;
-        let temp = std::env::temp_dir().join(format!(
-            "inst_out_trait_inline_{}.sk",
-            std::process::id()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("inst_out_trait_inline_{}.sk", std::process::id()));
         let mut f = std::fs::File::create(&temp).expect("temp file");
         f.write_all(source.as_bytes()).expect("write");
         let ctx = parse_and_build_compilation_context(&temp).expect("parse + modules");
@@ -289,5 +287,95 @@ mod instance_output_vs_trait_inline {
             ctrl.assignments.len() >= 2,
             "both q and wd_timeout must be driven"
         );
+    }
+}
+
+#[cfg(test)]
+mod fpga_leg {
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::fpga_power::fpga_power_posture;
+
+    fn compile_checked(src: &str) -> Result<skalp_mir::Mir, String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+    }
+
+    fn blink(clk_std: &str) -> String {
+        format!(
+            r#"
+            constraint physical {{
+                bank 0 {{ voltage: 1.8, io_standard: "LVCMOS18" }}
+                bank 1 {{ voltage: 3.3, io_standard: "LVCMOS33" }}
+            }}
+
+            entity Blink {{
+                in clk: clock @ {{ pin: "A1", io_standard: "{clk_std}", bank: 0 }}
+                out led: bit @ {{ pin: "B2", io_standard: "LVCMOS33", bank: 1 }}
+            }}
+
+            impl Blink {{
+                signal c: bit = 0
+                on(clk.rise) {{ c = !c }}
+                led = c
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn io_standard_vs_bank_rail_mismatch_fails() {
+        let err = compile_checked(&blink("LVCMOS33")).expect_err("3.3V pin on 1.8V bank");
+        assert!(
+            err.contains("VCCIO mismatch") && err.contains("bank 0"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn matching_bank_rails_pass() {
+        compile_checked(&blink("LVCMOS18")).expect("matching rails must build");
+    }
+
+    #[test]
+    fn unknown_io_standard_is_not_an_error() {
+        compile_checked(&blink("EXOTIC_IO")).expect("unknown standards are skipped");
+    }
+
+    #[test]
+    fn float_constraint_values_parse_and_terminate() {
+        // Regression: `voltage: 1.8` (FloatLiteral) had no arm in
+        // parse_constraint_value and the error path consumed nothing —
+        // the bank-block loop hung forever.
+        compile_checked(&blink("LVCMOS18")).expect("float bank voltages parse");
+    }
+
+    #[test]
+    fn stub_posture_decisions() {
+        let src = r#"
+            power_domain vreg: external;
+            power_domain vdd_core = regulated(vreg, macro = u_ldo, states = { on: 0.9V });
+            power_domain vdd_gpu = switched(vdd_core, on_when = !slp);
+
+            entity E { in x: bit out y: bit }
+            impl E { y = x }
+        "#;
+        let hir = parse_and_build_hir(src).expect("parse");
+
+        let err = fpga_power_posture(&hir, false).expect_err("must refuse without stub");
+        assert!(err.contains("--power-stub") && err.contains("vdd_gpu"));
+
+        let report = fpga_power_posture(&hir, true)
+            .expect("stub allowed")
+            .expect("must produce a report");
+        assert!(report.contains("STUBBED") && report.contains("VCCINT"));
+
+        // External-only trees need no stubbing at all.
+        let ext_only = parse_and_build_hir(
+            "power_domain vddio: external;\nentity E { in x: bit out y: bit }\nimpl E { y = x }",
+        )
+        .expect("parse");
+        assert!(fpga_power_posture(&ext_only, false).expect("ok").is_none());
     }
 }

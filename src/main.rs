@@ -248,6 +248,13 @@ enum Commands {
         /// Dump an intermediate representation and exit (hir, mir, lir, aig)
         #[arg(long, value_name = "STAGE")]
         emit: Option<String>,
+
+        /// ASIC-prototyping mode: stub switched/regulated power domains as
+        /// always-on (every stubbed element is reported). Without this flag,
+        /// such domains are an error on FPGA targets — fabric has no power
+        /// islands.
+        #[arg(long)]
+        power_stub: bool,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -789,6 +796,7 @@ fn main() -> Result<()> {
             optimize,
             pnr_preset,
             emit,
+            power_stub,
         } => {
             synthesize_design(
                 &source,
@@ -798,6 +806,7 @@ fn main() -> Result<()> {
                 &optimize,
                 &pnr_preset,
                 emit.as_deref(),
+                power_stub,
             )?;
         }
 
@@ -4088,6 +4097,7 @@ fn generate_ec_html_report(
 }
 
 /// Synthesize design for FPGA target
+#[allow(clippy::too_many_arguments)]
 fn synthesize_design(
     source: &PathBuf,
     device: &str,
@@ -4096,6 +4106,7 @@ fn synthesize_design(
     optimize: &str,
     pnr_preset: &str,
     emit: Option<&str>,
+    power_stub: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
@@ -4138,6 +4149,19 @@ fn synthesize_design(
     if emit == Some("hir") {
         println!("{}", serde_json::to_string_pretty(&hir)?);
         return Ok(());
+    }
+
+    // FPGA power posture: fabric has no user power islands. Declared
+    // switched/regulated domains are an error here unless --power-stub
+    // requests ASIC-prototyping semantics — and then every stubbed element
+    // is reported, never silent.
+    let is_fpga_family = matches!(family, "ice40" | "xc7" | "xilinx");
+    if is_fpga_family {
+        match skalp_mir::fpga_power::fpga_power_posture(&hir, power_stub) {
+            Ok(Some(report)) => print!("{}", report),
+            Ok(None) => {}
+            Err(e) => anyhow::bail!("{}", e),
+        }
     }
 
     // Lower to MIR with module resolution (trait impls, entity imports)

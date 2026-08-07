@@ -1,0 +1,189 @@
+//! FPGA leg of the power-domain model (spec power-domain subset).
+//!
+//! Commodity FPGA fabric has no user-partitionable power islands: VCCINT is
+//! one grid. What the silicon does give you is per-bank I/O rails (VCCIO),
+//! and what prototyping flows need is honest STUBBING of ASIC power intent.
+//! This module implements both:
+//!
+//! - `check_bank_io_compatibility`: a port's `io_standard` must match its
+//!   bank's declared rail voltage (`constraint physical { bank N { voltage:
+//!   3.3, ... } }`). An LVCMOS33 pin on a 1.8 V bank is a build error.
+//! - `fpga_power_posture`: `switched(...)`/`regulated(...)` domains are
+//!   unimplementable in fabric. Targeting an FPGA with such domains is an
+//!   error unless stubbing is requested, in which case every stubbed
+//!   element is REPORTED (never silent): switches become always-on,
+//!   regulated rails are assumed externally supplied, states collapse to
+//!   `on`. The dependent-failure reality is also stated: same-fabric logic
+//!   shares VCCINT and is never supply-independent.
+
+use skalp_frontend::hir::{GlobalConstraint, Hir, HirPowerDerivation};
+
+/// Nominal voltage (mV) required by a known I/O standard. Unknown standards
+/// return None and are skipped (no false errors on exotic standards).
+fn io_standard_voltage_mv(std_name: &str) -> Option<u32> {
+    let norm = std_name.to_uppercase().replace(['_', '-'], "");
+    match norm.as_str() {
+        "LVTTL" | "LVTTL33" | "LVCMOS33" => Some(3300),
+        "LVCMOS25" | "LVDS25" | "SSTL2" | "SSTL2I" | "SSTL2II" => Some(2500),
+        "LVCMOS18" | "SSTL18" | "SSTL18I" | "SSTL18II" | "HSTL18" => Some(1800),
+        "LVCMOS15" | "HSTL15" => Some(1500),
+        "LVCMOS12" | "SSTL12" => Some(1200),
+        _ => None,
+    }
+}
+
+/// Parse a declared bank voltage: `3.3`, `3.3V`, `1800mV`.
+fn parse_voltage_mv(text: &str) -> Option<u32> {
+    let t = text.trim();
+    if let Some(v) = t.strip_suffix("mV") {
+        return v.trim().parse::<f64>().ok().map(|v| v as u32);
+    }
+    let v = t.strip_suffix('V').unwrap_or(t);
+    v.trim()
+        .parse::<f64>()
+        .ok()
+        .map(|v| (v * 1000.0).round() as u32)
+}
+
+/// Check every port's `io_standard` against its bank's declared rail.
+/// Returns build-failing error strings; empty when no bank declares a
+/// voltage or no port names a bank.
+pub fn check_bank_io_compatibility(hir: &Hir) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    let banks: Vec<(u32, Option<u32>)> = hir
+        .global_constraints
+        .iter()
+        .filter_map(|c| match c {
+            GlobalConstraint::Bank(b) => {
+                Some((b.bank_id, b.voltage.as_deref().and_then(parse_voltage_mv)))
+            }
+            _ => None,
+        })
+        .collect();
+    if banks.is_empty() {
+        return errors;
+    }
+    let bank_voltage = |id: u32| -> Option<u32> {
+        banks
+            .iter()
+            .find(|(bid, _)| *bid == id)
+            .and_then(|(_, v)| *v)
+    };
+
+    for entity in &hir.entities {
+        for port in &entity.ports {
+            let Some(pc) = &port.physical_constraints else {
+                continue;
+            };
+            let (Some(bank), Some(io_std)) = (pc.bank, pc.io_standard.as_deref()) else {
+                continue;
+            };
+            let (Some(rail_mv), Some(io_mv)) = (bank_voltage(bank), io_standard_voltage_mv(io_std))
+            else {
+                continue;
+            };
+            if rail_mv != io_mv {
+                errors.push(format!(
+                    "port `{}` of `{}`: io_standard {} requires a {:.1} V rail, but bank {} declares {:.1} V (VCCIO mismatch)",
+                    port.name,
+                    entity.name,
+                    io_std,
+                    io_mv as f64 / 1000.0,
+                    bank,
+                    rail_mv as f64 / 1000.0
+                ));
+            }
+        }
+    }
+    errors
+}
+
+/// Decide how declared power domains map onto an FPGA target.
+///
+/// - No declarations, or external-only: Ok(None) — rails are the board's
+///   business, nothing to stub.
+/// - `switched`/`regulated` present, `allow_stub` false: Err with the list
+///   and the remedy.
+/// - `allow_stub` true: Ok(Some(report)) enumerating every stubbed element.
+pub fn fpga_power_posture(hir: &Hir, allow_stub: bool) -> Result<Option<String>, String> {
+    let non_external: Vec<(&str, &str)> = hir
+        .power_domain_decls
+        .iter()
+        .filter_map(|d| match &d.derivation {
+            HirPowerDerivation::External => None,
+            HirPowerDerivation::Regulated { .. } => Some((d.name.as_str(), "regulated")),
+            HirPowerDerivation::Switched { .. } => Some((d.name.as_str(), "switched")),
+        })
+        .collect();
+
+    if non_external.is_empty() {
+        return Ok(None);
+    }
+
+    if !allow_stub {
+        let list = non_external
+            .iter()
+            .map(|(n, k)| format!("`{}` ({})", n, k))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "design declares power domains that FPGA fabric cannot implement: {}. \
+             Fabric has no user power islands — switches and on-die regulators do not exist there. \
+             For ASIC prototyping, re-run with --power-stub to treat them as always-on \
+             (every stubbed element is reported).",
+            list
+        ));
+    }
+
+    let mut report = String::new();
+    report.push_str("⚡ FPGA power-stub report (ASIC power intent prototyped as always-on):\n");
+    for d in &hir.power_domain_decls {
+        match &d.derivation {
+            HirPowerDerivation::External => {}
+            HirPowerDerivation::Switched { parent, .. } => {
+                report.push_str(&format!(
+                    "   `{}`: power switch from `{}` STUBBED — always-on; no isolation clamps, no retention loss, off/retention states unreachable\n",
+                    d.name, parent
+                ));
+            }
+            HirPowerDerivation::Regulated { parent, macro_name } => {
+                report.push_str(&format!(
+                    "   `{}`: regulator{} on `{}` NOT instantiated — rail assumed externally supplied at its `on` voltage\n",
+                    d.name,
+                    macro_name
+                        .as_deref()
+                        .map(|m| format!(" `{}`", m))
+                        .unwrap_or_default(),
+                    parent
+                ));
+            }
+        }
+    }
+    report.push_str(
+        "   NOTE: all fabric logic shares VCCINT — safety mechanisms on this FPGA are NOT \
+         supply-independent from what they monitor, regardless of declared domains.\n",
+    );
+    Ok(Some(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voltage_parsing() {
+        assert_eq!(parse_voltage_mv("3.3"), Some(3300));
+        assert_eq!(parse_voltage_mv("3.3V"), Some(3300));
+        assert_eq!(parse_voltage_mv("1800mV"), Some(1800));
+        assert_eq!(parse_voltage_mv("1.8"), Some(1800));
+    }
+
+    #[test]
+    fn io_standard_table() {
+        assert_eq!(io_standard_voltage_mv("LVCMOS33"), Some(3300));
+        assert_eq!(io_standard_voltage_mv("LVDS_25"), Some(2500));
+        assert_eq!(io_standard_voltage_mv("lvcmos18"), Some(1800));
+        assert_eq!(io_standard_voltage_mv("EXOTIC_IO"), None);
+    }
+}

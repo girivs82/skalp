@@ -6342,6 +6342,18 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::IntLiteral) => {
                 self.bump(); // Integer value
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // optional unit (V, mV, MHz, ...)
+                }
+            }
+            Some(SyntaxKind::FloatLiteral) => {
+                // e.g. voltage: 3.3 or 3.3V — was unhandled and, with the
+                // non-consuming error fallthrough below, hung the bank-block
+                // loop forever.
+                self.bump();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // optional unit
+                }
             }
             Some(SyntaxKind::TrueKw) | Some(SyntaxKind::FalseKw) => {
                 self.bump(); // Boolean value
@@ -6402,7 +6414,9 @@ impl<'a> ParseState<'a> {
                 self.bump(); // Identifier value
             }
             _ => {
-                self.error("expected constraint value (string, number, boolean, or array)");
+                self.error_and_bump(
+                    "expected constraint value (string, number, boolean, or array)",
+                );
             }
         }
     }
@@ -6434,10 +6448,15 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            let before = self.current;
             self.parse_constraint_pair();
 
             if self.at(SyntaxKind::Comma) {
                 self.bump();
+            }
+            // A pair that consumed nothing would loop forever; force progress.
+            if self.current == before {
+                self.error_and_bump("expected bank constraint");
             }
         }
 
