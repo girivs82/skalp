@@ -363,6 +363,44 @@ impl CdcMark {
 Accepted arguments (`#[cdc(sync_stages = 3)]`, `#[cdc(cdc_type = gray)]`)
 are recorded for the analysis but generate no hardware.
 
+### 4.4 Design Decision: Domain Lifetimes Are Clock-Only
+
+**Decided 2026-08-07.** The lifetime syntax (`bit[8]<'a>`) is reserved for
+clock domains and will not be extended to other domain systems (power
+domains in particular). This is a deliberate decision, not an accident of
+implementation order.
+
+The tick syntax pays for itself when a property is **value-granular,
+propagates through expressions, and is mostly inferred**. Clock domain is
+exactly that shape: it varies signal-by-signal within a single entity (a
+synchronizer inherently holds values from two domains), the hazard lives at
+expression joins (`a + b` across domains is the bug CDC analysis exists to
+catch), and the compiler infers domains from drivers with annotations
+needed only at boundaries. This is the same algebra as Rust borrows — a tag
+riding on values, checked where values meet — which is why the borrowed
+syntax reads correctly.
+
+Power domain has a different algebra: it is a **regional containment
+property**. A rail powers a block of logic; essentially every signal in an
+instance inherits the instance's domain, and the event that matters is a
+*net crossing an island boundary*, checkable at instance ports from
+structural binding alone. A type-level tag that 99% of signals inherit
+unchanged is noise, "power domain of an expression" has no meaningful
+answer, and IEEE 1801 (UPF) — which the power model must ultimately emit —
+is itself containment-based, so signal-level tags would have to be
+collapsed back into regions anyway.
+
+Overloading `<'...>` with a second tag kind would also cost real
+readability: two tick-kinds distinguishable only by naming convention,
+ordering/default questions, and two inference systems sharing one
+syntactic position. Rust's lifetimes stay readable because there is exactly
+one kind of them; this specification preserves that property. Power
+domains bind structurally via attributes instead — see Section 20.1 for
+the recorded design. Signal-level power *exceptions* (retention registers,
+always-on straps in a gated block) are expressed as attributes on the
+specific declarations, which is the natural syntax for exceptions to a
+regional default.
+
 ## 5. Entities
 
 ### 5.1 Entity Declaration
@@ -1323,10 +1361,83 @@ a hard error or has no effect. They must not appear in designs.
 | External constraint file merging (`--constraints board.pcf`) | No such CLI option; use inline constraints (Section 17) |
 | `process` / `always` blocks, sensitivity lists | Never part of this dialect; use `on(event)` |
 | `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 18) |
-| Memory/power/debug attribute semantics (`#[memory]`, `#[retention]`, `#[isolation]`, `#[trace]`, `#[breakpoint]`, vendor-IP attributes) | Parse-accepted annotations only; no defined synthesis behavior |
+| Memory/power/debug attribute semantics (`#[memory]`, `#[retention]`, `#[isolation]`, `#[trace]`, `#[breakpoint]`, vendor-IP attributes) | Parse-accepted annotations only; no defined synthesis behavior. For the recorded power-domain design see Section 20.1 |
 | `while` loops in synthesizable code | Not synthesizable; use bounded `for` |
 | Entity aliases (`entity Fast = Foo::<N>;`) | Parsed and stored, but an alias cannot yet be instantiated (`unknown entity in instantiation`) |
 | Octal literals (`0o52`) | Not lexed; use decimal/hex/binary |
+
+### 20.1 Power Domains (design recorded, NOT implemented)
+
+**Status: design decision recorded 2026-08-07. None of this section is
+implemented** — today `#[power_domain("...")]` is a parse-accepted
+annotation carrying a free string, with no checking and no synthesis
+behavior. This section records the settled design so it is not
+relitigated; see Section 4.4 for why power does **not** use the clock
+lifetime syntax.
+
+**Motivation.** ISO 26262 dependent-failure analysis requires a safety
+mechanism to be *independent* of the element it monitors, and supply
+independence is a primary requirement — a mechanism sharing a rail with
+its monitored function dies with it (common-cause failure). Traditional
+flows cannot check this in-language because power intent lives in a side
+file (UPF); the check degenerates to manual review. SKALP's doctrine —
+the same one behind `#[cdc]` and the safety attributes — is that the
+language *models and verifies* such properties without turning them into
+simulated data. Power is not a port: a supply carries no functional
+waveform, and threading VDD pins through every instantiation would
+pollute designs while still not expressing independence.
+
+**Design.**
+
+1. *Domain declarations with supply parentage* (top level). Naming a
+   domain is not enough — two domains fed by one regulator share a
+   common-cause ancestor. Independence is a property of the supply tree:
+
+   ```text
+   power_domain vreg_main: independent;
+   power_domain vdd_core  = derived(vreg_main);
+   power_domain vdd_periph = derived(vreg_main);
+   power_domain vdd_mon: independent;      // separate supply path
+   ```
+
+   Two domains are independent iff they share no ancestor below their
+   independence boundaries. `vdd_core` vs `vdd_periph` are NOT
+   independent (both under `vreg_main`); either vs `vdd_mon` is.
+
+2. *Regional binding by containment.* `#[power_domain(vdd_core)]` on an
+   entity or instance binds the whole region; contained instances
+   inherit unless rebound. The argument becomes a **checked reference**
+   to a declared domain, not a free string — referencing an undeclared
+   domain is a compile error.
+
+3. *Signal-level attributes are for exceptions only* — `#[retention]`,
+   always-on straps — the cases where one declaration genuinely deviates
+   from its region's default.
+
+4. *Two compile-time checks on the instance tree:*
+   - **Dependent-failure (CCF) check:** a `#[safety_mechanism]` entity
+     whose bound domain shares a supply ancestor with the element it
+     `#[implements]` protection for fails the build. Graded like CDC:
+     an explicitly annotated, justified shared domain downgrades to a
+     documented warning where the standard permits it.
+   - **Isolation check:** a net crossing domain regions without an
+     isolation/level-shift strategy at the boundary port is flagged.
+
+5. *UPF is codegen output, not input.* The implementation flow consumes
+   power intent emitted from the checked model, so it cannot drift from
+   the analyzed design.
+
+6. *Fault-injection extension:* with domains modeled, whole-domain loss
+   becomes an injectable fault class — kill `vdd_core`, assert that the
+   mechanism in `vdd_mon` still raises its detection signal. This
+   directly evidences the FMEDA's independence claim, which per-gate
+   stuck-at campaigns cannot express.
+
+**Vocabulary note.** `intent` declarations (Section 15) are *advisory*
+to synthesis. `#[cdc]`, the safety attributes, and power-domain binding
+are *checked constraints* that can fail the build. Both use the same
+attribute surface syntax, but they belong to different enforcement
+classes, and documentation should not conflate them.
 
 ## Appendix A: Operator Precedence
 
