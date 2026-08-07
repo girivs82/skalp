@@ -1389,32 +1389,90 @@ pollute designs while still not expressing independence.
 
 **Design.**
 
-1. *Domain declarations with supply parentage* (top level). Naming a
-   domain is not enough — two domains fed by one regulator share a
-   common-cause ancestor. Independence is a property of the supply tree:
+1. *Domain declarations with supply parentage AND derivation kind* (top
+   level). Naming a domain is not enough — two domains fed by one
+   regulator share a common-cause ancestor. Independence is a property
+   of the supply tree, and each derivation edge carries HOW it is
+   implemented, because the digital flow, the FMEDA, and codegen treat
+   the three kinds differently:
 
    ```text
-   power_domain vreg_main: independent;
-   power_domain vdd_core  = derived(vreg_main);
-   power_domain vdd_periph = derived(vreg_main);
-   power_domain vdd_mon: independent;      // separate supply path
+   power_domain vddio: external;                 // chip supply port (PMIC is off-die)
+   power_domain vreg_main: external;
+   power_domain vdd_aon = regulated(vreg_main, macro = u_ldo_aon,
+                                    states = { on: 0.9V });
+   power_domain vdd_core = regulated(vreg_main, macro = u_ldo_core,
+                                     states = { on: 0.9V, ret: 0.6V, off });
+   power_domain vdd_gpu  = switched(vdd_core,
+                                    on_when = !pmu.gpu_sleep,
+                                    ack_on  = pmu.gpu_ack,
+                                    states = { on: 0.9V, off });
+   power_domain vdd_mon: external;               // independent supply path
    ```
 
-   Two domains are independent iff they share no ancestor below their
-   independence boundaries. `vdd_core` vs `vdd_periph` are NOT
-   independent (both under `vreg_main`); either vs `vdd_mon` is.
+   - `external` — a chip supply port; regulation is the board/PMIC's
+     concern and out of scope.
+   - `regulated(parent, macro = ...)` — a new voltage level produced by
+     an on-die analog block (LDO, buck). The regulator itself is a
+     **black-box hard-macro instance** referenced by the declaration,
+     never modeled by the language: dropout, PSRR, and loop dynamics
+     live in the analog flow. Its enable/pgood pins are ordinary ports.
+     This mirrors ASIC practice, where UPF sees only "supply net driven
+     by pin VOUT of instance u_ldo" and the regulator is an IP block.
+   - `switched(parent, on_when = ..., ack_on = ...)` — the same voltage,
+     gated by power-switch cells (the UPF `create_power_switch` case).
+     Forces isolation on the region's outputs, permits `#[retention]`,
+     and adds an `off` state to the power state table.
 
-2. *Regional binding by containment.* `#[power_domain(vdd_core)]` on an
+   Two domains are independent iff they share no ancestor below their
+   independence boundaries. Derivation kind does NOT affect
+   independence — an LDO filters its parent, it does not survive it —
+   but it does refine the FMEDA: each kind contributes an enumerable
+   failure-mode set (regulator fail-high = an OVERVOLTAGE hazard that
+   pure loss analysis cannot see; switch stuck-off = domain loss;
+   stuck-on = failure to shed).
+
+2. *States and the power state table.* Each domain declares its supply
+   states with voltages (`on: 0.9V`, `ret: 0.6V`, `off`). Legal
+   combinations across domains form the power state table (PST), which
+   drives isolation/retention/level-shifter inference, multi-voltage
+   timing corners, and the liveness check below.
+
+3. *Switch control: polarity is an expression, domains are inferred.*
+   `on_when` / `ack_on` bind **Boolean expressions**, not raw nets —
+   active-low is ordinary language-level negation (`!pmu.gpu_sleep`),
+   and multi-enable switches (staggered wake) are conjunctions. Glue
+   logic implied by the expression synthesizes into the CONTROLLING
+   domain. No annotation states the control signal's domain: the
+   compiler already knows it from the driver's containment, enabling
+   two checks that side-file flows do by manual review:
+   - **No-self-power:** the control/ack cone must not pass through the
+     switched domain or its descendants (a domain cannot switch its own
+     supply back on).
+   - **PST-liveness:** the controlling domain must be ON in every power
+     state in which the target domain transitions.
+
+4. *Pin-level supply compatibility.* Switch cells and regulator macros
+   declare each pin's related supply (from Liberty
+   `related_power_pin` for library cells; declared on the hard-macro
+   wrapper for analog IP). The compiler compares the control driver's
+   domain voltage — per the declared states — against the pin's
+   expected rail in every shared power state; a mismatch requires a
+   level-shifter strategy, reusing the crossing machinery. Dependency:
+   this requires the `.sklib` technology-library format to carry
+   per-pin related-supply data, which it does not today.
+
+5. *Regional binding by containment.* `#[power_domain(vdd_core)]` on an
    entity or instance binds the whole region; contained instances
    inherit unless rebound. The argument becomes a **checked reference**
    to a declared domain, not a free string — referencing an undeclared
    domain is a compile error.
 
-3. *Signal-level attributes are for exceptions only* — `#[retention]`,
+6. *Signal-level attributes are for exceptions only* — `#[retention]`,
    always-on straps — the cases where one declaration genuinely deviates
    from its region's default.
 
-4. *Two compile-time checks on the instance tree:*
+7. *Two compile-time checks on the instance tree:*
    - **Dependent-failure (CCF) check:** a `#[safety_mechanism]` entity
      whose bound domain shares a supply ancestor with the element it
      `#[implements]` protection for fails the build. Graded like CDC:
@@ -1423,15 +1481,26 @@ pollute designs while still not expressing independence.
    - **Isolation check:** a net crossing domain regions without an
      isolation/level-shift strategy at the boundary port is flagged.
 
-5. *UPF is codegen output, not input.* The implementation flow consumes
-   power intent emitted from the checked model, so it cannot drift from
-   the analyzed design.
+8. *UPF is codegen output, not input.* Supply nets/sets, PST,
+   `create_power_switch` (with `on_state`/`off_state` Booleans and ack
+   from the declared expressions), and isolation/level-shift/retention
+   strategies are all emitted from the checked model, so the
+   implementation flow cannot drift from the analyzed design. The power
+   sequencing controller (the PMU) is ordinary SKALP RTL in an
+   always-on domain — sequencing logic is just digital design.
 
-6. *Fault-injection extension:* with domains modeled, whole-domain loss
-   becomes an injectable fault class — kill `vdd_core`, assert that the
-   mechanism in `vdd_mon` still raises its detection signal. This
-   directly evidences the FMEDA's independence claim, which per-gate
-   stuck-at campaigns cannot express.
+9. *Fault-injection extension:* with domains and derivation kinds
+   modeled, power faults become injectable classes beyond per-gate
+   stuck-ats — whole-domain loss, switch stuck-off/stuck-on, regulator
+   output collapse, and overvoltage — directly evidencing the FMEDA's
+   independence claim and the derivation elements' failure modes.
+
+**Scope line.** The recorded design deliberately stops at: topology +
+states, derivation kind with macro reference, polarity-as-expression,
+the control-domain checks, and pin-level related-supply checking.
+Switch segmentation, rush-current staggering schedules, ack delays, and
+retention sequencing order are implementation-flow concerns, as they
+are in UPF-based flows.
 
 **Vocabulary note.** `intent` declarations (Section 15) are *advisory*
 to synthesis. `#[cdc]`, the safety attributes, and power-domain binding
