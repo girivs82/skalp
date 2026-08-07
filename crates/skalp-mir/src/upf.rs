@@ -152,6 +152,42 @@ pub fn generate_upf(hir: &Hir, mir: &Mir, top_name: &str) -> Option<String> {
     }
     out.push('\n');
 
+    // System power state table (legal cross-domain combinations)
+    if let Some(pst) = &hir.power_states_decl {
+        if let Some(first) = pst.states.first() {
+            let supplies: Vec<String> = first
+                .assignments
+                .iter()
+                .map(|(d, _)| d.to_uppercase())
+                .collect();
+            out.push_str(&format!(
+                "create_pst SYSTEM_PST -supplies {{{}}}
+",
+                supplies.join(" ")
+            ));
+            for sys in &pst.states {
+                let states: Vec<String> = first
+                    .assignments
+                    .iter()
+                    .map(|(d, _)| {
+                        sys.assignments
+                            .iter()
+                            .find(|(dd, _)| dd == d)
+                            .map(|(_, s)| s.clone())
+                            .unwrap_or_else(|| "on".to_string())
+                    })
+                    .collect();
+                out.push_str(&format!(
+                    "add_pst_state {} -pst SYSTEM_PST -state {{{}}}
+",
+                    sys.name,
+                    states.join(" ")
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
     // Power states
     for decl in &hir.power_domain_decls {
         for state in &decl.states {

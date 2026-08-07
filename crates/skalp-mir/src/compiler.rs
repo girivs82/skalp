@@ -567,6 +567,24 @@ impl MirCompiler {
                                     "power_domain `{}`: {} control `{}` is driven from domain `{}`, which is `{}` itself or a descendant — a domain cannot switch its own supply (no-self-power)",
                                     decl.name, what, path_str, ctrl_domain, decl.name
                                 ));
+                            } else if let Some(pst) = &hir.power_states_decl {
+                                // Precise PST-liveness: the controller must be
+                                // `on` in EVERY declared system state.
+                                for sys in &pst.states {
+                                    let ctrl_state = sys
+                                        .assignments
+                                        .iter()
+                                        .find(|(d, _)| d == &ctrl_domain)
+                                        .map(|(_, s)| s.as_str());
+                                    if let Some(st) = ctrl_state {
+                                        if st != "on" {
+                                            errors.push(format!(
+                                                "power_domain `{}`: {} control `{}` is driven from domain `{}`, which is `{}` in system power state `{}` — the controller must be on in every declared state (PST-liveness)",
+                                                decl.name, what, path_str, ctrl_domain, st, sys.name
+                                            ));
+                                        }
+                                    }
+                                }
                             } else if domain_can_power_off(&ctrl_domain) {
                                 warnings.push(format!(
                                     "power_domain `{}`: {} control `{}` is driven from domain `{}`, which can itself power off — the controller may be down when `{}` needs switching; drive switch controls from an always-on domain",
@@ -578,6 +596,44 @@ impl MirCompiler {
                             warnings.push(format!(
                                 "power_domain `{}`: {} control `{}` does not resolve to an instance or signal of the top entity — the control cone cannot be checked",
                                 decl.name, what, path_str
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Power state table checks (spec §18): with a declared PST,
+        // - Ancestry legality (ERROR): in every system state, a domain that
+        //   is powered (any state but `off`) must not have a supply ancestor
+        //   assigned `off` — a rail cannot be up while its source is down.
+        // - Full PST-liveness (ERROR, replaces the simplified warning): a
+        //   switched domain's resolved controller domain must be `on` in
+        //   every declared system state (a switch may need to operate
+        //   entering or leaving any state; no transition graph is modeled,
+        //   so the conservative rule applies).
+        if let Some(pst) = &hir.power_states_decl {
+            let state_of =
+                |sys: &skalp_frontend::hir::HirSystemPowerState, domain: &str| -> Option<String> {
+                    sys.assignments
+                        .iter()
+                        .find(|(d, _)| d == domain)
+                        .map(|(_, s)| s.clone())
+                };
+            for sys in &pst.states {
+                for (domain, state) in &sys.assignments {
+                    if state == "off" {
+                        continue;
+                    }
+                    // Every ancestor with a PST assignment must not be off
+                    for anc in ancestors(domain) {
+                        if &anc == domain {
+                            continue;
+                        }
+                        if state_of(sys, &anc).as_deref() == Some("off") {
+                            errors.push(format!(
+                                "system power state `{}`: domain `{}` is `{}` while its supply ancestor `{}` is `off` — a rail cannot be up while its source is down",
+                                sys.name, domain, state, anc
                             ));
                         }
                     }

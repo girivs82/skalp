@@ -387,10 +387,10 @@ language specification's "Domain Lifetimes Are Clock-Only" design note.
 These parts of the recorded power-domain design are **not implemented**;
 do not rely on them:
 
-- **Full PST-liveness for switch controls.** No-self-power (a domain
-  must not gate its own supply — build error) and a simplified
-  controller-liveness warning (the controller should be always-on) ARE
-  implemented; per-state liveness analysis needs the PST legality layer.
+- **PST transition modeling.** The `power_states` legality layer,
+  ancestry legality, no-self-power, and precise per-state PST-liveness
+  ARE implemented; a transition graph between system states (per-edge
+  liveness, sequencing order) is not.
 - **Pin-level related-supply compatibility** (Liberty
   `related_power_pin`; needs per-pin data in `.sklib`).
 - **Port-granular isolation / level-shifter strategies and inference.**

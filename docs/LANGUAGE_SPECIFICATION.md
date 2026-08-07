@@ -1562,6 +1562,51 @@ A control path that does not resolve to an instance or signal of the top
 entity produces a warning: the cone cannot be checked, but the design may
 resolve at a different top.
 
+### 18.9 The System Power State Table
+
+A `power_states { ... }` block declares the LEGAL cross-domain state
+combinations — the power state table (PST):
+
+```text
+power_states {
+    run   = { vdd_aon: on, vdd_core: on,  vdd_gpu: on },
+    idle  = { vdd_aon: on, vdd_core: on,  vdd_gpu: off },
+    sleep = { vdd_aon: on, vdd_core: ret, vdd_gpu: off },
+};
+```
+
+Validation (build errors): referenced domains and states must be declared;
+every domain that declares states must be assigned in **every** system
+state; duplicate system-state names are rejected. Two semantic checks run
+on a declared PST:
+
+- **Ancestry legality.** In every system state, a powered domain (any
+  state but `off`) must not have a supply ancestor assigned `off`:
+
+  ```text
+  system power state `sleep`: domain `vdd_gpu` is `on` while its supply ancestor `vdd_core` is `off` — a rail cannot be up while its source is down
+  ```
+
+- **Full PST-liveness.** With a PST declared, the simplified controller
+  warning of Section 18.8 is replaced by a precise, build-failing check:
+  a switched domain's resolved controller domain must be `on` in every
+  declared system state (no transition graph is modeled, so the
+  conservative rule applies — a switch may need to operate entering or
+  leaving any state):
+
+  ```text
+  power_domain `vdd_gpu`: on_when control `!pmu.gpu_sleep` is driven from domain `vdd_core`, which is `ret` in system power state `sleep` — the controller must be on in every declared state (PST-liveness)
+  ```
+
+The table is exported to UPF as a legacy PST alongside the per-domain
+`add_power_state` entries:
+
+```text
+create_pst SYSTEM_PST -supplies {VDD_AON VDD_CORE VDD_GPU}
+add_pst_state run -pst SYSTEM_PST -state {on on on}
+add_pst_state sleep -pst SYSTEM_PST -state {on ret off}
+```
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1704,13 +1749,11 @@ the coarse domain-crossing warning, and UPF emission from the checked
 model. The following recorded pieces remain **future work** and must not
 be relied on:
 
-1. *Full PST-liveness for switch controls.* No-self-power and the
-   simplified controller-liveness warning are implemented
-   (Section 18.8). Still future: per-state analysis — the controlling
-   domain must be ON in every power state in which the target domain
-   transitions, which requires the PST legality layer (item 6). Also
-   future: resolving control paths deeper than the top entity's
-   immediate instances.
+1. *Deep control-path resolution.* No-self-power, controller liveness,
+   and full per-state PST-liveness are implemented (Sections 18.8,
+   18.9). Still future: resolving control paths deeper than the top
+   entity's immediate instances, and modeling state TRANSITIONS (the
+   liveness rule is conservatively per-state, not per-edge).
 
 2. *Pin-level supply compatibility.* Comparing a control driver's domain
    voltage against each switch/macro pin's related supply (Liberty
@@ -1733,10 +1776,11 @@ be relied on:
    stuck-off/stuck-on, regulator output collapse, overvoltage —
    evidencing the FMEDA's independence claim beyond per-gate stuck-ats.
 
-6. *The power state table (PST) legality layer.* Declared states are
-   validated for name/voltage well-formedness and exported via
-   `add_power_state`, but legal cross-domain state *combinations* are
-   not yet modeled.
+6. *PST transition modeling.* The legality layer itself is implemented
+   (Section 18.9: `power_states` blocks, ancestry legality, precise
+   liveness, `create_pst` export). Still future: a transition graph
+   between system states (which transitions are legal, sequencing
+   order), which would sharpen liveness to per-edge analysis.
 
 7. *Instance-level rebinding.* Binding is per-entity; rebinding one
    `inst` of an entity to a different domain is not implemented.

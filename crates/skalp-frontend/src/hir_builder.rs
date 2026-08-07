@@ -598,6 +598,17 @@ impl HirBuilderContext {
                 SyntaxKind::GlobalConstraintBlock => {
                     self.build_global_constraints(&child, &mut hir);
                 }
+                SyntaxKind::PowerStatesDecl => {
+                    let decl = self.build_power_states_decl(&child);
+                    if hir.power_states_decl.is_some() {
+                        self.errors.push(HirError {
+                            message: "duplicate power_states block — declare the system power state table once".to_string(),
+                            span: self.make_span(&child),
+                        });
+                    } else {
+                        hir.power_states_decl = Some(decl);
+                    }
+                }
                 SyntaxKind::PowerDomainDecl => {
                     if let Some(decl) = self.build_power_domain_decl(&child) {
                         hir.power_domain_decls.push(decl);
@@ -1056,6 +1067,50 @@ impl HirBuilderContext {
         }
     }
 
+    /// Build the system power state table from a PowerStatesDecl node.
+    fn build_power_states_decl(&mut self, node: &SyntaxNode) -> crate::hir::HirPowerStatesDecl {
+        use crate::hir::{HirPowerStatesDecl, HirSystemPowerState};
+        let mut states = Vec::new();
+        for st in node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::SystemPowerState)
+        {
+            let toks: Vec<_> = st
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .collect();
+            let Some(name) = toks
+                .iter()
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())
+            else {
+                continue;
+            };
+            // Assignments: after '{', pairs of Ident ':' Ident
+            let mut assignments = Vec::new();
+            let mut i = 0;
+            while i < toks.len() {
+                if toks[i].kind() == SyntaxKind::Ident
+                    && i + 2 < toks.len()
+                    && toks[i + 1].kind() == SyntaxKind::Colon
+                    && toks[i + 2].kind() == SyntaxKind::Ident
+                    && toks[i].text() != name
+                {
+                    assignments.push((toks[i].text().to_string(), toks[i + 2].text().to_string()));
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            states.push(HirSystemPowerState { name, assignments });
+        }
+        HirPowerStatesDecl {
+            states,
+            span: self.make_span(node),
+        }
+    }
+
     /// Validate the supply tree and every `#[power_domain(...)]` reference.
     /// Runs only when declarations exist — designs without them keep the
     /// legacy annotation-only behavior.
@@ -1134,6 +1189,65 @@ impl HirBuilderContext {
                         } else {
                             break;
                         }
+                    }
+                }
+            }
+        }
+
+        // Power state table validation: every referenced domain and state
+        // must be declared; every domain that declares states must be
+        // assigned in every system state (completeness); duplicate system
+        // state names are errors.
+        if let Some(pst) = &hir.power_states_decl {
+            let mut seen = HashSet::new();
+            for sys in &pst.states {
+                if !seen.insert(sys.name.as_str()) {
+                    self.errors.push(HirError {
+                        message: format!("duplicate system power state `{}`", sys.name),
+                        span: pst.span.clone(),
+                    });
+                }
+                for (domain, state) in &sys.assignments {
+                    match by_name.get(domain.as_str()) {
+                        None => self.errors.push(HirError {
+                            message: format!(
+                                "system power state `{}`: unknown power domain `{}`",
+                                sys.name, domain
+                            ),
+                            span: pst.span.clone(),
+                        }),
+                        Some(d) => {
+                            if !d.states.is_empty() && !d.states.iter().any(|s| &s.name == state) {
+                                self.errors.push(HirError {
+                                    message: format!(
+                                        "system power state `{}`: domain `{}` has no state `{}` (declared: {})",
+                                        sys.name,
+                                        domain,
+                                        state,
+                                        d.states
+                                            .iter()
+                                            .map(|s| s.name.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ),
+                                    span: pst.span.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                // Completeness: every domain with declared states must appear
+                for decl in &hir.power_domain_decls {
+                    if !decl.states.is_empty()
+                        && !sys.assignments.iter().any(|(d, _)| d == &decl.name)
+                    {
+                        self.errors.push(HirError {
+                            message: format!(
+                                "system power state `{}`: domain `{}` declares states but is not assigned here — every stateful domain must appear in every system state",
+                                sys.name, decl.name
+                            ),
+                            span: pst.span.clone(),
+                        });
                     }
                 }
             }

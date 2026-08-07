@@ -543,6 +543,8 @@ pub enum SyntaxKind {
     // Power-domain declarations (spec §20.1 implemented subset)
     PowerDomainDecl,
     PowerStateList,
+    PowerStatesDecl,
+    SystemPowerState,
 
     // Placeholder for the end
     __Last,

@@ -81,6 +81,9 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
                 Some(SyntaxKind::ConstraintKw) => self.parse_global_constraint_block(),
                 Some(SyntaxKind::PowerDomainKw) => self.parse_power_domain_decl(),
+                Some(SyntaxKind::Ident) if self.at_ident_text("power_states") => {
+                    self.parse_power_states_decl()
+                }
                 Some(SyntaxKind::ConstKw) => {
                     // Check if this is 'const fn' or just 'const'
                     if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
@@ -6712,6 +6715,62 @@ impl ParseState<'_> {
             // Force progress so malformed input degrades to errors, not a hang.
             if self.current == before {
                 self.error_and_bump("expected power state");
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// Parse the system power state table (spec §18):
+    ///   power_states {
+    ///       run   = { vdd_core: on, vdd_gpu: on },
+    ///       sleep = { vdd_core: ret, vdd_gpu: off },
+    ///   };
+    /// `power_states` is a contextual identifier; domain-state names accept
+    /// `on` (a keyword elsewhere).
+    fn parse_power_states_decl(&mut self) {
+        self.start_node(SyntaxKind::PowerStatesDecl);
+        self.bump(); // 'power_states' contextual ident
+        self.expect(SyntaxKind::LBrace);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            let before = self.current;
+            self.parse_system_power_state();
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+            if self.current == before {
+                self.error_and_bump("expected system power state");
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
+        self.finish_node();
+    }
+
+    /// One `NAME = { domain: state, ... }` entry.
+    fn parse_system_power_state(&mut self) {
+        self.start_node(SyntaxKind::SystemPowerState);
+        self.expect(SyntaxKind::Ident); // state name
+        self.expect(SyntaxKind::Assign);
+        self.expect(SyntaxKind::LBrace);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            let before = self.current;
+            self.expect(SyntaxKind::Ident); // domain name
+            self.expect(SyntaxKind::Colon);
+            if self.at(SyntaxKind::Ident) {
+                self.bump();
+            } else if self.at(SyntaxKind::OnKw) {
+                self.bump_as_ident();
+            } else {
+                self.error("expected domain-state name");
+            }
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+            if self.current == before {
+                self.error_and_bump("expected domain-state assignment");
             }
         }
         self.expect(SyntaxKind::RBrace);

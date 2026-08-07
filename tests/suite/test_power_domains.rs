@@ -447,3 +447,104 @@ mod control_cone {
         compile_checked(&design("vdd_core")).expect("liveness is a warning, not an error");
     }
 }
+
+#[cfg(test)]
+mod power_state_table {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn compile_checked(src: &str) -> Result<skalp_mir::Mir, String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+    }
+
+    fn design(sleep_state: &str, pmu_domain: &str) -> String {
+        format!(
+            r#"
+            power_domain vdd_aon: external, states = {{ on: 0.9V }};
+            power_domain vreg: external;
+            power_domain vdd_core = regulated(vreg, macro = u_ldo, states = {{ on: 0.9V, ret: 0.6V, off }});
+            power_domain vdd_gpu = switched(vdd_core, on_when = !pmu.gpu_sleep, states = {{ on: 0.9V, off }});
+
+            power_states {{
+                run   = {{ vdd_aon: on, vdd_core: on, vdd_gpu: on }},
+                sleep = {{ {sleep_state} }},
+            }};
+
+            #[power_domain({pmu_domain})]
+            entity Pmu {{
+                in clk: clock
+                out gpu_sleep: bit
+            }}
+
+            impl Pmu {{
+                signal s: bit = 0
+                on(clk.rise) {{ s = !s }}
+                gpu_sleep = s
+            }}
+
+            entity Top {{
+                in clk: clock
+                out slp: bit
+            }}
+
+            impl Top {{
+                inst pmu = Pmu {{ clk: clk }}
+                slp = pmu.gpu_sleep
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn valid_pst_builds_and_exports() {
+        let src = design("vdd_aon: on, vdd_core: ret, vdd_gpu: off", "vdd_aon");
+        let hir = parse_and_build_hir(&src).expect("parse");
+        let mir = compile_checked(&src).expect("valid PST must build");
+        let upf = skalp_mir::upf::generate_upf(&hir, &mir, "Top").expect("upf");
+        assert!(upf.contains("create_pst SYSTEM_PST"));
+        assert!(upf.contains("add_pst_state sleep -pst SYSTEM_PST -state {on ret off}"));
+    }
+
+    #[test]
+    fn powered_child_of_off_parent_is_illegal() {
+        let err = compile_checked(&design(
+            "vdd_aon: on, vdd_core: off, vdd_gpu: on",
+            "vdd_aon",
+        ))
+        .expect_err("gpu on while core off must fail");
+        assert!(
+            err.contains("cannot be up while its source is down"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn pst_liveness_is_precise_and_fatal() {
+        // With a PST declared, the controller check is per-state and an
+        // ERROR: the PMU in vdd_core, which is `ret` in sleep, fails.
+        let err = compile_checked(&design(
+            "vdd_aon: on, vdd_core: ret, vdd_gpu: off",
+            "vdd_core",
+        ))
+        .expect_err("controller not on in sleep must fail");
+        assert!(
+            err.contains("PST-liveness") && err.contains("sleep"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_state_and_incompleteness_are_errors() {
+        let err = parse_and_build_hir(&design("vdd_core: retention", "vdd_aon"))
+            .map(|_| ())
+            .expect_err("must fail at HIR validation");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("has no state `retention`"), "missing ref error: {msg}");
+        assert!(
+            msg.contains("must appear in every system state"),
+            "missing completeness error: {msg}"
+        );
+    }
+}

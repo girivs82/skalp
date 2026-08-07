@@ -168,6 +168,9 @@ pub struct Hir {
     /// Top-level power-domain declarations (supply tree; spec §20.1)
     #[serde(default)]
     pub power_domain_decls: Vec<HirPowerDomainDecl>,
+    /// The system power state table, if declared (spec §18)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_states_decl: Option<HirPowerStatesDecl>,
 }
 
 /// Entity in HIR
@@ -1291,6 +1294,26 @@ pub enum HirPowerDerivation {
         /// Acknowledge: high when the domain is up (optionally negated)
         ack_on: Option<HirPowerCtrl>,
     },
+}
+
+/// The system power state table (spec §18): the set of LEGAL cross-domain
+/// state combinations. `power_states { run = { vdd_core: on, vdd_gpu: on },
+/// sleep = { vdd_core: ret, vdd_gpu: off } }`. Drives the ancestry
+/// legality check and full PST-liveness for switch controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirPowerStatesDecl {
+    pub states: Vec<HirSystemPowerState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<crate::span::SourceSpan>,
+}
+
+/// One named system power state: an assignment of a supply state to each
+/// participating domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirSystemPowerState {
+    pub name: String,
+    /// (domain name, domain-state name) pairs
+    pub assignments: Vec<(String, String)>,
 }
 
 /// An optionally-negated hierarchical signal reference used as switch
@@ -2426,6 +2449,7 @@ impl HirBuilder {
         Hir {
             name: "main".to_string(),
             power_domain_decls: Vec::new(),
+            power_states_decl: None,
             comments: vec![],
             entities: Vec::new(),
             entity_aliases: Vec::new(),
@@ -2543,6 +2567,7 @@ impl Hir {
             unresolved_instances: Vec::new(),
             main_entity_names: Vec::new(),
             power_domain_decls: Vec::new(),
+            power_states_decl: None,
         }
     }
 }

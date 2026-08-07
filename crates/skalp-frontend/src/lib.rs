@@ -2461,6 +2461,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         unresolved_instances: Vec::new(),
         main_entity_names: Vec::new(),
         power_domain_decls: Vec::new(),
+        power_states_decl: None,
     })
 }
 
