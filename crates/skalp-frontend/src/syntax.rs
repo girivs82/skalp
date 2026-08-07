@@ -1160,6 +1160,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
 
             Token::LineComment(_) => Comment,
             Token::BlockComment(_) => Comment,
+            Token::Whitespace => Whitespace,
 
             Token::Error => Error,
         }

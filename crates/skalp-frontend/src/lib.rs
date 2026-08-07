@@ -288,7 +288,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
             "HIR rebuild failed: {}",
             errors
                 .first()
-                .map(|e| e.message.clone())
+                .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown error".to_string())
         )
     })?;
@@ -2406,7 +2406,7 @@ pub fn parse_and_build_hir(source: &str) -> Result<Hir> {
     let hir = match builder.build(&syntax_tree) {
         Ok(hir) => hir,
         Err(errors) => {
-            let error_messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
+            let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
             return Err(anyhow::anyhow!(
                 "HIR building failed with {} errors:\n  {}",
                 errors.len(),

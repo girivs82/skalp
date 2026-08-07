@@ -111,7 +111,16 @@ impl MirCompiler {
         // are scoped to these — stdlib entities are monomorphized even when
         // unused, and a latent problem in an unused stdlib entity must not block
         // an unrelated design.
-        let reachable_names = Self::reachable_module_names(&mir, hir);
+        // Entities defined in module HIRs (the preloaded stdlib). A main file
+        // with NO entities of its own (a functions-only library file) must not
+        // treat these as check roots: they are generic templates monomorphized
+        // wholesale — never specialized by this design — and their unresolved
+        // conversions read as undriven outputs for hardware nothing emits.
+        let external_entity_names: std::collections::HashSet<String> = module_hirs
+            .values()
+            .flat_map(|h| h.entities.iter().map(|e| e.name.clone()))
+            .collect();
+        let reachable_names = Self::reachable_module_names(&mir, hir, &external_entity_names);
         if !conversion_errors.is_empty() {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
@@ -271,7 +280,15 @@ impl MirCompiler {
         {
             let reachable_refs: std::collections::HashSet<&str> =
                 reachable_names.iter().map(|s| s.as_str()).collect();
-            let undriven = crate::undriven::check_undriven_outputs(&mir, &reachable_refs);
+            // An empty reachable set is only "check everything" when there are
+            // no external module HIRs to exclude — with a functions-only main
+            // file and a preloaded stdlib, empty means nothing user-reachable
+            // exists and the check has nothing legitimate to inspect.
+            let undriven = if reachable_refs.is_empty() && !external_entity_names.is_empty() {
+                Vec::new()
+            } else {
+                crate::undriven::check_undriven_outputs(&mir, &reachable_refs)
+            };
             if !undriven.is_empty() {
                 return Err(format!(
                     "undriven output check failed with {} error(s):\n  {}",
@@ -355,10 +372,29 @@ impl MirCompiler {
     /// (`hir.main_entity_names`); an empty list means provenance is unknown
     /// (e.g. direct-HIR callers like the VHDL frontend) — every module is
     /// treated as a root in that case. Reachability follows instance edges.
-    fn reachable_module_names(mir: &Mir, hir: &Hir) -> std::collections::HashSet<String> {
+    fn reachable_module_names(
+        mir: &Mir,
+        hir: &Hir,
+        external_entity_names: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
         use std::collections::{HashSet, VecDeque};
+        let is_external = |name: &str| {
+            external_entity_names.iter().any(|n| {
+                n == name
+                    || (name.len() > n.len()
+                        && name.starts_with(n.as_str())
+                        && name.as_bytes()[n.len()] == b'_')
+            })
+        };
         let mut reachable: HashSet<crate::mir::ModuleId> = if hir.main_entity_names.is_empty() {
-            mir.modules.iter().map(|m| m.id).collect()
+            // No declared mains: every module is a root — EXCEPT entities that
+            // came from module HIRs (stdlib preload), which are only reachable
+            // through an actual instantiation edge from user hardware.
+            mir.modules
+                .iter()
+                .filter(|m| !is_external(&m.name))
+                .map(|m| m.id)
+                .collect()
         } else {
             mir.modules
                 .iter()

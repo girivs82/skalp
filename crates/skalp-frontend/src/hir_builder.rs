@@ -371,12 +371,16 @@ impl HirBuilderContext {
         ctx
     }
 
-    /// Create a span from syntax node's text range
+    /// Create a span from syntax node's text range. Whitespace is tokenized
+    /// (tree text == source text), so offsets are true source positions; a
+    /// node's range includes the trailing trivia its parser consumed, which
+    /// we trim so the caret covers only the construct itself.
     fn make_span(&self, node: &SyntaxNode) -> Option<SourceSpan> {
         let line_index = self.line_index.as_ref()?;
         let range = node.text_range();
         let start = u32::from(range.start()) as usize;
-        let end = u32::from(range.end()) as usize;
+        let text = node.text().to_string();
+        let end = start + text.trim_end().len();
         let mut span = SourceSpan::from_offset_range(start, end, line_index);
         if let Some(ref file) = self.source_file {
             span = span.with_file(file.clone());
@@ -4051,7 +4055,10 @@ impl HirBuilderContext {
                 //   exprs[1] = BinaryExpr(a!=0&&b!=0&&c!=0) - complete chained expression
                 //   exprs[2] = BinaryExpr(c!=0) - stray duplicate (starts with IdentExpr 'c')
                 // We should ONLY use exprs[1] in this case.
-                let first_elem = third_expr.children_with_tokens().next();
+                let first_elem = third_expr.children_with_tokens().find(|e| match e {
+                    rowan::NodeOrToken::Token(t) => !t.kind().is_trivia(),
+                    _ => true,
+                });
                 let third_starts_with_operator = first_elem
                     .as_ref()
                     .map(|elem| match elem {
@@ -4324,7 +4331,10 @@ impl HirBuilderContext {
                     // If so, and the first expression was also a BinaryExpr, this sibling
                     // was already processed by build_binary_expr's sibling chaining logic.
                     // We should skip it to avoid duplication.
-                    let first_elem = current_node.children_with_tokens().next();
+                    let first_elem = current_node.children_with_tokens().find(|e| match e {
+                        rowan::NodeOrToken::Token(t) => !t.kind().is_trivia(),
+                        _ => true,
+                    });
                     let starts_with_operator = first_elem
                         .as_ref()
                         .map(|elem| match elem {
@@ -4469,7 +4479,7 @@ impl HirBuilderContext {
             let first_token = node
                 .children_with_tokens()
                 .filter_map(|e| e.into_token())
-                .next();
+                .find(|t| !t.kind().is_trivia());
 
             if let Some(op_tok) = first_token {
                 if op_tok.kind().is_operator() {
@@ -8644,7 +8654,10 @@ impl HirBuilderContext {
                     while start_idx < expr_children.len() {
                         let next = &expr_children[start_idx];
                         if next.kind() == SyntaxKind::BinaryExpr {
-                            let first_elem = next.children_with_tokens().next();
+                            let first_elem = next.children_with_tokens().find(|e| match e {
+                                rowan::NodeOrToken::Token(t) => !t.kind().is_trivia(),
+                                _ => true,
+                            });
                             let starts_with_operator = first_elem
                                 .as_ref()
                                 .map(|elem| match elem {
@@ -8899,7 +8912,10 @@ impl HirBuilderContext {
                             // BUG FIX #189: Must check the FIRST ELEMENT (node or token), not
                             // just the first TOKEN! For "a + b", first token would be "+" but
                             // first element is IdentExpr(a), so it should NOT be added.
-                            let first_element = next.children_with_tokens().next();
+                            let first_element = next.children_with_tokens().find(|e| match e {
+                                rowan::NodeOrToken::Token(t) => !t.kind().is_trivia(),
+                                _ => true,
+                            });
                             let starts_with_operator = match &first_element {
                                 Some(rowan::NodeOrToken::Token(t)) => t.kind().is_operator(),
                                 _ => false, // First element is a Node or nothing
@@ -8989,7 +9005,10 @@ impl HirBuilderContext {
             for child in &expr_children[1..] {
                 // Check if this child STARTS with an operator token (continuation) or a node (direct RHS)
                 // Important: we need to check the FIRST element (node or token), not just the first token
-                let first_element = child.children_with_tokens().next();
+                let first_element = child.children_with_tokens().find(|e| match e {
+                    rowan::NodeOrToken::Token(t) => !t.kind().is_trivia(),
+                    _ => true,
+                });
 
                 let child_starts_with_operator = match &first_element {
                     Some(rowan::NodeOrToken::Token(t)) => t.kind().is_operator(),
@@ -10026,7 +10045,10 @@ impl HirBuilderContext {
                 .map(|n| n.text().to_string())?;
 
             // Extract field name (remove leading '.')
-            let field_name = field_text.trim_start_matches('.');
+            // Node text includes trivia now that whitespace is tokenized —
+            // trim it or the field name carries trailing spaces and every
+            // name-keyed lookup downstream misses.
+            let field_name = field_text.trim_start_matches('.').trim();
 
             Some(HirExpression::FieldAccess {
                 base: Box::new(base),
@@ -13183,11 +13205,12 @@ impl HirBuilderContext {
             .children()
             .filter(|c| c.kind() == SyntaxKind::ConstraintPair)
         {
-            // Get key - it's the first token (keyword or ident)
+            // Get key - the first NON-TRIVIA token (keyword or ident).
+            // Whitespace is tokenized, so positional walks must skip trivia.
             let key_token = pair
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
-                .next();
+                .find(|t| !t.kind().is_trivia());
 
             if key_token.is_none() {
                 continue;
@@ -13195,10 +13218,11 @@ impl HirBuilderContext {
 
             let key_text = key_token.unwrap().text().to_string();
 
-            // Find the value (third token) - may be string literal or keyword
+            // Find the value (third non-trivia token) - may be string literal or keyword
             let value_token = pair
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
+                .filter(|t| !t.kind().is_trivia())
                 .nth(2); // Skip key and colon, get value
 
             // Extract value text and kind if available
@@ -15777,7 +15801,7 @@ mod tests {
                 signal counter: nat[8] = 0
 
                 on(clk.rise) {
-                    counter <= counter + 1
+                    counter = counter + 1
                 }
 
                 count = counter

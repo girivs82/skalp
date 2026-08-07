@@ -540,8 +540,11 @@ pub enum Token {
     #[regex(r"/\*[^*]*\*+([^/*][^*]*\*+)*/", |lex| lex.slice().to_string())]
     BlockComment(String),
 
-    // Whitespace (skipped)
-    #[regex(r"[ \t\n\f]+", logos::skip)]
+    // Whitespace — lexed as a real trivia token so the syntax tree's text
+    // equals the source text and node offsets map to true source positions
+    // (error spans drifted by every skipped run of whitespace before this).
+    #[regex(r"[ \t\n\f]+")]
+    Whitespace,
     // Error token for unknown/invalid input
     Error,
 }
@@ -717,7 +720,12 @@ mod tests {
     #[test]
     fn test_keywords() {
         let mut lexer = Lexer::new("entity impl in out signal on");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -735,7 +743,12 @@ mod tests {
     #[test]
     fn test_identifiers() {
         let mut lexer = Lexer::new("counter clk reset_n my_signal");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -751,7 +764,12 @@ mod tests {
     #[test]
     fn test_literals() {
         let mut lexer = Lexer::new("42 0xFF 0b1010 \"hello world\"");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -769,7 +787,12 @@ mod tests {
         // Note: `<=` is now LessEqual (comparison), not NonBlockingAssign
         // Using unified `=` operator with context-based inference (no := or <= for assignment)
         let mut lexer = Lexer::new("<= = |> -> <-");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -793,7 +816,12 @@ entity Counter {
 "#;
 
         let mut lexer = Lexer::new(source);
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         // Should tokenize without errors
         assert!(tokens.contains(&Token::Entity));
@@ -803,7 +831,12 @@ entity Counter {
     #[test]
     fn test_on_syntax() {
         let mut lexer = Lexer::new("on(clk.rise | reset.rise)");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -825,7 +858,12 @@ entity Counter {
     #[test]
     fn test_underscore_numbers() {
         let mut lexer = Lexer::new("1_000_000 0xFF_FF 0b1010_1010");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -840,7 +878,12 @@ entity Counter {
     #[test]
     fn test_advanced_keywords() {
         let mut lexer = Lexer::new("intent requirement protocol async await flow");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -858,7 +901,12 @@ entity Counter {
     #[test]
     fn test_event_keywords() {
         let mut lexer = Lexer::new("rise fall");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(tokens, vec![Token::Rise, Token::Fall,]);
     }
@@ -866,7 +914,12 @@ entity Counter {
     #[test]
     fn test_verification_keywords() {
         let mut lexer = Lexer::new("assert requirement");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(tokens, vec![Token::Assert, Token::Requirement,]);
     }
@@ -874,7 +927,12 @@ entity Counter {
     #[test]
     fn test_safety_keywords() {
         let mut lexer = Lexer::new("asil safety_req psm lsm fmea power_domain");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
@@ -899,7 +957,12 @@ entity Counter {
         "#;
 
         let mut lexer = Lexer::new(source);
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         // Should contain intent keyword and identifiers
         assert!(tokens.contains(&Token::Intent));
@@ -914,7 +977,12 @@ entity Counter {
     #[test]
     fn test_error_recovery() {
         let mut lexer = Lexer::new("entity @ invalid $ Counter");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         // Should handle tokens gracefully
         assert_eq!(tokens[0], Token::Entity);
@@ -928,7 +996,12 @@ entity Counter {
     fn test_block_comments() {
         let source = "entity /* comment */ Test";
         let mut lexer = Lexer::new(source);
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
 
         // Comments are now captured as tokens
         assert_eq!(tokens.len(), 3);

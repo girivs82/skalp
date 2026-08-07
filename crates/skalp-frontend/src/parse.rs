@@ -3361,29 +3361,27 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    /// Check if we're at a newline by looking ahead in trivia
+    /// Check if a newline separates the previous non-trivia token from the
+    /// current one. Whitespace is a real token now, so walk back over trivia
+    /// tokens and look for a newline in their source text (the old
+    /// between-spans slice is always empty with whitespace tokenized).
     fn at_newline(&self) -> bool {
-        if self.current >= self.tokens.len() {
+        if self.current == 0 || self.current >= self.tokens.len() {
             return false;
         }
-        // Check the trivia before current position for newlines
-        let current_pos = self.current;
-        if current_pos == 0 {
-            return false;
+        let mut pos = self.current;
+        while pos > 0 {
+            let t = &self.tokens[pos - 1];
+            if SyntaxKind::from(t.token.clone()).is_trivia() {
+                if self.source[t.span.clone()].contains('\n') {
+                    return true;
+                }
+                pos -= 1;
+            } else {
+                break;
+            }
         }
-        // Look at the trivia between last token and current position
-        let last_token_end = if current_pos > 0 {
-            self.tokens[current_pos - 1].span.end
-        } else {
-            0
-        };
-        let current_token_start = if current_pos < self.tokens.len() {
-            self.tokens[current_pos].span.start
-        } else {
-            self.source.len()
-        };
-        let trivia = &self.source[last_token_end..current_token_start];
-        trivia.contains('\n')
+        false
     }
 
     /// Parse requirement declaration
@@ -7766,7 +7764,12 @@ mod tests {
         // Test that new pattern matching tokens (:: and =>) are properly recognized
         // This validates that the lexer enhancements are working
         let mut lexer = crate::lexer::Lexer::new(":: =>");
-        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        let tokens: Vec<_> = lexer
+            .tokenize()
+            .into_iter()
+            .map(|t| t.token)
+            .filter(|t| !matches!(t, crate::lexer::Token::Whitespace))
+            .collect();
 
         assert_eq!(
             tokens,
