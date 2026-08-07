@@ -1303,6 +1303,11 @@ pub enum HirPowerDerivation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirPowerStatesDecl {
     pub states: Vec<HirSystemPowerState>,
+    /// Legal transitions between system states (`transitions = { run ->
+    /// idle, ... }`). Empty means no transition graph is declared and
+    /// liveness falls back to the conservative all-states rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<crate::span::SourceSpan>,
 }

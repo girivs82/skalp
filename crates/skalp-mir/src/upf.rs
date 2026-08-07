@@ -184,6 +184,12 @@ pub fn generate_upf(hir: &Hir, mir: &Mir, top_name: &str) -> Option<String> {
                     states.join(" ")
                 ));
             }
+            for (i, (from, to)) in pst.transitions.iter().enumerate() {
+                out.push_str(&format!(
+                    "describe_state_transition T{}_{}_{} -from {{{}}} -to {{{}}}\n",
+                    i, from, to, from, to
+                ));
+            }
             out.push('\n');
         }
     }

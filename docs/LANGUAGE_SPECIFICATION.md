@@ -1609,6 +1609,35 @@ on a declared PST:
   power_domain `vdd_gpu`: on_when control `!pmu.gpu_sleep` is driven from domain `vdd_core`, which is `ret` in system power state `sleep` — the controller must be on in every declared state (PST-liveness)
   ```
 
+**The transition graph.** A `transitions = { ... }` entry declares the
+legal moves between system states, sharpening liveness from per-state to
+**per-edge**:
+
+```text
+power_states {
+    run   = { vdd_aon: on, vdd_core: on,  vdd_gpu: on },
+    idle  = { vdd_aon: on, vdd_core: on,  vdd_gpu: off },
+    sleep = { vdd_aon: on, vdd_core: ret, vdd_gpu: off },
+    transitions = { run -> idle, idle -> run, idle -> sleep, sleep -> idle },
+};
+```
+
+With a graph declared, a switched domain's controller must be `on` at
+**both endpoints of every transition that switches it** — and only those.
+This accepts designs the conservative rule rejects: a controller in
+`vdd_core` (which drops to `ret` in `sleep`) is fine above, because
+`vdd_gpu` only switches on the run↔idle edges, where `vdd_core` is on. A
+switching edge with a dead controller fails:
+
+```text
+power_domain `vdd_gpu`: transition `run -> sleep` switches it, but its on_when controller domain `vdd_core` is `ret` in state `sleep` — the controller must be on at both endpoints of a switching transition (PST-liveness)
+```
+
+Unknown endpoints and self-loops are validation errors; a system state
+appearing in no transition warns (unreachable, or the graph is
+incomplete). Transitions export to UPF as `describe_state_transition`
+commands.
+
 The table is exported to UPF as a legacy PST alongside the per-domain
 `add_power_state` entries:
 
@@ -1760,11 +1789,11 @@ the coarse domain-crossing warning, and UPF emission from the checked
 model. The following recorded pieces remain **future work** and must not
 be relied on:
 
-1. *State-transition modeling.* No-self-power, controller liveness,
-   full per-state PST-liveness, and deep control-path resolution are
-   implemented (Sections 18.8, 18.9). Still future: a transition graph
-   between system states, which would sharpen liveness from per-state
-   to per-edge and allow sequencing-order checks.
+1. *Sequencing-order checks.* The control checks, PST legality, and the
+   transition graph with per-edge liveness are all implemented
+   (Sections 18.8, 18.9). Still future: multi-step sequencing
+   constraints within a transition (isolate before switch-off, restore
+   order on wake), which need an ordering model beyond edges.
 
 2. *Pin-level supply compatibility.* Comparing a control driver's domain
    voltage against each switch/macro pin's related supply (Liberty
@@ -1787,11 +1816,8 @@ be relied on:
    stuck-off/stuck-on, regulator output collapse, overvoltage —
    evidencing the FMEDA's independence claim beyond per-gate stuck-ats.
 
-6. *PST transition modeling.* The legality layer itself is implemented
-   (Section 18.9: `power_states` blocks, ancestry legality, precise
-   liveness, `create_pst` export). Still future: a transition graph
-   between system states (which transitions are legal, sequencing
-   order), which would sharpen liveness to per-edge analysis.
+6. *(Merged into item 1.)* The PST legality layer AND the transition
+   graph with per-edge liveness are implemented (Section 18.9).
 
 7. *Instance-level rebinding.* Binding is per-entity; rebinding one
    `inst` of an entity to a different domain is not implemented.

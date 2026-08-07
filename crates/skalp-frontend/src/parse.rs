@@ -6734,7 +6734,11 @@ impl ParseState<'_> {
         self.expect(SyntaxKind::LBrace);
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
             let before = self.current;
-            self.parse_system_power_state();
+            if self.at_ident_text("transitions") {
+                self.parse_power_transitions();
+            } else {
+                self.parse_system_power_state();
+            }
             if self.at(SyntaxKind::Comma) {
                 self.bump();
             }
@@ -6746,6 +6750,29 @@ impl ParseState<'_> {
         if self.at(SyntaxKind::Semicolon) {
             self.bump();
         }
+        self.finish_node();
+    }
+
+    /// `transitions = { run -> idle, idle -> sleep, ... }` — the legal
+    /// transition graph between system states.
+    fn parse_power_transitions(&mut self) {
+        self.start_node(SyntaxKind::PowerTransitionList);
+        self.bump(); // 'transitions'
+        self.expect(SyntaxKind::Assign);
+        self.expect(SyntaxKind::LBrace);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            let before = self.current;
+            self.expect(SyntaxKind::Ident); // from
+            self.expect(SyntaxKind::Arrow);
+            self.expect(SyntaxKind::Ident); // to
+            if self.at(SyntaxKind::Comma) {
+                self.bump();
+            }
+            if self.current == before {
+                self.error_and_bump("expected transition (state -> state)");
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
         self.finish_node();
     }
 

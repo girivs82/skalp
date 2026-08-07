@@ -1108,8 +1108,33 @@ impl HirBuilderContext {
             }
             states.push(HirSystemPowerState { name, assignments });
         }
+        // Transitions: `from -> to` pairs inside the PowerTransitionList node
+        let mut transitions = Vec::new();
+        if let Some(list) = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::PowerTransitionList)
+        {
+            let toks: Vec<_> = list
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .collect();
+            let mut i = 0;
+            while i + 2 < toks.len() {
+                if toks[i].kind() == SyntaxKind::Ident
+                    && toks[i + 1].kind() == SyntaxKind::Arrow
+                    && toks[i + 2].kind() == SyntaxKind::Ident
+                {
+                    transitions.push((toks[i].text().to_string(), toks[i + 2].text().to_string()));
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+        }
         HirPowerStatesDecl {
             states,
+            transitions,
             span: self.make_span(node),
         }
     }
@@ -1252,6 +1277,34 @@ impl HirBuilderContext {
                             span: pst.span.clone(),
                         });
                     }
+                }
+            }
+        }
+
+        // Transition-graph validation: endpoints must be declared system
+        // states; self-loops are meaningless.
+        if let Some(pst) = &hir.power_states_decl {
+            let names: HashSet<&str> = pst.states.iter().map(|s| s.name.as_str()).collect();
+            for (from, to) in &pst.transitions {
+                for endpoint in [from, to] {
+                    if !names.contains(endpoint.as_str()) {
+                        self.errors.push(HirError {
+                            message: format!(
+                                "power transition `{} -> {}`: unknown system power state `{}`",
+                                from, to, endpoint
+                            ),
+                            span: pst.span.clone(),
+                        });
+                    }
+                }
+                if from == to {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "power transition `{} -> {}`: self-loops are not meaningful",
+                            from, to
+                        ),
+                        span: pst.span.clone(),
+                    });
                 }
             }
         }

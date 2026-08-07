@@ -647,3 +647,104 @@ mod bank_domain_and_deep_paths {
         assert!(err.contains("disagrees with domain"), "wrong error: {err}");
     }
 }
+
+#[cfg(test)]
+mod transition_graph {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn compile_checked(src: &str) -> Result<skalp_mir::Mir, String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+    }
+
+    fn design(transitions: &str) -> String {
+        format!(
+            r#"
+            power_domain vdd_aon: external, states = {{ on: 0.9V }};
+            power_domain vreg: external;
+            power_domain vdd_core = regulated(vreg, macro = u_ldo, states = {{ on: 0.9V, ret: 0.6V }});
+            power_domain vdd_gpu = switched(vdd_core, on_when = !pmu.gpu_sleep, states = {{ on: 0.9V, off }});
+
+            power_states {{
+                run   = {{ vdd_aon: on, vdd_core: on,  vdd_gpu: on }},
+                idle  = {{ vdd_aon: on, vdd_core: on,  vdd_gpu: off }},
+                sleep = {{ vdd_aon: on, vdd_core: ret, vdd_gpu: off }},
+                transitions = {{ {transitions} }},
+            }};
+
+            #[power_domain(vdd_core)]
+            entity Pmu {{
+                in clk: clock
+                out gpu_sleep: bit
+            }}
+
+            impl Pmu {{
+                signal s: bit = 0
+                on(clk.rise) {{ s = !s }}
+                gpu_sleep = s
+            }}
+
+            entity Top {{
+                in clk: clock
+                out slp: bit
+            }}
+
+            impl Top {{
+                inst pmu = Pmu {{ clk: clk }}
+                slp = pmu.gpu_sleep
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn per_edge_liveness_accepts_what_per_state_rejects() {
+        // The PMU lives in vdd_core, which is `ret` in sleep — the
+        // conservative per-state rule would reject this. With the graph,
+        // vdd_gpu only switches on run<->idle (core on at both ends): PASS.
+        let hir = parse_and_build_hir(&design(
+            "run -> idle, idle -> run, idle -> sleep, sleep -> idle",
+        ))
+        .expect("parse");
+        assert_eq!(hir.power_states_decl.as_ref().unwrap().transitions.len(), 4);
+        compile_checked(&design(
+            "run -> idle, idle -> run, idle -> sleep, sleep -> idle",
+        ))
+        .expect("per-edge analysis must accept the sleepable controller");
+    }
+
+    #[test]
+    fn switching_edge_with_dead_controller_fails() {
+        // A direct run -> sleep edge switches vdd_gpu while the controller
+        // domain is `ret` at the sleep endpoint.
+        let err = compile_checked(&design(
+            "run -> sleep, sleep -> run, run -> idle, idle -> run, idle -> sleep, sleep -> idle",
+        ))
+        .expect_err("run->sleep switches gpu with controller in ret");
+        assert!(
+            err.contains("both endpoints") && err.contains("run -> sleep"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_endpoint_and_self_loop_are_errors() {
+        let err = parse_and_build_hir(&design("run -> nowhere, idle -> idle"))
+            .map(|_| ())
+            .expect_err("must fail validation");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown system power state `nowhere`"), "{msg}");
+        assert!(msg.contains("self-loops are not meaningful"), "{msg}");
+    }
+
+    #[test]
+    fn upf_exports_transitions() {
+        let src = design("run -> idle, idle -> run, idle -> sleep, sleep -> idle");
+        let hir = parse_and_build_hir(&src).expect("parse");
+        let mir = compile_checked(&src).expect("mir");
+        let upf = skalp_mir::upf::generate_upf(&hir, &mir, "Top").expect("upf");
+        assert!(upf.contains("describe_state_transition T0_run_idle -from {run} -to {idle}"));
+    }
+}

@@ -583,20 +583,64 @@ impl MirCompiler {
                                     decl.name, what, path_str, ctrl_domain, decl.name
                                 ));
                             } else if let Some(pst) = &hir.power_states_decl {
-                                // Precise PST-liveness: the controller must be
-                                // `on` in EVERY declared system state.
-                                for sys in &pst.states {
-                                    let ctrl_state = sys
-                                        .assignments
+                                let ctrl_state_in = |sys_name: &str| -> Option<String> {
+                                    pst.states
                                         .iter()
-                                        .find(|(d, _)| d == &ctrl_domain)
-                                        .map(|(_, s)| s.as_str());
-                                    if let Some(st) = ctrl_state {
-                                        if st != "on" {
-                                            errors.push(format!(
-                                                "power_domain `{}`: {} control `{}` is driven from domain `{}`, which is `{}` in system power state `{}` — the controller must be on in every declared state (PST-liveness)",
-                                                decl.name, what, path_str, ctrl_domain, st, sys.name
-                                            ));
+                                        .find(|s| s.name == sys_name)
+                                        .and_then(|sys| {
+                                            sys.assignments
+                                                .iter()
+                                                .find(|(d, _)| d == &ctrl_domain)
+                                                .map(|(_, st)| st.clone())
+                                        })
+                                };
+                                let target_state_in = |sys_name: &str| -> Option<String> {
+                                    pst.states
+                                        .iter()
+                                        .find(|s| s.name == sys_name)
+                                        .and_then(|sys| {
+                                            sys.assignments
+                                                .iter()
+                                                .find(|(d, _)| d == &decl.name)
+                                                .map(|(_, st)| st.clone())
+                                        })
+                                };
+                                if pst.transitions.is_empty() {
+                                    // No transition graph: conservative rule —
+                                    // the controller must be `on` in EVERY
+                                    // declared system state.
+                                    for sys in &pst.states {
+                                        if let Some(st) = ctrl_state_in(&sys.name) {
+                                            if st != "on" {
+                                                errors.push(format!(
+                                                    "power_domain `{}`: {} control `{}` is driven from domain `{}`, which is `{}` in system power state `{}` — the controller must be on in every declared state (PST-liveness; declare `transitions` for per-edge analysis)",
+                                                    decl.name, what, path_str, ctrl_domain, st, sys.name
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Per-edge: the controller must be `on` at
+                                    // BOTH endpoints of every transition where
+                                    // the TARGET domain's state changes.
+                                    for (from, to) in &pst.transitions {
+                                        let changes =
+                                            match (target_state_in(from), target_state_in(to)) {
+                                                (Some(a), Some(b)) => a != b,
+                                                _ => false,
+                                            };
+                                        if !changes {
+                                            continue;
+                                        }
+                                        for endpoint in [from, to] {
+                                            if let Some(st) = ctrl_state_in(endpoint) {
+                                                if st != "on" {
+                                                    errors.push(format!(
+                                                        "power_domain `{}`: transition `{} -> {}` switches it, but its {} controller domain `{}` is `{}` in state `{}` — the controller must be on at both endpoints of a switching transition (PST-liveness)",
+                                                        decl.name, from, to, what, ctrl_domain, st, endpoint
+                                                    ));
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -628,6 +672,23 @@ impl MirCompiler {
         //   entering or leaving any state; no transition graph is modeled,
         //   so the conservative rule applies).
         if let Some(pst) = &hir.power_states_decl {
+            // With a transition graph declared, warn about isolated states —
+            // a system state no transition enters or leaves is unreachable
+            // (or the graph is incomplete).
+            if !pst.transitions.is_empty() {
+                for sys in &pst.states {
+                    let touched = pst
+                        .transitions
+                        .iter()
+                        .any(|(f, t)| f == &sys.name || t == &sys.name);
+                    if !touched {
+                        warnings.push(format!(
+                            "system power state `{}` appears in no transition — unreachable, or the transition graph is incomplete",
+                            sys.name
+                        ));
+                    }
+                }
+            }
             let state_of =
                 |sys: &skalp_frontend::hir::HirSystemPowerState, domain: &str| -> Option<String> {
                     sys.assignments

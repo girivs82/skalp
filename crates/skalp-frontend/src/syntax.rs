@@ -545,6 +545,7 @@ pub enum SyntaxKind {
     PowerStateList,
     PowerStatesDecl,
     SystemPowerState,
+    PowerTransitionList,
 
     // Placeholder for the end
     __Last,
