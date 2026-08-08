@@ -71,7 +71,10 @@ users arriving from Verilog or VHDL.
 - `monospace` for code and keywords
 - [brackets] for optional elements in prose grammar sketches
 - Complete examples in this document compile with the current compiler
-  (they are checked by `tools/doc_snippet_check.py`)
+  (they are checked by `tools/doc-check.sh`, which runs
+  `tools/doc_snippet_check.py` over the full corpus — repo docs plus the
+  published tutorial; the checker itself refuses to run on an empty file
+  list and reports how many blocks it actually checked)
 
 ## 2. Lexical Structure
 

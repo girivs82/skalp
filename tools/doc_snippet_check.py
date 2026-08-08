@@ -86,9 +86,18 @@ def blocks(path: pathlib.Path):
 
 
 def main():
+    files = sys.argv[1:]
+    if not files:
+        # A checker that reports "0 issues" after checking nothing is worse
+        # than no checker: it manufactures evidence. Refuse to run empty.
+        print(__doc__.strip().split("Usage:")[-1].strip(), file=sys.stderr)
+        print("error: no files given — nothing was checked", file=sys.stderr)
+        return 2
+
     total_bad = 0
+    n_files = n_blocks_total = 0
     staged: dict[str, str] = {}  # module filename -> code, accumulated in file order
-    for f in sys.argv[1:]:
+    for f in files:
         path = pathlib.Path(f)
         issues = []
         n_skalp = n_compiled = 0
@@ -126,13 +135,21 @@ def main():
                         # Only stage snippets that compile — the reader's
                         # project only ever contains working files.
                         staged[name] = code
+        n_files += 1
+        n_blocks_total += n_skalp
         status = "OK" if not issues else f"{len(issues)} ISSUES"
         print(f"== {f}: {n_skalp} skalp blocks, {n_compiled} compiled — {status}")
         for line, msg in issues:
             print(f"   L{line}: {msg}")
         total_bad += len(issues)
-    print(f"\nTOTAL ISSUES: {total_bad}")
-    return 0
+    # Report COVERAGE alongside the verdict, so a run that checked nothing
+    # can never read like a run that checked everything.
+    print(f"\nCHECKED: {n_files} file(s), {n_blocks_total} skalp block(s)")
+    print(f"TOTAL ISSUES: {total_bad}")
+    if n_blocks_total == 0:
+        print("error: no skalp blocks found — the file list is probably wrong", file=sys.stderr)
+        return 2
+    return 1 if total_bad else 0
 
 
 if __name__ == "__main__":
