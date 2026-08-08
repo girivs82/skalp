@@ -833,7 +833,23 @@ impl MirCompiler {
                 // and needs no annotation at all.
                 if let (Some(cd), Some(pd)) = (&child_eff, &eff) {
                     if cd != pd {
-                        let entity_iso = has_isolation(child.id) || has_isolation(eid);
+                        // An `#[isolation]` signal declares a strategy for THAT
+                        // signal. It says nothing about the entity's other
+                        // ports, so it must not blanket-suppress them — that
+                        // would defeat the per-port analysis. A signal whose
+                        // name matches the port (the `timeout_q` -> `timeout`
+                        // idiom) still counts as covering it.
+                        let covered_by_signal = |name: &str| -> bool {
+                            impl_of.get(&child.id).into_iter().any(|im| {
+                                im.signals.iter().any(|sig| {
+                                    sig.power_config
+                                        .as_ref()
+                                        .is_some_and(|pc| pc.isolation.is_some())
+                                        && (sig.name == name
+                                            || sig.name.trim_end_matches("_q") == name)
+                                })
+                            })
+                        };
                         for port in &child.ports {
                             // source -> sink across this port
                             let (src, sink) = match port.direction {
@@ -852,7 +868,7 @@ impl MirCompiler {
 
                             if (needs_isolation(src, sink) || (bidir && needs_isolation(sink, src)))
                                 && port.isolation_config.is_none()
-                                && !entity_iso
+                                && !covered_by_signal(&port.name)
                                 && warned_edges.insert((
                                     format!("iso:{}:{}", path.join("."), inst.name),
                                     port.name.clone(),

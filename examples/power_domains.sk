@@ -24,7 +24,14 @@ power_domain vdd_mon: external;
 #[power_domain(vdd_mon)]
 #[safety_mechanism(type = watchdog)]
 entity Watchdog {
+    // vdd_core can power down while vdd_mon stays up, so the nets arriving
+    // from the controller need clamping: an un-driven clock or kick into a
+    // live monitor floats. Clamping `kick` low is also the safe default —
+    // no kicks means the watchdog times out, which is what a dead
+    // controller should look like.
+    #[isolation(clamp = low)]
     in clk: clock
+    #[isolation(clamp = low)]
     in kick: bit
     out timeout: bit
 }

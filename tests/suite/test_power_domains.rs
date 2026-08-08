@@ -1055,6 +1055,129 @@ mod port_granular_strategies {
         );
     }
 
+    /// `#[isolation]` on a PORT must reach the HIR. It used to be dropped
+    /// on the floor (`isolation_config: None, // TODO`), so the check could
+    /// never be satisfied on the port it names.
+    #[test]
+    fn port_level_isolation_attribute_reaches_the_hir() {
+        let src = r#"
+        power_domain vbat: external;
+        power_domain vdd_aon = regulated(vbat, macro = u_aon, states = { on: 0.9V });
+        power_domain vdd_gpu = switched(vdd_aon, on_when = !gpu_sleep, states = { on: 0.9V, off });
+
+        #[power_domain(vdd_gpu)]
+        entity Gpu {
+            in clk: clock
+            in cmd: bit[8]
+            #[isolation(clamp = low)]
+            out result: bit[16]
+        }
+
+        impl Gpu {
+            signal acc: bit[16] = 0
+            on(clk.rise) { acc = acc + cmd }
+            result = acc
+        }
+
+        #[power_domain(vdd_aon)]
+        entity Soc {
+            in clk: clock
+            in gpu_sleep: bit
+            in cmd: bit[8]
+            out result: bit[16]
+        }
+
+        impl Soc {
+            inst g = Gpu { clk: clk, cmd: cmd }
+            result = g.result
+        }
+        "#;
+        let hir = parse_and_build_hir(src).expect("parse");
+        let gpu = hir.entities.iter().find(|e| e.name == "Gpu").expect("Gpu");
+        let result = gpu
+            .ports
+            .iter()
+            .find(|p| p.name == "result")
+            .expect("result port");
+        assert!(
+            result.isolation_config.is_some(),
+            "#[isolation] on a port must populate isolation_config"
+        );
+        // ...and the annotation must NOT leak onto neighbouring ports.
+        assert!(
+            gpu.ports
+                .iter()
+                .filter(|p| p.name != "result")
+                .all(|p| p.isolation_config.is_none()),
+            "port isolation must not leak to other ports"
+        );
+        let w = warnings(src);
+        assert!(
+            !w.iter()
+                .any(|m| m.contains("port `g.result`") && m.contains("isolation")),
+            "the annotated port must satisfy the check: {w:#?}"
+        );
+    }
+
+    /// One annotated signal must not blanket-suppress an entity's OTHER
+    /// ports — that would defeat the per-port analysis.
+    #[test]
+    fn isolation_on_one_signal_does_not_cover_every_port() {
+        let src = r#"
+        power_domain vbat: external;
+        power_domain vdd_mon: external;
+        power_domain vdd_sys = regulated(vbat, macro = u_sys, states = { on: 0.9V, off });
+
+        #[power_domain(vdd_mon)]
+        #[safety_mechanism(type = watchdog)]
+        entity Watchdog {
+            in clk: clock
+            in kick: bit
+            out timeout: bit
+        }
+
+        impl Watchdog {
+            signal cnt: bit[8] = 0
+            #[isolation(clamp = low)]
+            signal timeout_q: bit
+            on(clk.rise) {
+                if kick {
+                    cnt = 0
+                } else {
+                    cnt = cnt + 1
+                }
+            }
+            timeout_q = cnt == 255
+            timeout = timeout_q
+        }
+
+        #[power_domain(vdd_sys)]
+        entity SysController {
+            in clk: clock
+            in kick_in: bit
+            out wd_timeout: bit
+        }
+
+        impl SysController {
+            inst wd = Watchdog { clk: clk, kick: kick_in }
+            wd_timeout = wd.timeout
+        }
+        "#;
+        let w = warnings(src);
+        // vdd_sys can power off while vdd_mon stays up, so the nets going
+        // INTO the watchdog are the ones that float — not its output.
+        assert!(
+            w.iter()
+                .any(|m| m.contains("port `wd.kick`") && m.contains("isolation")),
+            "an unrelated isolated signal must not cover `kick`: {w:#?}"
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.contains("port `wd.clk`") && m.contains("isolation")),
+            "an unrelated isolated signal must not cover `clk`: {w:#?}"
+        );
+    }
+
     #[test]
     fn upf_exports_isolation_and_level_shifter_strategies() {
         let src = soc(false);

@@ -1741,6 +1741,15 @@ impl HirBuilderContext {
         // Consume pending power_domain_config from #[power_domain("name")] attribute
         let power_domain_config = self.pending_power_domain_config.take();
 
+        // `#[isolation(...)]` / `#[retention]` on a PORT land in
+        // pending_power_config (the same staging signals use). Without
+        // consuming it here, a port annotation was silently dropped — the
+        // power-domain crossing check could never be satisfied on the port
+        // it names, and the stale value would leak onto the next signal.
+        let port_power = self.pending_power_config.take();
+        let isolation_config = port_power.as_ref().and_then(|pc| pc.isolation.clone());
+        let retention_config = port_power.as_ref().and_then(|pc| pc.retention.clone());
+
         Some(HirPort {
             id,
             name,
@@ -1750,8 +1759,8 @@ impl HirBuilderContext {
             physical_constraints,
             detection_config,
             power_domain_config,
-            isolation_config: None, // TODO: Extract from #[isolation] attribute
-            retention_config: None, // TODO: Extract from #[retention] attribute
+            isolation_config,
+            retention_config,
             comments: Self::collect_leading_comments(node),
         })
     }
