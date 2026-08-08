@@ -333,15 +333,13 @@ impl PropertyEvaluator {
 
             // Update state based on property kind and result
             match property.kind {
-                PropertyKind::Safety => {
-                    if !result {
-                        self.states[i].state = EvalState::Failed { at_time: self.time };
-                    }
+                PropertyKind::Safety if !result => {
+                    self.states[i].state = EvalState::Failed { at_time: self.time };
                 }
-                PropertyKind::Liveness => {
-                    if result && matches!(self.states[i].state, EvalState::Active { .. }) {
-                        self.states[i].state = EvalState::Passed { at_time: self.time };
-                    }
+                PropertyKind::Liveness
+                    if result && matches!(self.states[i].state, EvalState::Active { .. }) =>
+                {
+                    self.states[i].state = EvalState::Passed { at_time: self.time };
                 }
                 _ => {}
             }

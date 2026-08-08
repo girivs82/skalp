@@ -5386,19 +5386,42 @@ fn run_fi_driven_safety(
     let top_module =
         find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
 
-    // Lower to Lir and tech-map to GateNetlist
+    // Lower to Lir and tech-map to GateNetlist.
+    //
+    // HIERARCHICAL designs must go through the hierarchical synthesis +
+    // flatten path: the flat single-module path silently DROPPED child
+    // instances (a Controller+Watchdog design analyzed only the
+    // Controller's own 31 cells), so FMEDA FIT totals and fault campaigns
+    // missed entire sub-blocks. The flattened netlist also keeps instance
+    // provenance on cell paths/nets (top.wd.aig.*), which the domain-loss
+    // power-fault campaign needs for attribution.
     println!("🔩 Converting to gate-level netlist...");
-    let lir_result = lower_mir_module_to_lir(top_module);
     let library =
         get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
 
-    // Synthesize using AIG-based engine
-    let synth_result = skalp_lir::synthesize(
-        &lir_result.lir,
-        &library,
-        skalp_lir::synth::SynthPreset::Balanced,
-    );
-    let netlist = &synth_result.netlist;
+    let has_hierarchy =
+        mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+    let flat_netlist;
+    let netlist = if has_hierarchy {
+        let (hier_lir, _detected_async) =
+            skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+        let hier_netlist = skalp_lir::synthesize_hierarchical(
+            &hier_lir,
+            &library,
+            skalp_lir::synth::SynthPreset::Balanced,
+        );
+        flat_netlist = hier_netlist.flatten();
+        &flat_netlist
+    } else {
+        let lir_result = lower_mir_module_to_lir(top_module);
+        let synth_result = skalp_lir::synthesize(
+            &lir_result.lir,
+            &library,
+            skalp_lir::synth::SynthPreset::Balanced,
+        );
+        flat_netlist = synth_result.netlist;
+        &flat_netlist
+    };
 
     let total_cells = netlist.cells.len();
     let total_fit = netlist.total_fit();
@@ -5514,6 +5537,18 @@ fn run_fi_driven_safety(
         )?
     };
 
+    // Domain-loss power-fault campaign (spec §18): kill each bound power
+    // domain wholesale — switch stuck-off / regulator collapse at the
+    // digital level — and check the loss is DETECTED. A mechanism on an
+    // independent supply must still raise its detection signal when the
+    // domain it monitors dies; this is the FMEDA independence evidence
+    // no per-gate stuck-at campaign can produce.
+    if !skip_fi {
+        if let Some(report) = run_domain_loss_fi(&hir, &sir_result.sir, &cell_paths, cycles) {
+            print!("{}", report);
+        }
+    }
+
     // Generate FI-driven FMEA
     println!("\n📋 Generating FI-Driven FMEA...");
     let mut fi_result = generator.generate_from_campaign_results(
@@ -5628,6 +5663,50 @@ fn run_fi_driven_safety(
     println!("📁 Collaterals: {:?}", output_dir);
 
     Ok(())
+}
+
+/// Domain-loss fault campaign: attribute SIR primitives to bound power
+/// domains by instance-path prefixes, kill each domain wholesale, and
+/// report whether the loss corrupts outputs and is detected.
+fn run_domain_loss_fi(
+    hir: &skalp_frontend::hir::Hir,
+    sir: &skalp_sim::sir::Sir,
+    _cell_paths: &std::collections::HashMap<u32, String>,
+    cycles: u64,
+) -> Option<String> {
+    use skalp_sim::GateLevelSimulator;
+
+    let prefixes = skalp_mir::fpga_power::domain_instance_prefixes(hir);
+    if prefixes.is_empty() {
+        return None;
+    }
+    let domains = skalp_sim::domain_primitive_sets(sir, &prefixes);
+    if domains.is_empty() {
+        return None;
+    }
+
+    let mut simulator = GateLevelSimulator::new(sir);
+    let results = simulator.run_domain_loss_campaign(&domains, cycles, "clk");
+    if results.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str("\n⚡ Power-fault campaign (domain loss):\n");
+    for r in &results {
+        let verdict = if r.detected {
+            "loss DETECTED by detection signals ✓"
+        } else if r.output_corruption {
+            "outputs corrupt, loss NOT detected ✗"
+        } else {
+            "no observable effect (domain drives no monitored output)"
+        };
+        out.push_str(&format!(
+            "   `{}` ({} primitives killed): {}\n",
+            r.domain, r.primitives_killed, verdict
+        ));
+    }
+    Some(out)
 }
 
 /// Run fault injection campaign on the SIR

@@ -59,8 +59,8 @@ pub use gate_netlist_to_sir::{
 };
 // NOTE: GateLevelRuntime needs to be reimplemented for GateNetlist
 pub use gate_simulator::{
-    FaultCampaignConfig, FaultCampaignResults, FaultSimResult, GateLevelSimulator,
-    GateSimulationState,
+    domain_primitive_sets, DomainLossResult, FaultCampaignConfig, FaultCampaignResults,
+    FaultSimResult, GateLevelSimulator, GateSimulationState,
 };
 pub use gpu_aig_cone_sim::AigCone;
 #[cfg(target_os = "macos")]

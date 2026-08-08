@@ -27,6 +27,8 @@ fn create_simple_entity() -> Hir {
         unresolved_instances: Vec::new(),
         main_entity_names: Vec::new(),
         entity_aliases: vec![],
+        power_domain_decls: vec![],
+        power_states_decl: None,
     };
 
     // Create entity

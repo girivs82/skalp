@@ -1678,8 +1678,7 @@ impl CdcCrit {
     let compiler = skalp_mir::MirCompiler::new();
     let err = compiler
         .compile_to_mir(&hir)
-        .err()
-        .expect("crossing through logic must fail the build");
+        .expect_err("crossing through logic must fail the build");
     assert!(
         err.contains("critical CDC violation"),
         "Triage #10: error must identify CDC: {}",
@@ -1849,8 +1848,7 @@ impl Fsm {
     let hir = engine.monomorphize(&hir);
     let err = skalp_mir::MirCompiler::new()
         .compile_to_mir(&hir)
-        .err()
-        .expect("non-exhaustive enum match must fail the build");
+        .expect_err("non-exhaustive enum match must fail the build");
     assert!(
         err.contains("non-exhaustive match") && err.contains("`Done`"),
         "Triage #9: error must name the missing variant: {}",
@@ -1910,7 +1908,7 @@ impl Sel {
         skalp_mir::MirCompiler::new().compile_to_mir(&hir)
     };
 
-    let err = compile(missing).err().expect("3/4 coverage must fail");
+    let err = compile(missing).expect_err("3/4 coverage must fail");
     assert!(
         err.contains("non-exhaustive match") && err.contains("3 of 4"),
         "Triage #9: {}",
@@ -1967,17 +1965,13 @@ impl Plain {
         skalp_mir::MirCompiler::new().compile_to_mir(&hir)
     };
 
-    let err = compile(port_form)
-        .err()
-        .expect("stream port must fail the build");
+    let err = compile(port_form).expect_err("stream port must fail the build");
     assert!(
         err.contains("stream") && err.contains("not implemented") && err.contains("`data`"),
         "Triage #12: error must name the stream port: {}",
         err
     );
-    let err = compile(signal_form)
-        .err()
-        .expect("stream signal must fail the build");
+    let err = compile(signal_form).expect_err("stream signal must fail the build");
     assert!(
         err.contains("stream") && err.contains("`buf`"),
         "Triage #12: error must name the stream signal: {}",
@@ -2087,8 +2081,7 @@ impl BadCross {
     let hir = engine.monomorphize(&hir);
     let err = skalp_mir::MirCompiler::new()
         .compile_to_mir(&hir)
-        .err()
-        .expect("annotated unsynchronized crossing must fail the build");
+        .expect_err("annotated unsynchronized crossing must fail the build");
     assert!(
         err.contains("'src") && err.contains("'dst"),
         "Triage #13: CDC violation must name the lifetimes, got: {}",
@@ -2352,7 +2345,7 @@ impl Tick {
 
     // `tick` must NOT be a state element — registering it skews the
     // behavioral model one cycle behind the gates.
-    for (name, _) in &sir.state_elements {
+    for name in sir.state_elements.keys() {
         let user = sir
             .name_registry
             .get_entry_by_internal(name)

@@ -85,6 +85,88 @@ pub struct FaultSimResult {
     pub detection_mode: Option<crate::sir::SirDetectionMode>,
 }
 
+/// Attribute every SIR primitive to a power domain by the LONGEST matching
+/// instance-path prefix. The primitive's hierarchical cell `path` is the
+/// primary key (`top.wd.aig.latch13` — it survives stitching, which can
+/// rename a child cell's OUTPUT NET into the parent's namespace, e.g. the
+/// gate driving a stitched port). The first output signal's name is the
+/// fallback when the path is empty. The leading module prefix (`top.`) is
+/// stripped before matching. Prefix "" is the bound root and claims
+/// everything not claimed deeper.
+pub fn domain_primitive_sets(
+    sir: &crate::sir::Sir,
+    prefixes: &[(String, String)],
+) -> Vec<(String, std::collections::HashSet<usize>)> {
+    use crate::sir::SirOperation;
+    use std::collections::{HashMap, HashSet};
+
+    let names: HashMap<u32, &str> = sir
+        .top_module
+        .signals
+        .iter()
+        .map(|s| (s.id.0, s.name.as_str()))
+        .collect();
+    let module_prefix = format!("{}.", sir.top_module.name);
+
+    let mut domains: Vec<(String, HashSet<usize>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+
+    let mut assign = |prim: u32, out_name: &str| {
+        // Flattened net names carry the flatten root's prefix (`top.`),
+        // which may differ from the SIR module name — strip either.
+        let local = out_name
+            .strip_prefix(&module_prefix)
+            .or_else(|| out_name.strip_prefix("top."))
+            .unwrap_or(out_name);
+        let mut best: Option<(&str, usize)> = None;
+        for (domain, prefix) in prefixes {
+            let matches =
+                prefix.is_empty() || local == prefix || local.starts_with(&format!("{}.", prefix));
+            if matches && (best.is_none() || prefix.len() > best.unwrap().1) {
+                best = Some((domain.as_str(), prefix.len()));
+            }
+        }
+        if let Some((domain, _)) = best {
+            let idx = *index.entry(domain.to_string()).or_insert_with(|| {
+                domains.push((domain.to_string(), HashSet::new()));
+                domains.len() - 1
+            });
+            domains[idx].1.insert(prim as usize);
+        }
+    };
+
+    let mut visit_ops = |ops: &[SirOperation]| {
+        for op in ops {
+            if let SirOperation::Primitive {
+                id, outputs, path, ..
+            } = op
+            {
+                if !path.is_empty() {
+                    assign(id.0, path);
+                } else if let Some(name) = outputs.first().and_then(|o| names.get(&o.0)) {
+                    assign(id.0, name);
+                }
+            }
+        }
+    };
+    for block in &sir.top_module.comb_blocks {
+        visit_ops(&block.operations);
+    }
+    for block in &sir.top_module.seq_blocks {
+        visit_ops(&block.operations);
+    }
+    domains
+}
+
+/// Result of one domain-loss injection (whole power domain dead)
+#[derive(Debug, Clone)]
+pub struct DomainLossResult {
+    pub domain: String,
+    pub primitives_killed: usize,
+    pub output_corruption: bool,
+    pub detected: bool,
+}
+
 /// Configuration for fault campaign
 #[derive(Debug, Clone)]
 pub struct FaultCampaignConfig {
@@ -264,6 +346,11 @@ pub struct GateLevelSimulator {
     clock_buffer_map: std::collections::HashMap<u32, SirSignalId>,
     /// Active fault injection (if any)
     active_fault: Option<FaultInjectionConfig>,
+    /// Domain-loss injection: every primitive in this set has its outputs
+    /// forced to 0 (the whole power domain is dead). Modeled as a
+    /// simultaneous multi-point fault — switch stuck-off / regulator
+    /// collapse at the digital level.
+    active_domain_kill: Option<std::collections::HashSet<usize>>,
     /// Detection signals (output signals that indicate fault detection)
     detection_signals: Vec<SirSignalId>,
     /// Total FIT of the design
@@ -286,6 +373,7 @@ impl GateLevelSimulator {
             clock_signals: Vec::new(),
             clock_buffer_map: std::collections::HashMap::new(),
             active_fault: None,
+            active_domain_kill: None,
             detection_signals: Vec::new(),
             total_fit: 0.0,
             ram_state: IndexMap::new(),
@@ -360,8 +448,19 @@ impl GateLevelSimulator {
                 SirSignalType::Register { clock, .. } => {
                     // Track clock for edge detection
                     self.state.prev_clocks.insert(clock.0, false);
+                    if signal.is_detection {
+                        self.detection_signals.push(signal.id);
+                    }
                 }
-                SirSignalType::Wire => {}
+                SirSignalType::Wire => {
+                    // #[detection_signal] nets that became internal wires after
+                    // hierarchical flattening (e.g. a child mechanism's marked
+                    // port) are still detection points — observe them at the
+                    // mechanism's own boundary, not just at primary outputs.
+                    if signal.is_detection {
+                        self.detection_signals.push(signal.id);
+                    }
+                }
             }
         }
 
@@ -830,7 +929,13 @@ impl GateLevelSimulator {
                     .collect();
 
                 // Evaluate primitive with potential fault injection
-                let output_values = if let Some(fault) = &self.active_fault {
+                let domain_killed = self
+                    .active_domain_kill
+                    .as_ref()
+                    .is_some_and(|kill| kill.contains(&(id.0 as usize)));
+                let output_values = if domain_killed {
+                    vec![false; outputs.len()]
+                } else if let Some(fault) = &self.active_fault {
                     if fault.target_primitive == *id {
                         evaluate_primitive_with_fault(
                             ptype,
@@ -1163,7 +1268,13 @@ impl GateLevelSimulator {
                                 }
                             }
 
-                            let output_values = if let Some(fault) = &self.active_fault {
+                            let domain_killed = self
+                                .active_domain_kill
+                                .as_ref()
+                                .is_some_and(|kill| kill.contains(&(id.0 as usize)));
+                            let output_values = if domain_killed {
+                                vec![false; outputs.len()]
+                            } else if let Some(fault) = &self.active_fault {
                                 if fault.target_primitive == *id {
                                     evaluate_primitive_with_fault(
                                         ptype,
@@ -1244,6 +1355,18 @@ impl GateLevelSimulator {
             states.push(self.step());
         }
         states
+    }
+
+    /// Set (or clear) the domain-kill set directly. Debug/inspection hook for
+    /// stepping a domain-dead simulation manually; campaigns use
+    /// [`run_domain_loss_campaign`](Self::run_domain_loss_campaign).
+    pub fn set_domain_kill(&mut self, kill: Option<std::collections::HashSet<usize>>) {
+        self.active_domain_kill = kill;
+    }
+
+    /// Read a signal's current value by SIR signal id (debug/inspection).
+    pub fn signal_value(&self, id: u32) -> Option<&[bool]> {
+        self.state.signals.get(&id).map(|v| v.as_slice())
     }
 
     /// Check if any detection signal is asserted
@@ -1340,6 +1463,83 @@ impl GateLevelSimulator {
     }
 
     /// Run a fault campaign over all primitives
+    /// Run a DOMAIN-LOSS fault campaign: for each named domain, kill every
+    /// primitive in its set simultaneously (switch stuck-off / regulator
+    /// collapse) and observe whether the loss corrupts outputs and whether
+    /// any detection signal fires. This evidences the FMEDA independence
+    /// claim — a mechanism on an independent supply must still detect the
+    /// loss of what it monitors.
+    pub fn run_domain_loss_campaign(
+        &mut self,
+        domains: &[(String, std::collections::HashSet<usize>)],
+        cycles: u64,
+        clock_name: &str,
+    ) -> Vec<DomainLossResult> {
+        let mut results = Vec::new();
+        for (name, kill_set) in domains {
+            if kill_set.is_empty() {
+                continue;
+            }
+            // Golden run
+            self.reset();
+            self.active_domain_kill = None;
+            let mut golden: Vec<IndexMap<String, Vec<bool>>> =
+                Vec::with_capacity((cycles * 2) as usize);
+            for cycle in 0..(cycles * 2) {
+                let clk_val = cycle % 2 == 1;
+                self.set_input(clock_name, &[clk_val]);
+                self.step();
+                golden.push(
+                    self.output_ports
+                        .iter()
+                        .filter_map(|id| {
+                            let n = self.signal_id_to_name.get(&id.0)?;
+                            let v = self.state.signals.get(&id.0)?;
+                            Some((n.clone(), v.clone()))
+                        })
+                        .collect(),
+                );
+            }
+
+            // Domain-dead run
+            self.reset();
+            self.active_domain_kill = Some(kill_set.clone());
+            let mut detected = false;
+            let mut corruption = false;
+            for cycle in 0..(cycles * 2) {
+                let clk_val = cycle % 2 == 1;
+                self.set_input(clock_name, &[clk_val]);
+                self.step();
+                if !detected && self.is_fault_detected() {
+                    detected = true;
+                }
+                if !corruption {
+                    if let Some(g) = golden.get(cycle as usize) {
+                        for id in &self.output_ports {
+                            if let (Some(n), Some(f)) = (
+                                self.signal_id_to_name.get(&id.0),
+                                self.state.signals.get(&id.0),
+                            ) {
+                                if g.get(n).is_some_and(|gv| gv != f) {
+                                    corruption = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.active_domain_kill = None;
+            results.push(DomainLossResult {
+                domain: name.clone(),
+                primitives_killed: kill_set.len(),
+                output_corruption: corruption,
+                detected,
+            });
+        }
+        results
+    }
+
     pub fn run_fault_campaign(
         &mut self,
         cycles_per_fault: u64,

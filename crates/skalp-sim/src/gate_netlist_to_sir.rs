@@ -299,6 +299,20 @@ impl GateNetlistToSirConverter {
                 );
             }
 
+            // Skip degenerate self-buffers: when buffer removal aliases a
+            // stitch buffer's input net into its output net, the BUF becomes
+            // `x = BUF(x)` — a no-op that DOUBLE-DRIVES the signal alongside
+            // the real logic driver. Harmless functionally (same value), but
+            // fault campaigns that force a killed cell's outputs to 0 would
+            // let the dead self-buffer clobber the live driver's value.
+            if matches!(ptype, PrimitiveType::Buf)
+                && inputs.len() == 1
+                && outputs.len() == 1
+                && inputs[0] == outputs[0]
+            {
+                continue;
+            }
+
             let op = SirOperation::Primitive {
                 id: primitive_id,
                 ptype,

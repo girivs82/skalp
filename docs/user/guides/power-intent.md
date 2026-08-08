@@ -22,6 +22,7 @@ still future work. Every quoted diagnostic below is real compiler output.
 - [Generated UPF](#generated-upf)
 - [Retention Registers](#retention-registers)
 - [Isolation and Level Shifting](#isolation-and-level-shifting)
+- [Power-Fault Injection: Domain Loss](#power-fault-injection-domain-loss)
 - [Still Future](#still-future)
 - [Best Practices](#best-practices)
 - [See Also](#see-also)
@@ -382,26 +383,48 @@ old `#[pdc(from = 'a, to = 'b)]` tick syntax is retired: power domains
 bind structurally by containment, not by lifetime tags — see the
 language specification's "Domain Lifetimes Are Clock-Only" design note.
 
+## Power-Fault Injection: Domain Loss
+
+On designs with power domains, the safety flow (`skalp safety`) runs a
+**domain-loss campaign** after the per-gate fault campaign: every gate in
+each domain is killed simultaneously (switch stuck-off / regulator
+collapse) and the result is compared against a golden run:
+
+```text
+⚡ Power-fault campaign (domain loss):
+   `vdd_core` (31 primitives killed): outputs corrupt, loss NOT detected ✗
+   `vdd_mon`  (39 primitives killed): no observable effect
+```
+
+A domain whose loss corrupts outputs undetected is a safety gap — the
+mechanism that should notice either shares the dying supply or does not
+observe it. A `#[detection_signal]` on a mechanism bound to an
+independent domain turns the verdict into `loss DETECTED ✓`, which
+*evidences* the FMEDA independence claim instead of merely asserting it
+from the declaration tree. Detection is observed at the mechanism's own
+domain boundary, so a detection path routed through the dead domain is
+correctly reported as lost.
+
 ## Still Future
 
 These parts of the recorded power-domain design are **not implemented**;
 do not rely on them:
 
-- **PST transition modeling.** The `power_states` legality layer,
-  ancestry legality, no-self-power, and precise per-state PST-liveness
-  ARE implemented; a transition graph between system states (per-edge
-  liveness, sequencing order) is not.
+- **Multi-step sequencing constraints.** The `power_states` legality
+  table, transition graph (`transitions = { a -> b }`), and per-edge
+  PST-liveness are all implemented; ordering *within* a transition
+  (isolate before switch-off, restore order on wake) is not.
 - **Pin-level related-supply compatibility** (Liberty
   `related_power_pin`; needs per-pin data in `.sklib`).
 - **Port-granular isolation / level-shifter strategies and inference.**
 - **`#[retention]` semantics** beyond synthesis-attribute emission.
-- **Power-fault injection classes**: whole-domain loss, switch
-  stuck-off/stuck-on, regulator collapse, overvoltage.
-- **The PST legality table** (legal cross-domain state combinations).
+- **Remaining power-fault classes**: whole-domain loss IS implemented
+  (see below); switch stuck-*on*, regulator droop (brown-out), and
+  overvoltage models are not.
 - **Instance-level rebinding** (`inst`-site `#[power_domain]`).
-- **FPGA bank/domain linkage**: naming a declared power domain as a
-  bank's rail (bank voltages are literals today), and modeling device
-  supply trees (VCCINT as an implicit external domain).
+- **Implicit device supply trees** (VCCINT as an implicit external
+  domain for FPGA fabric logic); domain-named bank rails
+  (`bank 0 { domain: vddio_a }`) ARE implemented.
 
 ## Best Practices
 

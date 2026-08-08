@@ -14162,22 +14162,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Check if a function body contains a recursive call (Phase 5)
     fn contains_recursive_call(&self, body: &[hir::HirStatement], func_name: &str) -> bool {
-        for stmt in body {
-            match stmt {
-                hir::HirStatement::Return(Some(expr))
-                    if self.expression_contains_call(expr, func_name) =>
-                {
-                    return true;
-                }
-                hir::HirStatement::Let(let_stmt)
-                    if self.expression_contains_call(&let_stmt.value, func_name) =>
-                {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
+        self.statements_contain_call(body, func_name)
     }
 
     /// Check if an expression contains a call to a specific function
@@ -14193,18 +14178,19 @@ impl<'hir> HirToMir<'hir> {
     /// Implementation of expression contains call check
     #[allow(clippy::only_used_in_recursion)]
     fn expression_contains_call_impl(&self, expr: &hir::HirExpression, func_name: &str) -> bool {
+        // EXHAUSTIVE on purpose — no `_ => false` arm. A missing variant here
+        // does not fail loudly: it silently reports "no recursion", the
+        // recursion guard never fires, and the inliner spins until it either
+        // trips the depth limit or (when stdlib trait inlining interleaves)
+        // hangs forever. `Block` was missing, which hid every self-call
+        // written as `if c { a } else { f(x) }` — the braces are Blocks.
         match expr {
             hir::HirExpression::Call(call) => {
-                if call.function == func_name {
-                    return true;
-                }
-                // Check arguments for nested calls
-                for arg in &call.args {
-                    if self.expression_contains_call(arg, func_name) {
-                        return true;
-                    }
-                }
-                false
+                call.function == func_name
+                    || call
+                        .args
+                        .iter()
+                        .any(|arg| self.expression_contains_call(arg, func_name))
             }
             hir::HirExpression::Binary(bin) => {
                 self.expression_contains_call(&bin.left, func_name)
@@ -14216,24 +14202,102 @@ impl<'hir> HirToMir<'hir> {
                     || self.expression_contains_call(&if_expr.then_expr, func_name)
                     || self.expression_contains_call(&if_expr.else_expr, func_name)
             }
-            hir::HirExpression::Match(match_expr) => {
-                if self.expression_contains_call(&match_expr.expr, func_name) {
-                    return true;
-                }
-                for arm in &match_expr.arms {
-                    if let Some(guard) = &arm.guard {
-                        if self.expression_contains_call(guard, func_name) {
-                            return true;
-                        }
-                    }
-                    if self.expression_contains_call(&arm.expr, func_name) {
-                        return true;
-                    }
-                }
-                false
+            hir::HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                self.expression_contains_call(condition, func_name)
+                    || self.expression_contains_call(true_expr, func_name)
+                    || self.expression_contains_call(false_expr, func_name)
             }
-            _ => false,
+            hir::HirExpression::Match(match_expr) => {
+                self.expression_contains_call(&match_expr.expr, func_name)
+                    || match_expr.arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|g| self.expression_contains_call(g, func_name))
+                            || self.expression_contains_call(&arm.expr, func_name)
+                    })
+            }
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
+                self.statements_contain_call(statements, func_name)
+                    || self.expression_contains_call(result_expr, func_name)
+            }
+            hir::HirExpression::Index(base, index) => {
+                self.expression_contains_call(base, func_name)
+                    || self.expression_contains_call(index, func_name)
+            }
+            hir::HirExpression::Range(base, high, low) => {
+                self.expression_contains_call(base, func_name)
+                    || self.expression_contains_call(high, func_name)
+                    || self.expression_contains_call(low, func_name)
+            }
+            hir::HirExpression::FieldAccess { base, .. } => {
+                self.expression_contains_call(base, func_name)
+            }
+            hir::HirExpression::Cast(cast) => self.expression_contains_call(&cast.expr, func_name),
+            hir::HirExpression::ArrayRepeat { value, count } => {
+                self.expression_contains_call(value, func_name)
+                    || self.expression_contains_call(count, func_name)
+            }
+            hir::HirExpression::Concat(exprs)
+            | hir::HirExpression::TupleLiteral(exprs)
+            | hir::HirExpression::ArrayLiteral(exprs) => exprs
+                .iter()
+                .any(|e| self.expression_contains_call(e, func_name)),
+            hir::HirExpression::StructLiteral(lit) => lit
+                .fields
+                .iter()
+                .any(|f| self.expression_contains_call(&f.value, func_name)),
+            // Leaves: no sub-expressions to walk.
+            hir::HirExpression::Literal(_)
+            | hir::HirExpression::Signal(_)
+            | hir::HirExpression::Port(_)
+            | hir::HirExpression::Variable(_)
+            | hir::HirExpression::Constant(_)
+            | hir::HirExpression::GenericParam(_)
+            | hir::HirExpression::EnumVariant { .. }
+            | hir::HirExpression::AssociatedConstant { .. } => false,
         }
+    }
+
+    /// Walk statements for a call to `func_name`. Used by the recursion check
+    /// for block-expression bodies and for function bodies whose `return` has
+    /// already been rewritten into assignments/ifs by `transform_early_returns`.
+    fn statements_contain_call(&self, stmts: &[hir::HirStatement], func_name: &str) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            hir::HirStatement::Return(Some(expr)) | hir::HirStatement::Expression(expr) => {
+                self.expression_contains_call(expr, func_name)
+            }
+            hir::HirStatement::Return(None) => false,
+            hir::HirStatement::Let(let_stmt) => {
+                self.expression_contains_call(&let_stmt.value, func_name)
+            }
+            hir::HirStatement::Assignment(assign) => {
+                self.expression_contains_call(&assign.rhs, func_name)
+            }
+            hir::HirStatement::If(if_stmt) => {
+                self.expression_contains_call(&if_stmt.condition, func_name)
+                    || self.statements_contain_call(&if_stmt.then_statements, func_name)
+                    || if_stmt
+                        .else_statements
+                        .as_ref()
+                        .is_some_and(|e| self.statements_contain_call(e, func_name))
+            }
+            hir::HirStatement::Match(match_stmt) => {
+                self.expression_contains_call(&match_stmt.expr, func_name)
+                    || match_stmt
+                        .arms
+                        .iter()
+                        .any(|arm| self.statements_contain_call(&arm.statements, func_name))
+            }
+            hir::HirStatement::Block(stmts) => self.statements_contain_call(stmts, func_name),
+            _ => false,
+        })
     }
 
     /// Inline a function call (Phases 2-5: simple functions, let bindings, control flow, recursion check)
@@ -14310,13 +14374,9 @@ impl<'hir> HirToMir<'hir> {
         let params = func.params.clone();
         let body = func.body.clone();
 
-        // Unroll const-bounded for loops before early-return transformation
-        let body = self.unroll_const_for_loops_in_body(body);
-
-        // Transform early returns
-        let body = self.transform_early_returns(body);
-
-        // Check for recursion
+        // Check for recursion on the RAW body: the transforms below rewrite
+        // `return` statements into forms this check does not walk, hiding the
+        // self-call.
         if self.contains_recursive_call(&body, &call.function) {
             trace!(
                 "Error: Recursive function calls are not supported: function '{}'",
@@ -14324,6 +14384,12 @@ impl<'hir> HirToMir<'hir> {
             );
             return None;
         }
+
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
+
+        // Transform early returns
+        let body = self.transform_early_returns(body);
 
         // Check arity
         if params.len() != call.args.len() {
@@ -14460,13 +14526,9 @@ impl<'hir> HirToMir<'hir> {
             params.len()
         );
 
-        // Unroll const-bounded for loops before early-return transformation
-        let body = self.unroll_const_for_loops_in_body(body);
-
-        // Transform early returns
-        let body = self.transform_early_returns(body);
-
-        // Check for recursion
+        // Check for recursion on the RAW body: the transforms below rewrite
+        // `return` statements into forms this check does not walk, hiding the
+        // self-call.
         if self.contains_recursive_call(&body, &call.function) {
             trace!(
                 "Error: Recursive function calls are not supported: function '{}'",
@@ -14474,6 +14536,12 @@ impl<'hir> HirToMir<'hir> {
             );
             return None;
         }
+
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
+
+        // Transform early returns
+        let body = self.transform_early_returns(body);
 
         // Check arity
         if params.len() != call.args.len() {
@@ -16513,8 +16581,10 @@ impl<'hir> HirToMir<'hir> {
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
         // Step 1: Find the function and clone its body to avoid borrow checker issues
         // BUG #211 FIX: Also try trait methods if regular function lookup fails
+        let mut is_plain_function = false;
         let (params, body, return_type) = if let Some(func) = self.find_function(&call.function) {
             trace!("[DEBUG] ✓ Found function '{}'", call.function);
+            is_plain_function = true;
             (
                 func.params.clone(),
                 func.body.clone(),
@@ -16533,6 +16603,25 @@ impl<'hir> HirToMir<'hir> {
             }
             return None;
         };
+
+        // Detect direct recursion on the RAW body, BEFORE loop unrolling and
+        // early-return transformation. Those rewrite `return` statements into
+        // forms that contains_recursive_call's Return/Let-only statement
+        // filter does not walk, so the self-call becomes invisible and the
+        // Phase-5 check below never fires. The depth guard is then the only
+        // stop left — and when stdlib trait inlining interleaves (each `*`/`+`
+        // re-inlines its argument expression per parameter use), no single
+        // chain reaches the depth limit and the compile spins forever
+        // instead of reporting the unsupported recursion.
+        // Only a plain `fn` can be self-recursive by name. A trait method body
+        // that calls the same method name on a different type is ordinary
+        // delegation, not recursion, so it keeps the conservative fallback.
+        if is_plain_function && self.contains_recursive_call(&body, &call.function) {
+            panic!(
+                "Recursive function calls are not supported (function '{}' calls itself)",
+                call.function
+            );
+        }
 
         // ARCHITECTURAL FIX: Push a new inlining context to prevent variable ID collisions
         // This ensures variables from different functions don't collide even if they have the same HIR VariableId

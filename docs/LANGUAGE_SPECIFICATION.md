@@ -1256,9 +1256,9 @@ See [Section 4.4](#44-design-decision-domain-lifetimes-are-clock-only) for
 why power domains bind structurally via attributes instead of the clock
 lifetime syntax, and [Section 21.1](#211-power-domains-remaining-future-work)
 for the parts of the recorded design that are **not** yet implemented
-(control-cone checks, pin-level supply compatibility, port-granular
-isolation/level-shifter strategies, `#[retention]` semantics, power-fault
-injection, the PST legality table, and the FPGA leg).
+(pin-level supply compatibility, port-granular isolation/level-shifter
+strategies, `#[retention]` semantics, and multi-step sequencing
+constraints).
 
 ### 18.1 Supply-Tree Declarations
 
@@ -1647,6 +1647,38 @@ add_pst_state run -pst SYSTEM_PST -state {on on on}
 add_pst_state sleep -pst SYSTEM_PST -state {on ret off}
 ```
 
+### 18.10 Power-Fault Injection: Domain Loss
+
+The safety flow (`skalp safety`, Section 20) extends its gate-level
+fault-injection campaign with a **domain-loss fault class** when the
+design declares power domains. For each domain, every gate attributed to
+that domain (by containment, Section 18.2) is killed *simultaneously* —
+outputs forced to `0`, modeling a switch stuck-off or regulator output
+collapse — and the simulation is compared against a golden run:
+
+```text
+⚡ Power-fault campaign (domain loss):
+   `vdd_core` (31 primitives killed): outputs corrupt, loss NOT detected ✗
+   `vdd_mon`  (39 primitives killed): no observable effect
+```
+
+Three verdicts are possible per domain: the loss is **detected** (a
+`#[detection_signal]` fires — the FMEDA's supply-independence claim is
+*evidenced*, not just asserted from the declaration tree), the loss
+corrupts outputs **undetected** (a safety gap: whatever monitors this
+domain shares its supply or does not observe it), or the loss has **no
+observable effect** on the monitored outputs.
+
+Detection is observed at the mechanism's *own* domain boundary: a
+`#[detection_signal]` port on an entity bound to an independent domain
+keeps firing when the monitored domain dies, while a detection path
+routed *through* the dead domain is correctly reported as lost — the
+campaign reproduces exactly the dependent-failure the CCF check
+(Section 18.4) exists to prevent.
+
+Still future in this class: switch stuck-*on*, partial regulator
+droop (brown-out), and overvoltage models (Section 21.1).
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1812,9 +1844,11 @@ be relied on:
    the attribute emits synthesis attributes (`RETAIN`, `DONT_TOUCH`) on
    the register and nothing more.
 
-5. *Power-fault injection classes* — whole-domain loss, switch
-   stuck-off/stuck-on, regulator output collapse, overvoltage —
-   evidencing the FMEDA's independence claim beyond per-gate stuck-ats.
+5. *Power-fault injection classes.* Whole-domain loss (switch
+   stuck-off / regulator collapse) is implemented (Section 18.10) and
+   runs in every `skalp safety` campaign on designs with power
+   domains. Still future: switch stuck-*on*, partial regulator droop
+   (brown-out), and overvoltage models.
 
 6. *(Merged into item 1.)* The PST legality layer AND the transition
    graph with per-edge liveness are implemented (Section 18.9).

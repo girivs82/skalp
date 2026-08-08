@@ -214,6 +214,60 @@ pub fn fpga_power_posture(hir: &Hir, allow_stub: bool) -> Result<Option<String>,
     Ok(Some(report))
 }
 
+/// (domain, instance-path prefix) pairs from the HIR containment tree, for
+/// attributing flattened netlist elements to power domains by instance-path
+/// prefix — matched against a cell's hierarchical path (primary; survives
+/// port stitching) or a net name's provenance prefix (`wd.cnt[0]`,
+/// fallback). A bound root entity gets prefix "".
+pub fn domain_instance_prefixes(hir: &Hir) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut prefixes: Vec<(String, String)> = Vec::new();
+    if hir.power_domain_decls.is_empty() {
+        return prefixes;
+    }
+    let instantiated: HashSet<_> = hir
+        .implementations
+        .iter()
+        .flat_map(|i| i.instances.iter().map(|inst| inst.entity))
+        .collect();
+    let mut stack: Vec<(skalp_frontend::hir::EntityId, String)> = hir
+        .entities
+        .iter()
+        .filter(|e| !instantiated.contains(&e.id))
+        .map(|e| (e.id, String::new()))
+        .collect();
+    for (eid, prefix) in &stack {
+        if let Some(entity) = hir.entities.iter().find(|e| e.id == *eid) {
+            if let Some(cfg) = &entity.power_domain_config {
+                prefixes.push((cfg.domain_name.clone(), prefix.clone()));
+            }
+        }
+    }
+    while let Some((eid, prefix)) = stack.pop() {
+        if prefix.matches('.').count() > 64 {
+            continue;
+        }
+        let Some(imp) = hir.implementations.iter().find(|i| i.entity == eid) else {
+            continue;
+        };
+        for inst in &imp.instances {
+            let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                continue;
+            };
+            let child_prefix = if prefix.is_empty() {
+                inst.name.clone()
+            } else {
+                format!("{}.{}", prefix, inst.name)
+            };
+            if let Some(cfg) = &child.power_domain_config {
+                prefixes.push((cfg.domain_name.clone(), child_prefix.clone()));
+            }
+            stack.push((child.id, child_prefix));
+        }
+    }
+    prefixes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -135,10 +135,12 @@ impl HierarchicalNetlist {
                 let new_net_name = format!("{}.{}", path, net.name);
                 let new_net_id = result.add_net_with_name(new_net_name.clone());
 
-                // Copy net properties (is_clock, is_reset, ncl_info)
+                // Copy net properties (is_clock, is_reset, detection, ncl_info)
                 if let Some(new_net) = result.nets.get_mut(new_net_id.0 as usize) {
                     new_net.is_clock = net.is_clock;
                     new_net.is_reset = net.is_reset;
+                    new_net.is_detection = net.is_detection;
+                    new_net.detection_config = net.detection_config.clone();
                     new_net.ncl_info = net.ncl_info.clone();
                 }
 

@@ -541,7 +541,10 @@ mod power_state_table {
             .map(|_| ())
             .expect_err("must fail at HIR validation");
         let msg = format!("{err:#}");
-        assert!(msg.contains("has no state `retention`"), "missing ref error: {msg}");
+        assert!(
+            msg.contains("has no state `retention`"),
+            "missing ref error: {msg}"
+        );
         assert!(
             msg.contains("must appear in every system state"),
             "missing completeness error: {msg}"
@@ -636,7 +639,10 @@ mod bank_domain_and_deep_paths {
     fn undeclared_bank_domain_is_an_error() {
         let src = design("LVCMOS33", "vdd_aon").replace("domain: vddio_a", "domain: nope");
         let err = compile_checked(&src).expect_err("undeclared bank domain");
-        assert!(err.contains("undeclared power domain"), "wrong error: {err}");
+        assert!(
+            err.contains("undeclared power domain"),
+            "wrong error: {err}"
+        );
     }
 
     #[test]
@@ -735,7 +741,10 @@ mod transition_graph {
             .map(|_| ())
             .expect_err("must fail validation");
         let msg = format!("{err:#}");
-        assert!(msg.contains("unknown system power state `nowhere`"), "{msg}");
+        assert!(
+            msg.contains("unknown system power state `nowhere`"),
+            "{msg}"
+        );
         assert!(msg.contains("self-loops are not meaningful"), "{msg}");
     }
 
@@ -746,5 +755,109 @@ mod transition_graph {
         let mir = compile_checked(&src).expect("mir");
         let upf = skalp_mir::upf::generate_upf(&hir, &mir, "Top").expect("upf");
         assert!(upf.contains("describe_state_transition T0_run_idle -from {run} -to {idle}"));
+    }
+}
+
+#[cfg(test)]
+mod domain_loss_fi {
+    use skalp_frontend::parse_and_build_hir;
+
+    /// Full domain-loss FI pipeline: hierarchical synth -> flatten -> SIR ->
+    /// domain attribution by net prefix -> kill campaign. The watchdog lives
+    /// on vdd_mon and must DETECT the death of vdd_core (its kick path goes
+    /// quiet, the timeout fires on the #[detection_signal] output).
+    #[test]
+    fn watchdog_detects_loss_of_monitored_domain() {
+        let src = r#"
+        power_domain vreg: external;
+        power_domain vdd_core = regulated(vreg, macro = u_ldo, states = { on: 0.9V, off });
+        power_domain vdd_mon: external;
+
+        #[power_domain(vdd_mon)]
+        #[safety_mechanism(type = watchdog)]
+        entity Watchdog {
+            in clk: clock
+            in kick: bit
+            #[detection_signal]
+            out timeout: bit
+        }
+
+        impl Watchdog {
+            signal cnt: bit[4] = 0
+            on(clk.rise) {
+                if kick {
+                    cnt = 0
+                } else {
+                    if cnt < 8 {
+                        cnt = cnt + 1
+                    }
+                }
+            }
+            timeout = cnt == 8
+        }
+
+        #[power_domain(vdd_core)]
+        entity Controller {
+            in clk: clock
+            out heartbeat: bit
+            out wd_timeout: bit
+        }
+
+        impl Controller {
+            // The kicker: alternates every cycle while alive; dead when
+            // vdd_core is killed.
+            signal beat: bit = 0
+            on(clk.rise) { beat = !beat }
+            heartbeat = beat
+
+            inst wd = Watchdog { clk: clk, kick: beat }
+            wd_timeout = wd.timeout
+        }
+        "#;
+        let hir = parse_and_build_hir(src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None)
+            .compile_to_mir(&hir)
+            .expect("mir");
+
+        let library = skalp_lir::get_stdlib_library("generic_asic").expect("lib");
+        let (hier_lir, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+        let hier = skalp_lir::synthesize_hierarchical(
+            &hier_lir,
+            &library,
+            skalp_lir::synth::SynthPreset::Balanced,
+        );
+        let netlist = hier.flatten();
+        let sir_result = skalp_sim::convert_gate_netlist_to_sir(&netlist);
+
+        let prefixes = skalp_mir::fpga_power::domain_instance_prefixes(&hir);
+        assert!(
+            prefixes.iter().any(|(d, p)| d == "vdd_mon" && p == "wd"),
+            "watchdog instance must map to vdd_mon: {prefixes:?}"
+        );
+        let domains = skalp_sim::domain_primitive_sets(&sir_result.sir, &prefixes);
+        let core = domains
+            .iter()
+            .find(|(d, _)| d == "vdd_core")
+            .expect("vdd_core set");
+        let mon = domains
+            .iter()
+            .find(|(d, _)| d == "vdd_mon")
+            .expect("vdd_mon set");
+        assert!(
+            !core.1.is_empty() && !mon.1.is_empty(),
+            "both domains must own primitives"
+        );
+
+        let mut sim = skalp_sim::GateLevelSimulator::new(&sir_result.sir);
+        let results = sim.run_domain_loss_campaign(&domains, 40, "clk");
+        let core_result = results
+            .iter()
+            .find(|r| r.domain == "vdd_core")
+            .expect("vdd_core result");
+        assert!(
+            core_result.detected,
+            "watchdog on vdd_mon must DETECT the loss of vdd_core: {core_result:?}"
+        );
     }
 }

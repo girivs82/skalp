@@ -329,6 +329,29 @@ pub fn synthesize(
             }
         }
     }
+
+    // Step 5.6: Stamp #[detection_signal] metadata onto gate nets. The AIG
+    // path creates fresh nets from AIG outputs, so LIR-level detection flags
+    // (ports via add_detection_output, internals via mark_as_detection) never
+    // reach the netlist — safety analyses were falling back to the deprecated
+    // name heuristic. Mark by signal name, per bit, following aliases.
+    for signal in lir.signals.iter().filter(|s| s.is_detection) {
+        for bit in 0..signal.width {
+            let name = if signal.width == 1 {
+                signal.name.clone()
+            } else {
+                format!("{}[{}]", signal.name, bit)
+            };
+            if let Some(net_id) = result.netlist.get_net_id(&name) {
+                let canonical = result.netlist.resolve_alias(net_id);
+                for id in [net_id, canonical] {
+                    if let Some(net) = result.netlist.nets.get_mut(id.0 as usize) {
+                        net.is_detection = true;
+                    }
+                }
+            }
+        }
+    }
     result.netlist.rebuild_cache();
 
     // Sync is_output flags with netlist.outputs — post-processing passes may
