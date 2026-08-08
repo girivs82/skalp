@@ -214,6 +214,67 @@ pub fn fpga_power_posture(hir: &Hir, allow_stub: bool) -> Result<Option<String>,
     Ok(Some(report))
 }
 
+/// Ordered (source-domain, sink-domain) pairs for every instance edge that
+/// crosses a power-domain boundary, taken from the HIR containment tree.
+///
+/// Level shifting and isolation are properties of a CROSSING — which domains
+/// actually exchange nets — not of the supply tree. Two rails that are
+/// siblings under one source still need shifters between them if their
+/// operating voltages differ, and a parent/child supply pair at the same
+/// voltage needs none.
+pub fn crossing_domain_pairs(hir: &Hir) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    if hir.power_domain_decls.is_empty() {
+        return pairs;
+    }
+    let instantiated: HashSet<_> = hir
+        .implementations
+        .iter()
+        .flat_map(|i| i.instances.iter().map(|inst| inst.entity))
+        .collect();
+    let mut stack: Vec<(skalp_frontend::hir::EntityId, Option<String>, usize)> = hir
+        .entities
+        .iter()
+        .filter(|e| !instantiated.contains(&e.id))
+        .map(|e| {
+            (
+                e.id,
+                e.power_domain_config
+                    .as_ref()
+                    .map(|c| c.domain_name.clone()),
+                0usize,
+            )
+        })
+        .collect();
+    while let Some((eid, eff, depth)) = stack.pop() {
+        if depth > 64 {
+            continue;
+        }
+        let Some(imp) = hir.implementations.iter().find(|i| i.entity == eid) else {
+            continue;
+        };
+        for inst in &imp.instances {
+            let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                continue;
+            };
+            let child_eff = child
+                .power_domain_config
+                .as_ref()
+                .map(|c| c.domain_name.clone())
+                .or_else(|| eff.clone());
+            if let (Some(p), Some(c)) = (&eff, &child_eff) {
+                if p != c && seen.insert((p.clone(), c.clone())) {
+                    pairs.push((p.clone(), c.clone()));
+                }
+            }
+            stack.push((child.id, child_eff, depth + 1));
+        }
+    }
+    pairs
+}
+
 /// (domain, instance-path prefix) pairs from the HIR containment tree, for
 /// attributing flattened netlist elements to power domains by instance-path
 /// prefix — matched against a cell's hierarchical path (primary; survives

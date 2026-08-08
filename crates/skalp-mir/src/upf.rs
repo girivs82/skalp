@@ -16,7 +16,7 @@
 //! - `add_power_state` per declared supply state
 
 use crate::mir::{Mir, Module};
-use skalp_frontend::hir::{Hir, HirPowerCtrl, HirPowerDerivation};
+use skalp_frontend::hir::{Hir, HirPowerCtrl, HirPowerDerivation, IsolationClamp};
 
 /// Generate UPF text for a design, or None when no power domains are declared.
 pub fn generate_upf(hir: &Hir, mir: &Mir, top_name: &str) -> Option<String> {
@@ -148,6 +148,85 @@ pub fn generate_upf(hir: &Hir, mir: &Mir, top_name: &str) -> Option<String> {
                 ));
             }
             out.push('\n');
+        }
+    }
+    out.push('\n');
+
+    // Isolation and level-shifter strategies (spec §18.11). These follow
+    // from the model, not from extra user syntax: a domain that can be
+    // de-energized needs its outputs clamped, and a domain whose operating
+    // voltage differs from its parent's needs shifters on the boundary.
+    let operating_mv = |name: &str| -> Option<u32> {
+        hir.power_domain_decls
+            .iter()
+            .find(|d| d.name == name)
+            .and_then(|d| d.states.iter().filter_map(|st| st.voltage_mv).max())
+    };
+    for decl in &hir.power_domain_decls {
+        let can_off = matches!(decl.derivation, HirPowerDerivation::Switched { .. })
+            || decl.states.iter().any(|st| st.voltage_mv.is_none());
+        if can_off {
+            // Clamp value: the strategy declared on any port/signal bound to
+            // this domain, else clamp low (the conservative default).
+            let clamp = hir
+                .entities
+                .iter()
+                .filter(|e| {
+                    e.power_domain_config
+                        .as_ref()
+                        .is_some_and(|c| c.domain_name == decl.name)
+                })
+                .flat_map(|e| e.ports.iter())
+                .find_map(|p| p.isolation_config.as_ref())
+                .map(|c| match c.clamp {
+                    IsolationClamp::Low => "0",
+                    IsolationClamp::High => "1",
+                    IsolationClamp::Latch => "latch",
+                })
+                .unwrap_or("0");
+            out.push_str(&format!(
+                "set_isolation ISO_{0} -domain PD_{0} -clamp_value {1} -applies_to outputs
+",
+                decl.name, clamp
+            ));
+            if let HirPowerDerivation::Switched {
+                on_when: Some(ctrl),
+                ..
+            } = &decl.derivation
+            {
+                // Isolation asserts while the domain is OFF — the inverse
+                // sense of the switch's on-condition.
+                out.push_str(&format!(
+                        "set_isolation_control ISO_{} -domain PD_{} -isolation_signal {} -isolation_sense {} -location parent
+",
+                        decl.name,
+                        decl.name,
+                        ctrl_net(ctrl),
+                    if ctrl.inverted { "high" } else { "low" }
+                ));
+            }
+        }
+    }
+
+    // Level shifters follow the CROSSINGS, not the supply tree: two rails that
+    // are siblings under one source still need shifters between them if their
+    // operating voltages differ, and a parent/child pair at equal voltage
+    // needs none.
+    let mut shifted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (a, b) in crate::fpga_power::crossing_domain_pairs(hir) {
+        let (Some(av), Some(bv)) = (operating_mv(&a), operating_mv(&b)) else {
+            continue;
+        };
+        if av == bv {
+            continue;
+        }
+        for d in [&a, &b] {
+            if hir.power_domain_decls.iter().any(|x| &x.name == d) && shifted.insert(d.clone()) {
+                out.push_str(&format!(
+                    "set_level_shifter LS_{0} -domain PD_{0} -applies_to both -rule both -location self\n",
+                    d
+                ));
+            }
         }
     }
     out.push('\n');

@@ -861,3 +861,225 @@ mod domain_loss_fi {
         );
     }
 }
+
+/// Port-granular isolation and level-shifter inference (spec §18.11).
+mod port_granular_strategies {
+    use skalp_frontend::parse_and_build_hir;
+
+    /// Common design: an always-on rail, a gated rail at the same voltage,
+    /// and a separate 1.8 V rail. The gated domain's OUTPUT needs isolation;
+    /// its inputs do not (their source cannot go down). The 1.8 V rail needs
+    /// shifters in both directions.
+    fn soc(extra_iso: bool) -> String {
+        let iso = if extra_iso {
+            "#[isolation(clamp = low)]\n            "
+        } else {
+            ""
+        };
+        format!(
+            r#"
+        power_domain vbat: external;
+        power_domain vdd_aon = regulated(vbat, macro = u_aon, states = {{ on: 0.9V }});
+        power_domain vdd_gpu = switched(vdd_aon, on_when = !gpu_sleep, states = {{ on: 0.9V, off }});
+        power_domain vdd_io  = regulated(vbat, macro = u_io, states = {{ on: 1.8V }});
+
+        #[power_domain(vdd_gpu)]
+        entity Gpu {{
+            in clk: clock
+            in cmd: bit[8]
+            {iso}out result: bit[16]
+        }}
+
+        impl Gpu {{
+            signal acc: bit[16] = 0
+            on(clk.rise) {{ acc = acc + cmd }}
+            result = acc
+        }}
+
+        #[power_domain(vdd_io)]
+        entity Pads {{
+            in clk: clock
+            in d: bit[8]
+            out q: bit[8]
+        }}
+
+        impl Pads {{
+            signal r: bit[8] = 0
+            on(clk.rise) {{ r = d }}
+            q = r
+        }}
+
+        #[power_domain(vdd_aon)]
+        entity Soc {{
+            in clk: clock
+            in gpu_sleep: bit
+            in cmd: bit[8]
+            out result: bit[16]
+            out io_q: bit[8]
+        }}
+
+        impl Soc {{
+            inst g = Gpu {{ clk: clk, cmd: cmd }}
+            inst p = Pads {{ clk: clk, d: cmd }}
+            result = g.result
+            io_q = p.q
+        }}
+        "#
+        )
+    }
+
+    fn warnings(src: &str) -> Vec<String> {
+        let hir = parse_and_build_hir(src).expect("parse");
+        let (errors, warnings) = skalp_mir::MirCompiler::check_power_domains(&hir);
+        assert!(errors.is_empty(), "design must be CCF-clean: {errors:#?}");
+        warnings
+    }
+
+    #[test]
+    fn output_of_gated_domain_needs_isolation() {
+        let w = warnings(&soc(false));
+        assert!(
+            w.iter()
+                .any(|m| m.contains("port `g.result`") && m.contains("no #[isolation] strategy")),
+            "gated domain's output must want isolation: {w:#?}"
+        );
+    }
+
+    #[test]
+    fn inputs_from_always_on_source_need_no_isolation() {
+        let w = warnings(&soc(false));
+        // cmd/clk flow vdd_aon -> vdd_gpu. The SOURCE cannot power off, so
+        // there is nothing to clamp — the coarse edge check used to flag these.
+        assert!(
+            !w.iter()
+                .any(|m| m.contains("port `g.cmd`") && m.contains("isolation")),
+            "input from an always-on rail must NOT be flagged: {w:#?}"
+        );
+        assert!(
+            !w.iter()
+                .any(|m| m.contains("port `g.clk`") && m.contains("isolation")),
+            "clock from an always-on rail must NOT be flagged: {w:#?}"
+        );
+    }
+
+    #[test]
+    fn declared_isolation_silences_the_port() {
+        let w = warnings(&soc(true));
+        assert!(
+            !w.iter()
+                .any(|m| m.contains("port `g.result`") && m.contains("isolation")),
+            "#[isolation] on the port must satisfy the check: {w:#?}"
+        );
+    }
+
+    #[test]
+    fn level_shifters_inferred_from_declared_voltages() {
+        let w = warnings(&soc(false));
+        assert!(
+            w.iter().any(|m| m.contains("port `p.d`")
+                && m.contains("level shifter (up)")
+                && m.contains("0.90 V")
+                && m.contains("1.80 V")),
+            "0.9 V -> 1.8 V input needs an up-shifter: {w:#?}"
+        );
+        assert!(
+            w.iter()
+                .any(|m| m.contains("port `p.q`") && m.contains("level shifter (down)")),
+            "1.8 V -> 0.9 V output needs a down-shifter: {w:#?}"
+        );
+        assert!(
+            !w.iter()
+                .any(|m| m.contains("port `g.") && m.contains("level shifter")),
+            "equal-voltage crossing needs no shifter: {w:#?}"
+        );
+    }
+
+    /// With a declared PST, the isolation requirement is precise: a domain
+    /// that COULD be gated but is never actually off while its sink is on in
+    /// any declared system state needs no isolation.
+    #[test]
+    fn declared_pst_makes_the_requirement_precise() {
+        let base = r#"
+        power_domain vbat: external;
+        power_domain vdd_aon = regulated(vbat, macro = u_aon, states = { on: 0.9V });
+        power_domain vdd_gpu = switched(vdd_aon, on_when = !gpu_sleep, states = { on: 0.9V, off });
+
+        #[power_domain(vdd_gpu)]
+        entity Gpu {
+            in clk: clock
+            in cmd: bit[8]
+            out result: bit[16]
+        }
+
+        impl Gpu {
+            signal acc: bit[16] = 0
+            on(clk.rise) { acc = acc + cmd }
+            result = acc
+        }
+
+        #[power_domain(vdd_aon)]
+        entity Soc {
+            in clk: clock
+            in gpu_sleep: bit
+            in cmd: bit[8]
+            out result: bit[16]
+        }
+
+        impl Soc {
+            inst g = Gpu { clk: clk, cmd: cmd }
+            result = g.result
+        }
+        "#;
+
+        // PST that never turns the GPU off: nothing to clamp.
+        let never_off = format!(
+            "{base}
+        power_states {{ run = {{ vdd_aon: on, vdd_gpu: on }} }};"
+        );
+        let w = warnings(&never_off);
+        assert!(
+            !w.iter().any(|m| m.contains("isolation")),
+            "no declared state has the GPU off — no isolation needed: {w:#?}"
+        );
+
+        // PST with a sleep state that does: the clamp is required.
+        let sleeps = format!(
+            "{base}
+        power_states {{ run = {{ vdd_aon: on, vdd_gpu: on }},              sleep = {{ vdd_aon: on, vdd_gpu: off }} }};"
+        );
+        let w = warnings(&sleeps);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("port `g.result`") && m.contains("isolation")),
+            "a declared state has the GPU off while AON is on: {w:#?}"
+        );
+    }
+
+    #[test]
+    fn upf_exports_isolation_and_level_shifter_strategies() {
+        let src = soc(false);
+        let hir = parse_and_build_hir(&src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        let upf = skalp_mir::upf::generate_upf(&hir, &mir, "Soc").expect("upf");
+        assert!(
+            upf.contains("set_isolation ISO_vdd_gpu -domain PD_vdd_gpu -clamp_value 0"),
+            "missing set_isolation:\n{upf}"
+        );
+        assert!(
+            upf.contains("set_isolation_control ISO_vdd_gpu")
+                && upf.contains("-isolation_signal gpu_sleep")
+                && upf.contains("-isolation_sense high"),
+            "isolation control must assert while the domain is OFF:\n{upf}"
+        );
+        assert!(
+            upf.contains("set_level_shifter LS_vdd_io"),
+            "missing level shifter for the 1.8 V rail:\n{upf}"
+        );
+        assert!(
+            !upf.contains("set_isolation ISO_vdd_aon"),
+            "an always-on rail needs no isolation strategy:\n{upf}"
+        );
+    }
+}

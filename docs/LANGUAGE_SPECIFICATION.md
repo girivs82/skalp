@@ -1425,22 +1425,28 @@ monitors (common-cause failure) [downgraded: allow_shared_supply]
 
 ### 18.5 The Domain-Crossing Warning
 
-A net crossing an instantiation edge between two different domains needs
-an isolation strategy at the boundary. The current check is **coarse**:
-if neither the instantiating entity nor the instantiated entity declares
-any `#[isolation]` signal, the build emits a warning (it never fails the
-build):
+Nets crossing an instantiation edge between two different domains may
+need an isolation cell, a level shifter, or both. The analysis is
+**per port** and direction-aware — an output leaving a domain that can be
+de-energized is not the same as an input arriving from one — and it never
+fails the build; every finding is a warning:
 
 ```text
-PDC warning: nets cross power domains `vdd_core` -> `vdd_mon` (instance
-`wd` of `Watchdog` in `Controller`) with no #[isolation] strategy
-declared on either side
+PDC warning: port `g.result` crosses from power domain `vdd_gpu` (which can be off)
+  into `vdd_aon` (which can be on) with no #[isolation] strategy — an un-clamped net
+  from a de-energized domain floats
+PDC warning: port `p.d` needs a level shifter (up): `vdd_aon` operates at 0.90 V,
+  `vdd_io` at 1.80 V
 ```
 
-Declaring an `#[isolation(...)]` signal on either side of the edge
-records that the crossing is handled and suppresses the warning.
-Port-granular isolation/level-shifter strategies and inference are future
-work (Section 21.1).
+Declaring `#[isolation(clamp = ...)]` on the port (or on either side of
+the edge) records that the crossing is handled and suppresses the
+isolation warning. Level-shifter requirements follow from the declared
+state voltages and need no annotation.
+
+Section 18.11 gives the full rules, including how a declared
+`power_states` table makes the isolation requirement precise instead of
+conservative.
 
 ### 18.6 UPF Emission
 
@@ -1682,6 +1688,76 @@ campaign reproduces exactly the dependent-failure the CCF check
 Still future in this class: switch stuck-*on*, partial regulator
 droop (brown-out), and overvoltage models (Section 21.1).
 
+### 18.11 Port-Granular Isolation and Level Shifters
+
+The crossing check is **per port**, and it distinguishes the two things a
+domain boundary can require.
+
+**Isolation** is needed when the *source* of a net can be de-energized
+while its *sink* is still up — an un-clamped output of a dead domain
+floats, and floating inputs burn current and propagate garbage. Direction
+therefore decides the rule: an output of a gated domain crossing into an
+always-on one needs a clamp; an input arriving *from* an always-on rail
+into a gated domain does not, because there is nothing to clamp.
+
+```skalp
+power_domain vbat: external;
+power_domain vdd_aon = regulated(vbat, macro = u_aon, states = { on: 0.9V });
+power_domain vdd_gpu = switched(vdd_aon, on_when = !gpu_sleep,
+                                states = { on: 0.9V, off });
+```
+
+```text
+PDC warning: port `g.result` crosses from power domain `vdd_gpu` (which can be off)
+  into `vdd_aon` (which can be on) with no #[isolation] strategy — an un-clamped net
+  from a de-energized domain floats
+```
+
+`#[isolation(clamp = low | high | hold)]` on the port satisfies the check.
+A domain "can be off" if it, or any supply ancestor, is `switched` or
+declares a state with no voltage.
+
+When a `power_states` table is declared (§18.9) the requirement becomes
+**precise** rather than conservative: isolation is required only if some
+declared system state actually has the source `off` while the sink is not.
+A domain that is gated in principle but never off while its consumer runs
+needs no isolation cells, and the compiler says so by staying quiet.
+
+**Level shifters** need no annotation at all — they follow from the
+declared state voltages. Any port whose two sides operate at different
+voltages is reported with the required direction:
+
+```text
+PDC warning: port `p.d` needs a level shifter (up): `vdd_aon` operates at 0.90 V,
+  `vdd_io` at 1.80 V
+PDC warning: port `p.q` needs a level shifter (down): `vdd_io` operates at 1.80 V,
+  `vdd_aon` at 0.90 V
+```
+
+A domain's operating voltage is the highest voltage among its powered
+states. A domain that declares no voltages reports nothing — the
+requirement is *unknown*, not absent.
+
+Both strategies export to UPF. Isolation asserts while the domain is off,
+which is the inverse sense of the switch's `on_when` expression:
+
+```text
+set_isolation ISO_vdd_gpu -domain PD_vdd_gpu -clamp_value 0 -applies_to outputs
+set_isolation_control ISO_vdd_gpu -domain PD_vdd_gpu -isolation_signal gpu_sleep \
+    -isolation_sense high -location parent
+set_level_shifter LS_vdd_io -domain PD_vdd_io -applies_to both -rule both -location self
+```
+
+Level shifters follow the **crossings**, not the supply tree: two rails
+that are siblings under one source still need shifters between them if
+their voltages differ, and a parent/child supply pair at equal voltage
+needs none.
+
+Still future: automatic *insertion* of the cells (the compiler reports the
+requirement; the implementation flow places them), clamp-value checking
+against a receiver's reset expectations, and `-applies_to` narrowing per
+port group.
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1836,11 +1912,13 @@ be relied on:
    `.sklib` technology-library format does not yet carry per-pin
    related-supply data.
 
-3. *Port-granular isolation and level-shifter strategies and their
-   inference.* The implemented crossing check is coarse
-   (Section 18.5): it only tests for the *presence* of `#[isolation]`
-   signals on either side of an edge. Per-port strategies, clamp-value
-   checking, and level-shifter insertion driven by the PST are future.
+3. *Isolation and level-shifter cell INSERTION.* Per-port crossing
+   analysis, the direction-aware isolation requirement, PST-precise
+   scoping, voltage-derived level-shifter inference, and UPF
+   `set_isolation`/`set_level_shifter` export are implemented
+   (Section 18.11). Still future: emitting the cells into the netlist
+   rather than reporting the requirement, and clamp-value checking
+   against what the receiving logic expects during power-down.
 
 4. *`#[retention]` semantics* — retention strategy selection,
    save/restore sequencing, and PST-driven retention inference. Today

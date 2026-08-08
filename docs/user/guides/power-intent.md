@@ -8,8 +8,9 @@ UPF is an *export backend*, and the native flow consumes the in-compiler
 model directly.
 
 This guide covers the implemented subset — supply-tree declarations,
-checked `#[power_domain]` binding, the dependent-failure (CCF) check, the
-domain-crossing warning, and UPF emission — and clearly marks what is
+checked `#[power_domain]` binding, the dependent-failure (CCF) check,
+per-port isolation and level-shifter analysis, domain-loss fault
+injection, and UPF emission — and clearly marks what is
 still future work. Every quoted diagnostic below is real compiler output.
 
 ## Table of Contents
@@ -55,7 +56,8 @@ Implemented today:
   duplicate state names — all build errors
 - The dependent-failure (CCF) check on `#[safety_mechanism]` entities,
   with the `allow_shared_supply` escape hatch
-- A coarse cross-domain crossing warning keyed on `#[isolation]` presence
+- Per-port crossing analysis: direction-aware isolation requirements and
+  level-shifter inference from the declared state voltages
 - UPF emission (`design.upf`) whenever declarations exist
 
 A complete working reference lives at `examples/power_domains.sk`.
@@ -368,20 +370,44 @@ context, not large buffers.
 
 ## Isolation and Level Shifting
 
-`#[isolation(clamp = low | high | latch, enable = "sig")]` on a signal
-records an isolation strategy. Two things are real today:
+`#[isolation(clamp = low | high | latch, enable = "sig")]` on a port or
+signal records an isolation strategy: it satisfies the crossing check for
+that port, exports to UPF, and puts a marker comment (e.g.
+`// Isolation: clamp=low (0)`) on the signal in the generated
+SystemVerilog. The old `#[pdc(from = 'a, to = 'b)]` tick syntax is
+retired: power domains bind structurally by containment, not by lifetime
+tags — see the language specification's "Domain Lifetimes Are Clock-Only"
+design note.
 
-1. Its **presence** marks the entity as handling cross-domain isolation,
-   which satisfies the [domain-crossing check](#domain-crossing-warnings).
-2. The generated SystemVerilog carries a marker comment (e.g.
-   `// Isolation: clamp=low (0)`) on the signal.
+Crossing analysis is per port and direction-aware. Isolation is required
+only when the *source* of a net can be de-energized while its *sink* is
+still up — a gated domain's output crossing into an always-on rail needs
+a clamp; an input arriving from an always-on rail into a gated domain
+does not, because there is nothing to clamp:
 
-Isolation-**cell insertion**, clamp-value verification, and
-`#[level_shift]` semantics (voltage compatibility between domains,
-shifter inference from the declared state voltages) are future work. The
-old `#[pdc(from = 'a, to = 'b)]` tick syntax is retired: power domains
-bind structurally by containment, not by lifetime tags — see the
-language specification's "Domain Lifetimes Are Clock-Only" design note.
+```text
+PDC warning: port `g.result` crosses from power domain `vdd_gpu` (which can be off)
+  into `vdd_aon` (which can be on) with no #[isolation] strategy — an un-clamped net
+  from a de-energized domain floats
+```
+
+Declare `#[isolation(clamp = low | high | hold)]` on the port to satisfy
+it. If you also declare a `power_states` table, the requirement becomes
+precise: isolation is asked for only where a declared system state
+actually has the source off while the sink is on.
+
+Level shifters need no annotation — they follow from the declared state
+voltages, in the direction the crossing implies:
+
+```text
+PDC warning: port `p.d` needs a level shifter (up): `vdd_aon` operates at 0.90 V,
+  `vdd_io` at 1.80 V
+```
+
+Both export to UPF as `set_isolation` / `set_isolation_control` (asserting
+while the domain is off — the inverse of the switch's `on_when`) and
+`set_level_shifter`. The compiler reports the requirement; placing the
+cells is the implementation flow's job.
 
 ## Power-Fault Injection: Domain Loss
 
@@ -416,7 +442,6 @@ do not rely on them:
   (isolate before switch-off, restore order on wake) is not.
 - **Pin-level related-supply compatibility** (Liberty
   `related_power_pin`; needs per-pin data in `.sklib`).
-- **Port-granular isolation / level-shifter strategies and inference.**
 - **`#[retention]` semantics** beyond synthesis-attribute emission.
 - **Remaining power-fault classes**: whole-domain loss IS implemented
   (see below); switch stuck-*on*, regulator droop (brown-out), and

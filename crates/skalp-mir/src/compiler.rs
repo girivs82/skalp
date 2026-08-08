@@ -9,7 +9,7 @@ use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use indexmap::IndexMap;
-use skalp_frontend::hir::Hir;
+use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerDerivation};
 use std::path::PathBuf;
 
 /// Optimization level
@@ -417,7 +417,10 @@ impl MirCompiler {
     ///
     /// Effective domain = the entity's own `#[power_domain]` binding, else
     /// inherited from the instantiating context (containment).
-    fn check_power_domains(hir: &Hir) -> (Vec<String>, Vec<String>) {
+    /// Run the power-domain checks over a HIR and return
+    /// `(errors, warnings)`. Public so tools and tests can inspect the
+    /// findings directly instead of scraping stderr.
+    pub fn check_power_domains(hir: &Hir) -> (Vec<String>, Vec<String>) {
         use skalp_frontend::hir::HirPowerDerivation;
         use std::collections::{HashMap, HashSet};
 
@@ -463,6 +466,53 @@ impl MirCompiler {
                     })
                 })
                 .unwrap_or(false)
+        };
+
+        // A domain is DE-ENERGIZABLE if it (or any supply ancestor) declares an
+        // `off` state — a state with no voltage — or is reached through a power
+        // switch. Isolation is only needed when the SOURCE of a net can be off
+        // while its SINK is still up; a net from an always-on rail into a
+        // gated one needs no isolation cell (there is nothing to clamp).
+        let decl_by_name: HashMap<&str, &skalp_frontend::hir::HirPowerDomainDecl> = hir
+            .power_domain_decls
+            .iter()
+            .map(|d| (d.name.as_str(), d))
+            .collect();
+        let can_power_off = |name: &str| -> bool {
+            ancestors(name).iter().any(|a| {
+                decl_by_name.get(a.as_str()).is_some_and(|d| {
+                    matches!(d.derivation, HirPowerDerivation::Switched { .. })
+                        || d.states.iter().any(|st| st.voltage_mv.is_none())
+                })
+            })
+        };
+        // Operating voltage of a domain = the voltage of its highest declared
+        // powered state. None when the domain declares no voltages (an
+        // undeclared external rail); level shifting is then unknown, not absent.
+        let operating_mv = |name: &str| -> Option<u32> {
+            decl_by_name
+                .get(name)
+                .and_then(|d| d.states.iter().filter_map(|st| st.voltage_mv).max())
+        };
+        // With a declared PST, isolation is required only if some declared
+        // system state actually has the source off while the sink is on.
+        // Without one, fall back to the conservative ancestry rule.
+        let needs_isolation = |src: &str, sink: &str| -> bool {
+            if src == sink {
+                return false;
+            }
+            match &hir.power_states_decl {
+                Some(pst) => pst.states.iter().any(|sys| {
+                    let s = |d: &str| {
+                        sys.assignments
+                            .iter()
+                            .find(|(dd, _)| dd == d)
+                            .map(|(_, st)| st.as_str())
+                    };
+                    s(src) == Some("off") && s(sink).is_some_and(|st| st != "off")
+                }),
+                None => can_power_off(src),
+            }
         };
 
         // Roots: entities nothing instantiates (covers main entities).
@@ -775,21 +825,72 @@ impl MirCompiler {
                     }
                 }
 
-                // Isolation (coarse): flag cross-domain edges with no strategy
+                // Port-granular crossing analysis (spec §18.11). Every port of
+                // a child bound to a different domain crosses the boundary; the
+                // direction decides which domain is the SOURCE, and the source
+                // is what determines whether an isolation cell is required.
+                // Level shifting is inferred from the declared state voltages
+                // and needs no annotation at all.
                 if let (Some(cd), Some(pd)) = (&child_eff, &eff) {
-                    if cd != pd
-                        && !has_isolation(child.id)
-                        && !has_isolation(eid)
-                        && warned_edges.insert((pd.clone(), cd.clone()))
-                    {
-                        warnings.push(format!(
-                            "nets cross power domains `{}` -> `{}` (instance `{}` of `{}` in `{}`) with no #[isolation] strategy declared on either side",
-                            pd,
-                            cd,
-                            inst.name,
-                            child.name,
-                            path.join(".")
-                        ));
+                    if cd != pd {
+                        let entity_iso = has_isolation(child.id) || has_isolation(eid);
+                        for port in &child.ports {
+                            // source -> sink across this port
+                            let (src, sink) = match port.direction {
+                                HirPortDirection::Output => (cd.as_str(), pd.as_str()),
+                                HirPortDirection::Input => (pd.as_str(), cd.as_str()),
+                                // Bidirectional: either end can drive, so it
+                                // needs isolation if EITHER side can go down.
+                                HirPortDirection::Bidirectional | HirPortDirection::Protocol => {
+                                    (cd.as_str(), pd.as_str())
+                                }
+                            };
+                            let bidir = matches!(
+                                port.direction,
+                                HirPortDirection::Bidirectional | HirPortDirection::Protocol
+                            );
+
+                            if (needs_isolation(src, sink) || (bidir && needs_isolation(sink, src)))
+                                && port.isolation_config.is_none()
+                                && !entity_iso
+                                && warned_edges.insert((
+                                    format!("iso:{}:{}", path.join("."), inst.name),
+                                    port.name.clone(),
+                                ))
+                            {
+                                warnings.push(format!(
+                                    "port `{}.{}` crosses from power domain `{}` (which can be off) into `{}` (which can be on) with no #[isolation] strategy — an un-clamped net from a de-energized domain floats",
+                                    inst.name, port.name, src, sink
+                                ));
+                            }
+
+                            // Level-shifter inference from declared voltages.
+                            // A domain that declares no voltage yields None:
+                            // the requirement is UNKNOWN, not absent.
+                            match (operating_mv(src), operating_mv(sink)) {
+                                (Some(sv), Some(kv))
+                                    if sv != kv
+                                        && warned_edges.insert((
+                                            format!("ls:{}:{}", path.join("."), inst.name),
+                                            port.name.clone(),
+                                        )) =>
+                                {
+                                    warnings.push(format!(
+                                            "port `{}.{}` needs a level shifter ({}): `{}` operates at {}.{:02} V, `{}` at {}.{:02} V",
+                                            inst.name,
+                                            port.name,
+                                            if kv > sv { "up" } else { "down" },
+                                            src,
+                                            sv / 1000,
+                                            (sv % 1000) / 10,
+                                            sink,
+                                            kv / 1000,
+                                            (kv % 1000) / 10,
+                                        ));
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
 
