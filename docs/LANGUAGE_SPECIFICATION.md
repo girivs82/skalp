@@ -1949,7 +1949,9 @@ a hard error or has no effect. They must not appear in designs.
 | External constraint file merging (`--constraints board.pcf`) | No such CLI option; use inline constraints (Section 17) |
 | `process` / `always` blocks, sensitivity lists | Never part of this dialect; use `on(event)` |
 | `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 19) |
-| Memory/debug attribute semantics (`#[memory]`, `#[trace]`, `#[breakpoint]`, vendor-IP attributes) | Parse-accepted annotations only; no defined synthesis behavior |
+| Vendor-IP attributes | Parse-accepted annotations only; no defined synthesis behavior |
+| `#[trace]` | Presentation only: `group`/`display_name`/`radix` are carried into the exported `.skw` waveform. No synthesis effect. |
+| `#[breakpoint]` | Emits an SVA-style `$error`/`$stop` block in the generated SystemVerilog. SKALP's own behavioral testbench does not evaluate it. |
 | `#[retention]` / `#[isolation]` semantics | Parse-accepted; `#[retention]` emits synthesis attributes (`RETAIN`/`DONT_TOUCH`) and `#[isolation]` presence feeds the coarse domain-crossing check (Section 18.5), but retention sequencing, isolation-cell insertion, and port-granular strategies are future (Section 21.1) |
 | `while` loops in synthesizable code | Not synthesizable; use bounded `for` |
 | Entity aliases (`entity Fast = Foo::<N>;`) | Parsed and stored, but an alias cannot yet be instantiated (`unknown entity in instantiation`) |

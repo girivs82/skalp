@@ -32,7 +32,9 @@ This document provides a comprehensive reference for all attributes available in
 
 ### #[breakpoint]
 
-Marks a signal for breakpoint debugging during simulation. When the signal transitions or meets a condition, the simulator pauses for inspection.
+Marks a signal as a debug stop condition. In the **generated SystemVerilog** this becomes an always-block that fires `$error` with the breakpoint's name and message and then `$stop` when the signal is high — so it halts a third-party SV simulator.
+
+SKALP's own behavioral testbench does **not** evaluate these: the breakpoint engine behind `skalp debug` is driven by the IDE debug protocol, not by source annotations. A `#[breakpoint]` will not fail a Rust testbench.
 
 **Syntax:**
 ```skalp
