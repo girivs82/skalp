@@ -9,7 +9,7 @@ use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use indexmap::IndexMap;
-use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerDerivation};
+use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerCtrl, HirPowerDerivation};
 use std::path::PathBuf;
 
 /// Optimization level
@@ -536,8 +536,6 @@ impl MirCompiler {
         //   needs switching. Full PST-liveness (per-state analysis) is
         //   future work.
         {
-            use skalp_frontend::hir::HirPowerCtrl;
-
             let descendants_of = |root_name: &str| -> HashSet<String> {
                 // Domains whose ancestor chain contains root_name
                 hir.power_domain_decls
@@ -573,41 +571,11 @@ impl MirCompiler {
                     .or_else(|| uninstantiated.first().copied())
             };
 
-            // Resolve a control path's driving DOMAIN at the root, walking
-            // as many leading segments as name instances (deep paths like
-            // `soc.pmu.gpu_sleep`), with containment inheritance at each
-            // hop. Resolution stops at the first segment that is not an
-            // instance — the remainder is a signal/port of the entity
-            // reached so far.
+            // Resolve a control path's driving DOMAIN at the root. See
+            // `resolve_ctrl_domain_at_root` — shared with the retention
+            // control-cone check below so both cannot drift apart.
             let resolve_ctrl_domain = |ctrl: &HirPowerCtrl| -> Option<String> {
-                let root = root_entity?;
-                let mut entity = root;
-                let mut eff_domain = root
-                    .power_domain_config
-                    .as_ref()
-                    .map(|c| c.domain_name.clone());
-                for (hops, segment) in ctrl.path.iter().enumerate() {
-                    if hops > 64 {
-                        break;
-                    }
-                    let Some(imp) = hir.implementations.iter().find(|i| i.entity == entity.id)
-                    else {
-                        break;
-                    };
-                    let Some(inst) = imp.instances.iter().find(|i| &i.name == segment) else {
-                        break; // remainder is a signal/port of `entity`
-                    };
-                    let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
-                        break;
-                    };
-                    eff_domain = child
-                        .power_domain_config
-                        .as_ref()
-                        .map(|c| c.domain_name.clone())
-                        .or(eff_domain);
-                    entity = child;
-                }
-                eff_domain
+                Self::resolve_ctrl_domain_at_root(hir, ctrl)
             };
 
             for decl in &hir.power_domain_decls {
@@ -916,7 +884,202 @@ impl MirCompiler {
             }
         }
 
+        // Retention checks (spec §18.12).
+        {
+            // Effective domain(s) per entity: an entity instantiated in two
+            // contexts can land in two domains, so this is a set.
+            let mut entity_domains: HashMap<skalp_frontend::hir::EntityId, HashSet<String>> =
+                HashMap::new();
+            let mut rstack: Vec<(skalp_frontend::hir::EntityId, Option<String>, usize)> = hir
+                .entities
+                .iter()
+                .filter(|e| !instantiated.contains(&e.id))
+                .map(|e| {
+                    (
+                        e.id,
+                        e.power_domain_config
+                            .as_ref()
+                            .map(|c| c.domain_name.clone()),
+                        0usize,
+                    )
+                })
+                .collect();
+            for (eid, dom, _) in &rstack {
+                if let Some(d) = dom {
+                    entity_domains.entry(*eid).or_default().insert(d.clone());
+                }
+            }
+            while let Some((eid, eff, depth)) = rstack.pop() {
+                if depth > 64 {
+                    continue;
+                }
+                let Some(imp) = impl_of.get(&eid) else {
+                    continue;
+                };
+                for inst in &imp.instances {
+                    let Some(child) = entity_by_id.get(&inst.entity) else {
+                        continue;
+                    };
+                    let child_eff = child
+                        .power_domain_config
+                        .as_ref()
+                        .map(|c| c.domain_name.clone())
+                        .or_else(|| eff.clone());
+                    if let Some(d) = &child_eff {
+                        entity_domains
+                            .entry(child.id)
+                            .or_default()
+                            .insert(d.clone());
+                    }
+                    rstack.push((child.id, child_eff, depth + 1));
+                }
+            }
+
+            // Retained elements per domain, and their declared save/restore.
+            let mut retained: HashMap<String, Vec<String>> = HashMap::new();
+            let mut controls: Vec<(String, String, &str)> = Vec::new(); // (domain, signal, what)
+            for entity in &hir.entities {
+                let Some(domains) = entity_domains.get(&entity.id) else {
+                    continue;
+                };
+                let mut hits: Vec<(String, &skalp_frontend::hir::RetentionConfig)> = Vec::new();
+                for port in &entity.ports {
+                    if let Some(rc) = &port.retention_config {
+                        hits.push((format!("{}.{}", entity.name, port.name), rc));
+                    }
+                }
+                if let Some(im) = impl_of.get(&entity.id) {
+                    for sig in &im.signals {
+                        if let Some(rc) = sig
+                            .power_config
+                            .as_ref()
+                            .and_then(|pc| pc.retention.as_ref())
+                        {
+                            hits.push((format!("{}.{}", entity.name, sig.name), rc));
+                        }
+                    }
+                }
+                for (elem, rc) in hits {
+                    for d in domains {
+                        retained.entry(d.clone()).or_default().push(elem.clone());
+                        for (what, sig) in [
+                            ("save", rc.save_signal.as_ref()),
+                            ("restore", rc.restore_signal.as_ref()),
+                        ] {
+                            if let Some(sig) = sig {
+                                controls.push((d.clone(), sig.clone(), what));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 1. Retention in a domain that can never be de-energized buys
+            //    nothing — retention cells cost area and leakage.
+            for (domain, elems) in &retained {
+                if !can_power_off(domain) {
+                    warnings.push(format!(
+                        "`{}` is #[retention]-annotated in power domain `{}`, which never powers off — retention cells cost area and leakage but preserve nothing here",
+                        elems.first().cloned().unwrap_or_default(),
+                        domain
+                    ));
+                }
+            }
+
+            // 2. A declared reduced-voltage (retention) state that nothing
+            //    uses: the state table promises retention the design does not
+            //    implement.
+            for decl in &hir.power_domain_decls {
+                let volts: Vec<u32> = decl.states.iter().filter_map(|s| s.voltage_mv).collect();
+                let Some(&top) = volts.iter().max() else {
+                    continue;
+                };
+                let has_reduced = volts.iter().any(|v| *v < top);
+                if has_reduced && !retained.contains_key(&decl.name) {
+                    warnings.push(format!(
+                        "power domain `{}` declares a reduced-voltage state but no element in it is #[retention]-annotated — the state table promises state retention the design does not implement",
+                        decl.name
+                    ));
+                }
+            }
+
+            // 3. Retention save/restore control must survive the power-down it
+            //    sequences — the same argument as switch controls.
+            for (domain, signal, what) in &controls {
+                let ctrl = HirPowerCtrl {
+                    path: signal.split('.').map(|s| s.to_string()).collect(),
+                    inverted: false,
+                };
+                if let Some(ctrl_domain) = Self::resolve_ctrl_domain_at_root(hir, &ctrl) {
+                    let inside = ancestors(&ctrl_domain).contains(domain);
+                    if can_power_off(&ctrl_domain) && inside {
+                        errors.push(format!(
+                            "power domain `{}`: retention {} control `{}` is driven from `{}`, which is inside the domain being retained — the control dies with the state it is meant to preserve",
+                            domain, what, signal, ctrl_domain
+                        ));
+                    } else if can_power_off(&ctrl_domain) {
+                        warnings.push(format!(
+                            "power domain `{}`: retention {} control `{}` is driven from domain `{}`, which can itself power off — drive retention controls from an always-on domain",
+                            domain, what, signal, ctrl_domain
+                        ));
+                    }
+                }
+            }
+        }
+
         (errors, warnings)
+    }
+
+    /// Resolve a power-control path to the DOMAIN that drives it, walking
+    /// from the hierarchy root through as many leading segments as name
+    /// instances (deep paths like `soc.pmu.gpu_sleep`) with containment
+    /// inheritance at each hop. Resolution stops at the first segment that
+    /// is not an instance — the remainder is a signal/port of the entity
+    /// reached so far.
+    fn resolve_ctrl_domain_at_root(hir: &Hir, ctrl: &HirPowerCtrl) -> Option<String> {
+        let uninstantiated: Vec<_> = hir
+            .entities
+            .iter()
+            .filter(|e| {
+                !hir.implementations
+                    .iter()
+                    .flat_map(|i| i.instances.iter())
+                    .any(|inst| inst.entity == e.id)
+            })
+            .collect();
+        let root = hir
+            .main_entity_names
+            .iter()
+            .find_map(|n| uninstantiated.iter().find(|e| &e.name == n))
+            .copied()
+            .or_else(|| uninstantiated.first().copied())?;
+
+        let mut entity = root;
+        let mut eff_domain = root
+            .power_domain_config
+            .as_ref()
+            .map(|c| c.domain_name.clone());
+        for (hops, segment) in ctrl.path.iter().enumerate() {
+            if hops > 64 {
+                break;
+            }
+            let Some(imp) = hir.implementations.iter().find(|i| i.entity == entity.id) else {
+                break;
+            };
+            let Some(inst) = imp.instances.iter().find(|i| &i.name == segment) else {
+                break; // remainder is a signal/port of `entity`
+            };
+            let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                break;
+            };
+            eff_domain = child
+                .power_domain_config
+                .as_ref()
+                .map(|c| c.domain_name.clone())
+                .or(eff_domain);
+            entity = child;
+        }
+        eff_domain
     }
 
     fn reachable_module_names(

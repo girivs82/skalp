@@ -1206,3 +1206,193 @@ mod port_granular_strategies {
         );
     }
 }
+
+/// Retention semantics (spec §18.12).
+mod retention {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn design(retained_in: &str, controls: &str) -> String {
+        format!(
+            r#"
+        power_domain vbat: external;
+        power_domain vdd_aon = regulated(vbat, macro = u_aon, states = {{ on: 0.9V }});
+        power_domain vdd_cpu = regulated(vbat, macro = u_cpu, states = {{ on: 0.9V, ret: 0.6V, off }});
+
+        #[power_domain(vdd_cpu)]
+        entity Cpu {{
+            #[isolation(clamp = low)]
+            in clk: clock
+            #[isolation(clamp = low)]
+            in d: bit[8]
+            #[isolation(clamp = low)]
+            out q: bit[8]
+        }}
+
+        impl Cpu {{
+            {cpu_ret}
+            signal state: bit[8] = 0
+            signal local_save: bit = 0
+            signal local_restore: bit = 0
+            on(clk.rise) {{ state = d }}
+            q = state
+        }}
+
+        #[power_domain(vdd_aon)]
+        entity Soc {{
+            in clk: clock
+            in d: bit[8]
+            out q: bit[8]
+        }}
+
+        impl Soc {{
+            {soc_ret}
+            signal pmu_save: bit = 0
+            signal pmu_restore: bit = 0
+            signal housekeeping: bit = 0
+            on(clk.rise) {{ housekeeping = !housekeeping }}
+            inst c = Cpu {{ clk: clk, d: d }}
+            q = c.q
+        }}
+        "#,
+            cpu_ret = if retained_in == "cpu" {
+                format!("#[retention({})]", controls)
+            } else {
+                String::new()
+            },
+            soc_ret = if retained_in == "soc" {
+                format!("#[retention({})]", controls)
+            } else {
+                String::new()
+            },
+        )
+    }
+
+    fn findings(src: &str) -> (Vec<String>, Vec<String>) {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::check_power_domains(&hir)
+    }
+
+    #[test]
+    fn retention_in_an_always_on_domain_is_pointless() {
+        // The annotation lands on Soc's `housekeeping`, in the always-on rail.
+        let (errors, warnings) = findings(&design("soc", "strategy = shadow"));
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("never powers off") && w.contains("vdd_aon")),
+            "retention on an always-on rail must be flagged: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn declared_retention_state_with_nothing_retained_is_flagged() {
+        // vdd_cpu declares `ret: 0.6V` but nothing in it is retained.
+        let (_, warnings) = findings(&design("soc", "strategy = shadow"));
+        assert!(
+            warnings.iter().any(|w| w.contains("vdd_cpu")
+                && w.contains("reduced-voltage state")
+                && w.contains("does not implement")),
+            "an unused retention state must be flagged: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn retention_control_from_inside_the_retained_domain_fails_the_build() {
+        let (errors, _) = findings(&design(
+            "cpu",
+            "strategy = shadow, save = c.local_save, restore = c.local_restore",
+        ));
+        assert!(
+            errors.iter().any(|e| e.contains("retention save control")
+                && e.contains("inside the domain being retained")),
+            "a control that dies with the state it preserves must fail: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn retention_from_an_always_on_controller_is_clean() {
+        let (errors, warnings) = findings(&design(
+            "cpu",
+            "strategy = shadow, save = pmu_save, restore = pmu_restore",
+        ));
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert!(
+            !warnings.iter().any(|w| w.contains("retention")),
+            "a correctly-retained domain must be quiet: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn upf_exports_retention_strategy_and_control() {
+        let src = design(
+            "cpu",
+            "strategy = shadow, save = pmu_save, restore = pmu_restore",
+        );
+        let hir = parse_and_build_hir(&src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        let upf = skalp_mir::upf::generate_upf(&hir, &mir, "Soc").expect("upf");
+        assert!(
+            upf.contains("set_retention RET_vdd_cpu -domain PD_vdd_cpu")
+                && upf.contains("Cpu/state"),
+            "missing set_retention with elements:\n{upf}"
+        );
+        assert!(
+            upf.contains("set_retention_control RET_vdd_cpu")
+                && upf.contains("-save_signal {pmu_save high}")
+                && upf.contains("-restore_signal {pmu_restore low}"),
+            "missing set_retention_control:\n{upf}"
+        );
+        assert!(
+            !upf.contains("set_retention RET_vdd_aon"),
+            "nothing is retained in the always-on rail:\n{upf}"
+        );
+    }
+
+    /// A power-intent attribute must not survive the construct it was written
+    /// in: an attribute node can be visited more than once, and a leftover
+    /// silently attached itself to the FIRST port of the NEXT entity.
+    #[test]
+    fn power_attributes_do_not_leak_across_entities() {
+        let src = r#"
+        entity A { in clk: clock  out q: bit }
+        impl A {
+            #[retention]
+            signal s: bit = 0
+            on(clk.rise) { s = !s }
+            q = s
+        }
+        entity B { in clk: clock  out z: bit }
+        impl B {
+            signal t: bit = 0
+            on(clk.rise) { t = !t }
+            z = t
+        }
+        "#;
+        let hir = parse_and_build_hir(src).expect("parse");
+        let b = hir.entities.iter().find(|e| e.name == "B").expect("B");
+        assert!(
+            b.ports.iter().all(|p| p.retention_config.is_none()),
+            "#[retention] in A's impl must not attach to B's ports"
+        );
+        let a_impl = hir
+            .implementations
+            .iter()
+            .find(|i| {
+                hir.entities
+                    .iter()
+                    .any(|e| e.id == i.entity && e.name == "A")
+            })
+            .expect("impl A");
+        assert!(
+            a_impl.signals.iter().any(|s| s.name == "s"
+                && s.power_config
+                    .as_ref()
+                    .and_then(|pc| pc.retention.as_ref())
+                    .is_some()),
+            "the annotation must still reach the signal it was written on"
+        );
+    }
+}

@@ -208,6 +208,68 @@ pub fn generate_upf(hir: &Hir, mir: &Mir, top_name: &str) -> Option<String> {
         }
     }
 
+    // Retention strategies (spec §18.12). A retained element keeps its state
+    // across a power-down of its own domain, on an always-on retention supply.
+    for decl in &hir.power_domain_decls {
+        let retained: Vec<&skalp_frontend::hir::HirEntity> = hir
+            .entities
+            .iter()
+            .filter(|e| {
+                e.power_domain_config
+                    .as_ref()
+                    .is_some_and(|c| c.domain_name == decl.name)
+            })
+            .collect();
+        let mut cfg: Option<&skalp_frontend::hir::RetentionConfig> = None;
+        let mut elements: Vec<String> = Vec::new();
+        for e in &retained {
+            for p in &e.ports {
+                if let Some(rc) = &p.retention_config {
+                    cfg = cfg.or(Some(rc));
+                    elements.push(format!("{}/{}", e.name, p.name));
+                }
+            }
+            if let Some(im) = hir.implementations.iter().find(|i| i.entity == e.id) {
+                for sig in &im.signals {
+                    if let Some(rc) = sig
+                        .power_config
+                        .as_ref()
+                        .and_then(|pc| pc.retention.as_ref())
+                    {
+                        cfg = cfg.or(Some(rc));
+                        elements.push(format!("{}/{}", e.name, sig.name));
+                    }
+                }
+            }
+        }
+        let Some(cfg) = cfg else { continue };
+        out.push_str(&format!(
+            "set_retention RET_{0} -domain PD_{0}{1}
+",
+            decl.name,
+            if elements.is_empty() {
+                String::new()
+            } else {
+                format!(" -elements {{{}}}", elements.join(" "))
+            }
+        ));
+        if cfg.save_signal.is_some() || cfg.restore_signal.is_some() {
+            let sig = |s: &Option<String>| {
+                s.as_deref()
+                    .map(|n| n.replace('.', "/"))
+                    .unwrap_or_else(|| "UNSPECIFIED".to_string())
+            };
+            out.push_str(&format!(
+                "set_retention_control RET_{} -domain PD_{} -save_signal {{{} high}} -restore_signal {{{} low}}
+",
+                decl.name,
+                decl.name,
+                sig(&cfg.save_signal),
+                sig(&cfg.restore_signal)
+            ));
+        }
+    }
+
     // Level shifters follow the CROSSINGS, not the supply tree: two rails that
     // are siblings under one source still need shifters between them if their
     // operating voltages differ, and a parent/child pair at equal voltage

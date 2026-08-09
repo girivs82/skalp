@@ -1330,6 +1330,14 @@ impl HirBuilderContext {
     fn build_entity(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
         let name = self.extract_name(node)?;
 
+        // Power-intent attributes (#[retention], #[isolation], ...) are staged
+        // in `pending_power_config` by the attribute walk and consumed by the
+        // next port or signal built. They must not survive the construct they
+        // were written in: an attribute node can be visited more than once, so
+        // a leftover would silently attach itself to the FIRST port of the
+        // NEXT entity. Discard anything still pending on entry.
+        self.pending_power_config = None;
+
         // BUG #240 FIX: Check if entity was preregistered (from merged HIR during file rebuild).
         // If so, use the preregistered ID to maintain consistency; otherwise generate a new one.
         let id = if let Some(&preregistered_id) = self.symbols.entities.get(&name) {
@@ -1767,6 +1775,10 @@ impl HirBuilderContext {
 
     /// Build implementation from syntax node
     fn build_implementation(&mut self, node: &SyntaxNode) -> Option<HirImplementation> {
+        // See build_entity: staged power-intent attributes never cross a
+        // construct boundary.
+        self.pending_power_config = None;
+
         // Get target entity name
         let entity_name = self.extract_name(node)?;
         trace!(
@@ -12845,15 +12857,30 @@ impl HirBuilderContext {
                             strategy = RetentionStrategy::ShadowRegister;
                             current_key = None;
                         }
-                        // Signal names as identifiers
+                        // Signal names as identifiers. A dotted path arrives
+                        // as Ident (Dot Ident)*, so append continuations to
+                        // the value already captured for this key instead of
+                        // overwriting it.
                         _ if text != "retention" => match current_key {
                             Some("save") => {
                                 save_signal = Some(text.to_string());
-                                current_key = None;
+                                current_key = Some("save.");
+                            }
+                            Some("save.") => {
+                                if let Some(v) = save_signal.as_mut() {
+                                    v.push('.');
+                                    v.push_str(text);
+                                }
                             }
                             Some("restore") => {
                                 restore_signal = Some(text.to_string());
-                                current_key = None;
+                                current_key = Some("restore.");
+                            }
+                            Some("restore.") => {
+                                if let Some(v) = restore_signal.as_mut() {
+                                    v.push('.');
+                                    v.push_str(text);
+                                }
                             }
                             _ => {}
                         },

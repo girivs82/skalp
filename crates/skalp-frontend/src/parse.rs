@@ -3211,9 +3211,23 @@ impl<'a> ParseState<'a> {
                                 self.bump();
                                 self.skip_trivia();
                             } else if self.at(SyntaxKind::Ident) {
-                                // Handle identifiers like domain names
+                                // Handle identifiers like domain names, and
+                                // dotted hierarchical paths — retention
+                                // save/restore controls name a signal that may
+                                // live below the top level (`pmu.save_req`),
+                                // the same shape `on_when`/`ack_on` accept.
                                 self.bump();
                                 self.skip_trivia();
+                                while self.at(SyntaxKind::Dot) {
+                                    self.bump();
+                                    self.skip_trivia();
+                                    if self.at(SyntaxKind::Ident) || self.at_keyword_as_ident() {
+                                        self.bump();
+                                        self.skip_trivia();
+                                    } else {
+                                        break;
+                                    }
+                                }
                             } else if self.at_keyword_as_ident() {
                                 // Handle keywords used as values (e.g., cdc_type = gray)
                                 self.bump();

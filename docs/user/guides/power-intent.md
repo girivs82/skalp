@@ -335,11 +335,34 @@ authoritative — do not hand-edit the file.
 
 ## Retention Registers
 
-> **Status: attribute + synthesis markers only.** `#[retention]` emits
-> synthesis attributes on the register; retention *semantics* (strategy
-> selection, save/restore sequencing, PST-driven inference) are future
-> work. The `strategy` / `save_signal` / `restore_signal` parameters
-> parse and are recorded, but do not change the generated hardware.
+`#[retention(strategy = shadow, save = pmu_save, restore = pmu_restore)]`
+on a register declares that its state survives a power-down of its own
+domain, held on an always-on retention supply. `strategy` is `auto`
+(default), `balloon`, or `shadow`; `save`/`restore` name the control
+signals and accept a hierarchical path, like switch controls.
+
+Three checks run:
+
+- **Retention that preserves nothing** — a retained element in a domain
+  that never powers off costs area and leakage and buys nothing.
+- **A retention state nothing implements** — a domain declaring a
+  reduced-voltage state (the classic `ret: 0.6V`) with no retained
+  element promises retention the design does not deliver.
+- **A control that dies with the state it preserves** — a save/restore
+  control driven from *inside* the domain being retained is a build
+  error. From another domain that can itself power off, it is a warning.
+
+The strategy exports to UPF:
+
+```text
+set_retention RET_vdd_cpu -domain PD_vdd_cpu -elements {Cpu/state}
+set_retention_control RET_vdd_cpu -domain PD_vdd_cpu \
+    -save_signal {pmu_save high} -restore_signal {pmu_restore low}
+```
+
+> **Still future:** choosing and inserting the retention cells, save/restore
+> ordering relative to isolation within a transition, and PST-driven
+> inference of which registers a declared state requires.
 
 ```skalp
 // retention_guide.sk
@@ -442,7 +465,6 @@ do not rely on them:
   (isolate before switch-off, restore order on wake) is not.
 - **Pin-level related-supply compatibility** (Liberty
   `related_power_pin`; needs per-pin data in `.sklib`).
-- **`#[retention]` semantics** beyond synthesis-attribute emission.
 - **Remaining power-fault classes**: whole-domain loss IS implemented
   (see below); switch stuck-*on*, regulator droop (brown-out), and
   overvoltage models are not.

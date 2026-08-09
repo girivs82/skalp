@@ -1758,6 +1758,71 @@ requirement; the implementation flow places them), clamp-value checking
 against a receiver's reset expectations, and `-applies_to` narrowing per
 port group.
 
+### 18.12 Retention
+
+`#[retention]` on a register (or a port) declares that its state survives a
+power-down of its own domain, held on an always-on retention supply:
+
+```skalp
+#[retention(strategy = shadow, save = pmu_save, restore = pmu_restore)]
+signal state: bit[8] = 0
+```
+
+`strategy` is `auto` (default), `balloon`, or `shadow`. `save` and
+`restore` name the control signals and accept a hierarchical path
+(`pmu.save_req`), the same shape `on_when` and `ack_on` take.
+
+Three things are checked.
+
+**Retention that preserves nothing.** A retained element in a domain that
+can never be de-energized costs area and leakage and buys nothing:
+
+```text
+PDC warning: `Soc.housekeeping` is #[retention]-annotated in power domain
+  `vdd_aon`, which never powers off — retention cells cost area and leakage
+  but preserve nothing here
+```
+
+**A retention state nothing implements.** A domain that declares a
+reduced-voltage state (a powered state below its top operating voltage —
+the classic `ret: 0.6V`) is promising state retention. If no element in
+that domain is annotated, the state table and the design disagree:
+
+```text
+PDC warning: power domain `vdd_cpu` declares a reduced-voltage state but no
+  element in it is #[retention]-annotated — the state table promises state
+  retention the design does not implement
+```
+
+**A control that dies with the state it preserves.** The save/restore
+controls sequence a power-down, so they must outlive it. A control driven
+from inside the very domain being retained is a build **error** — the same
+argument as the no-self-power rule for switch controls (§18.8):
+
+```text
+error: power domain `vdd_cpu`: retention save control `c.local_save` is driven
+  from `vdd_cpu`, which is inside the domain being retained — the control dies
+  with the state it is meant to preserve
+```
+
+A control from a *different* domain that can itself power off is a
+warning rather than an error: it may be legitimate if the system state
+table keeps that domain up during the transition, which the sequencing
+checks (§21.1) do not yet verify.
+
+The strategy exports to UPF:
+
+```text
+set_retention RET_vdd_cpu -domain PD_vdd_cpu -elements {Cpu/state}
+set_retention_control RET_vdd_cpu -domain PD_vdd_cpu \
+    -save_signal {pmu_save high} -restore_signal {pmu_restore low}
+```
+
+Still future: retention *cell* selection and insertion, save/restore
+ordering relative to isolation within a transition (§21.1), and
+PST-driven inference of which registers must be retained for a declared
+state to be re-enterable.
+
 ## 19. Asynchronous (NCL) Entities
 
 `async entity` declares a clockless Null Convention Logic circuit. Logic is
@@ -1920,10 +1985,13 @@ be relied on:
    rather than reporting the requirement, and clamp-value checking
    against what the receiving logic expects during power-down.
 
-4. *`#[retention]` semantics* — retention strategy selection,
-   save/restore sequencing, and PST-driven retention inference. Today
-   the attribute emits synthesis attributes (`RETAIN`, `DONT_TOUCH`) on
-   the register and nothing more.
+4. *Retention cell selection and PST-driven inference.* The
+   `#[retention]` attribute is checked and exported (Section 18.12):
+   pointless retention, an unimplemented retention state, and a
+   save/restore control that dies with the state it preserves are all
+   diagnosed, and `set_retention`/`set_retention_control` are emitted.
+   Still future: choosing and inserting the retention cells, and
+   inferring from the PST which registers a declared state requires.
 
 5. *Power-fault injection classes.* Whole-domain loss (switch
    stuck-off / regulator collapse) is implemented (Section 18.10) and
