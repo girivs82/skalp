@@ -568,10 +568,18 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             // Generate memory-inferrable SystemVerilog with synthesis attributes
             // Format: (* ram_style = "block" *) reg [WIDTH-1:0] mem [0:DEPTH-1];
 
-            // Determine data width from config or signal type
-            let data_width = mem_config
-                .width
-                .unwrap_or_else(|| type_width::get_type_width(&signal.signal_type) as u32);
+            // Determine data width from config or signal type. For an array
+            // signal this is the ELEMENT width: get_type_width returns the
+            // whole array's bit count, so a `bit[32][1024]` memory was
+            // emitted as `reg [32767:0] ram [0:1023]` — 1024 words of 32768
+            // bits each instead of 32.
+            let data_width = mem_config.width.unwrap_or_else(|| {
+                let ty = match &signal.signal_type {
+                    DataType::Array(inner, _) => inner.as_ref(),
+                    other => other,
+                };
+                type_width::get_type_width(ty) as u32
+            });
 
             // Generate synthesis attribute based on memory style
             let ram_style_attr = match mem_config.style {

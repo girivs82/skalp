@@ -1454,3 +1454,51 @@ impl Traced {
         );
     }
 }
+
+/// `#[memory]` element width in the emitted SystemVerilog.
+mod memory_attribute {
+    /// `#[memory]` fell back to the width of the WHOLE array when the config
+    /// omitted an explicit width, so a `bit[32][1024]` memory was declared as
+    /// `reg [32767:0] ram [0:1023]` — 1024 words of 32 kbit each. Without the
+    /// attribute the same signal emitted the correct `reg [31:0]`, so the
+    /// annotation actively made the output wrong.
+    #[test]
+    fn memory_declares_element_width_not_array_width() {
+        let src = r#"
+entity Mem {
+    in clk: clock
+    in we: bit
+    in addr: bit[10]
+    in wdata: bit[32]
+    out rdata: bit[32]
+}
+
+impl Mem {
+    #[memory(depth = 1024)]
+    signal ram: bit[32][1024]
+    on(clk.rise) {
+        if we { ram[addr] = wdata }
+    }
+    rdata = ram[addr]
+}
+"#;
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+        assert!(
+            sv.contains("reg [31:0] ram [0:1023];"),
+            "memory must declare the ELEMENT width:\n{sv}"
+        );
+        assert!(
+            !sv.contains("[32767:0]"),
+            "array-wide element width regressed:\n{sv}"
+        );
+        assert!(
+            sv.contains("width=32"),
+            "the memory comment must report the element width too:\n{sv}"
+        );
+    }
+}

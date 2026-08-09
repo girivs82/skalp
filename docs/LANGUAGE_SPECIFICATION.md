@@ -1950,6 +1950,7 @@ a hard error or has no effect. They must not appear in designs.
 | `process` / `always` blocks, sensitivity lists | Never part of this dialect; use `on(event)` |
 | `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 19) |
 | Vendor-IP attributes | Parse-accepted annotations only; no defined synthesis behavior |
+| `#[memory]` | Emits a `reg [ELEM-1:0] name [0:DEPTH-1]` array with the requested `ram_style` synthesis attribute, and drives BRAM inference in the LIR/synthesis path. |
 | `#[trace]` | Presentation only: `group`/`display_name`/`radix` are carried into the exported `.skw` waveform. No synthesis effect. |
 | `#[breakpoint]` | Emits an SVA-style `$error`/`$stop` block in the generated SystemVerilog. SKALP's own behavioral testbench does not evaluate it. |
 | `#[retention]` / `#[isolation]` semantics | Parse-accepted; `#[retention]` emits synthesis attributes (`RETAIN`/`DONT_TOUCH`) and `#[isolation]` presence feeds the coarse domain-crossing check (Section 18.5), but retention sequencing, isolation-cell insertion, and port-granular strategies are future (Section 21.1) |
