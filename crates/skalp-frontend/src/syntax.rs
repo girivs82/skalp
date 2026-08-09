@@ -1039,6 +1039,9 @@ impl From<crate::lexer::Token> for SyntaxKind {
 
             Token::Identifier(_) => Ident,
             Token::DecimalLiteral(_) => IntLiteral,
+            // Lexes as one token so it cannot silently split into `0` plus an
+            // identifier; the parser reports it as unsupported.
+            Token::UnsupportedOctalLiteral => Error,
             Token::BinaryLiteral(_) => BinLiteral,
             Token::HexLiteral(_) => HexLiteral,
             Token::SizedLiteral(_) => IntLiteral, // Treat sized literals as integer literals

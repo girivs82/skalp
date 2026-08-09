@@ -342,6 +342,12 @@ pub enum Token {
     #[regex(r"[0-9][0-9_]*", |lex| parse_decimal(lex.slice()))]
     DecimalLiteral(u64),
 
+    // Octal is NOT supported, and must not lex as `0` followed by an
+    // identifier: `q = 0o52` used to build cleanly and assign 0, silently
+    // turning 42 into 0. Match the whole thing so the parser can reject it.
+    #[regex(r"0[oO][0-7_]+")]
+    UnsupportedOctalLiteral,
+
     // Floating-point literals
     // Matches: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64, 1.0fp32, 1.0fp64, etc.
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f|f16|f32|f64|fp16|fp32|fp64)?", |lex| parse_float(lex.slice()))]

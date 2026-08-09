@@ -1502,3 +1502,49 @@ impl Mem {
         );
     }
 }
+
+/// Capability-table claims that turned out to be wrong.
+mod spec_capability_claims {
+    /// The spec says octal is "not lexed; use decimal/hex/binary", which
+    /// reads as "you get an error". In fact `0o52` lexed as `0` followed by
+    /// the identifier `o52`, and the design built cleanly with the constant
+    /// silently turned into 0 — 42 became 0 with no diagnostic at all.
+    #[test]
+    fn octal_literal_is_rejected_not_silently_zero() {
+        let src = r#"
+entity O {
+    in clk: clock
+    out q: bit[8]
+}
+
+impl O {
+    q = 0o52
+}
+"#;
+        let result = skalp_frontend::parse_and_build_hir(src);
+        assert!(result.is_err(), "0o52 must be a hard error, not a silent 0");
+    }
+
+    /// Decimal, hex and binary keep working — the octal rule must not eat
+    /// a leading `0` from anything else.
+    #[test]
+    fn supported_radices_still_lex() {
+        let src = r#"
+entity R {
+    in clk: clock
+    out a: bit[8]
+    out b: bit[8]
+    out c: bit[8]
+    out d: bit[8]
+}
+
+impl R {
+    a = 42
+    b = 0x2A
+    c = 0b101010
+    d = 0
+}
+"#;
+        skalp_frontend::parse_and_build_hir(src).expect("decimal/hex/binary/zero must still parse");
+    }
+}

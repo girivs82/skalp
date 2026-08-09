@@ -1953,10 +1953,10 @@ a hard error or has no effect. They must not appear in designs.
 | `#[memory]` | Emits a `reg [ELEM-1:0] name [0:DEPTH-1]` array with the requested `ram_style` synthesis attribute, and drives BRAM inference in the LIR/synthesis path. |
 | `#[trace]` | Presentation only: `group`/`display_name`/`radix` are carried into the exported `.skw` waveform. No synthesis effect. |
 | `#[breakpoint]` | Emits an SVA-style `$error`/`$stop` block in the generated SystemVerilog. SKALP's own behavioral testbench does not evaluate it. |
-| `#[retention]` / `#[isolation]` semantics | Parse-accepted; `#[retention]` emits synthesis attributes (`RETAIN`/`DONT_TOUCH`) and `#[isolation]` presence feeds the coarse domain-crossing check (Section 18.5), but retention sequencing, isolation-cell insertion, and port-granular strategies are future (Section 21.1) |
+| `#[retention]` / `#[isolation]` semantics | Checked against the supply tree, not merely parsed: see Sections 18.11 (per-port isolation and level shifters) and 18.12 (retention). Both export to UPF. Cell *insertion* is still future. |
 | `while` loops in synthesizable code | Not synthesizable; use bounded `for` |
 | Entity aliases (`entity Fast = Foo::<N>;`) | Parsed and stored, but an alias cannot yet be instantiated (`unknown entity in instantiation`) |
-| Octal literals (`0o52`) | Not lexed; use decimal/hex/binary |
+| Octal literals (`0o52`) | Rejected with a parse error; use decimal/hex/binary. (Until 2026-08-09 this lexed as `0` followed by an identifier and silently assigned 0.) |
 
 ### 21.1 Power Domains: Remaining Future Work
 
@@ -1964,8 +1964,8 @@ The core of the recorded power-domain design (decision 2026-08-07) is now
 implemented and specified in [Section 18](#18-power-domains): supply-tree
 declarations with derivation kinds and states, checked containment
 binding, the dependent-failure (CCF) check with `allow_shared_supply`,
-the coarse domain-crossing warning, and UPF emission from the checked
-model. The following recorded pieces remain **future work** and must not
+per-port isolation and level-shifter analysis, retention checking,
+domain-loss fault injection, and UPF emission from the checked model. The following recorded pieces remain **future work** and must not
 be relied on:
 
 1. *Sequencing-order checks.* The control checks, PST legality, and the
