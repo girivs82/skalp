@@ -1396,3 +1396,61 @@ mod retention {
         );
     }
 }
+
+/// `#[trace(...)]` presentation must reach the exported waveform.
+mod trace_metadata {
+    /// The waveform writer has always had an `add_traced_signal` API — and
+    /// NOTHING called it, because SIR dropped `trace_config` on the way from
+    /// MIR. Every exported file therefore had empty groups and HDL names,
+    /// while the tutorial promised the grouping "travels with the source".
+    #[tokio::test]
+    async fn trace_group_and_display_name_reach_the_waveform() {
+        let src = r#"
+entity Traced {
+    in clk: clock
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl Traced {
+    #[trace(group = "core", display_name = "Accumulator", radix = hex)]
+    signal acc: bit[8] = 0
+    on(clk.rise) { acc = d }
+    q = acc
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("traced.sk");
+        std::fs::write(&path, src).unwrap();
+
+        let mut tb = skalp_testing::testbench::Testbench::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        tb.set("d", 0x5Au8);
+        tb.clock(2).await;
+
+        let out = dir.path().join("traced.skw");
+        tb.export_waveform(&out).unwrap();
+
+        // The exporter always gzips, whatever the extension.
+        let bytes = std::fs::read(&out).expect("read waveform");
+        let mut text = String::new();
+        {
+            use std::io::Read;
+            flate2::read::GzDecoder::new(&bytes[..])
+                .read_to_string(&mut text)
+                .expect("gunzip waveform");
+        }
+
+        assert!(
+            text.contains("Accumulator"),
+            "display_name must reach the waveform:\n{}",
+            &text[..text.len().min(600)]
+        );
+        assert!(
+            text.contains("core"),
+            "group must reach the waveform:\n{}",
+            &text[..text.len().min(600)]
+        );
+    }
+}

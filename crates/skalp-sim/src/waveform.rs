@@ -400,6 +400,7 @@ impl Waveform {
                     TraceRadix::Ascii => "hex".to_string(),
                 },
                 color: None,
+                display_name: tc.display_name.clone(),
             });
 
             skw_signals.push(SkwSignal {
@@ -515,6 +516,11 @@ pub struct SkwSignalDisplay {
     pub radix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Human-readable label from `#[trace(display_name = "...")]`. Without
+    /// it the viewer can only show the raw HDL name, which is half the point
+    /// of the annotation.
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

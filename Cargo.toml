@@ -80,6 +80,7 @@ pretty_assertions = "1.4"
 insta = "1.34"  # Snapshot testing
 criterion = "0.5"  # Benchmarking
 half = "2.4"    # f16 support for L2 opcode tests
+flate2 = "1.0"  # read back gzipped .skw waveforms in tests
 
 [features]
 default = []

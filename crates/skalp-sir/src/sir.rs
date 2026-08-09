@@ -148,6 +148,11 @@ pub struct SirSignal {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Waveform presentation from `#[trace(group, display_name, radix)]`.
+    /// Carried to the exported waveform so the grouping travels with the
+    /// source instead of living in a simulator GUI config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_config: Option<skalp_frontend::hir::TraceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

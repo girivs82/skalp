@@ -219,6 +219,7 @@ impl<'a> MirToSirConverter<'a> {
                 fanout_nodes: Vec::new(),
                 is_state: is_sequential_port,
                 span: port.span.clone(),
+                trace_config: None,
             });
 
             // Create state element for sequential output ports
@@ -286,6 +287,9 @@ impl<'a> MirToSirConverter<'a> {
                 fanout_nodes: Vec::new(),
                 is_state: is_register,
                 span: signal.span.clone(),
+                // #[trace(...)] presentation follows the signal to the
+                // waveform; without this hop the attribute is inert.
+                trace_config: signal.trace_config.clone(),
             });
 
             if is_register {
@@ -370,6 +374,7 @@ impl<'a> MirToSirConverter<'a> {
                 fanout_nodes: Vec::new(),
                 is_state: false, // Variables are never state elements
                 span: variable.span.clone(),
+                trace_config: None,
             });
         }
     }
@@ -659,6 +664,7 @@ impl<'a> MirToSirConverter<'a> {
                             driver_node: None,
                             fanout_nodes: Vec::new(),
                             span: None,
+                            trace_config: None,
                         });
                         // Add as input so C++ codegen includes it in the inputs struct
                         self.sir.inputs.push(SirPort {
@@ -3432,6 +3438,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: vec![],
             span: None,
+            trace_config: None,
         });
 
         node_id
@@ -4194,6 +4201,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4235,6 +4243,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4551,6 +4560,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4604,6 +4614,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4822,6 +4833,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4927,6 +4939,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -4986,6 +4999,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -5031,6 +5045,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -5073,6 +5088,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -5119,6 +5135,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         let node = SirNode {
@@ -5163,6 +5180,7 @@ impl<'a> MirToSirConverter<'a> {
                 fanout_nodes: Vec::new(),
                 is_state: false,
                 span: None,
+                trace_config: None,
             });
         }
 
@@ -5770,6 +5788,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         // Translate MIR port name to internal name for SignalRef
@@ -5852,6 +5871,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         // Create a signal reader node (using internal name)
@@ -5913,6 +5933,7 @@ impl<'a> MirToSirConverter<'a> {
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),
             span: None,
+            trace_config: None,
         });
 
         // Create a signal reader node
@@ -6906,6 +6927,7 @@ impl<'a> MirToSirConverter<'a> {
                 driver_node: None,
                 fanout_nodes: Vec::new(),
                 span: None,
+                trace_config: None,
             });
         }
         name
@@ -7021,6 +7043,7 @@ impl<'a> MirToSirConverter<'a> {
                     fanout_nodes: Vec::new(),
                     is_state: is_register,
                     span: None,
+                    trace_config: None,
                 });
 
                 // Extract initial value from the flattened signal
@@ -7112,6 +7135,7 @@ impl<'a> MirToSirConverter<'a> {
                 fanout_nodes: Vec::new(),
                 is_state: false, // Variables are not registers
                 span: None,
+                trace_config: None,
             });
         }
 
@@ -7152,6 +7176,7 @@ impl<'a> MirToSirConverter<'a> {
                     fanout_nodes: Vec::new(),
                     is_state: false, // Input ports are not registers
                     span: None,
+                    trace_config: None,
                 });
 
                 // BUG #236 FIX: Connect the parent's expression to the child's input port signal
@@ -7286,6 +7311,7 @@ impl<'a> MirToSirConverter<'a> {
                         fanout_nodes: Vec::new(),
                         is_state: false, // Output ports are not registers
                         span: None,
+                        trace_config: None,
                     });
                 }
             }

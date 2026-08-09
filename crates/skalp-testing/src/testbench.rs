@@ -742,7 +742,10 @@ impl Testbench {
             cycle_count: 0,
             input_names,
             output_names,
-            sir_module: None,
+            // Keep the SIR: waveform export reads `#[trace(...)]` presentation
+            // from it. Dropping it here is why every exported waveform had
+            // empty groups and raw HDL names.
+            sir_module: Some(sir),
             coverage_db: None,
             coverage_enabled: false,
             coverage_input_info: vec![],
@@ -2074,11 +2077,38 @@ impl Testbench {
         let signal_widths = self.sim.get_signal_widths();
         let mut waveform = Waveform::new();
 
-        // Initialize signals from first snapshot with real widths
+        // Initialize signals from first snapshot with real widths, carrying
+        // #[trace(...)] presentation through from the design. Signals are
+        // matched by their SIR name and by the trailing component of a
+        // hierarchical name, since the simulator reports both forms.
+        let trace_of = |signal_name: &str| {
+            let module = self.sir_module.as_ref()?;
+            // Waveform names are user-visible (`acc`, `blk.acc`); SIR signals
+            // carry collision-proof internal names (`_s3`). Go through the
+            // name registry, and fall back to a direct/tail match for signals
+            // that were never registered.
+            let internal = module
+                .name_registry
+                .resolve(signal_name)
+                .map(|s| s.to_string());
+            let tail = signal_name.rsplit('.').next().unwrap_or(signal_name);
+            module
+                .signals
+                .iter()
+                .find(|s| {
+                    internal.as_deref() == Some(s.name.as_str())
+                        || s.name == signal_name
+                        || s.name == tail
+                })
+                .and_then(|s| s.trace_config.clone())
+        };
         if let Some(first) = snapshots.first() {
             for name in first.signals.keys() {
                 let width = signal_widths.get(name).copied().unwrap_or(64);
-                waveform.add_signal(name.clone(), width);
+                match trace_of(name) {
+                    Some(cfg) => waveform.add_traced_signal(name.clone(), width, cfg),
+                    None => waveform.add_signal(name.clone(), width),
+                }
             }
         }
 

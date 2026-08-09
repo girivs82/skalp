@@ -345,6 +345,7 @@ impl<'a> PipelineInserter<'a> {
             fanout_nodes: vec![],
             is_state: true,
             span: None,
+            trace_config: None,
         };
         self.sir.signals.push(reg_signal);
 
