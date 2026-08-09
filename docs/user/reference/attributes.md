@@ -275,12 +275,27 @@ UPF (`design.upf`) from the checked model whenever declarations exist. See
 the [Power Intent Guide](../guides/power-intent.md) and the language
 specification's Power Domains section for the full model.
 
-The signal-level attributes below (`#[retention]`, `#[isolation]`,
-`#[level_shift]`, `#[pdc]`) are at various stages: `#[retention]` emits
-synthesis attributes (e.g. `RETAIN`, `DONT_TOUCH`) on the affected
-registers, and `#[isolation]` participates in the domain-crossing check;
-their full semantics (retention sequencing, cell insertion, port-granular
-strategies) are still future work.
+The signal-level attributes below are at different stages, and the
+difference matters:
+
+- `#[isolation]` and `#[retention]` are **checked against the declared
+  supply tree** and exported to UPF. Isolation is per port and
+  direction-aware (a clamp is required only where a net's source domain
+  can be de-energized while its sink is up); retention is diagnosed for
+  pointless use, for a declared retention state nothing implements, and
+  for a save/restore control that dies with the state it preserves. See
+  the specification's Sections 18.11 and 18.12.
+- `#[level_shift]` is **documentation only**: it emits comments and a
+  synthesis hint into the generated SystemVerilog. Level-shifter
+  *requirements* are inferred from the declared state voltages and do not
+  need this attribute.
+- `#[pdc]` is retired legacy syntax; power domains bind structurally by
+  containment.
+
+Cell **insertion** — placing the isolation, level-shifter, and retention
+cells into the netlist — remains future work for all of them: the
+compiler states and checks the requirement, and the implementation flow
+places the cells.
 
 ### #[power_domain]
 
