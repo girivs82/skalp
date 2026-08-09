@@ -397,7 +397,9 @@ impl Waveform {
                     TraceRadix::Hex => "hex".to_string(),
                     TraceRadix::Unsigned => "decimal".to_string(),
                     TraceRadix::Signed => "signed".to_string(),
-                    TraceRadix::Ascii => "hex".to_string(),
+                    // Ascii is a real format here (format_value renders
+                    // printable bytes); exporting it as "hex" threw that away.
+                    TraceRadix::Ascii => "ascii".to_string(),
                 },
                 color: None,
                 display_name: tc.display_name.clone(),

@@ -26,7 +26,9 @@ Skalp provides first-class debug support through attributes that become part of 
 
 ## Breakpoints
 
-Breakpoints pause simulation when specific conditions occur, allowing you to inspect the design state.
+Breakpoints mark a condition that should halt a simulation. They are emitted into the **generated SystemVerilog** as an always-block that fires `$error` (or `$display` when `is_error` is false) with the breakpoint's name and message, then `$stop` — so a third-party SV simulator halts with a labelled reason.
+
+They do **not** affect SKALP's own behavioral simulator: a `#[breakpoint]` will not stop or fail a Rust testbench. Assert on the signal directly for that. The breakpoint engine behind `skalp debug` is driven by the IDE debug protocol rather than by these annotations.
 
 ### Simple Breakpoints
 
@@ -179,7 +181,7 @@ impl SafetyChecker {
 
 ## Signal Tracing
 
-Trace attributes mark signals for automatic waveform capture and organization.
+Trace attributes control how signals are **presented** in a waveform. Capture is not gated by the attribute — the simulator records every signal it knows about, annotated or not — so `#[trace]` is about grouping, labelling, and radix, and the metadata is written into the exported `.skw` so the presentation travels with the design rather than living in a viewer's local config.
 
 ### Basic Tracing
 
@@ -189,7 +191,7 @@ entity DataPath {
     in data_in: bit[32],
     out data_out: bit[32],
 
-    // Automatically included in waveform
+    // Presentation metadata; every signal is captured either way
     #[trace]
     signal pipeline_reg1: bit[32],
 

@@ -11441,7 +11441,7 @@ impl HirBuilderContext {
     /// Extract memory config from an IntentValue node
     /// Handles: #[memory(depth=N)] or #[memory(depth=N, width=M, style=block)]
     fn extract_memory_config_from_intent_value(
-        &self,
+        &mut self,
         intent_value: &SyntaxNode,
     ) -> Option<MemoryConfig> {
         // Recursively collect all tokens from the intent value and its children
@@ -11476,6 +11476,7 @@ impl HirBuilderContext {
         let mut style: Option<MemoryStyle> = None;
         let mut read_latency: Option<u32> = None;
         let mut read_only = false;
+        let mut unknown_style: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
 
@@ -11508,7 +11509,9 @@ impl HirBuilderContext {
                         }
                         current_key = None;
                     }
-                    "register" => {
+                    // `registers` is the spelling the guide documents and the
+                    // one the emitted attribute uses; accept both.
+                    "register" | "registers" => {
                         if current_key == Some("style") {
                             style = Some(MemoryStyle::Register);
                         }
@@ -11518,6 +11521,14 @@ impl HirBuilderContext {
                         if current_key == Some("style") {
                             style = Some(MemoryStyle::Auto);
                         }
+                        current_key = None;
+                    }
+                    // An unrecognized style used to fall through here and be
+                    // SILENTLY IGNORED, leaving the memory on Auto: a typo, or
+                    // the documented-but-unhandled `registers`, produced no
+                    // ram_style attribute and no diagnostic.
+                    other if current_key == Some("style") => {
+                        unknown_style = Some(other.to_string());
                         current_key = None;
                     }
                     _ => {}
@@ -11541,6 +11552,16 @@ impl HirBuilderContext {
                     current_key = None;
                 }
             }
+        }
+
+        if let Some(bad) = unknown_style {
+            self.errors.push(HirError {
+                message: format!(
+                    "#[memory]: unknown style `{}` — expected auto, block, distributed, ultra, or registers",
+                    bad
+                ),
+                span: self.make_span(intent_value),
+            });
         }
 
         // depth is required

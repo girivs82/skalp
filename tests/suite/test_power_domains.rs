@@ -1548,3 +1548,69 @@ impl R {
         skalp_frontend::parse_and_build_hir(src).expect("decimal/hex/binary/zero must still parse");
     }
 }
+
+/// `#[memory(style = ...)]` names, and what an unrecognized one does.
+mod memory_style_names {
+    fn design(style: &str) -> String {
+        format!(
+            r#"
+entity M {{
+    in clk: clock
+    in we: bit
+    in addr: bit[8]
+    in din: bit[32]
+    out dout: bit[32]
+}}
+impl M {{
+    #[memory(style = {style}, depth = 256)]
+    signal ram: bit[32][256]
+    on(clk.rise) {{ if we {{ ram[addr] = din }} }}
+    dout = ram[addr]
+}}
+"#
+        )
+    }
+
+    fn sv(style: &str) -> String {
+        let hir = skalp_frontend::parse_and_build_hir(&design(style)).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv")
+    }
+
+    /// Every style the guide documents must reach the emitted attribute.
+    /// `registers` (the documented spelling, and the one the attribute
+    /// itself uses) was not accepted — only the singular `register` was —
+    /// so it fell through to the catch-all and silently left the memory on
+    /// Auto with no attribute at all.
+    #[test]
+    fn documented_styles_emit_their_ram_style() {
+        for (style, expect) in [
+            ("block", "block"),
+            ("distributed", "distributed"),
+            ("ultra", "ultra"),
+            ("registers", "registers"),
+            ("register", "registers"),
+        ] {
+            let out = sv(style);
+            assert!(
+                out.contains(&format!("ram_style = \"{expect}\"")),
+                "style `{style}` must emit ram_style=\"{expect}\":\n{out}"
+            );
+        }
+    }
+
+    /// An unrecognized style is a typo, and a typo that silently downgrades
+    /// to Auto is the worst outcome — it looks like it worked.
+    #[test]
+    fn unknown_style_is_an_error_not_a_silent_downgrade() {
+        let err = skalp_frontend::parse_and_build_hir(&design("blockram"))
+            .expect_err("unknown memory style must fail");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("unknown style"),
+            "diagnostic must name the problem: {text}"
+        );
+    }
+}
