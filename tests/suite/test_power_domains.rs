@@ -1790,3 +1790,85 @@ impl N {
         );
     }
 }
+
+/// The FPGA stub report names which independence claims collapse on fabric.
+mod vccint_collapse {
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::fpga_power::fpga_power_posture;
+
+    fn design(mech_domain: &str) -> String {
+        format!(
+            r#"
+        power_domain vbat: external;
+        power_domain vdd_core = regulated(vbat, macro = u_core, states = {{ on: 0.9V, off }});
+        power_domain vdd_mon: external;
+
+        #[power_domain({mech_domain})]
+        #[safety_mechanism(type = watchdog)]
+        entity Watchdog {{
+            #[isolation(clamp = low)]
+            in clk: clock
+            #[isolation(clamp = low)]
+            in kick: bit
+            out timeout: bit
+        }}
+
+        impl Watchdog {{
+            signal cnt: bit[8] = 0
+            on(clk.rise) {{ if kick {{ cnt = 0 }} else {{ cnt = cnt + 1 }} }}
+            timeout = cnt == 255
+        }}
+
+        #[power_domain(vdd_core)]
+        entity Controller {{
+            in clk: clock
+            in kick: bit
+            out wd_timeout: bit
+        }}
+
+        impl Controller {{
+            inst wd = Watchdog {{ clk: clk, kick: kick }}
+            wd_timeout = wd.timeout
+        }}
+        "#
+        )
+    }
+
+    /// A blanket "fabric shares VCCINT" caveat is true but unactionable. The
+    /// report must name the mechanism whose FMEDA independence claim the
+    /// device breaks.
+    #[test]
+    fn report_names_the_mechanism_that_loses_independence() {
+        let hir = parse_and_build_hir(&design("vdd_mon")).expect("parse");
+        let report = fpga_power_posture(&hir, true)
+            .expect("stub allowed")
+            .expect("switched/regulated domains present");
+        assert!(
+            report.contains("`Watchdog`")
+                && report.contains("vdd_mon")
+                && report.contains("vdd_core"),
+            "report must name the mechanism and both domains:\n{report}"
+        );
+        assert!(
+            report.contains("does not hold here"),
+            "report must state the claim is invalid on this device:\n{report}"
+        );
+    }
+
+    /// A mechanism that shares a supply in the SOURCE relies on no
+    /// independence, so fabric invalidates nothing — say that instead of
+    /// listing it.
+    #[test]
+    fn nothing_to_invalidate_when_no_independence_is_claimed() {
+        // vdd_core for both: the CCF check downgrades via allow_shared_supply
+        // in real designs; here the mechanism simply shares its context's rail.
+        let hir = parse_and_build_hir(&design("vdd_core")).expect("parse");
+        let report = fpga_power_posture(&hir, true)
+            .expect("stub allowed")
+            .expect("switched/regulated domains present");
+        assert!(
+            report.contains("No #[safety_mechanism] in this design relies on supply independence"),
+            "report must say nothing is invalidated:\n{report}"
+        );
+    }
+}

@@ -207,11 +207,114 @@ pub fn fpga_power_posture(hir: &Hir, allow_stub: bool) -> Result<Option<String>,
             }
         }
     }
-    report.push_str(
-        "   NOTE: all fabric logic shares VCCINT — safety mechanisms on this FPGA are NOT \
-         supply-independent from what they monitor, regardless of declared domains.\n",
-    );
+    // The blanket caveat is true but unactionable. Name the mechanisms whose
+    // declared independence the design is actually relying on: those are the
+    // FMEDA claims that do not survive the move to fabric.
+    let collapsed = vccint_collapsed_mechanisms(hir);
+    if collapsed.is_empty() {
+        report.push_str(
+            "   NOTE: all fabric logic shares VCCINT. No #[safety_mechanism] in this design \
+             relies on supply independence, so nothing is invalidated by that.\n",
+        );
+    } else {
+        report.push_str(
+            "   NOTE: all fabric logic shares VCCINT. These mechanisms are declared \
+             supply-independent from what they monitor, and are NOT on this device — their \
+             dependent-failure claim does not hold here:\n",
+        );
+        for (mech, mech_domain, ctx, ctx_domain) in collapsed {
+            report.push_str(&format!(
+                "     `{}` (in `{}`): `{}` vs `{}` — both are fabric logic on VCCINT\n",
+                mech, ctx, mech_domain, ctx_domain
+            ));
+        }
+    }
     Ok(Some(report))
+}
+
+/// `#[safety_mechanism]` entities whose declared supply independence collapses
+/// on FPGA fabric: their domain and their instantiating context's domain have
+/// disjoint ancestry in the source, but both are fabric logic sharing VCCINT.
+///
+/// Returns (mechanism, mechanism domain, context entity, context domain).
+fn vccint_collapsed_mechanisms(hir: &Hir) -> Vec<(String, String, String, String)> {
+    use std::collections::{HashMap, HashSet};
+
+    let parent_of: HashMap<&str, Option<&str>> = hir
+        .power_domain_decls
+        .iter()
+        .map(|d| {
+            let parent = match &d.derivation {
+                HirPowerDerivation::External => None,
+                HirPowerDerivation::Regulated { parent, .. }
+                | HirPowerDerivation::Switched { parent, .. } => Some(parent.as_str()),
+            };
+            (d.name.as_str(), parent)
+        })
+        .collect();
+    let ancestors = |name: &str| -> HashSet<String> {
+        let mut set = HashSet::new();
+        let mut cur = Some(name);
+        while let Some(n) = cur {
+            if !set.insert(n.to_string()) {
+                break;
+            }
+            cur = parent_of.get(n).copied().flatten();
+        }
+        set
+    };
+
+    let instantiated: HashSet<_> = hir
+        .implementations
+        .iter()
+        .flat_map(|i| i.instances.iter().map(|inst| inst.entity))
+        .collect();
+    let mut out = Vec::new();
+    let mut stack: Vec<(skalp_frontend::hir::EntityId, Option<String>, String, usize)> = hir
+        .entities
+        .iter()
+        .filter(|e| !instantiated.contains(&e.id))
+        .map(|e| {
+            (
+                e.id,
+                e.power_domain_config
+                    .as_ref()
+                    .map(|c| c.domain_name.clone()),
+                e.name.clone(),
+                0usize,
+            )
+        })
+        .collect();
+
+    while let Some((eid, eff, name, depth)) = stack.pop() {
+        if depth > 64 {
+            continue;
+        }
+        let Some(imp) = hir.implementations.iter().find(|i| i.entity == eid) else {
+            continue;
+        };
+        for inst in &imp.instances {
+            let Some(child) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                continue;
+            };
+            let child_eff = child
+                .power_domain_config
+                .as_ref()
+                .map(|c| c.domain_name.clone())
+                .or_else(|| eff.clone());
+
+            if child.safety_mechanism_config.is_some() {
+                if let (Some(md), Some(cd)) = (&child_eff, &eff) {
+                    // Independent in the source is exactly the claim fabric breaks.
+                    if md != cd && ancestors(md).is_disjoint(&ancestors(cd)) {
+                        out.push((child.name.clone(), md.clone(), name.clone(), cd.clone()));
+                    }
+                }
+            }
+            stack.push((child.id, child_eff, child.name.clone(), depth + 1));
+        }
+    }
+    out
 }
 
 /// Ordered (source-domain, sink-domain) pairs for every instance edge that

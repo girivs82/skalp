@@ -2010,9 +2010,12 @@ be relied on:
 
 8. *Implicit device supply trees.* Bank/VCCIO checking, `--power-stub`,
    and domain-named bank rails (`bank 0 { domain: vddio_a }`) are
-   implemented (Section 18.7). Still future: modeling device supply
-   trees — VCCINT as an implicit external domain for fabric logic, so
-   the same-fabric CCF truth needs no user modeling.
+   implemented (Section 18.7), and the stub report now NAMES each
+   `#[safety_mechanism]` whose declared supply independence collapses on
+   fabric rather than stating a blanket caveat. Still future: modeling
+   VCCINT as an implicit external domain in the supply tree itself, so
+   the CCF check fails the build on an FPGA target instead of reporting
+   it at synth time.
 
 **Vocabulary note.** `intent` declarations (Section 15) are *advisory*
 to synthesis. `#[cdc]`, the safety attributes, and power-domain binding
