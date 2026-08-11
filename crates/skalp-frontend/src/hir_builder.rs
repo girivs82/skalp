@@ -14385,6 +14385,20 @@ impl HirBuilderContext {
                             _ => {}
                         }
 
+                        // `ncl<N>` has HIR/MIR/codegen support (dual-rail,
+                        // 2x physical width) that NOTHING reaches: the parser
+                        // never emits SyntaxKind::NclType, so the name fell
+                        // through to Custom("ncl") and MIR mapped it to
+                        // Bit(1). A port declared `ncl<8>` silently became one
+                        // bit wide. Reject it rather than emit wrong hardware.
+                        if type_name == "ncl" {
+                            self.errors.push(HirError {
+                                message: "`ncl<N>` dual-rail types are not implemented —                                           declare the entity `async` and let NCL synthesis                                           handle the encoding"
+                                    .to_string(),
+                                span: self.make_span(&child),
+                            });
+                        }
+
                         // All other named types resolve to Custom(name)
                         return HirType::Custom(type_name);
                     }

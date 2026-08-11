@@ -1948,13 +1948,13 @@ a hard error or has no effect. They must not appear in designs.
 | Inline timing constraint blocks (`with timing`, `path(...)`, `timing_budget`) | Not implemented |
 | External constraint file merging (`--constraints board.pcf`) | No such CLI option; use inline constraints (Section 17) |
 | `process` / `always` blocks, sensitivity lists | Never part of this dialect; use `on(event)` |
-| `ncl<N>` explicit dual-rail types | Not implemented; `async entity` handles encoding (Section 19) |
+| `ncl<N>` explicit dual-rail types | Rejected with a parse error; `async entity` handles encoding (Section 19). (Until 2026-08-11 this resolved to an unknown named type and silently produced a **1-bit** port.) |
 | Vendor-IP attributes | Parse-accepted annotations only; no defined synthesis behavior |
 | `#[memory]` | Emits a `reg [ELEM-1:0] name [0:DEPTH-1]` array with the requested `ram_style` synthesis attribute, and drives BRAM inference in the LIR/synthesis path. |
 | `#[trace]` | Presentation only: `group`/`display_name`/`radix` are carried into the exported `.skw` waveform. No synthesis effect. |
 | `#[breakpoint]` | Emits an SVA-style `$error`/`$stop` block in the generated SystemVerilog. SKALP's own behavioral testbench does not evaluate it. |
 | `#[retention]` / `#[isolation]` semantics | Checked against the supply tree, not merely parsed: see Sections 18.11 (per-port isolation and level shifters) and 18.12 (retention). Both export to UPF. Cell *insertion* is still future. |
-| `while` loops in synthesizable code | Not synthesizable; use bounded `for` |
+| `while` loops in synthesizable code | Unrolled at compile time when the condition is analyzable (a `let`-bound counter against a constant bound). Anything else is a build error — it used to drop the loop body and emit an empty block. Prefer bounded `for`. |
 | Entity aliases (`entity Fast = Foo::<N>;`) | Parsed and stored, but an alias cannot yet be instantiated (`unknown entity in instantiation`) |
 | Octal literals (`0o52`) | Rejected with a parse error; use decimal/hex/binary. (Until 2026-08-09 this lexed as `0` followed by an identifier and silently assigned 0.) |
 

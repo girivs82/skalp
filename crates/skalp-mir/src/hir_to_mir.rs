@@ -5848,18 +5848,23 @@ impl<'hir> HirToMir<'hir> {
     /// signal declarations, etc. — all are handled via `substitute_hir_variable_in_stmt`.
     fn unroll_while_loop(&mut self, while_stmt: &hir::HirWhileStatement) -> Option<Statement> {
         // Step 1: Analyze condition to extract (var_name, var_id, comparison_op, bound)
-        let (var_name, var_id, bound, is_strict_lt) =
-            match self.analyze_while_condition(&while_stmt.condition) {
-                Some(v) => v,
-                None => {
-                    eprintln!(
-                        "[skalp] warning: while loop condition could not be analyzed for \
-                         compile-time unrolling — loop body will be dropped. \
-                         Use `for var in start..end` instead."
-                    );
-                    return None;
-                }
-            };
+        let (var_name, var_id, bound, is_strict_lt) = match self
+            .analyze_while_condition(&while_stmt.condition)
+        {
+            Some(v) => v,
+            None => {
+                // Dropping the body leaves an EMPTY always block and no
+                // drive on anything the loop assigned — silent wrong
+                // hardware. A warning on stderr is not enough for that.
+                let entity = self.current_entity_name();
+                self.conversion_errors.push((
+                        entity,
+                        "while loop condition could not be analyzed for compile-time unrolling —                          the loop body would be dropped, leaving an empty block. Use                          `for var in start..end`, or drive the loop with a `let`-bound counter                          and a constant bound."
+                            .to_string(),
+                    ));
+                return None;
+            }
+        };
 
         // Step 2: Find the update statement and extract the step value.
         // Look for patterns like `var = var + STEP` or `var = var - STEP`.

@@ -1704,3 +1704,89 @@ impl P {{
         }
     }
 }
+
+/// Capability-table rows that said "not implemented" but were accepted.
+mod documented_as_absent {
+    fn build(src: &str) -> Result<(), String> {
+        skalp_frontend::parse_and_build_hir(src)
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|hir| {
+                skalp_mir::MirCompiler::new()
+                    .compile_to_mir(&hir)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+    }
+
+    /// A `while` whose condition cannot be analyzed for compile-time
+    /// unrolling used to drop its whole body, emitting an EMPTY always block
+    /// with the assigned signal never driven — behind an eprintln warning.
+    #[test]
+    fn unanalyzable_while_is_an_error_not_an_empty_block() {
+        let src = r#"
+entity W {
+    in clk: clock
+    out q: bit[8]
+}
+
+impl W {
+    signal i: bit[8] = 0
+    on(clk.rise) {
+        while i < 4 { i = i + 1 }
+    }
+    q = i
+}
+"#;
+        let err = build(src).expect_err("unanalyzable while must fail the build");
+        assert!(
+            err.contains("while loop"),
+            "diagnostic must name the construct: {err}"
+        );
+    }
+
+    /// The spec says while loops are "not synthesizable", but an analyzable
+    /// one IS unrolled. That must keep working — the error above must not
+    /// swallow the supported form.
+    #[test]
+    fn analyzable_while_still_unrolls() {
+        let src = r#"
+entity W2 {
+    in clk: clock
+    out q: bit[8]
+}
+
+impl W2 {
+    signal acc: bit[8] = 0
+    on(clk.rise) {
+        let mut i: bit[8] = 0
+        while i < 4 { i = i + 1 }
+        acc = i
+    }
+    q = acc
+}
+"#;
+        build(src).expect("an analyzable while loop must still unroll");
+    }
+
+    /// `ncl<N>` has HIR/MIR/codegen support that nothing reaches — the
+    /// parser never emits NclType — so it fell through to Custom("ncl") and
+    /// MIR mapped it to Bit(1): an 8-bit port silently became 1 bit.
+    #[test]
+    fn ncl_type_is_rejected_not_silently_one_bit() {
+        let src = r#"
+entity N {
+    in a: ncl<8>
+    out q: ncl<8>
+}
+
+impl N {
+    q = a
+}
+"#;
+        let err = build(src).expect_err("ncl<N> must be rejected");
+        assert!(
+            err.contains("ncl"),
+            "diagnostic must name the construct: {err}"
+        );
+    }
+}
