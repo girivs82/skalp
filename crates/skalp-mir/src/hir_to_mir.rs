@@ -466,6 +466,49 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Name of the entity currently being converted (for error attribution)
+    /// Peel index/range/field wrappers to the underlying assignment target.
+    fn root_lvalue(lhs: &hir::HirLValue) -> &hir::HirLValue {
+        match lhs {
+            hir::HirLValue::Index(base, _)
+            | hir::HirLValue::Range(base, _, _)
+            | hir::HirLValue::FieldAccess { base, .. } => Self::root_lvalue(base),
+            other => other,
+        }
+    }
+
+    /// Best-effort name for an assignment target, for diagnostics.
+    fn describe_lvalue(&self, lhs: &hir::HirLValue) -> String {
+        match lhs {
+            hir::HirLValue::Signal(id) => self
+                .hir
+                .and_then(|h| {
+                    h.implementations
+                        .iter()
+                        .flat_map(|i| i.signals.iter())
+                        .find(|s| s.id == *id)
+                        .map(|s| s.name.clone())
+                })
+                .unwrap_or_else(|| format!("signal#{}", id.0)),
+            hir::HirLValue::Port(id) => self
+                .hir
+                .and_then(|h| {
+                    h.entities
+                        .iter()
+                        .flat_map(|e| e.ports.iter())
+                        .find(|p| p.id == *id)
+                        .map(|p| p.name.clone())
+                })
+                .unwrap_or_else(|| format!("port#{}", id.0)),
+            hir::HirLValue::Variable(id) => format!("variable#{}", id.0),
+            hir::HirLValue::Index(base, _) => self.describe_lvalue(base),
+            hir::HirLValue::Range(base, _, _) => self.describe_lvalue(base),
+            hir::HirLValue::FieldAccess { base, field } => {
+                format!("{}.{}", self.describe_lvalue(base), field)
+            } // Exhaustive on purpose: a new lvalue kind should break the build
+              // here rather than silently describe itself as "<target>".
+        }
+    }
+
     fn current_entity_name(&self) -> String {
         self.current_entity_id
             .and_then(|id| {
@@ -2205,7 +2248,45 @@ impl<'hir> HirToMir<'hir> {
             hir::HirStatement::Assignment(assign) => {
                 let assigns = self.convert_assignment_expanded(assign);
                 match assigns.len() {
-                    0 => None,
+                    // An assignment that lowers to NOTHING is a lost
+                    // statement: the user wrote `x = y` and the hardware has
+                    // no such drive. Historically this returned None with only
+                    // a trace! to show for it, which is precisely how the
+                    // dropped-construct miscompiles in this file's history
+                    // reached generated RTL.
+                    0 => {
+                        // Assignments to a VARIABLE may legitimately lower to
+                        // nothing: a `let` binding is a compile-time name that
+                        // other mechanisms consume — `let op = Entity { ... }`
+                        // becomes an instance, and `let r = inst.field` becomes
+                        // placeholder wiring to an entity output. The stdlib
+                        // relies on both (`let sqrt_op = FpSqrt<...> { ... }`).
+                        //
+                        // Assignments to a SIGNAL or PORT are hardware. If one
+                        // lowers to nothing the drive is simply gone, which is
+                        // exactly how the dropped-construct miscompiles in this
+                        // file's history reached generated RTL.
+                        //
+                        // The variable exemption is load-bearing: narrowing it
+                        // breaks `test_sqrt_cli_path` and
+                        // `test_stdlib_scope_checks`, which exercise both
+                        // consumed shapes through the real stdlib.
+                        let target_is_hardware = matches!(
+                            Self::root_lvalue(&assign.lhs),
+                            hir::HirLValue::Signal(_) | hir::HirLValue::Port(_)
+                        );
+                        if target_is_hardware {
+                            let entity = self.current_entity_name();
+                            self.conversion_errors.push((
+                                entity,
+                                format!(
+                                    "assignment to `{}` could not be lowered — the drive would be silently missing from the generated hardware",
+                                    self.describe_lvalue(&assign.lhs)
+                                ),
+                            ));
+                        }
+                        None
+                    }
                     1 => Some(Statement::Assignment(assigns.into_iter().next().unwrap())),
                     _ => {
                         // Multiple assignments from struct expansion - wrap in block
