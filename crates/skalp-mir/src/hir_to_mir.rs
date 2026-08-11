@@ -1969,6 +1969,19 @@ impl<'hir> HirToMir<'hir> {
                     for hir_instance in &impl_block.instances {
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
+                        } else {
+                            // An instance that fails to convert is a whole
+                            // child module missing from the design, with the
+                            // parent's ports left dangling. Same class as a
+                            // dropped assignment, larger blast radius.
+                            let entity = self.current_entity_name();
+                            self.conversion_errors.push((
+                                entity,
+                                format!(
+                                    "instance `{}` could not be lowered — the child module would be silently missing from the design",
+                                    hir_instance.name
+                                ),
+                            ));
                         }
 
                         // BUG FIX: Propagate detection signal flags from sub-module output ports
