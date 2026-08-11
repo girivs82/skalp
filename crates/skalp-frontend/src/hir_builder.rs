@@ -11580,7 +11580,7 @@ impl HirBuilderContext {
     /// Extract trace config from an IntentValue node
     /// Handles: #[trace] or #[trace(group="debug", radix=hex)]
     fn extract_trace_config_from_intent_value(
-        &self,
+        &mut self,
         intent_value: &SyntaxNode,
     ) -> Option<TraceConfig> {
         // Recursively collect all tokens from the intent value and its children
@@ -11614,6 +11614,7 @@ impl HirBuilderContext {
         let mut display_name: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
+        let mut unknown: Option<String> = None;
 
         for token in tokens.iter() {
             // Handle both identifiers and keywords (like 'group')
@@ -11656,7 +11657,24 @@ impl HirBuilderContext {
                         }
                         current_key = None;
                     }
-                    _ => {}
+                    // A silent `_ => {}` here meant a typo'd radix
+                    // (`radix = hexx`) or key (`grp = "x"`) was accepted and
+                    // dropped — the annotation looked applied and did nothing.
+                    "trace" => {}
+                    other => {
+                        if current_key == Some("radix") {
+                            unknown = Some(format!(
+                                "unknown radix `{}` — expected binary, hex, unsigned, signed, or ascii",
+                                other
+                            ));
+                        } else {
+                            unknown = Some(format!(
+                                "unknown key `{}` — expected group, radix, name, or display_name",
+                                other
+                            ));
+                        }
+                        current_key = None;
+                    }
                 }
             } else if token.kind() == SyntaxKind::StringLiteral {
                 // String values for group or display_name
@@ -11670,6 +11688,13 @@ impl HirBuilderContext {
                 }
                 current_key = None;
             }
+        }
+
+        if let Some(msg) = unknown {
+            self.errors.push(HirError {
+                message: format!("#[trace]: {}", msg),
+                span: self.make_span(intent_value),
+            });
         }
 
         // Return trace config (even with all defaults)
@@ -11686,7 +11711,10 @@ impl HirBuilderContext {
     /// Integrates with the lifetime-based clock domain system:
     /// - `from = 'src` references source clock domain lifetime
     /// - `to = 'dst` references destination clock domain lifetime
-    fn extract_cdc_config_from_intent_value(&self, intent_value: &SyntaxNode) -> Option<CdcConfig> {
+    fn extract_cdc_config_from_intent_value(
+        &mut self,
+        intent_value: &SyntaxNode,
+    ) -> Option<CdcConfig> {
         // Recursively collect all tokens from the intent value and its children
         fn collect_all_tokens(
             node: &SyntaxNode,
@@ -11702,6 +11730,7 @@ impl HirBuilderContext {
         }
 
         let tokens = collect_all_tokens(intent_value);
+        let mut unknown: Option<String> = None;
 
         // Look for "cdc" identifier
         let has_cdc = tokens
@@ -11779,6 +11808,16 @@ impl HirBuilderContext {
                             to_domain = Some(text.to_string());
                             current_key = None;
                         }
+                        // A typo'd cdc_type used to land here and vanish,
+                        // leaving the crossing unclassified while looking
+                        // annotated.
+                        Some("type") => {
+                            unknown = Some(format!(
+                                "unknown cdc_type `{}` — expected two_ff, gray, handshake, pulse, or async_fifo",
+                                text
+                            ));
+                            current_key = None;
+                        }
                         _ => {}
                     },
                 }
@@ -11812,6 +11851,13 @@ impl HirBuilderContext {
                     current_key = None;
                 }
             }
+        }
+
+        if let Some(msg) = unknown {
+            self.errors.push(HirError {
+                message: format!("#[cdc]: {}", msg),
+                span: self.make_span(intent_value),
+            });
         }
 
         // Return CDC config with defaults for unspecified values
@@ -12256,7 +12302,7 @@ impl HirBuilderContext {
     ///
     /// Parses `#[breakpoint]` or `#[breakpoint(condition = "...", name = "...")]`
     fn extract_breakpoint_config_from_intent_value(
-        &self,
+        &mut self,
         intent_value: &SyntaxNode,
     ) -> Option<BreakpointConfig> {
         // Recursively collect all tokens from the intent value and its children
@@ -12289,6 +12335,7 @@ impl HirBuilderContext {
         let mut name: Option<String> = None;
         let mut message: Option<String> = None;
         let mut is_error = false;
+        let mut unknown: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
 
@@ -12303,10 +12350,24 @@ impl HirBuilderContext {
                         "message" | "msg" => current_key = Some("message"),
                         "error" | "is_error" => current_key = Some("error"),
                         // Other identifiers as values
-                        _ => {
-                            // Only use as value if we have a pending key
+                        other => {
                             // Skip "breakpoint" itself
-                            if text != "breakpoint" && current_key.is_some() {
+                            if other != "breakpoint" {
+                                if current_key == Some("error") {
+                                    // `is_error = yes` used to be swallowed
+                                    // here, silently leaving is_error false —
+                                    // the breakpoint downgraded itself from an
+                                    // error to a log with no diagnostic.
+                                    unknown = Some(format!(
+                                        "`is_error` expects true or false, found `{}`",
+                                        other
+                                    ));
+                                } else if current_key.is_none() {
+                                    unknown = Some(format!(
+                                        "unknown key `{}` — expected condition, name, message, or is_error",
+                                        other
+                                    ));
+                                }
                                 current_key = None; // Value was captured elsewhere
                             }
                         }
@@ -12346,6 +12407,13 @@ impl HirBuilderContext {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(msg) = unknown {
+            self.errors.push(HirError {
+                message: format!("#[breakpoint]: {}", msg),
+                span: self.make_span(intent_value),
+            });
         }
 
         Some(BreakpointConfig {
@@ -12743,7 +12811,7 @@ impl HirBuilderContext {
     ///
     /// Parses power intent attributes: `#[retention]`, `#[isolation]`, `#[pdc]`, `#[level_shift]`
     fn extract_power_config_from_intent_value(
-        &self,
+        &mut self,
         intent_value: &SyntaxNode,
     ) -> Option<PowerConfig> {
         // Recursively collect all tokens from the intent value and its children
@@ -12790,16 +12858,30 @@ impl HirBuilderContext {
         let mut config = PowerConfig::default();
 
         if has_retention {
-            config.retention = self.extract_retention_from_tokens(&tokens);
+            let (ret, ret_err) = self.extract_retention_from_tokens(&tokens);
+            config.retention = ret;
+            if let Some(msg) = ret_err {
+                self.errors.push(HirError {
+                    message: format!("#[retention]: {}", msg),
+                    span: self.make_span(intent_value),
+                });
+            }
         }
 
         if has_isolation {
-            config.isolation = self.extract_isolation_from_tokens(&tokens);
+            let (iso, iso_err) = self.extract_isolation_from_tokens(&tokens);
+            config.isolation = iso;
+            if let Some(msg) = iso_err {
+                self.errors.push(HirError {
+                    message: format!("#[isolation]: {}", msg),
+                    span: self.make_span(intent_value),
+                });
+            }
         }
 
         if has_pdc || has_level_shift {
             // PDC includes isolation info
-            if let Some(isolation) = self.extract_isolation_from_tokens(&tokens) {
+            if let (Some(isolation), _) = self.extract_isolation_from_tokens(&tokens) {
                 config.isolation = Some(isolation);
             }
             // Level shift config
@@ -12842,10 +12924,12 @@ impl HirBuilderContext {
     /// Extract RetentionConfig from tokens
     ///
     /// Parses: `#[retention]`, `#[retention(strategy = auto)]`, `#[retention(save = save_sig, restore = restore_sig)]`
+    /// Returns the config plus a diagnostic for anything unrecognized.
     fn extract_retention_from_tokens(
         &self,
         tokens: &[rowan::SyntaxToken<crate::syntax::SkalplLanguage>],
-    ) -> Option<RetentionConfig> {
+    ) -> (Option<RetentionConfig>, Option<String>) {
+        let mut unknown: Option<String> = None;
         let mut strategy = RetentionStrategy::Auto;
         let mut save_signal: Option<String> = None;
         let mut restore_signal: Option<String> = None;
@@ -12862,6 +12946,27 @@ impl HirBuilderContext {
                         "save" | "save_signal" => current_key = Some("save"),
                         "restore" | "restore_signal" => current_key = Some("restore"),
                         // Strategy values
+                        "retention" => {}
+                        other
+                            if current_key == Some("strategy")
+                                && !matches!(
+                                    other,
+                                    "auto"
+                                        | "Auto"
+                                        | "balloon"
+                                        | "balloon_latch"
+                                        | "BalloonLatch"
+                                        | "shadow"
+                                        | "shadow_register"
+                                        | "ShadowRegister"
+                                ) =>
+                        {
+                            unknown = Some(format!(
+                                "unknown strategy `{}` — expected auto, balloon, or shadow",
+                                other
+                            ));
+                            current_key = None;
+                        }
                         "auto" | "Auto" if current_key == Some("strategy") => {
                             strategy = RetentionStrategy::Auto;
                             current_key = None;
@@ -12922,23 +13027,30 @@ impl HirBuilderContext {
             }
         }
 
-        Some(RetentionConfig {
-            strategy,
-            save_signal,
-            restore_signal,
-        })
+        (
+            Some(RetentionConfig {
+                strategy,
+                save_signal,
+                restore_signal,
+            }),
+            unknown,
+        )
     }
 
     /// Extract IsolationConfig from tokens
     ///
     /// Parses: `#[isolation(clamp = low)]`, `#[isolation(clamp = high, enable = iso_en)]`
+    /// Returns the config plus a diagnostic for anything unrecognized: a
+    /// silently-ignored clamp or key is indistinguishable from a working
+    /// annotation, which is how `style = registers` hid for so long.
     fn extract_isolation_from_tokens(
         &self,
         tokens: &[rowan::SyntaxToken<crate::syntax::SkalplLanguage>],
-    ) -> Option<IsolationConfig> {
+    ) -> (Option<IsolationConfig>, Option<String>) {
         let mut clamp = IsolationClamp::Low;
         let mut enable_signal: Option<String> = None;
         let mut active_high = true;
+        let mut unknown: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
 
@@ -12978,6 +13090,22 @@ impl HirBuilderContext {
                             enable_signal = Some(text.to_string());
                             current_key = None;
                         }
+                        // `_ => {}` used to swallow a typo'd clamp
+                        // (`clamp = lo`), leaving the default silently.
+                        "isolation" | "pdc" => {}
+                        other if current_key == Some("clamp") => {
+                            unknown = Some(format!(
+                                "unknown clamp `{}` — expected low, high, or latch",
+                                other
+                            ));
+                            current_key = None;
+                        }
+                        other if current_key.is_none() => {
+                            unknown = Some(format!(
+                                "unknown key `{}` — expected clamp, enable, or active_high",
+                                other
+                            ));
+                        }
                         _ => {}
                     }
                 }
@@ -13005,11 +13133,14 @@ impl HirBuilderContext {
             }
         }
 
-        Some(IsolationConfig {
-            clamp,
-            enable_signal,
-            active_high,
-        })
+        (
+            Some(IsolationConfig {
+                clamp,
+                enable_signal,
+                active_high,
+            }),
+            unknown,
+        )
     }
 
     /// Extract LevelShiftConfig from tokens

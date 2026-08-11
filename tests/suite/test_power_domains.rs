@@ -1614,3 +1614,93 @@ impl M {{
         );
     }
 }
+
+/// Attribute arguments must not be silently ignored.
+///
+/// Three of this session's defects came from one shape: a `match` over
+/// attribute-argument tokens whose unknown arm is `_ => {}`. A typo'd key
+/// or value was accepted and dropped, so the annotation looked applied and
+/// did nothing — the worst possible outcome for an attribute whose entire
+/// job is to change behaviour.
+mod attribute_argument_typos {
+    fn build(attr: &str) -> Result<(), String> {
+        let src = format!(
+            r#"
+entity P {{
+    in clk: clock
+    out q: bit[4]
+}}
+
+impl P {{
+    #[{attr}]
+    signal s: bit[4] = 0
+    on(clk.rise) {{ s = s + 1 }}
+    q = s
+}}
+"#
+        );
+        skalp_frontend::parse_and_build_hir(&src)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    #[test]
+    fn unknown_argument_values_are_rejected() {
+        for attr in [
+            "trace(radix = bogus)",
+            "trace(bogus_key = 3)",
+            "isolation(clamp = bogus)",
+            "retention(strategy = bogus)",
+            "memory(depth = 4, style = bogus)",
+            "cdc(cdc_type = bogus)",
+            "breakpoint(is_error = bogus)",
+            "breakpoint(bogus_key = 3)",
+        ] {
+            assert!(
+                build(attr).is_err(),
+                "`#[{attr}]` must be rejected, not silently ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn every_valid_form_still_builds() {
+        for attr in [
+            "trace",
+            "trace(group = \"g\", display_name = \"D\", radix = hex)",
+            "trace(radix = binary)",
+            "trace(radix = ascii)",
+            "isolation",
+            "isolation(clamp = low)",
+            "isolation(clamp = high)",
+            "isolation(clamp = latch)",
+            "retention",
+            "retention(strategy = auto)",
+            "retention(strategy = shadow, save = save_req, restore = restore_req)",
+            "retention(strategy = balloon)",
+            "memory(depth = 4)",
+            "memory(depth = 4, style = block)",
+            "memory(depth = 4, style = distributed)",
+            "memory(depth = 4, style = ultra)",
+            "memory(depth = 4, style = registers)",
+            "cdc",
+            "cdc(sync_stages = 3)",
+            "cdc(cdc_type = gray)",
+            "cdc(cdc_type = two_ff)",
+            "cdc(cdc_type = handshake)",
+            "cdc(cdc_type = pulse)",
+            "cdc(cdc_type = async_fifo)",
+            "cdc(from = fast, to = slow)",
+            "breakpoint",
+            "breakpoint(is_error = true)",
+            "breakpoint(is_error = false)",
+            "breakpoint(is_error = true, name = \"N\", message = \"M\")",
+            "breakpoint(condition = \"x > 3\")",
+        ] {
+            assert!(
+                build(attr).is_ok(),
+                "`#[{attr}]` is valid and must still build"
+            );
+        }
+    }
+}
