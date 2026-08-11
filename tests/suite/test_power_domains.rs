@@ -1872,3 +1872,99 @@ mod vccint_collapse {
         );
     }
 }
+
+/// Isolation-enable liveness (spec §18.11): the first checkable piece of
+/// transition sequencing.
+mod isolation_enable_liveness {
+    use skalp_frontend::parse_and_build_hir;
+
+    fn design_with_aon_states(enable_site: &str, pst: &str, aon_states: &str) -> String {
+        let (gpu_sig, soc_sig, enable) = match enable_site {
+            "local" => ("    signal local_iso: bit = 0\n", "", "local_iso"),
+            _ => ("", "    signal iso_en: bit = 0\n", "iso_en"),
+        };
+        format!(
+            r#"
+        power_domain vbat: external;
+        power_domain vdd_aon = regulated(vbat, macro = u_aon, states = {{ {aon_states} }});
+        power_domain vdd_gpu = switched(vdd_aon, on_when = !gpu_sleep, states = {{ on: 0.9V, off }});
+
+        #[power_domain(vdd_gpu)]
+        entity Gpu {{
+            in clk: clock
+            in cmd: bit[8]
+            #[isolation(clamp = low, enable = {enable})]
+            out result: bit[16]
+        }}
+
+        impl Gpu {{
+            signal acc: bit[16] = 0
+        {gpu_sig}    on(clk.rise) {{ acc = acc + cmd }}
+            result = acc
+        }}
+
+        #[power_domain(vdd_aon)]
+        entity Soc {{
+            in clk: clock
+            in gpu_sleep: bit
+            in cmd: bit[8]
+            out result: bit[16]
+        }}
+
+        impl Soc {{
+        {soc_sig}    inst g = Gpu {{ clk: clk, cmd: cmd }}
+            result = g.result
+        }}
+        {pst}"#
+        )
+    }
+
+    fn design(enable_site: &str, pst: &str) -> String {
+        design_with_aon_states(enable_site, pst, "on: 0.9V")
+    }
+
+    fn findings(src: &str) -> (Vec<String>, Vec<String>) {
+        let hir = parse_and_build_hir(src).expect("parse");
+        skalp_mir::MirCompiler::check_power_domains(&hir)
+    }
+
+    /// A clamp enabled from inside the domain it clamps cannot fire when it
+    /// is needed — the enable dies with the rail.
+    #[test]
+    fn enable_inside_the_clamped_domain_fails() {
+        let (errors, _) = findings(&design("local", ""));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("clamp control dies with the domain")),
+            "an enable inside the clamped domain must fail: {errors:#?}"
+        );
+    }
+
+    /// An enable driven from the always-on rail is the correct arrangement.
+    #[test]
+    fn enable_from_an_always_on_domain_is_clean() {
+        let (errors, _) = findings(&design("aon", ""));
+        assert!(
+            !errors.iter().any(|e| e.contains("isolation on")),
+            "a correctly-placed enable must not be flagged: {errors:#?}"
+        );
+    }
+
+    /// With a state table, the enable's domain must be up in every state
+    /// where the clamped domain is off.
+    #[test]
+    fn pst_state_with_both_off_is_flagged() {
+        let pst = "power_states { run = { vdd_aon: on, vdd_gpu: on }, \
+                   sleep = { vdd_aon: off, vdd_gpu: off } };";
+        // vdd_aon must declare an `off` state for the table to reference it —
+        // the PST validator rightly rejects a state a domain cannot enter.
+        let (errors, _) = findings(&design_with_aon_states("aon", pst, "on: 0.9V, off"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("nothing can assert the clamp")),
+            "a state with both domains off must be flagged: {errors:#?}"
+        );
+    }
+}

@@ -884,6 +884,95 @@ impl MirCompiler {
             }
         }
 
+        // Isolation-enable liveness (spec §18.11): a clamp is useless if the
+        // signal that asserts it dies with the domain being clamped. This is
+        // the first checkable piece of transition sequencing — the enable must
+        // be controllable exactly when the clamp is needed.
+        {
+            for entity in &hir.entities {
+                let Some(src) = entity
+                    .power_domain_config
+                    .as_ref()
+                    .map(|c| c.domain_name.clone())
+                else {
+                    continue;
+                };
+                if !can_power_off(&src) {
+                    continue; // nothing to clamp
+                }
+                let enables = entity
+                    .ports
+                    .iter()
+                    .filter_map(|p| {
+                        p.isolation_config
+                            .as_ref()
+                            .and_then(|c| c.enable_signal.clone())
+                            .map(|e| (p.name.clone(), e))
+                    })
+                    .chain(impl_of.get(&entity.id).into_iter().flat_map(|im| {
+                        im.signals.iter().filter_map(|sig| {
+                            sig.power_config
+                                .as_ref()
+                                .and_then(|pc| pc.isolation.as_ref())
+                                .and_then(|c| c.enable_signal.clone())
+                                .map(|e| (sig.name.clone(), e))
+                        })
+                    }));
+
+                for (elem, enable) in enables {
+                    // A bare name that matches a signal or port of THIS
+                    // entity is local to it, so it lives in the entity's own
+                    // domain. Root-relative resolution would otherwise report
+                    // the top-level domain and miss the very case that
+                    // matters: a clamp enabled from inside what it clamps.
+                    let local = !enable.contains('.')
+                        && (entity.ports.iter().any(|p| p.name == enable)
+                            || impl_of
+                                .get(&entity.id)
+                                .is_some_and(|im| im.signals.iter().any(|sig| sig.name == enable)));
+                    let enable_domain = if local {
+                        src.clone()
+                    } else {
+                        let ctrl = HirPowerCtrl {
+                            path: enable.split('.').map(|s| s.to_string()).collect(),
+                            inverted: false,
+                        };
+                        match Self::resolve_ctrl_domain_at_root(hir, &ctrl) {
+                            Some(d) => d,
+                            None => continue,
+                        }
+                    };
+                    if ancestors(&enable_domain).contains(&src) {
+                        errors.push(format!(
+                            "isolation on `{}.{}`: enable `{}` is driven from `{}`, which is inside `{}` — the clamp control dies with the domain it is meant to clamp",
+                            entity.name, elem, enable, enable_domain, src
+                        ));
+                        continue;
+                    }
+                    // With a PST, the enable's domain must be up in every
+                    // declared state where the clamped domain is off.
+                    if let Some(pst) = &hir.power_states_decl {
+                        for sys in &pst.states {
+                            let state_of = |d: &str| {
+                                sys.assignments
+                                    .iter()
+                                    .find(|(dd, _)| dd == d)
+                                    .map(|(_, st)| st.as_str())
+                            };
+                            if state_of(&src) == Some("off")
+                                && state_of(&enable_domain) == Some("off")
+                            {
+                                errors.push(format!(
+                                    "system power state `{}`: `{}` is off and its isolation enable `{}` (domain `{}`) is off too — nothing can assert the clamp on `{}.{}`",
+                                    sys.name, src, enable, enable_domain, entity.name, elem
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Retention checks (spec §18.12).
         {
             // Effective domain(s) per entity: an entity instantiated in two

@@ -1717,6 +1717,19 @@ PDC warning: port `g.result` crosses from power domain `vdd_gpu` (which can be o
 A domain "can be off" if it, or any supply ancestor, is `switched` or
 declares a state with no voltage.
 
+An `enable` on the strategy is checked for liveness, because a clamp is
+useless if the signal that asserts it dies with the rail being clamped:
+
+```text
+error: isolation on `Gpu.result`: enable `local_iso` is driven from `vdd_gpu`,
+  which is inside `vdd_gpu` — the clamp control dies with the domain it is
+  meant to clamp
+```
+
+With a `power_states` table, a state in which the clamped domain and the
+enable's domain are both `off` is reported the same way — in that state
+nothing can assert the clamp.
+
 When a `power_states` table is declared (§18.9) the requirement becomes
 **precise** rather than conservative: isolation is required only if some
 declared system state actually has the source `off` while the sink is not.
@@ -1970,9 +1983,15 @@ be relied on:
 
 1. *Sequencing-order checks.* The control checks, PST legality, and the
    transition graph with per-edge liveness are all implemented
-   (Sections 18.8, 18.9). Still future: multi-step sequencing
-   constraints within a transition (isolate before switch-off, restore
-   order on wake), which need an ordering model beyond edges.
+   (Sections 18.8, 18.9), as is **isolation-enable liveness**: an
+   `#[isolation(enable = ...)]` signal driven from inside the domain it
+   clamps is a build error, and with a declared `power_states` table any
+   state where the clamped domain and the enable's domain are both `off`
+   is reported — nothing could assert the clamp there. That is the
+   necessary condition for "isolate before switch-off" that does not
+   require a temporal model. Still future: the ORDER itself (isolate
+   strictly before the switch opens, restore before de-isolating on
+   wake), which needs a sequencing model beyond states and edges.
 
 2. *Pin-level supply compatibility.* Comparing a control driver's domain
    voltage against each switch/macro pin's related supply (Liberty
