@@ -2334,6 +2334,19 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
             Statement::Block(block) if is_signal_assigned_in_block(signal_id, block) => {
                 return true;
             }
+            // A priority chain resolved to a mux still ASSIGNS its target.
+            // Missing this made `is_register` answer "no" for any signal
+            // driven only by an if-else-if chain, so it was declared `wire`
+            // and then assigned with `<=` inside always_ff — invalid SV.
+            Statement::ResolvedConditional(rc) if lvalue_contains_signal(&rc.target, signal_id) => {
+                return true;
+            }
+            Statement::Loop(
+                skalp_mir::LoopStatement::For { body, .. }
+                | skalp_mir::LoopStatement::While { body, .. },
+            ) if is_signal_assigned_in_block(signal_id, body) => {
+                return true;
+            }
             _ => {}
         }
     }
@@ -2395,6 +2408,17 @@ fn is_port_assigned_in_block(port_id: &skalp_mir::PortId, block: &skalp_mir::Blo
                 }
             }
             Statement::Block(block) if is_port_assigned_in_block(port_id, block) => {
+                return true;
+            }
+            // Same omission as the signal predicate: a resolved priority
+            // chain assigns its target, and a loop body can too.
+            Statement::ResolvedConditional(rc) if lvalue_contains_port(&rc.target, port_id) => {
+                return true;
+            }
+            Statement::Loop(
+                skalp_mir::LoopStatement::For { body, .. }
+                | skalp_mir::LoopStatement::While { body, .. },
+            ) if is_port_assigned_in_block(port_id, body) => {
                 return true;
             }
             _ => {}

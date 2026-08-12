@@ -1968,3 +1968,55 @@ mod isolation_enable_liveness {
         );
     }
 }
+
+/// A signal driven only by a resolved priority chain is still a register.
+mod resolved_conditional_is_a_register {
+    /// `is_register` decides `reg` vs `wire` in the emitted SystemVerilog,
+    /// and its scan did not handle `Statement::ResolvedConditional` — the
+    /// form an if-else-if chain lowers to. A signal driven only by such a
+    /// chain was declared `wire` and then assigned with `<=` inside
+    /// always_ff, which is invalid SystemVerilog that no SV tool accepts.
+    #[test]
+    fn priority_chain_target_is_declared_reg() {
+        let src = r#"
+entity Prio {
+    in clk: clock
+    in a: bit
+    in b: bit
+    in c: bit
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl Prio {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        if a {
+            r = d
+        } else if b {
+            r = d + 1
+        } else if c {
+            r = d + 2
+        } else {
+            r = 0
+        }
+    }
+    q = r
+}
+"#;
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+        assert!(
+            sv.contains("reg [7:0] r"),
+            "a signal driven by a priority chain must be a reg:\n{sv}"
+        );
+        assert!(
+            !sv.contains("wire [7:0] r"),
+            "declaring it a wire makes the always_ff assignment invalid SV:\n{sv}"
+        );
+    }
+}
