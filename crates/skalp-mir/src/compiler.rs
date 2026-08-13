@@ -9,6 +9,7 @@ use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use indexmap::IndexMap;
+use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerCtrl, HirPowerDerivation};
 use std::path::PathBuf;
 
@@ -33,6 +34,10 @@ type PendingSpecializations = IndexMap<
         Vec<(String, skalp_frontend::const_eval::ConstValue)>,
     ),
 >;
+
+/// One specialization still to be built: (specialized name, generic entity
+/// name, generic-arg bindings in declaration order).
+type SpecializationRequest = (String, String, Vec<(String, ConstValue)>);
 
 /// MIR compiler
 pub struct MirCompiler {
@@ -1301,19 +1306,89 @@ impl MirCompiler {
 
         let mut engine = MonomorphizationEngine::new();
         let mut added = false;
+
+        // An `EntityId` is only meaningful inside the Hir that minted it: the
+        // main file and every preloaded stdlib module HIR each number their
+        // entities from 0. Copying a generic implementation out of a module HIR
+        // into `base` therefore carries ids that mean something else here —
+        // measured, `inst adder = FpAdd<F>` inside the monomorphized
+        // `FpSub_fp32` kept FpAdd's id in the fp module HIR, EntityId(0), which
+        // resolves in `base` to whatever entity happens to be numbered 0: the
+        // user's own top-level entity.
+        //
+        // So ids are translated at the boundary, by name, exactly as
+        // `merge_import_into_hir` already does on the frontend's import path.
+        // A child that names a generic is redirected to that generic's
+        // specialization, queueing it when it does not exist yet — which is why
+        // this is a worklist and not a plain loop: `FpSub_fp32` pulls in
+        // `FpAdd_fp32`, and its id has to be known before its parent's instance
+        // can point at it.
+        let mut planned: IndexMap<String, skalp_frontend::hir::EntityId> = base
+            .entities
+            .iter()
+            .map(|e| (e.name.clone(), e.id))
+            .collect();
+        let mut queue: std::collections::VecDeque<SpecializationRequest> =
+            std::collections::VecDeque::new();
+        let enqueue = |name: String,
+                           generic: String,
+                           args: Vec<(String, ConstValue)>,
+                           planned: &mut IndexMap<String, skalp_frontend::hir::EntityId>,
+                           next_id: &mut u32,
+                           queue: &mut std::collections::VecDeque<_>|
+         -> skalp_frontend::hir::EntityId {
+            if let Some(&id) = planned.get(&name) {
+                return id;
+            }
+            let id = skalp_frontend::hir::EntityId(*next_id);
+            *next_id += 1;
+            planned.insert(name.clone(), id);
+            queue.push_back((name, generic, args));
+            id
+        };
+
         for (specialized_name, (generic_name, const_args)) in pending {
-            if base.entities.iter().any(|e| e.name == *specialized_name) {
+            enqueue(
+                specialized_name.clone(),
+                generic_name.clone(),
+                const_args.clone(),
+                &mut planned,
+                &mut next_entity_id,
+                &mut queue,
+            );
+        }
+
+        while let Some((specialized_name, generic_name, const_args)) = queue.pop_front() {
+            if base.entities.iter().any(|e| e.name == specialized_name) {
                 continue;
             }
-            // Find the generic entity and its implementation from the same HIR
+            let Some(&spec_entity_id) = planned.get(&specialized_name) else {
+                continue;
+            };
+            // Find the generic entity and its implementation from the same HIR.
+            // Capture that HIR's entity names too: they are the only way to say
+            // what an instance inside the specialized body actually refers to.
             let found = std::iter::once(&*base)
                 .chain(module_hirs.values())
                 .find_map(|h| {
-                    let e = h.entities.iter().find(|e| e.name == *generic_name)?;
+                    let e = h.entities.iter().find(|e| e.name == generic_name)?;
                     let i = h.implementations.iter().find(|i| i.entity == e.id).cloned();
-                    Some((e.clone(), i))
+                    let names: IndexMap<skalp_frontend::hir::EntityId, (String, Vec<String>)> = h
+                        .entities
+                        .iter()
+                        .map(|e| {
+                            (
+                                e.id,
+                                (
+                                    e.name.clone(),
+                                    e.generics.iter().map(|g| g.name.clone()).collect(),
+                                ),
+                            )
+                        })
+                        .collect();
+                    Some((e.clone(), i, names))
                 });
-            let Some((generic_entity, generic_impl)) = found else {
+            let Some((generic_entity, generic_impl, src_entity_names)) = found else {
                 continue;
             };
 
@@ -1328,10 +1403,9 @@ impl MirCompiler {
             let (mut spec_entity, port_id_map) = engine.specialize_entity(
                 &generic_entity,
                 &instantiation,
-                skalp_frontend::hir::EntityId(next_entity_id),
+                spec_entity_id,
                 &mut next_port_id,
             );
-            next_entity_id += 1;
             // Keep the exact name the instantiation site will look up — the
             // engine's mangling sorts params alphabetically, which can differ
             // from declaration order for multi-parameter entities.
@@ -1349,7 +1423,52 @@ impl MirCompiler {
             });
 
             base.entities.push(spec_entity);
-            if let Some(si) = spec_impl {
+            if let Some(mut si) = spec_impl {
+                for instance in &mut si.instances {
+                    let Some((child_name, child_generics)) =
+                        src_entity_names.get(&instance.entity).cloned()
+                    else {
+                        // Not from the source HIR's id space — already a `base`
+                        // id (the generic came from `base` itself). Leave it.
+                        continue;
+                    };
+
+                    // A child naming a generic resolves to that generic's
+                    // specialization, which is what the rest of the pipeline
+                    // looks up. The const args come from the instance's own
+                    // generic arguments, already substituted with this
+                    // instantiation's bindings by specialize_implementation.
+                    let mut evaluator = ConstEvaluator::new();
+                    evaluator.bind_all(const_args.iter().cloned().collect());
+                    let mut child_args: Vec<(String, ConstValue)> = Vec::new();
+                    for (param, arg) in child_generics.iter().zip(instance.generic_args.iter()) {
+                        match evaluator.eval(arg) {
+                            Ok(v) => child_args.push((param.clone(), v)),
+                            Err(_) => break,
+                        }
+                    }
+
+                    if child_args.len() == child_generics.len() && !child_args.is_empty() {
+                        let mut parts = vec![child_name.clone()];
+                        for (_, v) in &child_args {
+                            parts.push(crate::hir_to_mir::specialized_name_suffix(v));
+                        }
+                        instance.entity = enqueue(
+                            parts.join("_"),
+                            child_name,
+                            child_args,
+                            &mut planned,
+                            &mut next_entity_id,
+                            &mut queue,
+                        );
+                    } else if let Some(&id) = planned.get(&child_name) {
+                        // Non-generic child that `base` already knows by name.
+                        instance.entity = id;
+                    }
+                    // Otherwise the id stays as-is and the mis-resolution guard
+                    // in hir_to_mir reports it rather than wiring the wrong
+                    // module in silently.
+                }
                 base.implementations.push(si);
             }
             added = true;

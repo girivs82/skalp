@@ -15,6 +15,32 @@ use skalp_frontend::types::Width;
 use std::path::PathBuf;
 use tracing::trace;
 
+/// The name suffix a const generic argument contributes to a specialized
+/// entity name — `FpAdd` + `IEEE754_32` becomes `FpAdd_fp32`.
+///
+/// Two places construct these names: the instantiation site here, and
+/// `apply_pending_specializations` in compiler.rs when it redirects a
+/// specialized implementation's child instances. They must agree exactly —
+/// the specialized entity is looked up by name — so they share one function
+/// rather than two copies that can drift.
+pub(crate) fn specialized_name_suffix(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Nat(n) => n.to_string(),
+        ConstValue::Int(i) => {
+            if *i >= 0 {
+                i.to_string()
+            } else {
+                format!("n{}", i.abs())
+            }
+        }
+        ConstValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        ConstValue::String(s) => s.replace([' ', '-'], "_"),
+        ConstValue::Float(f) => format!("f{}", f.to_bits()),
+        ConstValue::FloatFormat(fmt) => format!("fp{}", fmt.total_bits),
+        ConstValue::Struct(_) => "struct".to_string(),
+    }
+}
+
 // Stack growth constants for deeply recursive expression conversion
 // Red zone: minimum stack space before growing (256KB)
 // We use a larger red zone to detect low stack earlier and avoid
@@ -2531,26 +2557,7 @@ impl<'hir> HirToMir<'hir> {
                             for arg_expr in &resolved_generic_args {
                                 match self.const_evaluator.eval(arg_expr) {
                                     Ok(const_val) => {
-                                        let suffix = match &const_val {
-                                            ConstValue::Nat(n) => n.to_string(),
-                                            ConstValue::Int(i) => {
-                                                if *i >= 0 {
-                                                    i.to_string()
-                                                } else {
-                                                    format!("n{}", i.abs())
-                                                }
-                                            }
-                                            ConstValue::Bool(b) => {
-                                                if *b { "true" } else { "false" }.to_string()
-                                            }
-                                            ConstValue::String(s) => s.replace([' ', '-'], "_"),
-                                            ConstValue::Float(f) => format!("f{}", f.to_bits()),
-                                            ConstValue::FloatFormat(fmt) => {
-                                                format!("fp{}", fmt.total_bits)
-                                            }
-                                            ConstValue::Struct(_) => "struct".to_string(),
-                                        };
-                                        name_parts.push(suffix);
+                                        name_parts.push(specialized_name_suffix(&const_val));
                                     }
                                     Err(_e) => {
                                         // Generic arg eval failed - will fall back to generic entity name

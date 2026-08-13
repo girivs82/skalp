@@ -2285,3 +2285,78 @@ impl Tx {{
         }
     }
 }
+
+/// An `EntityId` means nothing outside the Hir that minted it.
+mod entity_ids_do_not_cross_hirs {
+    /// `apply_pending_specializations` copies a generic implementation out of a
+    /// stdlib module HIR into the main HIR. EntityIds restart per HIR, so the
+    /// ids inside that implementation used to be re-resolved against the wrong
+    /// id space: inside the monomorphized `FpSub_fp32`, `inst adder = FpAdd<F>`
+    /// kept FpAdd's id in the fp module HIR — EntityId(0) — and resolved in the
+    /// main HIR to whatever entity was numbered 0, which is the user's own
+    /// top-level entity. `adder.result` then could not be resolved and both
+    /// output assignments were dropped.
+    ///
+    /// This asserts the wiring, not merely the absence of an error: a build
+    /// that succeeds while `FpSub_fp32` instantiates the wrong child is exactly
+    /// the silent miscompile this guards.
+    #[test]
+    fn a_specialized_stdlib_child_binds_to_the_right_entity() {
+        std::env::set_var(
+            "SKALP_STDLIB_PATH",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+        );
+
+        // `Top` is declared first, so it takes EntityId(0) in the main HIR —
+        // the same number FpAdd holds in the fp module HIR. That collision is
+        // the whole point of the fixture; do not reorder or rename it.
+        let src = r#"
+use skalp::numeric::cordic::*;
+
+entity Top {
+    in v: fp32
+    out r: fp32
+}
+
+impl Top {
+    inst s = CordicSqrt { value: v }
+    r = s.result
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("top.sk");
+        std::fs::write(&path, src).unwrap();
+
+        let ctx = skalp_frontend::parse_and_build_compilation_context(&path)
+            .expect("CordicSqrt must compile — a dropped assignment used to fail this");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+            .expect("MIR conversion");
+        let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+        let fp_sub = sv
+            .split("module FpSub_fp32")
+            .nth(1)
+            .and_then(|s| s.split("endmodule").next())
+            .expect("FpSub_fp32 must be emitted");
+
+        assert!(
+            fp_sub.contains("FpAdd_fp32 adder"),
+            "FpSub_fp32 must instantiate FpAdd_fp32, got:\n{fp_sub}"
+        );
+        assert!(
+            !fp_sub.contains("Top "),
+            "FpSub_fp32 instantiated the top-level entity — an EntityId from the \
+             fp module HIR was resolved against the main HIR:\n{fp_sub}"
+        );
+        // The two assignments that the id collision used to drop.
+        assert!(
+            fp_sub.contains("assign result = adder_result"),
+            "FpSub_fp32 must drive `result` from its adder:\n{fp_sub}"
+        );
+        assert!(
+            fp_sub.contains("assign flags = adder_flags"),
+            "FpSub_fp32 must drive `flags` from its adder:\n{fp_sub}"
+        );
+    }
+}
