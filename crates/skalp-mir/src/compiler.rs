@@ -124,14 +124,18 @@ impl MirCompiler {
         if !conversion_errors.is_empty() {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
-            let relevant: Vec<&str> = conversion_errors
+            // The entity name is what tells the user *where* to look, so it
+            // belongs in the rendered message and not just in the reachability
+            // filter — dedup on the pair, or two entities failing the same way
+            // collapse into one report that names neither.
+            let relevant: Vec<String> = conversion_errors
                 .iter()
                 .filter(|(entity, _)| {
                     // Module names for monomorphized entities equal the entity name
                     reachable_names.contains(entity.as_str())
                 })
-                .map(|(_, msg)| msg.as_str())
-                .filter(|m| seen.insert(*m))
+                .filter(|(entity, msg)| seen.insert((entity.as_str(), msg.as_str())))
+                .map(|(entity, msg)| format!("in `{}`: {}", entity, msg))
                 .collect();
 
             if !relevant.is_empty() {

@@ -2220,3 +2220,68 @@ impl S {{
         );
     }
 }
+
+/// The compiler must never panic on user input.
+mod stdlib_glob_imports_never_panic {
+    /// `hir_to_mir.rs` used to `panic!` when an assignment could not be
+    /// lowered (28f6434). The intent was right — an assignment must never be
+    /// silently dropped — but the mechanism killed the process at the FIRST
+    /// failure, before any span or entity name reached the user, and it
+    /// bypassed the reachability filter that scopes conversion errors to
+    /// entities the design actually instantiates. A glob import of the stdlib
+    /// `cordic` or `vector` module therefore crashed the compiler even though
+    /// the failing entity was never used.
+    #[test]
+    fn every_stdlib_numeric_module_glob_imports_without_panicking() {
+        const MODULES: &[&str] = &[
+            "cordic",
+            "fixed",
+            "formats",
+            "fp",
+            "int",
+            "partitionable_adder",
+            "partitionable_multiplier",
+            "traits",
+            "trig",
+            "vector",
+        ];
+
+        std::env::set_var(
+            "SKALP_STDLIB_PATH",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+        );
+
+        for module in MODULES {
+            let src = format!(
+                r#"
+use skalp::numeric::{module}::*;
+
+entity Tx {{
+    in clk: clock
+    out q: bit
+}}
+
+impl Tx {{
+    q = 0
+}}
+"#
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("m.sk");
+            std::fs::write(&path, src).unwrap();
+
+            // Success or a diagnostic are both acceptable; a panic is not.
+            // `catch_unwind` is the point of the test — it fails loudly if the
+            // compiler aborts instead of reporting.
+            let result = std::panic::catch_unwind(|| {
+                skalp_frontend::parse_and_build_hir_from_file(&path).map(|hir| {
+                    skalp_mir::MirCompiler::new().compile_to_mir(&hir).is_ok()
+                })
+            });
+            assert!(
+                result.is_ok(),
+                "glob-importing `skalp::numeric::{module}` panicked the compiler"
+            );
+        }
+    }
+}

@@ -1631,6 +1631,60 @@ impl<'hir> HirToMir<'hir> {
                             self.instance_outputs_by_name
                                 .insert(hir_instance.name.clone(), output_ports.clone());
 
+                            // `HirInstance::entity` is an `EntityId`, but EntityIds
+                            // restart per HIR — the preloaded stdlib module HIRs each
+                            // number from 0, exactly like the main file. When
+                            // `apply_pending_specializations` copies a generic stdlib
+                            // impl into the main HIR it does NOT remap those ids, so
+                            // resolving them here can bind a completely different
+                            // entity that merely shares the number. Measured: inside
+                            // the monomorphized `FpSub_fp32`, `inst adder = FpAdd<F>`
+                            // carries EntityId(0) (FpAdd's id in the fp module HIR) and
+                            // resolved to `Top` — the user's own top-level entity.
+                            //
+                            // A connection naming a port the resolved entity does not
+                            // have proves the resolution is wrong. Without this the
+                            // mis-binding is silent whenever the colliding entity
+                            // happens to share port names, and the design gets the
+                            // wrong child module wired in.
+                            let entity_port_names: Vec<&str> =
+                                entity.ports.iter().map(|p| p.name.as_str()).collect();
+                            let bogus: Vec<&str> = hir_instance
+                                .connections
+                                .iter()
+                                .map(|c| c.port.as_str())
+                                .filter(|p| !entity_port_names.contains(p))
+                                .collect();
+                            if !bogus.is_empty() {
+                                let current = self.current_entity_name();
+                                self.conversion_errors.push((
+                                    current,
+                                    format!(
+                                        "instance `{}` resolved to entity `{}`, which has no port(s) {} \
+                                         (its ports are {}). The instance's entity id ({:?}) was resolved \
+                                         against the wrong HIR — EntityIds restart per module, and a \
+                                         monomorphized library implementation keeps the id space of the \
+                                         module it came from.",
+                                        hir_instance.name,
+                                        entity.name,
+                                        bogus
+                                            .iter()
+                                            .map(|p| format!("`{}`", p))
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        if entity_port_names.is_empty() {
+                                            "none".to_string()
+                                        } else {
+                                            entity_port_names
+                                                .iter()
+                                                .map(|p| format!("`{}`", p))
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        },
+                                        hir_instance.entity,
+                                    ),
+                                ));
+                            }
                             if let Some(var_id) = hir_instance.variable_id {
                                 self.entity_instance_outputs.insert(var_id, output_ports);
                                 if let Some(module_id) = self.entity_map.get(&hir_instance.entity) {
@@ -4950,30 +5004,27 @@ impl<'hir> HirToMir<'hir> {
 
             let rhs_desc = Self::describe_hir_expr(&assign.rhs);
 
-            panic!(
-                "\n\n❌❌❌ COMPILATION ERROR: Assignment conversion failed! ❌❌❌\n\
-                 \n\
-                 Assignment: {} = {}\n\
-                 Current entity ID: {:?}\n\
-                 \n\
-                 This assignment could not be converted to MIR. Common causes:\n\
-                 1. Function inlining failed due to excessive complexity or recursion depth\n\
-                 2. Match expression with too many nested function calls\n\
-                 3. Expression type not supported in continuous assignments\n\
-                 4. Field access on a sub-entity whose module is not imported\n\
-                 \n\
-                 For function calls, try:\n\
-                 - Breaking the function into smaller pieces\n\
-                 - Reducing match expression nesting depth\n\
-                 - Using intermediate variables for complex sub-expressions\n\
-                 \n\
-                 If this involves a field access on a sub-entity (e.g., instance.port),\n\
-                 check that the entity is imported with a `use module::EntityName;` statement.\n\
-                 \n\
-                 This is Bug #85: Assignments must never be silently dropped!\n\
-                 ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n",
-                lhs_name, rhs_desc, self.current_entity_id
-            );
+            // A compiler must not panic on user input. This was a `panic!`
+            // (28f6434, Nov 2025) whose intent was right — an assignment must
+            // never be silently dropped — but whose mechanism killed the
+            // process at the FIRST failure, so a design with several could
+            // only be debugged one recompile at a time, and no span reached
+            // the user. Route it through conversion_errors like the dropped
+            // assignment/instance errors, and keep going.
+            let entity = self.current_entity_name();
+            self.conversion_errors.push((
+                entity,
+                format!(
+                    "assignment `{} = {}` could not be lowered — it would have been \
+                     silently dropped. Common causes: function inlining hit a complexity \
+                     or recursion limit; a match expression nests too many calls; the \
+                     expression form is unsupported in a continuous assignment; or a \
+                     field access names a sub-entity whose module was not imported \
+                     (`use module::EntityName;`).",
+                    lhs_name, rhs_desc
+                ),
+            ));
+            Vec::new()
         }
     }
 
@@ -19916,7 +19967,8 @@ impl<'hir> HirToMir<'hir> {
                     // Entity instances are created via let bindings like: let inner = Inner { data };
                     // Accessing inner.result should return the output port signal of the instance
                     trace!(
-                        "[FIELD_ACCESS] var {:?} field '{}'. entity_instance_outputs has {} entries: {:?}",
+                        "[FIELD_ACCESS] entity '{}' ctx {:?}: var {:?} field '{}'. entity_instance_outputs has {} entries: {:?}",
+                        self.current_entity_name(), self.get_current_context(),
                         var_id, field_name, self.entity_instance_outputs.len(),
                         self.entity_instance_outputs.keys().collect::<Vec<_>>()
                     );
