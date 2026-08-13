@@ -2085,3 +2085,87 @@ impl Counter {
         assert!(!files.is_empty(), "expected at least one VHDL file");
     }
 }
+
+/// A `let` variable driven by an if-else-if chain in a clocked block.
+mod resolved_conditional_ssa {
+    fn sv_of(src: &str) -> String {
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv")
+    }
+
+    const SRC: &str = r#"
+entity W2 {
+    in clk: clock
+    in a: bit
+    in b: bit
+    in x: bit[8]
+    in y: bit[8]
+    out q: bit[32]
+}
+
+impl W2 {
+    signal r: bit[32] = 0
+    on(clk.rise) {
+        let mut v: bit[8] = 0
+        if a {
+            v = x ++ y ++ x ++ y
+        } else if b {
+            v = y ++ x ++ y ++ x
+        } else {
+            v = 0
+        }
+        r = v
+    }
+    q = r
+}
+"#;
+
+    /// The SSA pass ignored `Statement::ResolvedConditional` in both of its
+    /// counting walks and never versioned `rc.target` in the rename walk, so
+    /// the chain's target kept the ORIGINAL name and collided with the `let`
+    /// initializer: `v = 0;` (blocking) and `v <= ...;` (non-blocking) landed
+    /// in the same always_ff. Synthesis tools reject that, and `r <= v` read
+    /// the pre-update value.
+    #[test]
+    fn no_variable_gets_both_blocking_and_nonblocking_in_one_block() {
+        let sv = sv_of(SRC);
+        for blk in sv.split("always_ff").skip(1) {
+            let body = blk.split("end").next().unwrap_or("");
+            let mut blocking = std::collections::HashSet::new();
+            let mut nonblocking = std::collections::HashSet::new();
+            for line in body.lines() {
+                let t = line.trim();
+                if let Some((lhs, rest)) = t.split_once('=') {
+                    let name = lhs.trim().trim_end_matches('<').trim();
+                    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    if t.contains("<=") {
+                        nonblocking.insert(name.to_string());
+                    } else if !rest.starts_with('=') {
+                        blocking.insert(name.to_string());
+                    }
+                }
+            }
+            let both: Vec<_> = blocking.intersection(&nonblocking).collect();
+            assert!(
+                both.is_empty(),
+                "mixed blocking/non-blocking on {both:?} in one always_ff:\n{sv}"
+            );
+        }
+    }
+
+    /// The width scan skipped ResolvedConditional too, so the chain's target
+    /// kept its declared 8 bits and truncated a 32-bit concat.
+    #[test]
+    fn chain_target_is_widened_to_the_widest_arm() {
+        let sv = sv_of(SRC);
+        assert!(
+            !sv.contains("logic [7:0] v_ssa"),
+            "the chain target must be widened to hold a 32-bit concat:\n{sv}"
+        );
+    }
+}

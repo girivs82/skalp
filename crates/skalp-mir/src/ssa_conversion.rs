@@ -178,6 +178,15 @@ impl SsaConverter {
                     out.insert(*var_id);
                 }
             }
+            // A resolved priority chain ASSIGNS its target, exactly like an
+            // Assignment. Skipping it here meant no SSA version was minted, so
+            // the target kept the original name and collided with the `let`
+            // initializer — emitting `v = 0;` and `v <= ...` in one always_ff.
+            Statement::ResolvedConditional(rc) => {
+                if let LValue::Variable(var_id) = &rc.target {
+                    out.insert(*var_id);
+                }
+            }
             Statement::If(if_stmt) => {
                 Self::collect_assigned_vars_in_block(&if_stmt.then_block, out);
                 if let Some(else_block) = &if_stmt.else_block {
@@ -261,7 +270,11 @@ impl SsaConverter {
                     self.count_reassignments_in_block(body);
                 }
             },
-            Statement::ResolvedConditional(_) => {}
+            Statement::ResolvedConditional(rc) => {
+                if let LValue::Variable(var_id) = &rc.target {
+                    *self.reassignment_count.entry(*var_id).or_insert(0) += 1;
+                }
+            }
             // Assertions don't involve variable reassignments
             Statement::Assert(_) | Statement::Assume(_) | Statement::Cover(_) => {}
         }
@@ -396,12 +409,29 @@ impl SsaConverter {
                 }
             }
             Statement::ResolvedConditional(rc) => {
-                // Update refs in conditions and values
+                // Update refs in conditions and values FIRST, so they read the
+                // versions current before this statement.
                 for case in &mut rc.resolved.cases {
                     self.update_expr_refs(&mut case.condition);
                     self.update_expr_refs(&mut case.value);
                 }
                 self.update_expr_refs(&mut rc.resolved.default);
+
+                // Then version the target, mirroring Statement::Assignment.
+                let var_id_copy = if let LValue::Variable(var_id) = &rc.target {
+                    if self.current_version.contains_key(var_id) {
+                        Some(*var_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(var_id) = var_id_copy {
+                    let new_var_id = self.create_new_version(var_id, original_vars);
+                    rc.target = LValue::Variable(new_var_id);
+                    self.current_version.insert(var_id, new_var_id);
+                }
             }
             Statement::Assert(assert_stmt) => {
                 // Update refs in assertion condition

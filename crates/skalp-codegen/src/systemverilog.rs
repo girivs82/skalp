@@ -409,6 +409,29 @@ fn scan_statements_for_variable_widths(
                     }
                 }
             }
+            // A resolved priority chain assigns its target from the mux
+            // arms. Skipping it left the target at its declared width, so a
+            // wide value (e.g. a 32-bit concat) was truncated into an 8-bit
+            // variable while a sibling SSA version got the wide declaration.
+            Statement::ResolvedConditional(rc) => {
+                if let skalp_mir::LValue::Variable(var_id) = &rc.target {
+                    let widest = rc
+                        .resolved
+                        .cases
+                        .iter()
+                        .filter_map(|c| compute_expression_width(&c.value, mir_module))
+                        .chain(compute_expression_width(&rc.resolved.default, mir_module))
+                        .max();
+                    if let Some(width) = widest {
+                        if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
+                            let type_w = safe_get_type_width(&var.var_type);
+                            if width > type_w {
+                                width_map.insert(*var_id, width);
+                            }
+                        }
+                    }
+                }
+            }
             Statement::If(if_stmt) => {
                 scan_statements_for_variable_widths(
                     &if_stmt.then_block.statements,
