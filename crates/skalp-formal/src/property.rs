@@ -345,7 +345,12 @@ fn formula_to_smt(formula: &TemporalFormula) -> String {
             TemporalFormula::Next(f) => {
                 format!("(X {})", formula_to_smt(f))
             }
-            _ => "unsupported".to_string(), // Simplified for now
+            // NOT `"unsupported"`: that produced `(assert unsupported)` — a
+            // syntactically valid assertion over an undeclared symbol, i.e. a
+            // property that does not mean what the user wrote. Nothing calls
+            // this yet; emit an obviously-false assertion so that wiring it up
+            // fails loudly instead of silently proving the wrong thing.
+            other => format!("(! false :unencodable \"{:?}\")", other),
         }
     })
 }
@@ -382,7 +387,8 @@ fn formula_to_nusmv(formula: &TemporalFormula) -> String {
         TemporalFormula::ExistsEventually(f) => {
             format!("EF {}", formula_to_nusmv(f))
         }
-        _ => "unsupported".to_string(),
+        // See formula_to_smt: a placeholder here is a property that lies.
+        other => format!("FALSE -- unencodable: {:?}", other),
     })
 }
 
