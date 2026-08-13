@@ -2169,3 +2169,54 @@ impl W2 {
         );
     }
 }
+
+/// Module path segments named after keywords.
+mod keyword_module_paths {
+    fn resolves(module: &str) -> bool {
+        let src = format!(
+            r#"
+use skalp::numeric::{module}::*;
+
+entity S {{
+    in clk: clock
+    out q: bit
+}}
+
+impl S {{
+    q = 0
+}}
+"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.sk");
+        std::fs::write(&path, src).unwrap();
+        std::env::set_var(
+            "SKALP_STDLIB_PATH",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+        );
+        skalp_frontend::parse_and_build_hir_from_file(&path).is_ok()
+    }
+
+    /// `int` is a lexer keyword. The PARSER accepts keywords as use-path
+    /// segments, but the HIR extractor collected only `Ident`, so the segment
+    /// was silently dropped and the resolver received `skalp::numeric` — with
+    /// the last segment missing. crates/skalp-stdlib/skalp/numeric/int.sk was
+    /// therefore unreachable by ANY importer.
+    #[test]
+    fn keyword_named_module_resolves() {
+        assert!(
+            resolves("int"),
+            "`use skalp::numeric::int::*` must resolve — `int` being a keyword must not truncate the path"
+        );
+    }
+
+    /// Control: a non-keyword module must resolve too, so a future change
+    /// cannot pass this pair by breaking both.
+    #[test]
+    fn non_keyword_module_still_resolves() {
+        assert!(
+            resolves("fixed"),
+            "`fixed` is not a keyword and must resolve"
+        );
+    }
+}

@@ -3677,6 +3677,7 @@ impl HirBuilderContext {
         // Collect path segments  (before any UseTree)
         let mut segments = Vec::new();
         let mut has_use_tree = false;
+        let mut saw_alias = false;
 
         for element in use_path.children_with_tokens() {
             match element {
@@ -3686,7 +3687,19 @@ impl HirBuilderContext {
                     }
                 }
                 rowan::NodeOrToken::Token(token) => {
-                    if token.kind() == SyntaxKind::Ident {
+                    // The PARSER accepts keywords as path segments; this
+                    // extractor collected only Ident, so a module named after
+                    // a keyword — `skalp::numeric::int` — silently lost its
+                    // last segment and the resolver was handed
+                    // `skalp::numeric`. Accept keywords here too.
+                    //
+                    // `as` is excluded: it introduces an ALIAS, which is not
+                    // part of the module path. Stop collecting once seen.
+                    if token.kind() == SyntaxKind::AsKw {
+                        saw_alias = true;
+                    } else if !saw_alias
+                        && (token.kind() == SyntaxKind::Ident || token.kind().is_keyword())
+                    {
                         let text = token.text().to_string();
                         segments.push(text);
                     }
