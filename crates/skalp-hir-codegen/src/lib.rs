@@ -19,25 +19,55 @@ pub struct GeneratedFile {
     pub code: String,
 }
 
+/// Fail when an emitter fell through to its "unsupported" placeholder.
+///
+/// The statement emitters write a COMMENT for constructs they cannot handle
+/// (`// unsupported statement`), so the hardware silently disappears while the
+/// build reports success. A comment is not an implementation: if a construct
+/// reached the backend and produced nothing, the output does not describe the
+/// design and the build must say so.
+fn reject_unsupported(files: Vec<GeneratedFile>) -> Result<Vec<GeneratedFile>> {
+    let mut offenders = Vec::new();
+    for f in &files {
+        for (i, line) in f.code.lines().enumerate() {
+            if line.contains("unsupported statement")
+                || line.contains("unsupported property")
+                || line.contains("unsupported type")
+                || line.contains("unsupported:")
+            {
+                offenders.push(format!("{}:{}: {}", f.name, i + 1, line.trim()));
+            }
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(files);
+    }
+    anyhow::bail!(
+        "backend emitted placeholders for constructs it cannot express — the generated \
+         source does not describe the design:\n  {}",
+        offenders.join("\n  ")
+    )
+}
+
 /// Generate skalp source code from HIR, one file per entity
 pub fn generate_skalp_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
     let resolver = NameResolver::from_hir(hir);
     let filtered = filter_entities(hir);
-    skalp_emit::emit_per_entity(&filtered, hir, &resolver)
+    reject_unsupported(skalp_emit::emit_per_entity(&filtered, hir, &resolver)?)
 }
 
 /// Generate VHDL source code from HIR, one file per entity
 pub fn generate_vhdl_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
     let resolver = NameResolver::from_hir(hir);
     let filtered = filter_entities(hir);
-    vhdl_emit::emit_per_entity(&filtered, hir, &resolver)
+    reject_unsupported(vhdl_emit::emit_per_entity(&filtered, hir, &resolver)?)
 }
 
 /// Generate SystemVerilog source code from HIR, one file per entity
 pub fn generate_systemverilog_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
     let resolver = NameResolver::from_hir(hir);
     let filtered = filter_entities(hir);
-    sv_emit::emit_per_entity(&filtered, hir, &resolver)
+    reject_unsupported(sv_emit::emit_per_entity(&filtered, hir, &resolver)?)
 }
 
 /// Generate skalp source code from HIR (single string, for backward compat)

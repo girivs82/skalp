@@ -2020,3 +2020,68 @@ impl Prio {
         );
     }
 }
+
+/// Backends must not emit a placeholder comment in place of hardware.
+mod backend_placeholders {
+    /// The HIR statement emitters fall through to
+    /// `// unsupported statement` for constructs they cannot express, so the
+    /// hardware silently disappeared while the build reported success. A
+    /// comment is not an implementation.
+    #[test]
+    fn unsupported_construct_fails_the_vhdl_backend() {
+        let src = r#"
+entity F {
+    in clk: clock
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl F {
+    signal acc: bit[8] = 0
+    on(clk.rise) {
+        let mut i: bit[8] = 0
+        while i < 4 { i = i + 1 }
+        acc = d + i
+    }
+    q = acc
+}
+"#;
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let text = match skalp_hir_codegen::generate_vhdl_files(&hir) {
+            Ok(_) => panic!("a construct the backend cannot express must fail the build"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            text.contains("placeholders") && text.contains("unsupported statement"),
+            "the error must name what was dropped and where: {text}"
+        );
+    }
+
+    /// The ordinary path must keep working — every tutorial VHDL design goes
+    /// through this backend.
+    #[test]
+    fn a_supported_design_still_generates_vhdl() {
+        let src = r#"
+entity Counter {
+    in clk: clock
+    in rst: reset
+    out q: bit[8]
+}
+
+impl Counter {
+    signal count: bit[8] = 0
+    on(clk.rise) {
+        if rst {
+            count = 0
+        } else {
+            count = count + 1
+        }
+    }
+    q = count
+}
+"#;
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let files = skalp_hir_codegen::generate_vhdl_files(&hir).expect("vhdl must generate");
+        assert!(!files.is_empty(), "expected at least one VHDL file");
+    }
+}
