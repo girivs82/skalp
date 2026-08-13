@@ -117,10 +117,18 @@ pub struct HirToMir<'hir> {
     /// BUG FIX #6: Prevents variable name collisions when multiple functions with
     /// match expressions are inlined into the same entity
     next_match_id: u32,
-    /// Entity to module ID mapping
+    /// Entity to module ID mapping.
+    ///
+    /// INVARIANT: keyed ONLY by ids minted by the HIR being converted
+    /// (`self.hir`). An `EntityId` means nothing outside the Hir that minted
+    /// it — the main file and every preloaded module HIR each number from 0 —
+    /// so mixing id spaces in one map makes a lookup silently return another
+    /// HIR's module. Entities that live in a module HIR are reachable through
+    /// `entity_name_to_module` instead; the name is the portable identifier.
     entity_map: IndexMap<hir::EntityId, ModuleId>,
-    /// Entity name to module ID mapping (for cross-module entity lookup where entity IDs
-    /// from different HIR files may collide)
+    /// Entity name to module ID mapping. This is the lookup that works for
+    /// entities from ANY HIR, and the one to prefer whenever the entity itself
+    /// is in hand rather than just an id.
     entity_name_to_module: IndexMap<String, ModuleId>,
     /// Function to module ID mapping (for module instantiation instead of inlining)
     /// Maps function name -> ModuleId
@@ -975,10 +983,14 @@ impl<'hir> HirToMir<'hir> {
             self.clear_entity_scope_maps();
 
             let module_id = self.next_module_id();
-            // Only insert into entity_map if the ID doesn't collide with a main HIR entity
-            if !self.entity_map.contains_key(&entity.id) {
-                self.entity_map.insert(entity.id, module_id);
-            }
+            // Deliberately NOT inserted into entity_map: this entity's id was
+            // minted by a module HIR and means something else in the HIR being
+            // converted. The previous "insert only if it does not collide with
+            // a main entity" guard kept the main HIR's entries from being
+            // overwritten, but it left the map holding a mixture of id spaces —
+            // a foreign id that happened not to collide would still resolve,
+            // and to the wrong module. Name is the only portable identifier
+            // across HIRs, so module-HIR entities are reachable by name alone.
             self.entity_name_to_module
                 .insert(entity.name.clone(), module_id);
             trace!(
@@ -4715,24 +4727,7 @@ impl<'hir> HirToMir<'hir> {
                     let mut name_parts = vec![resolved_type_name.clone()];
                     for arg_expr in &struct_lit.generic_args {
                         if let Ok(const_val) = self.const_evaluator.eval(arg_expr) {
-                            let suffix = match &const_val {
-                                ConstValue::Nat(n) => n.to_string(),
-                                ConstValue::Int(i) => {
-                                    if *i >= 0 {
-                                        i.to_string()
-                                    } else {
-                                        format!("n{}", i.abs())
-                                    }
-                                }
-                                ConstValue::Bool(b) => {
-                                    if *b { "true" } else { "false" }.to_string()
-                                }
-                                ConstValue::String(s) => s.replace([' ', '-'], "_"),
-                                ConstValue::Float(f) => format!("f{}", f.to_bits()),
-                                ConstValue::FloatFormat(fmt) => format!("fp{}", fmt.total_bits),
-                                ConstValue::Struct(_) => "struct".to_string(),
-                            };
-                            name_parts.push(suffix);
+                            name_parts.push(specialized_name_suffix(&const_val));
                         }
                     }
                     name_parts.join("_")
@@ -5463,22 +5458,24 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert module instance
     fn convert_instance(&mut self, instance: &hir::HirInstance) -> Option<ModuleInstance> {
-        // Map entity ID to module ID
-        let module_id = match self.entity_map.get(&instance.entity) {
-            Some(&id) => id,
+        // Map entity ID to module ID. The id is exact when it belongs to the
+        // HIR being converted, which is the only id space `entity_map` holds;
+        // the name covers an entity whose module was created from a module HIR.
+        let module_id = match self.entity_map.get(&instance.entity).copied().or_else(|| {
+            let name = &self
+                .hir
+                .as_ref()?
+                .entities
+                .iter()
+                .find(|e| e.id == instance.entity)?
+                .name;
+            self.entity_name_to_module.get(name).copied()
+        }) {
+            Some(id) => id,
             None => {
                 return None;
             }
         };
-
-        // DEBUG: Check entity_map lookup for FpSub's adder
-        if instance.name == "adder" {
-            trace!(
-                "[CONVERT_INSTANCE] adder: instance.entity={:?} -> module_id={:?}",
-                instance.entity,
-                module_id
-            );
-        }
 
         // Get the entity definition - needed for both connections and parameters
         let entity = self
