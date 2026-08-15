@@ -5558,6 +5558,18 @@ impl HirBuilderContext {
                                 body.signals.push(signal);
                             }
                         }
+                        // Must be built BEFORE the assignments that read it —
+                        // body_children is in source order, and `inst m = ...`
+                        // precedes `x[i] = m.result`, so building it here
+                        // registers `m` and those reads resolve to its variable.
+                        // Skipping it (as the catch-all below used to) left the
+                        // reads as unresolved identifiers, and the instance
+                        // itself simply never existed in any specialization.
+                        SyntaxKind::InstanceDecl => {
+                            if let Some(instance) = self.build_instance(child_node) {
+                                body.instances.push(instance);
+                            }
+                        }
                         SyntaxKind::AssignmentStmt => {
                             if let Some(assignment) =
                                 self.build_assignment(child_node, HirAssignmentType::Combinational)

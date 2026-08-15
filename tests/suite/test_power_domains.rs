@@ -2360,3 +2360,93 @@ impl Top {
         );
     }
 }
+
+/// A `generate for` whose bounds are generic elaborates during specialization.
+mod symbolic_generate_for_instances {
+    fn sv(src: &str) -> String {
+        let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+        let mir = skalp_mir::MirCompiler::new()
+            .compile_to_mir(&hir)
+            .expect("mir");
+        skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv")
+    }
+
+    const DESIGN: &str = r#"
+entity Mul8 {
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+    out overflow: bit
+}
+
+impl Mul8 {
+    result = a
+    overflow = 0
+}
+
+entity IdxGen<const N: nat> {
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl IdxGen<const N: nat> {
+    signal products: bit[8][N]
+    signal ovf: bit[N]
+
+    generate for i in 0..N {
+        inst m = Mul8 { a: d, b: d }
+        products[i] = m.result
+        ovf[i] = m.overflow
+    }
+
+    q = products[0]
+}
+
+entity TopG {
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl TopG {
+    inst g = IdxGen<4> { d: d }
+    q = g.q
+}
+"#;
+
+    /// The HIR builder skipped `inst` inside a symbolic generate-for via an
+    /// "unsupported body node" catch-all, so the instances never existed in any
+    /// specialization and the reads of them stayed unresolved identifiers.
+    #[test]
+    fn each_iteration_gets_its_own_instance() {
+        let sv = sv(DESIGN);
+        for i in 0..4 {
+            assert!(
+                sv.contains(&format!("Mul8 m__g{i} (")),
+                "iteration {i} must have its own instance:\n{sv}"
+            );
+        }
+    }
+
+    /// Writing an array element through a compile-time index names exactly one
+    /// element. The dynamic lowering — `x_k = (idx == k) ? v : x_k` — reads the
+    /// element to define it, so four unrolled writes left every element with
+    /// four self-referencing drivers and only the first survived.
+    #[test]
+    fn a_constant_index_writes_its_element_directly() {
+        let sv = sv(DESIGN);
+        for i in 0..4 {
+            assert!(
+                sv.contains(&format!("assign products_{i} = m__g{i}_result;")),
+                "products_{i} must be driven directly by iteration {i}:\n{sv}"
+            );
+            assert!(
+                sv.contains(&format!("assign ovf[{i}] = m__g{i}_overflow;")),
+                "ovf[{i}] must be driven by iteration {i}:\n{sv}"
+            );
+        }
+        assert!(
+            !sv.contains("? m__g0_result : products_0"),
+            "a constant index must not emit the self-referencing dynamic form:\n{sv}"
+        );
+    }
+}

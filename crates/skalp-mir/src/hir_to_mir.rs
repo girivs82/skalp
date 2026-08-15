@@ -4328,8 +4328,44 @@ impl<'hir> HirToMir<'hir> {
         // Generate assignments for each flattened element
         let mut assignments = Vec::new();
 
+        // A compile-time index names exactly ONE element, so it should be
+        // written directly. Every unrolled `generate for` produces this shape.
+        // Emitting the dynamic form for it is not merely wasteful, it is wrong
+        // for a combinational assignment: `x_k = (idx == k) ? v : x_k` reads
+        // x_k to define x_k, so N writes leave every element with N
+        // self-referencing drivers. Measured on `products[i] = m.result`
+        // unrolled four ways — only the first survived and the other three
+        // elements were never driven.
+        let const_index = self
+            .const_evaluator
+            .eval(index_expr)
+            .ok()
+            .and_then(|v| v.as_nat());
+
         for (idx_str, fields_at_index) in array_indices {
             let array_index: usize = idx_str.parse().ok()?;
+
+            if let Some(n) = const_index {
+                if n != array_index {
+                    continue; // this element is untouched by this assignment
+                }
+                for field_info in &fields_at_index {
+                    let lhs_lval = if is_signal {
+                        LValue::Signal(SignalId(field_info.id))
+                    } else {
+                        LValue::Port(PortId(field_info.id))
+                    };
+                    let rhs_for_field = self.adapt_rhs_for_array_element(&mir_rhs, field_info);
+                    assignments.push(Assignment {
+                        lhs: lhs_lval,
+                        rhs: rhs_for_field,
+                        kind,
+                        span: None,
+                    });
+                }
+                continue;
+            }
+
             // Create condition: index == array_index
             let index_literal = Expression::with_unknown_type(ExpressionKind::Literal(
                 Value::Integer(array_index as i64),

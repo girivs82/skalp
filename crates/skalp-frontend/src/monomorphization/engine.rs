@@ -734,12 +734,14 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // `generate for i in 0..WIDTH` as HirStatement::GenerateFor templates).
         let mut specialized_signals = specialized_signals;
         let mut specialized_assignments = specialized_assignments;
+        let mut specialized_instances = specialized_instances;
         let specialized_statements = self.elaborate_generate_fors(
             &impl_block.statements,
             instantiation,
             port_id_map,
             &mut specialized_signals,
             &mut specialized_assignments,
+            &mut specialized_instances,
         );
 
         // Create specialized implementation
@@ -784,10 +786,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
         port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
         signals: &mut Vec<crate::hir::HirSignal>,
         assignments: &mut Vec<crate::hir::HirAssignment>,
+        instances: &mut Vec<crate::hir::HirInstance>,
     ) -> Vec<crate::hir::HirStatement> {
         use crate::hir::{
-            AssignmentId, GenerateMode, HirAssignment, HirAssignmentType, HirLValue, HirSignal,
-            HirStatement, SignalId,
+            AssignmentId, GenerateMode, HirAssignment, HirAssignmentType, HirInstance, HirLValue,
+            HirSignal, HirStatement, InstanceId, SignalId, VariableId,
         };
         use crate::hir_builder::HirBuilderContext;
 
@@ -812,6 +815,30 @@ impl<'hir> MonomorphizationEngine<'hir> {
             max_assign += 1;
             AssignmentId(max_assign)
         };
+        let mut max_inst = instances.iter().map(|i| i.id.0).max().unwrap_or(0);
+        let mut max_var = instances
+            .iter()
+            .filter_map(|i| i.variable_id.map(|v| v.0))
+            .max()
+            .unwrap_or(0);
+        for stmt in statements {
+            if let HirStatement::GenerateFor(gf) = stmt {
+                for i in &gf.body.instances {
+                    max_inst = max_inst.max(i.id.0);
+                    if let Some(v) = i.variable_id {
+                        max_var = max_var.max(v.0);
+                    }
+                }
+            }
+        }
+        let mut next_inst = move || {
+            max_inst += 1;
+            InstanceId(max_inst)
+        };
+        let mut next_var = move || {
+            max_var += 1;
+            VariableId(max_var)
+        };
 
         let mut out = Vec::new();
         'stmts: for stmt in statements {
@@ -822,7 +849,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
             if gf.mode != GenerateMode::Elaborate
                 || !gf.body.generate_stmts.is_empty()
                 || !gf.body.variables.is_empty()
-                || !gf.body.instances.is_empty()
                 || !gf.body.event_blocks.is_empty()
             {
                 out.push(stmt.clone());
@@ -978,6 +1004,53 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     acc_prev.insert(*acc, target);
                 }
 
+                // One instance per iteration, each with its own variable so
+                // `m.result` in iteration i reaches iteration i's instance.
+                // Reads of it were resolved against the template's variable
+                // when the body was built once, so they are remapped alongside
+                // the signals below.
+                let mut var_map: IndexMap<VariableId, VariableId> = IndexMap::new();
+                let mut inst_vars: IndexMap<String, VariableId> = IndexMap::new();
+                for bi in &gf.body.instances {
+                    let mut ni: HirInstance = bi.clone();
+                    ni.id = next_inst();
+                    ni.name = format!("{}__g{}", bi.name, i);
+                    // Always give the iteration's instance its own variable:
+                    // that variable is what `m.result` resolves to, and the
+                    // template may carry none at all.
+                    let nv = next_var();
+                    if let Some(old_var) = bi.variable_id {
+                        var_map.insert(old_var, nv);
+                    }
+                    inst_vars.insert(bi.name.clone(), nv);
+                    ni.variable_id = Some(nv);
+                    for conn in &mut ni.connections {
+                        conn.expr = self.substitute_expr(&conn.expr, &instantiation.const_args);
+                        conn.expr = self.remap_expr_ports(&conn.expr, port_id_map);
+                        conn.expr = HirBuilderContext::substitute_in_expr(
+                            &conn.expr,
+                            gf.iterator_var_id,
+                            &gf.iterator,
+                            i as i64,
+                        );
+                        conn.expr = Self::remap_expr_signals(&conn.expr, &read_map, &var_map, &inst_vars);
+                    }
+                    ni.generic_args = ni
+                        .generic_args
+                        .iter()
+                        .map(|e| {
+                            let e = self.substitute_expr(e, &instantiation.const_args);
+                            HirBuilderContext::substitute_in_expr(
+                                &e,
+                                gf.iterator_var_id,
+                                &gf.iterator,
+                                i as i64,
+                            )
+                        })
+                        .collect();
+                    instances.push(ni);
+                }
+
                 for ba in &body_assigns {
                     let mut na = ba.clone();
                     na.id = next_assign();
@@ -993,8 +1066,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         &gf.iterator,
                         i as i64,
                     );
-                    na.rhs = Self::remap_expr_signals(&na.rhs, &read_map);
-                    na.lhs = Self::remap_lvalue_signals(&na.lhs, &write_map, &read_map);
+                    na.rhs = Self::remap_expr_signals(&na.rhs, &read_map, &var_map, &inst_vars);
+                    na.lhs = Self::remap_lvalue_signals(
+                        &na.lhs, &write_map, &read_map, &var_map, &inst_vars,
+                    );
                     assignments.push(na);
                 }
             }
@@ -1007,11 +1082,25 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn remap_expr_signals(
         expr: &HirExpression,
         map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
+        vars: &IndexMap<crate::hir::VariableId, crate::hir::VariableId>,
+        insts: &IndexMap<String, crate::hir::VariableId>,
     ) -> HirExpression {
         use crate::hir::HirExpression as E;
-        let r = |e: &HirExpression| Self::remap_expr_signals(e, map);
+        let r = |e: &HirExpression| Self::remap_expr_signals(e, map, vars, insts);
         match expr {
             E::Signal(id) => E::Signal(map.get(id).copied().unwrap_or(*id)),
+            // Instances unrolled from a generate-for body get one variable per
+            // iteration; reads of them were bound to the template's variable
+            // when the body was built once. Threaded through THIS walker rather
+            // than a parallel copy of it: a second recursive match over the
+            // expression tree would silently miss whichever node kinds it
+            // forgot, and the miss looks like a correct build.
+            E::Variable(id) => E::Variable(vars.get(id).copied().unwrap_or(*id)),
+            // `m.result` inside a generate-for body: the body is built once,
+            // before any instance named `m` exists, so the reference lands here
+            // as an unresolved identifier. Each unrolled iteration binds that
+            // name to its OWN instance's variable.
+            E::GenericParam(n) if insts.contains_key(n) => E::Variable(insts[n]),
             E::Binary(bin) => E::Binary(crate::hir::HirBinaryExpr {
                 op: bin.op.clone(),
                 left: Box::new(r(&bin.left)),
@@ -1087,8 +1176,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 statements: statements.clone(),
                 result_expr: Box::new(r(result_expr)),
             },
-            // Leaves: Literal, Port, Variable, Constant, GenericParam,
-            // EnumVariant, AssociatedConstant
+            // Leaves: Literal, Port, Constant, GenericParam, EnumVariant,
+            // AssociatedConstant
             other => other.clone(),
         }
     }
@@ -1099,21 +1188,23 @@ impl<'hir> MonomorphizationEngine<'hir> {
         lv: &crate::hir::HirLValue,
         write_map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
         read_map: &IndexMap<crate::hir::SignalId, crate::hir::SignalId>,
+        vars: &IndexMap<crate::hir::VariableId, crate::hir::VariableId>,
+        insts: &IndexMap<String, crate::hir::VariableId>,
     ) -> crate::hir::HirLValue {
         use crate::hir::HirLValue as L;
         match lv {
             L::Signal(id) => L::Signal(write_map.get(id).copied().unwrap_or(*id)),
             L::Index(base, idx) => L::Index(
-                Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
-                Self::remap_expr_signals(idx, read_map),
+                Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
+                Self::remap_expr_signals(idx, read_map, vars, insts),
             ),
             L::Range(base, lo, hi) => L::Range(
-                Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
-                Self::remap_expr_signals(lo, read_map),
-                Self::remap_expr_signals(hi, read_map),
+                Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
+                Self::remap_expr_signals(lo, read_map, vars, insts),
+                Self::remap_expr_signals(hi, read_map, vars, insts),
             ),
             L::FieldAccess { base, field } => L::FieldAccess {
-                base: Box::new(Self::remap_lvalue_signals(base, write_map, read_map)),
+                base: Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
                 field: field.clone(),
             },
             other => other.clone(),
