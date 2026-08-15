@@ -755,6 +755,33 @@ impl<'hir> InstantiationCollector<'hir> {
             type_args = self.infer_type_args_from_connections(entity, instance);
         }
 
+        // A specialization that leaves a type parameter UNBOUND is not a
+        // specialization. `Particle<T>` instantiates `VecAdd<T, 3>`, and
+        // collecting that from the unspecialized template recorded an
+        // instantiation binding only N — which built a `VecAdd_3` whose ports
+        // and body still stand on a symbolic T, so nothing in it can lower and
+        // its `.add()` reports as a dropped assignment against an entity the
+        // design never instantiates.
+        //
+        // Dropping it here loses nothing: monomorphization iterates until no
+        // new instantiations appear, so once `Particle` itself specializes, the
+        // impl of `Particle_fp32` is walked with concrete types and the same
+        // instance is collected properly as `VecAdd<fp32, 3>`.
+        let unbound: Vec<&str> = entity
+            .generics
+            .iter()
+            .filter(|g| {
+                matches!(
+                    g.param_type,
+                    HirGenericType::Type | HirGenericType::TypeWithBounds(_)
+                ) && !type_args.contains_key(&g.name)
+            })
+            .map(|g| g.name.as_str())
+            .collect();
+        if !unbound.is_empty() {
+            return;
+        }
+
         // Create instantiation record
         let instantiation = Instantiation {
             entity_name: entity.name.clone(),
