@@ -1767,36 +1767,80 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                     // When a trait impl like `impl Add for fp32` has a method that instantiates
                     // an entity (e.g., FpAdd<IEEE754_32>), we need to merge that entity
                     for method in &trait_impl.method_implementations {
-                        let entity_names = extract_entity_refs_from_statements(&method.body);
-                        for entity_name in entity_names {
-                            // Check if entity already exists in target
-                            if !target.entities.iter().any(|e| e.name == entity_name) {
-                                // Find and merge the entity from source
-                                if let Some(entity) =
-                                    source.entities.iter().find(|e| e.name == entity_name)
-                                {
-                                    // Assign new entity ID
-                                    let new_entity_id = hir::EntityId(
-                                        target.entities.iter().map(|e| e.id.0).max().unwrap_or(0)
-                                            + 1,
-                                    );
-                                    let old_entity_id = entity.id;
+                        // Entities the method body instantiates — and, transitively,
+                        // the ones THOSE bodies instantiate. Merging an
+                        // implementation without its children leaves its instances
+                        // pointing into `source`'s id space, and EntityIds restart
+                        // per HIR, so such an id silently resolves to whatever
+                        // `target` happens to number the same. Measured: merging
+                        // `FpSub` alone left `inst adder = FpAdd<F>` on FpAdd's id
+                        // in fp.sk, which in the user's HIR is their own top-level
+                        // entity, and the wrong module got wired in.
+                        let mut worklist = extract_entity_refs_from_statements(&method.body);
+                        let mut merged: Vec<usize> = Vec::new();
+                        while let Some(entity_name) = worklist.pop() {
+                            // Already present — nothing to merge, and the name is
+                            // what later resolution keys on anyway.
+                            if target.entities.iter().any(|e| e.name == entity_name) {
+                                continue;
+                            }
+                            let Some(entity) =
+                                source.entities.iter().find(|e| e.name == entity_name)
+                            else {
+                                continue;
+                            };
 
-                                    let mut new_entity = entity.clone();
-                                    new_entity.id = new_entity_id;
-                                    target.entities.push(new_entity);
+                            let new_entity_id = hir::EntityId(
+                                target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
+                            );
+                            let old_entity_id = entity.id;
 
-                                    // Also merge the entity's implementation
-                                    if let Some(impl_block) = source
-                                        .implementations
-                                        .iter()
-                                        .find(|i| i.entity == old_entity_id)
+                            let mut new_entity = entity.clone();
+                            new_entity.id = new_entity_id;
+                            target.entities.push(new_entity);
+
+                            // Also merge the entity's implementation
+                            if let Some(impl_block) = source
+                                .implementations
+                                .iter()
+                                .find(|i| i.entity == old_entity_id)
+                            {
+                                let mut new_impl = impl_block.clone();
+                                new_impl.entity = new_entity_id;
+                                for inst in &new_impl.instances {
+                                    if let Some(child) =
+                                        source.entities.iter().find(|e| e.id == inst.entity)
                                     {
-                                        let mut new_impl = impl_block.clone();
-                                        new_impl.entity = new_entity_id;
-                                        target.implementations.push(new_impl);
+                                        worklist.push(child.name.clone());
                                     }
                                 }
+                                merged.push(target.implementations.len());
+                                target.implementations.push(new_impl);
+                            }
+                        }
+
+                        // Every child is present now, so translate each instance out
+                        // of `source`'s id space and into `target`'s. The name is the
+                        // only identifier that means the same thing in both.
+                        for idx in merged {
+                            let remapped: Vec<(usize, hir::EntityId)> = target.implementations
+                                [idx]
+                                .instances
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, inst)| {
+                                    let name = &source
+                                        .entities
+                                        .iter()
+                                        .find(|e| e.id == inst.entity)?
+                                        .name;
+                                    let id =
+                                        target.entities.iter().find(|e| &e.name == name)?.id;
+                                    Some((i, id))
+                                })
+                                .collect();
+                            for (i, id) in remapped {
+                                target.implementations[idx].instances[i].entity = id;
                             }
                         }
                     }

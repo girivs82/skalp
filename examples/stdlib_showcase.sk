@@ -4,7 +4,7 @@
 // Shows floating-point, fixed-point, integer, and vector operations.
 
 use skalp::numeric::fp::{fp32, FpAdd, FpMul, FpSqrt, FpSub, FpDiv};
-use skalp::numeric::vec::{vec3, VecAdd, VecDot, Vec3Cross, VecNormalize, VecSub};
+use skalp::numeric::vector::{vec3, VecAdd, VecDot, Vec3Cross, VecNormalize, VecSub};
 use skalp::numeric::fixed::{q16_16, FixedMul};
 use skalp::numeric::int::{i32, u16, IntAdd, IntMul};
 use skalp::numeric::formats::{IEEE754_32};
@@ -89,7 +89,7 @@ impl LightingPipeline<T: Numeric> {
 
     // Scale light color by intensity
     signal lit_color: vec3<T>
-    for i in 0..3 {
+    generate for i in 0..3 {
         lit_color[i] = light_color[i].mul(intensity)
     }
 
@@ -116,7 +116,7 @@ impl Particle<T: Numeric> {
 
     // v' = v + (F/m) * dt  (assume m=1)
     signal scaled_force: vec3<T>
-    for i in 0..3 {
+    generate for i in 0..3 {
         scaled_force[i] = force[i].mul(dt)
     }
 
@@ -129,7 +129,7 @@ impl Particle<T: Numeric> {
 
     // p' = p + v * dt
     signal scaled_vel: vec3<T>
-    for i in 0..3 {
+    generate for i in 0..3 {
         scaled_vel[i] = vel[i].mul(dt)
     }
 
@@ -174,7 +174,7 @@ impl FIR<const NUM_TAPS: nat> {
     signal products: q16_16[NUM_TAPS]
     signal product_overflow: bit[NUM_TAPS]
 
-    for i in 0..NUM_TAPS {
+    generate for i in 0..NUM_TAPS {
         inst multiplier = FixedMul<32, 16, true> {
             a: delays[i],
             b: coeffs[i],
@@ -186,13 +186,13 @@ impl FIR<const NUM_TAPS: nat> {
 
     // Sum all products
     signal accumulator: q16_16 = 0
-    for i in 0..NUM_TAPS {
+    generate for i in 0..NUM_TAPS {
         accumulator = accumulator + products[i]
     }
 
     on(clk.rise) {
         // Shift delay line
-        for i in (NUM_TAPS-1)..1 {
+        generate for i in (NUM_TAPS-1)..1 {
             delays[i] = delays[i-1]
         }
         delays[0] = sample
@@ -220,7 +220,7 @@ impl CORDIC<const W: nat, const ITERATIONS: nat> {
     signal z: int<W, true> = angle
 
     // CORDIC iterations
-    for i in 0..ITERATIONS {
+    generate for i in 0..ITERATIONS {
         signal x_shifted: int<W, true> = y >> i
         signal y_shifted: int<W, true> = x >> i
 
