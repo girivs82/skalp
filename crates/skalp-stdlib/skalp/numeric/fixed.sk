@@ -47,11 +47,14 @@ impl FixedAdd<const W: nat, const F: nat, const S: bool> {
 
     result = sum[W-1:0]
 
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal a_sign: bit = a[W-1]
+    signal b_sign: bit = b[W-1]
+    signal r_sign: bit = sum[W-1]
+
     overflow = if S {
         // Signed overflow: signs same but result sign different
-        signal a_sign: bit = a[W-1]
-        signal b_sign: bit = b[W-1]
-        signal r_sign: bit = sum[W-1]
         (a_sign == b_sign) && (a_sign != r_sign)
     } else {
         // Unsigned overflow: carry out
@@ -72,10 +75,13 @@ impl FixedSub<const W: nat, const F: nat, const S: bool> {
 
     result = diff[W-1:0]
 
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal a_sign: bit = a[W-1]
+    signal b_sign: bit = b[W-1]
+    signal r_sign: bit = diff[W-1]
+
     overflow = if S {
-        signal a_sign: bit = a[W-1]
-        signal b_sign: bit = b[W-1]
-        signal r_sign: bit = diff[W-1]
         (a_sign != b_sign) && (a_sign != r_sign)
     } else {
         diff[W]  // Borrow
@@ -119,9 +125,12 @@ impl FixedMul<const W: nat, const F: nat, const S: bool> {
 
     // Check for overflow
     signal high_bits: bit[W] = shifted[PROD_BITS-1:W]
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal result_sign: bit = result_raw[W-1]
+
     overflow = if S {
         // For signed, check if high bits are not all sign extension
-        signal result_sign: bit = result_raw[W-1]
         high_bits != {{W{result_sign}}}
     } else {
         // For unsigned, check if any high bits are set
@@ -132,7 +141,6 @@ impl FixedMul<const W: nat, const F: nat, const S: bool> {
     result = if overflow && saturate {
         if S {
             // Saturate to max/min based on sign
-            signal result_sign: bit = result_raw[W-1]
             result_sign ? {1'b1, {(W-1){1'b0}}} : {1'b0, {(W-1){1'b1}}}
         } else {
             // Saturate to max
@@ -183,8 +191,11 @@ impl FixedDiv<const W: nat, const F: nat, const S: bool> {
 
     // Check overflow
     signal high_bits: bit[F] = quotient[DIV_BITS-1:W]
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal result_sign: bit = result_raw[W-1]
+
     overflow = if S {
-        signal result_sign: bit = result_raw[W-1]
         high_bits != {{F{result_sign}}}
     } else {
         |high_bits
@@ -233,8 +244,11 @@ impl FixedConvert<W_IN, F_IN, S_IN, W_OUT, F_OUT, S_OUT> {
 
     // Check overflow
     signal high_bits: bit[INTERMEDIATE_BITS - W_OUT] = shifted[INTERMEDIATE_BITS-1:W_OUT]
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal result_sign: bit = result_raw[W_OUT-1]
+
     overflow = if S_OUT {
-        signal result_sign: bit = result_raw[W_OUT-1]
         high_bits != {{(INTERMEDIATE_BITS - W_OUT){result_sign}}}
     } else {
         |high_bits
@@ -294,10 +308,13 @@ pub entity FixedCompare<const W: nat, const F: nat, const S: bool> {
 impl FixedCompare<const W: nat, const F: nat, const S: bool> {
     eq = (a == b)
 
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal a_sign: bit = a[W-1]
+    signal b_sign: bit = b[W-1]
+
     lt = if S {
         // Signed comparison
-        signal a_sign: bit = a[W-1]
-        signal b_sign: bit = b[W-1]
         (a_sign && !b_sign) || ((a_sign == b_sign) && (a < b))
     } else {
         // Unsigned comparison
@@ -344,8 +361,12 @@ impl FixedSaturate<const W_IN: nat, const F: nat, const S: bool, const W_OUT: na
     const BITS_TO_CHECK: nat = W_IN - W_OUT
     signal high_bits: bit[BITS_TO_CHECK] = x[W_IN-1:W_OUT]
 
+    // A `signal` is an impl-level declaration, not an expression, so these
+    // cannot be declared inside an `if` branch. Combinational either way.
+    signal result_sign: bit = x[W_OUT-1]
+    signal x_sign: bit = x[W_IN-1]
+
     signal overflow: bit = if S {
-        signal result_sign: bit = x[W_OUT-1]
         high_bits != {{BITS_TO_CHECK{result_sign}}}
     } else {
         |high_bits
@@ -354,7 +375,6 @@ impl FixedSaturate<const W_IN: nat, const F: nat, const S: bool, const W_OUT: na
     result = if overflow {
         if S {
             // Saturate based on sign
-            signal x_sign: bit = x[W_IN-1]
             x_sign ? {1'b1, {(W_OUT-1){1'b0}}} : {1'b0, {(W_OUT-1){1'b1}}}
         } else {
             // Saturate to max

@@ -499,7 +499,7 @@ pub entity IntPopcount<const W: nat> {
 
 impl IntPopcount<const W: nat> {
     signal accumulator: nat = 0
-    for i in 0..W {
+    generate for i in 0..W {
         accumulator = accumulator + (x[i] as nat)
     }
     count = accumulator
@@ -522,7 +522,7 @@ pub entity IntReverse<const W: nat> {
 }
 
 impl IntReverse<const W: nat> {
-    for i in 0..W {
+    generate for i in 0..W {
         result[i] = x[W-1-i]
     }
 }
@@ -537,7 +537,7 @@ where W % 8 == 0 {
 impl IntByteSwap<const W: nat> {
     const NUM_BYTES: nat = W / 8
 
-    for i in 0..NUM_BYTES {
+    generate for i in 0..NUM_BYTES {
         signal byte_in: bit[8] = x[(i*8)+7:i*8]
         signal byte_out_pos: nat = (NUM_BYTES - 1 - i) * 8
         result[byte_out_pos+7:byte_out_pos] = byte_in

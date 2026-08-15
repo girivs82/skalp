@@ -452,13 +452,13 @@ impl StdlibShowcase {
 
     // Lighting
     signal ambient: fp32 = 0.1
-    let lighting = LightingPipeline<fp32> {
+    inst lighting = LightingPipeline<fp32> {
         normal: normal,
         light_dir: light_dir,
         light_color: {1.0, 1.0, 1.0},
         ambient: ambient,
-        color: lit_color
     }
+    lit_color = lighting.color
 
     // Physics (FP32 version)
     signal dt: fp32 = 0.016  // ~60 FPS

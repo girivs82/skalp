@@ -1788,6 +1788,24 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
 
             // If expression - may be intent-based conditional
+            // An if-expression's branches are blocks — `if S { a[W-1] } else
+            // { a[0] }` puts `a[W-1]` inside one. Without this arm a block fell
+            // to the catch-all and was cloned verbatim, so const parameters
+            // inside it were never substituted: the condition and everything
+            // outside the `if` specialised correctly while the branch bodies
+            // kept `W`, which then read as an undefined identifier.
+            HirExpression::Block {
+                statements,
+                result_expr,
+            } => HirExpression::Block {
+                // Statements in expression position are rare — the common
+                // shape is `{ expr }` from an if-branch — so substitute the
+                // result and pass statements through, matching what
+                // remap_expr_signals does with the same node.
+                statements: statements.clone(),
+                result_expr: Box::new(self.substitute_expr(result_expr, const_args)),
+            },
+
             HirExpression::If(if_expr) => {
                 let cond = self.substitute_expr(&if_expr.condition, const_args);
                 let then_expr = self.substitute_expr(&if_expr.then_expr, const_args);

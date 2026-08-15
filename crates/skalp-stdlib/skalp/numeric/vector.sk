@@ -37,7 +37,7 @@ pub entity VecSwizzle<T, const N_IN: nat, const N_OUT: nat> {
 }
 
 impl VecSwizzle<T, const N_IN: nat, const N_OUT: nat> {
-    for i in 0..N_OUT {
+    generate for i in 0..N_OUT {
         result[i] = v[indices[i]]
     }
 }
@@ -54,7 +54,7 @@ pub entity VecAdd<T: Numeric, const N: nat> {
 }
 
 impl VecAdd<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = a[i].add(b[i])
     }
 }
@@ -67,7 +67,7 @@ pub entity VecSub<T: Numeric, const N: nat> {
 }
 
 impl VecSub<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = a[i].sub(b[i])
     }
 }
@@ -80,7 +80,7 @@ pub entity VecMul<T: Numeric, const N: nat> {
 }
 
 impl VecMul<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = a[i].mul(b[i])
     }
 }
@@ -93,7 +93,7 @@ pub entity VecDiv<T: Numeric, const N: nat> {
 }
 
 impl VecDiv<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = a[i].div(b[i])
     }
 }
@@ -106,7 +106,7 @@ pub entity VecScale<T: Numeric, const N: nat> {
 }
 
 impl VecScale<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = v[i].mul(scalar)
     }
 }
@@ -118,7 +118,7 @@ pub entity VecNegate<T: Numeric, const N: nat> {
 }
 
 impl VecNegate<T: Numeric, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = v[i].neg()
     }
 }
@@ -140,13 +140,13 @@ impl VecDot<T: Numeric, const N: nat> {
     signal products: T[N]
 
     // Multiply components
-    for i in 0..N {
+    generate for i in 0..N {
         products[i] = a[i].mul(b[i])
     }
 
     // Sum reduction
     signal accumulator: T = T::ZERO
-    for i in 0..N {
+    generate for i in 0..N {
         accumulator = accumulator.add(products[i])
     }
 
@@ -252,7 +252,7 @@ impl VecNormalize<T: Numeric, const N: nat> {
     result = scale.result
 
     // If zero length, return zero vector
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = valid ? result[i] : T::ZERO
     }
 }
@@ -509,7 +509,7 @@ pub entity VecEqual<T: Numeric, const N: nat> {
 impl VecEqual<T: Numeric, const N: nat> {
     signal components_equal: bit[N]
 
-    for i in 0..N {
+    generate for i in 0..N {
         components_equal[i] = (a[i] == b[i])
     }
 
@@ -535,7 +535,7 @@ impl VecApproxEqual<T: Numeric, const N: nat> {
 
     signal components_close: bit[N]
 
-    for i in 0..N {
+    generate for i in 0..N {
         signal abs_diff: T = abs(diff[i])
         components_close[i] = (abs_diff < epsilon)
     }
@@ -555,7 +555,7 @@ pub entity VecSum<T: Numeric, const N: nat> {
 
 impl VecSum<T: Numeric, const N: nat> {
     signal accumulator: T = T::ZERO
-    for i in 0..N {
+    generate for i in 0..N {
         accumulator = accumulator.add(v[i])
     }
     sum = accumulator
@@ -569,7 +569,7 @@ pub entity VecProduct<T: Numeric, const N: nat> {
 
 impl VecProduct<T: Numeric, const N: nat> {
     signal accumulator: T = T::ONE
-    for i in 0..N {
+    generate for i in 0..N {
         accumulator = accumulator.mul(v[i])
     }
     product = accumulator
@@ -583,7 +583,7 @@ pub entity VecMin<T: Numeric, const N: nat> {
 
 impl VecMin<T: Numeric, const N: nat> {
     signal accumulator: T = T::MAX_VALUE
-    for i in 0..N {
+    generate for i in 0..N {
         accumulator = (v[i] < accumulator) ? v[i] : accumulator
     }
     min_val = accumulator
@@ -597,7 +597,7 @@ pub entity VecMax<T: Numeric, const N: nat> {
 
 impl VecMax<T: Numeric, const N: nat> {
     signal accumulator: T = T::MIN_VALUE
-    for i in 0..N {
+    generate for i in 0..N {
         accumulator = (v[i] > accumulator) ? v[i] : accumulator
     }
     max_val = accumulator
@@ -614,7 +614,7 @@ pub entity VecFill<T, const N: nat> {
 }
 
 impl VecFill<T, const N: nat> {
-    for i in 0..N {
+    generate for i in 0..N {
         result[i] = value
     }
 }
