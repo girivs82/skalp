@@ -274,7 +274,7 @@ impl<'hir> InstantiationCollector<'hir> {
                             }
                         }
                     }
-                    HirGenericType::Type => {
+                    HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
                         if let Some(ref default) = generic.default_value {
                             if let Some(ty) = self.extract_type_from_expr(default) {
                                 type_args.insert(generic.name.clone(), ty);
@@ -556,8 +556,15 @@ impl<'hir> InstantiationCollector<'hir> {
 
             let generic = &entity.generics[i];
 
+            // A BOUND does not change what the parameter IS. Matching only
+            // `Type` meant `<T: Numeric>` fell through every arm, so no type
+            // argument was recorded, no specialization was built, and the
+            // instantiation resolved to a copy of the template with its
+            // generics list emptied and `T` still standing in its ports. MIR
+            // already treats the two alike ("TypeWithBounds is treated as Type
+            // in MIR"); this collector was the only place that did not.
             match &generic.param_type {
-                HirGenericType::Type => {
+                HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
                     if let Some(ty) = self.extract_type_from_expr(arg) {
                         type_args.insert(generic.name.clone(), ty);
                     }
@@ -650,8 +657,15 @@ impl<'hir> InstantiationCollector<'hir> {
 
             let generic = &entity.generics[i];
 
+            // A BOUND does not change what the parameter IS. Matching only
+            // `Type` meant `<T: Numeric>` fell through every arm, so no type
+            // argument was recorded, no specialization was built, and the
+            // instantiation resolved to a copy of the template with its
+            // generics list emptied and `T` still standing in its ports. MIR
+            // already treats the two alike ("TypeWithBounds is treated as Type
+            // in MIR"); this collector was the only place that did not.
             match &generic.param_type {
-                HirGenericType::Type => {
+                HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
                     // Type parameter - extract type from expression
                     if let Some(ty) = self.extract_type_from_expr(arg) {
                         type_args.insert(generic.name.clone(), ty);
@@ -681,7 +695,7 @@ impl<'hir> InstantiationCollector<'hir> {
             // Find the generic parameter with this name
             if let Some(generic) = entity.generics.iter().find(|g| &g.name == param_name) {
                 match &generic.param_type {
-                    HirGenericType::Type => {
+                    HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
                         if let Some(ty) = self.extract_type_from_expr(arg) {
                             type_args.insert(param_name.clone(), ty);
                         }
@@ -787,60 +801,68 @@ impl<'hir> InstantiationCollector<'hir> {
         // Build map of generic type parameter names
         let mut type_param_names = IndexSet::new();
         for generic in &entity.generics {
-            if matches!(generic.param_type, HirGenericType::Type) {
+            if matches!(
+                generic.param_type,
+                HirGenericType::Type | HirGenericType::TypeWithBounds(_)
+            ) {
                 type_param_names.insert(generic.name.clone());
             }
         }
 
-        // For each port, check if its type is a generic parameter
-        // If so, try to infer the concrete type from the connection
+        // For each port, check if its type mentions a generic parameter, and
+        // infer that parameter from the connection.
+        //
+        // The parameter may sit INSIDE an aggregate: a port `v: vec3<T>` names
+        // T, but the connected expression has type `vec3<fp32>`, so T is its
+        // ELEMENT, not the whole thing. Taking the name from the element and
+        // the type from the whole connection bound T to `vec3<fp32>` and
+        // specialised the entity as `Scale_vec3_fp32`, with every `vec3<T>`
+        // port becoming a vector of vectors.
         for port in &entity.ports {
-            // Check if port type is a generic type parameter
-            let param_name = match &port.port_type {
-                HirType::Custom(name) if type_param_names.contains(name) => name.clone(),
-                HirType::Vec2(elem) => {
-                    if let HirType::Custom(name) = elem.as_ref() {
-                        if type_param_names.contains(name) {
-                            name.clone()
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
+            // (parameter named by this port, how to read it back out of the
+            // connected type)
+            enum Shape {
+                Whole,
+                Element,
+            }
+            let (param_name, shape) = match &port.port_type {
+                HirType::Custom(name) if type_param_names.contains(name) => {
+                    (name.clone(), Shape::Whole)
                 }
-                HirType::Vec3(elem) | HirType::Vec4(elem) => {
-                    if let HirType::Custom(name) = elem.as_ref() {
-                        if type_param_names.contains(name) {
-                            name.clone()
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
+                HirType::Vec2(elem)
+                | HirType::Vec3(elem)
+                | HirType::Vec4(elem)
+                | HirType::Array(elem, _) => match elem.as_ref() {
+                    HirType::Custom(name) if type_param_names.contains(name) => {
+                        (name.clone(), Shape::Element)
                     }
-                }
-                HirType::Array(elem, _) => {
-                    if let HirType::Custom(name) = elem.as_ref() {
-                        if type_param_names.contains(name) {
-                            name.clone()
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
+                    _ => continue,
+                },
                 _ => continue,
             };
 
             // Find the connection for this port
             if let Some(connection) = instance.connections.iter().find(|c| c.port == port.name) {
                 // Try to infer the type from the connected expression
-                if let Some(concrete_type) = self.infer_expr_type(&connection.expr) {
-                    inferred_types
-                        .entry(param_name.clone())
-                        .or_insert(concrete_type);
+                if let Some(connected) = self.infer_expr_type(&connection.expr) {
+                    let concrete_type = match shape {
+                        Shape::Whole => Some(connected),
+                        Shape::Element => match connected {
+                            HirType::Vec2(e)
+                            | HirType::Vec3(e)
+                            | HirType::Vec4(e)
+                            | HirType::Array(e, _) => Some(*e),
+                            // Connected type is not the aggregate the port
+                            // declares. Infer nothing rather than bind the
+                            // parameter to something of the wrong shape.
+                            _ => None,
+                        },
+                    };
+                    if let Some(concrete_type) = concrete_type {
+                        inferred_types
+                            .entry(param_name.clone())
+                            .or_insert(concrete_type);
+                    }
                 }
             }
         }
@@ -872,15 +894,24 @@ impl<'hir> InstantiationCollector<'hir> {
                     None
                 }
             }
-            // Port references
+            // Port references. A connection names a port of the entity whose
+            // implementation contains the instance, so that entity is where the
+            // id means what it says. Scanning every entity and taking the first
+            // port with a matching number is wrong: PortIds restart per entity.
+            // Measured, it inferred T for `Scale<fp32>` from an unrelated
+            // `flags: bit[5]` port and produced `Scale_bit5`. Better to infer
+            // nothing than the wrong type — a wrong binding specialises the
+            // whole entity around it.
             HirExpression::Port(port_id) => {
-                // Look up port from all entities
-                for entity in self.hir.entities.iter() {
-                    if let Some(port) = entity.ports.iter().find(|p| p.id == *port_id) {
-                        return Some(port.port_type.clone());
-                    }
-                }
-                None
+                let owner = self.current_impl?.entity;
+                self.hir
+                    .entities
+                    .iter()
+                    .find(|e| e.id == owner)?
+                    .ports
+                    .iter()
+                    .find(|p| p.id == *port_id)
+                    .map(|p| p.port_type.clone())
             }
             // Variable references
             HirExpression::Variable(var_id) => {

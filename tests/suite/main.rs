@@ -110,6 +110,7 @@ mod test_phase9_safety;
 mod test_pipeline_annotation;
 mod test_pipelined_processor;
 mod test_popcount_in_mux;
+mod test_generic_type_params;
 mod test_power_domains;
 mod test_trait_method_calls;
 mod test_power_intent;
