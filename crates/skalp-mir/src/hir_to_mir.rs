@@ -4309,6 +4309,12 @@ impl<'hir> HirToMir<'hir> {
         // field_path will be like ["0", "x"], ["0", "y"], ["1", "x"], etc.
         let mut array_indices: IndexMap<String, Vec<FlattenedField>> = IndexMap::new();
 
+        // A vector flattens under x/y/z/w rather than 0/1/2/3, so `v[i] = ..`
+        // found no numeric groups at all and the whole expansion bailed out.
+        // Same translation as the read path in
+        // try_resolve_flattened_array_index. No type gate is needed here: the
+        // LHS is an index expression, and indexing is only meaningful on a
+        // vector or an array, so fields named x/y/z/w under one are components.
         for field in base_fields {
             if let Some(first_component) = field.field_path.first() {
                 // Check if first component is a numeric index
@@ -4317,6 +4323,11 @@ impl<'hir> HirToMir<'hir> {
                         .entry(first_component.clone())
                         .or_default()
                         .push(field);
+                } else if let Some(pos) = ["x", "y", "z", "w"]
+                    .iter()
+                    .position(|c| c == first_component)
+                {
+                    array_indices.entry(pos.to_string()).or_default().push(field);
                 }
             }
         }
@@ -5184,8 +5195,25 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
-        let lhs_id = match &assign.lhs {
-            hir::HirLValue::Signal(id) if self.flattened_signals.contains_key(id) => *id,
+        // The destination may be a signal or an output PORT. Only the signal
+        // case was handled, so `o = child.vec_output` with `o` a port fell
+        // through to the generic path, which cannot see a flattened aggregate
+        // and dropped the assignment. Ports became the common case once vectors
+        // started flattening into x/y/z like any other aggregate.
+        enum Dest {
+            Signal(hir::SignalId),
+            Port(hir::PortId),
+        }
+        let dest = match &assign.lhs {
+            hir::HirLValue::Signal(id) if self.flattened_signals.contains_key(id) => {
+                Dest::Signal(*id)
+            }
+            hir::HirLValue::Port(id)
+                if self.flattened_ports.contains_key(id)
+                    && self.port_belongs_to_current_entity(id) =>
+            {
+                Dest::Port(*id)
+            }
             _ => return None,
         };
         let (var_id, port) = match &assign.rhs {
@@ -5204,7 +5232,10 @@ impl<'hir> HirToMir<'hir> {
         if !output_ports.keys().any(|k| k.starts_with(&prefix)) {
             return None;
         }
-        let lhs_fields = self.flattened_signals.get(&lhs_id)?.clone();
+        let lhs_fields = match &dest {
+            Dest::Signal(id) => self.flattened_signals.get(id)?.clone(),
+            Dest::Port(id) => self.flattened_ports.get(id)?.clone(),
+        };
         let mut assigns = Vec::new();
         for field in &lhs_fields {
             let key = format!(
@@ -5217,7 +5248,10 @@ impl<'hir> HirToMir<'hir> {
                 continue;
             };
             assigns.push(ContinuousAssign {
-                lhs: LValue::Signal(SignalId(field.id)),
+                lhs: match &dest {
+                    Dest::Signal(_) => LValue::Signal(SignalId(field.id)),
+                    Dest::Port(_) => LValue::Port(PortId(field.id)),
+                },
                 rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(src))),
                 span: None,
             });
@@ -17777,6 +17811,16 @@ impl<'hir> HirToMir<'hir> {
                     let base_type = result_stack.pop().unwrap_or(None);
                     let result = base_type.map(|bt| match bt {
                         hir::HirType::Array(elem_type, _) => *elem_type,
+                        // `v[i]` on a vector yields its element, the same as
+                        // an array. Without this it fell to the catch-all
+                        // below and `v[0]` was typed as one bit, so
+                        // `v[0].mul(k)` looked for `impl Mul for bit[1]`,
+                        // found none, and the assignment could not be lowered.
+                        hir::HirType::Vec2(elem_type)
+                        | hir::HirType::Vec3(elem_type)
+                        | hir::HirType::Vec4(elem_type) => *elem_type,
+                        // Correct for bit vectors, which is what everything
+                        // else indexed here is: one bit out of `bit[N]`.
                         _ => hir::HirType::Bit(1),
                     });
                     result_stack.push(result);
@@ -24896,15 +24940,35 @@ impl<'hir> HirToMir<'hir> {
 
         let index_val = self.try_eval_const_expr(index)?;
 
+        let index_str = index_val.to_string();
+        // A vector flattens under x/y/z/w, not 0/1/2/3, so a numeric index has
+        // to be translated to the component name. Without this the lookup
+        // missed and lowering fell through to a bit-select: `v[0]` became
+        // `v__x[0]`, bit 0 of the first component rather than the whole
+        // component. Gated on the base really being a vector so that indexing
+        // some other struct that happens to have an `x` field is unaffected.
+        let component = if matches!(
+            self.infer_hir_type(base),
+            Some(hir::HirType::Vec2(_)) | Some(hir::HirType::Vec3(_)) | Some(hir::HirType::Vec4(_))
+        ) {
+            usize::try_from(index_val)
+                .ok()
+                .and_then(|i| ["x", "y", "z", "w"].get(i).copied())
+        } else {
+            None
+        };
         let fields = if is_signal {
             self.flattened_signals.get(&hir::SignalId(base_hir_id))?
         } else {
             self.flattened_ports.get(&hir::PortId(base_hir_id))?
         };
-
-        let index_str = index_val.to_string();
         for field in fields {
-            if field.field_path.first() == Some(&index_str) && field.field_path.len() == 1 {
+            let matches_component = field.field_path.len() == 1
+                && component.is_some()
+                && field.field_path.first().map(|s| s.as_str()) == component;
+            if matches_component
+                || (field.field_path.first() == Some(&index_str) && field.field_path.len() == 1)
+            {
                 return if is_signal {
                     Some(Expression::with_unknown_type(ExpressionKind::Ref(
                         LValue::Signal(SignalId(field.id)),

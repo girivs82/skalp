@@ -14414,8 +14414,66 @@ impl HirBuilderContext {
                                 }
                             }
 
-                            // TODO: Handle other parametric types (vec, etc.)
-                            // For now, fall through to Custom type handling
+                            // `vec2<T>`/`vec3<T>`/`vec4<T>`: keep the element
+                            // type. HirType::Vec2/3/4 carry it and MIR already
+                            // converts them; falling through to Custom("vec3")
+                            // threw the argument away, leaving convert_type to
+                            // guess — it defaulted to fp32 with a TODO saying
+                            // so. The same loss is why `v[i]` could not be
+                            // typed: with only a name, infer_hir_type had no
+                            // element type to hand back, so indexing fell to
+                            // its `_ => Bit(1)` case and `v[i].mul(k)` looked
+                            // for `impl Mul for bit[1]`.
+                            if matches!(type_name.as_str(), "vec2" | "vec3" | "vec4") {
+                                // A generic argument parses as an EXPRESSION,
+                                // not a type — which is why the `fixed<...>`
+                                // case above reads its arguments with
+                                // build_expression. So the element arrives as
+                                // a bare identifier and is resolved the way any
+                                // named type is. Anything that is not a plain
+                                // identifier falls through to Custom, i.e. to
+                                // the previous behaviour, rather than guessing.
+                                let elem = arg_list.children().find_map(|c| {
+                                    let inner = if c.kind() == SyntaxKind::Arg {
+                                        c.children().next()?
+                                    } else {
+                                        c.clone()
+                                    };
+                                    let text = inner.text().to_string();
+                                    let name = text.trim();
+                                    if name.is_empty()
+                                        || !name
+                                            .chars()
+                                            .all(|ch| ch.is_alphanumeric() || ch == '_')
+                                    {
+                                        return None;
+                                    }
+                                    Some(
+                                        self.symbols
+                                            .user_types
+                                            .get(name)
+                                            .cloned()
+                                            .unwrap_or(match name {
+                                                "fp16" => HirType::Float16,
+                                                "fp32" => HirType::Float32,
+                                                "fp64" => HirType::Float64,
+                                                _ => HirType::Custom(name.to_string()),
+                                            }),
+                                    )
+                                });
+                                if let Some(elem) = elem {
+                                    let boxed = Box::new(elem);
+                                    return match type_name.as_str() {
+                                        "vec2" => HirType::Vec2(boxed),
+                                        "vec3" => HirType::Vec3(boxed),
+                                        _ => HirType::Vec4(boxed),
+                                    };
+                                }
+                            }
+
+                            // TODO: Handle other parametric types beyond
+                            // `fixed` and `vec2/3/4`; these fall through to
+                            // Custom type handling.
                         }
 
                         // Check if this is a user-defined type (struct, enum, union, distinct) FIRST

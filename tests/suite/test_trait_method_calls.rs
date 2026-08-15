@@ -95,3 +95,103 @@ impl T1 {{
     build("k * k");
     build("k.mul(k)");
 }
+
+/// `vec3<fp32>` was stored as `HirType::Custom("vec3")`, dropping the element
+/// type. convert_type then had to guess it (defaulting to fp32, with a TODO
+/// saying so), and infer_hir_type had nothing to return for `v[i]`, so indexing
+/// fell to its `_ => Bit(1)` case and `v[i].mul(k)` looked for
+/// `impl Mul for bit[1]`. The Vec2/3/4 variants already carry an element type
+/// and MIR already converts them; the builder just was not producing them.
+#[test]
+fn a_vector_element_keeps_its_type() {
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+    );
+
+    let src = r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3};
+
+entity ScaleC {
+    in v: vec3<fp32>
+    in k: fp32
+    out o: vec3<fp32>
+}
+
+impl ScaleC {
+    signal out_v: vec3<fp32>
+    generate for i in 0..3 {
+        out_v[i] = v[i].mul(k)
+    }
+    o = out_v
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.sk");
+    std::fs::write(&path, src).unwrap();
+
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .expect("`v[i].mul(k)` must lower");
+    let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+    // Each component must reach its own multiplier as a WHOLE component. The
+    // first cut of this fix made the type resolve while still lowering `v[0]`
+    // as a bit-select, emitting `.a(v__x[0])` — bit 0 of the component. That
+    // built cleanly and was wrong, which is why this asserts the connection
+    // rather than that the build succeeded.
+    for c in ["x", "y", "z"] {
+        assert!(
+            sv.contains(&format!(".a(v__{c})")),
+            "component {c} must feed its multiplier whole:\n{sv}"
+        );
+        assert!(
+            !sv.contains(&format!(".a(v__{c}[0])")),
+            "component {c} must not be bit-selected:\n{sv}"
+        );
+    }
+}
+
+/// Reading a whole vector output off an instance into an output PORT. Only a
+/// signal destination was handled, so this was dropped; ports became the
+/// common case once vectors started flattening into x/y/z like any other
+/// aggregate. Failed before this change too, for the same reason.
+#[test]
+fn a_whole_vector_instance_output_reaches_a_port() {
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+    );
+
+    let src = r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3};
+
+entity Child { in v: vec3<fp32> out o: vec3<fp32> }
+impl Child { o = v }
+
+entity Par { in v: vec3<fp32> out o: vec3<fp32> }
+impl Par {
+    inst c = Child { v: v }
+    o = c.o
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.sk");
+    std::fs::write(&path, src).unwrap();
+
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .expect("`o = c.o` must lower");
+    let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+    for c in ["x", "y", "z"] {
+        assert!(
+            sv.contains(&format!("assign o__{c} = c_o__{c};")),
+            "component {c} must be wired through:\n{sv}"
+        );
+    }
+}
