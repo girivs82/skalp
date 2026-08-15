@@ -2449,4 +2449,31 @@ impl TopG {
             "a constant index must not emit the self-referencing dynamic form:\n{sv}"
         );
     }
+
+    /// The same loop with a LITERAL bound is elaborated by the HIR builder
+    /// instead of the monomorphizer, and had the same defect from the other
+    /// direction: the impl-level instance pre-registration walks only direct
+    /// children, so a nested instance was never registered or renamed. Every
+    /// iteration emitted a module with the SAME name, all wired to one set of
+    /// nets — duplicate module definitions, which is illegal SystemVerilog,
+    /// accepted silently. Both paths must agree.
+    #[test]
+    fn a_literal_bound_elaborates_identically() {
+        let sv = sv(&DESIGN
+            .replace("IdxGen<const N: nat>", "IdxLit")
+            .replace("0..N", "0..4")
+            .replace("bit[8][N]", "bit[8][4]")
+            .replace("bit[N]", "bit[4]")
+            .replace("inst g = IdxGen<4>", "inst g = IdxLit"));
+        for i in 0..4 {
+            assert!(
+                sv.contains(&format!("Mul8 m__g{i} (")),
+                "literal-bound iteration {i} must have its own instance:\n{sv}"
+            );
+            assert!(
+                sv.contains(&format!("assign products_{i} = m__g{i}_result;")),
+                "literal-bound products_{i} must come from iteration {i}:\n{sv}"
+            );
+        }
+    }
 }

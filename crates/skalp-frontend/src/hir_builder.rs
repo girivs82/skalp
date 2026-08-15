@@ -5676,6 +5676,29 @@ impl HirBuilderContext {
                         .iter()
                         .map(|e| Self::substitute_in_expr(e, iterator_var_id, iterator, i))
                         .collect();
+
+                    // Each iteration needs its own instance AND its own
+                    // variable. The impl-level pre-registration pass (BUG #85)
+                    // walks only the impl's DIRECT children, so an instance
+                    // nested in a generate-for was never registered and never
+                    // renamed: every iteration produced a module with the SAME
+                    // name, `m.result` resolved to none of them, and codegen
+                    // wired all N to one set of nets. That is duplicate module
+                    // definitions — illegal SystemVerilog — and it compiled
+                    // without complaint.
+                    //
+                    // Registering the base name here rebinds it per iteration.
+                    // Body children are processed in source order within each
+                    // iteration, so the assignments that read `m` see THIS
+                    // iteration's instance. Matches the `__g{i}` naming the
+                    // symbolic path uses for the same construct.
+                    let base_name = instance.name.clone();
+                    let var_id = self.next_variable_id();
+                    self.symbols.variables.insert(base_name.clone(), var_id);
+                    self.symbols
+                        .add_to_scope(&base_name, SymbolId::Variable(var_id));
+                    instance.variable_id = Some(var_id);
+                    instance.name = format!("{}__g{}", base_name, i);
                     instances.push(instance);
                 }
             }
