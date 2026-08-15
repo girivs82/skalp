@@ -18567,11 +18567,18 @@ impl<'hir> HirToMir<'hir> {
             "sqrt" => Some("Sqrt"),
             "abs" => Some("Abs"),
             "neg" => Some("Neg"),
-            // Binary traits
-            "add" => Some("Addable"),
-            "sub" => Some("Subtractable"),
-            "mul" => Some("Multipliable"),
-            "div" => Some("Divisible"),
+            // Binary traits. These named `Addable`/`Subtractable`/
+            // `Multipliable`/`Divisible`, which are not traits — the strings
+            // appear nowhere else in the tree, stdlib included. Resolution
+            // therefore never matched and `x.mul(y)` could not be lowered,
+            // while `x * y` worked, since the operator path resolves through
+            // the real `Mul`. The stdlib declares `trait Mul { fn mul(...) }`
+            // and `impl Mul for fp32`, so the trait name is the method name
+            // capitalised.
+            "add" => Some("Add"),
+            "sub" => Some("Sub"),
+            "mul" => Some("Mul"),
+            "div" => Some("Div"),
             // Standard library trait names
             "Add" | "add_" => Some("Add"),
             "Sub" | "sub_" => Some("Sub"),
