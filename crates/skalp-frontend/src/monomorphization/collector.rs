@@ -832,7 +832,8 @@ impl<'hir> InstantiationCollector<'hir> {
                 HirType::Vec2(elem)
                 | HirType::Vec3(elem)
                 | HirType::Vec4(elem)
-                | HirType::Array(elem, _) => match elem.as_ref() {
+                | HirType::Array(elem, _)
+                | HirType::ArrayExpr(elem, _) => match elem.as_ref() {
                     HirType::Custom(name) if type_param_names.contains(name) => {
                         (name.clone(), Shape::Element)
                     }
@@ -851,23 +852,46 @@ impl<'hir> InstantiationCollector<'hir> {
                             HirType::Vec2(e)
                             | HirType::Vec3(e)
                             | HirType::Vec4(e)
-                            | HirType::Array(e, _) => Some(*e),
+                            | HirType::Array(e, _)
+                            | HirType::ArrayExpr(e, _) => Some(*e),
                             // Connected type is not the aggregate the port
                             // declares. Infer nothing rather than bind the
                             // parameter to something of the wrong shape.
                             _ => None,
                         },
                     };
+                    // The connected type can still be symbolic: instantiating
+                    // `VecAdd<T, N>` from inside another generic entity
+                    // connects ports that are themselves `vec<T, N>`, so the
+                    // element reads back as `T`. Binding T -> T is a cycle, and
+                    // substitute_type follows it forever — a stack overflow
+                    // rather than a diagnostic. Infer only concrete types.
                     if let Some(concrete_type) = concrete_type {
-                        inferred_types
-                            .entry(param_name.clone())
-                            .or_insert(concrete_type);
+                        if !Self::type_mentions_param(&concrete_type, &type_param_names) {
+                            inferred_types
+                                .entry(param_name.clone())
+                                .or_insert(concrete_type);
+                        }
                     }
                 }
             }
         }
 
         inferred_types
+    }
+
+    /// Does this type still mention one of the entity's type parameters?
+    fn type_mentions_param(ty: &HirType, params: &IndexSet<String>) -> bool {
+        match ty {
+            HirType::Custom(name) => params.contains(name),
+            HirType::Vec2(e) | HirType::Vec3(e) | HirType::Vec4(e) => {
+                Self::type_mentions_param(e, params)
+            }
+            HirType::Array(e, _) | HirType::ArrayExpr(e, _) => {
+                Self::type_mentions_param(e, params)
+            }
+            _ => false,
+        }
     }
 
     /// Try to infer the type of an expression

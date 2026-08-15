@@ -1532,6 +1532,14 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // Custom type might be a type parameter
             HirType::Custom(name) => {
                 if let Some(concrete_ty) = instantiation.type_args.get(name) {
+                    // A parameter bound to ITSELF (`T -> T`) would recurse
+                    // forever here, and an infinite recursion in a compiler is
+                    // a stack overflow with no diagnostic at all. Callers are
+                    // expected not to build such a binding; this makes it
+                    // terminate regardless of who does.
+                    if matches!(concrete_ty, HirType::Custom(n) if n == name) {
+                        return self.resolve_custom_type(ty);
+                    }
                     // Recursively substitute and resolve the concrete type
                     let substituted = self.substitute_type(concrete_ty, instantiation);
                     // Resolve custom types to their definitions

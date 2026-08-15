@@ -14424,7 +14424,10 @@ impl HirBuilderContext {
                             // element type to hand back, so indexing fell to
                             // its `_ => Bit(1)` case and `v[i].mul(k)` looked
                             // for `impl Mul for bit[1]`.
-                            if matches!(type_name.as_str(), "vec2" | "vec3" | "vec4") {
+                            if matches!(
+                                type_name.as_str(),
+                                "vec" | "vec2" | "vec3" | "vec4"
+                            ) {
                                 // A generic argument parses as an EXPRESSION,
                                 // not a type — which is why the `fixed<...>`
                                 // case above reads its arguments with
@@ -14461,6 +14464,33 @@ impl HirBuilderContext {
                                             }),
                                     )
                                 });
+                                // `vec<T, N>` is the general alias
+                                // (`pub type vec<T, const N: nat> = T[N]`), so
+                                // it carries a SIZE as well as an element, and
+                                // the size may be the generic parameter itself.
+                                // HirType::ArrayExpr holds exactly that, and
+                                // substitute_type already collapses it to a
+                                // concrete Array once N is bound.
+                                if type_name == "vec" {
+                                    let size = arg_list
+                                        .children()
+                                        .filter_map(|c| {
+                                            let inner = if c.kind() == SyntaxKind::Arg {
+                                                c.children().next()?
+                                            } else {
+                                                c.clone()
+                                            };
+                                            self.build_expression(&inner)
+                                        })
+                                        .nth(1);
+                                    return match (elem, size) {
+                                        (Some(elem), Some(size)) => HirType::ArrayExpr(
+                                            Box::new(elem),
+                                            Box::new(size),
+                                        ),
+                                        _ => HirType::Custom("vec".to_string()),
+                                    };
+                                }
                                 if let Some(elem) = elem {
                                     let boxed = Box::new(elem);
                                     return match type_name.as_str() {

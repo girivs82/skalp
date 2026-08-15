@@ -17818,7 +17818,9 @@ impl<'hir> HirToMir<'hir> {
                         // found none, and the assignment could not be lowered.
                         hir::HirType::Vec2(elem_type)
                         | hir::HirType::Vec3(elem_type)
-                        | hir::HirType::Vec4(elem_type) => *elem_type,
+                        | hir::HirType::Vec4(elem_type)
+                        // `vec<T, N>` before its size is bound.
+                        | hir::HirType::ArrayExpr(elem_type, _) => *elem_type,
                         // Correct for bit vectors, which is what everything
                         // else indexed here is: one bit out of `bit[N]`.
                         _ => hir::HirType::Bit(1),

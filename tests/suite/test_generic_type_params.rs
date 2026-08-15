@@ -131,3 +131,71 @@ impl TopS {
         );
     }
 }
+
+/// `vec<T, N>` is the general alias (`pub type vec<T, const N: nat> = T[N]`),
+/// so it carries a size as well as an element and the size may be the parameter
+/// itself. It degraded to `Custom("vec")`, losing both, which is why an entity
+/// declaring `vec<T, N>` ports could not have T inferred from them.
+#[test]
+fn the_generic_vec_alias_keeps_its_arguments() {
+    let ctx = hir(r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3, VecAdd};
+
+entity TV {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out o: vec3<fp32>
+}
+
+impl TV {
+    inst s = VecAdd<fp32, 3> { a: a, b: b }
+    o = s.result
+}
+"#);
+    let names: Vec<&String> = ctx.main_hir.entities.iter().map(|e| &e.name).collect();
+    assert!(
+        names.iter().any(|n| *n == "VecAdd_3_fp32"),
+        "T must be inferred from `vec<T, N>` ports; got {names:?}"
+    );
+}
+
+/// Instantiating a generic entity from INSIDE another generic entity connects
+/// ports that are themselves symbolic, so inference read T back as `T` and
+/// bound T -> T. substitute_type followed that cycle forever: a stack overflow,
+/// which is not a diagnostic and cannot be caught. Reaching the end of this
+/// test at all is the assertion.
+#[test]
+fn a_parameter_is_never_bound_to_itself() {
+    let ctx = hir(r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3, VecAdd};
+
+entity Inner<T: Numeric> {
+    in a: vec3<T>
+    in b: vec3<T>
+    out o: vec3<T>
+}
+
+impl Inner<T: Numeric> {
+    // `a` and `b` are still `vec<T, _>` here — the connected types are
+    // symbolic, so nothing concrete can be inferred for the child.
+    inst s = VecAdd<T, 3> { a: a, b: b }
+    o = s.result
+}
+
+entity Outer {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out o: vec3<fp32>
+}
+
+impl Outer {
+    inst i = Inner<fp32> { a: a, b: b }
+    o = i.o
+}
+"#);
+    // Whether it lowers is a separate question; it must not recurse forever.
+    let _ = skalp_mir::MirCompiler::new()
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs);
+}
