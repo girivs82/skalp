@@ -199,3 +199,67 @@ impl Outer {
     let _ = skalp_mir::MirCompiler::new()
         .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs);
 }
+
+/// A `generate for` whose bounds are generic is preserved as a TEMPLATE in the
+/// implementation's `statements` and elaborated later, during specialization.
+/// The import merge remapped an implementation's assignments, instances,
+/// signals and event blocks — but not its statements — so the template kept the
+/// port ids of the module it came from. `VecAdd`'s ports became 38..40 on
+/// import while its template still said 3..5; specialization mapped 38..40 to
+/// 68..70 and left 5 untouched, and the elaborated `result[i] = ..` named a
+/// port belonging to no entity. It could not be lowered, and the diagnostic
+/// blamed the right-hand side because that is what the assignment printed.
+#[test]
+fn a_generate_for_template_survives_an_import_with_its_ports_remapped() {
+    let ctx = hir(r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3, VecAdd};
+
+entity TV {
+    in a: vec3<fp32>
+    in b: vec3<fp32>
+    out o: vec3<fp32>
+}
+
+impl TV {
+    inst s = VecAdd<fp32, 3> { a: a, b: b }
+    o = s.result
+}
+"#);
+
+    // Every port an implementation references must belong to its own entity.
+    // That invariant is what actually broke here, and it is cheap to state.
+    let ents: std::collections::HashMap<_, _> =
+        ctx.main_hir.entities.iter().map(|e| (e.id, e)).collect();
+    for imp in &ctx.main_hir.implementations {
+        let Some(owner) = ents.get(&imp.entity) else {
+            continue;
+        };
+        let own: std::collections::HashSet<_> = owner.ports.iter().map(|p| p.id).collect();
+        for a in &imp.assignments {
+            let mut lv = &a.lhs;
+            loop {
+                match lv {
+                    skalp_frontend::hir::HirLValue::Port(id) => {
+                        assert!(
+                            own.contains(id),
+                            "`{}` assigns to {:?}, which is not one of its ports {:?}",
+                            owner.name,
+                            id,
+                            own
+                        );
+                        break;
+                    }
+                    skalp_frontend::hir::HirLValue::Index(b, _)
+                    | skalp_frontend::hir::HirLValue::Range(b, _, _)
+                    | skalp_frontend::hir::HirLValue::FieldAccess { base: b, .. } => lv = b,
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    skalp_mir::MirCompiler::new()
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .expect("the elaborated template must lower");
+}

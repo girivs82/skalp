@@ -1017,6 +1017,19 @@ fn remap_impl_ports(
         }
     }
 
+    // Remap ports in impl-level statements. A `generate for` whose bounds are
+    // generic is preserved HERE as a template and elaborated later, during
+    // specialisation. Skipping it left the template holding the port ids of the
+    // module it was imported FROM: `VecAdd`'s ports became 38..40 on import
+    // while its template still said 3..5, specialisation mapped 38..40 -> 68..70
+    // and left 5 untouched, and the elaborated `result[i] = ..` named a port
+    // belonging to no entity. It could not be lowered, and the diagnostic
+    // pointed at the right-hand side because that is what the assignment
+    // printed.
+    for statement in &mut impl_block.statements {
+        *statement = remap_statement_ports(statement, port_id_map);
+    }
+
     impl_block
 }
 
@@ -1296,6 +1309,37 @@ fn remap_statement_ports(
         // Previously fell through to the catch-all clone, causing port references
         // inside blocks (e.g., match arm bodies wrapped in Block) to keep their
         // original port IDs after import merging.
+        // The body of a preserved `generate for` is real hardware waiting to be
+        // unrolled, so its ports need remapping exactly like any other.
+        hir::HirStatement::GenerateFor(gf) => {
+            let mut new_gf = gf.clone();
+            new_gf.range.start = remap_expr_ports(&gf.range.start, port_id_map);
+            new_gf.range.end = remap_expr_ports(&gf.range.end, port_id_map);
+            for assign in &mut new_gf.body.assignments {
+                assign.lhs = remap_lvalue_ports(&assign.lhs, port_id_map);
+                assign.rhs = remap_expr_ports(&assign.rhs, port_id_map);
+            }
+            for signal in &mut new_gf.body.signals {
+                if let Some(ref init) = signal.initial_value {
+                    signal.initial_value = Some(remap_expr_ports(init, port_id_map));
+                }
+            }
+            for instance in &mut new_gf.body.instances {
+                for connection in &mut instance.connections {
+                    connection.expr = remap_expr_ports(&connection.expr, port_id_map);
+                }
+                for arg in &mut instance.generic_args {
+                    *arg = remap_expr_ports(arg, port_id_map);
+                }
+            }
+            new_gf.body.generate_stmts = gf
+                .body
+                .generate_stmts
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            hir::HirStatement::GenerateFor(new_gf)
+        }
         hir::HirStatement::Block(stmts) => {
             let remapped_stmts = stmts
                 .iter()
