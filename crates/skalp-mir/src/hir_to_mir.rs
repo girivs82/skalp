@@ -5204,6 +5204,18 @@ impl<'hir> HirToMir<'hir> {
             Signal(hir::SignalId),
             Port(hir::PortId),
         }
+        // ...and it may be an aggregate that was NOT flattened. The flattener
+        // preserves an array of scalars as a real array port (see
+        // should_preserve_array) while flattening the same array in a SIGNAL,
+        // so a child's array output arrives as `o__0..o__n` while the
+        // destination port is one array. Nothing matched them up and the
+        // assignment was dropped: `o = c.o` between two `bit[8][4]` ports fails
+        // today with no vectors involved at all. Such a destination is written
+        // element-wise instead.
+        enum Preserved {
+            Port(PortId),
+            Signal(SignalId),
+        }
         let dest = match &assign.lhs {
             hir::HirLValue::Signal(id) if self.flattened_signals.contains_key(id) => {
                 Dest::Signal(*id)
@@ -5232,6 +5244,65 @@ impl<'hir> HirToMir<'hir> {
         if !output_ports.keys().any(|k| k.starts_with(&prefix)) {
             return None;
         }
+        let lhs_fields_probe = match &dest {
+            Dest::Signal(id) => self.flattened_signals.get(id)?.clone(),
+            Dest::Port(id) => self.flattened_ports.get(id)?.clone(),
+        };
+        // A PRESERVED aggregate leaves exactly one field with an empty path:
+        // the flattener keeps an array of scalars whole (see
+        // should_preserve_array) while flattening the same array in a signal,
+        // so the child's output arrives as `o__0..o__n` with nothing to match
+        // it against. Index into the destination instead. Measured: `o = c.o`
+        // between two `bit[8][4]` ports is dropped today, with no vectors
+        // involved at all.
+        let preserved: Option<Preserved> = if lhs_fields_probe.len() == 1
+            && lhs_fields_probe[0].field_path.is_empty()
+        {
+            match &dest {
+                Dest::Port(_) => Some(Preserved::Port(PortId(lhs_fields_probe[0].id))),
+                Dest::Signal(_) => Some(Preserved::Signal(SignalId(lhs_fields_probe[0].id))),
+            }
+        } else {
+            None
+        };
+        if let Some(target) = preserved {
+            let mut indices: Vec<(usize, SignalId)> = Vec::new();
+            for (key, src) in &output_ports {
+                let Some(rest) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Ok(i) = rest.parse::<usize>() else {
+                    return None; // not a plain array — leave it alone
+                };
+                indices.push((i, *src));
+            }
+            if indices.len() != output_ports.len() || indices.is_empty() {
+                return None;
+            }
+            indices.sort_by_key(|(i, _)| *i);
+            let base = match target {
+                Preserved::Port(p) => LValue::Port(p),
+                Preserved::Signal(sig) => LValue::Signal(sig),
+            };
+            return Some(
+                indices
+                    .into_iter()
+                    .map(|(i, src)| ContinuousAssign {
+                        lhs: LValue::BitSelect {
+                            base: Box::new(base.clone()),
+                            index: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::Integer(i as i64)),
+                            )),
+                        },
+                        rhs: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                            src,
+                        ))),
+                        span: None,
+                    })
+                    .collect(),
+            );
+        }
+
         let lhs_fields = match &dest {
             Dest::Signal(id) => self.flattened_signals.get(id)?.clone(),
             Dest::Port(id) => self.flattened_ports.get(id)?.clone(),

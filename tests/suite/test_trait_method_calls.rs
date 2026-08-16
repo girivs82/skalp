@@ -195,3 +195,35 @@ impl Par {
         );
     }
 }
+
+/// Reading a whole ARRAY output off an instance, with no vectors involved.
+/// The flattener PRESERVES an array of scalars as one array port (see
+/// should_preserve_array) while flattening the same array in a signal, so the
+/// child's output arrives as `o__0..o__n` and nothing matched it against the
+/// single destination port — the assignment was dropped. Vectors dodged this
+/// by being a different kind that flattens; plain arrays did not.
+#[test]
+fn a_whole_array_instance_output_reaches_an_array_port() {
+    let src = r#"
+entity AChild { in v: bit[8][4] out o: bit[8][4] }
+impl AChild { o = v }
+
+entity APar { in v: bit[8][4] out o: bit[8][4] }
+impl APar {
+    inst c = AChild { v: v }
+    o = c.o
+}
+"#;
+    let hir = skalp_frontend::parse_and_build_hir(src).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("`o = c.o` between array ports must lower");
+    let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+
+    for i in 0..4 {
+        assert!(
+            sv.contains(&format!("assign o[{i}] = c_o_{i};")),
+            "element {i} must be wired through:\n{sv}"
+        );
+    }
+}
