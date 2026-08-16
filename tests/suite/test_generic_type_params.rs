@@ -123,11 +123,11 @@ impl TopS {
         .expect("the specialized entity must lower");
     let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
 
-    // Each component multiplied whole, by its own multiplier.
-    for c in ["x", "y", "z"] {
+    // Each element multiplied whole, by its own multiplier.
+    for i in 0..3 {
         assert!(
-            sv.contains(&format!(".a(v__{c})")),
-            "component {c} must feed its own multiplier:\n{sv}"
+            sv.contains(&format!(".a(v[{i}])")),
+            "element {i} must feed its own multiplier:\n{sv}"
         );
     }
 }

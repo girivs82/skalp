@@ -5019,6 +5019,11 @@ impl<'hir> HirToMir<'hir> {
             return assigns;
         }
 
+        // Whole aggregate into a PRESERVED aggregate, from a plain reference.
+        if let Some(assigns) = self.try_expand_preserved_aggregate_assignment(assign) {
+            return assigns;
+        }
+
         // Try to expand struct-to-struct assignments
         if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
             return assigns;
@@ -5332,6 +5337,80 @@ impl<'hir> HirToMir<'hir> {
         } else {
             Some(assigns)
         }
+    }
+
+    /// `preserved_array_port = flattened_array_signal`.
+    ///
+    /// The flattener keeps an array of scalars whole in a PORT while flattening
+    /// the same array in a SIGNAL, so the two sides of `o = out_v` have
+    /// different shapes: one array against `out_v_0..out_v_n`. The generic path
+    /// converted the right-hand side to a reference to the FIRST flattened
+    /// signal and emitted `assign o = out_v_0` — the whole port driven by one
+    /// element, with the rest dropped. That builds and is wrong, which is the
+    /// worst kind of wrong, so the elements are written individually.
+    fn try_expand_preserved_aggregate_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        // Destination: a preserved aggregate leaves exactly one field with an
+        // empty path.
+        let dest_fields = match &assign.lhs {
+            hir::HirLValue::Port(id) if self.port_belongs_to_current_entity(id) => {
+                self.flattened_ports.get(id)?.clone()
+            }
+            hir::HirLValue::Signal(id) => self.flattened_signals.get(id)?.clone(),
+            _ => return None,
+        };
+        if dest_fields.len() != 1 || !dest_fields[0].field_path.is_empty() {
+            return None;
+        }
+        let base = match &assign.lhs {
+            hir::HirLValue::Port(_) => LValue::Port(PortId(dest_fields[0].id)),
+            _ => LValue::Signal(SignalId(dest_fields[0].id)),
+        };
+
+        // Source: a whole reference whose own flattening is numeric, i.e. an
+        // array. Anything else is left to the paths that understand it.
+        let src_fields = match &assign.rhs {
+            hir::HirExpression::Signal(id) => self.flattened_signals.get(id)?.clone(),
+            hir::HirExpression::Port(id) if self.port_belongs_to_current_entity(id) => {
+                self.flattened_ports.get(id)?.clone()
+            }
+            _ => return None,
+        };
+        if src_fields.len() < 2 {
+            return None;
+        }
+        let mut elements: Vec<(usize, u32)> = Vec::new();
+        for f in &src_fields {
+            if f.field_path.len() != 1 {
+                return None;
+            }
+            let i = f.field_path[0].parse::<usize>().ok()?;
+            elements.push((i, f.id));
+        }
+        elements.sort_by_key(|(i, _)| *i);
+
+        let src_is_port = matches!(&assign.rhs, hir::HirExpression::Port(_));
+        Some(
+            elements
+                .into_iter()
+                .map(|(i, id)| ContinuousAssign {
+                    lhs: LValue::BitSelect {
+                        base: Box::new(base.clone()),
+                        index: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::Integer(i as i64),
+                        ))),
+                    },
+                    rhs: Expression::with_unknown_type(ExpressionKind::Ref(if src_is_port {
+                        LValue::Port(PortId(id))
+                    } else {
+                        LValue::Signal(SignalId(id))
+                    })),
+                    span: None,
+                })
+                .collect(),
+        )
     }
 
     /// Try to expand a struct continuous assignment into multiple field assignments
@@ -17861,6 +17940,15 @@ impl<'hir> HirToMir<'hir> {
                                 return Some(hir::HirType::Float32);
                             }
                         }
+                        // A vector IS an array, so a component name is a named
+                        // index into it and yields the element type.
+                        if matches!(field, "x" | "y" | "z" | "w") {
+                            if let hir::HirType::Array(ref elem, _)
+                            | hir::HirType::ArrayExpr(ref elem, _) = bt
+                            {
+                                return Some((**elem).clone());
+                            }
+                        }
                         match bt {
                             hir::HirType::Vec2(element_type)
                             | hir::HirType::Vec3(element_type)
@@ -19985,6 +20073,14 @@ impl<'hir> HirToMir<'hir> {
             field_name.to_string()
         };
 
+        // A vector is an array, so `.x/.y/.z/.w` name elements 0..3, and the
+        // flattened fields of an array are numeric. Translate the component
+        // name before matching against them.
+        let component_index = ["x", "y", "z", "w"]
+            .iter()
+            .position(|c| *c == normalized_field_name)
+            .map(|i| i.to_string());
+
         // Build the complete field path from nested accesses
         let mut field_path = vec![normalized_field_name.clone()];
         let mut current_base = base;
@@ -20009,8 +20105,15 @@ impl<'hir> HirToMir<'hir> {
                     // Check if this signal was flattened
                     if let Some(flattened) = self.flattened_signals.get(sig_id) {
                         // Find the flattened field with matching path
+                        let alt_path = component_index.as_ref().map(|i| {
+                            let mut p = field_path.clone();
+                            *p.last_mut().unwrap() = i.clone();
+                            p
+                        });
                         for flat_field in flattened {
-                            if flat_field.field_path == field_path {
+                            if flat_field.field_path == field_path
+                                || Some(&flat_field.field_path) == alt_path.as_ref()
+                            {
                                 return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                     LValue::Signal(SignalId(flat_field.id)),
                                 )));
@@ -20092,8 +20195,15 @@ impl<'hir> HirToMir<'hir> {
                         // Check if this port was flattened
                         if let Some(flattened) = self.flattened_ports.get(port_id) {
                             // Find the flattened field with matching path
+                            let alt_path = component_index.as_ref().map(|i| {
+                                let mut p = field_path.clone();
+                                *p.last_mut().unwrap() = i.clone();
+                                p
+                            });
                             for flat_field in flattened {
-                                if flat_field.field_path == field_path {
+                                if flat_field.field_path == field_path
+                                    || Some(&flat_field.field_path) == alt_path.as_ref()
+                                {
                                     return Some(Expression::with_unknown_type(
                                         ExpressionKind::Ref(LValue::Port(PortId(flat_field.id))),
                                     ));

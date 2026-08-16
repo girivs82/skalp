@@ -14491,13 +14491,24 @@ impl HirBuilderContext {
                                         _ => HirType::Custom("vec".to_string()),
                                     };
                                 }
+                                // `vec2/3/4<T>` are ALIASES for `vec<T, 2/3/4>`
+                                // — the stdlib defines them that way — so they
+                                // are one type and must have one
+                                // representation. Mapping the aliases to
+                                // Vec2/3/4 while the general form became an
+                                // array split them: the aliases flattened to
+                                // x/y/z, the general form to 0/1/2, and a
+                                // `VecAdd<T, N>` output could not be read into
+                                // a `vec3<T>` signal because `result__0` never
+                                // met `new_vel__x`. `.x/.y/.z/.w` are names for
+                                // indices 0..3 instead.
                                 if let Some(elem) = elem {
-                                    let boxed = Box::new(elem);
-                                    return match type_name.as_str() {
-                                        "vec2" => HirType::Vec2(boxed),
-                                        "vec3" => HirType::Vec3(boxed),
-                                        _ => HirType::Vec4(boxed),
+                                    let n: u32 = match type_name.as_str() {
+                                        "vec2" => 2,
+                                        "vec3" => 3,
+                                        _ => 4,
                                     };
+                                    return HirType::Array(Box::new(elem), n);
                                 }
                             }
 

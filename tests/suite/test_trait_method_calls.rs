@@ -137,19 +137,24 @@ impl ScaleC {
         .expect("`v[i].mul(k)` must lower");
     let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
 
-    // Each component must reach its own multiplier as a WHOLE component. The
-    // first cut of this fix made the type resolve while still lowering `v[0]`
-    // as a bit-select, emitting `.a(v__x[0])` — bit 0 of the component. That
-    // built cleanly and was wrong, which is why this asserts the connection
-    // rather than that the build succeeded.
-    for c in ["x", "y", "z"] {
+    // Each element must reach its own multiplier WHOLE, and each result must
+    // come back out. Both halves have been wrong at some point: an early cut
+    // lowered `v[0]` as a bit-select (bit 0 of the element), and later
+    // `o = out_v` drove the whole array port from `out_v_0` alone, dropping two
+    // of three elements. Both built cleanly, which is why this asserts the
+    // wiring rather than that the build succeeded.
+    for i in 0..3 {
         assert!(
-            sv.contains(&format!(".a(v__{c})")),
-            "component {c} must feed its multiplier whole:\n{sv}"
+            sv.contains(&format!(".a(v[{i}])")),
+            "element {i} must feed its multiplier whole:\n{sv}"
         );
         assert!(
-            !sv.contains(&format!(".a(v__{c}[0])")),
-            "component {c} must not be bit-selected:\n{sv}"
+            !sv.contains(&format!(".a(v[{i}][0])")),
+            "element {i} must not be bit-selected:\n{sv}"
+        );
+        assert!(
+            sv.contains(&format!("assign o[{i}] = out_v_{i};")),
+            "element {i} must be driven onto the output:\n{sv}"
         );
     }
 }
@@ -188,10 +193,10 @@ impl Par {
         .expect("`o = c.o` must lower");
     let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
 
-    for c in ["x", "y", "z"] {
+    for i in 0..3 {
         assert!(
-            sv.contains(&format!("assign o__{c} = c_o__{c};")),
-            "component {c} must be wired through:\n{sv}"
+            sv.contains(&format!("assign o[{i}] = c_o_{i};")),
+            "element {i} must be wired through:\n{sv}"
         );
     }
 }
