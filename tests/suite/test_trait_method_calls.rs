@@ -232,3 +232,66 @@ impl APar {
         );
     }
 }
+
+/// A child with TWO aggregate outputs, reading the second. The element-wise
+/// expansion compared the indices it found under one port's prefix against
+/// EVERY output the child exposes, so a child with two vector outputs had six
+/// keys where three were wanted, the count never matched, and reading either
+/// output was dropped. One aggregate output worked, which is why it took a
+/// second one to show up.
+#[test]
+fn one_of_two_aggregate_outputs_can_be_read() {
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/crates/skalp-stdlib"),
+    );
+
+    let src = r#"
+use skalp::numeric::fp::{fp32};
+use skalp::numeric::vector::{vec3};
+
+entity Two<T: Numeric> {
+    in clk: clock
+    in v: vec3<T>
+    out o: vec3<T>
+    out p: vec3<T>
+}
+
+impl Two<T: Numeric> {
+    signal s: vec3<T>
+    signal r: vec3<T>
+    on(clk.rise) {
+        s = v
+        r = v
+    }
+    o = s
+    p = r
+}
+
+entity TwoPar {
+    in clk: clock
+    in v: vec3<fp32>
+    out o: vec3<fp32>
+}
+
+impl TwoPar {
+    inst c = Two<fp32> { clk: clk, v: v }
+    o = c.p
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.sk");
+    std::fs::write(&path, src).unwrap();
+
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .expect("reading the second aggregate output must lower");
+    let sv = skalp_codegen::generate_systemverilog_from_mir(&mir).expect("sv");
+    for i in 0..3 {
+        assert!(
+            sv.contains(&format!("assign o[{i}] = c_p_{i};")),
+            "element {i} must come from the SECOND output:\n{sv}"
+        );
+    }
+}

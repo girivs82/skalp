@@ -5281,7 +5281,13 @@ impl<'hir> HirToMir<'hir> {
                 };
                 indices.push((i, *src));
             }
-            if indices.len() != output_ports.len() || indices.is_empty() {
+            // Compare against the keys under THIS port's prefix, not against
+            // every output the child exposes: a child with two aggregate
+            // outputs (`position` and `velocity`) has six keys while only
+            // three belong to the port being read, so the count never matched
+            // and reading either one was dropped. Every prefixed key is either
+            // pushed or bails above, so emptiness is the only check left.
+            if indices.is_empty() {
                 return None;
             }
             indices.sort_by_key(|(i, _)| *i);
