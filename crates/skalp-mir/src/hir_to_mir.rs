@@ -1066,1156 +1066,9 @@ impl<'hir> HirToMir<'hir> {
         // method inlining. The actual entity implementations are compiled on-demand during
         // hierarchical synthesis (lower_mir_hierarchical_for_optimize_first).
 
-        // Second pass: add implementations
-        for impl_block in &hir.implementations {
-            let impl_start = Instant::now();
-            // AUDIT-2 #5: instance maps are keyed by BARE VariableId, which
-            // restarts per impl block — stale entries from an earlier impl
-            // (e.g. stdlib fp) collided with a later impl's variables:
-            // `.0` on a tuple-fn result hit a stdlib instance's ports
-            // (x_out/y_out) and failed conversion. Reset per impl.
-            self.entity_instance_outputs.clear();
-            self.entity_instance_info.clear();
-            self.tuple_call_results.clear();
-            // Debug: Find entity name
-            let impl_entity_name = hir
-                .entities
-                .iter()
-                .find(|e| e.id == impl_block.entity)
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| "?".to_string());
-            if impl_entity_name.contains("FpAdd") {
-                trace!(
-                    "[HIR_TO_MIR] Second pass: impl for '{}' ({:?}), {} signals",
-                    impl_entity_name,
-                    impl_block.entity,
-                    impl_block.signals.len()
-                );
-            }
-            // BUG #117r DEBUG: Log impl block processing
-            if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
-                // Set current entity for generic parameter resolution
-                self.current_entity_id = Some(impl_block.entity);
-
-                // BUG #10.2 FIX: Restore entity scope (port/signal maps) from first-pass cache
-                // Without this, CDC entities with lifetime parameters have empty port_map
-                // in the second pass, causing analyze_event_block to skip all triggers
-                self.restore_entity_scope_from_cache(impl_block.entity);
-
-                // Skip implementations for entities that are not used (0 instances) and are not the first entity
-                if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
-                    // Check if this is a generic entity (has generics, including those with defaults)
-                    // BUG #10.2 FIX: Exclude lifetime parameters (ClockDomain, PowerDomain)
-                    let has_generics = !entity.generics.is_empty()
-                        && entity.generics.iter().any(|g| {
-                            !matches!(
-                                g.param_type,
-                                hir::HirGenericType::ClockDomain
-                                    | hir::HirGenericType::PowerDomain { .. }
-                            )
-                        });
-
-                    // BUG #231 FIX: If this entity has generics, check if a monomorphized version exists.
-                    // A monomorphized version is another entity with:
-                    //   1. Same or similar name (starts with base name, possibly with suffix like "_10")
-                    //   2. Different EntityId
-                    //   3. Empty generics (fully specialized)
-                    // If a monomorphized version exists, skip the generic entity's impl to avoid
-                    // port ID mismatches (generic uses PortId(6), monomorphized uses PortId(49)).
-                    if has_generics {
-                        let base_name = &entity.name;
-                        let has_monomorphized_version = hir.entities.iter().any(|e| {
-                            e.id != entity.id
-                                && (e.name == *base_name
-                                    || e.name.starts_with(&format!("{}_", base_name)))
-                                && e.generics.is_empty() // Monomorphized entities have no generics
-                        });
-
-                        if has_monomorphized_version {
-                            continue;
-                        }
-                    }
-
-                    // Check if this is a generic entity (has unresolved generics)
-                    // BUG #10.2 FIX: Exclude PowerDomain lifetime parameters along with ClockDomain
-                    // Lifetime parameters (clock domains, power domains) don't need monomorphization
-                    let has_unresolved_generics = entity.generics.iter().any(|g| {
-                        g.default_value.is_none()
-                            && !matches!(
-                                g.param_type,
-                                hir::HirGenericType::ClockDomain
-                                    | hir::HirGenericType::PowerDomain { .. }
-                            )
-                    });
-
-                    // Skip if: has unresolved generics AND no instances
-                    // This skips unspecialized generic entities that are never instantiated
-                    if has_unresolved_generics && impl_block.instances.is_empty() {
-                        continue;
-                    }
-
-                    // NOTE: We do NOT skip monomorphized entities even if they have 0 instances in their own impl block.
-                    // Monomorphized entities (like FpAdd_fp32) are created by monomorphization because some other
-                    // entity instantiates them. The instances are registered in the parent entity's impl block,
-                    // not in the monomorphized entity's own impl block.
-                    // Skipping them would cause their signals/logic to be missing from the final output.
-                }
-
-                // Bind generic parameter default values into const evaluator for expression evaluation
-                // Track which names we bound so we can clean them up later
-                let mut bound_generic_names = Vec::new();
-                if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
-                    for generic in &entity.generics {
-                        if let Some(default_expr) = &generic.default_value {
-                            // Try to evaluate the default value and bind it
-                            if let Ok(const_val) = self.const_evaluator.eval(default_expr) {
-                                self.const_evaluator.bind(generic.name.clone(), const_val);
-                                bound_generic_names.push(generic.name.clone());
-                            }
-                        }
-                    }
-                }
-
-                // Find the module
-                if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
-                    // BUG #272 FIX: Clear variable_map between entity impl blocks to prevent
-                    // HIR VariableId collisions. Each entity's let bindings have independent
-                    // HIR VariableIds (e.g., both PiController and TemperatureProtection can
-                    // have VariableId(0)). Without clearing, a later entity's let binding
-                    // reuses the previous entity's MIR variable instead of creating a new one,
-                    // resulting in missing module.variables entries and undriven LIR signals.
-                    self.variable_map.clear();
-                    self.context_variable_map.clear();
-
-                    // Elaborate generate blocks: evaluate conditions and collect body items
-                    let (gen_signals, gen_event_blocks, gen_assignments) =
-                        self.elaborate_generate_blocks_in_impl(impl_block);
-
-                    // Add signals - flatten structs/vectors into individual signals
-                    for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
-                        let pre_id = self.next_signal_id;
-                        let signal_type = self.convert_type(&hir_signal.signal_type);
-                        let initial = hir_signal
-                            .initial_value
-                            .as_ref()
-                            .and_then(|expr| self.convert_literal_expr(expr));
-                        let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
-
-                        // Auto-detect memory-eligible arrays for BRAM inference
-                        let auto_memory_config = if hir_signal.memory_config.is_none() {
-                            if let DataType::Array(ref element_type, size) = signal_type {
-                                let elem_width = TypeFlattener::get_scalar_width(element_type);
-                                if let Some(ew) = elem_width {
-                                    let total_bits = ew as usize * size;
-                                    if (total_bits >= 128 && size >= 4) || total_bits > 256 {
-                                        Some(skalp_frontend::hir::MemoryConfig {
-                                            depth: size as u32,
-                                            width: Some(ew),
-                                            ports: 1,
-                                            style: skalp_frontend::hir::MemoryStyle::Auto,
-                                            read_latency: 1,
-                                            read_only: false,
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        let is_memory =
-                            hir_signal.memory_config.is_some() || auto_memory_config.is_some();
-                        let effective_memory_config =
-                            hir_signal.memory_config.clone().or(auto_memory_config);
-
-                        let (flattened_signals, flattened_fields) = self.flatten_signal(
-                            &hir_signal.name,
-                            &signal_type,
-                            initial,
-                            clock_domain,
-                            hir_signal.span.clone(),
-                            is_memory,
-                        );
-                        // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
-                        // Even single-field structs need mapping because field name != signal name
-                        // (e.g., signal "data: SimpleData" → flattened signal "data_value")
-                        if !flattened_fields.is_empty() {
-                            self.flattened_signals
-                                .insert(hir_signal.id, flattened_fields.clone());
-                        }
-
-                        // BUG #33 FIX: Also populate reverse map for each flattened signal
-                        for field in &flattened_fields {
-                            self.signal_to_hir.insert(
-                                SignalId(field.id),
-                                (hir_signal.id, field.field_path.clone()),
-                            );
-                        }
-
-                        // For simple mapping (first signal or single non-struct signal)
-                        if let Some(first_signal) = flattened_signals.first() {
-                            self.signal_map.insert(hir_signal.id, first_signal.id);
-                        }
-
-                        // BUG #237 FIX: Track which entity this signal belongs to
-                        self.signal_owner.insert(hir_signal.id, impl_block.entity);
-
-                        // Add all flattened signals to the module
-                        for mut signal in flattened_signals {
-                            // Propagate memory config (explicit or auto-inferred) to MIR signal
-                            if let Some(ref mem_config) = effective_memory_config {
-                                signal.memory_config = Some(mem_config.clone());
-                            }
-                            // Propagate trace config from HIR signal to MIR signal
-                            if hir_signal.trace_config.is_some() {
-                                signal.trace_config = hir_signal.trace_config.clone();
-                            }
-                            // Propagate CDC config from HIR signal to MIR signal
-                            if hir_signal.cdc_config.is_some() {
-                                signal.cdc_config = hir_signal.cdc_config.clone();
-                            }
-                            // TRIAGE #13: propagate the explicit clock-domain
-                            // lifetime name for CDC analysis
-                            signal.clock_domain_name = hir_signal.clock_domain_name.clone();
-                            // Propagate breakpoint config from HIR signal to MIR signal
-                            if hir_signal.breakpoint_config.is_some() {
-                                signal.breakpoint_config = hir_signal.breakpoint_config.clone();
-                            }
-                            // Propagate power config from HIR signal to MIR signal
-                            if hir_signal.power_config.is_some() {
-                                signal.power_config = hir_signal.power_config.clone();
-                            }
-                            // Propagate power domain from HIR signal to MIR signal
-                            if hir_signal.power_domain.is_some() {
-                                signal.power_domain = hir_signal.power_domain.clone();
-                            }
-                            // Propagate safety config from HIR signal to MIR signal
-                            if let Some(ref safety_config) = hir_signal.safety_config {
-                                signal.safety_context = Some(convert_safety_config(safety_config));
-                            }
-                            module.signals.push(signal);
-                        }
-
-                        // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
-                        // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
-                        // BUG #207 DEBUG: Trace all signals with initial values for FP entities
-                        let is_fp_module = module.name.contains("FpAdd")
-                            || module.name.contains("FpSub")
-                            || module.name.contains("FpMul");
-                        let has_init = hir_signal.initial_value.is_some();
-                        if is_fp_module {
-                            trace!(
-                                "[BUG #207 TRACE] Module '{}' Signal '{}' initial_value: {}",
-                                module.name,
-                                hir_signal.name,
-                                has_init
-                            );
-                        }
-                        if has_init {
-                            let init_expr = hir_signal.initial_value.as_ref().unwrap();
-                            if is_fp_module {
-                                trace!(
-                                    "[BUG #207 EXPR] Module '{}' Signal '{}' expr_type: {:?}",
-                                    module.name,
-                                    hir_signal.name,
-                                    std::mem::discriminant(init_expr)
-                                );
-                            }
-                        }
-                        // Use separate variable to avoid borrow issues
-                        let opt_init = &hir_signal.initial_value;
-                        if is_fp_module {
-                            trace!(
-                                "[BUG #207 PRE-IF] Module '{}' Signal '{}'",
-                                module.name,
-                                hir_signal.name
-                            );
-                        }
-                        if let Some(init_expr) = opt_init.clone() {
-                            let init_expr = &init_expr;
-                            if is_fp_module {
-                                // Debug: print expression type
-                                trace!(
-                                    "[BUG #207 ENTRY] Module '{}' Signal '{}' is_literal: {}",
-                                    module.name,
-                                    hir_signal.name,
-                                    matches!(init_expr, hir::HirExpression::Literal(_))
-                                );
-                            }
-                            // Only generate an assignment if the initializer is NOT a
-                            // compile-time constant (literal or enum variant). Constant
-                            // initializers were already stored as the flip-flop initial
-                            // value during flattening; also emitting a continuous assign
-                            // would multi-drive the signal (SpiMaster FSM bug).
-                            let is_literal = self.convert_literal_expr(init_expr).is_some();
-                            if is_fp_module {
-                                trace!(
-                                    "[BUG #207 NOT-LIT] Module '{}' Signal '{}' is_literal={}, entering non-literal block: {}",
-                                    module.name, hir_signal.name, is_literal, !is_literal
-                                );
-                            }
-                            if !is_literal {
-                                if is_fp_module {
-                                    trace!(
-                                        "[BUG #207 CONVERT] Module '{}' Signal '{}' about to call convert_expression",
-                                        module.name, hir_signal.name
-                                    );
-                                }
-                                // Convert the expression
-                                let convert_result = self.convert_expression(init_expr, 0);
-                                if is_fp_module {
-                                    trace!(
-                                        "[BUG #207 RESULT] Module '{}' Signal '{}' convert_expression returned: {}",
-                                        module.name, hir_signal.name, if convert_result.is_some() { "Some" } else { "None" }
-                                    );
-                                }
-                                if let Some(rhs) = convert_result {
-                                    // Get the first MIR signal ID for this HIR signal
-                                    if let Some(&mir_signal_id) =
-                                        self.signal_map.get(&hir_signal.id)
-                                    {
-                                        let continuous = ContinuousAssign {
-                                            lhs: LValue::Signal(mir_signal_id),
-                                            rhs,
-                                            span: None,
-                                        };
-                                        module.assignments.push(continuous);
-                                        trace!(
-                                            "[HIR→MIR] Created ContinuousAssign for impl signal '{}' -> SignalId({:?})",
-                                            hir_signal.name, mir_signal_id
-                                        );
-
-                                        // BUG #256 FIX: Drain pending temp signals created during
-                                        // signal initializer conversion (e.g., clz32 inlining in FpAdd)
-                                        for (sig_id, name, dtype, rhs) in
-                                            self.pending_temp_signals.drain(..)
-                                        {
-                                            module.signals.push(Signal {
-                                                id: sig_id,
-                                                name,
-                                                signal_type: dtype,
-                                                initial: None,
-                                                clock_domain: None,
-                                                clock_domain_name: None,
-                                                span: None,
-                                                memory_config: None,
-                                                trace_config: None,
-                                                cdc_config: None,
-                                                breakpoint_config: None,
-                                                power_config: None,
-                                                safety_context: None,
-                                                detection_config: None,
-                                                power_domain: None,
-                                            });
-                                            module.assignments.push(ContinuousAssign {
-                                                lhs: LValue::Signal(sig_id),
-                                                rhs,
-                                                span: None,
-                                            });
-                                        }
-                                    }
-                                } else {
-                                    // BUG #207: Signal initializer conversion FAILED
-                                    // Print more details based on expression type
-                                    match init_expr {
-                                        hir::HirExpression::Index(base, idx) => {}
-                                        hir::HirExpression::Range(base, hi, lo) => {}
-                                        hir::HirExpression::Cast(cast) => {}
-                                        hir::HirExpression::Binary(bin) => {}
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Add variables
-                    for hir_var in &impl_block.variables {
-                        let var_id = self.next_variable_id();
-                        self.variable_map.insert(hir_var.id, var_id);
-
-                        let mut mir_var_type = self.convert_type(&hir_var.var_type);
-                        // Widen variable type by 1 if its initial value is an addition
-                        // This preserves the carry bit for expressions like `let result = a + b`.
-                        // TRIAGE #15: only for INFERRED types — an explicit
-                        // annotation (`let x: bit[9] = a + b`) is a contract;
-                        // widening it emitted a 10-bit net where 9 was declared.
-                        if !hir_var.explicit_type {
-                            if let Some(ref init_expr) = hir_var.initial_value {
-                                if Self::hir_expr_contains_add(init_expr) {
-                                    mir_var_type = Self::widen_type_by_one(mir_var_type);
-                                }
-                            }
-                        }
-                        let variable = Variable {
-                            id: var_id,
-                            name: hir_var.name.clone(),
-                            var_type: mir_var_type,
-                            initial: hir_var
-                                .initial_value
-                                .as_ref()
-                                .and_then(|expr| self.convert_literal_expr(expr)),
-                            span: None,
-                        };
-                        module.variables.push(variable);
-                    }
-
-                    // Pre-process entity instances BEFORE event blocks, so that
-                    // entity_instance_outputs is populated when convert_field_access
-                    // resolves instance.port expressions inside on() blocks.
-                    for hir_instance in &impl_block.instances {
-                        // Find the entity to get its output ports
-                        if let Some(entity) = self
-                            .hir
-                            .as_ref()
-                            .and_then(|h| h.entities.iter().find(|e| e.id == hir_instance.entity))
-                        {
-                            let mut output_ports: IndexMap<String, SignalId> = IndexMap::new();
-
-                            // Create signals for each output port
-                            // BUG FIX: Flatten struct-typed ports into multiple scalar signals
-                            // BUG #249 FIX: Check if output port is connected to a parent signal.
-                            // If connected, use the parent's signal IDs instead of creating new signals.
-                            // This prevents duplicate signals (e.g., protection_faults__* vs prot_faults__*)
-                            // where one set is driven and the other is not.
-                            for port in &entity.ports {
-                                if matches!(port.direction, hir::HirPortDirection::Output) {
-                                    // BUG #249 FIX: Check if this output port is connected to a parent signal
-                                    let connected_parent_signal = hir_instance
-                                        .connections
-                                        .iter()
-                                        .find(|conn| conn.port == port.name)
-                                        .and_then(|conn| {
-                                            if let hir::HirExpression::Signal(hir_sig_id) =
-                                                &conn.expr
-                                            {
-                                                let mir_id =
-                                                    self.signal_map.get(hir_sig_id).copied();
-                                                mir_id
-                                            } else {
-                                                None
-                                            }
-                                        });
-
-                                    if let Some(parent_mir_signal_id) = connected_parent_signal {
-                                        // BUG #249 FIX: Output port is connected to a parent signal.
-                                        // Use the parent's flattened signal IDs for the output_ports map
-                                        // instead of creating new (duplicate, undriven) signals.
-
-                                        // Find the parent signal's name to look up flattened fields
-                                        if let Some(parent_signal) = module
-                                            .signals
-                                            .iter()
-                                            .find(|s| s.id == parent_mir_signal_id)
-                                        {
-                                            // For scalar types, just map directly
-                                            output_ports
-                                                .insert(port.name.clone(), parent_mir_signal_id);
-                                        } else {
-                                            // Parent signal may be flattened - look for flattened siblings
-                                            // Find all signals whose name starts with parent signal's base name
-                                            if let Some((hir_sig_id, _)) = hir_instance
-                                                .connections
-                                                .iter()
-                                                .find(|conn| conn.port == port.name)
-                                                .and_then(|conn| {
-                                                    if let hir::HirExpression::Signal(id) =
-                                                        &conn.expr
-                                                    {
-                                                        Some((*id, ()))
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                            {
-                                                // Look up the flattened signals from the parent
-                                                if let Some(flattened_fields) =
-                                                    self.flattened_signals.get(&hir_sig_id)
-                                                {
-                                                    for field in flattened_fields {
-                                                        let key = if field.field_path.is_empty() {
-                                                            port.name.clone()
-                                                        } else {
-                                                            format!(
-                                                                "{}{}{}",
-                                                                port.name,
-                                                                FIELD_SEPARATOR,
-                                                                field
-                                                                    .field_path
-                                                                    .join(FIELD_SEPARATOR)
-                                                            )
-                                                        };
-                                                        output_ports.insert(
-                                                            key.clone(),
-                                                            SignalId(field.id),
-                                                        );
-                                                    }
-                                                    continue; // Skip the normal signal creation below
-                                                }
-                                            }
-                                            // Fallback: just map the port directly
-                                            output_ports
-                                                .insert(port.name.clone(), parent_mir_signal_id);
-                                        }
-
-                                        // Skip creating new signals - use parent's signals
-                                        // But still propagate detection flags if needed (handled below)
-                                    } else {
-                                        // Output port is NOT connected - create new signals as before.
-                                        // Collision-proofing: a user let/signal may already be named
-                                        // "{instance}_{port}" (e.g. `let tx_fifo_empty = tx_fifo.empty`).
-                                        // All compiler-internal references go through the SignalId in
-                                        // instance_outputs_by_name, so pick a non-colliding name.
-                                        let mut signal_name =
-                                            format!("{}_{}", hir_instance.name, port.name);
-                                        let name_taken = |n: &str| {
-                                            impl_block.signals.iter().any(|s| s.name == n)
-                                                || impl_block.variables.iter().any(|v| v.name == n)
-                                                // Entity PORTS collide too: instance `pwm` +
-                                                // port `counter` auto-wires "pwm_counter",
-                                                // which may equal a top-level port name —
-                                                // duplicate LIR signal names break every
-                                                // name-keyed lookup downstream (flatten's
-                                                // name_to_signal, gate-net matching).
-                                                || module.ports.iter().any(|p| p.name == n)
-                                                || module.signals.iter().any(|s| s.name == n)
-                                        };
-                                        if name_taken(&signal_name) {
-                                            signal_name =
-                                                format!("{}__{}", hir_instance.name, port.name);
-                                            while name_taken(&signal_name) {
-                                                signal_name.push('_');
-                                            }
-                                        }
-                                        let signal_type = self.convert_type(&port.port_type);
-
-                                        // Use flatten_signal to properly handle struct types
-                                        let (flattened_signals, flattened_fields) = self
-                                            .flatten_signal(
-                                                &signal_name,
-                                                &signal_type,
-                                                None,
-                                                None,
-                                                None,
-                                                false,
-                                            );
-
-                                        // Add all flattened signals to the module
-                                        for mut signal in flattened_signals {
-                                            // Propagate detection signal config from sub-module port
-                                            signal.detection_config = port.detection_config.clone();
-                                            signal.power_domain = port
-                                                .power_domain_config
-                                                .as_ref()
-                                                .map(|c| c.domain_name.clone());
-                                            module.signals.push(signal);
-                                        }
-
-                                        // Map each flattened field with its full path
-                                        // For scalar ports: "result" -> signal_id
-                                        // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
-                                        for field in &flattened_fields {
-                                            // Build the key: port_name + field_path joined by FIELD_SEPARATOR
-                                            let key = if field.field_path.is_empty() {
-                                                port.name.clone()
-                                            } else {
-                                                format!(
-                                                    "{}{}{}",
-                                                    port.name,
-                                                    FIELD_SEPARATOR,
-                                                    field.field_path.join(FIELD_SEPARATOR)
-                                                )
-                                            };
-                                            output_ports.insert(key, SignalId(field.id));
-                                        }
-                                    }
-
-                                    // BUG FIX: Also propagate detection flag to the connected signal
-                                    // in the parent module (if this output port connects to a local signal)
-                                    if port.is_detection_signal() {
-                                        // Find the connection to this port
-                                        for conn in &hir_instance.connections {
-                                            if conn.port == port.name {
-                                                // Get the signal ID from the RHS expression
-                                                if let hir::HirExpression::Signal(hir_sig_id) =
-                                                    &conn.expr
-                                                {
-                                                    if let Some(&mir_sig_id) =
-                                                        self.signal_map.get(hir_sig_id)
-                                                    {
-                                                        // Mark the parent's connected signal
-                                                        if let Some(parent_signal) = module
-                                                            .signals
-                                                            .iter_mut()
-                                                            .find(|s| s.id == mir_sig_id)
-                                                        {
-                                                            // Propagate detection config from port
-                                                            parent_signal.detection_config =
-                                                                port.detection_config.clone();
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            self.instance_outputs_by_name
-                                .insert(hir_instance.name.clone(), output_ports.clone());
-
-                            // `HirInstance::entity` is an `EntityId`, but EntityIds
-                            // restart per HIR — the preloaded stdlib module HIRs each
-                            // number from 0, exactly like the main file. When
-                            // `apply_pending_specializations` copies a generic stdlib
-                            // impl into the main HIR it does NOT remap those ids, so
-                            // resolving them here can bind a completely different
-                            // entity that merely shares the number. Measured: inside
-                            // the monomorphized `FpSub_fp32`, `inst adder = FpAdd<F>`
-                            // carries EntityId(0) (FpAdd's id in the fp module HIR) and
-                            // resolved to `Top` — the user's own top-level entity.
-                            //
-                            // A connection naming a port the resolved entity does not
-                            // have proves the resolution is wrong. Without this the
-                            // mis-binding is silent whenever the colliding entity
-                            // happens to share port names, and the design gets the
-                            // wrong child module wired in.
-                            let entity_port_names: Vec<&str> =
-                                entity.ports.iter().map(|p| p.name.as_str()).collect();
-                            let bogus: Vec<&str> = hir_instance
-                                .connections
-                                .iter()
-                                .map(|c| c.port.as_str())
-                                .filter(|p| !entity_port_names.contains(p))
-                                .collect();
-                            if !bogus.is_empty() {
-                                let current = self.current_entity_name();
-                                self.conversion_errors.push((
-                                    current,
-                                    format!(
-                                        "instance `{}` resolved to entity `{}`, which has no port(s) {} \
-                                         (its ports are {}). The instance's entity id ({:?}) was resolved \
-                                         against the wrong HIR — EntityIds restart per module, and a \
-                                         monomorphized library implementation keeps the id space of the \
-                                         module it came from.",
-                                        hir_instance.name,
-                                        entity.name,
-                                        bogus
-                                            .iter()
-                                            .map(|p| format!("`{}`", p))
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
-                                        if entity_port_names.is_empty() {
-                                            "none".to_string()
-                                        } else {
-                                            entity_port_names
-                                                .iter()
-                                                .map(|p| format!("`{}`", p))
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        },
-                                        hir_instance.entity,
-                                    ),
-                                ));
-                            }
-                            if let Some(var_id) = hir_instance.variable_id {
-                                self.entity_instance_outputs.insert(var_id, output_ports);
-                                if let Some(module_id) = self.entity_map.get(&hir_instance.entity) {
-                                    self.entity_instance_info
-                                        .insert(var_id, (hir_instance.name.clone(), *module_id));
-                                }
-                            }
-                        }
-                    }
-
-                    // Convert event blocks to processes
-                    // (entity_instance_outputs is now populated from above)
-                    trace!("[HIR→MIR] Converting {} event_blocks + {} gen_event_blocks for module '{}'",
-                        impl_block.event_blocks.len(), gen_event_blocks.len(), module.name);
-                    for event_block in impl_block
-                        .event_blocks
-                        .iter()
-                        .chain(gen_event_blocks.iter())
-                    {
-                        let process = self.convert_event_block(event_block);
-                        trace!(
-                            "[HIR→MIR] Event block -> process kind={:?}, sensitivity={:?}",
-                            process.kind,
-                            process.sensitivity
-                        );
-                        module.processes.push(process);
-                    }
-
-                    // Add any dynamically created variables (from let bindings in event blocks)
-                    let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
-                    for (mir_var_id, name, hir_type) in dynamic_vars {
-                        let mir_type = self.convert_type(&hir_type);
-                        let variable = Variable {
-                            id: mir_var_id,
-                            name: name.clone(),
-                            var_type: mir_type,
-                            initial: None,
-                            span: None,
-                        };
-                        module.variables.push(variable);
-                    }
-                    // Clear dynamic variables for next impl block
-                    self.dynamic_variables.clear();
-
-                    // Convert continuous assignments (may expand to multiple for structs)
-                    trace!(
-                        "⏱️  [PERF]     Processing {} assignments from impl block",
-                        impl_block.assignments.len()
-                    );
-                    let all_assignments: Vec<_> = impl_block
-                        .assignments
-                        .iter()
-                        .chain(gen_assignments.iter())
-                        .collect();
-                    for (i, a) in all_assignments.iter().enumerate() {}
-                    let all_assignments_for_processing: Vec<_> = impl_block
-                        .assignments
-                        .iter()
-                        .chain(gen_assignments.iter())
-                        .collect();
-                    let total_assignments = all_assignments_for_processing.len();
-                    for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate()
-                    {
-                        let assignment_start = Instant::now();
-                        trace!(
-                            "⏱️  [PERF]       Starting assignment {}/{}: LHS={:?}, RHS={:?}",
-                            idx + 1,
-                            total_assignments,
-                            std::mem::discriminant(&hir_assign.lhs),
-                            std::mem::discriminant(&hir_assign.rhs)
-                        );
-                        trace!(
-                            "[TRAIT_DEBUG_ENTRY] Entering convert_continuous_assignment_expanded for assignment {}", idx
-                        );
-                        // Clear any pending statements from previous assignments
-                        self.pending_statements.clear();
-                        self.pending_temp_signals.clear();
-
-                        // Convert the assignment (may generate pending statements from block expressions)
-                        let assigns = self.convert_continuous_assignment_expanded(hir_assign);
-                        trace!(
-                            "[TRAIT_DEBUG_EXIT] convert_continuous_assignment_expanded returned {} assigns", assigns.len()
-                        );
-                        trace!(
-                            "⏱️  [PERF]       Finished assignment {}/{} in {:?}",
-                            idx + 1,
-                            impl_block.assignments.len(),
-                            assignment_start.elapsed()
-                        );
-
-                        // BUG #71 DEBUG: Check variable_map size after assignment conversion
-                        trace!(
-                            "[BUG #71 AFTER ASSIGNMENT {}] variable_map size={}",
-                            idx,
-                            self.variable_map.len()
-                        );
-                        trace!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
-                            idx, self.variable_map.contains_key(&hir::VariableId(5)));
-
-                        // BUGFIX: First, scan pending_statements for any variables that need to be declared
-                        // These come from let bindings in block expressions that don't go through
-                        // the dynamic_variables mechanism (e.g., when functions are inlined)
-
-                        // BUG FIX #71: Don't use a snapshot - use current dynamic_variables directly!
-                        // Variables are created during assignment conversion (via match expressions, etc.)
-                        // and preserved by BUG #68. A snapshot taken before conversion would be empty.
-                        //
-                        // Original BUG #56 tried to use a snapshot to avoid borrow checker issues,
-                        // but that was taken BEFORE assignment conversion when dynamic_variables was
-                        // empty (cleared at line 308).
-                        //
-                        // The correct approach: Process pending statements and look up types from
-                        // the CURRENT state of dynamic_variables, which includes all preserved variables.
-                        let pending_stmts_snapshot = self.pending_statements.clone();
-
-                        // BUG #71 DEBUG: Check variable_map size before processing pending statements
-                        trace!(
-                            "[BUG #71 BEFORE PENDING LOOP] variable_map size={}",
-                            self.variable_map.len()
-                        );
-                        trace!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
-                            self.variable_map.contains_key(&hir::VariableId(5)));
-
-                        for pending_stmt in &pending_stmts_snapshot {
-                            if let Statement::Assignment(assign) = pending_stmt {
-                                if let LValue::Variable(var_id) = &assign.lhs {
-                                    // BUG #71 DEBUG: Check if var_148 is already in the module
-                                    let in_module =
-                                        module.variables.iter().any(|v| v.id == *var_id);
-                                    if var_id.0 == 148 {
-                                        trace!(
-                                            "[BUG #71 IN_MODULE] var_148 in module? {}",
-                                            in_module
-                                        );
-                                    }
-                                    // Check if this variable is already in the module
-                                    if !in_module {
-                                        // BUG FIX #56/#71: Look up type from dynamic_variables instead of inferring from RHS
-                                        // This preserves Float types that were declared in let statements
-                                        // BUG #71: Use CURRENT dynamic_variables, not empty snapshot
-
-                                        // BUG #71 FIX: Search dynamic_variables by MIR ID, not HIR ID!
-                                        // HIR IDs are reused across function contexts, but MIR IDs are unique.
-                                        // dynamic_variables is keyed by HIR ID, but the values contain MIR IDs.
-                                        // We must search the values to find the entry with matching MIR ID.
-
-                                        // BUG #71 DEBUG: Check if var_148 is in dynamic_variables
-                                        if var_id.0 == 148 {
-                                            trace!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
-                                                var_id, self.dynamic_variables.len());
-                                            let found = self
-                                                .dynamic_variables
-                                                .values()
-                                                .any(|(id, _, _)| id == var_id);
-                                            trace!(
-                                                "[BUG #71 DYN_VAR LOOKUP] Found var_148? {}",
-                                                found
-                                            );
-                                            if !found {
-                                                trace!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
-                                                for (mir_id, name, hir_type) in
-                                                    self.dynamic_variables.values()
-                                                {
-                                                    if name.contains("edge") {
-                                                        trace!("  - MIR {:?}: name='{}', HIR type={:?}", mir_id, name, hir_type);
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        let dyn_var_info = self
-                                            .dynamic_variables
-                                            .values()
-                                            .find(|(id, _, _)| id == var_id)
-                                            .cloned();
-
-                                        let (var_name, var_type) = if let Some((
-                                            _,
-                                            name,
-                                            hir_type,
-                                        )) = dyn_var_info
-                                        {
-                                            // Found in dynamic_variables - use its declared type
-                                            let mir_type = self.convert_type(&hir_type);
-                                            trace!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
-                                                    var_id.0, name, hir_type, mir_type);
-                                            // BUG #71 DEBUG
-                                            if name.contains("edge1")
-                                                || name.contains("edge2")
-                                                || name.contains("_h")
-                                                || name.contains("_s")
-                                            {
-                                                trace!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
-                                                    name, hir_type, mir_type);
-                                            }
-                                            (name, mir_type)
-                                        } else {
-                                            // Not in dynamic_variables - fall back to name lookup and type inference
-                                            // CRITICAL FIX #IMPORT_MATCH: Use mir_variable_names for reverse lookup
-                                            // to avoid collision issues when multiple HIR IDs map to same MIR ID
-                                            let var_name = self
-                                                .mir_variable_names
-                                                .get(var_id)
-                                                .cloned()
-                                                .or_else(|| {
-                                                    // Fall back to old method if not in mir_variable_names
-                                                    self.variable_map
-                                                        .iter()
-                                                        .find(|(_, &mir_id)| mir_id == *var_id)
-                                                        .and_then(|(hir_id, _)| {
-                                                            // Try to find the variable name from the HIR
-                                                            self.find_variable_name(*hir_id)
-                                                        })
-                                                })
-                                                .unwrap_or_else(|| format!("var_{}", var_id.0));
-
-                                            trace!(
-                                                "[BUG #IMPORT_MATCH] Reverse lookup for MIR {:?}: found name '{}'",
-                                                var_id, var_name
-                                            );
-
-                                            // Infer the type from the RHS expression
-                                            let var_type = self.infer_expression_type_with_module(
-                                                &assign.rhs,
-                                                module,
-                                            );
-                                            // BUG #71 DEBUG
-                                            if var_name.contains("edge1")
-                                                || var_name.contains("edge2")
-                                                || var_name.contains("_h")
-                                                || var_name.contains("_s")
-                                            {
-                                                trace!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
-                                                    var_name, var_type);
-                                            }
-                                            (var_name, var_type)
-                                        };
-
-                                        let variable = Variable {
-                                            id: *var_id,
-                                            name: var_name.clone(),
-                                            var_type,
-                                            initial: None,
-                                            span: None,
-                                        };
-                                        trace!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
-                                        module.variables.push(variable);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Add any new dynamic variables that were created during conversion
-                        // This ensures variables from let bindings in block expressions are declared
-                        // before we try to assign to them
-                        let dynamic_vars: Vec<_> =
-                            self.dynamic_variables.values().cloned().collect();
-                        for (mir_var_id, name, hir_type) in dynamic_vars {
-                            // Check if this variable is already in the module
-                            let already_in = module.variables.iter().any(|v| v.id == mir_var_id);
-                            if !already_in {
-                                trace!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
-                                let mir_type = self.convert_type(&hir_type);
-                                trace!("[DEBUG]   -> mir_type={:?}", mir_type);
-                                // BUG #71 DEBUG: Check if this is one of the problematic variables
-                                if name.contains("edge1")
-                                    || name.contains("edge2")
-                                    || name.contains("_h")
-                                    || name.contains("_s")
-                                {
-                                    trace!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
-                                        name, mir_var_id, hir_type, mir_type);
-                                }
-                                let variable = Variable {
-                                    id: mir_var_id,
-                                    name: name.clone(),
-                                    var_type: mir_type,
-                                    initial: None,
-                                    span: None,
-                                };
-                                trace!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
-                                module.variables.push(variable);
-                            }
-                        }
-
-                        // Emit pending statements as continuous assignments first
-                        // These come from let bindings in block expressions within conditionals
-                        for pending_stmt in self.pending_statements.drain(..) {
-                            if let Statement::Assignment(assign) = pending_stmt {
-                                let continuous = ContinuousAssign {
-                                    lhs: assign.lhs,
-                                    rhs: assign.rhs,
-                                    span: None,
-                                };
-                                module.assignments.push(continuous);
-                            }
-                        }
-
-                        // BUG #256 FIX: Drain pending temp signals (from bit-indexing on Concat)
-                        for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
-                            module.signals.push(Signal {
-                                id: sig_id,
-                                name,
-                                signal_type: dtype,
-                                initial: None,
-                                clock_domain: None,
-                                clock_domain_name: None,
-                                span: None,
-                                memory_config: None,
-                                trace_config: None,
-                                cdc_config: None,
-                                breakpoint_config: None,
-                                power_config: None,
-                                safety_context: None,
-                                detection_config: None,
-                                power_domain: None,
-                            });
-                            module.assignments.push(ContinuousAssign {
-                                lhs: LValue::Signal(sig_id),
-                                rhs,
-                                span: None,
-                            });
-                        }
-
-                        // Drain pending module instances (from complex function calls)
-                        self.drain_pending_module_instances(module);
-
-                        // Drain pending entity instances (from let bindings with entity instantiation)
-                        self.drain_pending_entity_instances(module);
-
-                        // Then emit the main assignment
-                        module.assignments.extend(assigns);
-                    }
-
-                    // Convert module instances
-                    for hir_instance in &impl_block.instances {
-                        if let Some(instance) = self.convert_instance(hir_instance) {
-                            module.instances.push(instance);
-                        } else {
-                            // An instance that fails to convert is a whole
-                            // child module missing from the design, with the
-                            // parent's ports left dangling. Same class as a
-                            // dropped assignment, larger blast radius.
-                            let entity = self.current_entity_name();
-                            self.conversion_errors.push((
-                                entity,
-                                format!(
-                                    "instance `{}` could not be lowered — the child module would be silently missing from the design",
-                                    hir_instance.name
-                                ),
-                            ));
-                        }
-
-                        // BUG FIX: Propagate detection signal flags from sub-module output ports
-                        // to connected signals in the parent module
-                        if let Some(hir) = self.hir.as_ref() {
-                            if let Some(entity) =
-                                hir.entities.iter().find(|e| e.id == hir_instance.entity)
-                            {
-                                for port in &entity.ports {
-                                    // Only process output ports with detection_signal flag
-                                    if port.is_detection_signal()
-                                        && matches!(port.direction, hir::HirPortDirection::Output)
-                                    {
-                                        // Find the connection to this port
-                                        for conn in &hir_instance.connections {
-                                            if conn.port == port.name {
-                                                // Get the signal ID from the RHS expression
-                                                let signal_id = match &conn.expr {
-                                                    hir::HirExpression::Signal(id) => {
-                                                        self.signal_map.get(id).copied()
-                                                    }
-                                                    _ => None,
-                                                };
-
-                                                if let Some(mir_signal_id) = signal_id {
-                                                    // Mark this signal as detection signal
-                                                    if let Some(signal) = module
-                                                        .signals
-                                                        .iter_mut()
-                                                        .find(|s| s.id == mir_signal_id)
-                                                    {
-                                                        trace!(
-                                                            "[DETECTION_PROPAGATE] Marking signal '{}' (id={}) as detection signal (from {}.{})",
-                                                            signal.name,
-                                                            mir_signal_id.0,
-                                                            hir_instance.name,
-                                                            port.name
-                                                        );
-                                                        // Propagate detection config from port
-                                                        signal.detection_config =
-                                                            port.detection_config.clone();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Convert formal verification statements AND Let statements for entity instantiation
-                    // BUG FIX: Previously only Assert/Assume/Cover were handled, but Let statements
-                    // with entity struct literals (e.g., `let voltage_loop = PiController { ... }`)
-                    // were being ignored, causing PI controllers in CcCvController to be missing
-                    for stmt in &impl_block.statements {
-                        match stmt {
-                            hir::HirStatement::Assert(assert_stmt) => {
-                                if let Some(condition) =
-                                    self.convert_assertion_expression(&assert_stmt.condition, 0)
-                                {
-                                    module.assertions.push(Assertion {
-                                        kind: AssertionKind::Assert,
-                                        condition,
-                                        message: assert_stmt.message.clone(),
-                                        span: None,
-                                    });
-                                }
-                            }
-                            hir::HirStatement::Assume(assume_stmt) => {
-                                if let Some(condition) =
-                                    self.convert_assertion_expression(&assume_stmt.condition, 0)
-                                {
-                                    module.assertions.push(Assertion {
-                                        kind: AssertionKind::Assume,
-                                        condition,
-                                        message: assume_stmt.message.clone(),
-                                        span: None,
-                                    });
-                                }
-                            }
-                            hir::HirStatement::Cover(cover_stmt) => {
-                                // For cover, extract the condition from the property
-                                if let hir::HirProperty::Expression(expr) = &cover_stmt.property {
-                                    if let Some(condition) =
-                                        self.convert_assertion_expression(expr, 0)
-                                    {
-                                        module.assertions.push(Assertion {
-                                            kind: AssertionKind::Cover,
-                                            condition,
-                                            message: cover_stmt.name.clone(),
-                                            span: None,
-                                        });
-                                    }
-                                }
-                            }
-                            hir::HirStatement::Let(let_stmt) => {
-                                // BUG FIX: Handle Let statements with entity instantiation via struct literals
-                                // This enables patterns like: let voltage_loop = PiController { ... }
-                                // which create child module instances
-                                trace!(
-                                    "[IMPL_BLOCK_LET] Processing Let '{}' in impl block statements",
-                                    let_stmt.name
-                                );
-                                // convert_statement handles entity instantiation detection internally
-                                // and pushes to pending_entity_instances if it's an entity struct literal
-                                let _ = self.convert_statement(stmt);
-                            }
-                            hir::HirStatement::While(_) | hir::HirStatement::If(_) => {
-                                // While/If in impl blocks are combinational logic.
-                                // While loops get unrolled at compile time, then the
-                                // resulting statements form a combinational process.
-                                if let Some(mir_stmt) = self.convert_statement(stmt) {
-                                    let proc_id = self.next_process_id();
-                                    module.processes.push(Process {
-                                        id: proc_id,
-                                        kind: ProcessKind::Combinational,
-                                        sensitivity: SensitivityList::Always,
-                                        body: Block {
-                                            statements: vec![mir_stmt],
-                                        },
-                                        span: None,
-                                    });
-                                }
-                            }
-                            _ => {} // Ignore other statement types (handled elsewhere or not applicable)
-                        }
-                    }
-
-                    // BUG FIX: Drain any pending entity instances created from Let statements above
-                    // These weren't being drained before because the earlier drain happened before
-                    // the statements loop
-                    self.drain_pending_entity_instances(module);
-                    self.drain_pending_module_instances(module);
-
-                    // Clean up generic parameter bindings for this impl block
-                    for name in &bound_generic_names {
-                        self.const_evaluator.unbind(name);
-                    }
-                }
-            }
-        }
+        // Implementations are converted per compilation unit — see
+        // convert_implementations.
+        self.convert_implementations(hir, &mut mir);
 
         trace!(
             "⏱️  [PERF] HIR→MIR transform complete in {:?}",
@@ -2234,6 +1087,1168 @@ impl<'hir> HirToMir<'hir> {
         }
 
         mir
+    }
+
+    /// Convert every implementation in `hir` into the MIR modules already
+    /// created for its entities.
+    ///
+    /// Extracted verbatim from `transform` so it can run once per
+    /// compilation unit. An id is only meaningful inside the Hir that
+    /// minted it, so a module HIR is converted against ITS OWN hir rather
+    /// than by copying its entities into the main one and renumbering them.
+    fn convert_implementations(&mut self, hir: &'hir Hir, mir: &mut Mir) {
+        use std::time::Instant;
+
+            // Second pass: add implementations
+            for impl_block in &hir.implementations {
+                let impl_start = Instant::now();
+                // AUDIT-2 #5: instance maps are keyed by BARE VariableId, which
+                // restarts per impl block — stale entries from an earlier impl
+                // (e.g. stdlib fp) collided with a later impl's variables:
+                // `.0` on a tuple-fn result hit a stdlib instance's ports
+                // (x_out/y_out) and failed conversion. Reset per impl.
+                self.entity_instance_outputs.clear();
+                self.entity_instance_info.clear();
+                self.tuple_call_results.clear();
+                // Debug: Find entity name
+                let impl_entity_name = hir
+                    .entities
+                    .iter()
+                    .find(|e| e.id == impl_block.entity)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| "?".to_string());
+                if impl_entity_name.contains("FpAdd") {
+                    trace!(
+                        "[HIR_TO_MIR] Second pass: impl for '{}' ({:?}), {} signals",
+                        impl_entity_name,
+                        impl_block.entity,
+                        impl_block.signals.len()
+                    );
+                }
+                // BUG #117r DEBUG: Log impl block processing
+                if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
+                    // Set current entity for generic parameter resolution
+                    self.current_entity_id = Some(impl_block.entity);
+
+                    // BUG #10.2 FIX: Restore entity scope (port/signal maps) from first-pass cache
+                    // Without this, CDC entities with lifetime parameters have empty port_map
+                    // in the second pass, causing analyze_event_block to skip all triggers
+                    self.restore_entity_scope_from_cache(impl_block.entity);
+
+                    // Skip implementations for entities that are not used (0 instances) and are not the first entity
+                    if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
+                        // Check if this is a generic entity (has generics, including those with defaults)
+                        // BUG #10.2 FIX: Exclude lifetime parameters (ClockDomain, PowerDomain)
+                        let has_generics = !entity.generics.is_empty()
+                            && entity.generics.iter().any(|g| {
+                                !matches!(
+                                    g.param_type,
+                                    hir::HirGenericType::ClockDomain
+                                        | hir::HirGenericType::PowerDomain { .. }
+                                )
+                            });
+
+                        // BUG #231 FIX: If this entity has generics, check if a monomorphized version exists.
+                        // A monomorphized version is another entity with:
+                        //   1. Same or similar name (starts with base name, possibly with suffix like "_10")
+                        //   2. Different EntityId
+                        //   3. Empty generics (fully specialized)
+                        // If a monomorphized version exists, skip the generic entity's impl to avoid
+                        // port ID mismatches (generic uses PortId(6), monomorphized uses PortId(49)).
+                        if has_generics {
+                            let base_name = &entity.name;
+                            let has_monomorphized_version = hir.entities.iter().any(|e| {
+                                e.id != entity.id
+                                    && (e.name == *base_name
+                                        || e.name.starts_with(&format!("{}_", base_name)))
+                                    && e.generics.is_empty() // Monomorphized entities have no generics
+                            });
+
+                            if has_monomorphized_version {
+                                continue;
+                            }
+                        }
+
+                        // Check if this is a generic entity (has unresolved generics)
+                        // BUG #10.2 FIX: Exclude PowerDomain lifetime parameters along with ClockDomain
+                        // Lifetime parameters (clock domains, power domains) don't need monomorphization
+                        let has_unresolved_generics = entity.generics.iter().any(|g| {
+                            g.default_value.is_none()
+                                && !matches!(
+                                    g.param_type,
+                                    hir::HirGenericType::ClockDomain
+                                        | hir::HirGenericType::PowerDomain { .. }
+                                )
+                        });
+
+                        // Skip if: has unresolved generics AND no instances
+                        // This skips unspecialized generic entities that are never instantiated
+                        if has_unresolved_generics && impl_block.instances.is_empty() {
+                            continue;
+                        }
+
+                        // NOTE: We do NOT skip monomorphized entities even if they have 0 instances in their own impl block.
+                        // Monomorphized entities (like FpAdd_fp32) are created by monomorphization because some other
+                        // entity instantiates them. The instances are registered in the parent entity's impl block,
+                        // not in the monomorphized entity's own impl block.
+                        // Skipping them would cause their signals/logic to be missing from the final output.
+                    }
+
+                    // Bind generic parameter default values into const evaluator for expression evaluation
+                    // Track which names we bound so we can clean them up later
+                    let mut bound_generic_names = Vec::new();
+                    if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
+                        for generic in &entity.generics {
+                            if let Some(default_expr) = &generic.default_value {
+                                // Try to evaluate the default value and bind it
+                                if let Ok(const_val) = self.const_evaluator.eval(default_expr) {
+                                    self.const_evaluator.bind(generic.name.clone(), const_val);
+                                    bound_generic_names.push(generic.name.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // Find the module
+                    if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
+                        // BUG #272 FIX: Clear variable_map between entity impl blocks to prevent
+                        // HIR VariableId collisions. Each entity's let bindings have independent
+                        // HIR VariableIds (e.g., both PiController and TemperatureProtection can
+                        // have VariableId(0)). Without clearing, a later entity's let binding
+                        // reuses the previous entity's MIR variable instead of creating a new one,
+                        // resulting in missing module.variables entries and undriven LIR signals.
+                        self.variable_map.clear();
+                        self.context_variable_map.clear();
+
+                        // Elaborate generate blocks: evaluate conditions and collect body items
+                        let (gen_signals, gen_event_blocks, gen_assignments) =
+                            self.elaborate_generate_blocks_in_impl(impl_block);
+
+                        // Add signals - flatten structs/vectors into individual signals
+                        for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
+                            let pre_id = self.next_signal_id;
+                            let signal_type = self.convert_type(&hir_signal.signal_type);
+                            let initial = hir_signal
+                                .initial_value
+                                .as_ref()
+                                .and_then(|expr| self.convert_literal_expr(expr));
+                            let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
+
+                            // Auto-detect memory-eligible arrays for BRAM inference
+                            let auto_memory_config = if hir_signal.memory_config.is_none() {
+                                if let DataType::Array(ref element_type, size) = signal_type {
+                                    let elem_width = TypeFlattener::get_scalar_width(element_type);
+                                    if let Some(ew) = elem_width {
+                                        let total_bits = ew as usize * size;
+                                        if (total_bits >= 128 && size >= 4) || total_bits > 256 {
+                                            Some(skalp_frontend::hir::MemoryConfig {
+                                                depth: size as u32,
+                                                width: Some(ew),
+                                                ports: 1,
+                                                style: skalp_frontend::hir::MemoryStyle::Auto,
+                                                read_latency: 1,
+                                                read_only: false,
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let is_memory =
+                                hir_signal.memory_config.is_some() || auto_memory_config.is_some();
+                            let effective_memory_config =
+                                hir_signal.memory_config.clone().or(auto_memory_config);
+
+                            let (flattened_signals, flattened_fields) = self.flatten_signal(
+                                &hir_signal.name,
+                                &signal_type,
+                                initial,
+                                clock_domain,
+                                hir_signal.span.clone(),
+                                is_memory,
+                            );
+                            // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
+                            // Even single-field structs need mapping because field name != signal name
+                            // (e.g., signal "data: SimpleData" → flattened signal "data_value")
+                            if !flattened_fields.is_empty() {
+                                self.flattened_signals
+                                    .insert(hir_signal.id, flattened_fields.clone());
+                            }
+
+                            // BUG #33 FIX: Also populate reverse map for each flattened signal
+                            for field in &flattened_fields {
+                                self.signal_to_hir.insert(
+                                    SignalId(field.id),
+                                    (hir_signal.id, field.field_path.clone()),
+                                );
+                            }
+
+                            // For simple mapping (first signal or single non-struct signal)
+                            if let Some(first_signal) = flattened_signals.first() {
+                                self.signal_map.insert(hir_signal.id, first_signal.id);
+                            }
+
+                            // BUG #237 FIX: Track which entity this signal belongs to
+                            self.signal_owner.insert(hir_signal.id, impl_block.entity);
+
+                            // Add all flattened signals to the module
+                            for mut signal in flattened_signals {
+                                // Propagate memory config (explicit or auto-inferred) to MIR signal
+                                if let Some(ref mem_config) = effective_memory_config {
+                                    signal.memory_config = Some(mem_config.clone());
+                                }
+                                // Propagate trace config from HIR signal to MIR signal
+                                if hir_signal.trace_config.is_some() {
+                                    signal.trace_config = hir_signal.trace_config.clone();
+                                }
+                                // Propagate CDC config from HIR signal to MIR signal
+                                if hir_signal.cdc_config.is_some() {
+                                    signal.cdc_config = hir_signal.cdc_config.clone();
+                                }
+                                // TRIAGE #13: propagate the explicit clock-domain
+                                // lifetime name for CDC analysis
+                                signal.clock_domain_name = hir_signal.clock_domain_name.clone();
+                                // Propagate breakpoint config from HIR signal to MIR signal
+                                if hir_signal.breakpoint_config.is_some() {
+                                    signal.breakpoint_config = hir_signal.breakpoint_config.clone();
+                                }
+                                // Propagate power config from HIR signal to MIR signal
+                                if hir_signal.power_config.is_some() {
+                                    signal.power_config = hir_signal.power_config.clone();
+                                }
+                                // Propagate power domain from HIR signal to MIR signal
+                                if hir_signal.power_domain.is_some() {
+                                    signal.power_domain = hir_signal.power_domain.clone();
+                                }
+                                // Propagate safety config from HIR signal to MIR signal
+                                if let Some(ref safety_config) = hir_signal.safety_config {
+                                    signal.safety_context = Some(convert_safety_config(safety_config));
+                                }
+                                module.signals.push(signal);
+                            }
+
+                            // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
+                            // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
+                            // BUG #207 DEBUG: Trace all signals with initial values for FP entities
+                            let is_fp_module = module.name.contains("FpAdd")
+                                || module.name.contains("FpSub")
+                                || module.name.contains("FpMul");
+                            let has_init = hir_signal.initial_value.is_some();
+                            if is_fp_module {
+                                trace!(
+                                    "[BUG #207 TRACE] Module '{}' Signal '{}' initial_value: {}",
+                                    module.name,
+                                    hir_signal.name,
+                                    has_init
+                                );
+                            }
+                            if has_init {
+                                let init_expr = hir_signal.initial_value.as_ref().unwrap();
+                                if is_fp_module {
+                                    trace!(
+                                        "[BUG #207 EXPR] Module '{}' Signal '{}' expr_type: {:?}",
+                                        module.name,
+                                        hir_signal.name,
+                                        std::mem::discriminant(init_expr)
+                                    );
+                                }
+                            }
+                            // Use separate variable to avoid borrow issues
+                            let opt_init = &hir_signal.initial_value;
+                            if is_fp_module {
+                                trace!(
+                                    "[BUG #207 PRE-IF] Module '{}' Signal '{}'",
+                                    module.name,
+                                    hir_signal.name
+                                );
+                            }
+                            if let Some(init_expr) = opt_init.clone() {
+                                let init_expr = &init_expr;
+                                if is_fp_module {
+                                    // Debug: print expression type
+                                    trace!(
+                                        "[BUG #207 ENTRY] Module '{}' Signal '{}' is_literal: {}",
+                                        module.name,
+                                        hir_signal.name,
+                                        matches!(init_expr, hir::HirExpression::Literal(_))
+                                    );
+                                }
+                                // Only generate an assignment if the initializer is NOT a
+                                // compile-time constant (literal or enum variant). Constant
+                                // initializers were already stored as the flip-flop initial
+                                // value during flattening; also emitting a continuous assign
+                                // would multi-drive the signal (SpiMaster FSM bug).
+                                let is_literal = self.convert_literal_expr(init_expr).is_some();
+                                if is_fp_module {
+                                    trace!(
+                                        "[BUG #207 NOT-LIT] Module '{}' Signal '{}' is_literal={}, entering non-literal block: {}",
+                                        module.name, hir_signal.name, is_literal, !is_literal
+                                    );
+                                }
+                                if !is_literal {
+                                    if is_fp_module {
+                                        trace!(
+                                            "[BUG #207 CONVERT] Module '{}' Signal '{}' about to call convert_expression",
+                                            module.name, hir_signal.name
+                                        );
+                                    }
+                                    // Convert the expression
+                                    let convert_result = self.convert_expression(init_expr, 0);
+                                    if is_fp_module {
+                                        trace!(
+                                            "[BUG #207 RESULT] Module '{}' Signal '{}' convert_expression returned: {}",
+                                            module.name, hir_signal.name, if convert_result.is_some() { "Some" } else { "None" }
+                                        );
+                                    }
+                                    if let Some(rhs) = convert_result {
+                                        // Get the first MIR signal ID for this HIR signal
+                                        if let Some(&mir_signal_id) =
+                                            self.signal_map.get(&hir_signal.id)
+                                        {
+                                            let continuous = ContinuousAssign {
+                                                lhs: LValue::Signal(mir_signal_id),
+                                                rhs,
+                                                span: None,
+                                            };
+                                            module.assignments.push(continuous);
+                                            trace!(
+                                                "[HIR→MIR] Created ContinuousAssign for impl signal '{}' -> SignalId({:?})",
+                                                hir_signal.name, mir_signal_id
+                                            );
+
+                                            // BUG #256 FIX: Drain pending temp signals created during
+                                            // signal initializer conversion (e.g., clz32 inlining in FpAdd)
+                                            for (sig_id, name, dtype, rhs) in
+                                                self.pending_temp_signals.drain(..)
+                                            {
+                                                module.signals.push(Signal {
+                                                    id: sig_id,
+                                                    name,
+                                                    signal_type: dtype,
+                                                    initial: None,
+                                                    clock_domain: None,
+                                                    clock_domain_name: None,
+                                                    span: None,
+                                                    memory_config: None,
+                                                    trace_config: None,
+                                                    cdc_config: None,
+                                                    breakpoint_config: None,
+                                                    power_config: None,
+                                                    safety_context: None,
+                                                    detection_config: None,
+                                                    power_domain: None,
+                                                });
+                                                module.assignments.push(ContinuousAssign {
+                                                    lhs: LValue::Signal(sig_id),
+                                                    rhs,
+                                                    span: None,
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        // BUG #207: Signal initializer conversion FAILED
+                                        // Print more details based on expression type
+                                        match init_expr {
+                                            hir::HirExpression::Index(base, idx) => {}
+                                            hir::HirExpression::Range(base, hi, lo) => {}
+                                            hir::HirExpression::Cast(cast) => {}
+                                            hir::HirExpression::Binary(bin) => {}
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add variables
+                        for hir_var in &impl_block.variables {
+                            let var_id = self.next_variable_id();
+                            self.variable_map.insert(hir_var.id, var_id);
+
+                            let mut mir_var_type = self.convert_type(&hir_var.var_type);
+                            // Widen variable type by 1 if its initial value is an addition
+                            // This preserves the carry bit for expressions like `let result = a + b`.
+                            // TRIAGE #15: only for INFERRED types — an explicit
+                            // annotation (`let x: bit[9] = a + b`) is a contract;
+                            // widening it emitted a 10-bit net where 9 was declared.
+                            if !hir_var.explicit_type {
+                                if let Some(ref init_expr) = hir_var.initial_value {
+                                    if Self::hir_expr_contains_add(init_expr) {
+                                        mir_var_type = Self::widen_type_by_one(mir_var_type);
+                                    }
+                                }
+                            }
+                            let variable = Variable {
+                                id: var_id,
+                                name: hir_var.name.clone(),
+                                var_type: mir_var_type,
+                                initial: hir_var
+                                    .initial_value
+                                    .as_ref()
+                                    .and_then(|expr| self.convert_literal_expr(expr)),
+                                span: None,
+                            };
+                            module.variables.push(variable);
+                        }
+
+                        // Pre-process entity instances BEFORE event blocks, so that
+                        // entity_instance_outputs is populated when convert_field_access
+                        // resolves instance.port expressions inside on() blocks.
+                        for hir_instance in &impl_block.instances {
+                            // Find the entity to get its output ports
+                            if let Some(entity) = self
+                                .hir
+                                .as_ref()
+                                .and_then(|h| h.entities.iter().find(|e| e.id == hir_instance.entity))
+                            {
+                                let mut output_ports: IndexMap<String, SignalId> = IndexMap::new();
+
+                                // Create signals for each output port
+                                // BUG FIX: Flatten struct-typed ports into multiple scalar signals
+                                // BUG #249 FIX: Check if output port is connected to a parent signal.
+                                // If connected, use the parent's signal IDs instead of creating new signals.
+                                // This prevents duplicate signals (e.g., protection_faults__* vs prot_faults__*)
+                                // where one set is driven and the other is not.
+                                for port in &entity.ports {
+                                    if matches!(port.direction, hir::HirPortDirection::Output) {
+                                        // BUG #249 FIX: Check if this output port is connected to a parent signal
+                                        let connected_parent_signal = hir_instance
+                                            .connections
+                                            .iter()
+                                            .find(|conn| conn.port == port.name)
+                                            .and_then(|conn| {
+                                                if let hir::HirExpression::Signal(hir_sig_id) =
+                                                    &conn.expr
+                                                {
+                                                    let mir_id =
+                                                        self.signal_map.get(hir_sig_id).copied();
+                                                    mir_id
+                                                } else {
+                                                    None
+                                                }
+                                            });
+
+                                        if let Some(parent_mir_signal_id) = connected_parent_signal {
+                                            // BUG #249 FIX: Output port is connected to a parent signal.
+                                            // Use the parent's flattened signal IDs for the output_ports map
+                                            // instead of creating new (duplicate, undriven) signals.
+
+                                            // Find the parent signal's name to look up flattened fields
+                                            if let Some(parent_signal) = module
+                                                .signals
+                                                .iter()
+                                                .find(|s| s.id == parent_mir_signal_id)
+                                            {
+                                                // For scalar types, just map directly
+                                                output_ports
+                                                    .insert(port.name.clone(), parent_mir_signal_id);
+                                            } else {
+                                                // Parent signal may be flattened - look for flattened siblings
+                                                // Find all signals whose name starts with parent signal's base name
+                                                if let Some((hir_sig_id, _)) = hir_instance
+                                                    .connections
+                                                    .iter()
+                                                    .find(|conn| conn.port == port.name)
+                                                    .and_then(|conn| {
+                                                        if let hir::HirExpression::Signal(id) =
+                                                            &conn.expr
+                                                        {
+                                                            Some((*id, ()))
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                {
+                                                    // Look up the flattened signals from the parent
+                                                    if let Some(flattened_fields) =
+                                                        self.flattened_signals.get(&hir_sig_id)
+                                                    {
+                                                        for field in flattened_fields {
+                                                            let key = if field.field_path.is_empty() {
+                                                                port.name.clone()
+                                                            } else {
+                                                                format!(
+                                                                    "{}{}{}",
+                                                                    port.name,
+                                                                    FIELD_SEPARATOR,
+                                                                    field
+                                                                        .field_path
+                                                                        .join(FIELD_SEPARATOR)
+                                                                )
+                                                            };
+                                                            output_ports.insert(
+                                                                key.clone(),
+                                                                SignalId(field.id),
+                                                            );
+                                                        }
+                                                        continue; // Skip the normal signal creation below
+                                                    }
+                                                }
+                                                // Fallback: just map the port directly
+                                                output_ports
+                                                    .insert(port.name.clone(), parent_mir_signal_id);
+                                            }
+
+                                            // Skip creating new signals - use parent's signals
+                                            // But still propagate detection flags if needed (handled below)
+                                        } else {
+                                            // Output port is NOT connected - create new signals as before.
+                                            // Collision-proofing: a user let/signal may already be named
+                                            // "{instance}_{port}" (e.g. `let tx_fifo_empty = tx_fifo.empty`).
+                                            // All compiler-internal references go through the SignalId in
+                                            // instance_outputs_by_name, so pick a non-colliding name.
+                                            let mut signal_name =
+                                                format!("{}_{}", hir_instance.name, port.name);
+                                            let name_taken = |n: &str| {
+                                                impl_block.signals.iter().any(|s| s.name == n)
+                                                    || impl_block.variables.iter().any(|v| v.name == n)
+                                                    // Entity PORTS collide too: instance `pwm` +
+                                                    // port `counter` auto-wires "pwm_counter",
+                                                    // which may equal a top-level port name —
+                                                    // duplicate LIR signal names break every
+                                                    // name-keyed lookup downstream (flatten's
+                                                    // name_to_signal, gate-net matching).
+                                                    || module.ports.iter().any(|p| p.name == n)
+                                                    || module.signals.iter().any(|s| s.name == n)
+                                            };
+                                            if name_taken(&signal_name) {
+                                                signal_name =
+                                                    format!("{}__{}", hir_instance.name, port.name);
+                                                while name_taken(&signal_name) {
+                                                    signal_name.push('_');
+                                                }
+                                            }
+                                            let signal_type = self.convert_type(&port.port_type);
+
+                                            // Use flatten_signal to properly handle struct types
+                                            let (flattened_signals, flattened_fields) = self
+                                                .flatten_signal(
+                                                    &signal_name,
+                                                    &signal_type,
+                                                    None,
+                                                    None,
+                                                    None,
+                                                    false,
+                                                );
+
+                                            // Add all flattened signals to the module
+                                            for mut signal in flattened_signals {
+                                                // Propagate detection signal config from sub-module port
+                                                signal.detection_config = port.detection_config.clone();
+                                                signal.power_domain = port
+                                                    .power_domain_config
+                                                    .as_ref()
+                                                    .map(|c| c.domain_name.clone());
+                                                module.signals.push(signal);
+                                            }
+
+                                            // Map each flattened field with its full path
+                                            // For scalar ports: "result" -> signal_id
+                                            // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
+                                            for field in &flattened_fields {
+                                                // Build the key: port_name + field_path joined by FIELD_SEPARATOR
+                                                let key = if field.field_path.is_empty() {
+                                                    port.name.clone()
+                                                } else {
+                                                    format!(
+                                                        "{}{}{}",
+                                                        port.name,
+                                                        FIELD_SEPARATOR,
+                                                        field.field_path.join(FIELD_SEPARATOR)
+                                                    )
+                                                };
+                                                output_ports.insert(key, SignalId(field.id));
+                                            }
+                                        }
+
+                                        // BUG FIX: Also propagate detection flag to the connected signal
+                                        // in the parent module (if this output port connects to a local signal)
+                                        if port.is_detection_signal() {
+                                            // Find the connection to this port
+                                            for conn in &hir_instance.connections {
+                                                if conn.port == port.name {
+                                                    // Get the signal ID from the RHS expression
+                                                    if let hir::HirExpression::Signal(hir_sig_id) =
+                                                        &conn.expr
+                                                    {
+                                                        if let Some(&mir_sig_id) =
+                                                            self.signal_map.get(hir_sig_id)
+                                                        {
+                                                            // Mark the parent's connected signal
+                                                            if let Some(parent_signal) = module
+                                                                .signals
+                                                                .iter_mut()
+                                                                .find(|s| s.id == mir_sig_id)
+                                                            {
+                                                                // Propagate detection config from port
+                                                                parent_signal.detection_config =
+                                                                    port.detection_config.clone();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                self.instance_outputs_by_name
+                                    .insert(hir_instance.name.clone(), output_ports.clone());
+
+                                // `HirInstance::entity` is an `EntityId`, but EntityIds
+                                // restart per HIR — the preloaded stdlib module HIRs each
+                                // number from 0, exactly like the main file. When
+                                // `apply_pending_specializations` copies a generic stdlib
+                                // impl into the main HIR it does NOT remap those ids, so
+                                // resolving them here can bind a completely different
+                                // entity that merely shares the number. Measured: inside
+                                // the monomorphized `FpSub_fp32`, `inst adder = FpAdd<F>`
+                                // carries EntityId(0) (FpAdd's id in the fp module HIR) and
+                                // resolved to `Top` — the user's own top-level entity.
+                                //
+                                // A connection naming a port the resolved entity does not
+                                // have proves the resolution is wrong. Without this the
+                                // mis-binding is silent whenever the colliding entity
+                                // happens to share port names, and the design gets the
+                                // wrong child module wired in.
+                                let entity_port_names: Vec<&str> =
+                                    entity.ports.iter().map(|p| p.name.as_str()).collect();
+                                let bogus: Vec<&str> = hir_instance
+                                    .connections
+                                    .iter()
+                                    .map(|c| c.port.as_str())
+                                    .filter(|p| !entity_port_names.contains(p))
+                                    .collect();
+                                if !bogus.is_empty() {
+                                    let current = self.current_entity_name();
+                                    self.conversion_errors.push((
+                                        current,
+                                        format!(
+                                            "instance `{}` resolved to entity `{}`, which has no port(s) {} \
+                                             (its ports are {}). The instance's entity id ({:?}) was resolved \
+                                             against the wrong HIR — EntityIds restart per module, and a \
+                                             monomorphized library implementation keeps the id space of the \
+                                             module it came from.",
+                                            hir_instance.name,
+                                            entity.name,
+                                            bogus
+                                                .iter()
+                                                .map(|p| format!("`{}`", p))
+                                                .collect::<Vec<_>>()
+                                                .join(", "),
+                                            if entity_port_names.is_empty() {
+                                                "none".to_string()
+                                            } else {
+                                                entity_port_names
+                                                    .iter()
+                                                    .map(|p| format!("`{}`", p))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            },
+                                            hir_instance.entity,
+                                        ),
+                                    ));
+                                }
+                                if let Some(var_id) = hir_instance.variable_id {
+                                    self.entity_instance_outputs.insert(var_id, output_ports);
+                                    if let Some(module_id) = self.entity_map.get(&hir_instance.entity) {
+                                        self.entity_instance_info
+                                            .insert(var_id, (hir_instance.name.clone(), *module_id));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Convert event blocks to processes
+                        // (entity_instance_outputs is now populated from above)
+                        trace!("[HIR→MIR] Converting {} event_blocks + {} gen_event_blocks for module '{}'",
+                            impl_block.event_blocks.len(), gen_event_blocks.len(), module.name);
+                        for event_block in impl_block
+                            .event_blocks
+                            .iter()
+                            .chain(gen_event_blocks.iter())
+                        {
+                            let process = self.convert_event_block(event_block);
+                            trace!(
+                                "[HIR→MIR] Event block -> process kind={:?}, sensitivity={:?}",
+                                process.kind,
+                                process.sensitivity
+                            );
+                            module.processes.push(process);
+                        }
+
+                        // Add any dynamically created variables (from let bindings in event blocks)
+                        let dynamic_vars: Vec<_> = self.dynamic_variables.values().cloned().collect();
+                        for (mir_var_id, name, hir_type) in dynamic_vars {
+                            let mir_type = self.convert_type(&hir_type);
+                            let variable = Variable {
+                                id: mir_var_id,
+                                name: name.clone(),
+                                var_type: mir_type,
+                                initial: None,
+                                span: None,
+                            };
+                            module.variables.push(variable);
+                        }
+                        // Clear dynamic variables for next impl block
+                        self.dynamic_variables.clear();
+
+                        // Convert continuous assignments (may expand to multiple for structs)
+                        trace!(
+                            "⏱️  [PERF]     Processing {} assignments from impl block",
+                            impl_block.assignments.len()
+                        );
+                        let all_assignments: Vec<_> = impl_block
+                            .assignments
+                            .iter()
+                            .chain(gen_assignments.iter())
+                            .collect();
+                        for (i, a) in all_assignments.iter().enumerate() {}
+                        let all_assignments_for_processing: Vec<_> = impl_block
+                            .assignments
+                            .iter()
+                            .chain(gen_assignments.iter())
+                            .collect();
+                        let total_assignments = all_assignments_for_processing.len();
+                        for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate()
+                        {
+                            let assignment_start = Instant::now();
+                            trace!(
+                                "⏱️  [PERF]       Starting assignment {}/{}: LHS={:?}, RHS={:?}",
+                                idx + 1,
+                                total_assignments,
+                                std::mem::discriminant(&hir_assign.lhs),
+                                std::mem::discriminant(&hir_assign.rhs)
+                            );
+                            trace!(
+                                "[TRAIT_DEBUG_ENTRY] Entering convert_continuous_assignment_expanded for assignment {}", idx
+                            );
+                            // Clear any pending statements from previous assignments
+                            self.pending_statements.clear();
+                            self.pending_temp_signals.clear();
+
+                            // Convert the assignment (may generate pending statements from block expressions)
+                            let assigns = self.convert_continuous_assignment_expanded(hir_assign);
+                            trace!(
+                                "[TRAIT_DEBUG_EXIT] convert_continuous_assignment_expanded returned {} assigns", assigns.len()
+                            );
+                            trace!(
+                                "⏱️  [PERF]       Finished assignment {}/{} in {:?}",
+                                idx + 1,
+                                impl_block.assignments.len(),
+                                assignment_start.elapsed()
+                            );
+
+                            // BUG #71 DEBUG: Check variable_map size after assignment conversion
+                            trace!(
+                                "[BUG #71 AFTER ASSIGNMENT {}] variable_map size={}",
+                                idx,
+                                self.variable_map.len()
+                            );
+                            trace!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
+                                idx, self.variable_map.contains_key(&hir::VariableId(5)));
+
+                            // BUGFIX: First, scan pending_statements for any variables that need to be declared
+                            // These come from let bindings in block expressions that don't go through
+                            // the dynamic_variables mechanism (e.g., when functions are inlined)
+
+                            // BUG FIX #71: Don't use a snapshot - use current dynamic_variables directly!
+                            // Variables are created during assignment conversion (via match expressions, etc.)
+                            // and preserved by BUG #68. A snapshot taken before conversion would be empty.
+                            //
+                            // Original BUG #56 tried to use a snapshot to avoid borrow checker issues,
+                            // but that was taken BEFORE assignment conversion when dynamic_variables was
+                            // empty (cleared at line 308).
+                            //
+                            // The correct approach: Process pending statements and look up types from
+                            // the CURRENT state of dynamic_variables, which includes all preserved variables.
+                            let pending_stmts_snapshot = self.pending_statements.clone();
+
+                            // BUG #71 DEBUG: Check variable_map size before processing pending statements
+                            trace!(
+                                "[BUG #71 BEFORE PENDING LOOP] variable_map size={}",
+                                self.variable_map.len()
+                            );
+                            trace!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
+                                self.variable_map.contains_key(&hir::VariableId(5)));
+
+                            for pending_stmt in &pending_stmts_snapshot {
+                                if let Statement::Assignment(assign) = pending_stmt {
+                                    if let LValue::Variable(var_id) = &assign.lhs {
+                                        // BUG #71 DEBUG: Check if var_148 is already in the module
+                                        let in_module =
+                                            module.variables.iter().any(|v| v.id == *var_id);
+                                        if var_id.0 == 148 {
+                                            trace!(
+                                                "[BUG #71 IN_MODULE] var_148 in module? {}",
+                                                in_module
+                                            );
+                                        }
+                                        // Check if this variable is already in the module
+                                        if !in_module {
+                                            // BUG FIX #56/#71: Look up type from dynamic_variables instead of inferring from RHS
+                                            // This preserves Float types that were declared in let statements
+                                            // BUG #71: Use CURRENT dynamic_variables, not empty snapshot
+
+                                            // BUG #71 FIX: Search dynamic_variables by MIR ID, not HIR ID!
+                                            // HIR IDs are reused across function contexts, but MIR IDs are unique.
+                                            // dynamic_variables is keyed by HIR ID, but the values contain MIR IDs.
+                                            // We must search the values to find the entry with matching MIR ID.
+
+                                            // BUG #71 DEBUG: Check if var_148 is in dynamic_variables
+                                            if var_id.0 == 148 {
+                                                trace!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
+                                                    var_id, self.dynamic_variables.len());
+                                                let found = self
+                                                    .dynamic_variables
+                                                    .values()
+                                                    .any(|(id, _, _)| id == var_id);
+                                                trace!(
+                                                    "[BUG #71 DYN_VAR LOOKUP] Found var_148? {}",
+                                                    found
+                                                );
+                                                if !found {
+                                                    trace!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
+                                                    for (mir_id, name, hir_type) in
+                                                        self.dynamic_variables.values()
+                                                    {
+                                                        if name.contains("edge") {
+                                                            trace!("  - MIR {:?}: name='{}', HIR type={:?}", mir_id, name, hir_type);
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            let dyn_var_info = self
+                                                .dynamic_variables
+                                                .values()
+                                                .find(|(id, _, _)| id == var_id)
+                                                .cloned();
+
+                                            let (var_name, var_type) = if let Some((
+                                                _,
+                                                name,
+                                                hir_type,
+                                            )) = dyn_var_info
+                                            {
+                                                // Found in dynamic_variables - use its declared type
+                                                let mir_type = self.convert_type(&hir_type);
+                                                trace!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
+                                                        var_id.0, name, hir_type, mir_type);
+                                                // BUG #71 DEBUG
+                                                if name.contains("edge1")
+                                                    || name.contains("edge2")
+                                                    || name.contains("_h")
+                                                    || name.contains("_s")
+                                                {
+                                                    trace!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
+                                                        name, hir_type, mir_type);
+                                                }
+                                                (name, mir_type)
+                                            } else {
+                                                // Not in dynamic_variables - fall back to name lookup and type inference
+                                                // CRITICAL FIX #IMPORT_MATCH: Use mir_variable_names for reverse lookup
+                                                // to avoid collision issues when multiple HIR IDs map to same MIR ID
+                                                let var_name = self
+                                                    .mir_variable_names
+                                                    .get(var_id)
+                                                    .cloned()
+                                                    .or_else(|| {
+                                                        // Fall back to old method if not in mir_variable_names
+                                                        self.variable_map
+                                                            .iter()
+                                                            .find(|(_, &mir_id)| mir_id == *var_id)
+                                                            .and_then(|(hir_id, _)| {
+                                                                // Try to find the variable name from the HIR
+                                                                self.find_variable_name(*hir_id)
+                                                            })
+                                                    })
+                                                    .unwrap_or_else(|| format!("var_{}", var_id.0));
+
+                                                trace!(
+                                                    "[BUG #IMPORT_MATCH] Reverse lookup for MIR {:?}: found name '{}'",
+                                                    var_id, var_name
+                                                );
+
+                                                // Infer the type from the RHS expression
+                                                let var_type = self.infer_expression_type_with_module(
+                                                    &assign.rhs,
+                                                    module,
+                                                );
+                                                // BUG #71 DEBUG
+                                                if var_name.contains("edge1")
+                                                    || var_name.contains("edge2")
+                                                    || var_name.contains("_h")
+                                                    || var_name.contains("_s")
+                                                {
+                                                    trace!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
+                                                        var_name, var_type);
+                                                }
+                                                (var_name, var_type)
+                                            };
+
+                                            let variable = Variable {
+                                                id: *var_id,
+                                                name: var_name.clone(),
+                                                var_type,
+                                                initial: None,
+                                                span: None,
+                                            };
+                                            trace!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
+                                            module.variables.push(variable);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Add any new dynamic variables that were created during conversion
+                            // This ensures variables from let bindings in block expressions are declared
+                            // before we try to assign to them
+                            let dynamic_vars: Vec<_> =
+                                self.dynamic_variables.values().cloned().collect();
+                            for (mir_var_id, name, hir_type) in dynamic_vars {
+                                // Check if this variable is already in the module
+                                let already_in = module.variables.iter().any(|v| v.id == mir_var_id);
+                                if !already_in {
+                                    trace!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
+                                    let mir_type = self.convert_type(&hir_type);
+                                    trace!("[DEBUG]   -> mir_type={:?}", mir_type);
+                                    // BUG #71 DEBUG: Check if this is one of the problematic variables
+                                    if name.contains("edge1")
+                                        || name.contains("edge2")
+                                        || name.contains("_h")
+                                        || name.contains("_s")
+                                    {
+                                        trace!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
+                                            name, mir_var_id, hir_type, mir_type);
+                                    }
+                                    let variable = Variable {
+                                        id: mir_var_id,
+                                        name: name.clone(),
+                                        var_type: mir_type,
+                                        initial: None,
+                                        span: None,
+                                    };
+                                    trace!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
+                                    module.variables.push(variable);
+                                }
+                            }
+
+                            // Emit pending statements as continuous assignments first
+                            // These come from let bindings in block expressions within conditionals
+                            for pending_stmt in self.pending_statements.drain(..) {
+                                if let Statement::Assignment(assign) = pending_stmt {
+                                    let continuous = ContinuousAssign {
+                                        lhs: assign.lhs,
+                                        rhs: assign.rhs,
+                                        span: None,
+                                    };
+                                    module.assignments.push(continuous);
+                                }
+                            }
+
+                            // BUG #256 FIX: Drain pending temp signals (from bit-indexing on Concat)
+                            for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
+                                module.signals.push(Signal {
+                                    id: sig_id,
+                                    name,
+                                    signal_type: dtype,
+                                    initial: None,
+                                    clock_domain: None,
+                                    clock_domain_name: None,
+                                    span: None,
+                                    memory_config: None,
+                                    trace_config: None,
+                                    cdc_config: None,
+                                    breakpoint_config: None,
+                                    power_config: None,
+                                    safety_context: None,
+                                    detection_config: None,
+                                    power_domain: None,
+                                });
+                                module.assignments.push(ContinuousAssign {
+                                    lhs: LValue::Signal(sig_id),
+                                    rhs,
+                                    span: None,
+                                });
+                            }
+
+                            // Drain pending module instances (from complex function calls)
+                            self.drain_pending_module_instances(module);
+
+                            // Drain pending entity instances (from let bindings with entity instantiation)
+                            self.drain_pending_entity_instances(module);
+
+                            // Then emit the main assignment
+                            module.assignments.extend(assigns);
+                        }
+
+                        // Convert module instances
+                        for hir_instance in &impl_block.instances {
+                            if let Some(instance) = self.convert_instance(hir_instance) {
+                                module.instances.push(instance);
+                            } else {
+                                // An instance that fails to convert is a whole
+                                // child module missing from the design, with the
+                                // parent's ports left dangling. Same class as a
+                                // dropped assignment, larger blast radius.
+                                let entity = self.current_entity_name();
+                                self.conversion_errors.push((
+                                    entity,
+                                    format!(
+                                        "instance `{}` could not be lowered — the child module would be silently missing from the design",
+                                        hir_instance.name
+                                    ),
+                                ));
+                            }
+
+                            // BUG FIX: Propagate detection signal flags from sub-module output ports
+                            // to connected signals in the parent module
+                            if let Some(hir) = self.hir.as_ref() {
+                                if let Some(entity) =
+                                    hir.entities.iter().find(|e| e.id == hir_instance.entity)
+                                {
+                                    for port in &entity.ports {
+                                        // Only process output ports with detection_signal flag
+                                        if port.is_detection_signal()
+                                            && matches!(port.direction, hir::HirPortDirection::Output)
+                                        {
+                                            // Find the connection to this port
+                                            for conn in &hir_instance.connections {
+                                                if conn.port == port.name {
+                                                    // Get the signal ID from the RHS expression
+                                                    let signal_id = match &conn.expr {
+                                                        hir::HirExpression::Signal(id) => {
+                                                            self.signal_map.get(id).copied()
+                                                        }
+                                                        _ => None,
+                                                    };
+
+                                                    if let Some(mir_signal_id) = signal_id {
+                                                        // Mark this signal as detection signal
+                                                        if let Some(signal) = module
+                                                            .signals
+                                                            .iter_mut()
+                                                            .find(|s| s.id == mir_signal_id)
+                                                        {
+                                                            trace!(
+                                                                "[DETECTION_PROPAGATE] Marking signal '{}' (id={}) as detection signal (from {}.{})",
+                                                                signal.name,
+                                                                mir_signal_id.0,
+                                                                hir_instance.name,
+                                                                port.name
+                                                            );
+                                                            // Propagate detection config from port
+                                                            signal.detection_config =
+                                                                port.detection_config.clone();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Convert formal verification statements AND Let statements for entity instantiation
+                        // BUG FIX: Previously only Assert/Assume/Cover were handled, but Let statements
+                        // with entity struct literals (e.g., `let voltage_loop = PiController { ... }`)
+                        // were being ignored, causing PI controllers in CcCvController to be missing
+                        for stmt in &impl_block.statements {
+                            match stmt {
+                                hir::HirStatement::Assert(assert_stmt) => {
+                                    if let Some(condition) =
+                                        self.convert_assertion_expression(&assert_stmt.condition, 0)
+                                    {
+                                        module.assertions.push(Assertion {
+                                            kind: AssertionKind::Assert,
+                                            condition,
+                                            message: assert_stmt.message.clone(),
+                                            span: None,
+                                        });
+                                    }
+                                }
+                                hir::HirStatement::Assume(assume_stmt) => {
+                                    if let Some(condition) =
+                                        self.convert_assertion_expression(&assume_stmt.condition, 0)
+                                    {
+                                        module.assertions.push(Assertion {
+                                            kind: AssertionKind::Assume,
+                                            condition,
+                                            message: assume_stmt.message.clone(),
+                                            span: None,
+                                        });
+                                    }
+                                }
+                                hir::HirStatement::Cover(cover_stmt) => {
+                                    // For cover, extract the condition from the property
+                                    if let hir::HirProperty::Expression(expr) = &cover_stmt.property {
+                                        if let Some(condition) =
+                                            self.convert_assertion_expression(expr, 0)
+                                        {
+                                            module.assertions.push(Assertion {
+                                                kind: AssertionKind::Cover,
+                                                condition,
+                                                message: cover_stmt.name.clone(),
+                                                span: None,
+                                            });
+                                        }
+                                    }
+                                }
+                                hir::HirStatement::Let(let_stmt) => {
+                                    // BUG FIX: Handle Let statements with entity instantiation via struct literals
+                                    // This enables patterns like: let voltage_loop = PiController { ... }
+                                    // which create child module instances
+                                    trace!(
+                                        "[IMPL_BLOCK_LET] Processing Let '{}' in impl block statements",
+                                        let_stmt.name
+                                    );
+                                    // convert_statement handles entity instantiation detection internally
+                                    // and pushes to pending_entity_instances if it's an entity struct literal
+                                    let _ = self.convert_statement(stmt);
+                                }
+                                hir::HirStatement::While(_) | hir::HirStatement::If(_) => {
+                                    // While/If in impl blocks are combinational logic.
+                                    // While loops get unrolled at compile time, then the
+                                    // resulting statements form a combinational process.
+                                    if let Some(mir_stmt) = self.convert_statement(stmt) {
+                                        let proc_id = self.next_process_id();
+                                        module.processes.push(Process {
+                                            id: proc_id,
+                                            kind: ProcessKind::Combinational,
+                                            sensitivity: SensitivityList::Always,
+                                            body: Block {
+                                                statements: vec![mir_stmt],
+                                            },
+                                            span: None,
+                                        });
+                                    }
+                                }
+                                _ => {} // Ignore other statement types (handled elsewhere or not applicable)
+                            }
+                        }
+
+                        // BUG FIX: Drain any pending entity instances created from Let statements above
+                        // These weren't being drained before because the earlier drain happened before
+                        // the statements loop
+                        self.drain_pending_entity_instances(module);
+                        self.drain_pending_module_instances(module);
+
+                        // Clean up generic parameter bindings for this impl block
+                        for name in &bound_generic_names {
+                            self.const_evaluator.unbind(name);
+                        }
+                    }
+                }
+            }
     }
 
     /// Convert event block to process
