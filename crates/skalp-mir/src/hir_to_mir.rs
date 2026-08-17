@@ -5113,7 +5113,21 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        let lhs = self.convert_lvalue(&assign.lhs)?;
+        // Which SIDE failed is the single most useful fact about a dropped
+        // assignment. The reported message prints the whole assignment, so a
+        // failed LHS reads as a problem with the right-hand side — every hunt
+        // in this area has started by investigating the wrong half, including
+        // one that went as far as trait-method resolution for a fault that was
+        // a port lookup on the left.
+        let Some(lhs) = self.convert_lvalue(&assign.lhs) else {
+            trace!(
+                "[ASSIGN_FAIL] entity '{}': LHS {:?} did not convert; ports known here: {:?}",
+                self.current_entity_name(),
+                std::mem::discriminant(&assign.lhs),
+                self.port_map.keys().collect::<Vec<_>>()
+            );
+            return None;
+        };
 
         trace!(
             "[TRAIT_DEBUG] About to call convert_expression for RHS: {:?}",
