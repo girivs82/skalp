@@ -96,16 +96,15 @@ fn an_entity_imported_directly_gets_a_body() {
     );
 }
 
-/// The differential itself. Un-ignore when module-HIR implementations are
-/// converted; it is the acceptance test for that change.
+/// The differential itself, and the acceptance test for converting module-HIR
+/// implementations.
 ///
-/// Today the second design does not even compile: `CordicSqrt` is emitted as
-/// ports with no logic, and the undriven-output check catches it. That check is
-/// the only thing standing between this and a silently empty module in real
-/// hardware — a design whose output happened to be driven elsewhere would emit
-/// dead logic and say nothing.
+/// Before that change the second design did not compile at all: `CordicSqrt`
+/// was emitted as ports with no logic, and the undriven-output check caught it.
+/// That check was the only thing standing between this and a silently empty
+/// module in real hardware — a design whose output happened to be driven
+/// elsewhere would have emitted dead logic and said nothing.
 #[test]
-#[ignore = "known defect: module-HIR implementations are never converted"]
 fn the_same_entity_converts_the_same_whichever_path_reaches_it() {
     let direct = compile(VIA_DIRECT_IMPORT).expect("the direct-import design must build");
     let via_module = match compile(VIA_MODULE_HIR) {

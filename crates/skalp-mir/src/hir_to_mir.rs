@@ -199,7 +199,7 @@ pub struct HirToMir<'hir> {
     in_assertion: bool,
     /// All loaded module HIRs for proper scope resolution (Bug #84 fix)
     /// This allows resolving function calls in their original module scope
-    module_hirs: IndexMap<PathBuf, Hir>,
+    module_hirs: IndexMap<PathBuf, &'hir Hir>,
     /// Current entity being converted (for generic parameter resolution)
     current_entity_id: Option<hir::EntityId>,
     /// Const evaluator for evaluating const expressions (including user-defined const functions)
@@ -346,7 +346,7 @@ pub struct HirToMir<'hir> {
     /// After processing each entity in the first pass, we save the maps here.
     /// In the second pass (impl blocks), we restore them for the entity being processed.
     /// This prevents cross-entity port/signal ID confusion.
-    entity_scope_cache: IndexMap<hir::EntityId, EntityScopeCache>,
+    entity_scope_cache: IndexMap<ModuleId, EntityScopeCache>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -397,11 +397,12 @@ fn convert_safety_config(config: &hir::SafetyConfig) -> SafetyContext {
 impl<'hir> HirToMir<'hir> {
     /// Create a new transformer
     pub fn new() -> Self {
-        Self::new_with_modules(&IndexMap::new())
+        static EMPTY: std::sync::OnceLock<IndexMap<PathBuf, Hir>> = std::sync::OnceLock::new();
+        Self::new_with_modules(EMPTY.get_or_init(IndexMap::new))
     }
 
     /// Create a new transformer with module HIRs for proper scope resolution (Bug #84 fix)
-    pub fn new_with_modules(module_hirs: &IndexMap<PathBuf, Hir>) -> Self {
+    pub fn new_with_modules(module_hirs: &'hir IndexMap<PathBuf, Hir>) -> Self {
         Self {
             next_module_id: 0,
             next_port_id: 0,
@@ -431,7 +432,7 @@ impl<'hir> HirToMir<'hir> {
             tuple_call_results: std::collections::HashMap::new(),
             pending_specializations: IndexMap::new(),
             in_assertion: false,
-            module_hirs: module_hirs.clone(),
+            module_hirs: module_hirs.iter().map(|(p, h)| (p.clone(), h)).collect(),
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
             dynamic_variables: IndexMap::new(),
@@ -957,11 +958,12 @@ impl<'hir> HirToMir<'hir> {
                 entity_start.elapsed()
             );
 
+            let module_id = module.id;
             mir.add_module(module);
 
             // BUG #10.2 FIX: Save entity scope (port/signal maps) to cache
             // so the second pass can restore them when processing impl blocks
-            self.save_entity_scope_to_cache(entity.id);
+            self.save_entity_scope_to_cache(module_id);
         }
 
         // First pass (continued): process module HIR entities (stdlib components)
@@ -1052,13 +1054,9 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
 
+            let module_id = module.id;
             mir.add_module(module);
-            // Only save to cache if this entity ID doesn't collide with a main HIR entity.
-            // Module HIR entities can have the same ID as main entities (IDs are per-file),
-            // so saving here would overwrite the main entity's cached port_map.
-            if !self.entity_scope_cache.contains_key(&entity.id) {
-                self.save_entity_scope_to_cache(entity.id);
-            }
+            self.save_entity_scope_to_cache(module_id);
         }
 
         // Note: Module HIR impl blocks are NOT processed here. The entity port declarations
@@ -1069,6 +1067,58 @@ impl<'hir> HirToMir<'hir> {
         // Implementations are converted per compilation unit — see
         // convert_implementations.
         self.convert_implementations(hir, &mut mir);
+
+        let shells: std::collections::HashSet<ModuleId> = mir
+            .modules
+            .iter()
+            .filter(|m| {
+                m.assignments.is_empty() && m.processes.is_empty() && m.instances.is_empty()
+            })
+            .map(|m| m.id)
+            .collect();
+        if !shells.is_empty() {
+            let units: Vec<&'hir Hir> = self.module_hirs.values().copied().collect();
+            // A module is filled once. Entities are matched to modules by NAME,
+            // and one name can reach several entity ids: an entity is duplicated
+            // within a unit when it is both declared and re-merged through an
+            // import, and the same entity is visible from more than one unit.
+            // Converting every matching impl would drive the module's contents
+            // in once per copy — the first cut of this produced exactly twice
+            // the assignments and twice the instances, which simulates and
+            // synthesizes but is two of every adder.
+            let mut filled: std::collections::HashSet<ModuleId> =
+                std::collections::HashSet::new();
+            for unit in units {
+                let mut unit_map: IndexMap<hir::EntityId, ModuleId> = IndexMap::new();
+                for entity in unit.entities.iter().filter(|e| e.generics.is_empty()) {
+                    let Some(&module_id) = self.entity_name_to_module.get(&entity.name) else {
+                        continue;
+                    };
+                    if !shells.contains(&module_id) || filled.contains(&module_id) {
+                        continue;
+                    }
+                    // Only a copy that carries an implementation is worth
+                    // claiming the module: claiming with a bodiless duplicate
+                    // would lock out the copy that has the logic.
+                    if !unit.implementations.iter().any(|i| i.entity == entity.id) {
+                        continue;
+                    }
+                    filled.insert(module_id);
+                    unit_map.insert(entity.id, module_id);
+                }
+                if unit_map.is_empty() {
+                    continue;
+                }
+                trace!("[UNIT] converting unit with {} shell entities", unit_map.len());
+                self.clear_unit_scope_maps();
+                self.hir = Some(unit);
+                self.entity_map = unit_map;
+                self.convert_implementations(unit, &mut mir);
+            }
+            self.clear_unit_scope_maps();
+            self.hir = Some(hir);
+            self.entity_map = IndexMap::new();
+        }
 
         trace!(
             "⏱️  [PERF] HIR→MIR transform complete in {:?}",
@@ -1133,7 +1183,34 @@ impl<'hir> HirToMir<'hir> {
                     // BUG #10.2 FIX: Restore entity scope (port/signal maps) from first-pass cache
                     // Without this, CDC entities with lifetime parameters have empty port_map
                     // in the second pass, causing analyze_event_block to skip all triggers
-                    self.restore_entity_scope_from_cache(impl_block.entity);
+                    let scope_restored = self.restore_entity_scope_from_cache(module_id);
+                    // The cache was captured while processing exactly this
+                    // module's ports and nothing else (port_owner is cleared
+                    // per entity), so every port now in scope belongs here by
+                    // construction. What it records as the OWNER is the
+                    // EntityId that minted the ports, which need not be the id
+                    // this impl block names: the same entity can reach the MIR
+                    // under two ids — an entity is merged from an imported
+                    // module under a fresh id while its ports keep the original
+                    // numbering — and an id only means something inside the HIR
+                    // that minted it. Left alone, the cross-entity guard in
+                    // port_belongs_to_current_entity compares those two ids,
+                    // finds them different, and rejects the entity's own output
+                    // port: the assignment converts to nothing and the module is
+                    // emitted with its ports and no body. Re-stamp ownership to
+                    // the entity being converted so the guard compares like with
+                    // like. The guard keeps its purpose — a port that is not in
+                    // this scope is still rejected — because the scope, not the
+                    // id, is the evidence.
+                    // Only when the scope was actually restored: with no cache
+                    // entry the maps are whatever the previous impl left behind,
+                    // and re-stamping those would authorize another entity's
+                    // ports instead of rejecting them.
+                    if scope_restored {
+                        for owner in self.port_owner.values_mut() {
+                            *owner = impl_block.entity;
+                        }
+                    }
 
                     // Skip implementations for entities that are not used (0 instances) and are not the first entity
                     if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
@@ -5121,9 +5198,19 @@ impl<'hir> HirToMir<'hir> {
         // a port lookup on the left.
         let Some(lhs) = self.convert_lvalue(&assign.lhs) else {
             trace!(
-                "[ASSIGN_FAIL] entity '{}': LHS {:?} did not convert; ports known here: {:?}",
+                "[ASSIGN_FAIL] entity '{}' (current_entity_id {:?}): LHS {:?} did not convert; \
+                 owner {:?}; in port_map: {}; ports known here: {:?}",
                 self.current_entity_name(),
-                std::mem::discriminant(&assign.lhs),
+                self.current_entity_id,
+                &assign.lhs,
+                match &assign.lhs {
+                    hir::HirLValue::Port(p) => self.port_owner.get(p).copied(),
+                    _ => None,
+                },
+                match &assign.lhs {
+                    hir::HirLValue::Port(p) => self.port_map.contains_key(p),
+                    _ => false,
+                },
                 self.port_map.keys().collect::<Vec<_>>()
             );
             return None;
@@ -25028,7 +25115,7 @@ impl<'hir> HirToMir<'hir> {
     /// specifically about port IDs from one entity bleeding into another.
     /// Signal maps work correctly because signals are processed in the impl block
     /// where they're defined, and we don't have the same cross-entity confusion.
-    fn save_entity_scope_to_cache(&mut self, entity_id: hir::EntityId) {
+    fn save_entity_scope_to_cache(&mut self, module_id: ModuleId) {
         let cache = EntityScopeCache {
             port_map: self.port_map.clone(),
             flattened_ports: self.flattened_ports.clone(),
@@ -25040,7 +25127,7 @@ impl<'hir> HirToMir<'hir> {
             signal_to_hir: self.signal_to_hir.clone(),
             signal_owner: self.signal_owner.clone(),
         };
-        self.entity_scope_cache.insert(entity_id, cache);
+        self.entity_scope_cache.insert(module_id, cache);
     }
 
     /// BUG #237 FIX: Restore entity-scoped PORT maps from the cache
@@ -25052,8 +25139,8 @@ impl<'hir> HirToMir<'hir> {
     /// NOTE: We restore ports and merge signals (not replace). This is because:
     /// - Ports are only created in the first pass (entity.ports)
     /// - Signals can come from both entity.signals (first pass) and impl_block.signals (second pass)
-    fn restore_entity_scope_from_cache(&mut self, entity_id: hir::EntityId) {
-        if let Some(cache) = self.entity_scope_cache.get(&entity_id) {
+    fn restore_entity_scope_from_cache(&mut self, module_id: ModuleId) -> bool {
+        if let Some(cache) = self.entity_scope_cache.get(&module_id) {
             // Restore port maps (completely replace, ports only come from first pass)
             self.port_map = cache.port_map.clone();
             self.flattened_ports = cache.flattened_ports.clone();
@@ -25064,6 +25151,7 @@ impl<'hir> HirToMir<'hir> {
             self.flattened_signals = cache.flattened_signals.clone();
             self.signal_to_hir = cache.signal_to_hir.clone();
             self.signal_owner = cache.signal_owner.clone();
+            return true;
         }
         // If no cache entry exists, we keep the existing maps
         // This handles cases like monomorphized entities
@@ -25071,6 +25159,7 @@ impl<'hir> HirToMir<'hir> {
         // The original bug #237 was about PORT maps accumulating across entities,
         // not variable/signal maps. Clearing these was too aggressive and broke
         // legitimate cross-entity references and variable tracking.
+        false
     }
 
     /// BUG #237 FIX: Clear entity-scoped PORT maps when starting a new entity
@@ -25088,6 +25177,22 @@ impl<'hir> HirToMir<'hir> {
     /// NOTE: We only clear PORT and SIGNAL maps for the first pass.
     /// Variable and entity instance maps must NOT be cleared here because
     /// they are used across entity processing.
+    fn clear_unit_scope_maps(&mut self) {
+        self.clear_entity_scope_maps();
+        self.variable_map.clear();
+        self.context_variable_map.clear();
+        self.dynamic_variables.clear();
+        self.payload_var_expressions.clear();
+        self.tuple_call_results.clear();
+        self.entity_instance_outputs.clear();
+        self.entity_instance_info.clear();
+        self.placeholder_signal_to_entity_output.clear();
+        self.placeholder_hir_signal_to_entity_output.clear();
+        self.clock_domain_map.clear();
+        self.current_entity_id = None;
+        self.const_evaluator = ConstEvaluator::new();
+    }
+
     fn clear_entity_scope_maps(&mut self) {
         // Clear port maps - these must be scoped per-entity
         self.port_map.clear();
