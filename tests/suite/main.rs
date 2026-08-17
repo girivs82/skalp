@@ -113,6 +113,7 @@ mod test_popcount_in_mux;
 mod test_generic_type_params;
 mod test_power_domains;
 mod test_trait_method_calls;
+mod test_unit_conversion_differential;
 mod test_power_intent;
 mod test_regression_bugs;
 mod test_safety_annotation_pipeline;
