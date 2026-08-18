@@ -885,7 +885,7 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
 
 /// Merge trait implementations from source into target for types that already exist in target
 /// This is called after importing any symbol to ensure trait impls are available
-fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir) {
+fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir) -> Result<()> {
     // Get all type names we have in target (distinct types and user-defined types)
     let target_types: std::collections::HashSet<String> = target
         .distinct_types
@@ -964,6 +964,8 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
             }
         }
     }
+
+    Ok(())
 }
 
 /// Remap port IDs in an implementation (BUG #33 FIX)
@@ -1617,10 +1619,25 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     // FIRST: Merge trait implementations for types we already have
     // This ensures that when we import an entity from a module that has trait impls
     // for types we already have (like fp32), those impls are available
-    merge_trait_implementations_for_existing_types(target, source);
+    merge_trait_implementations_for_existing_types(target, source)?;
 
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
+        // Already merged — importing it again would push a SECOND entity with
+        // the same name. That is not a harmless duplicate: each copy carries
+        // its own implementation, monomorphizes separately, and reaches the
+        // MIR as its own module, so the design ends up with two definitions of
+        // the same module name — invalid SystemVerilog, and two copies of the
+        // hardware. It happens on a perfectly ordinary import list:
+        // `use skalp::numeric::fp::{fp32, FpAdd, ...}` merges fp32 first, whose
+        // `impl Add for fp32` pulls FpAdd in as a method dependency, and the
+        // explicit FpAdd that follows then merged it a second time.
+        // Name is the right key here — later resolution keys on the name too,
+        // so a second copy under a different id is not reachable as anything
+        // distinguishable, only duplicable.
+        if target.entities.iter().any(|e| e.name == symbol_name) {
+            return Ok(());
+        }
         let old_entity_id = entity.id;
 
         // Assign a new unique entity ID to avoid collisions
@@ -1820,71 +1837,25 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                         // `FpSub` alone left `inst adder = FpAdd<F>` on FpAdd's id
                         // in fp.sk, which in the user's HIR is their own top-level
                         // entity, and the wrong module got wired in.
-                        let mut worklist = extract_entity_refs_from_statements(&method.body);
-                        let mut merged: Vec<usize> = Vec::new();
-                        while let Some(entity_name) = worklist.pop() {
-                            // Already present — nothing to merge, and the name is
-                            // what later resolution keys on anyway.
-                            if target.entities.iter().any(|e| e.name == entity_name) {
-                                continue;
-                            }
-                            let Some(entity) =
-                                source.entities.iter().find(|e| e.name == entity_name)
-                            else {
-                                continue;
-                            };
-
-                            let new_entity_id = hir::EntityId(
-                                target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
-                            );
-                            let old_entity_id = entity.id;
-
-                            let mut new_entity = entity.clone();
-                            new_entity.id = new_entity_id;
-                            target.entities.push(new_entity);
-
-                            // Also merge the entity's implementation
-                            if let Some(impl_block) = source
-                                .implementations
-                                .iter()
-                                .find(|i| i.entity == old_entity_id)
-                            {
-                                let mut new_impl = impl_block.clone();
-                                new_impl.entity = new_entity_id;
-                                for inst in &new_impl.instances {
-                                    if let Some(child) =
-                                        source.entities.iter().find(|e| e.id == inst.entity)
-                                    {
-                                        worklist.push(child.name.clone());
-                                    }
-                                }
-                                merged.push(target.implementations.len());
-                                target.implementations.push(new_impl);
-                            }
-                        }
-
-                        // Every child is present now, so translate each instance out
-                        // of `source`'s id space and into `target`'s. The name is the
-                        // only identifier that means the same thing in both.
-                        for idx in merged {
-                            let remapped: Vec<(usize, hir::EntityId)> = target.implementations
-                                [idx]
-                                .instances
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(i, inst)| {
-                                    let name = &source
-                                        .entities
-                                        .iter()
-                                        .find(|e| e.id == inst.entity)?
-                                        .name;
-                                    let id =
-                                        target.entities.iter().find(|e| &e.name == name)?.id;
-                                    Some((i, id))
-                                })
-                                .collect();
-                            for (i, id) in remapped {
-                                target.implementations[idx].instances[i].entity = id;
+                        // Merge each entity the body instantiates through the
+                        // same path an explicit import takes. A hand-rolled clone
+                        // stood here and was NOT equivalent to one: it gave the
+                        // entity a fresh id but left its PORTS in the source's id
+                        // space, skipped remap_impl_ports, never pulled in the
+                        // GLOBAL_IMPL constants the body reads, and merged
+                        // children by the same lossy rule. Such a copy cannot be
+                        // monomorphized. A design that ALSO imported the name
+                        // explicitly got a second, good copy and used that one,
+                        // which is exactly what hid this — until the duplicate was
+                        // removed and the stub was all that remained, leaving the
+                        // instance wired to an empty module.
+                        //
+                        // merge_symbol recurses into its own instance dependencies,
+                        // so the transitive closure arrives without a worklist here,
+                        // and it returns early on a name the target already has.
+                        for entity_name in extract_entity_refs_from_statements(&method.body) {
+                            if source.entities.iter().any(|e| e.name == entity_name) {
+                                merge_symbol(target, source, &entity_name)?;
                             }
                         }
                     }
@@ -2251,6 +2222,14 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
 
     for entity in &source.entities {
         if entity.visibility == HirVisibility::Public {
+            // Same rule as merge_symbol: a name already in the target is
+            // already merged. Leaving it out of entity_id_map also makes
+            // pass 2 skip its implementation, which is what we want — the
+            // implementation that is already there belongs to the copy that
+            // is already there.
+            if target.entities.iter().any(|e| e.name == entity.name) {
+                continue;
+            }
             let old_entity_id = entity.id;
 
             // Assign new unique entity ID

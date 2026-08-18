@@ -146,6 +146,7 @@ mod test_tuple_destructuring_sim;
 mod test_unified_simulation;
 mod test_unroll_for_loop;
 mod test_vendor_ip_attribute;
+mod test_import_duplicate_entities;
 mod test_vhdl_integration;
 mod test_vhdl_tutorial;
 mod test_wide_arithmetic;
