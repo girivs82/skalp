@@ -171,6 +171,16 @@ pub struct HirToMir<'hir> {
     clock_domain_map: IndexMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
+    /// The HIR the design is being compiled FROM, which stays put while `hir`
+    /// moves to each compilation unit in turn.
+    ///
+    /// The specialization fixpoint in compiler.rs plants on-demand
+    /// specializations (`FpAdd_fp32` for an inlined `a + b`) in this HIR and
+    /// nowhere else. A module HIR's own entities therefore never gain them, so
+    /// an instantiation site inside a stdlib entity that looks only at its own
+    /// unit finds no specialization and falls back to the bare generic — a
+    /// module with parameters and no body. Resolution consults this as well.
+    root_hir: Option<&'hir Hir>,
     /// Errors collected during conversion that must fail the build.
     /// These are cases where the converter would otherwise emit silently wrong
     /// hardware (e.g. an unresolved identifier lowered to literal 0).
@@ -428,6 +438,7 @@ impl<'hir> HirToMir<'hir> {
             mir_variable_types: IndexMap::new(),
             clock_domain_map: IndexMap::new(),
             hir: None,
+            root_hir: None,
             conversion_errors: Vec::new(),
             tuple_call_results: std::collections::HashMap::new(),
             pending_specializations: IndexMap::new(),
@@ -560,6 +571,7 @@ impl<'hir> HirToMir<'hir> {
         let transform_start = Instant::now();
 
         self.hir = Some(hir);
+        self.root_hir = Some(hir);
         // Register all user-defined const functions in the evaluator
         self.const_evaluator.register_functions(&hir.functions);
 
@@ -1111,6 +1123,31 @@ impl<'hir> HirToMir<'hir> {
                 }
                 trace!("[UNIT] converting unit with {} shell entities", unit_map.len());
                 self.clear_unit_scope_maps();
+                // Put the const evaluator back. clear_unit_scope_maps resets it
+                // with the rest of the per-unit state, and an instantiation site
+                // inside this unit needs it: `inst adder = FpAdd<IEEE754_32>` in
+                // an inlined trait body names a CONSTANT, and the specialized
+                // entity name is built by evaluating that argument. An argument
+                // the evaluator cannot resolve does not fail — it simply is not
+                // appended, so `FpAdd_fp32` collapses to `FpAdd`, the on-demand
+                // specialization is never requested (the request is gated on the
+                // name having changed), and the instance wires to the bare
+                // generic template: a module with parameters and no body.
+                //
+                // Both HIRs are registered. The root's constants are what a
+                // trait impl merged into the design refers to; the unit's own
+                // are what its bodies refer to (cordic.sk reads
+                // CORDIC_GAIN_INV_16 from its GLOBAL_IMPL block).
+                self.const_evaluator.register_functions(&hir.functions);
+                for implementation in &hir.implementations {
+                    self.const_evaluator
+                        .register_constants(&implementation.constants);
+                }
+                self.const_evaluator.register_functions(&unit.functions);
+                for implementation in &unit.implementations {
+                    self.const_evaluator
+                        .register_constants(&implementation.constants);
+                }
                 self.hir = Some(unit);
                 self.entity_map = unit_map;
                 self.convert_implementations(unit, &mut mir);
@@ -2664,7 +2701,18 @@ impl<'hir> HirToMir<'hir> {
                                         name_parts.push(specialized_name_suffix(&const_val));
                                     }
                                     Err(_e) => {
-                                        // Generic arg eval failed - will fall back to generic entity name
+                                        // Falls back to the bare generic name, which
+                                        // also suppresses the on-demand specialization
+                                        // request below (it is gated on the name having
+                                        // changed). Legitimate while converting a generic
+                                        // entity's own template, where the argument IS a
+                                        // type parameter; a miscompile anywhere else, and
+                                        // silent either way — so at least say so.
+                                        trace!(
+                                            "[ON_DEMAND_SPEC] '{}': generic arg did not evaluate, \
+                                             falling back to the unspecialized entity",
+                                            resolved_type_name
+                                        );
                                     }
                                 }
                             }
@@ -2688,6 +2736,9 @@ impl<'hir> HirToMir<'hir> {
                         {
                             let specialized_exists =
                                 hir.entities.iter().any(|e| e.name == target_entity_name)
+                                    || self.root_hir.is_some_and(|r| {
+                                        r.entities.iter().any(|e| e.name == target_entity_name)
+                                    })
                                     || self.module_hirs.values().any(|h| {
                                         h.entities.iter().any(|e| e.name == target_entity_name)
                                     });
@@ -2734,10 +2785,21 @@ impl<'hir> HirToMir<'hir> {
 
                         // BUG #207 FIX: Look for specialized entity first, then fall back to generic
                         // Also search module HIRs for stdlib entities (e.g., std_multiplier, FpMul)
+                        let root_hir = self.root_hir;
                         let entity = hir
                             .entities
                             .iter()
                             .find(|e| e.name == target_entity_name)
+                            // The specialization the fixpoint planted lives in
+                            // the root HIR, not in the unit being converted.
+                            // Without this the fallback below silently picks the
+                            // bare generic and the instance wires to an empty
+                            // module.
+                            .or_else(|| {
+                                root_hir.and_then(|r| {
+                                    r.entities.iter().find(|e| e.name == target_entity_name)
+                                })
+                            })
                             .or_else(|| hir.entities.iter().find(|e| e.name == resolved_type_name));
                         // If not found in main HIR, search module HIRs (clone to avoid borrow conflict)
                         let module_hir_entity: Option<hir::HirEntity>;

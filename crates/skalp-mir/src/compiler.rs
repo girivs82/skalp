@@ -398,58 +398,84 @@ impl MirCompiler {
         // Step 4: Apply optimizations
         self.apply_optimizations(&mut mir);
 
-        // Step 5: Drop generic templates that nothing instantiates.
+        // Step 5: Drop generic templates that no real hardware reaches.
         //
-        // Monomorphization emits `FpAdd_fp32` carrying the arithmetic and
-        // leaves the generic `FpAdd` behind as parameters and ports with no
-        // body. Instances point at the specialization, so the template reaches
-        // SystemVerilog as `module FpAdd #(parameter F) (...); endmodule` —
+        // Monomorphization emits `FpMAC_fp32` carrying the logic and leaves the
+        // generic `FpMAC` behind as parameters and ports with no body.
+        // Instances point at the specialization, so the template reaches
+        // SystemVerilog as `module FpMAC #(parameter F) (...); endmodule` —
         // dead output that reads like a compiler bug.
         //
-        // All three conditions are required, and each one is load-bearing:
+        // Reachability, not emptiness, is the test. A template body legitimately
+        // instantiates other templates: `VecNormalize<T, N>` contains
+        // `inst dot = VecDot<T, N>`, whose arguments are its own type parameters
+        // and cannot resolve to anything until it is specialized. Dropping only
+        // BODILESS templates left those chains standing — VecNormalize was kept
+        // because it had an instance, and it kept VecLength, VecDot and VecScale
+        // alive behind it, none of them reachable from any hardware.
         //
-        //   - HAS PARAMETERS. A module with no parameters and no body is not a
-        //     template; it is the "ports but no logic" miscompile this project
-        //     shipped until 7c258b9, and it must stay visible in the output
-        //     rather than be tidied away by a cleanup pass.
-        //   - NOT INSTANTIATED. Anything with an instance edge stays whatever
-        //     its body looks like, or the instance dangles at elaboration.
-        //   - NOT A ROOT. A main entity may legitimately be generic, and the
-        //     first module is the design; dropping either would empty the
-        //     output rather than trim it.
+        // So: every module WITHOUT parameters is real hardware and is a root.
+        // A template is kept when some root reaches it through instance edges,
+        // and dropped otherwise. Two consequences worth stating:
+        //
+        //   - A bodiless module with NO parameters is a root by construction and
+        //     can never be dropped. That matters: it is not a template, it is
+        //     the "ports but no logic" miscompile this project shipped until
+        //     7c258b9, and a cleanup pass must never tidy it out of the output.
+        //   - A template a root still instantiates stays, whatever its body
+        //     looks like, because the alternative is an instance that dangles at
+        //     elaboration. If that template is bodiless the design is wrong, and
+        //     it stays visible rather than being quietly removed.
+        //
+        // The exception is a template the design itself declared as a top entity
+        // with no specialization anywhere: nothing used it, but removing a
+        // module the user wrote by name would be a surprise, so it is kept.
         {
-            let instantiated: std::collections::HashSet<crate::mir::ModuleId> = mir
+            let is_template: std::collections::HashMap<crate::mir::ModuleId, bool> = mir
                 .modules
                 .iter()
-                .flat_map(|m| m.instances.iter().map(|i| i.module))
+                .map(|m| (m.id, !m.parameters.is_empty()))
                 .collect();
-            let first = mir.modules.first().map(|m| m.id);
-            // A specialization of the same entity, by the monomorphization
-            // naming convention `Base_arg`. Its presence is the evidence that
-            // the template's hardware exists elsewhere, which is what makes a
-            // root template safe to drop — otherwise the design's own top
-            // entity could be removed and the output left empty.
+            let mut reachable: std::collections::HashSet<crate::mir::ModuleId> = mir
+                .modules
+                .iter()
+                .filter(|m| m.parameters.is_empty())
+                .map(|m| m.id)
+                .collect();
+            let mut queue: std::collections::VecDeque<crate::mir::ModuleId> =
+                reachable.iter().copied().collect();
+            while let Some(id) = queue.pop_front() {
+                let Some(module) = mir.modules.iter().find(|m| m.id == id) else {
+                    continue;
+                };
+                for inst in &module.instances {
+                    if reachable.insert(inst.module) {
+                        queue.push_back(inst.module);
+                    }
+                }
+            }
+            // A sibling named `Base_arg` is the evidence that this template's
+            // hardware exists elsewhere under its specialized name.
             let specialized: std::collections::HashSet<String> = mir
                 .modules
                 .iter()
                 .filter_map(|m| m.name.rsplit_once('_').map(|(base, _)| base.to_string()))
                 .collect();
+            let first = mir.modules.first().map(|m| m.id);
             mir.modules.retain(|m| {
-                let is_template = !m.parameters.is_empty();
-                let is_empty = m.assignments.is_empty()
-                    && m.processes.is_empty()
-                    && m.instances.is_empty()
-                    && m.generate_blocks.is_empty();
-                let is_root = Some(m.id) == first
-                    || hir.main_entity_names.iter().any(|n| n == &m.name);
-                let drop = is_template
-                    && is_empty
-                    && !instantiated.contains(&m.id)
-                    && (!is_root || specialized.contains(m.name.as_str()));
-                if drop {
-                    trace!("dropping uninstantiated generic template '{}'", m.name);
+                if !is_template.get(&m.id).copied().unwrap_or(false) {
+                    return true;
                 }
-                !drop
+                if reachable.contains(&m.id) {
+                    return true;
+                }
+                let declared_here =
+                    Some(m.id) == first || hir.main_entity_names.iter().any(|n| n == &m.name);
+                if declared_here && !specialized.contains(m.name.as_str()) {
+                    return true;
+                }
+                trace!("dropping unreachable generic template '{}'", m.name);
+                false
             });
         }
 

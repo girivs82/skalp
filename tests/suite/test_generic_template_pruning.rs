@@ -114,9 +114,10 @@ impl HollowTop {
 }
 
 /// A template something instantiates stays, whatever its body looks like, or
-/// the instance dangles at elaboration. The stdlib currently does instantiate
-/// unspecialized templates from inlined trait operators, so this is not
-/// hypothetical.
+/// the instance dangles at elaboration. Real hardware should no longer point
+/// at one — `stdlib_cordic_instantiates_only_specializations` is what enforces
+/// that — but the prune must not be what enforces it, because removing the
+/// target would turn a visible hole into a dangling instance.
 #[test]
 fn an_instantiated_template_is_kept() {
     let mir = compile(
@@ -185,4 +186,105 @@ fn nothing_bodiless_and_unreferenced_survives_in_the_showcase() {
         stragglers.is_empty(),
         "these specialized templates produce no hardware and nothing references them: {stragglers:?}"
     );
+}
+
+/// The invariant behind all of this: real hardware never instantiates a
+/// generic template.
+///
+/// A module with parameters and no body produces nothing. When a module
+/// WITHOUT parameters instantiates one, the design has a hole in it that
+/// simulates and synthesizes as zeros. That is what stdlib Cordic did — every
+/// inlined `a + b` inside `CordicRotateIteration` wired `__adder_result_N` to
+/// the bare `FpAdd` instead of `FpAdd_fp32`, because the const evaluator was
+/// reset per compilation unit and `IEEE754_32` no longer resolved, so the
+/// specialized NAME silently collapsed to the generic one.
+fn assert_no_real_module_instantiates_a_template(mir: &skalp_mir::mir::Mir) {
+    let template: std::collections::HashMap<_, _> = mir
+        .modules
+        .iter()
+        .map(|m| (m.id, (!m.parameters.is_empty(), m.name.clone())))
+        .collect();
+    let mut bad: Vec<String> = Vec::new();
+    for m in &mir.modules {
+        if !m.parameters.is_empty() {
+            // A template body naming templates is correct: its arguments are
+            // its own parameters and cannot resolve until it is specialized.
+            continue;
+        }
+        for inst in &m.instances {
+            if let Some((true, target)) = template.get(&inst.module) {
+                bad.push(format!("{}.{} -> {}", m.name, inst.name, target));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "these instances wire real hardware to an unspecialized template: {bad:?}"
+    );
+}
+
+/// The reported case: an entity reached only through a module HIR, whose body
+/// is full of inlined trait operators.
+#[test]
+fn stdlib_cordic_instantiates_only_specializations() {
+    let mir = compile(
+        r#"
+use skalp::numeric::fp::{fp32, FpSqrt, IEEE754_32};
+
+entity SqrtTop {
+    in v: fp32
+    out o: fp32
+}
+
+impl SqrtTop {
+    inst s = FpSqrt<IEEE754_32> { x: v }
+    o = s.result
+}
+"#,
+    );
+    assert_no_real_module_instantiates_a_template(&mir);
+    // And the specializations it should have reached are actually there.
+    let names: Vec<&str> = mir.modules.iter().map(|m| m.name.as_str()).collect();
+    for want in ["FpAdd_fp32", "FpSub_fp32", "FpMul_fp32"] {
+        assert!(
+            names.contains(&want),
+            "expected {want} among {names:?}"
+        );
+    }
+}
+
+/// Same invariant over the whole showcase, which exercises fp, fixed, int and
+/// vector together.
+#[test]
+fn the_showcase_instantiates_only_specializations() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/stdlib_showcase.sk"
+    ))
+    .expect("the showcase example must exist");
+    let mir = compile(&src);
+    assert_no_real_module_instantiates_a_template(&mir);
+}
+
+/// Every instance must name a module that is still in the design. This is the
+/// counterweight to the prune: `std_adder` used to be instantiated by
+/// AngleReduce and Acos and defined nowhere at all.
+#[test]
+fn every_instance_in_the_showcase_resolves() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/stdlib_showcase.sk"
+    ))
+    .expect("the showcase example must exist");
+    let mir = compile(&src);
+    for m in &mir.modules {
+        for inst in &m.instances {
+            assert!(
+                mir.modules.iter().any(|t| t.id == inst.module),
+                "instance `{}` in `{}` names a module that is not in the design",
+                inst.name,
+                m.name
+            );
+        }
+    }
 }
