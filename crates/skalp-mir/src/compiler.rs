@@ -10,6 +10,7 @@ use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use indexmap::IndexMap;
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
+use tracing::trace;
 use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerCtrl, HirPowerDerivation};
 use std::path::PathBuf;
 
@@ -396,6 +397,61 @@ impl MirCompiler {
 
         // Step 4: Apply optimizations
         self.apply_optimizations(&mut mir);
+
+        // Step 5: Drop generic templates that nothing instantiates.
+        //
+        // Monomorphization emits `FpAdd_fp32` carrying the arithmetic and
+        // leaves the generic `FpAdd` behind as parameters and ports with no
+        // body. Instances point at the specialization, so the template reaches
+        // SystemVerilog as `module FpAdd #(parameter F) (...); endmodule` —
+        // dead output that reads like a compiler bug.
+        //
+        // All three conditions are required, and each one is load-bearing:
+        //
+        //   - HAS PARAMETERS. A module with no parameters and no body is not a
+        //     template; it is the "ports but no logic" miscompile this project
+        //     shipped until 7c258b9, and it must stay visible in the output
+        //     rather than be tidied away by a cleanup pass.
+        //   - NOT INSTANTIATED. Anything with an instance edge stays whatever
+        //     its body looks like, or the instance dangles at elaboration.
+        //   - NOT A ROOT. A main entity may legitimately be generic, and the
+        //     first module is the design; dropping either would empty the
+        //     output rather than trim it.
+        {
+            let instantiated: std::collections::HashSet<crate::mir::ModuleId> = mir
+                .modules
+                .iter()
+                .flat_map(|m| m.instances.iter().map(|i| i.module))
+                .collect();
+            let first = mir.modules.first().map(|m| m.id);
+            // A specialization of the same entity, by the monomorphization
+            // naming convention `Base_arg`. Its presence is the evidence that
+            // the template's hardware exists elsewhere, which is what makes a
+            // root template safe to drop — otherwise the design's own top
+            // entity could be removed and the output left empty.
+            let specialized: std::collections::HashSet<String> = mir
+                .modules
+                .iter()
+                .filter_map(|m| m.name.rsplit_once('_').map(|(base, _)| base.to_string()))
+                .collect();
+            mir.modules.retain(|m| {
+                let is_template = !m.parameters.is_empty();
+                let is_empty = m.assignments.is_empty()
+                    && m.processes.is_empty()
+                    && m.instances.is_empty()
+                    && m.generate_blocks.is_empty();
+                let is_root = Some(m.id) == first
+                    || hir.main_entity_names.iter().any(|n| n == &m.name);
+                let drop = is_template
+                    && is_empty
+                    && !instantiated.contains(&m.id)
+                    && (!is_root || specialized.contains(m.name.as_str()));
+                if drop {
+                    trace!("dropping uninstantiated generic template '{}'", m.name);
+                }
+                !drop
+            });
+        }
 
         Ok(mir)
     }
