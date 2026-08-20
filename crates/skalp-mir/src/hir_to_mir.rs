@@ -18369,8 +18369,19 @@ impl<'hir> HirToMir<'hir> {
 
         // Bind impl generics for the concrete type.
         // e.g., `impl<const N: usize> Mul for bit<N>` with type_name="bit[8]" → bind N=8
-        let mut bound_generics: Vec<String> = Vec::new();
+        //
+        // The PREVIOUS binding is kept and put back afterwards, exactly as the
+        // operand overlay below does. These inlines nest: `a + b + c` inlines
+        // the outer `+`, and converting its left operand inlines the inner one,
+        // which bound the same `N` and then unbound it on the way out. The
+        // outer body then had no `N`, so `inst adder = std_adder<N>` could not
+        // evaluate its argument, the specialized name collapsed to the bare
+        // `std_adder`, and the design was emitted with an instance of a module
+        // that is never defined — a successful build whose netlist cannot
+        // elaborate.
+        let mut bound_generics: Vec<(String, Option<ConstValue>)> = Vec::new();
         if let Some((param_name, width)) = impl_generic_binding {
+            let previous = self.const_evaluator.get_binding(&param_name).cloned();
             self.const_evaluator
                 .bind(param_name.clone(), ConstValue::Nat(width));
             trace!(
@@ -18379,15 +18390,15 @@ impl<'hir> HirToMir<'hir> {
                 width,
                 type_name
             );
-            bound_generics.push(param_name);
+            bound_generics.push((param_name, previous));
         }
         // Fallback: also bind WIDTH for backward compatibility with `impl Mul for bit`
-        let mut bound_width = false;
+        let mut bound_width: Option<Option<ConstValue>> = None;
         if bound_generics.is_empty() {
             if let Some(width) = Self::extract_bit_width(type_name) {
+                bound_width = Some(self.const_evaluator.get_binding("WIDTH").cloned());
                 self.const_evaluator
                     .bind("WIDTH".to_string(), ConstValue::Nat(width));
-                bound_width = true;
                 trace!(
                     "[TRAIT_INLINE] Bound WIDTH={} for type '{}'",
                     width,
@@ -18581,12 +18592,18 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        // Unbind generics we bound
-        for name in &bound_generics {
-            self.const_evaluator.unbind(name);
+        // Restore what we shadowed (reverse order, like the overlay above)
+        for (name, previous) in bound_generics.into_iter().rev() {
+            match previous {
+                Some(value) => self.const_evaluator.bind(name, value),
+                None => self.const_evaluator.unbind(&name),
+            }
         }
-        if bound_width {
-            self.const_evaluator.unbind("WIDTH");
+        if let Some(previous) = bound_width {
+            match previous {
+                Some(value) => self.const_evaluator.bind("WIDTH".to_string(), value),
+                None => self.const_evaluator.unbind("WIDTH"),
+            }
         }
 
         if result.is_none() {
@@ -18699,11 +18716,15 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Bind impl generics for the concrete type
-        let mut bound_generics: Vec<String> = Vec::new();
+        // Shadow-and-restore, for the same reason as the binary case above:
+        // a unary operator can appear inside an operand that is itself being
+        // inlined, and an unconditional unbind would strip the outer binding.
+        let mut bound_generics: Vec<(String, Option<ConstValue>)> = Vec::new();
         if let Some((param_name, width)) = impl_generic_binding {
+            let previous = self.const_evaluator.get_binding(&param_name).cloned();
             self.const_evaluator
                 .bind(param_name.clone(), ConstValue::Nat(width));
-            bound_generics.push(param_name);
+            bound_generics.push((param_name, previous));
         }
 
         // Build var_id -> name mapping for let bindings in the body
@@ -18749,9 +18770,12 @@ impl<'hir> HirToMir<'hir> {
         // Convert the substituted expression to MIR
         let result = self.convert_expression(&substituted, 0);
 
-        // Unbind generics we bound
-        for name in &bound_generics {
-            self.const_evaluator.unbind(name);
+        // Restore what we shadowed
+        for (name, previous) in bound_generics.into_iter().rev() {
+            match previous {
+                Some(value) => self.const_evaluator.bind(name, value),
+                None => self.const_evaluator.unbind(&name),
+            }
         }
 
         if result.is_none() {

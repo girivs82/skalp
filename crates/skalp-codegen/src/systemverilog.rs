@@ -158,6 +158,54 @@ pub fn generate_systemverilog_from_mir(mir: &Mir) -> Result<String> {
     // 1. Modules with generic/expression-based types (unresolved) are always skipped (not valid SystemVerilog)
     // 2. Modules with parameters but concrete types can be emitted as parameterized SystemVerilog modules
     // 3. Concrete modules (no parameters, all types resolved) are always emitted
+    // A module skipped here is a module the output does not define, so nothing
+    // emitted may instantiate one. That combination used to pass silently: a
+    // chained `a + b + c` produced an instance of the unspecialized `std_adder`,
+    // whose ports are `bit[N]` with N unresolved, so the module was skipped by
+    // the rule below while the INSTANCE of it was still written out. `skalp
+    // build` exited 0 and emitted a netlist that no tool can elaborate.
+    //
+    // The specialization is what an instance should name (`std_adder_8`), so
+    // reaching here means resolution failed earlier and the design is wrong.
+    // Say so, rather than writing the reference and moving on.
+    let skipped: std::collections::HashSet<_> = mir
+        .modules
+        .iter()
+        .filter(|m| has_generic_types(m))
+        .map(|m| m.id)
+        .collect();
+    if !skipped.is_empty() {
+        let mut unresolved: Vec<String> = Vec::new();
+        for mir_module in mir.modules.iter().filter(|m| !skipped.contains(&m.id)) {
+            for instance in &mir_module.instances {
+                if skipped.contains(&instance.module) {
+                    let target = mir
+                        .modules
+                        .iter()
+                        .find(|m| m.id == instance.module)
+                        .map(|m| m.name.as_str())
+                        .unwrap_or("<unknown>");
+                    unresolved.push(format!(
+                        "`{}` in module `{}` instantiates `{}`",
+                        instance.name, mir_module.name, target
+                    ));
+                }
+            }
+        }
+        if !unresolved.is_empty() {
+            unresolved.sort();
+            unresolved.dedup();
+            return Err(anyhow::anyhow!(
+                "{} instance(s) name a generic module that cannot be emitted \
+                 (its ports still have unresolved widths, so no SystemVerilog \
+                 module is written for it and the instance would dangle). This \
+                 means a specialization was expected and not found:\n  {}",
+                unresolved.len(),
+                unresolved.join("\n  ")
+            ));
+        }
+    }
+
     for mir_module in mir.modules.iter() {
         // Skip modules with unresolved/generic types - these cannot be converted to SystemVerilog
         if has_generic_types(mir_module) {

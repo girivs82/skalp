@@ -2133,12 +2133,44 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // constants like IEEE754_32 to not be found during evaluation
         let mut evaluator = self.create_evaluator_with_constants();
 
+        // Arguments are matched to parameters POSITIONALLY, so the two lists
+        // have to describe the same positions. They do not always: an entity
+        // declared `Fifo<'wr, 'rd, const WIDTH: nat, const DEPTH: nat>` has four
+        // generics, while `inst f = Fifo<'sys, 'other, 8, 16>` arrives carrying
+        // only the two VALUE arguments. Zipped straight, 8 pairs with `'wr` and
+        // 16 with `'rd`; both are lifetimes, so both are skipped, `const_args`
+        // comes out empty, no instantiation matches, and the instance is left
+        // pointing at the generic template. The specialization exists — the
+        // frontend built `Fifo_16_8` — and nothing ever points at it, so
+        // codegen writes no module for the template and the instance dangles.
+        //
+        // Match against whichever list the arguments actually correspond to,
+        // rather than assuming: lifetimes included when the counts say so, and
+        // value parameters only when they do not.
+        let value_generics: Vec<&crate::hir::HirGeneric> = entity
+            .generics
+            .iter()
+            .filter(|g| {
+                !matches!(
+                    g.param_type,
+                    crate::hir::HirGenericType::ClockDomain
+                        | crate::hir::HirGenericType::PowerDomain { .. }
+                )
+            })
+            .collect();
+        let positional: Vec<&crate::hir::HirGeneric> =
+            if instance.generic_args.len() == entity.generics.len() {
+                entity.generics.iter().collect()
+            } else {
+                value_generics
+            };
+
         for (i, arg) in instance.generic_args.iter().enumerate() {
-            if i >= entity.generics.len() {
+            if i >= positional.len() {
                 break;
             }
 
-            let generic = &entity.generics[i];
+            let generic = positional[i];
             if let crate::hir::HirGenericType::Const(_) = generic.param_type {
                 if let Ok(value) = evaluator.eval(arg) {
                     const_args.insert(generic.name.clone(), value);

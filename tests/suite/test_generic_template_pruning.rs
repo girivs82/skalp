@@ -288,3 +288,63 @@ fn every_instance_in_the_showcase_resolves() {
         }
     }
 }
+
+/// An entity whose generic list STARTS with lifetimes must still be
+/// specialized at its instantiation site.
+///
+/// `inst f = Fifo<'sys, 'other, 8, 16>` carries only the two VALUE arguments,
+/// while the entity declares four generics with the lifetimes first. Matched
+/// positionally, 8 paired with `'wr` and 16 with `'rd`; both are lifetimes, so
+/// both were skipped, no instantiation matched, and the instance was left
+/// pointing at the generic template. The specialization existed the whole time
+/// — the frontend had already built `Fifo_16_8` — and nothing pointed at it.
+#[test]
+fn an_entity_whose_generics_begin_with_lifetimes_is_specialized() {
+    let mir = compile(
+        r#"
+entity Fifo<'wr, 'rd, const WIDTH: nat = 8, const DEPTH: nat = 16> {
+    in wr_clk: clock<'wr>
+    in rd_clk: clock<'rd>
+    in wr_data: bit[WIDTH]
+    out rd_data: bit[WIDTH]
+}
+
+impl Fifo<'wr, 'rd, const WIDTH: nat, const DEPTH: nat> {
+    rd_data = wr_data
+}
+
+entity LtTop {
+    in a: clock<'sys>
+    in b: clock<'other>
+    in d: bit[8]
+    out o: bit[8]
+}
+
+impl LtTop {
+    inst f = Fifo<'sys, 'other, 8, 16> { wr_clk: a, rd_clk: b, wr_data: d }
+    o = f.rd_data
+}
+"#,
+    );
+    assert_no_real_module_instantiates_a_template(&mir);
+    let top = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "LtTop")
+        .expect("LtTop must be in the design");
+    let target = top
+        .instances
+        .first()
+        .and_then(|i| mir.modules.iter().find(|m| m.id == i.module))
+        .expect("the instance must resolve to a module in the design");
+    assert!(
+        target.name.starts_with("Fifo_"),
+        "the instance must name the specialization, got `{}`",
+        target.name
+    );
+    assert!(
+        target.parameters.is_empty(),
+        "`{}` should carry no parameters once specialized",
+        target.name
+    );
+}
