@@ -8234,7 +8234,28 @@ impl<'hir> HirToMir<'hir> {
                                 result_stack.push(mux_expr);
                             }
                         } else {
-                            result_stack.push(None);
+                            // Bit select on a computed value, e.g. the inlined
+                            // body of a call: `f(a, b)[0]` becomes `(a ^ b)[0]`.
+                            // There is no lvalue to select from, so extract
+                            // the bit arithmetically: `(base >> index) & 1`.
+                            // This used to push None, failing the assignment.
+                            let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::RightShift,
+                                left: Box::new(base),
+                                right: Box::new(index),
+                            });
+                            result_stack.push(Some(Expression::with_unknown_type(
+                                ExpressionKind::Binary {
+                                    op: BinaryOp::BitwiseAnd,
+                                    left: Box::new(shifted),
+                                    right: Box::new(Expression::with_unknown_type(
+                                        ExpressionKind::Literal(Value::BitVector {
+                                            value: 1,
+                                            width: 1,
+                                        }),
+                                    )),
+                                },
+                            )));
                         }
                     } else {
                         result_stack.push(None);
@@ -12590,6 +12611,11 @@ impl<'hir> HirToMir<'hir> {
                     .map(|e| self.substitute_variables(e, var_exprs, _let_bindings))
                     .collect(),
             ),
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => hir::HirExpression::ArrayRepeat {
+                value: Box::new(self.substitute_variables(value, var_exprs, _let_bindings)),
+                count: Box::new(self.substitute_variables(count, var_exprs, _let_bindings)),
+            },
             hir::HirExpression::TupleLiteral(exprs) => hir::HirExpression::TupleLiteral(
                 exprs
                     .iter()
@@ -13898,6 +13924,17 @@ impl<'hir> HirToMir<'hir> {
                 Some(hir::HirExpression::Concat(substituted_elements))
             }
 
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => {
+                let value =
+                    self.substitute_expression_with_var_map(value, param_map, var_id_to_name)?;
+                let count =
+                    self.substitute_expression_with_var_map(count, param_map, var_id_to_name)?;
+                Some(hir::HirExpression::ArrayRepeat {
+                    value: Box::new(value),
+                    count: Box::new(count),
+                })
+            }
             // FieldAccess expression - substitute base expression
             hir::HirExpression::FieldAccess { base, field } => {
                 trace!(
@@ -15799,6 +15836,17 @@ impl<'hir> HirToMir<'hir> {
                 Some(hir::HirExpression::Concat(elements_sub?))
             }
 
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => {
+                let value =
+                    self.substitute_hir_expr_recursively(value, params, lets, var_id_to_name)?;
+                let count =
+                    self.substitute_hir_expr_recursively(count, params, lets, var_id_to_name)?;
+                Some(hir::HirExpression::ArrayRepeat {
+                    value: Box::new(value),
+                    count: Box::new(count),
+                })
+            }
             // BUG FIX #118: Index - substitute in base and index expressions
             hir::HirExpression::Index(base, index) => {
                 let base_sub =
@@ -16319,6 +16367,11 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Concat(substituted)
             }
 
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => hir::HirExpression::ArrayRepeat {
+                value: Box::new(self.substitute_hir_expr_with_map(value, name_map)),
+                count: Box::new(self.substitute_hir_expr_with_map(count, name_map)),
+            },
             // BUG FIX #92: FieldAccess - substitute in base expression
             // This is critical for tuple destructuring like `let valid = _tuple_tmp.0`
             hir::HirExpression::FieldAccess { base, field } => {
@@ -16485,6 +16538,11 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Concat(substituted)
             }
 
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => hir::HirExpression::ArrayRepeat {
+                value: Box::new(self.substitute_var_ids_in_expr(value, var_id_map)),
+                count: Box::new(self.substitute_var_ids_in_expr(count, var_id_map)),
+            },
             hir::HirExpression::Cast(cast_expr) => {
                 let sub_expr = self.substitute_var_ids_in_expr(&cast_expr.expr, var_id_map);
                 hir::HirExpression::Cast(hir::HirCastExpr {
@@ -16722,6 +16780,10 @@ impl<'hir> HirToMir<'hir> {
                         stack.push(p);
                     }
                 }
+                hir::HirExpression::ArrayRepeat { value, count } => {
+                    stack.push(value);
+                    stack.push(count);
+                }
                 hir::HirExpression::FieldAccess { base, .. } => {
                     stack.push(base);
                 }
@@ -16891,6 +16953,19 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Concat(substituted)
             }
 
+            // Replication `{N{v}}` - substitute in both value and count
+            hir::HirExpression::ArrayRepeat { value, count } => hir::HirExpression::ArrayRepeat {
+                value: Box::new(self.substitute_var_ids_in_expr_filtered(
+                    value,
+                    var_id_map,
+                    local_var_ids,
+                )),
+                count: Box::new(self.substitute_var_ids_in_expr_filtered(
+                    count,
+                    var_id_map,
+                    local_var_ids,
+                )),
+            },
             hir::HirExpression::Cast(cast_expr) => {
                 let sub_expr = self.substitute_var_ids_in_expr_filtered(
                     &cast_expr.expr,
@@ -16984,6 +17059,10 @@ impl<'hir> HirToMir<'hir> {
                     for part in parts {
                         stack.push(part);
                     }
+                }
+                hir::HirExpression::ArrayRepeat { value, count } => {
+                    stack.push(value);
+                    stack.push(count);
                 }
                 hir::HirExpression::Cast(cast) => {
                     stack.push(&cast.expr);
@@ -23636,24 +23715,42 @@ impl<'hir> HirToMir<'hir> {
                 // Convert base expression (e.g., data1) in module context
                 let base_converted = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
 
-                // Extract index as integer
-                let bit_idx = match &**index {
-                    hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => *n as i64,
-                    _ => 0,
+                // Convert the index in module context too. It used to be read
+                // only as an integer literal, and anything else (a parameter, a
+                // let binding, an expression) silently became index 0.
+                let index_converted = match &**index {
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => {
+                        Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(
+                            *n as i64,
+                        )))
+                    }
+                    _ => self.convert_hir_expr_for_module(index, ctx, depth + 1)?,
                 };
 
                 if let ExpressionKind::Ref(base_lval) = base_converted.kind {
                     Some(Expression::with_unknown_type(ExpressionKind::Ref(
                         LValue::BitSelect {
                             base: Box::new(base_lval),
-                            index: Box::new(Expression::with_unknown_type(
-                                ExpressionKind::Literal(Value::Integer(bit_idx)),
-                            )),
+                            index: Box::new(index_converted),
                         },
                     )))
                 } else {
-                    trace!("    📐 BitSelect on non-Ref base - using fallback");
-                    self.convert_expression(expr, depth)
+                    // Bit select on a computed value, e.g. a call result
+                    // `f(a, b)[0]`: `(value >> index) & 1`. This used to fall
+                    // back to convert_expression, which does not know the
+                    // module's parameter ports and produced a constant 0.
+                    let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::RightShift,
+                        left: Box::new(base_converted),
+                        right: Box::new(index_converted),
+                    });
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::BitwiseAnd,
+                        left: Box::new(shifted),
+                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
+                            Value::BitVector { value: 1, width: 1 },
+                        ))),
+                    }))
                 }
             }
 

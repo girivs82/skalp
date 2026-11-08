@@ -789,8 +789,26 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                 get_type_dimensions(&variable.var_type)
             };
 
-        // Check if this variable name has already been declared
-        let unique_name = if declared_variable_names.contains_key(&variable.name) {
+        // A variable that mirrors a same-named, same-typed signal is an alias:
+        // function-module synthesis creates a Signal for each `let` binding
+        // and a Variable with the same name and type so Variable references
+        // resolve to it. Declaring both produced `wire x; logic x;` — illegal
+        // SystemVerilog. Refer to the signal's declaration instead.
+        if variable.initial.is_none()
+            && mir_module
+                .signals
+                .iter()
+                .any(|s| s.name == variable.name && s.signal_type == variable.var_type)
+        {
+            variable_unique_names.insert(variable.id, variable.name.clone());
+            continue;
+        }
+
+        // Check if this variable name has already been declared, as a variable
+        // or as a signal of a different type
+        let unique_name = if declared_variable_names.contains_key(&variable.name)
+            || declared_signal_names.contains(&variable.name)
+        {
             // Collision detected - use unique name with variable ID suffix
             format!("{}_{}", variable.name, variable.id.0)
         } else {
@@ -816,7 +834,7 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
         sv.push_str(";\n");
     }
 
-    if !mir_module.variables.is_empty() {
+    if !declared_variable_names.is_empty() {
         sv.push('\n');
     }
 
