@@ -320,9 +320,15 @@ mod tests {
             mapper.get_type_for_width(64),
             ("uint64_t".to_string(), None)
         );
+        // 65-128 bits use native unsigned __int128 (TRIAGE #32); wider
+        // signals are uint32_t arrays.
         assert_eq!(
             mapper.get_type_for_width(128),
-            ("uint32_t".to_string(), Some(4))
+            ("unsigned __int128".to_string(), None)
+        );
+        assert_eq!(
+            mapper.get_type_for_width(129),
+            ("uint32_t".to_string(), Some(5))
         );
     }
 

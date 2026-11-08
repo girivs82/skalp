@@ -445,8 +445,15 @@ impl AndOr {
 
 // Helper to write test files to a location where stdlib can be found
 fn write_test_file(filename: &str, content: &str) -> String {
-    // Write to the examples directory so stdlib can be found
-    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), filename);
+    // Write to the examples directory so stdlib can be found. Use a scratch
+    // name: examples/ also holds tracked files with these names, which the
+    // cleanup used to delete.
+    let path = format!(
+        "{}/examples/.scratch_{}_{}",
+        env!("CARGO_MANIFEST_DIR"),
+        std::process::id(),
+        filename
+    );
     std::fs::write(&path, content).expect("Failed to write test file");
     path
 }
