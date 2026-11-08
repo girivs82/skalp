@@ -39,9 +39,28 @@ fn assert_every_instance_resolves(sv: &str) {
         })
         .collect();
     let keywords = [
-        "input", "output", "inout", "wire", "reg", "assign", "always", "if", "else", "case",
-        "begin", "end", "logic", "generate", "endgenerate", "initial", "module", "endmodule",
-        "function", "task", "parameter", "localparam",
+        "input",
+        "output",
+        "inout",
+        "wire",
+        "reg",
+        "assign",
+        "always",
+        "if",
+        "else",
+        "case",
+        "begin",
+        "end",
+        "logic",
+        "generate",
+        "endgenerate",
+        "initial",
+        "module",
+        "endmodule",
+        "function",
+        "task",
+        "parameter",
+        "localparam",
     ];
     let mut missing: Vec<&str> = Vec::new();
     for line in sv.lines() {

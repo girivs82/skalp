@@ -4735,12 +4735,23 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Start with the first expression
-        let mut result = self.build_expression(&rhs_exprs[0])?;
+        // Start with the first expression. A plain call `f(a, b)` followed by
+        // postfix siblings (`f(a, b)[0]`, `f(a, b).0`) arrives as
+        // [IdentExpr(f), CallExpr((a, b)), ...]: the function name is not a
+        // value, so building it alone fails and used to drop the whole
+        // expression. Start from the CallExpr, which reads its name from the
+        // preceding IdentExpr.
+        let (mut result, mut i) = if rhs_exprs.len() >= 2
+            && rhs_exprs[0].kind() == SyntaxKind::IdentExpr
+            && rhs_exprs[1].kind() == SyntaxKind::CallExpr
+        {
+            (self.build_expression(&rhs_exprs[1])?, 2)
+        } else {
+            (self.build_expression(&rhs_exprs[0])?, 1)
+        };
 
         // Chain the remaining expressions using a while loop to allow lookahead
         // BUG FIX #71 Part 4e: Need to detect FieldExpr+CallExpr pattern (method calls)
-        let mut i = 1;
         while i < rhs_exprs.len() {
             let current_node = &rhs_exprs[i];
 
@@ -4942,7 +4953,8 @@ impl HirBuilderContext {
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
             // Get syntax nodes before and after colon
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -4970,8 +4982,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -7771,15 +7781,14 @@ impl HirBuilderContext {
                 let base_name = tokens[0].text().to_string();
 
                 // Look up the base as a signal/variable/port
-                let mut current_lval = if let Some(symbol) = self.symbols.lookup(&base_name) {
+                let mut current_lval = {
+                    let symbol = self.symbols.lookup(&base_name)?;
                     match symbol {
                         SymbolId::Signal(id) => HirLValue::Signal(*id),
                         SymbolId::Variable(id) => HirLValue::Variable(*id),
                         SymbolId::Port(id) => HirLValue::Port(*id),
                         _ => return None,
                     }
-                } else {
-                    return None;
                 };
 
                 // Build nested field accesses for each remaining field
@@ -8335,14 +8344,16 @@ impl HirBuilderContext {
         // All IdentExpr children inside CallExpr are arguments, not the function name.
         let function = if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
             ident_token.text().to_string()
-        } else if let Some(parent) = node.parent() {
+        } else {
+            let parent = node.parent()?;
             // Postfix call: IdentExpr and CallExpr are siblings
             // Look for preceding IdentExpr sibling
             let siblings: Vec<_> = parent.children().collect();
             let call_pos = siblings.iter().position(|n| n == node)?;
 
             if call_pos > 0 {
-                if let Some(prev_sibling) = siblings.get(call_pos - 1) {
+                {
+                    let prev_sibling = siblings.get(call_pos - 1)?;
                     if prev_sibling.kind() == SyntaxKind::IdentExpr {
                         prev_sibling
                             .first_token_of_kind(SyntaxKind::Ident)
@@ -8366,14 +8377,10 @@ impl HirBuilderContext {
                     } else {
                         return None;
                     }
-                } else {
-                    return None;
                 }
             } else {
                 return None;
             }
-        } else {
-            return None;
         };
 
         // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
@@ -8828,37 +8835,64 @@ impl HirBuilderContext {
     /// This is Verilog-style replication like {8{1'b1}} which repeats 1'b1 eight times.
     /// BUG #181 FIX: Added support for ReplicateExpr nodes in HIR builder
     fn build_replicate_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Collect all expression children - should be exactly 2: count and value
-        let expressions: Vec<HirExpression> = node
-            .children()
-            .filter(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::ConcatExpr
-                        | SyntaxKind::CastExpr
-                )
-            })
-            .filter_map(|n| self.build_expression(&n))
-            .collect();
-
-        if expressions.len() >= 2 {
-            // First is count, second is value to replicate
-            Some(HirExpression::ArrayRepeat {
-                count: Box::new(expressions[0].clone()),
-                value: Box::new(expressions[1].clone()),
-            })
-        } else {
-            None
+        // `{count{value}}` arrives as one ReplicateExpr holding the tokens
+        // `{`, count..., `{`, value..., `}`, `}`. Either operand may be several
+        // sibling nodes, because the parser emits postfix operations as
+        // siblings of their base: `{32{x[31]}}` has the value children
+        // `[IdentExpr(x), IndexExpr([31])]`. Taking "the second expression
+        // child" (as this used to) built `{32{x}}` — silently replicating the
+        // whole of `x` instead of its sign bit. Split the children at the inner
+        // `{` and build each side as a full sibling chain.
+        let mut count_nodes: Vec<SyntaxNode> = Vec::new();
+        let mut value_nodes: Vec<SyntaxNode> = Vec::new();
+        let mut braces_seen = 0;
+        for elem in node.children_with_tokens() {
+            match elem {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    braces_seen += 1;
+                }
+                rowan::NodeOrToken::Node(n) if Self::is_replicate_operand_kind(n.kind()) => {
+                    match braces_seen {
+                        1 => count_nodes.push(n),
+                        2 => value_nodes.push(n),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
         }
+
+        let count = self.build_chained_rhs_expression(&count_nodes)?;
+        let value = self.build_chained_rhs_expression(&value_nodes)?;
+        Some(HirExpression::ArrayRepeat {
+            count: Box::new(count),
+            value: Box::new(value),
+        })
+    }
+
+    /// Node kinds that can make up an operand of `{count{value}}`, including
+    /// the postfix siblings (`FieldExpr`, `IndexExpr`, `CallExpr`) and the
+    /// operator-led `BinaryExpr` continuations the parser splits out.
+    fn is_replicate_operand_kind(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::LiteralExpr
+                | SyntaxKind::IdentExpr
+                | SyntaxKind::BinaryExpr
+                | SyntaxKind::UnaryExpr
+                | SyntaxKind::CallExpr
+                | SyntaxKind::FieldExpr
+                | SyntaxKind::IndexExpr
+                | SyntaxKind::PathExpr
+                | SyntaxKind::ParenExpr
+                | SyntaxKind::ConcatExpr
+                | SyntaxKind::ReplicateExpr
+                | SyntaxKind::SizedCastExpr
+                | SyntaxKind::CastExpr
+                | SyntaxKind::IfExpr
+                | SyntaxKind::TupleExpr
+                | SyntaxKind::ArrayLiteral
+        )
     }
 
     /// Build sized cast expression: (WIDTH)'b0, (N)'hFF, (EXPR)'d15
@@ -9654,10 +9688,9 @@ impl HirBuilderContext {
                             // BUG FIX #220: Use the FieldExpr - build_expression on it will
                             // find the preceding sibling IdentExpr and create proper FieldAccess
                             self.build_expression(&binary_expr_children[1])?
-                        } else if let Some(right_node) = binary_expr_children.first() {
-                            self.build_expression(right_node)?
                         } else {
-                            return None;
+                            let right_node = binary_expr_children.first()?;
+                            self.build_expression(right_node)?
                         };
 
                         result = HirExpression::Binary(HirBinaryExpr {
@@ -10048,7 +10081,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -10078,8 +10112,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -10097,13 +10129,7 @@ impl HirBuilderContext {
             // build_index_operand reassembles that shape. The `indices` filter above
             // drops IndexExpr children, so check the raw children here.
             let raw_children: Vec<SyntaxNode> = index_node.children().collect();
-            if raw_children.len() >= 2
-                && matches!(
-                    raw_children[0].kind(),
-                    SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
-                )
-                && raw_children[1].kind() == SyntaxKind::IndexExpr
-            {
+            if Self::is_postfix_sibling_chain(&raw_children) {
                 let index_expr = self.build_index_operand(&raw_children)?;
                 return Some(HirExpression::Index(base, Box::new(index_expr)));
             }
@@ -10822,6 +10848,27 @@ impl HirBuilderContext {
         })
     }
 
+    /// True when `nodes` is one operand the parser split into a base and its
+    /// postfix operations, e.g. `[IdentExpr(s), FieldExpr(.a), IndexExpr(3:0)]`
+    /// for `s.a[3:0]`. A bare `[IdentExpr(f), CallExpr(..)]` call is excluded:
+    /// it is already handled wherever a CallExpr is built.
+    fn is_postfix_sibling_chain(nodes: &[SyntaxNode]) -> bool {
+        nodes.len() >= 2
+            && matches!(
+                nodes[0].kind(),
+                SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+            )
+            && nodes[1..].iter().all(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::FieldExpr | SyntaxKind::IndexExpr | SyntaxKind::CallExpr
+                )
+            })
+            && nodes[1..]
+                .iter()
+                .any(|n| matches!(n.kind(), SyntaxKind::FieldExpr | SyntaxKind::IndexExpr))
+    }
+
     /// Build index expression
     /// Build the INDEX operand of an indexing expression from the index node's
     /// children, handling the parser's sibling split for nested indexed
@@ -10836,17 +10883,19 @@ impl HirBuilderContext {
         if children.is_empty() {
             return None;
         }
-        // Sibling pattern: base expression followed by its own IndexExpr —
-        // rebuild the nested index/range with the base attached.
-        if children.len() >= 2
-            && matches!(
-                children[0].kind(),
-                SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
-            )
-            && children[1].kind() == SyntaxKind::IndexExpr
-        {
-            let inner_base = self.build_expression(&children[0])?;
-            return self.build_index_expr_with_base(&children[1], inner_base);
+        // Sibling pattern: a base expression followed only by its own postfix
+        // operations — `ptr[3:0]` is [IdentExpr(ptr), IndexExpr(3:0)] and
+        // `s.a[3:0]` (an instance output slice) is
+        // [IdentExpr(s), FieldExpr(.a), IndexExpr(3:0)]. Rebuild the whole
+        // chain. Only the two-node form used to be recognised, so
+        // `mem[s.a[3:0]]` indexed `mem` with the instance `s` itself and
+        // failed to lower.
+        if Self::is_postfix_sibling_chain(children) {
+            if children.len() == 2 && children[1].kind() == SyntaxKind::IndexExpr {
+                let inner_base = self.build_expression(&children[0])?;
+                return self.build_index_expr_with_base(&children[1], inner_base);
+            }
+            return self.build_chained_rhs_expression(children);
         }
         // Prefer BinaryExpr over IdentExpr for complex indices
         // (mem[wr_ptr % DEPTH] parses as [IdentExpr(wr_ptr), BinaryExpr(% DEPTH)])
@@ -10872,12 +10921,18 @@ impl HirBuilderContext {
             if let Some(pos) = siblings.iter().position(|n| n == node) {
                 if pos > 0 {
                     let prev = &siblings[pos - 1];
+                    // CallExpr: `f(a, b)[0]` splits into the siblings
+                    // [IdentExpr(f), CallExpr((a, b)), IndexExpr([0])]; the
+                    // call result is the base. Without it the whole index
+                    // expression came back None and the enclosing `let`,
+                    // `return` or assignment was silently dropped.
                     if matches!(
                         prev.kind(),
                         SyntaxKind::IdentExpr
                             | SyntaxKind::FieldExpr
                             | SyntaxKind::IndexExpr
                             | SyntaxKind::PathExpr
+                            | SyntaxKind::CallExpr
                     ) {
                         base_expr = Some(prev.clone());
                     }
@@ -10895,7 +10950,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -10923,8 +10979,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -10970,7 +11024,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -10998,8 +11053,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -11048,24 +11101,22 @@ impl HirBuilderContext {
             .map(|t| t.text().to_string())?;
 
         // Extract direction
-        let direction =
-            if let Some(direction_node) = node.first_child_of_kind(SyntaxKind::ProtocolDirection) {
-                if direction_node
-                    .first_token_of_kind(SyntaxKind::InKw)
-                    .is_some()
-                {
-                    HirProtocolDirection::In
-                } else if direction_node
-                    .first_token_of_kind(SyntaxKind::OutKw)
-                    .is_some()
-                {
-                    HirProtocolDirection::Out
-                } else {
-                    return None;
-                }
+        let direction = {
+            let direction_node = node.first_child_of_kind(SyntaxKind::ProtocolDirection)?;
+            if direction_node
+                .first_token_of_kind(SyntaxKind::InKw)
+                .is_some()
+            {
+                HirProtocolDirection::In
+            } else if direction_node
+                .first_token_of_kind(SyntaxKind::OutKw)
+                .is_some()
+            {
+                HirProtocolDirection::Out
             } else {
                 return None;
-            };
+            }
+        };
 
         // Extract type
         let signal_type =
@@ -14424,10 +14475,7 @@ impl HirBuilderContext {
                             // element type to hand back, so indexing fell to
                             // its `_ => Bit(1)` case and `v[i].mul(k)` looked
                             // for `impl Mul for bit[1]`.
-                            if matches!(
-                                type_name.as_str(),
-                                "vec" | "vec2" | "vec3" | "vec4"
-                            ) {
+                            if matches!(type_name.as_str(), "vec" | "vec2" | "vec3" | "vec4") {
                                 // A generic argument parses as an EXPRESSION,
                                 // not a type — which is why the `fixed<...>`
                                 // case above reads its arguments with
@@ -14445,24 +14493,18 @@ impl HirBuilderContext {
                                     let text = inner.text().to_string();
                                     let name = text.trim();
                                     if name.is_empty()
-                                        || !name
-                                            .chars()
-                                            .all(|ch| ch.is_alphanumeric() || ch == '_')
+                                        || !name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
                                     {
                                         return None;
                                     }
-                                    Some(
-                                        self.symbols
-                                            .user_types
-                                            .get(name)
-                                            .cloned()
-                                            .unwrap_or(match name {
-                                                "fp16" => HirType::Float16,
-                                                "fp32" => HirType::Float32,
-                                                "fp64" => HirType::Float64,
-                                                _ => HirType::Custom(name.to_string()),
-                                            }),
-                                    )
+                                    Some(self.symbols.user_types.get(name).cloned().unwrap_or(
+                                        match name {
+                                            "fp16" => HirType::Float16,
+                                            "fp32" => HirType::Float32,
+                                            "fp64" => HirType::Float64,
+                                            _ => HirType::Custom(name.to_string()),
+                                        },
+                                    ))
                                 });
                                 // `vec<T, N>` is the general alias
                                 // (`pub type vec<T, const N: nat> = T[N]`), so
@@ -14484,10 +14526,9 @@ impl HirBuilderContext {
                                         })
                                         .nth(1);
                                     return match (elem, size) {
-                                        (Some(elem), Some(size)) => HirType::ArrayExpr(
-                                            Box::new(elem),
-                                            Box::new(size),
-                                        ),
+                                        (Some(elem), Some(size)) => {
+                                            HirType::ArrayExpr(Box::new(elem), Box::new(size))
+                                        }
                                         _ => HirType::Custom("vec".to_string()),
                                     };
                                 }
@@ -15658,10 +15699,9 @@ impl HirBuilderContext {
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility
             let target_name = ident_tokens[1].text().to_string();
-            if let Some(entity_id) = self.symbols.entities.get(&target_name) {
+            {
+                let entity_id = self.symbols.entities.get(&target_name)?;
                 TraitImplTarget::Entity(*entity_id)
-            } else {
-                return None;
             }
         } else {
             return None;

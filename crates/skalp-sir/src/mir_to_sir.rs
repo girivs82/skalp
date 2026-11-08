@@ -3041,9 +3041,8 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_concat_node(part_nodes)
             }
             ExpressionKind::Replicate { count, value } => {
-                let _count_node = self.create_expression_with_local_context(count, local_context);
-                // For now, just return the value (replication logic would be more complex)
-                self.create_expression_with_local_context(value, local_context)
+                let value_node = self.create_expression_with_local_context(value, local_context);
+                self.create_replicate_node(count, value_node)
             }
             ExpressionKind::FunctionCall { .. } => {
                 // Fall back to original implementation for function calls
@@ -3940,6 +3939,10 @@ impl<'a> MirToSirConverter<'a> {
                     .collect();
 
                 self.create_concat_node_with_width(truncated_nodes, target_width)
+            }
+            ExpressionKind::Replicate { count, value } => {
+                let value_node = self.create_expression_node(value);
+                self.create_replicate_node(count, value_node)
             }
             ExpressionKind::Cast {
                 expr: inner_expr,
@@ -4877,6 +4880,52 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
         None
+    }
+
+    /// `{count{value}}`: concatenate `count` copies of `value_node`.
+    ///
+    /// Replication used to be unimplemented here: one lowering returned the
+    /// value once and the others fell through to a 1-bit zero, so a sign
+    /// extension like `{{32{x[31]}}, x}` simulated as a zero extension.
+    fn create_replicate_node(&mut self, count: &Expression, value_node: usize) -> usize {
+        match Self::eval_replicate_count(count) {
+            Some(0) => self.create_constant_node(0, 1),
+            Some(1) => value_node,
+            Some(n) => self.create_concat_node(vec![value_node; n as usize]),
+            None => {
+                eprintln!(
+                    "warning: replication count is not a compile-time constant ({:?}); \
+                     simulating a single copy",
+                    count.kind
+                );
+                value_node
+            }
+        }
+    }
+
+    /// Evaluate a replication count. It is a constant by the time MIR is built,
+    /// but may still be an unfolded expression such as `(W - 5)` after
+    /// generic substitution.
+    fn eval_replicate_count(expr: &Expression) -> Option<u64> {
+        match &expr.kind {
+            ExpressionKind::Literal(Value::Integer(n)) => u64::try_from(*n).ok(),
+            ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+            ExpressionKind::Cast { expr, .. } => Self::eval_replicate_count(expr),
+            ExpressionKind::Binary { op, left, right } => {
+                let l = Self::eval_replicate_count(left)?;
+                let r = Self::eval_replicate_count(right)?;
+                match op {
+                    BinaryOp::Add | BinaryOp::WidenAdd => l.checked_add(r),
+                    BinaryOp::Sub => l.checked_sub(r),
+                    BinaryOp::Mul => l.checked_mul(r),
+                    BinaryOp::Div => l.checked_div(r),
+                    BinaryOp::LeftShift => l.checked_shl(u32::try_from(r).ok()?),
+                    BinaryOp::RightShift => l.checked_shr(u32::try_from(r).ok()?),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     fn create_concat_node(&mut self, parts: Vec<usize>) -> usize {
@@ -6820,11 +6869,7 @@ impl<'a> MirToSirConverter<'a> {
         // Note: 'unordered' output (NaN check) is not directly supported as a native op
         // We skip it for GPU simulation - NaN handling uses native FP behavior
 
-        if created_ops.is_empty() {
-            return false;
-        }
-
-        true
+        !created_ops.is_empty()
     }
 
     /// Helper: Strip incorrect FP casts from connection expressions
@@ -9629,6 +9674,17 @@ impl<'a> MirToSirConverter<'a> {
                     })
                     .collect();
                 self.create_concat_node(part_nodes)
+            }
+            ExpressionKind::Replicate { count, value } => {
+                let value_node = self.create_expression_node_for_instance_with_context(
+                    value,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_replicate_node(count, value_node)
             }
             // BUG FIX #85: Handle tuple field access for module synthesis
             ExpressionKind::TupleFieldAccess { base, index } => {

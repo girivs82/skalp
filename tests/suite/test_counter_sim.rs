@@ -100,7 +100,7 @@ mod counter_sim_tests {
         // Generate and print Metal shader for debugging
         let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
-        println!("{}", &shader_code);
+        println!("{}", shader_code);
         println!("\n... (total {} chars)", shader_code.len());
 
         // Create simulation config

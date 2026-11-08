@@ -43,11 +43,14 @@ fn compile(src: &str) -> Result<Mir, String> {
 }
 
 fn shape_of(mir: &Mir, module: &str) -> Option<Shape> {
-    mir.modules.iter().find(|m| m.name == module).map(|m| Shape {
-        assignments: m.assignments.len(),
-        processes: m.processes.len(),
-        instances: m.instances.len(),
-    })
+    mir.modules
+        .iter()
+        .find(|m| m.name == module)
+        .map(|m| Shape {
+            assignments: m.assignments.len(),
+            processes: m.processes.len(),
+            instances: m.instances.len(),
+        })
 }
 
 /// Reached by importing `cordic` directly, so `CordicSqrt` is merged into the

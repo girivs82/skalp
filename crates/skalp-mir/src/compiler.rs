@@ -10,9 +10,9 @@ use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
 use indexmap::IndexMap;
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
-use tracing::trace;
 use skalp_frontend::hir::{Hir, HirPortDirection, HirPowerCtrl, HirPowerDerivation};
 use std::path::PathBuf;
+use tracing::trace;
 
 /// Optimization level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1413,11 +1413,11 @@ impl MirCompiler {
         let mut queue: std::collections::VecDeque<SpecializationRequest> =
             std::collections::VecDeque::new();
         let enqueue = |name: String,
-                           generic: String,
-                           args: Vec<(String, ConstValue)>,
-                           planned: &mut IndexMap<String, skalp_frontend::hir::EntityId>,
-                           next_id: &mut u32,
-                           queue: &mut std::collections::VecDeque<_>|
+                       generic: String,
+                       args: Vec<(String, ConstValue)>,
+                       planned: &mut IndexMap<String, skalp_frontend::hir::EntityId>,
+                       next_id: &mut u32,
+                       queue: &mut std::collections::VecDeque<_>|
          -> skalp_frontend::hir::EntityId {
             if let Some(&id) = planned.get(&name) {
                 return id;

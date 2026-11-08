@@ -777,7 +777,8 @@ impl Refactor {
         // Safety check: verify all leaves are valid (either Input/Latch/Barrier or multi-fanout AND)
         // If we find a leaf that is a single-fanout AND, the cone is invalid
         for &leaf_id in &cone.leaves {
-            if let Some(node) = aig.get_node(leaf_id) {
+            {
+                let node = aig.get_node(leaf_id)?;
                 match node {
                     AigNode::Input { .. }
                     | AigNode::Latch { .. }
@@ -790,9 +791,6 @@ impl Refactor {
                         // (verified during cone collection) - OK
                     }
                 }
-            } else {
-                // Invalid node reference - skip this cone
-                return None;
             }
         }
 

@@ -914,9 +914,7 @@ impl<'hir> InstantiationCollector<'hir> {
             HirType::Vec2(e) | HirType::Vec3(e) | HirType::Vec4(e) => {
                 Self::type_mentions_param(e, params)
             }
-            HirType::Array(e, _) | HirType::ArrayExpr(e, _) => {
-                Self::type_mentions_param(e, params)
-            }
+            HirType::Array(e, _) | HirType::ArrayExpr(e, _) => Self::type_mentions_param(e, params),
             _ => false,
         }
     }
