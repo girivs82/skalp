@@ -14424,10 +14424,7 @@ impl HirBuilderContext {
                             // element type to hand back, so indexing fell to
                             // its `_ => Bit(1)` case and `v[i].mul(k)` looked
                             // for `impl Mul for bit[1]`.
-                            if matches!(
-                                type_name.as_str(),
-                                "vec" | "vec2" | "vec3" | "vec4"
-                            ) {
+                            if matches!(type_name.as_str(), "vec" | "vec2" | "vec3" | "vec4") {
                                 // A generic argument parses as an EXPRESSION,
                                 // not a type — which is why the `fixed<...>`
                                 // case above reads its arguments with
@@ -14445,24 +14442,18 @@ impl HirBuilderContext {
                                     let text = inner.text().to_string();
                                     let name = text.trim();
                                     if name.is_empty()
-                                        || !name
-                                            .chars()
-                                            .all(|ch| ch.is_alphanumeric() || ch == '_')
+                                        || !name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
                                     {
                                         return None;
                                     }
-                                    Some(
-                                        self.symbols
-                                            .user_types
-                                            .get(name)
-                                            .cloned()
-                                            .unwrap_or(match name {
-                                                "fp16" => HirType::Float16,
-                                                "fp32" => HirType::Float32,
-                                                "fp64" => HirType::Float64,
-                                                _ => HirType::Custom(name.to_string()),
-                                            }),
-                                    )
+                                    Some(self.symbols.user_types.get(name).cloned().unwrap_or(
+                                        match name {
+                                            "fp16" => HirType::Float16,
+                                            "fp32" => HirType::Float32,
+                                            "fp64" => HirType::Float64,
+                                            _ => HirType::Custom(name.to_string()),
+                                        },
+                                    ))
                                 });
                                 // `vec<T, N>` is the general alias
                                 // (`pub type vec<T, const N: nat> = T[N]`), so
@@ -14484,10 +14475,9 @@ impl HirBuilderContext {
                                         })
                                         .nth(1);
                                     return match (elem, size) {
-                                        (Some(elem), Some(size)) => HirType::ArrayExpr(
-                                            Box::new(elem),
-                                            Box::new(size),
-                                        ),
+                                        (Some(elem), Some(size)) => {
+                                            HirType::ArrayExpr(Box::new(elem), Box::new(size))
+                                        }
                                         _ => HirType::Custom("vec".to_string()),
                                     };
                                 }

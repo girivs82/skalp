@@ -155,8 +155,5 @@ impl DupD {
         .nth(1)
         .and_then(|s| s.split("endmodule").next())
         .expect("FpAdd_fp32 must be emitted");
-    assert!(
-        body.contains("assign"),
-        "FpAdd_fp32 kept no logic:\n{body}"
-    );
+    assert!(body.contains("assign"), "FpAdd_fp32 kept no logic:\n{body}");
 }

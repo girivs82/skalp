@@ -246,10 +246,7 @@ impl SqrtTop {
     // And the specializations it should have reached are actually there.
     let names: Vec<&str> = mir.modules.iter().map(|m| m.name.as_str()).collect();
     for want in ["FpAdd_fp32", "FpSub_fp32", "FpMul_fp32"] {
-        assert!(
-            names.contains(&want),
-            "expected {want} among {names:?}"
-        );
+        assert!(names.contains(&want), "expected {want} among {names:?}");
     }
 }
 
