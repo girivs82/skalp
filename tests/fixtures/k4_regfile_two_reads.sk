@@ -1,0 +1,22 @@
+// A register file read combinationally at two addresses, as in a CPU's
+// register read stage. 8 x 32 bits is large enough to be inferred as a memory.
+entity Rf {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[32]
+    in ra: bit[3]
+    in rb: bit[3]
+    out qa: bit[32]
+    out qb: bit[32]
+}
+impl Rf {
+    signal rf: bit[32][8]
+    on(clk.rise) {
+        if we == 1 {
+            rf[wa] = wd
+        }
+    }
+    qa = rf[ra]
+    qb = rf[rb]
+}

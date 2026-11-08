@@ -84,6 +84,7 @@ mod test_improved_optimization;
 mod test_integration;
 mod test_intent_and_numeric;
 mod test_k4_index_replicate_regressions;
+mod test_k4_round2_regressions;
 mod test_l0_l5_ops;
 mod test_l0l1_match;
 mod test_language_features;

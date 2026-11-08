@@ -20,9 +20,9 @@ use indexmap::IndexMap;
 use skalp_frontend::hir::MemoryStyle;
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType, EdgeType,
-    Expression, ExpressionKind, IfStatement, LValue, Module, PortDirection, PortId, Process,
-    ProcessKind, ReduceOp, SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value,
-    Variable, VariableId,
+    Expression, ExpressionKind, IfStatement, LValue, LoopStatement, Module, PortDirection, PortId,
+    Process, ProcessKind, ReduceOp, SafetyContext, SensitivityList, SignalId, Statement, UnaryOp,
+    Value, Variable, VariableId,
 };
 use std::collections::HashMap;
 use tracing::{debug, info, trace};
@@ -116,6 +116,10 @@ struct MemoryInfo {
     node_id: LirNodeId,
     /// Whether the memory is read-only
     read_only: bool,
+    /// Read ports in use: (read address, read data, MemBlock node). The first is the
+    /// primary block above; every further read site gets its own block that shares the
+    /// write port, so two reads with different addresses never fight over one address.
+    read_ports: Vec<(LirSignalId, LirSignalId, LirNodeId)>,
 }
 
 pub struct MirToLirTransform {
@@ -288,6 +292,7 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
+        self.mark_async_memory_reads(module);
 
         // Phase 4b: Synthesize instance port connection expressions
         // When a module has instances with port connections that are expressions
@@ -417,6 +422,7 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
+        self.mark_async_memory_reads(module);
 
         // Phase 4b: Synthesize instance port connection expressions
         // When a module has instances with port connections that are expressions
@@ -551,6 +557,7 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
+        self.mark_async_memory_reads(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -724,6 +731,7 @@ impl MirToLirTransform {
                 depth,
                 has_write: !read_only,
                 read_only,
+                async_read: false,
             },
             inputs,
             rdata_signal,
@@ -748,6 +756,7 @@ impl MirToLirTransform {
                 rdata_signal,
                 node_id,
                 read_only,
+                read_ports: Vec::new(),
             },
         );
 
@@ -4520,6 +4529,54 @@ impl MirToLirTransform {
         // Transform the index expression to get the address signal
         let addr_signal = self.transform_expression(index, mem_info.addr_width);
 
+        // The same address read twice shares a port.
+        if let Some(&(_, rdata, _)) = mem_info
+            .read_ports
+            .iter()
+            .find(|(addr, _, _)| *addr == addr_signal)
+        {
+            return rdata;
+        }
+
+        // First read site: the primary MemBlock. Later sites: a MemBlock of their own
+        // that shares the write port (address, data, enable, clock), i.e. the memory is
+        // replicated per read port. Driving every read address into one raddr made all
+        // reads return the word of whichever address won.
+        let (raddr_signal, rdata_signal, node_id) = if mem_info.read_ports.is_empty() {
+            (
+                mem_info.raddr_signal,
+                mem_info.rdata_signal,
+                mem_info.node_id,
+            )
+        } else {
+            let port = mem_info.read_ports.len();
+            let base_name = self.lir.signals[mem_info.rdata_signal.0 as usize]
+                .name
+                .trim_end_matches("_rdata")
+                .to_string();
+            let raddr = self
+                .lir
+                .add_signal(format!("{}_raddr{}", base_name, port), mem_info.addr_width);
+            let rdata = self.lir.add_signal(
+                format!("{}_rdata{}", base_name, port),
+                mem_info.element_width,
+            );
+            let primary = &self.lir.nodes[mem_info.node_id.0 as usize];
+            let op = primary.op.clone();
+            let clock = primary.clock;
+            let mut inputs = primary.inputs.clone();
+            inputs[0] = raddr;
+            let path = format!("{}_rd{}", primary.path, port);
+            let node = self.lir.add_node(op, inputs, rdata, path);
+            if let Some(clk) = clock {
+                self.lir.set_node_clock(node, clk);
+            }
+            (raddr, rdata, node)
+        };
+        if let Some(info) = self.memory_signals.get_mut(&mem_signal_id) {
+            info.read_ports.push((addr_signal, rdata_signal, node_id));
+        }
+
         // Wire address combinationally to the memory's raddr input
         let path = self.unique_node_path("mem_raddr");
         self.lir.add_node(
@@ -4527,12 +4584,57 @@ impl MirToLirTransform {
                 width: mem_info.addr_width,
             },
             vec![addr_signal],
-            mem_info.raddr_signal,
+            raddr_signal,
             path,
         );
 
-        // Return the rdata signal (read data output from BRAM)
-        mem_info.rdata_signal
+        rdata_signal
+    }
+
+    /// Set the MemBlock clock on the primary block and every read-port replica.
+    fn set_memory_clock(&mut self, mem_signal_id: SignalId, clk: LirSignalId) {
+        let mem_info = &self.memory_signals[&mem_signal_id];
+        let mut nodes = vec![mem_info.node_id];
+        nodes.extend(mem_info.read_ports.iter().map(|(_, _, n)| *n));
+        for node in nodes {
+            self.lir.set_node_clock(node, clk);
+        }
+    }
+
+    /// Mark memories that are read outside a clocked process (continuous assignments,
+    /// combinational processes) as `async_read`. Their read data must be valid in the
+    /// same cycle as the address, which a synchronous block RAM cannot provide, so the
+    /// tech mapper keeps them out of block RAM.
+    fn mark_async_memory_reads(&mut self, module: &Module) {
+        if self.memory_signals.is_empty() {
+            return;
+        }
+        let mems: std::collections::HashSet<SignalId> =
+            self.memory_signals.keys().copied().collect();
+        let mut found = std::collections::HashSet::new();
+        for assign in &module.assignments {
+            mem_refs_in_expr(&assign.rhs, &mems, &mut found);
+            mem_refs_in_lvalue_indices(&assign.lhs, &mems, &mut found);
+        }
+        for process in &module.processes {
+            if matches!(
+                process.kind,
+                ProcessKind::Combinational | ProcessKind::General
+            ) {
+                mem_refs_in_block(&process.body, &mems, &mut found);
+            }
+        }
+        for sig in found {
+            let info = &self.memory_signals[&sig];
+            let mut nodes = vec![info.node_id];
+            nodes.extend(info.read_ports.iter().map(|(_, _, n)| *n));
+            for node in nodes {
+                if let LirOp::MemBlock { async_read, .. } = &mut self.lir.nodes[node.0 as usize].op
+                {
+                    *async_read = true;
+                }
+            }
+        }
     }
 
     /// Handle a memory write operation in a sequential context.
@@ -4715,10 +4817,10 @@ impl MirToLirTransform {
         if sites.is_empty() {
             return false;
         }
-        let mem_info = self.memory_signals[&mem_signal_id].clone();
         if let Some(clk) = clock_signal {
-            self.lir.set_node_clock(mem_info.node_id, clk);
+            self.set_memory_clock(mem_signal_id, clk);
         }
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Write enable: OR of all site guards (an unconditional site → 1)
         let mut we: Option<LirSignalId> = None;
@@ -4817,12 +4919,11 @@ impl MirToLirTransform {
         clock_signal: Option<LirSignalId>,
         _reset_signal: Option<LirSignalId>,
     ) {
-        let mem_info = self.memory_signals[&mem_signal_id].clone();
-
         // Set the MemBlock node's clock (deferred from create_memory_signal)
         if let Some(clk) = clock_signal {
-            self.lir.set_node_clock(mem_info.node_id, clk);
+            self.set_memory_clock(mem_signal_id, clk);
         }
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index → write address (combinational drive)
         let addr_signal = self.transform_expression(index, mem_info.addr_width);
@@ -7852,6 +7953,166 @@ fn lvalue_to_name(lvalue: &LValue) -> String {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// Collect memory signals referenced anywhere in `expr`.
+fn mem_refs_in_expr(
+    expr: &Expression,
+    mems: &std::collections::HashSet<SignalId>,
+    found: &mut std::collections::HashSet<SignalId>,
+) {
+    match &expr.kind {
+        ExpressionKind::Ref(lv) => mem_refs_in_lvalue(lv, mems, found),
+        ExpressionKind::Binary { left, right, .. } => {
+            mem_refs_in_expr(left, mems, found);
+            mem_refs_in_expr(right, mems, found);
+        }
+        ExpressionKind::Unary { operand, .. } => mem_refs_in_expr(operand, mems, found),
+        ExpressionKind::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            mem_refs_in_expr(cond, mems, found);
+            mem_refs_in_expr(then_expr, mems, found);
+            mem_refs_in_expr(else_expr, mems, found);
+        }
+        ExpressionKind::Concat(parts) => {
+            for p in parts {
+                mem_refs_in_expr(p, mems, found);
+            }
+        }
+        ExpressionKind::Replicate { count, value } => {
+            mem_refs_in_expr(count, mems, found);
+            mem_refs_in_expr(value, mems, found);
+        }
+        ExpressionKind::FunctionCall { args, .. } => {
+            for a in args {
+                mem_refs_in_expr(a, mems, found);
+            }
+        }
+        ExpressionKind::Cast { expr, .. } => mem_refs_in_expr(expr, mems, found),
+        ExpressionKind::TupleFieldAccess { base, .. }
+        | ExpressionKind::FieldAccess { base, .. } => mem_refs_in_expr(base, mems, found),
+        ExpressionKind::Literal(_) => {}
+    }
+}
+
+/// A read of `lv`: the signal itself and everything its indices read.
+fn mem_refs_in_lvalue(
+    lv: &LValue,
+    mems: &std::collections::HashSet<SignalId>,
+    found: &mut std::collections::HashSet<SignalId>,
+) {
+    match lv {
+        LValue::Signal(id) => {
+            if mems.contains(id) {
+                found.insert(*id);
+            }
+        }
+        LValue::BitSelect { base, index } => {
+            mem_refs_in_lvalue(base, mems, found);
+            mem_refs_in_expr(index, mems, found);
+        }
+        LValue::RangeSelect { base, high, low } => {
+            mem_refs_in_lvalue(base, mems, found);
+            mem_refs_in_expr(high, mems, found);
+            mem_refs_in_expr(low, mems, found);
+        }
+        LValue::Concat(parts) => {
+            for p in parts {
+                mem_refs_in_lvalue(p, mems, found);
+            }
+        }
+        LValue::Port(_) | LValue::Variable(_) => {}
+    }
+}
+
+/// Reads made by the index expressions of an assignment target (not the target itself).
+fn mem_refs_in_lvalue_indices(
+    lv: &LValue,
+    mems: &std::collections::HashSet<SignalId>,
+    found: &mut std::collections::HashSet<SignalId>,
+) {
+    match lv {
+        LValue::BitSelect { base, index } => {
+            mem_refs_in_lvalue_indices(base, mems, found);
+            mem_refs_in_expr(index, mems, found);
+        }
+        LValue::RangeSelect { base, high, low } => {
+            mem_refs_in_lvalue_indices(base, mems, found);
+            mem_refs_in_expr(high, mems, found);
+            mem_refs_in_expr(low, mems, found);
+        }
+        LValue::Concat(parts) => {
+            for p in parts {
+                mem_refs_in_lvalue_indices(p, mems, found);
+            }
+        }
+        LValue::Signal(_) | LValue::Port(_) | LValue::Variable(_) => {}
+    }
+}
+
+fn mem_refs_in_block(
+    block: &Block,
+    mems: &std::collections::HashSet<SignalId>,
+    found: &mut std::collections::HashSet<SignalId>,
+) {
+    for stmt in &block.statements {
+        mem_refs_in_stmt(stmt, mems, found);
+    }
+}
+
+fn mem_refs_in_stmt(
+    stmt: &Statement,
+    mems: &std::collections::HashSet<SignalId>,
+    found: &mut std::collections::HashSet<SignalId>,
+) {
+    match stmt {
+        Statement::Assignment(a) => {
+            mem_refs_in_expr(&a.rhs, mems, found);
+            mem_refs_in_lvalue_indices(&a.lhs, mems, found);
+        }
+        Statement::If(i) => {
+            mem_refs_in_expr(&i.condition, mems, found);
+            mem_refs_in_block(&i.then_block, mems, found);
+            if let Some(e) = &i.else_block {
+                mem_refs_in_block(e, mems, found);
+            }
+        }
+        Statement::Case(c) => {
+            mem_refs_in_expr(&c.expr, mems, found);
+            for item in &c.items {
+                for v in &item.values {
+                    mem_refs_in_expr(v, mems, found);
+                }
+                mem_refs_in_block(&item.block, mems, found);
+            }
+            if let Some(d) = &c.default {
+                mem_refs_in_block(d, mems, found);
+            }
+        }
+        Statement::Block(b) => mem_refs_in_block(b, mems, found),
+        Statement::Loop(LoopStatement::For {
+            condition, body, ..
+        }) => {
+            mem_refs_in_expr(condition, mems, found);
+            mem_refs_in_block(body, mems, found);
+        }
+        Statement::Loop(LoopStatement::While { condition, body }) => {
+            mem_refs_in_expr(condition, mems, found);
+            mem_refs_in_block(body, mems, found);
+        }
+        Statement::ResolvedConditional(rc) => {
+            mem_refs_in_lvalue_indices(&rc.target, mems, found);
+            for case in &rc.resolved.cases {
+                mem_refs_in_expr(&case.condition, mems, found);
+                mem_refs_in_expr(&case.value, mems, found);
+            }
+            mem_refs_in_expr(&rc.resolved.default, mems, found);
+        }
+        Statement::Assert(_) | Statement::Assume(_) | Statement::Cover(_) => {}
+    }
+}
 
 #[cfg(test)]
 mod tests {

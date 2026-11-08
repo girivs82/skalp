@@ -88,11 +88,22 @@ impl<'a> SharedCodegen<'a> {
 
         // 5. Compute widths from combinational nodes (in topological order)
         // Nodes should already be in topological order in the SIR
+        // A node's own output takes the computed width. A named signal or port
+        // that the node also drives keeps its declared width: overwriting it
+        // made e.g. an 8-bit output driven by a shift left 32 bits wide, so
+        // the bits shifted out leaked into the port.
         for node in &self.module.combinational_nodes {
             let computed_width = self.compute_node_output_width_from_cache(node);
-            for output in &node.outputs {
-                self.signal_width_cache
-                    .insert(output.signal_id.clone(), computed_width);
+            for (i, output) in node.outputs.iter().enumerate() {
+                // (Only for scalar-storage nodes: a wide node's outputs share its
+                // array layout and are copied element-wise.)
+                let declared = i > 0
+                    && !self.uses_array_storage(computed_width)
+                    && self.signal_width_cache.contains_key(&output.signal_id);
+                if !declared {
+                    self.signal_width_cache
+                        .insert(output.signal_id.clone(), computed_width);
+                }
             }
         }
 
@@ -3451,11 +3462,21 @@ impl<'a> SharedCodegen<'a> {
                         self.sanitize_name(first_output)
                     ));
                 } else {
-                    // Scalar copy
+                    // Scalar copy. A named signal narrower than the node that
+                    // drives it (an add carries its carry bit, a shift left
+                    // the bits shifted out) takes only its declared width, as
+                    // an assignment does in hardware.
+                    let out_width = self.get_signal_width(&additional_output.signal_id);
+                    let mask = if out_width < first_width && !self.uses_vector_storage(out_width) {
+                        Self::cpp_mask_suffix(out_width)
+                    } else {
+                        String::new()
+                    };
                     self.write_indented(&format!(
-                        "signals->{} = signals->{};\n",
+                        "signals->{} = signals->{}{};\n",
                         self.sanitize_name(&additional_output.signal_id),
-                        self.sanitize_name(first_output)
+                        self.sanitize_name(first_output),
+                        mask
                     ));
                 }
             }

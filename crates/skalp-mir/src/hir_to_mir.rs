@@ -7865,6 +7865,20 @@ impl<'hir> HirToMir<'hir> {
         })
     }
 
+    /// Wrap a bit/range select computed arithmetically, `(v >> lo) & mask`,
+    /// in a cast to its width. The shift-and-mask is `v`'s width wide, so used
+    /// as a concatenation or replication operand (`{{56{f(x)[7]}}, ...}`) it
+    /// contributed all of `v`'s bits instead of `width`.
+    fn sized_bits(expr: Expression, width: usize) -> Expression {
+        Expression::new(
+            ExpressionKind::Cast {
+                expr: Box::new(expr),
+                target_type: DataType::Bit(width),
+            },
+            Type::Bit(Width::Fixed(width as u32)),
+        )
+    }
+
     fn convert_expression_iterative(
         &mut self,
         expr: &hir::HirExpression,
@@ -8240,8 +8254,8 @@ impl<'hir> HirToMir<'hir> {
                                 left: Box::new(base),
                                 right: Box::new(index),
                             });
-                            result_stack.push(Some(Expression::with_unknown_type(
-                                ExpressionKind::Binary {
+                            result_stack.push(Some(Self::sized_bits(
+                                Expression::with_unknown_type(ExpressionKind::Binary {
                                     op: BinaryOp::BitwiseAnd,
                                     left: Box::new(shifted),
                                     right: Box::new(Expression::with_unknown_type(
@@ -8250,7 +8264,8 @@ impl<'hir> HirToMir<'hir> {
                                             width: 1,
                                         }),
                                     )),
-                                },
+                                }),
+                                1,
                             )));
                         }
                     } else {
@@ -8336,12 +8351,13 @@ impl<'hir> HirToMir<'hir> {
                                             value: mask_val,
                                         }),
                                     );
-                                    result_stack.push(Some(Expression::with_unknown_type(
-                                        ExpressionKind::Binary {
+                                    result_stack.push(Some(Self::sized_bits(
+                                        Expression::with_unknown_type(ExpressionKind::Binary {
                                             op: BinaryOp::And,
                                             left: Box::new(shifted),
                                             right: Box::new(mask),
-                                        },
+                                        }),
+                                        width,
                                     )));
                                 } else {
                                     // Fully dynamic — can't compute mask statically
@@ -9806,12 +9822,19 @@ impl<'hir> HirToMir<'hir> {
                     right: Box::new(index_expr),
                 });
                 // Mask with 1 to get single bit
-                let one = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1)));
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::And,
-                    left: Box::new(shifted),
-                    right: Box::new(one),
-                }))
+                let one =
+                    Expression::with_unknown_type(ExpressionKind::Literal(Value::BitVector {
+                        value: 1,
+                        width: 1,
+                    }));
+                Some(Self::sized_bits(
+                    Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: BinaryOp::BitwiseAnd,
+                        left: Box::new(shifted),
+                        right: Box::new(one),
+                    }),
+                    1,
+                ))
             }
             hir::HirExpression::Range(base, high, low) => {
                 // Convert range expression to range select
@@ -9896,13 +9919,16 @@ impl<'hir> HirToMir<'hir> {
                         }),
                         ty.clone(),
                     );
-                    Some(Expression::new(
-                        ExpressionKind::Binary {
-                            op: BinaryOp::BitwiseAnd,
-                            left: Box::new(shifted),
-                            right: Box::new(mask_expr),
-                        },
-                        ty,
+                    Some(Self::sized_bits(
+                        Expression::new(
+                            ExpressionKind::Binary {
+                                op: BinaryOp::BitwiseAnd,
+                                left: Box::new(shifted),
+                                right: Box::new(mask_expr),
+                            },
+                            ty,
+                        ),
+                        width,
                     ))
                 } else if let (
                     ExpressionKind::Literal(Value::BitVector { value: h, .. }),
@@ -9922,13 +9948,16 @@ impl<'hir> HirToMir<'hir> {
                         }),
                         ty.clone(),
                     );
-                    Some(Expression::new(
-                        ExpressionKind::Binary {
-                            op: BinaryOp::BitwiseAnd,
-                            left: Box::new(shifted),
-                            right: Box::new(mask_expr),
-                        },
-                        ty,
+                    Some(Self::sized_bits(
+                        Expression::new(
+                            ExpressionKind::Binary {
+                                op: BinaryOp::BitwiseAnd,
+                                left: Box::new(shifted),
+                                right: Box::new(mask_expr),
+                            },
+                            ty,
+                        ),
+                        width,
                     ))
                 } else {
                     // Dynamic indices - just return the shifted value
@@ -23735,13 +23764,16 @@ impl<'hir> HirToMir<'hir> {
                         left: Box::new(base_converted),
                         right: Box::new(index_converted),
                     });
-                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                        op: BinaryOp::BitwiseAnd,
-                        left: Box::new(shifted),
-                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                            Value::BitVector { value: 1, width: 1 },
-                        ))),
-                    }))
+                    Some(Self::sized_bits(
+                        Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(shifted),
+                            right: Box::new(Expression::with_unknown_type(
+                                ExpressionKind::Literal(Value::BitVector { value: 1, width: 1 }),
+                            )),
+                        }),
+                        1,
+                    ))
                 }
             }
 
@@ -23834,7 +23866,7 @@ impl<'hir> HirToMir<'hir> {
                         })
                     };
 
-                    Some(result)
+                    Some(Self::sized_bits(result, width as usize))
                 }
             }
 

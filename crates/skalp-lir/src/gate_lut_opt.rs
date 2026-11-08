@@ -452,13 +452,21 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
             }
         }
 
-        // Pad combined_inputs to 4 with the first input (unused inputs don't matter
-        // since the truth table is already computed for the actual number of inputs)
+        // Pad combined_inputs to 4 with the first input. The padded pins carry a live
+        // signal, so the table must ignore them: repeat the num_combined-input table
+        // across all 16 entries. (Leaving the upper entries 0 made e.g. a 3-input AND
+        // padded with its first input read 0 whenever that input was 1.)
         while combined_inputs.len() < 4 {
-            // Pad with the first input — truth table already handles this correctly
-            // since higher input bits beyond num_combined are unused
             combined_inputs.push(combined_inputs[0]);
         }
+        let mask = (1u64 << num_combined) - 1;
+        let mut padded_tt: u64 = 0;
+        for entry in 0..16u64 {
+            if (composed_tt >> (entry & mask)) & 1 == 1 {
+                padded_tt |= 1 << entry;
+            }
+        }
+        let composed_tt = padded_tt;
 
         // Update cell B to be the combined LUT
         netlist.cells[cell_b_idx].lut_init = Some(composed_tt & 0xFFFF);
