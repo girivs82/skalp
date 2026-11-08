@@ -55,7 +55,7 @@ mod debug_pipeline_valid_tests {
         // Generate Metal shader
         let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
-        println!("{}", &shader_code);
+        println!("{}", shader_code);
 
         // Create simulation config
         let config = UnifiedSimConfig {
