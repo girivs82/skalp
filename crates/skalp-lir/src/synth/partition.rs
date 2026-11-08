@@ -60,10 +60,7 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
             // Known infrastructure cells (SB_GND, SB_VCC, etc.) are incompatible,
             // and so is anything else without a function (e.g., NCL threshold gates
             // like TH22_X1 that don't go through the tech_mapper).
-            if c.function.is_none() {
-                return true;
-            }
-            false
+            c.function.is_none()
         })
         .map(|c| c.id)
         .collect();

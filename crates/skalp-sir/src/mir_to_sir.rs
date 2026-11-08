@@ -6869,11 +6869,7 @@ impl<'a> MirToSirConverter<'a> {
         // Note: 'unordered' output (NaN check) is not directly supported as a native op
         // We skip it for GPU simulation - NaN handling uses native FP behavior
 
-        if created_ops.is_empty() {
-            return false;
-        }
-
-        true
+        !created_ops.is_empty()
     }
 
     /// Helper: Strip incorrect FP casts from connection expressions

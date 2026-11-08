@@ -4102,15 +4102,14 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is a tuple signal (has flattened fields)
         let (_lhs_sig_id, lhs_flattened) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if let Some(flattened) = self.flattened_signals.get(id) {
+                {
+                    let flattened = self.flattened_signals.get(id)?;
                     if flattened.len() > 1 {
                         // Multiple flattened fields = tuple signal
                         (*id, flattened.clone())
                     } else {
                         return None; // Single field, not a tuple
                     }
-                } else {
-                    return None; // Not flattened
                 }
             }
             _ => return None, // Not a signal LHS
@@ -5305,14 +5304,13 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is a tuple signal (has multiple flattened fields)
         let lhs_flattened = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if let Some(flattened) = self.flattened_signals.get(id) {
+                {
+                    let flattened = self.flattened_signals.get(id)?;
                     if flattened.len() > 1 {
                         flattened.clone()
                     } else {
                         return None; // Single field, not a tuple
                     }
-                } else {
-                    return None; // Not flattened
                 }
             }
             _ => return None, // Not a signal LHS
@@ -5757,30 +5755,28 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is a flattened port or signal
         let (lhs_hir_id, lhs_is_signal, lhs_fields) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if let Some(fields) = self.flattened_signals.get(id) {
+                {
+                    let fields = self.flattened_signals.get(id)?;
                     if fields.len() > 1 {
                         // Multiple flattened fields indicates struct/composite type
                         (id.0, true, fields.clone())
                     } else {
                         return None;
                     }
-                } else {
-                    return None;
                 }
             }
             hir::HirLValue::Port(id)
                 // BUG #237 FIX: Only use flattened_ports if the port belongs to the current entity
                 if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
                 => {
-                    if let Some(fields) = self.flattened_ports.get(id) {
+                    {
+                        let fields = self.flattened_ports.get(id)?;
                         if fields.len() > 1 {
                             // Multiple flattened fields indicates struct/composite type
                             (id.0, false, fields.clone())
                         } else {
                             return None;
                         }
-                    } else {
-                        return None;
                     }
                 }
             _ => return None,
@@ -9524,10 +9520,9 @@ impl<'hir> HirToMir<'hir> {
                                 hir.functions.iter().find(|f| f.name == call.function)
                             });
 
-                            if let Some(func) = func {
+                            {
+                                let func = func?;
                                 self.synthesize_function_as_module(func)
-                            } else {
-                                return None;
                             }
                         };
 
@@ -9578,7 +9573,8 @@ impl<'hir> HirToMir<'hir> {
                     // module instance connections have actual signal drivers
                     let mut arg_exprs = Vec::new();
                     for arg in &call.args {
-                        if let Some(mut arg_expr) = self.convert_expression(arg, depth + 1) {
+                        {
+                            let mut arg_expr = self.convert_expression(arg, depth + 1)?;
                             // If the argument is a variable reference, try to expand it to the RHS
                             // This ensures module instance connections use actual signal expressions
                             // instead of variable references that may not have continuous drivers
@@ -9602,8 +9598,6 @@ impl<'hir> HirToMir<'hir> {
                                 }
                             }
                             arg_exprs.push(arg_expr);
-                        } else {
-                            return None;
                         }
                     }
 
@@ -12693,10 +12687,9 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Variable(var_id) => (*var_id, None),
             hir::HirExpression::Cast(cast) => {
                 // Cast(expr) - check if expr contains a Variable
-                if let Some(var_id) = Self::extract_variable_from_expr(&cast.expr) {
+                {
+                    let var_id = Self::extract_variable_from_expr(&cast.expr)?;
                     (var_id, Some(result_expr.clone()))
-                } else {
-                    return None;
                 }
             }
             hir::HirExpression::Range(base, _, _) => {
@@ -12711,10 +12704,9 @@ impl<'hir> HirToMir<'hir> {
                 // BUG #119 FIX: Handle Concat([Literal(0), Variable(x)]) pattern - zero extension
                 // This pattern appears when returning a narrower variable in a wider result type
                 // e.g., popcount32 returns `x[5:0] as nat[6]` which becomes Concat([Literal(0), Variable(10)])
-                if let Some(var_id) = Self::extract_variable_from_concat(elements) {
+                {
+                    let var_id = Self::extract_variable_from_concat(elements)?;
                     (var_id, Some(result_expr.clone()))
-                } else {
-                    return None;
                 }
             }
             _ => {
@@ -14549,10 +14541,9 @@ impl<'hir> HirToMir<'hir> {
                 // Sum of all part widths, if all parts have known widths
                 let mut total = 0u32;
                 for part in parts {
-                    if let Some(w) = self.infer_hir_expression_width(part) {
+                    {
+                        let w = self.infer_hir_expression_width(part)?;
                         total += w;
-                    } else {
-                        return None;
                     }
                 }
                 Some(total)

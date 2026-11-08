@@ -70,9 +70,9 @@ fn find_project_root(start_path: &Path) -> Option<PathBuf> {
         }
 
         // Try to go up one level
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None, // Reached the filesystem root
+        {
+            let parent = current.parent()?;
+            current = parent.to_path_buf()
         }
     }
 

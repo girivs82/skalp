@@ -287,9 +287,8 @@ impl Visualizer {
         .unwrap();
 
         // Draw congestion grid
-        for y in 0..height {
-            for x in 0..width {
-                let congestion_value = congestion.values[y][x];
+        for (y, row) in congestion.values.iter().enumerate().take(height) {
+            for (x, &congestion_value) in row.iter().enumerate().take(width) {
                 let color = self.get_congestion_color(congestion_value);
 
                 writeln!(

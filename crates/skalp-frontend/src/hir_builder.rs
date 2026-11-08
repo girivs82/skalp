@@ -4953,7 +4953,8 @@ impl HirBuilderContext {
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
             // Get syntax nodes before and after colon
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -4981,8 +4982,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -7782,15 +7781,14 @@ impl HirBuilderContext {
                 let base_name = tokens[0].text().to_string();
 
                 // Look up the base as a signal/variable/port
-                let mut current_lval = if let Some(symbol) = self.symbols.lookup(&base_name) {
+                let mut current_lval = {
+                    let symbol = self.symbols.lookup(&base_name)?;
                     match symbol {
                         SymbolId::Signal(id) => HirLValue::Signal(*id),
                         SymbolId::Variable(id) => HirLValue::Variable(*id),
                         SymbolId::Port(id) => HirLValue::Port(*id),
                         _ => return None,
                     }
-                } else {
-                    return None;
                 };
 
                 // Build nested field accesses for each remaining field
@@ -8346,14 +8344,16 @@ impl HirBuilderContext {
         // All IdentExpr children inside CallExpr are arguments, not the function name.
         let function = if let Some(ident_token) = node.first_token_of_kind(SyntaxKind::Ident) {
             ident_token.text().to_string()
-        } else if let Some(parent) = node.parent() {
+        } else {
+            let parent = node.parent()?;
             // Postfix call: IdentExpr and CallExpr are siblings
             // Look for preceding IdentExpr sibling
             let siblings: Vec<_> = parent.children().collect();
             let call_pos = siblings.iter().position(|n| n == node)?;
 
             if call_pos > 0 {
-                if let Some(prev_sibling) = siblings.get(call_pos - 1) {
+                {
+                    let prev_sibling = siblings.get(call_pos - 1)?;
                     if prev_sibling.kind() == SyntaxKind::IdentExpr {
                         prev_sibling
                             .first_token_of_kind(SyntaxKind::Ident)
@@ -8377,14 +8377,10 @@ impl HirBuilderContext {
                     } else {
                         return None;
                     }
-                } else {
-                    return None;
                 }
             } else {
                 return None;
             }
-        } else {
-            return None;
         };
 
         // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
@@ -9692,10 +9688,9 @@ impl HirBuilderContext {
                             // BUG FIX #220: Use the FieldExpr - build_expression on it will
                             // find the preceding sibling IdentExpr and create proper FieldAccess
                             self.build_expression(&binary_expr_children[1])?
-                        } else if let Some(right_node) = binary_expr_children.first() {
-                            self.build_expression(right_node)?
                         } else {
-                            return None;
+                            let right_node = binary_expr_children.first()?;
+                            self.build_expression(right_node)?
                         };
 
                         result = HirExpression::Binary(HirBinaryExpr {
@@ -10086,7 +10081,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -10116,8 +10112,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -10956,7 +10950,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -10984,8 +10979,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -11031,7 +11024,8 @@ impl HirBuilderContext {
                 .iter()
                 .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
 
-            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = {
+                let pos = colon_pos?;
                 let before: Vec<_> = children_with_tokens[..pos]
                     .iter()
                     .filter_map(|e| e.as_node())
@@ -11059,8 +11053,6 @@ impl HirBuilderContext {
                     .cloned()
                     .collect();
                 (before, after)
-            } else {
-                return None;
             };
 
             if before_colon.is_empty() || after_colon.is_empty() {
@@ -11109,24 +11101,22 @@ impl HirBuilderContext {
             .map(|t| t.text().to_string())?;
 
         // Extract direction
-        let direction =
-            if let Some(direction_node) = node.first_child_of_kind(SyntaxKind::ProtocolDirection) {
-                if direction_node
-                    .first_token_of_kind(SyntaxKind::InKw)
-                    .is_some()
-                {
-                    HirProtocolDirection::In
-                } else if direction_node
-                    .first_token_of_kind(SyntaxKind::OutKw)
-                    .is_some()
-                {
-                    HirProtocolDirection::Out
-                } else {
-                    return None;
-                }
+        let direction = {
+            let direction_node = node.first_child_of_kind(SyntaxKind::ProtocolDirection)?;
+            if direction_node
+                .first_token_of_kind(SyntaxKind::InKw)
+                .is_some()
+            {
+                HirProtocolDirection::In
+            } else if direction_node
+                .first_token_of_kind(SyntaxKind::OutKw)
+                .is_some()
+            {
+                HirProtocolDirection::Out
             } else {
                 return None;
-            };
+            }
+        };
 
         // Extract type
         let signal_type =
@@ -15709,10 +15699,9 @@ impl HirBuilderContext {
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility
             let target_name = ident_tokens[1].text().to_string();
-            if let Some(entity_id) = self.symbols.entities.get(&target_name) {
+            {
+                let entity_id = self.symbols.entities.get(&target_name)?;
                 TraitImplTarget::Entity(*entity_id)
-            } else {
-                return None;
             }
         } else {
             return None;

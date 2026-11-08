@@ -279,10 +279,9 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             // Sum the widths of all concatenated expressions
             let mut total_width = 0;
             for e in exprs {
-                if let Some(w) = compute_expression_width(e, mir_module) {
+                {
+                    let w = compute_expression_width(e, mir_module)?;
                     total_width += w;
-                } else {
-                    return None; // Can't determine width
                 }
             }
             Some(total_width)
