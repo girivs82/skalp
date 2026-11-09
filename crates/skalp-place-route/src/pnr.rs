@@ -610,11 +610,6 @@ pub fn place_and_route_nexus_real(
     } else {
         config.timing.as_ref().map_or(100.0, |t| t.target_frequency)
     };
-    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, "LIFCL")?;
-    let timing = crate::device::nexus::timing::analyze(
-        &device, netlist, &placement, &routing, &tied, &timing_db, target_mhz,
-    );
-
     let generator = NexusConfig {
         device: &device,
         variant,
@@ -626,6 +621,13 @@ pub fn place_and_route_nexus_real(
         routing: &routing,
         tied: &tied,
     };
+    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
+    let timing_model = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &timing_db,
+    };
+    let timing = crate::timing::sta::analyze(&device, &timing_model, &design, target_mhz);
+
     let bit_writer = NexusBitWriter {
         db_root,
         idcode: variant.idcode(),

@@ -272,7 +272,10 @@ impl NexusDevice {
             }
         }
 
-        for (&(x, y), t) in &primary {
+        // Tile order sets BEL ids and placement order, so keep it stable.
+        let mut ordered: Vec<_> = primary.iter().collect();
+        ordered.sort_unstable_by_key(|(&(x, y), _)| (y, x));
+        for (&(x, y), t) in ordered {
             let placeable = logic_rows.is_none_or(|(from, to)| y >= from && y <= to);
             let bels = if t.tiletype == "PLC" && !placeable {
                 Vec::new()

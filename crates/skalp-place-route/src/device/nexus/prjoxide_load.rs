@@ -141,6 +141,18 @@ impl NexusVariant {
         }
     }
 
+    /// Family whose timing tables apply. prjoxide has none for LFCPNX, which
+    /// shares the Nexus fabric with CrossLink-NX.
+    pub fn timing_family(&self) -> &'static str {
+        "LIFCL"
+    }
+
+    /// Speed grade of the timing tables to use.
+    pub fn timing_speed_grade(&self) -> &'static str {
+        // The fastest characterized grade; matches the parts these boards carry.
+        "12"
+    }
+
     /// prjoxide device directory name (`LIFCL-40` / `LFCPNX-100`).
     pub fn prjoxide_device(&self) -> &'static str {
         self.name()

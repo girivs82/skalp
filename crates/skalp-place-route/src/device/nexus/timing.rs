@@ -1,29 +1,19 @@
-//! Static timing analysis on the real Nexus device data.
+//! Nexus timing data for the generic analyzer ([`crate::timing::sta`]).
 //!
 //! Uses prjoxide's delay tables: per-pip interconnect classes and per-cell
-//! timing arcs. The tables were characterized on CrossLink-NX; CertusPro-NX has
-//! none of its own and shares the Nexus fabric, so these are estimates for it.
-//!
-//! Scope: register-to-register paths on one clock, without clock skew. Paths
-//! from and to the IO pads are not timed.
+//! timing arcs. CertusPro-NX has no tables of its own and shares the Nexus
+//! fabric, so its numbers are CrossLink-NX's and are estimates.
 
-use super::NexusDevice;
-use crate::bitstream::prepare::{constant_value, is_pad, TiedInputs};
-use crate::device::{CellPin, Device, PipId, WireId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
+use super::{NexusDevice, NexusVariant};
+use crate::bitstream::prepare::{constant_value, is_pad};
+use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
-use crate::placer::PlacementResult;
-use crate::router::RoutingResult;
-use crate::timing::{ClockSummary, CriticalPath, TimingReport};
+use crate::timing::sta::{TimingEndpoint, TimingModel};
 use serde::Deserialize;
-use skalp_lir::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::Cell;
 use skalp_lir::tech_library::CellFunction;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
-
-/// Speed grade table of the Versa board's LFCPNX-100-9 part.
-const SPEED_GRADE: &str = "12";
-
-const PS_PER_NS: f64 = 1000.0;
 
 #[derive(Debug, Deserialize)]
 struct InterconnectFile {
@@ -70,9 +60,10 @@ pub struct TimingDb {
 }
 
 impl TimingDb {
-    /// Load the delay tables from the prjoxide database.
-    pub fn load(db_root: &Path, family: &str) -> Result<Self> {
-        let dir = db_root.join(family).join("timing");
+    /// Load a device's delay tables from the prjoxide database.
+    pub fn load(db_root: &Path, variant: NexusVariant) -> Result<Self> {
+        let dir = db_root.join(variant.timing_family()).join("timing");
+        let speed = variant.timing_speed_grade();
         let read = |name: String| -> Result<String> {
             std::fs::read_to_string(dir.join(&name))
                 .map_err(|e| PlaceRouteError::BitstreamFailed(format!("reading {name}: {e}")))
@@ -82,9 +73,9 @@ impl TimingDb {
         };
 
         let interconnect: InterconnectFile =
-            serde_json::from_str(&read(format!("interconnect_{SPEED_GRADE}.json"))?)
+            serde_json::from_str(&read(format!("interconnect_{speed}.json"))?)
                 .map_err(|e| bad("interconnect", e))?;
-        let cells: CellsFile = serde_json::from_str(&read(format!("cells_{SPEED_GRADE}.json"))?)
+        let cells: CellsFile = serde_json::from_str(&read(format!("cells_{speed}.json"))?)
             .map_err(|e| bad("cells", e))?;
 
         let cell = |name: &str| {
@@ -154,22 +145,26 @@ fn ccu2_output(index: usize) -> &'static str {
     }
 }
 
-struct Sta<'a> {
-    device: &'a NexusDevice,
-    netlist: &'a GateNetlist,
-    placement: &'a PlacementResult,
-    routing: &'a RoutingResult,
-    tied: &'a TiedInputs,
-    db: &'a TimingDb,
-    /// Per-net map from a routed wire to the pip that drives it
-    drivers: HashMap<GateNetId, HashMap<WireId, PipId>>,
-    /// Worst arrival time at each net and the net it came through
-    arrivals: HashMap<GateNetId, (i64, Option<GateNetId>)>,
-    visiting: HashSet<GateNetId>,
+/// [`TimingModel`] for a Nexus device.
+pub struct NexusTiming<'a> {
+    /// Real device model the design was routed on
+    pub device: &'a NexusDevice,
+    /// Delay tables for the device
+    pub db: &'a TimingDb,
 }
 
-impl Sta<'_> {
-    fn pip_delay(&self, pip: PipId) -> i64 {
+impl NexusTiming<'_> {
+    fn is_dist_ram(cell: &Cell) -> bool {
+        cell.function == Some(CellFunction::DistRam16x4)
+    }
+
+    fn is_carry(cell: &Cell) -> bool {
+        cell.function == Some(CellFunction::Ccu2)
+    }
+}
+
+impl TimingModel for NexusTiming<'_> {
+    fn interconnect_ps(&self, pip: PipId) -> i64 {
         let Some(info) = self.device.pip(pip) else {
             return 0;
         };
@@ -186,240 +181,64 @@ impl Sta<'_> {
             .unwrap_or(0)
     }
 
-    /// Routing delay of a net from its source to one input pin of a cell.
-    fn route_delay(&mut self, net: GateNetId, cell: CellId, pin: usize) -> i64 {
-        let Some(loc) = self.placement.placements.get(&cell) else {
-            return 0;
-        };
-        let Some(mut wire) =
-            self.device
-                .bel_pin_wire(loc.tile_x, loc.tile_y, loc.bel_index, CellPin::Input(pin))
-        else {
-            return 0;
-        };
-        let Some(route) = self.routing.routes.get(&net) else {
-            return 0;
-        };
-        let device = self.device;
-        let drivers = self.drivers.entry(net).or_insert_with(|| {
-            route
-                .pips
-                .iter()
-                .filter_map(|&p| device.pip(p).map(|info| (info.dst_wire, p)))
-                .collect()
-        });
-        let path: Vec<PipId> = {
-            let mut path = Vec::new();
-            while let Some(&pip) = drivers.get(&wire) {
-                path.push(pip);
-                let Some(info) = device.pip(pip) else { break };
-                wire = info.src_wire;
-                if path.len() > 10_000 {
-                    break;
-                }
-            }
-            path
-        };
-        path.into_iter().map(|p| self.pip_delay(p)).sum()
-    }
-
-    fn net_arrival(&mut self, net: GateNetId) -> i64 {
-        if let Some(&(time, _)) = self.arrivals.get(&net) {
-            return time;
+    fn launch_ps(&self, cell: &Cell, _output: usize) -> Option<i64> {
+        if is_pad(cell) || constant_value(cell).is_some() {
+            return Some(0);
         }
-        if !self.visiting.insert(net) {
-            return 0;
-        }
-        let driver = self.netlist.nets[net.0 as usize]
-            .driver
-            .and_then(|id| self.netlist.get_cell(id));
-        let driver_pin = self.netlist.nets[net.0 as usize].driver_pin.unwrap_or(0);
-        let (time, from) = match driver {
-            Some(cell) => self.cell_output_time(cell, driver_pin),
-            None => (0, None),
-        };
-        self.visiting.remove(&net);
-        self.arrivals.insert(net, (time, from));
-        time
-    }
-
-    /// Latest arrival of a net at an input, or `None` if it isn't timed.
-    fn input_time(&mut self, cell: &Cell, index: usize, pin: usize) -> Option<(i64, GateNetId)> {
-        let net = *cell.inputs.get(index)?;
-        if self.tied.value(cell.id, index).is_some() {
+        if Self::is_dist_ram(cell) {
             return None;
         }
-        Some((
-            self.net_arrival(net) + self.route_delay(net, cell.id, pin),
-            net,
-        ))
+        cell.clock.map(|_| self.db.clk_to_q)
     }
 
-    fn cell_output_time(&mut self, cell: &Cell, output: usize) -> (i64, Option<GateNetId>) {
-        if is_pad(cell) || constant_value(cell).is_some() {
-            return (0, None);
+    fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        if Self::is_dist_ram(cell) {
+            return (9..=12).contains(&input).then_some(self.db.lut);
         }
-        if cell.function == Some(CellFunction::DistRam16x4) {
-            let mut worst = (0, None);
-            for address in 0..4 {
-                let net = cell.inputs[9 + address];
-                let mut time = self.net_arrival(net);
-                time += (0..4)
-                    .map(|lut| self.route_delay(net, cell.id, DIST_RAM_PIN_RAD + 4 * address + lut))
-                    .max()
-                    .unwrap_or(0);
-                if time + self.db.lut > worst.0 {
-                    worst = (time + self.db.lut, Some(net));
-                }
-            }
-            return worst;
+        if Self::is_carry(cell) {
+            let arc = (ccu2_input(input), ccu2_output(output).to_string());
+            return self.db.ccu2.get(&arc).copied();
         }
-        if cell.clock.is_some() {
-            return (self.db.clk_to_q, None);
-        }
-        if cell.function == Some(CellFunction::Ccu2) {
-            let to = ccu2_output(output);
-            let mut worst = (0, None);
-            for index in 0..cell.inputs.len().min(9) {
-                let arc = (ccu2_input(index), to.to_string());
-                let Some(&delay) = self.db.ccu2.get(&arc) else {
-                    continue;
-                };
-                let timed = if index == 8 {
-                    let net = cell.inputs[8];
-                    (self.tied.value(cell.id, 8).is_none()).then(|| (self.net_arrival(net), net))
-                } else {
-                    self.input_time(cell, index, index)
-                };
-                if let Some((time, net)) = timed {
-                    if time + delay > worst.0 {
-                        worst = (time + delay, Some(net));
-                    }
-                }
-            }
-            return worst;
-        }
-        let mut worst = (0, None);
-        for index in 0..cell.inputs.len() {
-            if let Some((time, net)) = self.input_time(cell, index, index) {
-                if time + self.db.lut > worst.0 {
-                    worst = (time + self.db.lut, Some(net));
-                }
-            }
-        }
-        worst
+        Some(self.db.lut)
     }
 
-    /// Router pin and setup time of each input a clocked cell samples.
-    fn endpoints(&self, cell: &Cell) -> Vec<(usize, usize, i64)> {
+    fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
         let setup = |name: &str| self.db.setup.get(name).copied().unwrap_or(0);
-        if cell.function == Some(CellFunction::DistRam16x4) {
-            return (0..=8).map(|i| (i, i, 0)).collect();
+        if Self::is_dist_ram(cell) {
+            return (0..=8)
+                .map(|input| TimingEndpoint {
+                    input,
+                    pin: input,
+                    setup_ps: 0,
+                })
+                .collect();
         }
         (0..cell.inputs.len())
-            .map(|index| match (cell.cell_type.as_str(), index) {
-                (_, 0) => (0, 0, setup("M")),
-                ("OXIDE_FF_EN", 1) | ("OXIDE_FF_RSTE", 2) => (index, FF_PIN_CE, setup("CE")),
-                (_, i) => (i, FF_PIN_LSR, setup("LSR")),
+            .map(|input| {
+                let (pin, setup_ps) = match (cell.cell_type.as_str(), input) {
+                    (_, 0) => (0, setup("M")),
+                    ("OXIDE_FF_EN", 1) | ("OXIDE_FF_RSTE", 2) => (FF_PIN_CE, setup("CE")),
+                    _ => (FF_PIN_LSR, setup("LSR")),
+                };
+                TimingEndpoint {
+                    input,
+                    pin,
+                    setup_ps,
+                }
             })
             .collect()
     }
 
-    fn path_through(&self, mut net: GateNetId) -> Vec<String> {
-        let mut path = vec![self.netlist.nets[net.0 as usize].name.clone()];
-        let mut seen = HashSet::from([net]);
-        while let Some(&(_, Some(previous))) = self.arrivals.get(&net) {
-            if !seen.insert(previous) {
-                break;
-            }
-            path.push(self.netlist.nets[previous.0 as usize].name.clone());
-            net = previous;
+    fn input_pins(&self, cell: &Cell, input: usize) -> Vec<usize> {
+        if Self::is_dist_ram(cell) && (9..=12).contains(&input) {
+            let base = DIST_RAM_PIN_RAD + 4 * (input - 9);
+            return (0..4).map(|lut| base + lut).collect();
         }
-        path.reverse();
-        path
-    }
-}
-
-/// Analyze a placed and routed design against a clock frequency in MHz.
-pub fn analyze(
-    device: &NexusDevice,
-    netlist: &GateNetlist,
-    placement: &PlacementResult,
-    routing: &RoutingResult,
-    tied: &TiedInputs,
-    db: &TimingDb,
-    target_mhz: f64,
-) -> TimingReport {
-    let mut sta = Sta {
-        device,
-        netlist,
-        placement,
-        routing,
-        tied,
-        db,
-        drivers: HashMap::new(),
-        arrivals: HashMap::new(),
-        visiting: HashSet::new(),
-    };
-
-    let target_ns = PS_PER_NS / target_mhz;
-    let mut per_clock: BTreeMap<u32, (usize, f64)> = BTreeMap::new();
-    let mut paths = Vec::new();
-
-    for cell in &netlist.cells {
-        let Some(clock) = cell.clock else { continue };
-        let entry = per_clock.entry(clock.0).or_insert((0, 0.0));
-        entry.0 += 1;
-        for (index, pin, setup) in sta.endpoints(cell) {
-            let Some((time, net)) = sta.input_time(cell, index, pin) else {
-                continue;
-            };
-            let delay_ns = (time + setup) as f64 / PS_PER_NS;
-            if delay_ns > per_clock[&clock.0].1 {
-                per_clock.get_mut(&clock.0).expect("present").1 = delay_ns;
-            }
-            paths.push(CriticalPath {
-                delay: delay_ns,
-                required: target_ns,
-                slack: target_ns - delay_ns,
-                source: sta.path_through(net).first().cloned().unwrap_or_default(),
-                destination: cell.path.clone(),
-                path: sta.path_through(net),
-            });
-        }
+        vec![input]
     }
 
-    paths.sort_by(|a, b| b.delay.total_cmp(&a.delay));
-    let failing_paths = paths.iter().filter(|p| p.slack < 0.0).count();
-    let worst_delay = paths.first().map_or(0.0, |p| p.delay);
-    paths.truncate(10);
-
-    let clock_summaries = per_clock
-        .iter()
-        .map(|(&net, &(registers, delay))| ClockSummary {
-            name: netlist.nets[net as usize].name.clone(),
-            frequency: if delay > 0.0 {
-                PS_PER_NS / delay
-            } else {
-                target_mhz
-            },
-            register_count: registers,
-            worst_slack: target_ns - delay,
-        })
-        .collect();
-
-    TimingReport {
-        target_frequency: target_mhz,
-        design_frequency: if worst_delay > 0.0 {
-            PS_PER_NS / worst_delay
-        } else {
-            target_mhz
-        },
-        worst_negative_slack: (worst_delay - target_ns).max(0.0),
-        failing_paths,
-        meets_timing: failing_paths == 0,
-        clock_summaries,
-        critical_paths: paths,
+    fn is_dedicated(&self, cell: &Cell, input: usize) -> bool {
+        Self::is_carry(cell) && input == 8
     }
 }
 
@@ -449,7 +268,7 @@ mod tests {
             eprintln!("PRJOXIDE_DB not found — skipping");
             return;
         };
-        let timing = TimingDb::load(&db, "LIFCL").unwrap();
+        let timing = TimingDb::load(&db, NexusVariant::Lfcpnx100).unwrap();
         assert_eq!(timing.lut, 213);
         assert_eq!(timing.clk_to_q, 307);
         assert_eq!(timing.setup.get("M"), Some(&0));
