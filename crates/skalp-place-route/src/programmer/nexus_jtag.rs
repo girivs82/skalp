@@ -22,10 +22,8 @@ const FT2232H_PID: u16 = 0x6010;
 /// seconds and has margin on the evaluation board's level shifters.
 const JTAG_HZ: u32 = 6_000_000;
 
-/// How long to keep retrying the erase, leaving time to hold PROGRAMN.
-const ERASE_WINDOW: Duration = Duration::from_secs(30);
-/// Pause after each erase; LFCPNX-100 needs 4.87 ms (FPGA-TN-02099 table 6.7).
-const ERASE_SETTLE: Duration = Duration::from_millis(250);
+/// Pause after the erase; LFCPNX-100 needs 4.87 ms (FPGA-TN-02099 table 6.7).
+const ERASE_SETTLE: Duration = Duration::from_millis(50);
 
 // Nexus configuration opcodes.
 const IDCODE_PUB: u8 = 0xE0;
@@ -396,30 +394,24 @@ impl NexusJtagProgrammer {
     /// them still reports DONE=1 after the burst, which is indistinguishable
     /// from success.
     fn erase_sram(&mut self) -> Result<()> {
-        let deadline = Instant::now() + ERASE_WINDOW;
-        loop {
-            self.command_with(ISC_ERASE, &[0x00])?;
-            self.idle(100)?;
-            std::thread::sleep(ERASE_SETTLE);
-            self.wait_not_busy("SRAM erase")?;
-            let status = self.read_status()?;
-            log::debug!("after ISC_ERASE: {status}");
-            if status.fail() {
-                return Err(self.fail("SRAM erase"));
-            }
-            if !status.done() {
-                return Ok(());
-            }
-            if Instant::now() > deadline {
-                return Err(PlaceRouteError::BitstreamFailed(format!(
-                    "SRAM erase had no effect: DONE is still set (status {status}). \
-                     The device is not accepting configuration over JTAG, which \
-                     happens when the running design leaves the JTAG port disabled. \
-                     Hold the PROGRAMN button (SW2 on the Versa board) until the \
-                     erase completes."
-                )));
-            }
+        self.command_with(ISC_ERASE, &[0x00])?;
+        self.idle(100)?;
+        std::thread::sleep(ERASE_SETTLE);
+        self.wait_not_busy("SRAM erase")?;
+        let status = self.read_status()?;
+        log::debug!("after ISC_ERASE: {status}");
+        if status.fail() {
+            return Err(self.fail("SRAM erase"));
         }
+        if status.done() {
+            return Err(PlaceRouteError::BitstreamFailed(format!(
+                "SRAM erase had no effect: DONE is still set (status {status}). \
+                 The device ignores JTAG configuration while running a design \
+                 that leaves its internal oscillator off. Tap the PROGRAMN \
+                 button (SW2 on the Versa board) and load again."
+            )));
+        }
+        Ok(())
     }
 
     fn fail(&mut self, step: &str) -> PlaceRouteError {
@@ -434,12 +426,8 @@ impl NexusJtagProgrammer {
     ///
     /// Refuses a bitstream built for a different device before changing
     /// anything on the chip.
-    ///
-    /// `after_erase` runs once the SRAM is confirmed erased. PROGRAMN has to
-    /// be high before ISC_DISABLE or the device stays in initialization, so
-    /// this is the moment to tell whoever is holding the button to let go.
-    pub fn program(&mut self, file: &[u8], after_erase: impl FnOnce()) -> Result<NexusLoadResult> {
-        let result = self.load(file, after_erase);
+    pub fn program(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
+        let result = self.load(file);
         if result.is_err() {
             // A failed load must not strand the device in configuration mode,
             // where user logic is halted and I/O is tri-stated.
@@ -460,7 +448,7 @@ impl NexusJtagProgrammer {
         self.reset_tap()
     }
 
-    fn load(&mut self, file: &[u8], after_erase: impl FnOnce()) -> Result<NexusLoadResult> {
+    fn load(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
         let bitstream = parse_bitstream(file)?;
         let idcode = self.read_idcode()?;
         if bitstream.idcode != idcode {
@@ -493,7 +481,6 @@ impl NexusJtagProgrammer {
         log::debug!("after configuration reset: {}", self.read_status()?);
 
         self.erase_sram()?;
-        after_erase();
 
         self.command(LSC_INIT_ADDRESS)?;
         self.idle(1000)?;
