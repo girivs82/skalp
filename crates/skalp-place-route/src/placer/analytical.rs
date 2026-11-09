@@ -8,11 +8,11 @@
 
 use super::sites::{bel_types_compatible, SiteMap};
 use super::{is_constant_cell, PlacementLoc, PlacementResult};
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
-use std::collections::HashMap;
 
 /// Nets with more pins than this use a star model instead of a clique.
 const CLIQUE_MAX_PINS: usize = 8;

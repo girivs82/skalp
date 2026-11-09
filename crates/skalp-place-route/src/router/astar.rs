@@ -3,12 +3,13 @@
 //! Implements A* pathfinding for FPGA routing.
 
 use super::graph::RoutingGraph;
+use crate::collections::{HashMap, HashMapExt, HashSet};
 use crate::device::{Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::timing::DelayModel;
 use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 
 /// A* search node
 #[derive(Clone)]

@@ -4,11 +4,11 @@
 
 use super::sites::{bel_types_compatible, SiteMap};
 use super::{BelType, PlacementLoc, PlacementResult};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CarryChainLayout, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
-use std::collections::{HashMap, HashSet};
 
 /// Legalizer for snapping placements to valid BEL sites
 pub struct Legalizer<'a, D: Device> {

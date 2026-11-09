@@ -6,13 +6,13 @@ mod delays;
 
 pub use delays::DelayModel;
 
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::Device;
 use crate::error::Result;
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
-use std::collections::{HashMap, HashSet};
 
 /// Timing configuration
 #[derive(Debug, Clone)]

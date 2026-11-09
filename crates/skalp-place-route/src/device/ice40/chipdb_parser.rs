@@ -11,8 +11,8 @@
 //! See: https://github.com/YosysHQ/icestorm
 
 use super::{Ice40Variant, TileType};
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::{Bel, BelId, BelType, Pip, PipId, Wire, WireId, WireType};
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 static CHIPDB_1K: LazyLock<ChipDb> =

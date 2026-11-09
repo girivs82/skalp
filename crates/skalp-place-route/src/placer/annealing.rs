@@ -5,6 +5,7 @@
 //! Includes parallel move evaluation for improved performance on multi-core systems.
 
 use super::{PlacementLoc, PlacementResult};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::Result;
 use crate::packing::CarryChain;
@@ -12,7 +13,6 @@ use crate::timing::DelayModel;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Result of a placement-move cost evaluation:
@@ -33,6 +33,14 @@ const CALIBRATION_MOVES: usize = 1000;
 /// Freeze when the temperature drops below this fraction of the average
 /// cost per net (VPR uses 0.005)
 const FREEZE_FRACTION: f64 = 0.005;
+
+/// Seed used unless [`SimulatedAnnealing::with_seed`] gives another
+/// (the default of [`super::PlacerConfig::seed`])
+const DEFAULT_SEED: u64 = 42;
+
+/// Offset of the temperature-calibration stream from the annealer's seed,
+/// so calibration draws different moves from the first annealing moves
+const CALIBRATION_STREAM: u64 = 12_303;
 
 /// NCL proximity group for placement co-location enforcement.
 /// Tracks which cells must be placed close together and the tile distance limit.
@@ -421,6 +429,9 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     /// The initial placement is already good (analytical + legalized):
     /// refine it locally instead of re-annealing from a hot, global start
     refine: bool,
+    /// Seed of every random stream the annealer draws from, so a placement
+    /// is reproducible for a given seed
+    seed: u64,
 }
 
 /// Move-generation data that stays fixed for a whole annealing run, so a
@@ -522,6 +533,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
             refine: false,
+            seed: DEFAULT_SEED,
         }
     }
 
@@ -545,7 +557,14 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
             refine: false,
+            seed: DEFAULT_SEED,
         }
+    }
+
+    /// Seed the annealer's random moves and acceptances
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
     }
 
     /// Set carry chains for chain-aware moves
@@ -615,7 +634,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         net_criticalities: &HashMap<GateNetId, f64>,
         rlim: u32,
     ) -> f64 {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(CALIBRATION_STREAM));
         let mut cal_placement = placement.clone();
         let mut cal_loc_map = loc_map.clone();
         let mut uphill_sum = 0.0f64;
@@ -701,7 +720,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         initial: PlacementResult,
         netlist: &GateNetlist,
     ) -> Result<PlacementResult> {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
         let mut current = initial;
 
         // Compute net criticalities for timing-driven mode
@@ -933,7 +952,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     .into_par_iter()
                     .map(|i| {
                         let mut rng = rand::rngs::StdRng::seed_from_u64(
-                            42 + _iteration as u64 * 1000 + i as u64,
+                            self.seed
+                                .wrapping_add(_iteration as u64 * 1000)
+                                .wrapping_add(i as u64),
                         );
                         if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
                             self.generate_critical_path_move(
@@ -995,7 +1016,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 // Find the best improving move (or best move if temperature allows)
                 let mut best_move_idx: Option<usize> = None;
                 let mut best_delta = f64::MAX;
-                let mut rng = rand::rngs::StdRng::seed_from_u64(42 + _iteration as u64);
+                let mut rng =
+                    rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(_iteration as u64));
 
                 for (idx, (_, _, _, delta, _, _)) in evaluated.iter().enumerate() {
                     // Check acceptance

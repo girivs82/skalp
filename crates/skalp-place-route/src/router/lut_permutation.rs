@@ -6,8 +6,8 @@
 //! A LUT4's truth table is indexed by: I3<<3 | I2<<2 | I1<<1 | I0
 //! Swapping inputs requires permuting the truth table bits accordingly.
 
+use crate::collections::{HashMap, HashMapExt};
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
-use std::collections::HashMap;
 
 /// LUT input permutation result
 #[derive(Debug, Clone)]
@@ -340,7 +340,8 @@ mod tests {
     #[test]
     fn test_all_permutations_unique() {
         let perms = all_lut4_permutations();
-        let mut unique: std::collections::HashSet<[usize; 4]> = std::collections::HashSet::new();
+        let mut unique: crate::collections::HashSet<[usize; 4]> =
+            crate::collections::HashSet::default();
         for p in perms {
             unique.insert(p);
         }

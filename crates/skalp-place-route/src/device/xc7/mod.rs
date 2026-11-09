@@ -40,8 +40,8 @@ use super::{
     RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment,
     WireType,
 };
+use crate::collections::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Xilinx 7-series device variants
 ///

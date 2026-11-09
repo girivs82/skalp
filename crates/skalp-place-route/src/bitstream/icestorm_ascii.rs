@@ -10,6 +10,7 @@
 //! - .io_tile X Y followed by 16 rows of 18 bits each
 //! - .ramb_tile/.ramt_tile X Y followed by 16 rows of 42 bits each
 
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::ice40::{chipdb_parser::ChipDb, Ice40Device, Ice40Variant};
 use crate::device::{BelType, Device, TileType};
 use crate::error::Result;
@@ -17,7 +18,6 @@ use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::tech_library::CellFunction;
-use std::collections::{HashMap, HashSet};
 
 /// DFF configuration bits for an LC
 /// In iCE40, each LC has 20 configuration bits: 16 for LUT init, 4 for DFF config

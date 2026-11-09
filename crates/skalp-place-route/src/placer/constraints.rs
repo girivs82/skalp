@@ -7,10 +7,10 @@
 //! - Region-based floorplanning
 //! - Pull-up resistor configuration
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// I/O pin constraint
 #[derive(Debug, Clone, Serialize, Deserialize)]

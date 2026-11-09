@@ -245,8 +245,8 @@ pub fn place_and_route(
 fn collect_frequency_constraints(
     netlist: &GateNetlist,
     config: &PnrConfig,
-) -> std::collections::HashMap<String, f64> {
-    let mut constraints = std::collections::HashMap::new();
+) -> crate::collections::HashMap<String, f64> {
+    let mut constraints = crate::collections::HashMap::default();
 
     // From placer IO constraints
     for fc in config.placer.io_constraints.frequency_constraints() {
@@ -705,6 +705,158 @@ mod tests {
         netlist.add_cell(cell);
 
         netlist
+    }
+
+    /// A random-looking but fixed netlist: `luts` four-input LUTs reading
+    /// primary inputs and earlier cells, and a flip-flop after every third
+    /// LUT feeding back into later logic
+    fn create_mesh_netlist(luts: usize) -> GateNetlist {
+        let mut netlist = GateNetlist::new("mesh".to_string(), "ice40".to_string());
+        let clock = netlist.add_net({
+            let mut net = GateNet::new_input(GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+        let mut pool: Vec<GateNetId> = (0..8)
+            .map(|i| netlist.add_net(GateNet::new_input(GateNetId(0), format!("in{i}"))))
+            .collect();
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for i in 0..luts {
+            let out = netlist.add_net(GateNet::new(GateNetId(0), format!("lut{i}")));
+            let inputs = (0..4).map(|_| pool[next(pool.len())]).collect();
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(0),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("mesh.lut{i}"),
+                inputs,
+                vec![out],
+            ));
+            pool.push(out);
+            if i % 3 == 2 {
+                let q = netlist.add_net(GateNet::new(GateNetId(0), format!("ff{i}")));
+                let mut ff = Cell::new_seq(
+                    skalp_lir::gate_netlist::CellId(0),
+                    "SB_DFF".to_string(),
+                    "ice40".to_string(),
+                    0.0,
+                    format!("mesh.ff{i}"),
+                    vec![out],
+                    vec![q],
+                    clock,
+                    None,
+                );
+                ff.clock = Some(clock);
+                netlist.add_cell(ff);
+                pool.push(q);
+            }
+        }
+        netlist
+    }
+
+    /// Placement and routes in a form two runs can be compared in
+    #[allow(clippy::type_complexity)]
+    fn pnr_fingerprint(
+        r: &PnrResult,
+    ) -> (
+        Vec<(u32, u32, u32, usize)>,
+        Vec<(u32, u32, Vec<u32>, Vec<u32>, Vec<u32>)>,
+    ) {
+        let mut cells: Vec<_> = r
+            .placement
+            .placements
+            .iter()
+            .map(|(c, l)| (c.0, l.tile_x, l.tile_y, l.bel_index))
+            .collect();
+        cells.sort();
+        let mut routes: Vec<_> = r
+            .routing
+            .routes
+            .iter()
+            .map(|(n, route)| {
+                (
+                    n.0,
+                    route.source.0,
+                    route.sinks.iter().map(|w| w.0).collect(),
+                    route.wires.iter().map(|w| w.0).collect(),
+                    route.pips.iter().map(|p| p.0).collect(),
+                )
+            })
+            .collect();
+        routes.sort();
+        (cells, routes)
+    }
+
+    /// Placement and routing are deterministic: the same netlist and seed
+    /// give the same placement, routes and bitstream every time. With std's
+    /// randomly seeded hash maps, iterating one wherever the order decides
+    /// something made every build different (see [`crate::collections`]);
+    /// repeating the flow in one process catches any such map, since each
+    /// one gets a fresh random seed.
+    fn check_repeatable(what: &str, run: impl Fn() -> PnrResult) {
+        let first = run();
+        assert!(!first.routing.routes.is_empty());
+        let expected = pnr_fingerprint(&first);
+        for attempt in 1..4 {
+            let again = run();
+            let got = pnr_fingerprint(&again);
+            assert_eq!(
+                expected.0, got.0,
+                "{what}: placement differs on run {attempt}"
+            );
+            assert_eq!(
+                expected.1, got.1,
+                "{what}: routing differs on run {attempt}"
+            );
+            assert_eq!(
+                first.bitstream.data, again.bitstream.data,
+                "{what}: bitstream differs on run {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ice40_place_and_route_is_repeatable() {
+        let netlist = create_mesh_netlist(60);
+        check_repeatable("ice40", || {
+            place_and_route(&netlist, Ice40Variant::Hx1k, PnrConfig::default()).unwrap()
+        });
+    }
+
+    /// The placer's seed reaches its random choices: a different seed gives
+    /// a different, equally repeatable placement
+    #[test]
+    fn test_placement_follows_the_seed() {
+        let netlist = create_mesh_netlist(60);
+        let place = |seed| {
+            let mut config = PnrConfig::default();
+            config.placer.seed = seed;
+            let r = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+            pnr_fingerprint(&r).0
+        };
+        let a = place(42);
+        assert_eq!(a, place(42));
+        assert_ne!(a, place(7), "seed 7 placed exactly like seed 42");
+    }
+
+    #[test]
+    fn test_nexus_place_and_route_is_repeatable() {
+        let netlist = create_mesh_netlist(60);
+        check_repeatable("nexus", || {
+            place_and_route_nexus(
+                &netlist,
+                crate::device::nexus::NexusVariant::Lifcl40,
+                PnrConfig::default(),
+            )
+            .unwrap()
+        });
     }
 
     #[test]
@@ -2798,7 +2950,7 @@ set_io btn A6
         }
         for i in 0..4 {
             let mut lut = Cell::new_comb(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_LUT4".to_string(),
                 "ice40".to_string(),
                 0.0,
@@ -2817,7 +2969,7 @@ set_io btn A6
                 .push((lut_id, 1));
 
             let carry = Cell::new_comb(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_CARRY".to_string(),
                 "ice40".to_string(),
                 0.0,
@@ -2835,7 +2987,7 @@ set_io btn A6
                 .push((carry_id, 1));
 
             let mut dff = Cell::new_seq(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_DFF".to_string(),
                 "ice40".to_string(),
                 0.0,

@@ -9,12 +9,12 @@
 
 use super::astar::{AStarRouter, SearchBounds};
 use super::{BranchInfo, Route, RoutingResult};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, CellPin, Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::{PlacementLoc, PlacementResult};
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::ncl_constraints::MatchedDelayGroup;
-use std::collections::{HashMap, HashSet};
 
 /// How many tiles beyond a net's bounding box its route searches may go at
 /// first. A net that stays congested gets twice the margin each time it is
@@ -749,7 +749,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let mut route_wire_set: HashSet<WireId> = HashSet::new();
         // Delay from the source to each wire of the route; route.delay is
         // the largest over the sinks
-        let mut arrival: HashMap<WireId, u32> = HashMap::from([(source_wire, 0)]);
+        let mut arrival: HashMap<WireId, u32> = [(source_wire, 0)].into_iter().collect();
 
         let timing_weight = net_criticality * self.timing_weight;
         let bounds = self.search_bounds(net, placement, margin);

@@ -20,13 +20,13 @@ pub use constraints::{
 };
 pub use legalization::Legalizer;
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::{BelType, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::HashMap;
 
 /// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
 /// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
@@ -335,6 +335,7 @@ impl<D: Device + Clone> Placer<D> {
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
                 .with_carry_chains(carry_chains.to_vec());
 
                 annealer.optimize(legalized, netlist)?
@@ -409,7 +410,8 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.max_iterations,
                 )
                 .with_parallel(self.config.parallel)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalWithRefinement => {
@@ -431,7 +433,8 @@ impl<D: Device + Clone> Placer<D> {
                 )
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed);
                 annealer.optimize(legalized, netlist)?
             }
             PlacementAlgorithm::TimingDriven => {
@@ -445,7 +448,8 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.timing_weight,
                 )
                 .with_parallel(self.config.parallel)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalTimingDriven => {
@@ -468,7 +472,8 @@ impl<D: Device + Clone> Placer<D> {
                 )
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed);
                 annealer.optimize(legalized, netlist)?
             }
         };
