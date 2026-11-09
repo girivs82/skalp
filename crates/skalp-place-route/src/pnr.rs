@@ -551,14 +551,7 @@ pub fn place_and_route_nexus_real(
         variant.prjoxide_device(),
     )
     .map_err(PlaceRouteError::BitstreamFailed)?;
-    let mut region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len());
-    if std::env::var("SKALP_TEST_BOTH_SPINES").is_ok() {
-        region = sites::design_region(&tiles, &clocks, &pad_sites, 45_000);
-    }
-    if let Ok(rows) = std::env::var("SKALP_TEST_ROWS") {
-        let (a, b) = rows.split_once(',').unwrap();
-        region.logic_rows = (a.parse().unwrap(), b.parse().unwrap());
-    }
+    let region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len());
     let device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
             .map_err(PlaceRouteError::BitstreamFailed)?;
