@@ -4,9 +4,11 @@
 //! Each format reads its constants (magic bytes, frame geometry, CRC polynomials)
 //! from the corresponding `device::*/data.rs` module — single source of truth.
 
+pub mod config;
 mod cram;
 mod icestorm_ascii;
 mod icestorm_binary;
+pub mod prepare;
 
 pub use cram::ConfigRam;
 pub use icestorm_ascii::IceStormAscii;
@@ -39,6 +41,8 @@ pub enum BitstreamFormat {
     OpenFpgaBitstream,
     /// Xilinx 7-series binary format (.bit) — direct frame generation from prjxray-db
     Xc7Binary,
+    /// Plain text configuration bits, one `frame bit value` per line
+    ConfigBitsText,
 }
 
 /// Bitstream configuration
@@ -129,6 +133,7 @@ impl Bitstream {
             BitstreamFormat::OxideBitstream => "Project Oxide (Nexus)",
             BitstreamFormat::OpenFpgaBitstream => "OpenFPGA Bitstream",
             BitstreamFormat::Xc7Binary => "Xilinx 7-Series Binary (.bit)",
+            BitstreamFormat::ConfigBitsText => "Configuration bits (text)",
         }
     }
 
@@ -188,7 +193,8 @@ impl Bitstream {
         match self.format {
             BitstreamFormat::IceStormAscii
             | BitstreamFormat::VtrBitstream
-            | BitstreamFormat::OpenFpgaBitstream => {
+            | BitstreamFormat::OpenFpgaBitstream
+            | BitstreamFormat::ConfigBitsText => {
                 // Already ASCII-based, return as string
                 String::from_utf8_lossy(&self.data).to_string()
             }
@@ -291,6 +297,7 @@ impl Bitstream {
                     ));
                 }
             }
+            BitstreamFormat::ConfigBitsText => {}
             BitstreamFormat::OpenFpgaBitstream => {
                 let content = String::from_utf8_lossy(&self.data);
                 if !content.contains("<openfpga_bitstream>") {
@@ -433,6 +440,10 @@ impl BitstreamGenerator {
             BitstreamFormat::OxideBitstream => self.generate_oxide(placement, routing, netlist),
             BitstreamFormat::OpenFpgaBitstream => self.generate_openfpga(placement, routing),
             BitstreamFormat::Xc7Binary => self.generate_xc7(placement, routing, netlist),
+            BitstreamFormat::ConfigBitsText => Err(PlaceRouteError::BitstreamFailed(
+                "Configuration text is written through bitstream::config::generate_bitstream"
+                    .to_string(),
+            )),
         }
     }
 
@@ -640,9 +651,12 @@ impl BitstreamGenerator {
         Ok(bitstream)
     }
 
-    /// Generate Nexus binary bitstream for CertusPro-NX / CrossLink-NX
+    /// Stand-in Nexus output for the synthetic device model.
     ///
-    /// Produces a valid SPI configuration bitstream per prjoxide/nxpack format.
+    /// The synthetic flow has no real configuration bits, so this data will not
+    /// run on a chip. Real bitstreams come from
+    /// [`crate::pnr::place_and_route_nexus_real`].
+    ///
     /// All protocol constants come from `device::nexus::data`.
     ///
     /// Structure: [dummy] [preamble] [DEVICE_CTRL/IDCODE] [RESET_CRC]

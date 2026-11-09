@@ -18,10 +18,12 @@ pub mod prjoxide_bels;
 pub mod prjoxide_graph;
 pub mod prjoxide_load;
 pub mod prjoxide_pack;
+pub mod sites;
 mod tiles;
 
 pub use prjoxide_graph::{resolve_wire, NodeKey};
 pub use prjoxide_load::{load_tilegrid, PrjoxideTile};
+pub use sites::OSC_PIN;
 pub use tiles::NexusTile;
 
 use super::{
@@ -224,6 +226,7 @@ impl NexusDevice {
         let all_tiles = prjoxide_load::load_tilegrid(db_root, variant)?;
         let clocks =
             prjoxide_graph::ClockRegions::load(db_root, family, variant.prjoxide_device())?;
+        let all_tiles_for_pins = all_tiles.clone();
         let graph = prjoxide_graph::build_routing_graph_with_clocks(
             db_root,
             family,
@@ -364,7 +367,7 @@ impl NexusDevice {
             pip_bits: graph.pip_bits,
             prjoxide_tiles: all_tiles,
             hop_costs: Vec::new(),
-            packages: Self::known_package_pins(variant),
+            packages: sites::package_pins(db_root, variant, &all_tiles_for_pins)?,
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles,
@@ -374,45 +377,17 @@ impl NexusDevice {
         })
     }
 
-    /// Package pins with confirmed locations.
-    ///
-    /// prjoxide has no pin data for LFCPNX, so these come from the Versa board
-    /// schematic and user guide (FPGA-EB-02053): the eight user LEDs, plus
-    /// `"OSC"`, the on-chip oscillator used as a clock source.
-    fn known_package_pins(variant: NexusVariant) -> HashMap<String, PackagePins> {
-        let mut packages = HashMap::new();
-        if variant == NexusVariant::Lfcpnx100 {
-            let pins: HashMap<String, (u32, u32, u8)> = [
-                ("P8", (159, 26, 1)), // LED7, PR26B
-                ("R4", (159, 28, 0)), // LED1, PR28A
-                ("R5", (159, 28, 1)), // LED0, PR28B
-                ("R6", (159, 29, 0)), // LED6, PR29A
-                ("R7", (159, 29, 1)), // LED5, PR29B
-                ("R8", (159, 31, 0)), // LED2, PR31A
-                ("R9", (159, 31, 1)), // LED3, PR31B
-                ("U8", (159, 33, 0)), // LED4, PR33A
-                ("OSC", (137, 0, 0)),
-            ]
-            .into_iter()
-            .map(|(pin, loc)| (pin.to_string(), loc))
-            .collect();
-            packages.insert(
-                "LFG672".to_string(),
-                PackagePins {
-                    name: "LFG672".to_string(),
-                    pins,
-                },
-            );
-        }
-        packages
-    }
-
     /// Configuration bits of a PIP (real-silicon model only).
     pub fn pip_config_bits(&self, pip: PipId) -> &[prjoxide_graph::GlobalBit] {
         self.pip_bits
             .get(pip.0 as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// The first prjoxide tile of a type (real-silicon model only).
+    pub fn prjoxide_tile_of_type(&self, tiletype: &str) -> Option<&PrjoxideTile> {
+        self.prjoxide_tiles.iter().find(|t| t.tiletype == tiletype)
     }
 
     /// Every prjoxide tile of the device (real-silicon model only).

@@ -6,13 +6,16 @@
 //!
 //! The settings mirror what nextpnr writes for the same cells.
 
-use super::prjoxide_graph::{load_tiletype, ConfigBit, GlobalBit, TileBitsDb};
+use super::prjoxide_graph::{
+    load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
+};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
-use crate::device::{BelType, Device, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR};
+use crate::bitstream::config::{ConfigGenerator, DesignBit, PlacedDesign};
+use crate::bitstream::prepare::{constant_value, is_pad};
+use crate::device::{BelType, Device};
 use crate::error::{PlaceRouteError, Result};
-use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
-use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::{Cell, CellId};
 use skalp_lir::tech_library::CellFunction;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -25,164 +28,8 @@ const OSC_HF_CLK_DIV: u64 = 24;
 /// Divider for the configuration engine's clock.
 const OSC_SED_SEC_DIV: u64 = 1;
 
-/// Constant inputs found while preparing a netlist for routing.
-#[derive(Debug, Default)]
-pub struct TiedInputs {
-    /// (cell, input index) → the constant it reads
-    values: HashMap<(CellId, usize), bool>,
-}
-
 fn emit_err(message: String) -> PlaceRouteError {
     PlaceRouteError::BitstreamFailed(message)
-}
-
-fn constant_value(cell: &Cell) -> Option<bool> {
-    match cell.function {
-        Some(CellFunction::TieHigh) => Some(true),
-        Some(CellFunction::TieLow) => Some(false),
-        _ if crate::placer::is_constant_cell(&cell.cell_type) => {
-            Some(cell.cell_type.contains('1') || cell.cell_type.contains("VCC"))
-        }
-        _ => None,
-    }
-}
-
-fn is_carry(cell: &Cell) -> bool {
-    cell.function == Some(CellFunction::Ccu2)
-}
-
-fn is_pad(cell: &Cell) -> bool {
-    matches!(
-        cell.function,
-        Some(CellFunction::InputPad)
-            | Some(CellFunction::OutputPad)
-            | Some(CellFunction::BidirPad)
-            | Some(CellFunction::ClockPad)
-    )
-}
-
-fn is_flip_flop(cell: &Cell) -> bool {
-    cell.clock.is_some()
-}
-
-/// Router pin number of a flip-flop's `index`-th input.
-fn ff_pin(cell: &Cell, index: usize) -> usize {
-    match (cell.cell_type.as_str(), index) {
-        ("OXIDE_FF_EN", 1) | ("OXIDE_FF_RSTE", 2) => FF_PIN_CE,
-        ("OXIDE_FF_RST", 1) | ("OXIDE_FF_RSTE", 1) => FF_PIN_LSR,
-        _ => index,
-    }
-}
-
-/// Which net drives each constant cell's output.
-fn constant_nets(netlist: &GateNetlist) -> HashMap<GateNetId, bool> {
-    netlist
-        .cells
-        .iter()
-        .filter_map(|cell| {
-            let value = constant_value(cell)?;
-            Some((*cell.outputs.first()?, value))
-        })
-        .collect()
-}
-
-/// Rewrite a netlist's connectivity into what the router should route.
-///
-/// Rebuilds every net's fanout from the cells, because clock pins are absent
-/// from it. Leaves out connections with no routing: constants (set with
-/// [`emit_bits`]) and the dedicated carry path from one `CCU2` to the next.
-pub fn prepare_for_routing(netlist: &GateNetlist) -> (GateNetlist, TiedInputs) {
-    let constants = constant_nets(netlist);
-    let mut prepared = netlist.clone();
-    let mut tied = TiedInputs::default();
-    for net in &mut prepared.nets {
-        net.fanout.clear();
-        // Routed as ordinary signals: LFCPNX clock tree data is incomplete.
-        net.is_clock = false;
-        net.is_reset = false;
-    }
-
-    let connect = |nets: &mut Vec<GateNet>, net: GateNetId, cell: CellId, pin: usize| {
-        nets[net.0 as usize].fanout.push((cell, pin));
-    };
-    for cell in &netlist.cells {
-        if constant_value(cell).is_some() {
-            continue;
-        }
-        for (index, &net) in cell.inputs.iter().enumerate() {
-            if let Some(&value) = constants.get(&net) {
-                tied.values.insert((cell.id, index), value);
-                continue;
-            }
-            if is_carry(cell) && index == 8 {
-                continue;
-            }
-            let pin = if is_flip_flop(cell) {
-                ff_pin(cell, index)
-            } else {
-                index
-            };
-            connect(&mut prepared.nets, net, cell.id, pin);
-        }
-        if let Some(clock) = cell.clock {
-            connect(&mut prepared.nets, clock, cell.id, FF_PIN_CLK);
-        }
-        if let Some(reset) = cell.reset {
-            connect(&mut prepared.nets, reset, cell.id, FF_PIN_LSR);
-        }
-    }
-    (prepared, tied)
-}
-
-/// Copy a netlist for the placer, hiding pads so only logic gets placed.
-pub fn logic_only_netlist(netlist: &GateNetlist) -> GateNetlist {
-    let mut logic = netlist.clone();
-    for cell in &mut logic.cells {
-        if is_pad(cell) {
-            cell.cell_type = "TIE_PAD".to_string();
-            cell.function = None;
-            cell.parameters.clear();
-        }
-    }
-    logic
-}
-
-/// Fix each pad on the site its `LOC` names.
-pub fn place_pads(
-    device: &NexusDevice,
-    netlist: &GateNetlist,
-    placement: &mut PlacementResult,
-) -> Result<()> {
-    let packages = device.packages();
-    let pins = packages
-        .values()
-        .next()
-        .map(|p| &p.pins)
-        .ok_or_else(|| emit_err("No package pin data for this device".to_string()))?;
-
-    for cell in netlist.cells.iter().filter(|c| is_pad(c)) {
-        let Some(loc) = cell.parameters.get("LOC") else {
-            return Err(emit_err(format!(
-                "Pad '{}' has no pin assignment. Annotate the port with @ {{ pin: \"...\" }}",
-                cell.path
-            )));
-        };
-        let &(x, y, bel) = pins.get(loc).ok_or_else(|| {
-            let mut known: Vec<&str> = pins.keys().map(String::as_str).collect();
-            known.sort_unstable();
-            emit_err(format!(
-                "Pin '{}' on '{}' has no known location. Known pins: {}",
-                loc,
-                cell.path,
-                known.join(", ")
-            ))
-        })?;
-        placement.placements.insert(
-            cell.id,
-            crate::placer::PlacementLoc::new(x, y, bel as usize, BelType::IoCell),
-        );
-    }
-    Ok(())
 }
 
 /// Tiletype settings, loaded once per type.
@@ -390,14 +237,50 @@ fn nth_of_kind(device: &NexusDevice, loc: &crate::placer::PlacementLoc) -> Optio
     )
 }
 
+/// Generates configuration bits for a Nexus device.
+pub struct NexusConfig<'a> {
+    /// Real device model the design was placed on
+    pub device: &'a NexusDevice,
+    /// Device variant
+    pub variant: NexusVariant,
+    /// prjoxide database root
+    pub db_root: &'a Path,
+}
+
+impl ConfigGenerator for NexusConfig<'_> {
+    fn device_name(&self) -> &str {
+        self.device.name()
+    }
+
+    fn config_bits(&self, design: &PlacedDesign<'_>) -> Result<Vec<DesignBit>> {
+        let bits = emit_bits(
+            self.device,
+            self.variant,
+            design.netlist,
+            design.placement,
+            design.routing,
+            design.tied,
+            self.db_root,
+        )?;
+        Ok(bits
+            .into_iter()
+            .map(|b| DesignBit {
+                frame: b.frame,
+                bit: b.bit,
+                value: !b.invert,
+            })
+            .collect())
+    }
+}
+
 /// Collect every configuration bit the design needs.
-pub fn emit_bits(
+fn emit_bits(
     device: &NexusDevice,
     variant: NexusVariant,
-    netlist: &GateNetlist,
-    placement: &PlacementResult,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    placement: &crate::placer::PlacementResult,
     routing: &RoutingResult,
-    tied: &TiedInputs,
+    tied: &crate::bitstream::prepare::TiedInputs,
     db_root: &Path,
 ) -> Result<Vec<GlobalBit>> {
     let mut config = ConfigDb {
@@ -419,10 +302,10 @@ pub fn emit_bits(
 
     enable_clock_buffers(&mut config, routing)?;
 
-    let is_tied_high = |cell: CellId, index: usize| tied.values.get(&(cell, index)) == Some(&true);
+    let is_tied_high = |cell: CellId, index: usize| tied.value(cell, index) == Some(true);
     let tied_low = |cell: CellId, first: usize, count: usize| -> Vec<usize> {
         (0..count)
-            .filter(|&i| tied.values.get(&(cell, first + i)) == Some(&false))
+            .filter(|&i| tied.value(cell, first + i) == Some(false))
             .collect()
     };
     let mut slices_with_ff: HashSet<(u32, u32, char, bool)> = HashSet::new();
@@ -470,7 +353,7 @@ pub fn emit_bits(
                 if cell
                     .inputs
                     .first()
-                    .is_some_and(|_| tied.values.contains_key(&(cell.id, 0)))
+                    .is_some_and(|_| tied.value(cell.id, 0).is_some())
                 {
                     return Err(emit_err(format!(
                         "Flip-flop '{}' has a constant data input, which is not supported yet",
@@ -514,6 +397,19 @@ pub fn emit_bits(
     Ok(config.bits)
 }
 
+/// Bank voltage a standard runs at.
+fn bank_voltage(standard: &str) -> Result<&'static str> {
+    let voltage = standard.trim_start_matches(|c: char| c.is_alphabetic());
+    match voltage {
+        "33" => Ok("3V3"),
+        "25" => Ok("2V5"),
+        "18" => Ok("1V8"),
+        "15" => Ok("1V5"),
+        "12" => Ok("1V2"),
+        _ => Err(emit_err(format!("Unknown IO standard '{standard}'"))),
+    }
+}
+
 fn emit_pad(
     config: &mut ConfigDb<'_>,
     cell: &Cell,
@@ -521,20 +417,20 @@ fn emit_pad(
     y: u32,
     bel_index: usize,
 ) -> Result<()> {
-    if cell.parameters.get("LOC").map(String::as_str) == Some("OSC") {
+    if cell.parameters.get("LOC").map(String::as_str) == Some(super::OSC_PIN) {
         return emit_oscillator(config, x, y);
     }
 
     let tile = config
         .device
-        .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B1_0_"))
+        .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
         .cloned()
-        .ok_or_else(|| {
-            emit_err(format!(
-                "Pad '{}' is at column {x}, row {y}, outside bank 1, the only bank supported so far",
-                cell.path
-            ))
-        })?;
+        .ok_or_else(|| emit_err(format!("Pad '{}' has no IO tile", cell.path)))?;
+    let bank = tile
+        .tiletype
+        .strip_prefix("SYSIO_B")
+        .and_then(|rest| rest.chars().next())
+        .ok_or_else(|| emit_err(format!("Unrecognized IO tile {}", tile.tiletype)))?;
     let side = ['A', 'B'][bel_index];
     let is_output = cell.function == Some(CellFunction::OutputPad);
     let standard = cell
@@ -552,13 +448,23 @@ fn emit_pad(
     config.set_enum(&tile, &format!("{prefix}.PULLMODE"), "NONE")?;
     config.set_enum(&tile, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
     if is_output {
-        config.set_enum(&tile, &format!("{prefix}.DRIVE_3V3"), "8")?;
+        let voltage = bank_voltage(standard)?;
+        config.set_enum(&tile, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
         config.set_enum(&tile, &format!("{prefix}.SLEWRATE"), "MED")?;
         config.set_enum(&tile, &format!("{prefix}.TMUX"), "INV")?;
     }
 
-    let bank = config.tile(159, 14, "BANKREF1")?;
-    config.set_enum(&bank, "BANK1.VCC", "3V3")
+    let bank_ref = format!("BANKREF{bank}");
+    let bank_tile = config
+        .device
+        .prjoxide_tile_of_type(&bank_ref)
+        .cloned()
+        .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
+    config.set_enum(
+        &bank_tile,
+        &format!("BANK{bank}.VCC"),
+        bank_voltage(standard)?,
+    )
 }
 
 fn emit_oscillator(config: &mut ConfigDb<'_>, x: u32, y: u32) -> Result<()> {
@@ -569,9 +475,23 @@ fn emit_oscillator(config: &mut ConfigDb<'_>, x: u32, y: u32) -> Result<()> {
     config.set_enum(&tile, "OSC_CORE.DEBUG_N", "DISABLED")?;
     config.set_word(&tile, "OSC_CORE.HF_CLK_DIV", OSC_HF_CLK_DIV)?;
     config.set_word(&tile, "OSC_CORE.HF_SED_SEC_DIV", OSC_SED_SEC_DIV)?;
-    // HFOUTEN must read high. This CIB mux feeds it from its default input.
-    let cib = config.tile(134, 1, "CIB_T")?;
-    config.set_pip(&cib, "JCIBMUXOUTD3", "JCIBMUXINA3")
+
+    // HFOUTEN must read high: selecting an input on its CIB mux holds it so.
+    let device = config.device;
+    let enable = resolve_wire(x, y, "S1:JHFOUTEN_OSC_CORE")
+        .and_then(|n| device.wire_by_name(&node_name(&n)))
+        .ok_or_else(|| emit_err("No oscillator enable wire".to_string()))?;
+    let cib_mux = find_cib_mux(device, enable)
+        .ok_or_else(|| emit_err("No CIB mux feeds the oscillator enable".to_string()))?;
+    let pip = device
+        .wire_pips(cib_mux)
+        .into_iter()
+        .next()
+        .ok_or_else(|| emit_err("Nothing drives the oscillator enable mux".to_string()))?;
+    config
+        .bits
+        .extend(device.pip_config_bits(pip).iter().cloned());
+    Ok(())
 }
 
 #[cfg(test)]

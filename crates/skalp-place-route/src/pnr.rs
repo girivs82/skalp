@@ -511,17 +511,11 @@ pub fn place_and_route_nexus(
     })
 }
 
-/// Grid window searched for the real-silicon Nexus flow: `(x0, y0, x1, y1)`.
-///
-/// The clock reaches the fabric from the oscillator through columns 73 and 74, and the
-/// LEDs sit in column 159, so this region of the chip holds both.
-#[cfg(feature = "nexus-bitstream")]
-const REAL_NEXUS_REGION: (u32, u32, u32, u32) = (73, 0, 159, 40);
-
 /// Place and route on the real Nexus device data and emit a loadable bitstream.
 ///
 /// `db_root` is the prjoxide database root. Unlike [`place_and_route_nexus`],
-/// which uses a synthetic device model, the output runs on real silicon.
+/// which uses a synthetic device model, the output runs on real silicon. The
+/// output format follows `config.bitstream.format`.
 #[cfg(feature = "nexus-bitstream")]
 pub fn place_and_route_nexus_real(
     netlist: &GateNetlist,
@@ -529,16 +523,33 @@ pub fn place_and_route_nexus_real(
     config: PnrConfig,
     db_root: &std::path::Path,
 ) -> Result<PnrResult> {
-    use crate::device::nexus::emit;
-    use crate::device::nexus::prjoxide_pack::pack_bitstream;
+    use crate::bitstream::config::{
+        generate_bitstream, ConfigTextWriter, FormatWriter, PlacedDesign,
+    };
+    use crate::bitstream::prepare;
+    use crate::bitstream::BitstreamFormat;
+    use crate::device::nexus::emit::NexusConfig;
+    use crate::device::nexus::prjoxide_load::load_tilegrid;
+    use crate::device::nexus::prjoxide_pack::NexusBitWriter;
+    use crate::device::nexus::sites;
     use crate::device::nexus::NexusDevice;
-    use crate::device::Device;
     use crate::error::PlaceRouteError;
 
-    let device = NexusDevice::from_prjoxide_bbox(variant, db_root, REAL_NEXUS_REGION)
+    let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
+    let packages =
+        sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
+    let pad_sites: Vec<(u32, u32)> = netlist
+        .cells
+        .iter()
+        .filter_map(|c| c.parameters.get("LOC"))
+        .filter_map(|loc| packages.values().find_map(|p| p.pins.get(loc)))
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    let region = sites::routing_region(&tiles, &pad_sites);
+    let device = NexusDevice::from_prjoxide_bbox(variant, db_root, region)
         .map_err(PlaceRouteError::BitstreamFailed)?;
 
-    let logic = emit::logic_only_netlist(netlist);
+    let logic = prepare::logic_only_netlist(netlist);
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();
     let mut placer = Placer::new(config.placer.clone(), device.clone());
@@ -547,9 +558,9 @@ pub fn place_and_route_nexus_real(
     } else {
         placer.place_with_carry_chains(&logic, &packing.carry_chains)?
     };
-    emit::place_pads(&device, netlist, &mut placement)?;
+    prepare::place_pads(&device, netlist, &mut placement)?;
 
-    let (routable, tied) = emit::prepare_for_routing(netlist);
+    let (routable, tied) = prepare::prepare_for_routing(netlist);
     let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
         RouterConfig::for_design_size(routable.nets.len())
     } else {
@@ -563,16 +574,26 @@ pub fn place_and_route_nexus_real(
         ));
     }
 
-    let bits = emit::emit_bits(
-        &device, variant, netlist, &placement, &routing, &tied, db_root,
-    )?;
-    let data = pack_bitstream(db_root, variant.idcode(), bits)
-        .map_err(PlaceRouteError::BitstreamFailed)?;
-    let mut bitstream = Bitstream::new(
-        device.name().to_string(),
-        crate::bitstream::BitstreamFormat::OxideBitstream,
-    );
-    bitstream.data = data;
+    let generator = NexusConfig {
+        device: &device,
+        variant,
+        db_root,
+    };
+    let design = PlacedDesign {
+        netlist,
+        placement: &placement,
+        routing: &routing,
+        tied: &tied,
+    };
+    let bit_writer = NexusBitWriter {
+        db_root,
+        idcode: variant.idcode(),
+    };
+    let writer: &dyn FormatWriter = match config.bitstream.format {
+        BitstreamFormat::ConfigBitsText => &ConfigTextWriter,
+        _ => &bit_writer,
+    };
+    let bitstream = generate_bitstream(&generator, writer, &design)?;
 
     let wire_delays: IndexMap<GateNetId, f64> = routing
         .routes

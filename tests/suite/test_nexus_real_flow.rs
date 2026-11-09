@@ -25,7 +25,7 @@ fn blinker_netlist() -> GateNetlist {
         skalp_lir::synthesize_hierarchical(&hier, &library, skalp_lir::synth::SynthPreset::Quick)
             .flatten();
 
-    let top = mir.modules.last().unwrap();
+    let top = mir.modules.iter().find(|m| m.name == "Blinker").unwrap();
     let constraints: indexmap::IndexMap<_, _> = top
         .ports
         .iter()

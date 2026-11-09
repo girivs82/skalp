@@ -52,6 +52,32 @@ pub fn pack_bitstream(
     Ok(BitstreamParser::serialise_chip(&chip))
 }
 
+/// Writes Lattice `.bit` files for Nexus devices.
+#[cfg(feature = "nexus-bitstream")]
+pub struct NexusBitWriter<'a> {
+    /// prjoxide database root
+    pub db_root: &'a Path,
+    /// IDCODE of the target device
+    pub idcode: u32,
+}
+
+#[cfg(feature = "nexus-bitstream")]
+impl crate::bitstream::config::FormatWriter for NexusBitWriter<'_> {
+    fn format(&self) -> crate::bitstream::BitstreamFormat {
+        crate::bitstream::BitstreamFormat::OxideBitstream
+    }
+
+    fn write(&self, bits: &[crate::bitstream::config::DesignBit]) -> crate::error::Result<Vec<u8>> {
+        let bits = bits.iter().map(|b| GlobalBit {
+            frame: b.frame,
+            bit: b.bit,
+            invert: !b.value,
+        });
+        pack_bitstream(self.db_root, self.idcode, bits)
+            .map_err(crate::error::PlaceRouteError::BitstreamFailed)
+    }
+}
+
 #[cfg(all(test, feature = "nexus-bitstream"))]
 mod tests {
     use super::super::prjoxide_load::find_database;
