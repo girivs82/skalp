@@ -15,6 +15,63 @@ use std::time::{Duration, Instant};
 /// IDCODE of the LFCPNX-100, as read back from silicon.
 pub const LFCPNX_100_IDCODE: u32 = 0x010F_4043;
 
+/// Nexus parts this loader recognizes, from the prjoxide device database.
+const KNOWN_CHIPS: [(u32, &str); 5] = [
+    (LFCPNX_100_IDCODE, "LFCPNX-100"),
+    (0x110F_1043, "LIFCL-40"),
+    (0x010F_1043, "LIFCL-40 (engineering sample)"),
+    (0x010F_0043, "LIFCL-17"),
+    (0x310F_1043, "LFD2NX-40"),
+];
+
+/// Name of the Nexus part with this IDCODE, if it is one this loader knows.
+pub fn chip_name(idcode: u32) -> Option<&'static str> {
+    KNOWN_CHIPS
+        .iter()
+        .find(|(id, _)| *id == idcode)
+        .map(|(_, name)| *name)
+}
+
+/// A board this tool knows the layout of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NexusBoard {
+    /// Names accepted by `--board`.
+    pub cli_names: &'static [&'static str],
+    /// Display name.
+    pub name: &'static str,
+    /// IDCODE of the FPGA fitted to this board.
+    pub idcode: u32,
+    /// Where to find the button wired to PROGRAMN.
+    pub programn_button: &'static str,
+}
+
+/// Boards with a confirmed PROGRAMN button. Add an entry for each new board
+/// rather than assuming the chip implies the board: different boards fit the
+/// same FPGA and wire the button differently.
+pub const NEXUS_BOARDS: [NexusBoard; 1] = [NexusBoard {
+    cli_names: &["certuspro-versa", "lfcpnx-versa"],
+    name: "CertusPro-NX Versa",
+    idcode: LFCPNX_100_IDCODE,
+    programn_button: "SW2, labelled PROGRAMN, just below the Raspberry Pi connector",
+}];
+
+impl NexusBoard {
+    /// Look up a board by the name given to `--board`.
+    pub fn by_name(name: &str) -> Option<&'static NexusBoard> {
+        let name = name.to_lowercase();
+        NEXUS_BOARDS
+            .iter()
+            .find(|b| b.cli_names.contains(&name.as_str()))
+    }
+}
+
+fn describe_idcode(idcode: u32) -> String {
+    match chip_name(idcode) {
+        Some(name) => format!("{name} (IDCODE 0x{idcode:08x})"),
+        None => format!("unknown device (IDCODE 0x{idcode:08x})"),
+    }
+}
+
 const FTDI_VID: u16 = 0x0403;
 const FT2232H_PID: u16 = 0x6010;
 
@@ -24,6 +81,15 @@ const JTAG_HZ: u32 = 6_000_000;
 
 /// Pause after the erase; LFCPNX-100 needs 4.87 ms (FPGA-TN-02099 table 6.7).
 const ERASE_SETTLE: Duration = Duration::from_millis(50);
+
+/// How long to wait for someone to tap PROGRAMN on a locked device.
+const PROGRAMN_WAIT: Duration = Duration::from_secs(60);
+/// Consecutive clear status reads that show PROGRAMN has been released.
+const PROGRAMN_CLEAR_READS: u32 = 5;
+const PROGRAMN_POLL: Duration = Duration::from_millis(100);
+
+/// Bytes sent per progress report during the bitstream burst.
+const BURST_CHUNK: usize = 0x1_0000;
 
 // Nexus configuration opcodes.
 const IDCODE_PUB: u8 = 0xE0;
@@ -79,6 +145,34 @@ impl NexusStatus {
     pub fn bse_error(self) -> u8 {
         ((self.0 >> 24) & 0xF) as u8
     }
+
+    /// Plain-language description of any error the status register reports.
+    pub fn error_summary(self) -> Option<String> {
+        let mut errors: Vec<&str> = Vec::new();
+        match self.bse_error() {
+            0 => {}
+            1 => errors.push("bitstream is for a different device (ID error)"),
+            2 => errors.push("bitstream contains an illegal command"),
+            3 => errors.push("bitstream failed its CRC check, so it is corrupted"),
+            4 => errors.push("no valid bitstream preamble found"),
+            5 => errors.push("configuration was aborted"),
+            6 => errors.push("bitstream overflowed the data buffer"),
+            7 => errors.push("bitstream is larger than this device's SRAM"),
+            8 | 9 => errors.push("bitstream authentication failed"),
+            10 => errors.push("bitstream engine timed out"),
+            _ => errors.push("unrecognized bitstream engine error"),
+        }
+        if self.0 & (1 << 29) != 0 && self.bse_error() != 1 {
+            errors.push("device ID check failed");
+        }
+        if self.0 & (1 << 30) != 0 {
+            errors.push("device rejected a command as invalid");
+        }
+        if self.fail() && errors.is_empty() {
+            errors.push("device reported a failed operation");
+        }
+        (!errors.is_empty()).then(|| errors.join("; "))
+    }
 }
 
 impl std::fmt::Display for NexusStatus {
@@ -96,9 +190,27 @@ impl std::fmt::Display for NexusStatus {
     }
 }
 
+/// Progress of an SRAM load, reported as it happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadEvent {
+    /// Erasing configuration SRAM.
+    Erasing,
+    /// The running design is blocking JTAG configuration; someone needs to tap
+    /// PROGRAMN within `timeout`.
+    NeedsProgramn { timeout: Duration },
+    /// PROGRAMN was seen and the design has cleared.
+    ProgramnSeen,
+    /// `sent` of `total` bitstream bytes have been shifted in.
+    Loading { sent: usize, total: usize },
+    /// Bitstream fully shifted; checking the device's verdict.
+    Verifying,
+}
+
 /// Outcome of a successful SRAM load.
 #[derive(Debug, Clone)]
 pub struct NexusLoadResult {
+    /// IDCODE of the configured device.
+    pub idcode: u32,
     /// Bytes shifted into the device.
     pub bytes: usize,
     /// Wall-clock load time in milliseconds.
@@ -119,7 +231,9 @@ pub struct NexusBitstream<'a> {
 /// Split a Lattice `.bit` file into its target IDCODE and configuration payload.
 pub fn parse_bitstream(file: &[u8]) -> Result<NexusBitstream<'_>> {
     const PREAMBLE: [u8; 4] = [0xFF, 0xFF, 0xBD, 0xB3];
-    let bad = |why: &str| PlaceRouteError::BitstreamFailed(format!("Not a Nexus .bit file: {why}"));
+    let bad = |why: &str| {
+        PlaceRouteError::ProgrammingFailed(format!("Not a Lattice Nexus .bit file: {why}"))
+    };
 
     let preamble = file
         .windows(PREAMBLE.len())
@@ -147,6 +261,27 @@ pub fn parse_bitstream(file: &[u8]) -> Result<NexusBitstream<'_>> {
     })
 }
 
+/// Confirm a bitstream was built for the connected device.
+pub fn check_target(bitstream_idcode: u32, device_idcode: u32) -> Result<()> {
+    if bitstream_idcode == device_idcode {
+        return Ok(());
+    }
+    Err(PlaceRouteError::ProgrammingFailed(format!(
+        "This bitstream was built for {} but the connected device is {}. \
+         Nothing was changed on the device.",
+        describe_idcode(bitstream_idcode),
+        describe_idcode(device_idcode)
+    )))
+}
+
+/// What a bulk erase achieved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EraseOutcome {
+    Erased,
+    /// DONE stayed set: the device ignored the erase.
+    Blocked,
+}
+
 /// Which JTAG TAP state a shift should finish by way of.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AfterIr {
@@ -162,7 +297,7 @@ pub struct NexusJtagProgrammer {
 }
 
 fn usb_err(what: &str, e: impl std::fmt::Display) -> PlaceRouteError {
-    PlaceRouteError::BitstreamFailed(format!("{what}: {e}"))
+    PlaceRouteError::ProgrammingFailed(format!("{what}: {e}"))
 }
 
 impl NexusJtagProgrammer {
@@ -175,7 +310,7 @@ impl NexusJtagProgrammer {
             .iter()
             .position(|d| d.vendor_id == FTDI_VID && d.product_id == FT2232H_PID)
             .ok_or_else(|| {
-                PlaceRouteError::BitstreamFailed(
+                PlaceRouteError::ProgrammingFailed(
                     "No FT2232H found. Is the board connected?".to_string(),
                 )
             })?;
@@ -212,7 +347,7 @@ impl NexusJtagProgrammer {
         let mut echo = [0u8; 2];
         self.read(&mut echo)?;
         if echo != [MPSSE_BAD_COMMAND_ECHO, 0xAA] {
-            return Err(PlaceRouteError::BitstreamFailed(format!(
+            return Err(PlaceRouteError::ProgrammingFailed(format!(
                 "MPSSE did not synchronize (echo {echo:02x?})"
             )));
         }
@@ -379,21 +514,68 @@ impl NexusJtagProgrammer {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                return Err(PlaceRouteError::BitstreamFailed(format!(
+                return Err(PlaceRouteError::ProgrammingFailed(format!(
                     "Timed out waiting for {what}"
                 )));
             }
         }
     }
 
-    /// Bulk-erase configuration SRAM and confirm it took effect.
+    /// Read the IDCODE and confirm a device is actually answering.
+    pub fn identify(&mut self) -> Result<u32> {
+        let idcode = self.read_idcode()?;
+        if idcode == 0 || idcode == u32::MAX {
+            return Err(PlaceRouteError::ProgrammingFailed(format!(
+                "No device answered on the JTAG chain (read 0x{idcode:08x}). \
+                 Check that the board is powered and the USB cable is connected."
+            )));
+        }
+        Ok(idcode)
+    }
+
+    /// Reinitialize the device, as pulsing PROGRAMN does: it clears the running
+    /// design and boots from SPI flash if the flash holds a valid image.
+    pub fn refresh(&mut self) -> Result<NexusStatus> {
+        self.command(LSC_REFRESH)?;
+        self.idle(1000)?;
+        // Initialization can take seconds with a large image in flash.
+        std::thread::sleep(Duration::from_secs(2));
+        self.reset_tap()?;
+        self.wait_not_busy("device refresh")?;
+        self.read_status()
+    }
+
+    /// Enter in-system configuration mode and reset the configuration logic.
+    fn enter_config(&mut self) -> Result<()> {
+        self.command_with(ISC_ENABLE, &[0x00])?;
+        self.idle(1000)?;
+        self.wait_not_busy("ISC_ENABLE")?;
+        let status = self.read_status()?;
+        log::debug!("after ISC_ENABLE: {status}");
+        if !status.isc_enabled() {
+            return Err(self.fail("Entering configuration mode"));
+        }
+
+        self.command(LSC_REFRESH)?;
+        self.idle(2)?;
+        self.command_with(LSC_DEVICE_CONTROL, &[0x08])?;
+        self.idle(1000)?;
+        self.wait_not_busy("configuration reset")?;
+        self.command_with(LSC_DEVICE_CONTROL, &[0x00])?;
+        self.idle(1000)?;
+        self.wait_not_busy("configuration reset release")?;
+        log::debug!("after configuration reset: {}", self.read_status()?);
+        Ok(())
+    }
+
+    /// Bulk-erase configuration SRAM and report whether it took effect.
     ///
     /// DONE and FAIL must both read 0 after the erase (FPGA-TN-02099, table
     /// 6.16 note 2). This is the only point in the load where the device
     /// proves it is acting on configuration commands: a device that ignores
     /// them still reports DONE=1 after the burst, which is indistinguishable
     /// from success.
-    fn erase_sram(&mut self) -> Result<()> {
+    fn erase_sram(&mut self) -> Result<EraseOutcome> {
         self.command_with(ISC_ERASE, &[0x00])?;
         self.idle(100)?;
         std::thread::sleep(ERASE_SETTLE);
@@ -403,31 +585,65 @@ impl NexusJtagProgrammer {
         if status.fail() {
             return Err(self.fail("SRAM erase"));
         }
-        if status.done() {
-            return Err(PlaceRouteError::BitstreamFailed(format!(
-                "SRAM erase had no effect: DONE is still set (status {status}). \
-                 The device ignores JTAG configuration while running a design \
-                 that leaves its internal oscillator off. Tap the PROGRAMN \
-                 button (SW2 on the Versa board) and load again."
-            )));
+        Ok(if status.done() {
+            EraseOutcome::Blocked
+        } else {
+            EraseOutcome::Erased
+        })
+    }
+
+    /// Wait for PROGRAMN to clear the running design and be released.
+    ///
+    /// DONE falls as soon as the button goes down, so the status has to stay
+    /// clear for several reads before configuration can safely restart.
+    fn wait_for_programn(&mut self) -> Result<()> {
+        let deadline = Instant::now() + PROGRAMN_WAIT;
+        let mut clear_reads = 0;
+        while clear_reads < PROGRAMN_CLEAR_READS {
+            if Instant::now() > deadline {
+                return Err(PlaceRouteError::ProgrammingFailed(format!(
+                    "Timed out after {} s waiting for PROGRAMN. The running design \
+                     is still blocking JTAG configuration and was not changed.",
+                    PROGRAMN_WAIT.as_secs()
+                )));
+            }
+            let status = self.read_status()?;
+            clear_reads = if status.done() || status.busy() {
+                0
+            } else {
+                clear_reads + 1
+            };
+            std::thread::sleep(PROGRAMN_POLL);
         }
         Ok(())
     }
 
     fn fail(&mut self, step: &str) -> PlaceRouteError {
-        let status = self
-            .read_status()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|e| format!("unreadable ({e})"));
-        PlaceRouteError::BitstreamFailed(format!("{step} failed, status {status}"))
+        let detail = match self.read_status() {
+            Ok(status) => match status.error_summary() {
+                Some(summary) => format!("{summary} (status {status})"),
+                None => format!("status {status}"),
+            },
+            Err(e) => format!("status unreadable: {e}"),
+        };
+        PlaceRouteError::ProgrammingFailed(format!("{step} failed: {detail}"))
     }
 
     /// Load `file` (a Lattice `.bit`) into configuration SRAM.
     ///
     /// Refuses a bitstream built for a different device before changing
-    /// anything on the chip.
-    pub fn program(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
-        let result = self.load(file);
+    /// anything on the chip. `on_event` hears about each stage, including the
+    /// point at which someone needs to tap PROGRAMN.
+    pub fn program(
+        &mut self,
+        file: &[u8],
+        mut on_event: impl FnMut(LoadEvent),
+    ) -> Result<NexusLoadResult> {
+        let bitstream = parse_bitstream(file)?;
+        let idcode = self.identify()?;
+        check_target(bitstream.idcode, idcode)?;
+
+        let result = self.load(&bitstream, idcode, &mut on_event);
         if result.is_err() {
             // A failed load must not strand the device in configuration mode,
             // where user logic is halted and I/O is tri-stated.
@@ -444,43 +660,57 @@ impl NexusJtagProgrammer {
         self.idle(2)?;
         self.command(BYPASS)?;
         self.idle(100)?;
-        self.wait_not_busy("ISC_DISABLE")?;
+        self.wait_not_busy("leaving configuration mode")?;
         self.reset_tap()
     }
 
-    fn load(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
-        let bitstream = parse_bitstream(file)?;
-        let idcode = self.read_idcode()?;
-        if bitstream.idcode != idcode {
-            return Err(PlaceRouteError::BitstreamFailed(format!(
-                "Bitstream targets IDCODE 0x{:08x} but the device reports 0x{idcode:08x}",
-                bitstream.idcode
-            )));
+    /// Shift the bitstream into the current shift state, reporting progress.
+    fn burst(&mut self, data: &[u8], on_event: &mut impl FnMut(LoadEvent)) -> Result<()> {
+        let (last, head) = data.split_last().expect("empty bitstream payload");
+        let mut sent = 0;
+        for chunk in head.chunks(BURST_CHUNK) {
+            let n = (chunk.len() - 1) as u16;
+            let mut cmd = Vec::with_capacity(chunk.len() + 3);
+            cmd.extend_from_slice(&[MPSSE_BYTES_OUT, (n & 0xFF) as u8, (n >> 8) as u8]);
+            cmd.extend_from_slice(chunk);
+            self.write(&cmd)?;
+            sent += chunk.len();
+            on_event(LoadEvent::Loading {
+                sent,
+                total: data.len(),
+            });
         }
+        self.shift(std::slice::from_ref(last), None)?;
+        on_event(LoadEvent::Loading {
+            sent: data.len(),
+            total: data.len(),
+        });
+        Ok(())
+    }
 
+    fn load(
+        &mut self,
+        bitstream: &NexusBitstream<'_>,
+        idcode: u32,
+        on_event: &mut impl FnMut(LoadEvent),
+    ) -> Result<NexusLoadResult> {
         let start = Instant::now();
 
-        self.command_with(ISC_ENABLE, &[0x00])?;
-        self.idle(1000)?;
-        self.wait_not_busy("ISC_ENABLE")?;
-        let status = self.read_status()?;
-        log::debug!("after ISC_ENABLE: {status}");
-        if !status.isc_enabled() {
-            return Err(self.fail("ISC_ENABLE"));
+        self.enter_config()?;
+        on_event(LoadEvent::Erasing);
+        if self.erase_sram()? == EraseOutcome::Blocked {
+            self.leave_isc()?;
+            on_event(LoadEvent::NeedsProgramn {
+                timeout: PROGRAMN_WAIT,
+            });
+            self.wait_for_programn()?;
+            on_event(LoadEvent::ProgramnSeen);
+            self.enter_config()?;
+            on_event(LoadEvent::Erasing);
+            if self.erase_sram()? == EraseOutcome::Blocked {
+                return Err(self.fail("SRAM erase"));
+            }
         }
-
-        // Drop the running configuration and pulse the configuration logic.
-        self.command(LSC_REFRESH)?;
-        self.idle(2)?;
-        self.command_with(LSC_DEVICE_CONTROL, &[0x08])?;
-        self.idle(1000)?;
-        self.wait_not_busy("configuration reset")?;
-        self.command_with(LSC_DEVICE_CONTROL, &[0x00])?;
-        self.idle(1000)?;
-        self.wait_not_busy("configuration reset release")?;
-        log::debug!("after configuration reset: {}", self.read_status()?);
-
-        self.erase_sram()?;
 
         self.command(LSC_INIT_ADDRESS)?;
         self.idle(1000)?;
@@ -491,10 +721,11 @@ impl NexusJtagProgrammer {
         let reversed: Vec<u8> = bitstream.payload.iter().map(|b| b.reverse_bits()).collect();
         // Idle -> Select-DR -> Capture-DR -> Shift-DR.
         self.tms(0b001, 3, true)?;
-        self.shift(&reversed, None)?;
+        self.burst(&reversed, on_event)?;
         self.finish_dr()?;
         self.idle(1000)?;
 
+        on_event(LoadEvent::Verifying);
         let status = self.read_status()?;
         log::debug!("after bitstream: {status}");
         if !status.done() || status.busy() || status.fail() || status.bse_error() != 0 {
@@ -505,10 +736,11 @@ impl NexusJtagProgrammer {
         let status = self.read_status()?;
         log::debug!("after ISC_DISABLE: {status}");
         if status.isc_enabled() || !status.done() {
-            return Err(self.fail("ISC_DISABLE"));
+            return Err(self.fail("Leaving configuration mode"));
         }
 
         Ok(NexusLoadResult {
+            idcode,
             bytes: bitstream.payload.len(),
             time_ms: start.elapsed().as_millis() as u64,
             status,
@@ -542,6 +774,45 @@ mod tests {
     fn rejects_files_without_verify_id() {
         let file = [0xFF, 0xFF, 0xFF, 0xBD, 0xB3, 0x3B, 0, 0, 0];
         assert!(parse_bitstream(&file).is_err());
+    }
+
+    #[test]
+    fn finds_boards_by_cli_name() {
+        let board = NexusBoard::by_name("CertusPro-Versa").unwrap();
+        assert_eq!(board.idcode, LFCPNX_100_IDCODE);
+        assert!(board.programn_button.contains("SW2"));
+        assert_eq!(NexusBoard::by_name("icebreaker"), None);
+    }
+
+    #[test]
+    fn names_known_chips() {
+        assert_eq!(chip_name(LFCPNX_100_IDCODE), Some("LFCPNX-100"));
+        assert_eq!(chip_name(0xDEAD_BEEF), None);
+    }
+
+    #[test]
+    fn accepts_a_matching_target() {
+        assert!(check_target(LFCPNX_100_IDCODE, LFCPNX_100_IDCODE).is_ok());
+    }
+
+    #[test]
+    fn explains_a_mismatched_target() {
+        let err = check_target(0x110F_1043, LFCPNX_100_IDCODE)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("LIFCL-40"), "{err}");
+        assert!(err.contains("LFCPNX-100"), "{err}");
+    }
+
+    #[test]
+    fn summarizes_status_errors() {
+        assert_eq!(NexusStatus(0x1501_0000_0100).error_summary(), None);
+        let crc = NexusStatus(3 << 24).error_summary().unwrap();
+        assert!(crc.contains("CRC"), "{crc}");
+        let id = NexusStatus(1 << 29).error_summary().unwrap();
+        assert!(id.contains("ID"), "{id}");
+        let fail = NexusStatus(1 << 13).error_summary().unwrap();
+        assert!(fail.contains("failed"), "{fail}");
     }
 
     #[test]

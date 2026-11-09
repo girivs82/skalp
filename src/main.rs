@@ -281,7 +281,7 @@ enum Commands {
 
     /// Program the FPGA device
     Program {
-        /// Bitstream file (.bin format)
+        /// Bitstream file (.bit for Lattice Nexus, .bin for iCE40)
         #[arg(required_unless_present_any = ["list", "reset_only"])]
         bitstream: Option<PathBuf>,
 
@@ -4435,43 +4435,155 @@ fn run_pnr_on_netlist(
     Ok(())
 }
 
-/// Load a bitstream into the SRAM of a Lattice CertusPro-NX Versa board over JTAG
-fn program_nexus_board(bitstream: Option<&PathBuf>, reset_only: bool) -> Result<()> {
-    use skalp_place_route::programmer::nexus_jtag::{NexusJtagProgrammer, LFCPNX_100_IDCODE};
+/// Report a Nexus device on the JTAG chain, if there is one.
+fn probe_nexus_device() -> Option<(String, String)> {
+    use skalp_place_route::programmer::nexus_jtag::{chip_name, NexusJtagProgrammer};
+
+    let mut programmer = NexusJtagProgrammer::open().ok()?;
+    let idcode = programmer.identify().ok()?;
+    let name = chip_name(idcode)?;
+    let state = match programmer.read_status() {
+        Ok(status) if status.done() => "running a design".to_string(),
+        Ok(status) => format!(
+            "not configured{}",
+            status
+                .error_summary()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        ),
+        Err(e) => format!("status unreadable: {e}"),
+    };
+    Some((format!("{name} (IDCODE 0x{idcode:08x})"), state))
+}
+
+/// Load a bitstream into SRAM of a Lattice Nexus device over JTAG.
+fn program_nexus_board(
+    bitstream: Option<&PathBuf>,
+    board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
+    reset_only: bool,
+) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::{
+        check_target, chip_name, parse_bitstream, LoadEvent, NexusJtagProgrammer,
+    };
+    use std::io::{IsTerminal, Write};
+
+    let describe = |idcode: u32| {
+        chip_name(idcode)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("unknown device 0x{idcode:08x}"))
+    };
+
+    let data = match bitstream {
+        Some(path) => Some(
+            std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("Cannot read bitstream {:?}: {}", path, e))?,
+        ),
+        None if reset_only => None,
+        None => anyhow::bail!("A bitstream file is required"),
+    };
+    // Validate the file before opening the hardware.
+    let target = data
+        .as_deref()
+        .map(parse_bitstream)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .map(|b| b.idcode);
+
+    let mut programmer = NexusJtagProgrammer::open().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let idcode = programmer
+        .identify()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!("🔌 Found {} (IDCODE 0x{:08x})", describe(idcode), idcode);
+    if chip_name(idcode).is_none() {
+        anyhow::bail!("This is not a Nexus device this tool knows how to program.");
+    }
+    if let Some(board) = board {
+        if board.idcode != idcode {
+            anyhow::bail!(
+                "--board selected {}, which fits {}, but the connected device is {}.",
+                board.name,
+                describe(board.idcode),
+                describe(idcode)
+            );
+        }
+        println!("🧩 Board: {}", board.name);
+    }
 
     if reset_only {
-        anyhow::bail!("--reset-only is not supported for Nexus boards");
+        let status = programmer
+            .refresh()
+            .map_err(|e| anyhow::anyhow!("Reset failed: {}", e))?;
+        if status.done() {
+            println!("🔄 Reset sent, but a design is still running. It may be blocking JTAG.");
+        } else {
+            println!("🔄 Device cleared and not configured.");
+        }
+        println!("   Status: {}", status);
+        return Ok(());
     }
-    let bitstream = bitstream.ok_or_else(|| anyhow::anyhow!("Bitstream file is required"))?;
-    let data = std::fs::read(bitstream)
-        .map_err(|e| anyhow::anyhow!("Cannot read bitstream {:?}: {}", bitstream, e))?;
 
-    let mut programmer = NexusJtagProgrammer::open()
-        .map_err(|e| anyhow::anyhow!("Cannot open programmer: {}", e))?;
-    let idcode = programmer
-        .read_idcode()
-        .map_err(|e| anyhow::anyhow!("Cannot read IDCODE: {}", e))?;
-    if idcode != LFCPNX_100_IDCODE {
-        anyhow::bail!(
-            "Expected an LFCPNX-100 (IDCODE 0x{:08x}) but the JTAG chain reports 0x{:08x}",
-            LFCPNX_100_IDCODE,
-            idcode
-        );
-    }
-    println!("🔌 LFCPNX-100 found (IDCODE 0x{:08x})", idcode);
-    println!("📤 Loading {:?} into SRAM...", bitstream);
+    let (path, file, target) = match (bitstream, data.as_deref(), target) {
+        (Some(path), Some(file), Some(target)) => (path, file, target),
+        _ => unreachable!("a bitstream was required above"),
+    };
+    println!(
+        "📦 {:?}: {:.2} MB, built for {}",
+        path,
+        file.len() as f64 / 1_048_576.0,
+        describe(target)
+    );
+    check_target(target, idcode).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let result = programmer.program(&data).map_err(|e| {
+    let show_progress = std::io::stdout().is_terminal();
+    let mut last_percent = usize::MAX;
+    let on_event = |event: LoadEvent| match event {
+        LoadEvent::Erasing => println!("🧹 Erasing SRAM..."),
+        LoadEvent::NeedsProgramn { timeout } => {
+            println!("⚠️  The running design is blocking JTAG configuration.");
+            match board {
+                Some(board) => println!(
+                    "👉 Tap the PROGRAMN button once ({}). Waiting up to {} s...",
+                    board.programn_button,
+                    timeout.as_secs()
+                ),
+                None => println!(
+                    "👉 Tap this board's PROGRAMN button once. Waiting up to {} s...",
+                    timeout.as_secs()
+                ),
+            }
+        }
+        LoadEvent::ProgramnSeen => println!("   ✓ Button seen, continuing."),
+        LoadEvent::Loading { sent, total } => {
+            let percent = sent * 100 / total;
+            if show_progress && percent != last_percent {
+                last_percent = percent;
+                print!("\r📤 Loading bitstream: {percent:3}%");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        LoadEvent::Verifying => {
+            if show_progress {
+                println!();
+            }
+        }
+    };
+
+    let result = programmer.program(file, on_event).map_err(|e| {
         let state = programmer
             .read_status()
             .map(|s| s.to_string())
             .unwrap_or_else(|e| format!("unreadable ({})", e));
-        anyhow::anyhow!("Programming failed: {}\nDevice status now: {}", e, state)
+        anyhow::anyhow!("{}\nDevice status now: {}", e, state)
     })?;
+
     println!(
-        "   ✓ Configured: {} bytes in {} ms, status {}",
-        result.bytes, result.time_ms, result.status
+        "✅ {} configured and running: {:.2} MB in {:.1} s",
+        describe(result.idcode),
+        result.bytes as f64 / 1_048_576.0,
+        result.time_ms as f64 / 1000.0
     );
+    println!("   Loaded into SRAM only; a power cycle clears it.");
+    println!("   Status: {}", result.status);
     Ok(())
 }
 
@@ -4484,16 +4596,46 @@ fn program_device(
 ) -> Result<()> {
     use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
 
-    if matches!(
-        board.to_lowercase().as_str(),
-        "certuspro-versa" | "lfcpnx-versa"
-    ) && !list
-    {
-        return program_nexus_board(bitstream, reset_only);
+    let nexus_board = skalp_place_route::programmer::nexus_jtag::NexusBoard::by_name(board);
+    // A Lattice .bit file carries the device it targets, so it picks the path.
+    let nexus_file = bitstream
+        .and_then(|path| std::fs::read(path).ok())
+        .is_some_and(|file| {
+            skalp_place_route::programmer::nexus_jtag::parse_bitstream(&file).is_ok()
+        });
+    if !list {
+        if nexus_file && nexus_board.is_none() && board.to_lowercase() != "auto" {
+            anyhow::bail!(
+                "This is a Lattice Nexus bitstream, and board '{}' can't load it. Use --board auto or certuspro-versa.",
+                board
+            );
+        }
+        if nexus_board.is_some() || nexus_file {
+            return program_nexus_board(bitstream, nexus_board, reset_only);
+        }
+        // Don't let auto-detection drive a Nexus board as an iCE40 SPI target.
+        if board.to_lowercase() == "auto" {
+            if let Some((device, _)) = probe_nexus_device() {
+                if reset_only {
+                    return program_nexus_board(bitstream, None, reset_only);
+                }
+                anyhow::bail!(
+                    "Connected device is {}, but this file is not a Lattice Nexus .bit bitstream.",
+                    device
+                );
+            }
+        }
     }
 
     // List mode: just show detected boards (doesn't need board selection)
     if list {
+        // An FT2232H also matches the iCE40 profiles below, so a Nexus device
+        // answering on JTAG settles it.
+        if let Some((device, state)) = probe_nexus_device() {
+            println!("🔍 Found on JTAG:\n");
+            println!("   ✓ {}: {}", device, state);
+            return Ok(());
+        }
         println!("🔍 Scanning for iCE40 boards...\n");
         let boards = [
             BoardConfig::IceBreaker,
@@ -4555,7 +4697,7 @@ fn program_device(
         }
         _ => {
             anyhow::bail!(
-                "Unknown board: {}. Supported: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto",
+                "Unknown board: {}. Supported: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, certuspro-versa, auto",
                 board
             );
         }
