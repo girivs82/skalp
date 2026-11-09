@@ -9,9 +9,10 @@
 
 use super::{ClockSummary, CriticalPath, TimingReport};
 use crate::bitstream::config::PlacedDesign;
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId};
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetId};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 const PS_PER_NS: f64 = 1000.0;
 
@@ -163,7 +164,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
     fn path_through(&self, mut net: GateNetId) -> Vec<String> {
         let netlist = self.design.netlist;
         let mut path = vec![netlist.nets[net.0 as usize].name.clone()];
-        let mut seen = HashSet::from([net]);
+        let mut seen = HashSet::from_iter([net]);
         while let Some(&(_, Some(previous))) = self.arrivals.get(&net) {
             if !seen.insert(previous) {
                 break;

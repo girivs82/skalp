@@ -7,12 +7,13 @@
 //! Which wires count as general comes from
 //! [`Device::is_general_routing_wire`].
 
+use crate::collections::{HashMap, HashMapExt, HashSet};
 use crate::device::{is_clock_pin, CellPin, Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use crate::router::Route;
 use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 /// Clock nets routed on dedicated wires.
 #[derive(Debug, Default)]
@@ -44,7 +45,7 @@ fn find_path<D: Device + ?Sized>(
 ) -> Option<Vec<PipId>> {
     let mut visited: HashMap<WireId, PipId> = HashMap::new();
     let mut queue = VecDeque::from([sink]);
-    let mut seen: HashSet<WireId> = HashSet::from([sink]);
+    let mut seen: HashSet<WireId> = HashSet::from_iter([sink]);
 
     while let Some(wire) = queue.pop_front() {
         for pip_id in device.wire_pips(wire) {
@@ -116,7 +117,7 @@ pub fn route_clock_nets<D: Device + ?Sized>(
 
         let mut route = Route::new(net.id);
         route.source = source;
-        let mut tree = HashSet::from([source]);
+        let mut tree = HashSet::from_iter([source]);
         let mut dedicated = true;
         for (cell, pin) in clock_pins {
             let sink =
@@ -186,7 +187,7 @@ mod tests {
         let osc = wire(137, 0, "S1:JHFCLKOUT_OSC_CORE");
         let sink = wire(100, 20, "JCLK_SLICEA");
 
-        let path = find_path(&device, sink, &HashSet::from([osc]), &HashMap::new())
+        let path = find_path(&device, sink, &HashSet::from_iter([osc]), &HashMap::new())
             .expect("a dedicated path");
         assert!(!path.is_empty());
         for pip in path {

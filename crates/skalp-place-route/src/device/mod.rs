@@ -8,8 +8,8 @@ pub mod ice40;
 pub mod nexus;
 pub mod xc7;
 
+use crate::collections::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Device family enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -385,7 +385,7 @@ pub(crate) fn synthetic_switch_box_pips(
     locals_per_tile: usize,
     fanin: usize,
 ) -> Vec<(WireId, WireId, u32, u32, u32)> {
-    use std::collections::HashSet;
+    use crate::collections::HashSet;
     let wire = |w: WireId| wires.get(w.0 as usize);
     let is_inter_tile = |t: WireType| {
         matches!(
@@ -1030,7 +1030,7 @@ impl Pip {
 /// fabric and inputs are driven from it.
 #[cfg(test)]
 pub(crate) fn check_lattice_logic_pin_wires<D: Device>(device: &D) {
-    use std::collections::HashSet;
+    use crate::collections::{HashSet, HashSetExt};
     let (w, h) = device.grid_size();
     let (x, y) = (0..h)
         .flat_map(|y| (0..w).map(move |x| (x, y)))

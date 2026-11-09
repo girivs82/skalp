@@ -24,7 +24,7 @@ pub struct GlobalNetworkAllocator {
     /// Which global network indices are currently in use
     used_networks: [bool; 8],
     /// Mapping from net ID to allocated global network
-    allocations: std::collections::HashMap<GateNetId, u8>,
+    allocations: crate::collections::HashMap<GateNetId, u8>,
 }
 
 impl GlobalNetworkAllocator {

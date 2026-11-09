@@ -13,12 +13,12 @@ use super::{dsp, ebr};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
 use crate::bitstream::config::{ConfigGenerator, DesignBit, PlacedDesign};
 use crate::bitstream::prepare::{constant_value, is_pad};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::{PlaceRouteError, Result};
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::{Cell, CellId};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Slices per logic tile, in LUT/FF numbering order.

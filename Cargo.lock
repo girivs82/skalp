@@ -3553,6 +3553,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "ron 0.8.1",
+ "rustc-hash",
  "serde",
  "serde_json",
  "skalp-frontend",

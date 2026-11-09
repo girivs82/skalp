@@ -4,12 +4,12 @@
 //! bitstream emitters need, handling the connections with no routing (constants
 //! and dedicated carry paths) and fixing IO cells on their assigned sites.
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::{BelType, Device, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::HashMap;
 
 fn emit_err(message: String) -> PlaceRouteError {
     PlaceRouteError::BitstreamFailed(message)

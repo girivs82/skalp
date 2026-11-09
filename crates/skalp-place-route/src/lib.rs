@@ -55,6 +55,7 @@
 pub mod bitstream;
 pub mod boards;
 pub mod clock_routing;
+pub mod collections;
 pub mod device;
 pub mod error;
 pub mod packing;

@@ -6,13 +6,13 @@
 
 use super::{dsp, ebr, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
+use crate::collections::HashMap;
 use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
 use crate::timing::sta::{TimingEndpoint, TimingModel};
 use serde::Deserialize;
 use skalp_lir::gate_netlist::Cell;
 use skalp_lir::tech_library::CellFunction;
-use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]

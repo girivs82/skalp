@@ -5,8 +5,8 @@
 
 use super::super::{PackagePins, TileType, WireType};
 use super::{Ice40Device, Ice40Variant};
+use crate::collections::{HashMap, HashMapExt};
 use crate::error::{PlaceRouteError, Result};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Parsed chip database

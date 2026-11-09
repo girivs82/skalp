@@ -4,8 +4,8 @@
 //! - PLL parameter calculator (like icepll)
 //! - BRAM content swapping (like icebram)
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::error::{PlaceRouteError, Result};
-use std::collections::HashMap;
 
 // ============================================================================
 // PLL Parameter Calculator (icepll equivalent)

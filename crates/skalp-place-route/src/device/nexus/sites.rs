@@ -5,9 +5,9 @@
 
 use super::prjoxide_graph::ClockRegions;
 use super::{NexusVariant, PrjoxideTile};
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::PackagePins;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Pin name that assigns a clock input to the on-chip oscillator.

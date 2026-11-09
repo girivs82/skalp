@@ -21,12 +21,12 @@ pub use lut_permutation::{
 };
 pub use pathfinder::PathFinder;
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::{Device, PipId, WireId};
 use crate::error::Result;
 use crate::placer::PlacementResult;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
-use std::collections::HashMap;
 
 /// Routing algorithm selection
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

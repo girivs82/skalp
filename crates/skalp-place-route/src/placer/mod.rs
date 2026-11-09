@@ -20,13 +20,13 @@ pub use constraints::{
 };
 pub use legalization::Legalizer;
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::{BelType, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::HashMap;
 
 /// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
 /// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
@@ -140,7 +140,21 @@ pub struct PlacerConfig {
     pub parallel: bool,
     /// Batch size for parallel move evaluation
     pub parallel_batch_size: usize,
+    /// Share (0..=1) of each tile's BELs of a type placement may fill.
+    /// `None`: [`DEFAULT_TILE_FILL`], or more if the design needs it to fit
+    /// ([`Placer::fill_limit`]).
+    pub max_tile_fill: Option<f64>,
 }
+
+/// How full placement fills a tile's BELs of each type when the design
+/// leaves room. Packing every tile full left the busiest part of a design
+/// needing more signals in and out of each tile than the local routing
+/// carries (CLE-µ on the LFCPNX-100 never finished routing).
+pub const DEFAULT_TILE_FILL: f64 = 0.75;
+
+/// Room above the fill a design needs at the least, so the nearest-site
+/// search still finds BELs near where the cells want to be
+const FILL_HEADROOM: f64 = 1.15;
 
 impl Default for PlacerConfig {
     fn default() -> Self {
@@ -156,6 +170,7 @@ impl Default for PlacerConfig {
             io_constraints: IoConstraints::new(),
             parallel: false, // Default to serial for determinism
             parallel_batch_size: 64,
+            max_tile_fill: None,
         }
     }
 }
@@ -266,6 +281,11 @@ impl<D: Device + Clone> Placer<D> {
     ) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        let fill_limit = self.fill_limit(netlist);
+        log::info!(
+            "placer: filling tiles to at most {:.0}%",
+            fill_limit * 100.0
+        );
 
         // Extract inline constraints
         let inline_constraints = Self::extract_inline_constraints(netlist);
@@ -294,7 +314,7 @@ impl<D: Device + Clone> Placer<D> {
             PlacementAlgorithm::AnalyticalWithRefinement
             | PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical with carry chain column constraints
-                let analytical = AnalyticalPlacer::new(&self.device);
+                let analytical = AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
                 let initial = if carry_chains.is_empty() {
                     analytical.place(netlist)?
                 } else {
@@ -302,7 +322,7 @@ impl<D: Device + Clone> Placer<D> {
                 };
 
                 // Legalize with carry chain consecutive-row constraints
-                let legalizer = Legalizer::new(&self.device);
+                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
                 let legalized =
                     legalizer.legalize_with_carry_chains(initial, netlist, carry_chains)?;
 
@@ -335,6 +355,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
+                .with_fill_limit(fill_limit)
                 .with_carry_chains(carry_chains.to_vec());
 
                 annealer.optimize(legalized, netlist)?
@@ -362,6 +384,11 @@ impl<D: Device + Clone> Placer<D> {
     pub fn place(&mut self, netlist: &GateNetlist) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        let fill_limit = self.fill_limit(netlist);
+        log::info!(
+            "placer: filling tiles to at most {:.0}%",
+            fill_limit * 100.0
+        );
 
         // Extract inline constraints from cell parameters (LOC, IO_STANDARD, etc.)
         let inline_constraints = Self::extract_inline_constraints(netlist);
@@ -390,12 +417,14 @@ impl<D: Device + Clone> Placer<D> {
             PlacementAlgorithm::Random => self.random_placement(netlist)?,
             PlacementAlgorithm::Analytical => {
                 let analytical = AnalyticalPlacer::new(&self.device)
+                    .with_fill_limit(fill_limit)
                     .with_resolved_constraints(resolved_constraints.clone());
                 analytical.place(netlist)?
             }
             PlacementAlgorithm::ForceDirected => {
                 // Use analytical as base for force-directed
                 let analytical = AnalyticalPlacer::new(&self.device)
+                    .with_fill_limit(fill_limit)
                     .with_resolved_constraints(resolved_constraints.clone());
                 analytical.place(netlist)?
             }
@@ -409,17 +438,20 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.max_iterations,
                 )
                 .with_parallel(self.config.parallel)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
+                .with_fill_limit(fill_limit);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalWithRefinement => {
                 // Analytical + legalization + SA refinement
                 let analytical = AnalyticalPlacer::new(&self.device)
+                    .with_fill_limit(fill_limit)
                     .with_resolved_constraints(resolved_constraints.clone());
                 let initial = analytical.place(netlist)?;
 
                 // Legalize
-                let legalizer = Legalizer::new(&self.device);
+                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
                 let legalized = legalizer.legalize(initial, netlist)?;
 
                 // SA refinement
@@ -431,7 +463,9 @@ impl<D: Device + Clone> Placer<D> {
                 )
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
+                .with_fill_limit(fill_limit);
                 annealer.optimize(legalized, netlist)?
             }
             PlacementAlgorithm::TimingDriven => {
@@ -445,17 +479,20 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.timing_weight,
                 )
                 .with_parallel(self.config.parallel)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
+                .with_fill_limit(fill_limit);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical + legalization + timing-driven SA refinement
                 let analytical = AnalyticalPlacer::new(&self.device)
+                    .with_fill_limit(fill_limit)
                     .with_resolved_constraints(resolved_constraints.clone());
                 let initial = analytical.place(netlist)?;
 
                 // Legalize
-                let legalizer = Legalizer::new(&self.device);
+                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
                 let legalized = legalizer.legalize(initial, netlist)?;
 
                 // Timing-driven SA refinement
@@ -468,7 +505,9 @@ impl<D: Device + Clone> Placer<D> {
                 )
                 .with_parallel(self.config.parallel)
                 .with_refinement(true)
-                .with_batch_size(self.config.parallel_batch_size);
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_seed(self.config.seed)
+                .with_fill_limit(fill_limit);
                 annealer.optimize(legalized, netlist)?
             }
         };
@@ -530,6 +569,71 @@ impl<D: Device + Clone> Placer<D> {
         }
 
         constraints
+    }
+
+    /// The share of each tile's BELs of a type placement may fill: the
+    /// configured [`PlacerConfig::max_tile_fill`], or [`DEFAULT_TILE_FILL`]
+    /// raised to what the design needs to fit, with some headroom. A
+    /// design's demand per BEL type counts its cells and the LUTs carry and
+    /// distributed-RAM cells use up beside their own BEL.
+    pub fn fill_limit(&self, netlist: &GateNetlist) -> f64 {
+        if let Some(fill) = self.config.max_tile_fill {
+            return fill.clamp(0.0, 1.0);
+        }
+        // BELs of each type on the device, and BELs a RAM cell blocks
+        let (width, height) = self.device.grid_size();
+        let mut available: HashMap<BelType, usize> = HashMap::new();
+        let mut ram_footprint = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                let Some(tile) = self.device.tile_at(x, y) else {
+                    continue;
+                };
+                for (i, bel) in tile.bels().iter().enumerate() {
+                    *available.entry(bel.bel_type).or_default() += 1;
+                    if bel.bel_type == BelType::DistRam && ram_footprint == 0 {
+                        ram_footprint = self.device.bel_footprint(x, y, i).len();
+                    }
+                }
+            }
+        }
+        let luts_per_carry = self
+            .device
+            .carry_chain_layout()
+            .and_then(|l| l.slots.first().map(|s| s.lut_bels.len()))
+            .unwrap_or(0);
+        let mut demand: HashMap<BelType, usize> = HashMap::new();
+        for cell in netlist
+            .cells
+            .iter()
+            .filter(|c| !is_constant_cell(&c.cell_type))
+        {
+            let required = cell_bel_type(cell);
+            *demand.entry(required).or_default() += 1;
+            let blocked_luts = match required {
+                BelType::Carry => luts_per_carry,
+                BelType::DistRam => ram_footprint,
+                _ => 0,
+            };
+            *demand.entry(BelType::Lut4).or_default() += blocked_luts;
+        }
+        let needed = demand
+            .iter()
+            .filter(|&(_, &n)| n > 0)
+            .map(|(&required, &n)| {
+                let bels: usize = available
+                    .iter()
+                    .filter(|&(&t, _)| sites::bel_types_compatible(t, required))
+                    .map(|(_, &c)| c)
+                    .sum();
+                if bels == 0 {
+                    1.0
+                } else {
+                    n as f64 / bels as f64
+                }
+            })
+            .fold(0.0f64, f64::max);
+        (needed * FILL_HEADROOM).clamp(DEFAULT_TILE_FILL, 1.0)
     }
 
     /// Check if design fits on device

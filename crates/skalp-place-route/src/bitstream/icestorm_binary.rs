@@ -173,7 +173,7 @@ struct CramBuilder {
     current_tile: Option<(u32, u32, TileKind)>,
     current_row: usize,
     // CRAM data organized by (x, y, kind) -> rows of bits
-    tiles: std::collections::HashMap<(u32, u32), Vec<Vec<bool>>>,
+    tiles: crate::collections::HashMap<(u32, u32), Vec<Vec<bool>>>,
 }
 
 impl CramBuilder {
@@ -182,7 +182,7 @@ impl CramBuilder {
             grid_size,
             current_tile: None,
             current_row: 0,
-            tiles: std::collections::HashMap::new(),
+            tiles: crate::collections::HashMap::default(),
         }
     }
 

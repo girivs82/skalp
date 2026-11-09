@@ -18,8 +18,8 @@ use super::{
     RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment,
     WireType,
 };
+use crate::collections::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// iCE40 device variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
