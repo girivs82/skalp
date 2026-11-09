@@ -368,22 +368,17 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 break;
             }
 
-            // Convergence check: require minimum 15 iterations before checking,
-            // then stop if total overuse improved < 2% over 8 iterations. (The
-            // maximum overuse is no measure of progress: it sits at 2 while
-            // the number of shared wires falls.)
+            // Stall check, after at least 15 iterations: stop once the best
+            // total overuse of the last 8 iterations is under 2% below the
+            // best before them. The best, not the latest: as the present
+            // factor climbs, overuse wanders up and down while still falling
+            // overall, and comparing two single iterations stopped such runs
+            // at an upswing. (The maximum overuse is no measure of progress:
+            // it sits at 2 while the number of shared wires falls.)
             congestion_history.push(congestion.total_overuse() as f64);
-            if congestion_history.len() >= 15 {
-                let window = 8;
-                if congestion_history.len() >= window {
-                    let recent = &congestion_history[congestion_history.len() - window..];
-                    let oldest = recent[0];
-                    let newest = recent[window - 1];
-                    if oldest > 0.0 && (oldest - newest) / oldest < 0.02 {
-                        result.iterations = iteration;
-                        break;
-                    }
-                }
+            if congestion_history.len() >= 15 && stalled(&congestion_history, 8, 0.02) {
+                result.iterations = iteration;
+                break;
             }
 
             // PathFinder: the cost of sharing a wire grows geometrically, so a
@@ -1627,6 +1622,18 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     }
 }
 
+/// Whether the best of the last `window` values of `history` is less than
+/// `fraction` below the best before them
+fn stalled(history: &[f64], window: usize, fraction: f64) -> bool {
+    if history.len() <= window {
+        return false;
+    }
+    let (before, recent) = history.split_at(history.len() - window);
+    let best_before = before.iter().copied().fold(f64::INFINITY, f64::min);
+    let best_recent = recent.iter().copied().fold(f64::INFINITY, f64::min);
+    best_before > 0.0 && (best_before - best_recent) / best_before < fraction
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1672,6 +1679,23 @@ mod tests {
                 .insert(*cell, PlacementLoc::new(x, y, 0, BelType::Lut4));
         }
         (netlist, placement, [nets[1], nets[3]])
+    }
+
+    #[test]
+    fn stall_check_looks_at_the_best_not_the_latest() {
+        // Falling, then wandering above an earlier low: not stalled while the
+        // window holds a new best
+        let history = [
+            400.0, 300.0, 250.0, 182.0, 174.0, 160.0, 157.0, 156.0, 139.0, 150.0, 173.0,
+        ];
+        assert!(!stalled(&history, 8, 0.02));
+        // Eight iterations without beating 139 by 2%: stalled
+        let flat = [
+            400.0, 139.0, 150.0, 141.0, 145.0, 139.0, 142.0, 160.0, 140.0, 138.0,
+        ];
+        assert!(stalled(&flat, 8, 0.02));
+        // Too short to judge
+        assert!(!stalled(&[5.0, 5.0], 8, 0.02));
     }
 
     #[test]
