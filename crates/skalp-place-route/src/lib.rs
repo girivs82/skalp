@@ -53,6 +53,7 @@
 //! - Critical path reporting
 
 pub mod bitstream;
+pub mod clock_routing;
 pub mod device;
 pub mod error;
 pub mod packing;

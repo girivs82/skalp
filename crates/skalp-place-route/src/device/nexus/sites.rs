@@ -121,58 +121,92 @@ pub struct DesignRegion {
     pub logic_rows: (u32, u32),
 }
 
+/// LUTs in a logic tile.
+const LUTS_PER_TILE: usize = 8;
+/// Share of a region's LUTs a design should fill, leaving room to route.
+const MAX_REGION_FILL: f64 = 0.6;
+
 /// The region holding a design's pads, its logic, and its clock path.
 ///
 /// The on-chip clock reaches the fabric through the TMID and CMUX tiles, so the
-/// window always includes them. Logic stays within one clock spine's rows,
-/// because a clock pin can only be reached from the spine that serves its row.
+/// window always includes them. Logic stays within one clock spine's rows when
+/// it fits, keeping the loaded part of the device small; a larger design gets
+/// every spine and then the full width of the chip.
 pub fn design_region(
     tiles: &[PrjoxideTile],
     clocks: &ClockRegions,
     sites: &[(u32, u32)],
+    lut_count: usize,
 ) -> DesignRegion {
     let clock_tiles = tiles
         .iter()
         .filter(|t| t.tiletype.starts_with("TMID") || t.tiletype.contains("_GSR"));
     let first_col = clock_tiles.clone().map(|t| t.x).min().unwrap_or(0);
-    let last_row = clock_tiles.map(|t| t.y).max().unwrap_or(0);
+    let last_clock_row = clock_tiles.map(|t| t.y).max().unwrap_or(0);
+    let last_row = tiles.iter().map(|t| t.y).max().unwrap_or(0);
+    let last_col = tiles.iter().map(|t| t.x).max().unwrap_or(0);
 
-    let logic_rows = sites
+    let one_spine = sites
         .iter()
         .find_map(|&(_, y)| clocks.spine_rows(y))
         .or_else(|| clocks.first_spine_rows())
-        .unwrap_or((0, last_row));
+        .unwrap_or((0, last_clock_row));
+    let all_spines = clocks.all_spine_rows().unwrap_or((0, last_row));
 
-    let x0 = sites
-        .iter()
-        .map(|s| s.0)
-        .min()
-        .unwrap_or(first_col)
-        .min(first_col);
-    let x1 = sites
-        .iter()
-        .map(|s| s.0)
-        .max()
-        .unwrap_or(first_col)
-        .max(first_col + MIN_REGION_COLUMNS);
-    let y1 = sites
-        .iter()
-        .map(|s| s.1)
-        .max()
-        .unwrap_or(last_row)
-        .max(last_row)
-        .max(logic_rows.1)
-        + 2;
-    DesignRegion {
-        window: (x0, 0, x1, y1),
-        logic_rows,
-    }
+    let site_x0 = sites.iter().map(|s| s.0).min().unwrap_or(first_col);
+    let site_x1 = sites.iter().map(|s| s.0).max().unwrap_or(first_col);
+    let site_y1 = sites.iter().map(|s| s.1).max().unwrap_or(0);
+
+    let build = |rows: (u32, u32), x0: u32, x1: u32| DesignRegion {
+        window: (
+            x0.min(site_x0),
+            0,
+            x1.max(site_x1),
+            (rows.1.max(site_y1).max(last_clock_row) + 2).min(last_row),
+        ),
+        logic_rows: rows,
+    };
+    let fits = |region: &DesignRegion| {
+        let (x0, _, x1, _) = region.window;
+        let (from, to) = region.logic_rows;
+        let capacity = tiles
+            .iter()
+            .filter(|t| t.tiletype == "PLC" && t.x >= x0 && t.x <= x1 && t.y >= from && t.y <= to)
+            .count()
+            * LUTS_PER_TILE;
+        lut_count as f64 <= capacity as f64 * MAX_REGION_FILL
+    };
+
+    let right_edge = (first_col + MIN_REGION_COLUMNS).max(site_x1);
+    [
+        build(one_spine, first_col, right_edge),
+        build(one_spine, first_col, last_col),
+        build(all_spines, first_col, last_col),
+    ]
+    .into_iter()
+    .find(|region| fits(region))
+    .unwrap_or_else(|| build(all_spines, 0, last_col))
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::prjoxide_load::{find_database, load_tilegrid};
     use super::*;
+
+    #[test]
+    fn large_designs_get_more_of_the_chip() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
+        let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
+        let small = design_region(&tiles, &clocks, &[(159, 31)], 100);
+        let large = design_region(&tiles, &clocks, &[(159, 31)], 45_000);
+        assert_eq!(small.logic_rows, (1, 37));
+        assert_eq!(large.logic_rows, (1, 73));
+        assert!(large.window.3 > small.window.3);
+    }
 
     #[test]
     fn lfcpnx_pins_and_oscillator_are_known() {
@@ -210,7 +244,7 @@ mod tests {
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
         let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
-        let region = design_region(&tiles, &clocks, &[(159, 31)]);
+        let region = design_region(&tiles, &clocks, &[(159, 31)], 100);
         assert_eq!(region.window, (73, 0, 159, 40));
         assert_eq!(region.logic_rows, (1, 37));
     }

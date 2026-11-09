@@ -528,7 +528,6 @@ pub fn place_and_route_nexus_real(
     };
     use crate::bitstream::prepare;
     use crate::bitstream::BitstreamFormat;
-    use crate::device::nexus::clock_route;
     use crate::device::nexus::emit::NexusConfig;
     use crate::device::nexus::prjoxide_load::load_tilegrid;
     use crate::device::nexus::prjoxide_pack::NexusBitWriter;
@@ -552,7 +551,14 @@ pub fn place_and_route_nexus_real(
         variant.prjoxide_device(),
     )
     .map_err(PlaceRouteError::BitstreamFailed)?;
-    let region = sites::design_region(&tiles, &clocks, &pad_sites);
+    let mut region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len());
+    if std::env::var("SKALP_TEST_BOTH_SPINES").is_ok() {
+        region = sites::design_region(&tiles, &clocks, &pad_sites, 45_000);
+    }
+    if let Ok(rows) = std::env::var("SKALP_TEST_ROWS") {
+        let (a, b) = rows.split_once(',').unwrap();
+        region.logic_rows = (a.parse().unwrap(), b.parse().unwrap());
+    }
     let device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
             .map_err(PlaceRouteError::BitstreamFailed)?;
@@ -569,7 +575,7 @@ pub fn place_and_route_nexus_real(
     prepare::place_pads(&device, netlist, &mut placement)?;
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist);
-    let clock_routes = clock_route::route_clock_nets(&device, &routable, &placement)?;
+    let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         net.fanout
             .retain(|(_, pin)| *pin != crate::device::FF_PIN_CLK);

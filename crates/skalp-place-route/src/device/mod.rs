@@ -698,6 +698,11 @@ pub trait Device: Send + Sync {
 
     // BEL pin wire methods (optional, for proper routing endpoints)
 
+    /// Whether a wire is general fabric routing, which a clock must not use.
+    fn is_general_routing_wire(&self, _wire: WireId) -> bool {
+        false
+    }
+
     /// The wire that `pin` of a cell placed on BEL `bel_index` of tile
     /// (x, y) connects to. `None`: the device does not model it, and the
     /// router falls back to the iCE40 logic-cell layout (a LUT/DFF pair per

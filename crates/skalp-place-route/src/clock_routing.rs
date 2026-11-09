@@ -1,12 +1,12 @@
-//! Route clock nets on the Nexus dedicated clock network.
+//! Route clock nets on a device's dedicated clock network.
 //!
 //! Each clock pin is reached by a breadth-first search upstream through the
-//! global wires (spines, branches and clock muxes), never through the general
-//! `H0x`/`V0x` fabric wires, so clocks arrive with low skew and leave the
-//! general routing to data. Clock wires are claimed here, before general
-//! routing, so data nets cannot be routed through them.
+//! dedicated clock wires, never through the general fabric, so clocks arrive
+//! with low skew and leave the general routing to data. Clock wires are claimed
+//! here, before general routing, so data nets cannot be routed through them.
+//! Which wires count as general comes from
+//! [`Device::is_general_routing_wire`].
 
-use super::NexusDevice;
 use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
@@ -23,22 +23,8 @@ pub struct ClockRouting {
     pub claimed: HashSet<WireId>,
 }
 
-/// Whether the destination wire of a pip is general fabric routing.
-///
-/// Wire names carry a `R<row>C<col>_` location prefix, then `H0x` or `V0x` for
-/// the general spans.
-fn is_general_wire(name: &str) -> bool {
-    let base = name.rsplit('_').next().unwrap_or(name);
-    let base = name
-        .strip_prefix('R')
-        .and_then(|rest| rest.split_once('_'))
-        .map_or(base, |(_, rest)| rest);
-    let mut chars = base.chars();
-    matches!(chars.next(), Some('H') | Some('V')) && chars.next() == Some('0')
-}
-
-fn clock_pin_wire(
-    device: &NexusDevice,
+fn clock_pin_wire<D: Device + ?Sized>(
+    device: &D,
     placement: &PlacementResult,
     cell: skalp_lir::gate_netlist::CellId,
     pin: CellPin,
@@ -48,8 +34,8 @@ fn clock_pin_wire(
 }
 
 /// Search upstream from `sink` to any wire already on this net.
-fn find_path(
-    device: &NexusDevice,
+fn find_path<D: Device + ?Sized>(
+    device: &D,
     sink: WireId,
     tree: &HashSet<WireId>,
     other_nets: &HashMap<WireId, GateNetId>,
@@ -63,10 +49,9 @@ fn find_path(
             let Some(pip) = device.pip(pip_id) else {
                 continue;
             };
-            let is_general = device
-                .wire(pip.dst_wire)
-                .is_some_and(|w| is_general_wire(&w.name));
-            if is_general || other_nets.contains_key(&pip.src_wire) {
+            if device.is_general_routing_wire(pip.dst_wire)
+                || other_nets.contains_key(&pip.src_wire)
+            {
                 continue;
             }
             if !seen.insert(pip.src_wire) {
@@ -89,8 +74,8 @@ fn find_path(
 }
 
 /// Route every clock pin of a design prepared for routing.
-pub fn route_clock_nets(
-    device: &NexusDevice,
+pub fn route_clock_nets<D: Device + ?Sized>(
+    device: &D,
     netlist: &GateNetlist,
     placement: &PlacementResult,
 ) -> Result<ClockRouting> {
@@ -167,12 +152,12 @@ pub fn route_clock_nets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::nexus::prjoxide_graph::node_name;
+    use crate::device::nexus::{prjoxide_load::find_database, resolve_wire};
+    use crate::device::nexus::{NexusDevice, NexusVariant};
 
     #[test]
     fn oscillator_reaches_a_clock_pin_on_dedicated_wires() {
-        use super::super::prjoxide_graph::node_name;
-        use super::super::{prjoxide_load::find_database, resolve_wire, NexusVariant};
-
         let Some(db) = find_database() else {
             eprintln!("PRJOXIDE_DB not found — skipping");
             return;
@@ -193,22 +178,7 @@ mod tests {
         assert!(!path.is_empty());
         for pip in path {
             let dst = device.pip(pip).unwrap().dst_wire;
-            assert!(!is_general_wire(&device.wire(dst).unwrap().name));
+            assert!(!device.is_general_routing_wire(dst));
         }
-    }
-
-    #[test]
-    fn general_wires_are_recognized() {
-        assert!(is_general_wire("R2C97_H01W0300"));
-        assert!(is_general_wire("R2C97_V02S0601"));
-        assert!(is_general_wire("R2C97_H00L0100"));
-    }
-
-    #[test]
-    fn clock_network_wires_are_not_general() {
-        assert!(!is_general_wire("R2C97_BRANCH:HPBX0000"));
-        assert!(!is_general_wire("R19C109_SPINE:VPSX0000"));
-        assert!(!is_general_wire("R36C76_JCLK0"));
-        assert!(!is_general_wire("G:JOSCHF_TMID_CORE_TMIDMUX"));
     }
 }

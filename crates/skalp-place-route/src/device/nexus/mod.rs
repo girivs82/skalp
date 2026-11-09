@@ -12,7 +12,6 @@
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
-pub mod clock_route;
 pub mod data;
 pub mod emit;
 pub mod prjoxide_bels;
@@ -1632,6 +1631,17 @@ impl NexusDevice {
     }
 }
 
+/// Whether a wire name is general fabric routing: `H0x` or `V0x` after its
+/// `R<row>C<col>_` location prefix.
+fn is_general_wire_name(name: &str) -> bool {
+    let base = name
+        .strip_prefix('R')
+        .and_then(|rest| rest.split_once('_'))
+        .map_or(name, |(_, rest)| rest);
+    let mut chars = base.chars();
+    matches!(chars.next(), Some('H') | Some('V')) && chars.next() == Some('0')
+}
+
 impl Device for NexusDevice {
     fn family(&self) -> DeviceFamily {
         DeviceFamily::Nexus
@@ -1724,7 +1734,7 @@ impl Device for NexusDevice {
         (0..height)
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .filter_map(|(x, y)| self.tile_at(x, y))
-            .find(|t| t.tile_type() == TileType::Logic)
+            .find(|t| t.tile_type() == TileType::Logic && !t.bels().is_empty())
             .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
@@ -1771,6 +1781,11 @@ impl Device for NexusDevice {
     fn route_cost_estimate(&self, dx: u32, dy: u32) -> Option<f64> {
         let last = self.hop_costs.len().checked_sub(1)?;
         Some(self.hop_costs[(dx as usize).min(last)] + self.hop_costs[(dy as usize).min(last)])
+    }
+
+    fn is_general_routing_wire(&self, wire: WireId) -> bool {
+        self.wire(wire)
+            .is_some_and(|w| is_general_wire_name(&w.name))
     }
 
     fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
@@ -1962,6 +1977,17 @@ mod tests {
     /// the exact `Device` trait the Placer/Router use, real BELs whose pins bind to
     /// real routing nodes that are reachable through the fabric. This is the first
     /// end-to-end exercise of the silicon-grounded device model.
+    #[test]
+    fn general_wires_are_recognized() {
+        assert!(is_general_wire_name("R2C97_H01W0300"));
+        assert!(is_general_wire_name("R2C97_V02S0601"));
+        assert!(is_general_wire_name("R2C97_H00L0100"));
+        assert!(!is_general_wire_name("R2C97_BRANCH:HPBX0000"));
+        assert!(!is_general_wire_name("R19C109_SPINE:VPSX0000"));
+        assert!(!is_general_wire_name("R36C76_JCLK0"));
+        assert!(!is_general_wire_name("G:JOSCHF_TMID_CORE_TMIDMUX"));
+    }
+
     #[test]
     fn from_prjoxide_device_is_placeable_and_routable() {
         let Some(db) = prjoxide_load::find_database() else {

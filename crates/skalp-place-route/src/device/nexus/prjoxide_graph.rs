@@ -366,6 +366,13 @@ impl ClockRegions {
             .map(|s| (s.from_row, s.to_row))
     }
 
+    /// Rows served by any clock spine.
+    pub fn all_spine_rows(&self) -> Option<(u32, u32)> {
+        let from = self.spines.iter().map(|s| s.from_row).min()?;
+        let to = self.spines.iter().map(|s| s.to_row).max()?;
+        Some((from, to))
+    }
+
     /// The first clock spine's rows.
     pub fn first_spine_rows(&self) -> Option<(u32, u32)> {
         self.spines.first().map(|s| (s.from_row, s.to_row))
