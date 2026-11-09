@@ -196,8 +196,8 @@ impl Outer {
 }
 "#);
     // Whether it lowers is a separate question; it must not recurse forever.
-    let _ = skalp_mir::MirCompiler::new()
-        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs);
+    let _ =
+        skalp_mir::MirCompiler::new().compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs);
 }
 
 /// A `generate for` whose bounds are generic is preserved as a TEMPLATE in the

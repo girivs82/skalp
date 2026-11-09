@@ -225,7 +225,7 @@ enum Commands {
         /// Source file
         source: PathBuf,
 
-        /// Target device (e.g., ice40-hx8k, ice40-hx1k, ice40-up5k)
+        /// Target device (e.g., ice40-hx8k, ice40-up5k, nexus-lfcpnx100, nexus-lifcl40)
         #[arg(short, long)]
         device: String,
 
@@ -262,7 +262,7 @@ enum Commands {
         /// Gate-level netlist file (JSON format from previous synthesis)
         netlist: PathBuf,
 
-        /// Target device (e.g., ice40-hx8k, ice40-hx1k, ice40-up5k)
+        /// Target device (e.g., ice40-hx8k, ice40-up5k, nexus-lfcpnx100, nexus-lifcl40)
         #[arg(short, long)]
         device: String,
 
@@ -4130,16 +4130,21 @@ fn synthesize_design(
     })?;
 
     // Determine library to use based on device family
+    let family = normalize_device_family(family);
     let library_name = match family {
         "ice40" => "ice40",
+        "nexus" => "nexus",
         "xc7" | "xilinx" => "generic_asic", // Xilinx support pending
         "sky130" => "sky130",
         "freepdk45" => "freepdk45",
         _ => anyhow::bail!(
-            "Unsupported device family: {}. Supported: ice40, sky130, freepdk45",
+            "Unsupported device family: {}. Supported: ice40, nexus, sky130, freepdk45",
             family
         ),
     };
+    if family == "nexus" {
+        nexus_variant(variant)?;
+    }
 
     // Load technology library
     let library = get_stdlib_library(library_name)
@@ -4161,7 +4166,7 @@ fn synthesize_design(
     // switched/regulated domains are an error here unless --power-stub
     // requests ASIC-prototyping semantics — and then every stubbed element
     // is reported, never silent.
-    let is_fpga_family = matches!(family, "ice40" | "xc7" | "xilinx");
+    let is_fpga_family = matches!(family, "ice40" | "nexus" | "xc7" | "xilinx");
     if is_fpga_family {
         match skalp_mir::fpga_power::fpga_power_posture(&hir, power_stub) {
             Ok(Some(report)) => print!("{}", report),
@@ -4272,9 +4277,13 @@ fn synthesize_design(
         println!();
         println!("🔧 Running Place & Route...");
         run_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+    } else if full_flow && family == "nexus" {
+        println!();
+        println!("🔧 Running Place & Route...");
+        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
     } else if full_flow {
         println!();
-        println!("⚠️  Place & route only supported for iCE40 devices currently");
+        println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
     }
 
     println!();
@@ -4303,11 +4312,15 @@ fn run_place_and_route(
         )
     })?;
 
-    if family != "ice40" {
+    let family = normalize_device_family(family);
+    if family != "ice40" && family != "nexus" {
         anyhow::bail!(
-            "Place & route only supports iCE40 devices currently. Got: {}",
+            "Place & route supports iCE40 and Nexus devices currently. Got: {}",
             family
         );
+    }
+    if family == "nexus" {
+        nexus_variant(variant)?;
     }
 
     // Load netlist from JSON
@@ -4323,10 +4336,115 @@ fn run_place_and_route(
     fs::create_dir_all(output_dir)?;
 
     // Run P&R
-    run_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+    if family == "nexus" {
+        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+    } else {
+        run_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+    }
 
     println!();
     println!("✅ Place & route complete");
+    Ok(())
+}
+
+/// Map device family aliases onto the family names the flow uses. Lattice part
+/// prefixes are accepted for Nexus: `lifcl-40` and `lfcpnx-100` are the same as
+/// `nexus-lifcl40` and `nexus-lfcpnx100`.
+fn normalize_device_family(family: &str) -> &str {
+    match family {
+        "nexus" | "certuspro" | "certuspro_nx" | "lattice_nexus" | "lifcl" | "lfcpnx" => "nexus",
+        other => other,
+    }
+}
+
+/// Parse a Nexus variant: `lfcpnx100`, `lfcpnx-100`, `100`, `lifcl40`, `lifcl-40`, `40`.
+fn nexus_variant(variant: &str) -> Result<skalp_place_route::NexusVariant> {
+    use skalp_place_route::NexusVariant;
+    let v: String = variant
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    match v.as_str() {
+        "lfcpnx100" | "100" | "certuspro100" => Ok(NexusVariant::Lfcpnx100),
+        "lifcl40" | "40" | "crosslink40" => Ok(NexusVariant::Lifcl40),
+        _ => anyhow::bail!(
+            "Unknown Nexus variant: {}. Supported: lfcpnx100 (CertusPro-NX), lifcl40 (CrossLink-NX)",
+            variant
+        ),
+    }
+}
+
+/// Place and route a gate-level netlist on a Lattice Nexus device.
+fn run_nexus_pnr_on_netlist(
+    gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: &str,
+    output_dir: &std::path::Path,
+    preset: &str,
+    frequency: Option<f64>,
+) -> Result<()> {
+    use skalp_place_route::{place_and_route_nexus, PnrConfig, TimingConfig};
+
+    let nexus = nexus_variant(variant)?;
+    let mut config = match preset.to_lowercase().as_str() {
+        "fast" => PnrConfig::fast(),
+        "default" => PnrConfig::default(),
+        "high_quality" | "high-quality" => PnrConfig::high_quality(),
+        _ => {
+            println!("⚠️  Unknown preset '{}', using default", preset);
+            PnrConfig::default()
+        }
+    };
+    if let Some(freq) = frequency {
+        config.timing = Some(TimingConfig {
+            target_frequency: freq,
+            ..TimingConfig::default()
+        });
+    }
+
+    println!("Variant: {:?}", nexus);
+    println!("Preset: {}", preset);
+    println!();
+    println!("Running placement...");
+    let result = place_and_route_nexus(gate_netlist, nexus, config)?;
+
+    println!("Placement:");
+    println!("  Cells placed: {}", result.placement.placements.len());
+    println!(
+        "  Utilization: {:.1}%",
+        100.0 * result.placement.utilization
+    );
+    println!("Routing:");
+    println!("  Nets routed: {}", result.routing.routes.len());
+    println!("  Total wirelength: {}", result.routing.wirelength);
+    if result.routing.success {
+        println!("  Status: ✅ Success");
+    } else {
+        println!("  Status: ⚠️ Incomplete (some nets unrouted)");
+    }
+    if let Some(ref timing) = result.timing {
+        println!("Timing:");
+        println!("  Target: {} MHz", timing.target_frequency);
+        println!("  Achieved: {:.2} MHz", timing.design_frequency);
+        if timing.meets_timing {
+            println!("  Status: ✅ Timing met");
+        } else {
+            println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
+            println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
+        }
+        let timing_path = output_dir.join("timing_report.json");
+        fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
+        println!("Timing report: {:?}", timing_path);
+    }
+
+    let bit_path = output_dir.join("design.bit");
+    result.bitstream.write_to_file(&bit_path)?;
+    println!();
+    println!(
+        "Bitstream: {:?} ({} bytes)",
+        bit_path,
+        result.bitstream.data.len()
+    );
     Ok(())
 }
 

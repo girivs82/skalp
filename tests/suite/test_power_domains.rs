@@ -2274,9 +2274,8 @@ impl Tx {{
             // `catch_unwind` is the point of the test — it fails loudly if the
             // compiler aborts instead of reporting.
             let result = std::panic::catch_unwind(|| {
-                skalp_frontend::parse_and_build_hir_from_file(&path).map(|hir| {
-                    skalp_mir::MirCompiler::new().compile_to_mir(&hir).is_ok()
-                })
+                skalp_frontend::parse_and_build_hir_from_file(&path)
+                    .map(|hir| skalp_mir::MirCompiler::new().compile_to_mir(&hir).is_ok())
             });
             assert!(
                 result.is_ok(),

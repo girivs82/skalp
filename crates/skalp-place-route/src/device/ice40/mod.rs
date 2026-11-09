@@ -1676,11 +1676,11 @@ impl Device for Ice40Device {
         self.wire_to_pips.get(&wire_id).cloned().unwrap_or_default()
     }
 
-    fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId> {
+    fn wire_src_pips(&self, wire_id: WireId) -> &[PipId] {
         self.wire_src_pips
             .get(&wire_id)
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {

@@ -56,7 +56,7 @@ mod minimal_pipeline_tests {
         // Generate and print Metal shader
         let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
-        println!("{}", &shader_code);
+        println!("{}", shader_code);
 
         // Create simulation config
         let config = UnifiedSimConfig {

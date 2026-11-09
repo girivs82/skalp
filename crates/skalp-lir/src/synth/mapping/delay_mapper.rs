@@ -259,7 +259,10 @@ impl DelayMapper {
         let mut best_match: Option<CutMatch> = None;
 
         for cut in &cut_set.cuts {
-            if cut.leaves.is_empty() {
+            // The trivial cut {node} is not an implementation of the node: choosing
+            // it maps the node onto itself, and writing the netlist then recurses
+            // forever (stack overflow in the Timing preset).
+            if cut.leaves.is_empty() || (cut.leaves.len() == 1 && cut.leaves[0] == node_id) {
                 continue;
             }
 
@@ -338,7 +341,8 @@ impl DelayMapper {
             // Find a smaller cell that still meets timing
             if let Some(cut_set) = cuts.get_cuts(node_id) {
                 for cut in &cut_set.cuts {
-                    if cut.leaves.is_empty() {
+                    if cut.leaves.is_empty() || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
+                    {
                         continue;
                     }
 

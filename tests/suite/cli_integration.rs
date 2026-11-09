@@ -4,11 +4,9 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn skalp_binary() -> PathBuf {
-    let mut binary = std::env::current_exe().unwrap();
-    binary.pop(); // deps
-    binary.pop(); // debug
-    binary.push("skalp");
-    binary
+    // Cargo builds the package's binaries for its integration tests and says
+    // where; guessing target/debug/skalp failed when only the test was built.
+    PathBuf::from(env!("CARGO_BIN_EXE_skalp"))
 }
 
 #[test]

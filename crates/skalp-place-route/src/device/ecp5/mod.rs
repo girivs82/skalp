@@ -26,11 +26,22 @@ mod tiles;
 pub use tiles::Ecp5Tile;
 
 use super::{
-    Bel, BelId, BelPin, BelType, ClockDomain, ClockResources, Device, DeviceFamily, DeviceStats,
-    DspTile, IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip, PipId,
-    RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment,
-    WireType,
+    Bel, BelId, BelPin, BelType, CellPin, ClockDomain, ClockResources, Device, DeviceFamily,
+    DeviceStats, DspTile, IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip,
+    PipId, RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId,
+    WireSegment, WireType,
 };
+
+/// Local wires per tile in the synthetic routing graph: the input-mux and
+/// switching wires of a logic tile, which every pin connection and every
+/// route through the tile uses one of.
+const LOCAL_WIRES: usize = 40;
+
+/// Local wires each BEL input pin can select from, `INPUT_MUX_STRIDE` apart
+/// (coprime with [`LOCAL_WIRES`]). With a few adjacent locals per pin, the
+/// pins of a fully used tile shared too few locals to all be fed at once.
+const INPUT_MUX_WIDTH: usize = 8;
+const INPUT_MUX_STRIDE: usize = 11;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -233,6 +244,9 @@ pub struct Ecp5Device {
     wire_src_pips: HashMap<WireId, Vec<PipId>>,
     tile_wires: HashMap<(u32, u32), Vec<WireId>>,
     bel_wires: HashMap<(u32, u32, String), WireId>,
+    /// Least routing cost per tile distance along one axis
+    /// ([`Device::route_cost_estimate`]); empty when not modelled
+    hop_costs: Vec<f64>,
     packages: HashMap<String, PackagePins>,
     routing: RoutingArchitecture,
     clock_resources: ClockResources,
@@ -263,6 +277,7 @@ impl Ecp5Device {
             wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
             bel_wires: HashMap::new(),
+            hop_costs: Vec::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(variant),
@@ -380,7 +395,7 @@ impl Ecp5Device {
     }
 
     fn make_logic_bels(bel_id: &mut u32) -> Vec<Bel> {
-        let mut bels = Vec::with_capacity(17);
+        let mut bels = Vec::with_capacity(20);
 
         for i in 0..8 {
             let id = BelId(*bel_id);
@@ -456,26 +471,40 @@ impl Ecp5Device {
             });
         }
 
+        // 4 carry cells, one per slice; carry k uses LUTs 2k and 2k+1
+        for slice in ['A', 'B', 'C', 'D'] {
+            let id = BelId(*bel_id);
+            *bel_id += 1;
+            bels.push(Bel {
+                id,
+                bel_type: BelType::Carry,
+                name: format!("CCU2C_{}", slice),
+                pins: vec![
+                    BelPin {
+                        name: "CIN".into(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "COUT".into(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                ],
+            });
+        }
+
+        // One distributed RAM site: a 16 x 4 RAM (DPR16X4) built from the
+        // LUTs of slices A and B plus slice C as its write port (RAMW), so it
+        // takes LUTs 0..5 (see bel_footprint)
         let id = BelId(*bel_id);
         *bel_id += 1;
         bels.push(Bel {
             id,
-            bel_type: BelType::Carry,
-            name: "CCU2C".into(),
-            pins: vec![
-                BelPin {
-                    name: "CIN".into(),
-                    direction: PinDirection::Input,
-                    wire: None,
-                },
-                BelPin {
-                    name: "COUT".into(),
-                    direction: PinDirection::Output,
-                    wire: None,
-                },
-            ],
+            bel_type: BelType::DistRam,
+            name: "DPRAM".to_string(),
+            pins: Vec::new(),
         });
-
         bels
     }
 
@@ -649,8 +678,8 @@ impl Ecp5Device {
                     .unwrap()
                     .tile_type();
 
-                // Local wires (ECP5 has ~20 local wires per tile)
-                for i in 0..20u8 {
+                // Local wires (40 per tile: the input-mux and switching wires of a PLC)
+                for i in 0..LOCAL_WIRES as u8 {
                     let w = Wire {
                         id: WireId(wire_id),
                         name: format!("R{}C{}_J{}", y, x, i),
@@ -663,6 +692,32 @@ impl Ecp5Device {
                     self.tile_wires.entry((x, y)).or_default().push(w.id);
                     self.wires.push(w);
                     wire_id += 1;
+                }
+
+                // Switch box: each local wire drives two others (+1 and +7
+                // around the tile), so a signal landing on any local wire
+                // can reach every other local wire of the tile, and through
+                // them every outgoing span and every BEL input. Without it a
+                // route could only continue from the few locals that happen
+                // to drive an outgoing span, and most of the fabric was
+                // unreachable.
+                let locals: Vec<WireId> = self.tile_wires[&(x, y)][..LOCAL_WIRES].to_vec();
+                for (k, &src_wire) in locals.iter().enumerate() {
+                    for step in [1, 7] {
+                        let p = Pip {
+                            id: PipId(pip_id),
+                            src_wire,
+                            dst_wire: locals[(k + step) % LOCAL_WIRES],
+                            delay: 25,
+                            configurable: true,
+                            tile_x: x,
+                            tile_y: y,
+                        };
+                        self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                        self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+                        self.pips.push(p);
+                        pip_id += 1;
+                    }
                 }
 
                 if tile_type == TileType::Logic {
@@ -680,6 +735,7 @@ impl Ecp5Device {
                         self.bel_wires
                             .insert((x, y, format!("LUT{}_F", lc)), out_wire.id);
                         self.tile_wires.entry((x, y)).or_default().push(out_wire.id);
+                        let lut_out_id = out_wire.id;
                         self.wires.push(out_wire);
                         wire_id += 1;
 
@@ -718,9 +774,57 @@ impl Ecp5Device {
                         self.wires.push(ff_wire);
                         wire_id += 1;
 
+                        // FF data input; the FF output and input reach the
+                        // tile's local wires like the LUT's (one local out,
+                        // a few locals in)
+                        let ff_d_wire = Wire {
+                            id: WireId(wire_id),
+                            name: format!("R{}C{}_FF{}_D", y, x, lc),
+                            wire_type: WireType::BelPin,
+                            tile_x: x,
+                            tile_y: y,
+                            delay: 0,
+                        };
+                        self.wire_names.insert(ff_d_wire.name.clone(), ff_d_wire.id);
+                        self.bel_wires
+                            .insert((x, y, format!("FF{}_D", lc)), ff_d_wire.id);
+                        self.tile_wires
+                            .entry((x, y))
+                            .or_default()
+                            .push(ff_d_wire.id);
+                        let (ff_q_id, ff_d_id) = (WireId(wire_id - 1), ff_d_wire.id);
+                        self.wires.push(ff_d_wire);
+                        wire_id += 1;
+                        let locals = self.tile_wires.get(&(x, y)).cloned().unwrap_or_default();
+                        let mut ff_pips = Vec::new();
+                        if let Some(&lw) = locals.get((lc * 4 + 1) % LOCAL_WIRES) {
+                            ff_pips.push((ff_q_id, lw, 25));
+                        }
+                        for j in 0..INPUT_MUX_WIDTH {
+                            if let Some(&lw) =
+                                locals.get((lc * 4 + 3 + j * INPUT_MUX_STRIDE) % LOCAL_WIRES)
+                            {
+                                ff_pips.push((lw, ff_d_id, 20));
+                            }
+                        }
+                        for (src_wire, dst_wire, delay) in ff_pips {
+                            let p = Pip {
+                                id: PipId(pip_id),
+                                src_wire,
+                                dst_wire,
+                                delay,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+                            self.pips.push(p);
+                            pip_id += 1;
+                        }
+
                         // LUT output → local PIP
-                        let lut_out_id = WireId(wire_id - 7);
-                        let local_idx = (lc * 2) % 20;
+                        let local_idx = (lc * 4) % LOCAL_WIRES;
                         if let Some(locals) = self.tile_wires.get(&(x, y)) {
                             if let Some(&local_wire) = locals.get(local_idx) {
                                 let p = Pip {
@@ -745,8 +849,10 @@ impl Ecp5Device {
                             if let Some(&lut_in_id) =
                                 self.bel_wires.get(&(x, y, format!("LUT{}_{}", lc, pin)))
                             {
-                                for lo in 0..3u8 {
-                                    let li = (lc * 2 + inp + lo as usize) % 20;
+                                // Input mux: see INPUT_MUX_WIDTH
+                                for j in 0..INPUT_MUX_WIDTH {
+                                    let li =
+                                        (lc * 4 + inp + 2 + j * INPUT_MUX_STRIDE) % LOCAL_WIRES;
                                     if let Some(locals) = self.tile_wires.get(&(x, y)) {
                                         if let Some(&lw) = locals.get(li) {
                                             let p = Pip {
@@ -841,7 +947,7 @@ impl Ecp5Device {
                     wire_id += 1;
 
                     // local → H02
-                    let li = (i as usize * 3) % 20;
+                    let li = (i as usize * 6) % LOCAL_WIRES;
                     if let Some(locals) = self.tile_wires.get(&(x, y)) {
                         if let Some(&lw) = locals.get(li) {
                             let p = Pip {
@@ -863,7 +969,7 @@ impl Ecp5Device {
                     // H02 → local at x+2
                     let dx = x + 2;
                     if dx < width - 1 {
-                        let dli = (i as usize * 3 + 1) % 20;
+                        let dli = (i as usize * 6 + 1) % LOCAL_WIRES;
                         if let Some(dl) = self.tile_wires.get(&(dx, y)) {
                             if let Some(&dlw) = dl.get(dli) {
                                 let p = Pip {
@@ -898,7 +1004,7 @@ impl Ecp5Device {
                     self.wires.push(v2);
                     wire_id += 1;
 
-                    let li2 = (i as usize * 3 + 2) % 20;
+                    let li2 = (i as usize * 6 + 2) % LOCAL_WIRES;
                     if let Some(locals) = self.tile_wires.get(&(x, y)) {
                         if let Some(&lw) = locals.get(li2) {
                             let p = Pip {
@@ -919,7 +1025,7 @@ impl Ecp5Device {
 
                     let dy = y + 2;
                     if dy < height - 1 {
-                        let dli2 = (i as usize * 3 + 1) % 20;
+                        let dli2 = (i as usize * 6 + 1) % LOCAL_WIRES;
                         if let Some(dl) = self.tile_wires.get(&(x, dy)) {
                             if let Some(&dlw) = dl.get(dli2) {
                                 let p = Pip {
@@ -961,7 +1067,7 @@ impl Ecp5Device {
                         wire_id += 1;
 
                         // local → span
-                        let li = (i as usize * 7) % 20;
+                        let li = (i as usize * 14) % LOCAL_WIRES;
                         if let Some(locals) = self.tile_wires.get(&(x, y)) {
                             if let Some(&lw) = locals.get(li) {
                                 let p = Pip {
@@ -987,7 +1093,7 @@ impl Ecp5Device {
                             (x, (y as i32 + span).min(height as i32 - 2) as u32)
                         };
                         if dest_x > 0 && dest_y > 0 {
-                            let dli = (i as usize * 7 + 3) % 20;
+                            let dli = (i as usize * 14 + 3) % LOCAL_WIRES;
                             if let Some(dl) = self.tile_wires.get(&(dest_x, dest_y)) {
                                 if let Some(&dlw) = dl.get(dli) {
                                     let p = Pip {
@@ -1097,6 +1203,41 @@ impl Ecp5Device {
             self.wires.push(w);
             wire_id += 1;
         }
+
+        // Switch boxes (see synthetic_switch_box_pips)
+        debug_assert!(self
+            .wires
+            .iter()
+            .enumerate()
+            .all(|(i, w)| w.id.0 as usize == i));
+        debug_assert!(self
+            .pips
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.id.0 as usize == i));
+        for (src_wire, dst_wire, delay, tile_x, tile_y) in
+            crate::device::synthetic_switch_box_pips(&self.wires, &self.pips, LOCAL_WIRES, 6)
+        {
+            let p = Pip {
+                id: PipId(self.pips.len() as u32),
+                src_wire,
+                dst_wire,
+                delay,
+                configurable: true,
+                tile_x,
+                tile_y,
+            };
+            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+            self.pips.push(p);
+        }
+        // Inter-tile wires (neighbour, spans) and the cost of the PIP into
+        // each, as built above
+        let (width, height) = self.grid_size();
+        self.hop_costs = crate::device::span_hop_costs(
+            width.max(height) as usize,
+            &[(1, 1.0), (2, 1.0), (6, 2.0)],
+        );
     }
 
     fn build_synthetic_packages(&mut self) {
@@ -1254,11 +1395,11 @@ impl Device for Ecp5Device {
         self.wire_to_pips.get(&wire_id).cloned().unwrap_or_default()
     }
 
-    fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId> {
+    fn wire_src_pips(&self, wire_id: WireId) -> &[PipId] {
         self.wire_src_pips
             .get(&wire_id)
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {
@@ -1279,7 +1420,8 @@ impl Device for Ecp5Device {
             "DFF" | "TRELLIS_FF" | "FD1P3IX" | "FD1P3DX" | "FD1S3BX" | "FD1S3AX" => {
                 bel_type.is_ff()
             }
-            "CCU2C" | "CARRY" => bel_type == BelType::Carry,
+            "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
+            "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "TRELLIS_IO" | "PIO" => bel_type == BelType::IoCell,
             "DP16KD" | "PDPW16KD" | "SP16KD" => bel_type == BelType::RamSlice,
             "MULT18X18D" | "ALU54B" => bel_type == BelType::DspSlice,
@@ -1288,8 +1430,55 @@ impl Device for Ecp5Device {
         }
     }
 
+    fn carry_chain_layout(&self) -> Option<crate::device::CarryChainLayout> {
+        // Carry chains run left to right: slice A..D of a tile, then slice A
+        // of the tile to the right.
+        let (width, height) = self.grid_size();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter_map(|(x, y)| self.tile_at(x, y))
+            .find(|t| t.tile_type() == TileType::Logic)
+            .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
+    }
+
+    fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
+        // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
+        // slice C); each of those LUTs, when used, blocks the RAM site.
+        const RAM_LUTS: usize = 6;
+        let Some(tile) = self.tile_at(x, y) else {
+            return Vec::new();
+        };
+        let bels = tile.bels();
+        let luts: Vec<usize> = bels
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.bel_type == BelType::Lut4)
+            .map(|(i, _)| i)
+            .take(RAM_LUTS)
+            .collect();
+        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
+            return Vec::new();
+        };
+        match bels.get(bel_index).map(|b| b.bel_type) {
+            Some(BelType::DistRam) => luts,
+            Some(BelType::Lut4) if luts.contains(&bel_index) => vec![ram],
+            _ => Vec::new(),
+        }
+    }
+
     fn wire_count(&self) -> usize {
         self.wires.len()
+    }
+
+    fn route_cost_estimate(&self, dx: u32, dy: u32) -> Option<f64> {
+        let last = self.hop_costs.len().checked_sub(1)?;
+        Some(self.hop_costs[(dx as usize).min(last)] + self.hop_costs[(dy as usize).min(last)])
+    }
+
+    fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
+        crate::device::lattice_logic_pin_wire(self, x, y, bel_index, pin, "F", |name| {
+            self.bel_wires.get(&(x, y, name)).copied()
+        })
     }
 
     fn lut_output_wire(&self, tile_x: u32, tile_y: u32, lc_idx: usize) -> Option<WireId> {
@@ -1333,6 +1522,16 @@ impl Device for Ecp5Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_synthetic_routing_reaches_every_tile() {
+        crate::device::check_synthetic_routing(&Ecp5Device::new(Ecp5Variant::Lfe5u25f));
+    }
+
+    #[test]
+    fn test_logic_tile_pin_wires() {
+        crate::device::check_lattice_logic_pin_wires(&Ecp5Device::new(Ecp5Variant::Lfe5u25f));
+    }
 
     #[test]
     fn test_ecp5_device_12f() {

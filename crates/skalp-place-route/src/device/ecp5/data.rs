@@ -265,7 +265,7 @@ pub const SERDES_RATE_UM5G: f64 = 5.0;
 // Tile architecture constants
 // ---------------------------------------------------------------------------
 
-/// BELs per PLC2 logic tile: 8 LUT4 + 8 FF + 1 CCU2C carry
+/// BELs per PLC2 logic tile: 8 LUT4 + 8 FF + 4 CCU2C carry cells (one per slice)
 pub const LOGIC_LUTS_PER_TILE: u8 = 8;
 pub const LOGIC_FFS_PER_TILE: u8 = 8;
 

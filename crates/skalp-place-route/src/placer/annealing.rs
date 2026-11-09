@@ -19,6 +19,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// (total delta, per-net (index, new_wl, new_timing) updates, proximity (index, new_cost) updates).
 type CostDelta = (f64, Vec<(usize, f64, f64)>, Vec<(usize, f64)>);
 
+/// Probability of accepting an average uphill move at the start of an anneal
+/// from a random placement (VPR).
+const RANDOM_START_ACCEPTANCE: f64 = 0.95;
+/// The same when refining an already good placement: cold enough that the
+/// anneal does not scramble it, warm enough to climb out of legalization's
+/// local minima.
+const REFINE_START_ACCEPTANCE: f64 = 0.1;
+/// Initial move window, in tiles, when refining
+const REFINE_RLIM: f64 = 3.0;
+/// Moves sampled to calibrate the initial temperature
+const CALIBRATION_MOVES: usize = 1000;
+/// Freeze when the temperature drops below this fraction of the average
+/// cost per net (VPR uses 0.005)
+const FREEZE_FRACTION: f64 = 0.005;
+
 /// NCL proximity group for placement co-location enforcement.
 /// Tracks which cells must be placed close together and the tile distance limit.
 struct ProximityGroupInfo {
@@ -378,9 +393,8 @@ struct UndoRecord {
 /// Move operation for simulated annealing
 #[derive(Debug, Clone)]
 enum Move {
-    /// Swap two cells
-    Swap(CellId, CellId),
-    /// Move a cell to a new location
+    /// Move a cell to a new location; a cell already there takes the
+    /// mover's old location (a swap)
     Relocate(CellId, PlacementLoc),
     /// Relocate an entire carry chain to a new column/start position
     RelocateCarryChain(usize, u32, u32), // chain_id, new_x, new_start_y
@@ -404,6 +418,93 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     carry_chain_membership: HashMap<CellId, usize>,
     /// Carry chains for chain-aware moves
     carry_chains: Vec<CarryChain>,
+    /// The initial placement is already good (analytical + legalized):
+    /// refine it locally instead of re-annealing from a hot, global start
+    refine: bool,
+}
+
+/// Move-generation data that stays fixed for a whole annealing run, so a
+/// move costs O(1) instead of a scan over every cell.
+struct MoveContext {
+    /// All placed cells
+    cells: Vec<CellId>,
+    /// Cells on critical nets (criticality > 0.5), most critical quarter
+    critical: Vec<CellId>,
+    /// BELs no move may target: the LUTs under fixed two-bit carry cells
+    /// and under distributed-RAM cells
+    reserved: HashSet<(u32, u32, usize)>,
+}
+
+impl MoveContext {
+    /// `carry_layout`: on a device whose carry cells take LUTs (Lattice CCU2),
+    /// the legalizer has placed every chain on consecutive carry positions;
+    /// those chains stay fixed (they are not moved and are not move targets)
+    /// and the LUTs under them are reserved.
+    ///
+    /// Distributed-RAM cells stay fixed too: a RAM BEL uses up LUTs of its
+    /// tile (`footprint`, [`Device::bel_footprint`]), which the legalizer
+    /// kept free and which no move may then fill.
+    fn build(
+        placement: &PlacementResult,
+        netlist: &GateNetlist,
+        net_criticalities: &HashMap<GateNetId, f64>,
+        chain_membership: &HashMap<CellId, usize>,
+        carry_layout: Option<&crate::device::CarryChainLayout>,
+        footprint: &dyn Fn(u32, u32, usize) -> Vec<usize>,
+    ) -> Self {
+        let mut reserved = HashSet::new();
+        for loc in placement.placements.values() {
+            if loc.bel_type == BelType::DistRam {
+                reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
+                for lut in footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
+                    reserved.insert((loc.tile_x, loc.tile_y, lut));
+                }
+            }
+        }
+        if let Some(layout) = carry_layout {
+            for cell in chain_membership.keys() {
+                if let Some(loc) = placement.placements.get(cell) {
+                    if let Some(slot) = layout.slots.iter().find(|s| s.carry_bel == loc.bel_index) {
+                        for &lut in &slot.lut_bels {
+                            reserved.insert((loc.tile_x, loc.tile_y, lut));
+                        }
+                    }
+                }
+            }
+        }
+        let cells: Vec<CellId> = placement
+            .placements
+            .iter()
+            .filter(|(c, loc)| {
+                loc.bel_type != BelType::DistRam
+                    && (carry_layout.is_none() || !chain_membership.contains_key(c))
+            })
+            .map(|(&c, _)| c)
+            .collect();
+        let mut critical: Vec<(CellId, f64)> = Vec::new();
+        if !net_criticalities.is_empty() {
+            for &cell_id in &cells {
+                if let Some(cell) = netlist.get_cell(cell_id) {
+                    let crit = cell
+                        .outputs
+                        .iter()
+                        .chain(cell.inputs.iter())
+                        .filter_map(|n| net_criticalities.get(n))
+                        .fold(0.0f64, |m, &c| m.max(c));
+                    if crit > 0.5 {
+                        critical.push((cell_id, crit));
+                    }
+                }
+            }
+        }
+        critical.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_n = (critical.len() / 4).max(1).min(critical.len());
+        Self {
+            cells,
+            critical: critical[..top_n].iter().map(|&(c, _)| c).collect(),
+            reserved,
+        }
+    }
 }
 
 impl<'a, D: Device> SimulatedAnnealing<'a, D> {
@@ -420,6 +521,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             parallel_batch_size: 64,
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
+            refine: false,
         }
     }
 
@@ -442,6 +544,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             parallel_batch_size: 64,
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
+            refine: false,
         }
     }
 
@@ -453,6 +556,16 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         self.carry_chains = carry_chains;
+        self
+    }
+
+    /// Treat the initial placement as already good (e.g. analytical placement
+    /// followed by legalization). The anneal then starts cold, with a small
+    /// move window, so it refines that placement instead of first scrambling
+    /// it: from a hot start with chip-wide moves, a 15K-cell Nexus design
+    /// never got back to its legalized starting cost.
+    pub fn with_refinement(mut self, refine: bool) -> Self {
+        self.refine = refine;
         self
     }
 
@@ -487,6 +600,101 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         }
     }
 
+    /// Initial temperature: the average uphill cost delta of sample moves,
+    /// scaled so such a move is accepted with probability
+    /// [`RANDOM_START_ACCEPTANCE`] from a random start (VPR) or
+    /// [`REFINE_START_ACCEPTANCE`] when refining a good placement.
+    #[allow(clippy::too_many_arguments)]
+    fn calibrate_temperature(
+        &self,
+        placement: &PlacementResult,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        ctx: &MoveContext,
+        cost_cache: &NetCostCache,
+        netlist: &GateNetlist,
+        net_criticalities: &HashMap<GateNetId, f64>,
+        rlim: u32,
+    ) -> f64 {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        let mut cal_placement = placement.clone();
+        let mut cal_loc_map = loc_map.clone();
+        let mut uphill_sum = 0.0f64;
+        let mut uphill_count = 0u32;
+        for _ in 0..CALIBRATION_MOVES.min(ctx.cells.len() * 2) {
+            let move_op = self.generate_move(&cal_placement, ctx, &cal_loc_map, rlim, &mut rng);
+            let affected = self.moved_cells_with_displaced(&move_op, &cal_placement, &cal_loc_map);
+            let undo = self.apply_move_in_place(&mut cal_placement, &mut cal_loc_map, &move_op);
+            let affected_nets = cost_cache.affected_nets(&affected);
+            let (delta, _, _) = cost_cache.compute_delta(
+                &affected_nets,
+                &affected,
+                &cal_placement,
+                netlist,
+                net_criticalities,
+                &self.delay_model,
+                self.timing_weight,
+            );
+            // Calibration only measures deltas; it keeps no move
+            Self::undo_move(&mut cal_placement, &mut cal_loc_map, undo);
+            if delta > 0.0 {
+                uphill_sum += delta;
+                uphill_count += 1;
+            }
+        }
+        if uphill_count == 0 {
+            return self.initial_temp;
+        }
+        let target = if self.refine {
+            REFINE_START_ACCEPTANCE
+        } else {
+            RANDOM_START_ACCEPTANCE
+        };
+        // exp(-avg / T) = target
+        (uphill_sum / uphill_count as f64) / -target.ln()
+    }
+
+    /// Initial move window in tiles: the whole device from a random start,
+    /// a few tiles when refining.
+    fn initial_rlim(&self) -> f64 {
+        let (width, height) = self.device.grid_size();
+        let max = width.max(height).max(1) as f64;
+        if self.refine {
+            REFINE_RLIM.min(max)
+        } else {
+            max
+        }
+    }
+
+    /// VPR range limit update: grow the window while more than 44% of moves
+    /// are accepted, shrink it below that.
+    fn next_rlim(&self, rlim: f64, acceptance_rate: f64) -> f64 {
+        let (width, height) = self.device.grid_size();
+        let max = width.max(height).max(1) as f64;
+        (rlim * (1.0 - 0.44 + acceptance_rate)).clamp(1.0, max)
+    }
+
+    /// VPR adaptive cooling: cool fast while nearly every move is accepted
+    /// (or almost none are), and at the configured rate in the productive
+    /// middle band.
+    fn next_temperature(&self, temperature: f64, acceptance_rate: f64) -> f64 {
+        let alpha = if acceptance_rate > 0.96 {
+            0.5
+        } else if acceptance_rate > 0.8 {
+            0.9
+        } else if acceptance_rate > 0.15 {
+            self.cooling_rate
+        } else {
+            0.8
+        };
+        temperature * alpha
+    }
+
+    /// VPR exit criterion: the temperature is a small fraction of the average
+    /// cost per net, so no uphill move of consequence would still be taken.
+    fn is_frozen(temperature: f64, cost: f64, netlist: &GateNetlist) -> bool {
+        temperature < FREEZE_FRACTION * cost / netlist.nets.len().max(1) as f64
+    }
+
     /// Serial simulated annealing optimization
     fn optimize_serial(
         &self,
@@ -512,88 +720,62 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             self.timing_weight,
         );
         let mut current_cost = cost_cache.combined_cost(self.timing_weight);
+        let carry_layout = self.device.carry_chain_layout();
+        let move_ctx = MoveContext::build(
+            &current,
+            netlist,
+            &net_criticalities,
+            &self.carry_chain_membership,
+            carry_layout.as_ref(),
+            &|x, y, bel| self.device.bel_footprint(x, y, bel),
+        );
+        if move_ctx.cells.is_empty() {
+            current.cost = current_cost;
+            return Ok(current);
+        }
+
+        // Reverse mapping: location -> cell_id
+        let mut location_to_cell: HashMap<(u32, u32, usize), CellId> = current
+            .placements
+            .iter()
+            .map(|(&cid, loc)| ((loc.tile_x, loc.tile_y, loc.bel_index), cid))
+            .collect();
+
+        let mut rlim = self.initial_rlim();
+        let mut temperature = self.calibrate_temperature(
+            &current,
+            &location_to_cell,
+            &move_ctx,
+            &cost_cache,
+            netlist,
+            &net_criticalities,
+            rlim.round() as u32,
+        );
         let mut best = current.clone();
         let mut best_cost = current_cost;
 
-        // VPR-style initial temperature calibration:
-        // Perform random moves and set T so that ~95% are accepted.
-        let mut temperature = {
-            let mut delta_sum = 0.0f64;
-            let mut delta_count = 0u32;
-            let mut cal_rng = rand::rngs::StdRng::seed_from_u64(12345);
-            let cal_cells: Vec<CellId> = current.placements.keys().copied().collect();
-            // Use a temporary copy for calibration (cloned once, not per-move)
-            let mut cal_placement = current.clone();
-            let mut cal_loc_map: HashMap<(u32, u32, usize), CellId> = cal_placement
-                .placements
-                .iter()
-                .map(|(&cid, loc)| ((loc.tile_x, loc.tile_y, loc.bel_index), cid))
-                .collect();
-
-            for _ in 0..100.min(cal_cells.len() * 2) {
-                let move_op = self.generate_move(&cal_placement, &cal_cells, &mut cal_rng);
-                let affected =
-                    self.moved_cells_with_displaced(&move_op, &cal_placement, &cal_loc_map);
-                let undo = self.apply_move_in_place(&mut cal_placement, &mut cal_loc_map, &move_op);
-                let affected_nets = cost_cache.affected_nets(&affected);
-                let (delta, _, _) = cost_cache.compute_delta(
-                    &affected_nets,
-                    &affected,
-                    &cal_placement,
-                    netlist,
-                    &net_criticalities,
-                    &self.delay_model,
-                    self.timing_weight,
-                );
-                // Undo — calibration only measures deltas, doesn't keep moves
-                Self::undo_move(&mut cal_placement, &mut cal_loc_map, undo);
-                let delta = delta.abs();
-                if delta > 0.0 {
-                    delta_sum += delta;
-                    delta_count += 1;
-                }
-            }
-
-            if delta_count > 0 {
-                let avg_delta = delta_sum / delta_count as f64;
-                // T = -avg_delta / ln(acceptance_rate)
-                // For 95% acceptance: ln(0.95) ≈ -0.0513
-                avg_delta / 0.0513
-            } else {
-                self.initial_temp
-            }
-        };
-
-        // Build reverse mapping: location -> cell_id
-        let mut location_to_cell: HashMap<(u32, u32, usize), CellId> = HashMap::new();
-        for (&cell_id, loc) in &current.placements {
-            location_to_cell.insert((loc.tile_x, loc.tile_y, loc.bel_index), cell_id);
-        }
-
-        let cells: Vec<CellId> = current.placements.keys().copied().collect();
+        let cells = &move_ctx.cells;
         let moves_per_temp = cells.len().max(100);
 
         // Scale iterations to design size — tiny designs converge quickly
         let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
 
-        for _iteration in 0..effective_iterations {
-            // Track acceptance rate for convergence detection
+        for iteration in 0..effective_iterations {
             let mut accepted_moves = 0u32;
-            let mut total_moves = 0u32;
+            let window = rlim.round() as u32;
 
-            // Perform several moves at each temperature
             for _ in 0..moves_per_temp {
                 // Generate a random move (biased toward critical cells in timing mode)
                 let move_op = if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
                     self.generate_critical_path_move(
                         &current,
-                        &cells,
-                        netlist,
-                        &net_criticalities,
+                        &move_ctx,
+                        &location_to_cell,
+                        window,
                         &mut rng,
                     )
                 } else {
-                    self.generate_move(&current, &cells, &mut rng)
+                    self.generate_move(&current, &move_ctx, &location_to_cell, window, &mut rng)
                 };
 
                 // Determine affected cells before mutation
@@ -615,43 +797,47 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     self.timing_weight,
                 );
 
-                // Acceptance criterion
-                let accept = if delta <= 0.0 {
-                    true
-                } else {
-                    let probability = (-delta / temperature).exp();
-                    rng.gen::<f64>() < probability
-                };
-
-                total_moves += 1;
+                let accept = delta <= 0.0 || rng.gen::<f64>() < (-delta / temperature).exp();
                 if accept {
                     accepted_moves += 1;
                     cost_cache.apply_updates(&net_updates, &prox_updates);
                     current_cost = cost_cache.combined_cost(self.timing_weight);
-
-                    if current_cost < best_cost {
-                        best = current.clone();
-                        best_cost = current_cost;
-                    }
                 } else {
-                    // Rejected: undo the in-place mutation
                     Self::undo_move(&mut current, &mut location_to_cell, undo);
                 }
             }
 
-            // Cool down
-            temperature *= self.cooling_rate;
+            // Snapshot the best placement once per temperature step. Cloning
+            // the whole placement on every improving move made each early
+            // (mostly improving) move O(cells): quadratic on large designs.
+            if current_cost < best_cost {
+                best = current.clone();
+                best_cost = current_cost;
+            }
 
-            // Early termination based on acceptance rate
-            // When acceptance rate drops below 0.1%, the solution has frozen
-            let acceptance_rate = if total_moves > 0 {
-                accepted_moves as f64 / total_moves as f64
-            } else {
-                0.0
-            };
-            if acceptance_rate < 0.001 {
+            let acceptance_rate = accepted_moves as f64 / moves_per_temp as f64;
+            if iteration % 10 == 0 {
+                log::debug!(
+                    "anneal step {}: T={:.4} window {} accepted {:.1}% cost {:.1} (best {:.1})",
+                    iteration,
+                    temperature,
+                    window,
+                    100.0 * acceptance_rate,
+                    current_cost,
+                    best_cost
+                );
+            }
+            if acceptance_rate < 0.001 || Self::is_frozen(temperature, current_cost, netlist) {
+                log::debug!(
+                    "anneal frozen after {} steps: cost {:.1} (best {:.1})",
+                    iteration + 1,
+                    current_cost,
+                    best_cost
+                );
                 break;
             }
+            temperature = self.next_temperature(temperature, acceptance_rate);
+            rlim = self.next_rlim(rlim, acceptance_rate);
         }
 
         // Update metrics
@@ -696,7 +882,19 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let mut best = current.clone();
         let mut best_cost = current_cost;
 
-        let mut temperature = self.initial_temp;
+        let carry_layout = self.device.carry_chain_layout();
+        let move_ctx = MoveContext::build(
+            &current,
+            netlist,
+            &net_criticalities,
+            &self.carry_chain_membership,
+            carry_layout.as_ref(),
+            &|x, y, bel| self.device.bel_footprint(x, y, bel),
+        );
+        if move_ctx.cells.is_empty() {
+            current.cost = current_cost;
+            return Ok(current);
+        }
 
         // Build reverse mapping: location -> cell_id
         let mut location_to_cell: HashMap<(u32, u32, usize), CellId> = HashMap::new();
@@ -704,7 +902,18 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             location_to_cell.insert((loc.tile_x, loc.tile_y, loc.bel_index), cell_id);
         }
 
-        let cells: Vec<CellId> = current.placements.keys().copied().collect();
+        let mut rlim = self.initial_rlim();
+        let mut temperature = self.calibrate_temperature(
+            &current,
+            &location_to_cell,
+            &move_ctx,
+            &cost_cache,
+            netlist,
+            &net_criticalities,
+            rlim.round() as u32,
+        );
+
+        let cells = &move_ctx.cells;
         let batch_size = self.parallel_batch_size;
         let batches_per_temp = (cells.len().max(100) / batch_size).max(1);
 
@@ -715,6 +924,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let accepted_count = AtomicUsize::new(0);
 
         for _iteration in 0..effective_iterations {
+            let window = rlim.round() as u32;
+            let mut accepted_batches = 0usize;
             // Process batches at this temperature
             for _ in 0..batches_per_temp {
                 // Generate a batch of candidate moves using different seeds
@@ -727,13 +938,19 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                         if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
                             self.generate_critical_path_move(
                                 &current,
-                                &cells,
-                                netlist,
-                                &net_criticalities,
+                                &move_ctx,
+                                &location_to_cell,
+                                window,
                                 &mut rng,
                             )
                         } else {
-                            self.generate_move(&current, &cells, &mut rng)
+                            self.generate_move(
+                                &current,
+                                &move_ctx,
+                                &location_to_cell,
+                                window,
+                                &mut rng,
+                            )
                         }
                     })
                     .collect();
@@ -804,21 +1021,22 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     cost_cache.apply_updates(&net_updates, &prox_updates);
                     current_cost = cost_cache.combined_cost(self.timing_weight);
                     accepted_count.fetch_add(1, Ordering::Relaxed);
-
-                    if current_cost < best_cost {
-                        best = current.clone();
-                        best_cost = current_cost;
-                    }
+                    accepted_batches += 1;
                 }
             }
 
-            // Cool down
-            temperature *= self.cooling_rate;
+            // Snapshot the best placement once per temperature step
+            if current_cost < best_cost {
+                best = current.clone();
+                best_cost = current_cost;
+            }
 
-            // Early termination if temperature is too low
-            if temperature < 0.01 {
+            let acceptance_rate = accepted_batches as f64 / batches_per_temp as f64;
+            if acceptance_rate < 0.001 || Self::is_frozen(temperature, current_cost, netlist) {
                 break;
             }
+            temperature = self.next_temperature(temperature, acceptance_rate);
+            rlim = self.next_rlim(rlim, acceptance_rate);
         }
 
         // Update metrics
@@ -833,95 +1051,92 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         Ok(result)
     }
 
-    /// Generate a random move
+    /// Generate a random move: a random cell goes to a random compatible BEL
+    /// within `rlim` tiles of where it is (swapping with any occupant).
     fn generate_move<R: Rng>(
         &self,
         placement: &PlacementResult,
-        cells: &[CellId],
+        ctx: &MoveContext,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        rlim: u32,
         rng: &mut R,
     ) -> Move {
-        if cells.len() < 2 {
-            return Move::Relocate(cells[0], placement.placements[&cells[0]]);
+        let cells = &ctx.cells;
+        let cell = cells[rng.gen_range(0..cells.len())];
+
+        // A carry chain cell on a device without a fixed chain layout: half
+        // the time move the whole chain
+        if self.carry_chain_membership.contains_key(&cell) && rng.gen::<f64>() < 0.5 {
+            let chain_id = self.carry_chain_membership[&cell];
+            let (width, height) = self.device.grid_size();
+            let new_x = rng.gen_range(1..width.saturating_sub(1).max(2));
+            let new_y = rng.gen_range(1..height.saturating_sub(1).max(2));
+            return Move::RelocateCarryChain(chain_id, new_x, new_y);
         }
 
-        // Select a random cell
-        let idx = rng.gen_range(0..cells.len());
-        let cell = cells[idx];
-
-        // If this cell is in a carry chain, generate a chain move instead
-        if let Some(&chain_id) = self.carry_chain_membership.get(&cell) {
-            if rng.gen::<f64>() < 0.5 {
-                // Move entire chain
-                let (width, height) = self.device.grid_size();
-                let new_x = rng.gen_range(1..width.saturating_sub(1).max(2));
-                let new_y = rng.gen_range(1..height.saturating_sub(1).max(2));
-                return Move::RelocateCarryChain(chain_id, new_x, new_y);
-            }
-            // Otherwise fall through to normal move (for non-chain cells)
-        }
-
-        // Choose move type: 70% swap, 30% relocate
-        if rng.gen::<f64>() < 0.7 {
-            let cell1 = cell;
-            let loc1 = &placement.placements[&cell1];
-
-            // Don't swap carry chain cells individually
-            if self.carry_chain_membership.contains_key(&cell1) {
-                return self.generate_relocate_move(placement, cell1, rng);
-            }
-
-            let candidates: Vec<_> = cells
-                .iter()
-                .filter(|&&c| {
-                    c != cell1
-                        && placement.placements[&c].bel_type == loc1.bel_type
-                        && !self.carry_chain_membership.contains_key(&c)
-                })
-                .collect();
-
-            if let Some(&&cell2) = candidates.get(rng.gen_range(0..candidates.len().max(1))) {
-                Move::Swap(cell1, cell2)
-            } else {
-                self.generate_relocate_move(placement, cell1, rng)
-            }
-        } else {
-            self.generate_relocate_move(placement, cell, rng)
-        }
+        self.generate_window_move(placement, ctx, loc_map, cell, rlim, rng)
     }
 
-    /// Generate a relocate move
-    fn generate_relocate_move<R: Rng>(
+    /// Move `cell_id` to a random compatible, unreserved BEL in a random tile
+    /// within `rlim` tiles (VPR-style range limit). If that BEL is taken, the
+    /// occupant moves to `cell_id`'s old BEL, so the occupant must be movable
+    /// and fit there. Returns a no-op move if no such BEL turns up.
+    fn generate_window_move<R: Rng>(
         &self,
         placement: &PlacementResult,
+        ctx: &MoveContext,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
         cell_id: CellId,
+        rlim: u32,
         rng: &mut R,
     ) -> Move {
-        let current_loc = &placement.placements[&cell_id];
+        let loc = placement.placements[&cell_id];
         let (width, height) = self.device.grid_size();
+        let r = rlim.max(1) as i64;
+        let source_bel_type = self
+            .device
+            .tile_at(loc.tile_x, loc.tile_y)
+            .and_then(|t| t.bels().get(loc.bel_index).map(|b| b.bel_type))
+            .unwrap_or(loc.bel_type);
 
-        // Random displacement (nearby)
-        let max_dist = (width.max(height) / 4).max(2);
-        let dx = rng.gen_range(-(max_dist as i32)..=(max_dist as i32));
-        let dy = rng.gen_range(-(max_dist as i32)..=(max_dist as i32));
-
-        let new_x = (current_loc.tile_x as i32 + dx).clamp(0, (width - 1) as i32) as u32;
-        let new_y = (current_loc.tile_y as i32 + dy).clamp(0, (height - 1) as i32) as u32;
-
-        // Find a valid BEL at the new location
-        if let Some(tile) = self.device.tile_at(new_x, new_y) {
+        const ATTEMPTS: usize = 8;
+        for _ in 0..ATTEMPTS {
+            let x = (loc.tile_x as i64 + rng.gen_range(-r..=r)).clamp(0, width as i64 - 1) as u32;
+            let y = (loc.tile_y as i64 + rng.gen_range(-r..=r)).clamp(0, height as i64 - 1) as u32;
+            let Some(tile) = self.device.tile_at(x, y) else {
+                continue;
+            };
+            // Reservoir-sample one acceptable BEL of the tile
+            let mut chosen = None;
+            let mut seen = 0u32;
             for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                if Self::bel_types_compatible(bel.bel_type, current_loc.bel_type) {
-                    // Keep the cell's original bel_type (requirement) not the BEL's type
-                    return Move::Relocate(
-                        cell_id,
-                        PlacementLoc::new(new_x, new_y, bel_idx, current_loc.bel_type),
-                    );
+                if (x, y, bel_idx) == (loc.tile_x, loc.tile_y, loc.bel_index)
+                    || !Self::bel_types_compatible(bel.bel_type, loc.bel_type)
+                    || ctx.reserved.contains(&(x, y, bel_idx))
+                {
+                    continue;
+                }
+                if let Some(&occupant) = loc_map.get(&(x, y, bel_idx)) {
+                    if self.carry_chain_membership.contains_key(&occupant)
+                        || !Self::bel_types_compatible(
+                            source_bel_type,
+                            placement.placements[&occupant].bel_type,
+                        )
+                    {
+                        continue;
+                    }
+                }
+                seen += 1;
+                if rng.gen_range(0..seen) == 0 {
+                    chosen = Some(bel_idx);
                 }
             }
+            if let Some(bel_idx) = chosen {
+                // Keep the cell's own requirement as its bel_type
+                return Move::Relocate(cell_id, PlacementLoc::new(x, y, bel_idx, loc.bel_type));
+            }
         }
-
-        // If no valid BEL found, stay in place
-        Move::Relocate(cell_id, *current_loc)
+        Move::Relocate(cell_id, loc)
     }
 
     /// Get all cells affected by a move, including displaced occupants.
@@ -932,7 +1147,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         loc_map: &HashMap<(u32, u32, usize), CellId>,
     ) -> Vec<CellId> {
         match move_op {
-            Move::Swap(c1, c2) => vec![*c1, *c2],
             Move::Relocate(cell_id, new_loc) => {
                 let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
                 if let Some(&occupant) = loc_map.get(&new_key) {
@@ -979,18 +1193,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let mut new_loc_map = loc_map.clone();
 
         match move_op {
-            Move::Swap(cell1, cell2) => {
-                let loc1 = placement.placements[cell1];
-                let loc2 = placement.placements[cell2];
-
-                // Swap locations
-                new_placement.placements.insert(*cell1, loc2);
-                new_placement.placements.insert(*cell2, loc1);
-
-                // Update location map
-                new_loc_map.insert((loc1.tile_x, loc1.tile_y, loc1.bel_index), *cell2);
-                new_loc_map.insert((loc2.tile_x, loc2.tile_y, loc2.bel_index), *cell1);
-            }
             Move::Relocate(cell_id, new_loc) => {
                 let old_loc = placement.placements[cell_id];
 
@@ -1085,24 +1287,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         };
 
         match move_op {
-            Move::Swap(cell1, cell2) => {
-                let loc1 = placement.placements[cell1];
-                let loc2 = placement.placements[cell2];
-
-                // Record undo
-                undo.placement_changes.push((*cell1, loc1));
-                undo.placement_changes.push((*cell2, loc2));
-                let key1 = (loc1.tile_x, loc1.tile_y, loc1.bel_index);
-                let key2 = (loc2.tile_x, loc2.tile_y, loc2.bel_index);
-                undo.loc_map_changes.push((key1, Some(*cell1)));
-                undo.loc_map_changes.push((key2, Some(*cell2)));
-
-                // Apply swap
-                placement.placements.insert(*cell1, loc2);
-                placement.placements.insert(*cell2, loc1);
-                loc_map.insert(key1, *cell2);
-                loc_map.insert(key2, *cell1);
-            }
             Move::Relocate(cell_id, new_loc) => {
                 let old_loc = placement.placements[cell_id];
                 let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
@@ -1370,51 +1554,16 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
     fn generate_critical_path_move<R: Rng>(
         &self,
         placement: &PlacementResult,
-        cells: &[CellId],
-        netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
+        ctx: &MoveContext,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        rlim: u32,
         rng: &mut R,
     ) -> Move {
-        // Find cells on critical paths (connected to high-criticality nets)
-        let mut critical_cells: Vec<(CellId, f64)> = Vec::new();
-
-        for &cell_id in cells {
-            if let Some(cell) = netlist.get_cell(cell_id) {
-                let mut max_criticality = 0.0f64;
-
-                // Check output criticality
-                for &output in &cell.outputs {
-                    if let Some(&crit) = net_criticalities.get(&output) {
-                        max_criticality = max_criticality.max(crit);
-                    }
-                }
-
-                // Check input criticalities
-                for &input_net in &cell.inputs {
-                    if let Some(&crit) = net_criticalities.get(&input_net) {
-                        max_criticality = max_criticality.max(crit);
-                    }
-                }
-
-                if max_criticality > 0.5 {
-                    critical_cells.push((cell_id, max_criticality));
-                }
-            }
+        if ctx.critical.is_empty() {
+            return self.generate_move(placement, ctx, loc_map, rlim, rng);
         }
-
-        // If no critical cells, fall back to normal move
-        if critical_cells.is_empty() {
-            return self.generate_move(placement, cells, rng);
-        }
-
-        // Sort by criticality and pick one of the most critical
-        critical_cells.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let top_n = (critical_cells.len() / 4).max(1);
-        let idx = rng.gen_range(0..top_n);
-        let (cell_id, _) = critical_cells[idx];
-
-        // Generate a move for this critical cell
-        self.generate_relocate_move(placement, cell_id, rng)
+        let cell_id = ctx.critical[rng.gen_range(0..ctx.critical.len())];
+        self.generate_window_move(placement, ctx, loc_map, cell_id, rlim, rng)
     }
 
     /// Estimate timing score for final placement (worst slack)

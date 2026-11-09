@@ -32,6 +32,9 @@ pub struct LirToSynthAig<'a> {
     /// Max operand width for DSP inference (0 = no DSP). Mul ops with
     /// width ≤ 2×dsp_max_width become physical; wider ones stay in AIG.
     dsp_max_width: u32,
+    /// Narrowest add/sub/compare mapped onto the target's carry chain
+    /// (None = the target has no carry chain; arithmetic stays in the AIG).
+    carry_chain_min_width: Option<u32>,
 }
 
 /// Result of LIR-to-AIG conversion
@@ -40,6 +43,10 @@ pub struct LirToAigResult {
     pub aig: Aig,
     /// Indices into lir.nodes for nodes that need special handling (BRAM, NCL, DSP)
     pub physical_node_indices: Vec<usize>,
+    /// Names of AIG outputs that only export a physical node's input signal so
+    /// optimization keeps it. They are not module ports: once the physical
+    /// cells are merged they must be dropped from the netlist's outputs.
+    pub internal_exports: Vec<String>,
 }
 
 impl<'a> LirToSynthAig<'a> {
@@ -50,7 +57,16 @@ impl<'a> LirToSynthAig<'a> {
             signal_map: BTreeMap::new(),
             physical_nodes: Vec::new(),
             dsp_max_width: 0,
+            carry_chain_min_width: None,
         }
+    }
+
+    /// Map add/sub/compare operations at least `min_width` bits wide onto the
+    /// target's carry chain: they become physical nodes, mapped by
+    /// [`crate::carry_chain::map_carry_chain`].
+    pub fn with_carry_chain_min_width(mut self, min_width: Option<u32>) -> Self {
+        self.carry_chain_min_width = min_width;
+        self
     }
 
     /// Enable DSP inference with the given max operand width per block.
@@ -349,14 +365,29 @@ impl<'a> LirToSynthAig<'a> {
         // sweep it and the merge step would wire the physical cell to
         // undriven nets. Naming matches merge_physical_nodes_into_netlist's
         // resolve_signal lookups ("name" / "name[bit]").
+        let mut internal_exports = Vec::new();
         {
             let exported: std::collections::HashSet<u32> =
                 self.lir.outputs.iter().map(|s| s.0).collect();
             let lir_input_set: std::collections::HashSet<u32> =
                 self.lir.inputs.iter().map(|s| s.0).collect();
+            // Signals driven by a constant: a carry chain folds those into its
+            // truth tables and needs no net for them.
+            let constant_signals: std::collections::HashSet<u32> = self
+                .lir
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.op, LirOp::Constant { .. }))
+                .map(|n| n.output.0)
+                .collect();
             let mut done: std::collections::HashSet<u32> = std::collections::HashSet::new();
             for &phys_idx in &self.physical_nodes {
-                for &input_sig in &self.lir.nodes[phys_idx].inputs {
+                let phys_node = &self.lir.nodes[phys_idx];
+                let folds_constants = self.is_carry_chain_op(&phys_node.op);
+                for &input_sig in &phys_node.inputs {
+                    if folds_constants && constant_signals.contains(&input_sig.0) {
+                        continue;
+                    }
                     if exported.contains(&input_sig.0)
                         || lir_input_set.contains(&input_sig.0)
                         || phys_output_set.contains(&input_sig.0)
@@ -377,6 +408,7 @@ impl<'a> LirToSynthAig<'a> {
                         } else {
                             format!("{}[{}]", signal.name, bit)
                         };
+                        internal_exports.push(name.clone());
                         self.aig.add_output(name, lit);
                     }
                 }
@@ -386,11 +418,21 @@ impl<'a> LirToSynthAig<'a> {
         LirToAigResult {
             aig: self.aig,
             physical_node_indices: self.physical_nodes.clone(),
+            internal_exports,
         }
+    }
+
+    /// Whether `op` is arithmetic mapped onto the target's carry chain.
+    fn is_carry_chain_op(&self, op: &LirOp) -> bool {
+        self.carry_chain_min_width
+            .is_some_and(|w| crate::carry_chain::is_carry_chain_op(op, w))
     }
 
     /// Check if a LIR operation cannot be represented in AIG
     fn is_physical_op(&self, op: &LirOp) -> bool {
+        if self.is_carry_chain_op(op) {
+            return true;
+        }
         match op {
             // Mul is physical only when DSP hard blocks are available and width fits
             LirOp::Mul { width, .. }
@@ -897,12 +939,27 @@ impl<'a> LirToSynthAig<'a> {
                     .map(|s| s.width)
                     .unwrap_or(1);
 
+                // Only the low clog2(data_width) index bits pick a bit; any higher
+                // index bit set means out of range, which reads 0. Building the
+                // tree over the full index width allocated 2^sel_width entries
+                // (a 32-bit index ran the machine out of memory).
+                let mut tree_bits = 0u32;
+                while (1usize << tree_bits) < values.len() {
+                    tree_bits += 1;
+                }
+                let tree_bits = tree_bits.min(sel_width);
+                let mut in_range = AigLit::true_lit();
+                for stage in tree_bits..sel_width {
+                    let bit = self.get_input_bit(index, stage);
+                    in_range = self.aig.add_and(in_range, bit.invert());
+                }
+
                 // Pad to power of 2
-                while values.len() < (1usize << sel_width) {
+                while values.len() < (1usize << tree_bits) {
                     values.push(AigLit::false_lit());
                 }
 
-                for stage in 0..sel_width {
+                for stage in 0..tree_bits {
                     let sel_bit = self.get_input_bit(index, stage);
                     let mut next = Vec::new();
                     for pair in values.chunks(2) {
@@ -913,7 +970,8 @@ impl<'a> LirToSynthAig<'a> {
                     values = next;
                 }
 
-                self.set_output_bit(node.output, 0, values[0]);
+                let selected = self.aig.add_and(values[0], in_range);
+                self.set_output_bit(node.output, 0, selected);
             }
 
             LirOp::RangeSelect { high, low, .. } => {

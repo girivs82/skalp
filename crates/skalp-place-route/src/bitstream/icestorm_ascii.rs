@@ -601,7 +601,7 @@ impl<'a> IceStormAscii<'a> {
                         // This is a chain head. Check if CI is driven by VCC/constant-1.
                         let ci_is_vcc = ci_net
                             .driver
-                            .and_then(|drv| netlist.cells.iter().find(|c| c.id == drv))
+                            .and_then(|drv| crate::utils::find_cell(netlist, drv))
                             .map(|driver_cell| {
                                 driver_cell.cell_type.contains("VCC")
                                     || driver_cell.cell_type.contains("TIE_HIGH")

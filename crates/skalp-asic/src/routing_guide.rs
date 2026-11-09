@@ -304,9 +304,13 @@ impl RoutingGuide {
         // Analyze congestion grid
         {
             let congestion = &routing.congestion;
-            for y in 0..congestion.grid_size.0 {
-                for x in 0..congestion.grid_size.1 {
-                    let value = congestion.values[y][x];
+            for (y, row) in congestion
+                .values
+                .iter()
+                .enumerate()
+                .take(congestion.grid_size.0)
+            {
+                for (x, &value) in row.iter().enumerate().take(congestion.grid_size.1) {
                     total_congestion += value;
                     count += 1;
                     peak = peak.max(value);

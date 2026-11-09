@@ -61,6 +61,22 @@ impl LibraryCellInfo {
     }
 }
 
+/// Input order for a MUX2 cell computing `sel ? d1 : d0`. A generic MUX2 takes
+/// `[sel, d0, d1]`; an FPGA MUX2 is a LUT whose library INIT (0xCACA) reads
+/// `[d0, d1, sel]`, so passing the generic order to it computes a different function.
+fn mux2_inputs(
+    ci: &LibraryCellInfo,
+    sel: GateNetId,
+    d0: GateNetId,
+    d1: GateNetId,
+) -> Vec<GateNetId> {
+    if ci.lut_init.is_some() {
+        vec![d0, d1, sel]
+    } else {
+        vec![sel, d0, d1]
+    }
+}
+
 /// Look up a library cell by function, falling back to a default if not found.
 fn lookup_cell(
     library: &TechLibrary,
@@ -171,7 +187,14 @@ pub fn synthesize(
         .find_dsp_cell()
         .map(|(_, info)| info.a_width.min(info.b_width))
         .unwrap_or(0);
-    let converter = LirToSynthAig::new(lir).with_dsp_max_width(dsp_max_width);
+    // Adders, subtractors and comparators go on the carry chain when the
+    // target has one (Lattice CCU2); otherwise they are AIG logic.
+    let carry_chain_min_width = library
+        .find_best_cell(&CellFunction::Ccu2)
+        .map(|_| crate::carry_chain::CARRY_CHAIN_MIN_WIDTH);
+    let converter = LirToSynthAig::new(lir)
+        .with_dsp_max_width(dsp_max_width)
+        .with_carry_chain_min_width(carry_chain_min_width);
     let lir_to_aig_result = converter.build();
 
     // Step 2: Run synthesis engine on the AIG
@@ -353,6 +376,26 @@ pub fn synthesize(
         }
     }
     result.netlist.rebuild_cache();
+
+    // The AIG exported physical-node inputs as outputs only to keep their
+    // logic alive; now that the physical cells read them they are ordinary
+    // internal nets, not module ports. This runs last, after the cleanup
+    // passes above, which treat output nets as fixed points: dropping the
+    // exports before buffer removal broke NCL gate-level simulation (an
+    // async FP32 adder stopped converging) (left as outputs, every carry-chain
+    // operand bit would become a top-level output and an I/O cell in PnR).
+    if !lir_to_aig_result.internal_exports.is_empty() {
+        let internal: std::collections::HashSet<&str> = lir_to_aig_result
+            .internal_exports
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let nets = &result.netlist.nets;
+        result.netlist.outputs.retain(|id| {
+            nets.get(id.0 as usize)
+                .is_none_or(|n| !internal.contains(n.name.as_str()))
+        });
+    }
 
     // Sync is_output flags with netlist.outputs — post-processing passes may
     // have moved output references without updating the per-net flag.
@@ -1020,6 +1063,7 @@ fn map_memblock_standalone(
     addr_width: u32,
     depth: u32,
     has_write: bool,
+    async_read: bool,
     inputs: &[Vec<GateNetId>],
     outputs: &[GateNetId],
     path: &str,
@@ -1034,11 +1078,28 @@ fn map_memblock_standalone(
     let total_bits = data_width * depth;
 
     // Query library for RAM cell
-    let ram_lookup = if total_bits < BRAM_MIN_BITS {
+    // Block RAM reads are synchronous; a memory read combinationally (a register
+    // file read in the same cycle) would see its data a cycle late, so it is built
+    // from registers instead.
+    let ram_lookup = if total_bits < BRAM_MIN_BITS || async_read {
         None
     } else {
         library.find_ram_cell()
     };
+    // A memory read combinationally goes into distributed RAM when the target
+    // has it and that is cheaper than registers (it nearly always is beyond a
+    // couple of words).
+    if ram_lookup.is_none()
+        && async_read
+        && has_write
+        && library.find_best_cell(&CellFunction::DistRam16x4).is_some()
+        && distram_is_cheaper(data_width, depth)
+    {
+        map_memblock_to_distram(
+            netlist, library, data_width, addr_width, depth, inputs, outputs, path, clk,
+        );
+        return;
+    }
     let (ram_cell, ram_info) = match ram_lookup {
         Some(info) => info,
         None => {
@@ -1369,7 +1430,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d0_w{}_rmux{}", path, wb, i - bit_lo),
-                            vec![bank_sel, tie_low, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, tie_low, block_out[i - bit_lo]),
                             vec![result_net],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1390,7 +1451,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            vec![bank_sel, prev_result, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
                             vec![final_out],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1412,7 +1473,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            vec![bank_sel, prev_result, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
                             vec![new_result],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1426,6 +1487,222 @@ fn map_memblock_standalone(
                     }
                 }
             }
+        }
+    }
+}
+
+/// LUT-equivalent cost of a `DistRam16x4` cell: four RAM LUTs plus the write
+/// port slice that drives them.
+const DISTRAM_CELL_COST: u32 = 6;
+
+/// Whether a `data_width` × `depth` memory costs less as 16×4 distributed RAM
+/// than as registers. Registers: one FF per bit, a 2:1 mux per bit and word
+/// for the read tree, and a write mux per bit. Distributed RAM: the cells,
+/// plus a read mux tree across 16-word banks.
+fn distram_is_cheaper(data_width: u32, depth: u32) -> bool {
+    let (dw, depth) = (data_width.max(1), depth.max(1));
+    let register_cost = dw * depth + dw * (depth - 1) + dw * depth;
+    let banks = depth.div_ceil(16);
+    let distram_cost = banks * dw.div_ceil(4) * DISTRAM_CELL_COST + dw * (banks - 1);
+    distram_cost < register_cost
+}
+
+/// Map an asynchronous-read MemBlock onto 16×4 distributed RAM cells
+/// (`CellFunction::DistRam16x4`: Lattice DPR16X4 / DPR16X4C).
+///
+/// The memory is tiled into 16-word banks of 4-bit slices. Each bank's write
+/// enable is `we` qualified by the upper write-address bits; the read data is
+/// a mux tree over the banks selected by the upper read-address bits. Each
+/// read port of a memory is its own MemBlock (see mir_to_lir), so a register
+/// file with two read ports becomes two copies sharing the write port.
+#[allow(clippy::too_many_arguments)]
+fn map_memblock_to_distram(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    data_width: u32,
+    addr_width: u32,
+    depth: u32,
+    inputs: &[Vec<GateNetId>],
+    outputs: &[GateNetId],
+    path: &str,
+    clk: GateNetId,
+) {
+    const WORDS: usize = 16;
+    const BITS: usize = 4;
+    const CELL_ADDR_BITS: usize = 4;
+
+    let ram_ci = lookup_cell(library, CellFunction::DistRam16x4, "DPR16X4", 0.16);
+    let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
+    let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let mux_ci = lookup_cell(library, CellFunction::Mux2, "MUX2", 0.3);
+    let tie_low = crate::carry_chain::get_or_create_tie(netlist, false);
+
+    let dw = data_width as usize;
+    let aw = addr_width as usize;
+    let banks = (depth as usize).div_ceil(WORDS);
+    let empty = Vec::new();
+    let raddr = inputs.first().unwrap_or(&empty);
+    let waddr = inputs.get(1).unwrap_or(&empty);
+    let wdata = inputs.get(2).unwrap_or(&empty);
+    let we = inputs
+        .get(3)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(tie_low);
+    let bit =
+        |nets: &Vec<GateNetId>, i: usize| -> GateNetId { nets.get(i).copied().unwrap_or(tie_low) };
+
+    let add_comb = |netlist: &mut GateNetlist,
+                    ci: &LibraryCellInfo,
+                    cell_path: String,
+                    ins: Vec<GateNetId>,
+                    out_name: String|
+     -> GateNetId {
+        let out = netlist.add_net(GateNet::new(GateNetId(0), out_name));
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            ci.name.clone(),
+            library.name.clone(),
+            ci.fit,
+            cell_path,
+            ins,
+            vec![out],
+        );
+        cell.source_op = Some("MemBlock_DistRam".to_string());
+        ci.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+        out
+    };
+
+    // Per-bank write enable: we & (waddr[upper] == bank)
+    let upper_bits = aw.saturating_sub(CELL_ADDR_BITS);
+    let mut inverted_waddr: Vec<Option<GateNetId>> = vec![None; upper_bits];
+    let mut bank_we = Vec::with_capacity(banks);
+    for b in 0..banks {
+        let mut sel = we;
+        for (u, inverted) in inverted_waddr.iter_mut().enumerate() {
+            let a = bit(waddr, CELL_ADDR_BITS + u);
+            let term = if (b >> u) & 1 == 1 {
+                a
+            } else {
+                *inverted.get_or_insert_with(|| {
+                    add_comb(
+                        netlist,
+                        &inv_ci,
+                        format!("{}.waddr_inv{}", path, u),
+                        vec![a],
+                        format!("{}.waddr_n{}", path, u),
+                    )
+                })
+            };
+            sel = add_comb(
+                netlist,
+                &and_ci,
+                format!("{}.bank{}_we_and{}", path, b, u),
+                vec![sel, term],
+                format!("{}.bank{}_we{}", path, b, u),
+            );
+        }
+        bank_we.push(sel);
+    }
+
+    // RAM cells. bank_data[b][i] = bank b's read data bit i.
+    let mut bank_data: Vec<Vec<GateNetId>> = Vec::with_capacity(banks);
+    for (b, &wre) in bank_we.iter().enumerate() {
+        let mut data = Vec::with_capacity(dw);
+        for s in 0..dw.div_ceil(BITS) {
+            let mut ins = Vec::with_capacity(2 * BITS + 1 + CELL_ADDR_BITS);
+            for i in 0..BITS {
+                let d = s * BITS + i;
+                ins.push(if d < dw { bit(wdata, d) } else { tie_low });
+            }
+            for i in 0..CELL_ADDR_BITS {
+                ins.push(if i < aw { bit(waddr, i) } else { tie_low });
+            }
+            ins.push(wre);
+            for i in 0..CELL_ADDR_BITS {
+                ins.push(if i < aw { bit(raddr, i) } else { tie_low });
+            }
+            let outs: Vec<GateNetId> = (0..BITS)
+                .map(|i| {
+                    let d = s * BITS + i;
+                    // A single bank drives the memory's outputs directly
+                    if banks == 1 && d < dw {
+                        outputs.get(d).copied().unwrap_or_else(|| {
+                            netlist.add_net(GateNet::new(
+                                GateNetId(0),
+                                format!("{}.b{}s{}.do{}", path, b, s, i),
+                            ))
+                        })
+                    } else {
+                        netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.b{}s{}.do{}", path, b, s, i),
+                        ))
+                    }
+                })
+                .collect();
+            data.extend(outs.iter().take(dw.saturating_sub(s * BITS).min(BITS)));
+            let mut cell = Cell::new_seq(
+                CellId(0),
+                ram_ci.name.clone(),
+                library.name.clone(),
+                ram_ci.fit,
+                format!("{}.b{}s{}", path, b, s),
+                ins,
+                outs,
+                clk,
+                None,
+            );
+            cell.source_op = Some("MemBlock_DistRam".to_string());
+            cell.parameters
+                .insert("INITVAL".to_string(), "0x0000000000000000".to_string());
+            ram_ci.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
+        }
+        bank_data.push(data);
+    }
+    if banks == 1 {
+        return;
+    }
+
+    // Read mux tree over the banks: level u halves the candidates using
+    // raddr[4 + u]. Banks past the memory's depth read as 0.
+    for i in 0..dw {
+        let mut level: Vec<GateNetId> = bank_data.iter().map(|d| d[i]).collect();
+        let mut u = 0;
+        while level.len() > 1 {
+            let sel = bit(raddr, CELL_ADDR_BITS + u);
+            let last_level = level.len() <= 2;
+            level = level
+                .chunks(2)
+                .enumerate()
+                .map(|(k, pair)| {
+                    let d0 = pair[0];
+                    let d1 = pair.get(1).copied().unwrap_or(tie_low);
+                    let out = if last_level {
+                        outputs[i]
+                    } else {
+                        netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.rmux{}_{}_{}", path, i, u, k),
+                        ))
+                    };
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        mux_ci.name.clone(),
+                        library.name.clone(),
+                        mux_ci.fit,
+                        format!("{}.rmux{}_{}_{}", path, i, u, k),
+                        mux2_inputs(&mux_ci, sel, d0, d1),
+                        vec![out],
+                    );
+                    cell.source_op = Some("MemBlock_DistRam".to_string());
+                    mux_ci.apply_to_cell(&mut cell);
+                    netlist.add_cell(cell);
+                    out
+                })
+                .collect();
+            u += 1;
         }
     }
 }
@@ -1589,9 +1866,31 @@ fn decompose_memblock_to_dffs(
         acc.unwrap_or(tie_low)
     };
 
+    // A read-port replica (`<memory>_rd<n>`, see mir_to_lir's handle_memory_read)
+    // shares the write port of its primary block, so in registers it can share the
+    // primary's storage and add only a read mux.
+    let shared_storage: Option<Vec<Vec<GateNetId>>> = path
+        .rsplit_once("_rd")
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|(primary, _)| {
+            (0..depth as usize)
+                .map(|word| {
+                    (0..dw)
+                        .map(|b| netlist.get_net_id(&format!("{}_w{}_q{}", primary, word, b)))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+
     // Storage: depth × data_width DFFs with write-select muxes
     let mut q_nets: Vec<Vec<GateNetId>> = Vec::with_capacity(depth as usize);
+    if let Some(shared) = shared_storage {
+        q_nets = shared;
+    }
     for word in 0..depth as usize {
+        if q_nets.len() == depth as usize {
+            break;
+        }
         let word_we = if has_write {
             mk_decode(netlist, word, waddr_nets, &waddr_inv, Some(we_net), "w")
         } else {
@@ -1613,7 +1912,7 @@ fn decompose_memblock_to_dffs(
                 mk_cell(
                     netlist,
                     &mux_ci,
-                    vec![word_we, q, wbit],
+                    mux2_inputs(&mux_ci, word_we, q, wbit),
                     din,
                     format!("{}_w{}_wmux{}", path, word, b),
                 );
@@ -1671,7 +1970,7 @@ fn decompose_memblock_to_dffs(
             mk_cell(
                 netlist,
                 &mux_ci,
-                vec![read_sel[word - 1], acc, q_nets[word][b]],
+                mux2_inputs(&mux_ci, read_sel[word - 1], acc, q_nets[word][b]),
                 stage_out,
                 format!("{}_rmux_w{}_b{}", path, word, b),
             );
@@ -1706,6 +2005,16 @@ fn merge_physical_nodes_into_netlist(
 
     // Build set of LIR input signal IDs
     let lir_input_signals: HashSet<u32> = lir.inputs.iter().map(|s| s.0).collect();
+
+    // Values of constant-driven signals (folded into carry-chain truth tables)
+    let constant_signals: std::collections::HashMap<u32, u64> = lir
+        .nodes
+        .iter()
+        .filter_map(|n| match n.op {
+            LirOp::Constant { value, .. } => Some((n.output.0, value)),
+            _ => None,
+        })
+        .collect();
 
     // Resolve a LIR signal to a vector of GateNetIds in the netlist.
     // Creates missing input nets on the fly (module inputs consumed only by
@@ -1923,11 +2232,19 @@ fn merge_physical_nodes_into_netlist(
         let node = &lir.nodes[idx];
         let path = &node.path;
 
-        // Resolve input signals to net ID vectors
+        // Resolve input signals to net ID vectors. A carry chain folds
+        // constant operands into its truth tables, so those need no nets.
+        let folds_constants = crate::carry_chain::is_carry_chain_op(&node.op, 0);
         let input_nets: Vec<Vec<GateNetId>> = node
             .inputs
             .iter()
-            .map(|&sig_id| resolve_signal(netlist, sig_id))
+            .map(|&sig_id| {
+                if folds_constants && constant_signals.contains_key(&sig_id.0) {
+                    Vec::new()
+                } else {
+                    resolve_signal(netlist, sig_id)
+                }
+            })
             .collect();
 
         // Resolve output signal to net ID vector (__phys_* nets)
@@ -2704,6 +3021,7 @@ fn merge_physical_nodes_into_netlist(
                 addr_width,
                 depth,
                 has_write,
+                async_read,
                 ..
             } => {
                 // TRIAGE #35: the clock input net may not EXIST yet — when
@@ -2737,6 +3055,7 @@ fn merge_physical_nodes_into_netlist(
                     *addr_width,
                     *depth,
                     *has_write,
+                    *async_read,
                     &input_nets,
                     &output_nets,
                     path,
@@ -2745,6 +3064,31 @@ fn merge_physical_nodes_into_netlist(
             }
             LirOp::MemRead { .. } | LirOp::MemWrite { .. } => {
                 // MemRead/MemWrite are part of MemBlock — handled above
+            }
+
+            op if crate::carry_chain::is_carry_chain_op(op, 0) => {
+                let operands: Vec<crate::carry_chain::Operand> = node
+                    .inputs
+                    .iter()
+                    .zip(input_nets.iter())
+                    .map(|(sig, nets)| crate::carry_chain::Operand {
+                        nets: nets.clone(),
+                        constant: constant_signals.get(&sig.0).copied(),
+                    })
+                    .collect();
+                if !crate::carry_chain::map_carry_chain(
+                    netlist,
+                    library,
+                    op,
+                    &operands,
+                    &output_nets,
+                    path,
+                ) {
+                    eprintln!(
+                        "warning: no carry-chain cell in library '{}' for {:?} at {}",
+                        library.name, op, path
+                    );
+                }
             }
 
             LirOp::Mul {

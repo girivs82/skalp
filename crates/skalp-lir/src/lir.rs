@@ -153,6 +153,29 @@ pub enum PrimitiveType {
         /// Number of data bits
         data_width: u8,
     },
+    /// Write port of a distributed RAM with an asynchronous read port
+    /// (`CellFunction::DistRam16x4`). Sequential: on the clock edge with WE
+    /// high, `mem[waddr] = wdata`.
+    /// Inputs: [wdata[0..dw], waddr[0..aw], WE]; no outputs.
+    /// Pairs with the [`PrimitiveType::DistRamRead`] that has the same `ram`.
+    DistRamWrite {
+        /// Memory this port writes (shared with its read port)
+        ram: u32,
+        /// Number of address bits
+        addr_width: u8,
+        /// Number of data bits
+        data_width: u8,
+    },
+    /// Asynchronous read port of a distributed RAM: `rdata = mem[raddr]`,
+    /// combinationally. Inputs: [raddr[0..aw]]; outputs: [rdata[0..dw]].
+    DistRamRead {
+        /// Memory this port reads (shared with its write port)
+        ram: u32,
+        /// Number of address bits
+        addr_width: u8,
+        /// Number of data bits
+        data_width: u8,
+    },
 
     // === Special ===
     /// Clock buffer (special timing properties)
@@ -176,6 +199,17 @@ pub enum PrimitiveType {
     Lut6 {
         /// 64-bit initialization value (truth table)
         init: u64,
+    },
+    /// Lattice two-bit carry cell (Nexus `CCU2`, ECP5 `CCU2C`), `INJECT = "NO"`.
+    ///
+    /// Inputs: [A0, B0, C0, D0, A1, B1, C1, D1, CIN]; outputs: [S0, S1, COUT].
+    /// Half `i`: `P = init_i(A, B, C, D)`, `G = init_i[3:0](A, B)`,
+    /// `S_i = P ^ c_i`, `c_(i+1) = P ? c_i : G`, with `c_0 = CIN`, `COUT = c_2`.
+    Ccu2 {
+        /// INIT0: truth table of the low half
+        init0: u16,
+        /// INIT1: truth table of the high half
+        init1: u16,
     },
 
     // === Power Infrastructure ===
@@ -274,6 +308,7 @@ impl PrimitiveType {
                 | PrimitiveType::MemCell
                 | PrimitiveType::RegCell
                 | PrimitiveType::RamBlock { .. }
+                | PrimitiveType::DistRamWrite { .. }
                 | PrimitiveType::RetentionDff { .. }
                 // NCL threshold gates are state-holding (hysteresis behavior)
                 | PrimitiveType::Th12
@@ -334,6 +369,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 3,
             PrimitiveType::CarryCell => 3,
+            PrimitiveType::Ccu2 { .. } => 9,
             PrimitiveType::CompBit => 4,
             PrimitiveType::MemCell => 3,
             PrimitiveType::RegCell => 3,
@@ -344,6 +380,12 @@ impl PrimitiveType {
                 // raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE
                 *addr_width * 2 + *data_width + 6
             }
+            PrimitiveType::DistRamWrite {
+                addr_width,
+                data_width,
+                ..
+            } => *data_width + *addr_width + 1,
+            PrimitiveType::DistRamRead { addr_width, .. } => *addr_width,
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
             PrimitiveType::Lut4 { .. } => 4,
@@ -385,8 +427,11 @@ impl PrimitiveType {
         match self {
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 2,
+            PrimitiveType::Ccu2 { .. } => 3,
             PrimitiveType::CompBit => 2,
             PrimitiveType::RamBlock { data_width, .. } => *data_width,
+            PrimitiveType::DistRamWrite { .. } => 0,
+            PrimitiveType::DistRamRead { data_width, .. } => *data_width,
             PrimitiveType::PowerSwitch { .. } => 0,
             // FP32 arithmetic operations have 32 output bits
             PrimitiveType::Fp32Add
@@ -430,6 +475,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => 0.2,
             PrimitiveType::FullAdder => 0.3,
             PrimitiveType::CarryCell => 0.1, // Simpler than full adder
+            PrimitiveType::Ccu2 { .. } => 1.2, // two LUT4s + two carry muxes
             PrimitiveType::CompBit => 0.15,
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
@@ -440,6 +486,13 @@ impl PrimitiveType {
                 // FIT scales with memory size
                 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64)
             }
+            // The storage FIT sits on the write port (it holds the state)
+            PrimitiveType::DistRamWrite {
+                addr_width,
+                data_width,
+                ..
+            } => 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64),
+            PrimitiveType::DistRamRead { .. } => 0.1,
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0,
             // FPGA LUTs - SRAM-based configuration memory
@@ -478,7 +531,11 @@ impl PrimitiveType {
     pub fn is_memory(&self) -> bool {
         matches!(
             self,
-            PrimitiveType::MemCell | PrimitiveType::RegCell | PrimitiveType::RamBlock { .. }
+            PrimitiveType::MemCell
+                | PrimitiveType::RegCell
+                | PrimitiveType::RamBlock { .. }
+                | PrimitiveType::DistRamWrite { .. }
+                | PrimitiveType::DistRamRead { .. }
         )
     }
 
@@ -516,10 +573,13 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => "HA",
             PrimitiveType::FullAdder => "FA",
             PrimitiveType::CarryCell => "CARRY",
+            PrimitiveType::Ccu2 { .. } => "CCU2",
             PrimitiveType::CompBit => "COMP",
             PrimitiveType::MemCell => "MEM",
             PrimitiveType::RegCell => "REG",
             PrimitiveType::RamBlock { .. } => "RAM",
+            PrimitiveType::DistRamWrite { .. } => "DPRAM_W",
+            PrimitiveType::DistRamRead { .. } => "DPRAM_R",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
             PrimitiveType::Lut4 { .. } => "LUT4",
@@ -571,6 +631,9 @@ impl std::fmt::Display for PrimitiveType {
             }
             PrimitiveType::Constant { value } => write!(f, "CONST{}", if *value { 1 } else { 0 }),
             PrimitiveType::Lut4 { init } => write!(f, "LUT4[{:#06x}]", init),
+            PrimitiveType::Ccu2 { init0, init1 } => {
+                write!(f, "CCU2[{:#06x},{:#06x}]", init0, init1)
+            }
             PrimitiveType::Lut6 { init } => write!(f, "LUT6[{:#018x}]", init),
             PrimitiveType::LevelShifter {
                 from_voltage,
@@ -887,6 +950,10 @@ pub enum LirOp {
         depth: u32,
         has_write: bool,
         read_only: bool,
+        /// Read outside a clocked process: read data must follow the address in the
+        /// same cycle, so the memory cannot live in a synchronous-read block RAM.
+        #[serde(default)]
+        async_read: bool,
     },
 
     // === Special ===

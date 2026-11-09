@@ -58,7 +58,7 @@ mod context_debug_tests {
         // Generate and print Metal shader for debugging
         let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
-        println!("{}", &shader_code);
+        println!("{}", shader_code);
 
         // Check if final_result references temp_value correctly
         // It should NOT duplicate the data_in + 5 computation

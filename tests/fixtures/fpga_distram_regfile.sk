@@ -1,0 +1,23 @@
+// A 32 x 64 register file with two combinational read ports and register 0
+// reading as zero, as in an RV64 core's register read stage. On FPGA targets
+// with distributed RAM this maps to 16 x 4 RAM cells (two banks of 16 words).
+entity RegFile {
+    in clk: clock
+    in we: bit
+    in wa: bit[5]
+    in wd: bit[64]
+    in ra: bit[5]
+    in rb: bit[5]
+    out qa: bit[64]
+    out qb: bit[64]
+}
+impl RegFile {
+    signal rf: bit[64][32]
+    on(clk.rise) {
+        if we == 1 {
+            rf[wa] = wd
+        }
+    }
+    qa = if ra == 0 { 0 } else { rf[ra] }
+    qb = if rb == 0 { 0 } else { rf[rb] }
+}

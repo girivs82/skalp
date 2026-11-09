@@ -279,10 +279,9 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             // Sum the widths of all concatenated expressions
             let mut total_width = 0;
             for e in exprs {
-                if let Some(w) = compute_expression_width(e, mir_module) {
+                {
+                    let w = compute_expression_width(e, mir_module)?;
                     total_width += w;
-                } else {
-                    return None; // Can't determine width
                 }
             }
             Some(total_width)
@@ -789,8 +788,26 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                 get_type_dimensions(&variable.var_type)
             };
 
-        // Check if this variable name has already been declared
-        let unique_name = if declared_variable_names.contains_key(&variable.name) {
+        // A variable that mirrors a same-named, same-typed signal is an alias:
+        // function-module synthesis creates a Signal for each `let` binding
+        // and a Variable with the same name and type so Variable references
+        // resolve to it. Declaring both produced `wire x; logic x;` — illegal
+        // SystemVerilog. Refer to the signal's declaration instead.
+        if variable.initial.is_none()
+            && mir_module
+                .signals
+                .iter()
+                .any(|s| s.name == variable.name && s.signal_type == variable.var_type)
+        {
+            variable_unique_names.insert(variable.id, variable.name.clone());
+            continue;
+        }
+
+        // Check if this variable name has already been declared, as a variable
+        // or as a signal of a different type
+        let unique_name = if declared_variable_names.contains_key(&variable.name)
+            || declared_signal_names.contains(&variable.name)
+        {
             // Collision detected - use unique name with variable ID suffix
             format!("{}_{}", variable.name, variable.id.0)
         } else {
@@ -816,7 +833,7 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
         sv.push_str(";\n");
     }
 
-    if !mir_module.variables.is_empty() {
+    if !declared_variable_names.is_empty() {
         sv.push('\n');
     }
 
@@ -1427,6 +1444,18 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
                 .unwrap_or_else(|| format!("port_{}", id.0))
         }
         skalp_mir::LValue::BitSelect { base, index } => {
+            // `x[31:0][7]` is not legal SystemVerilog: select from the slice's base instead.
+            if let skalp_mir::LValue::RangeSelect {
+                base: inner,
+                low: inner_low,
+                ..
+            } = base.as_ref()
+            {
+                let idx = offset_select_index(inner_low, index, &|e| {
+                    format_expression_with_context(e, module)
+                });
+                return format!("{}[{}]", format_lvalue_with_context(inner, module), idx);
+            }
             format!(
                 "{}[{}]",
                 format_lvalue_with_context(base, module),
@@ -1434,6 +1463,20 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
             )
         }
         skalp_mir::LValue::RangeSelect { base, high, low } => {
+            if let skalp_mir::LValue::RangeSelect {
+                base: inner,
+                low: inner_low,
+                ..
+            } = base.as_ref()
+            {
+                let fmt = |e: &skalp_mir::Expression| format_expression_with_context(e, module);
+                return format!(
+                    "{}[{}:{}]",
+                    format_lvalue_with_context(inner, module),
+                    offset_select_index(inner_low, high, &fmt),
+                    offset_select_index(inner_low, low, &fmt)
+                );
+            }
             format!(
                 "{}[{}:{}]",
                 format_lvalue_with_context(base, module),
@@ -1451,6 +1494,26 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
     }
 }
 
+/// Index into the base of a part-select: bit `index` of `x[h:low]` is bit `low + index` of `x`.
+fn offset_select_index(
+    low: &skalp_mir::Expression,
+    index: &skalp_mir::Expression,
+    fmt: &dyn Fn(&skalp_mir::Expression) -> String,
+) -> String {
+    let as_int = |e: &skalp_mir::Expression| match &e.kind {
+        skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(v)) => Some(*v),
+        skalp_mir::ExpressionKind::Literal(skalp_mir::Value::BitVector { value, .. }) => {
+            i64::try_from(*value).ok()
+        }
+        _ => None,
+    };
+    match (as_int(low), as_int(index)) {
+        (Some(0), _) => fmt(index),
+        (Some(l), Some(i)) => (l + i).to_string(),
+        _ => format!("({}) + ({})", fmt(low), fmt(index)),
+    }
+}
+
 /// Format an lvalue (fallback without context)
 fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
     match lvalue {
@@ -1458,9 +1521,31 @@ fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
         skalp_mir::LValue::Variable(id) => format!("var_{}", id.0),
         skalp_mir::LValue::Port(id) => format!("port_{}", id.0),
         skalp_mir::LValue::BitSelect { base, index } => {
+            if let skalp_mir::LValue::RangeSelect {
+                base: inner,
+                low: inner_low,
+                ..
+            } = base.as_ref()
+            {
+                let idx = offset_select_index(inner_low, index, &format_expression);
+                return format!("{}[{}]", format_lvalue(inner), idx);
+            }
             format!("{}[{}]", format_lvalue(base), format_expression(index))
         }
         skalp_mir::LValue::RangeSelect { base, high, low } => {
+            if let skalp_mir::LValue::RangeSelect {
+                base: inner,
+                low: inner_low,
+                ..
+            } = base.as_ref()
+            {
+                return format!(
+                    "{}[{}:{}]",
+                    format_lvalue(inner),
+                    offset_select_index(inner_low, high, &format_expression),
+                    offset_select_index(inner_low, low, &format_expression)
+                );
+            }
             format!(
                 "{}[{}:{}]",
                 format_lvalue(base),
@@ -1530,9 +1615,18 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                 .collect();
             format!("{}({})", name, arg_strs.join(", "))
         }
-        skalp_mir::ExpressionKind::Cast { expr, .. } => {
-            // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
-            format_expression_with_context(expr, module)
+        skalp_mir::ExpressionKind::Cast { expr, target_type } => {
+            // Cast is a bitwise reinterpretation, but a bit-select or part-select lowered
+            // to a shift and mask must keep its width: `(x >> 7) & 1'b1` is as wide as x,
+            // which matters inside a concatenation or replication.
+            let inner = format_expression_with_context(expr, module);
+            match (&expr.kind, target_type) {
+                (
+                    skalp_mir::ExpressionKind::Binary { .. },
+                    DataType::Bit(w) | DataType::Logic(w),
+                ) if *w > 0 => format!("{}'({})", w, inner),
+                _ => inner,
+            }
         }
         // BUG FIX #85: Handle tuple/field access for module synthesis
         skalp_mir::ExpressionKind::TupleFieldAccess { base, index } => {
@@ -1634,9 +1728,18 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             let arg_strs: Vec<_> = args.iter().map(format_expression).collect();
             format!("{}({})", name, arg_strs.join(", "))
         }
-        skalp_mir::ExpressionKind::Cast { expr, .. } => {
-            // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
-            format_expression(expr)
+        skalp_mir::ExpressionKind::Cast { expr, target_type } => {
+            // Cast is a bitwise reinterpretation, but a bit-select or part-select lowered
+            // to a shift and mask must keep its width: `(x >> 7) & 1'b1` is as wide as x,
+            // which matters inside a concatenation or replication.
+            let inner = format_expression(expr);
+            match (&expr.kind, target_type) {
+                (
+                    skalp_mir::ExpressionKind::Binary { .. },
+                    DataType::Bit(w) | DataType::Logic(w),
+                ) if *w > 0 => format!("{}'({})", w, inner),
+                _ => inner,
+            }
         }
         // BUG FIX #85: Handle tuple/field access for module synthesis
         skalp_mir::ExpressionKind::TupleFieldAccess { base, .. } => format_expression(base),

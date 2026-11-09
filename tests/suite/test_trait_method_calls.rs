@@ -20,12 +20,7 @@ fn arithmetic_trait_methods_lower() {
     // `fn abs<T: Numeric>` in vector.sk and `fn abs(x: int)` in fixed.sk and
     // resolves to those instead of the trait method. Separate defect.
     for expr in [
-        "k.add(k)",
-        "k.sub(k)",
-        "k.mul(k)",
-        "k.div(k)",
-        "k.neg()",
-        "k.sqrt()",
+        "k.add(k)", "k.sub(k)", "k.mul(k)", "k.div(k)", "k.neg()", "k.sqrt()",
     ] {
         let src = format!(
             r#"

@@ -236,6 +236,16 @@ impl GateNetlistToSirConverter {
                     addr_width,
                     data_width,
                 }
+            } else if cell.function.as_ref() == Some(&CellFunction::Ccu2) {
+                // Lattice carry cell: the truth tables are cell parameters
+                let (init0, init1) =
+                    skalp_lir::carry_chain::ccu2_inits(cell).unwrap_or_else(|| {
+                        panic!(
+                            "CCU2 cell '{}' has no valid INIT0/INIT1 parameters",
+                            cell.path
+                        )
+                    });
+                PrimitiveType::Ccu2 { init0, init1 }
             } else if let Some(func) = &cell.function {
                 // Use the library-provided function for accurate mapping
                 self.cell_function_to_primitive(func)
@@ -297,6 +307,50 @@ impl GateNetlistToSirConverter {
                     outputs.len(),
                     expected_outputs - outputs.len()
                 );
+            }
+
+            // Distributed RAM: a sequential write port and a combinational
+            // (asynchronous) read port sharing one memory, keyed by the
+            // write port's primitive id. Inputs: [DI0..3, WAD0..3, WRE,
+            // RAD0..3]; outputs: [DO0..3].
+            if cell.function.as_ref() == Some(&CellFunction::DistRam16x4) {
+                const DW: usize = 4;
+                const AW: usize = 4;
+                assert!(
+                    inputs.len() == 2 * AW + DW + 1 && outputs.len() == DW,
+                    "distributed RAM cell '{}' has {} inputs / {} outputs, expected {} / {}",
+                    cell.path,
+                    inputs.len(),
+                    outputs.len(),
+                    2 * AW + DW + 1,
+                    DW
+                );
+                let ram = primitive_id.0;
+                seq_ops.push(SirOperation::Primitive {
+                    id: primitive_id,
+                    ptype: PrimitiveType::DistRamWrite {
+                        ram,
+                        addr_width: AW as u8,
+                        data_width: DW as u8,
+                    },
+                    inputs: inputs[..DW + AW + 1].to_vec(),
+                    outputs: vec![],
+                    path: cell.path.clone(),
+                });
+                let read_id = PrimitiveId(self.next_primitive_id);
+                self.next_primitive_id += 1;
+                comb_ops.push(SirOperation::Primitive {
+                    id: read_id,
+                    ptype: PrimitiveType::DistRamRead {
+                        ram,
+                        addr_width: AW as u8,
+                        data_width: DW as u8,
+                    },
+                    inputs: inputs[DW + AW + 1..].to_vec(),
+                    outputs,
+                    path: format!("{}.read", cell.path),
+                });
+                continue;
             }
 
             // Skip degenerate self-buffers: when buffer removal aliases a

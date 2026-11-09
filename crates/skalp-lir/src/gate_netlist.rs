@@ -1029,10 +1029,58 @@ impl GateNetlist {
             } else {
                 &cell.cell_type
             };
-            output.push_str(&format!("    {} U{} (\n", cell_type_display, cell.id.0));
+            if cell.parameters.is_empty() {
+                output.push_str(&format!("    {} U{} (\n", cell_type_display, cell.id.0));
+            } else {
+                // Vendor parameters (e.g. a CCU2's INIT0/INIT1/INJECT)
+                let params: Vec<String> = cell
+                    .parameters
+                    .iter()
+                    .map(|(k, v)| format!(".{}(\"{}\")", k, v))
+                    .collect();
+                output.push_str(&format!(
+                    "    {} #({}) U{} (\n",
+                    cell_type_display,
+                    params.join(", "),
+                    cell.id.0
+                ));
+            }
 
             // Collect all port connections
             let mut connections = Vec::new();
+
+            // Lattice distributed RAM: vector ports, write clock WCK
+            if cell.function == Some(CellFunction::DistRam16x4) {
+                let bus = |ids: &[GateNetId]| -> String {
+                    let names: Vec<&str> = ids
+                        .iter()
+                        .rev()
+                        .map(|id| self.nets[id.0 as usize].name.as_str())
+                        .collect();
+                    format!("{{{}}}", names.join(", "))
+                };
+                let ins = &cell.inputs;
+                if ins.len() == 13 {
+                    connections.push(format!("        .DI({})", bus(&ins[0..4])));
+                    connections.push(format!("        .WAD({})", bus(&ins[4..8])));
+                    connections.push(format!(
+                        "        .WRE({})",
+                        self.nets[ins[8].0 as usize].name
+                    ));
+                    connections.push(format!("        .RAD({})", bus(&ins[9..13])));
+                    if let Some(clk) = cell.clock {
+                        connections
+                            .push(format!("        .WCK({})", self.nets[clk.0 as usize].name));
+                    }
+                    connections.push(format!("        .DO({})", bus(&cell.outputs)));
+                    for (i, conn) in connections.iter().enumerate() {
+                        let comma = if i < connections.len() - 1 { "," } else { "" };
+                        output.push_str(&format!("{}{}\n", conn, comma));
+                    }
+                    output.push_str("    );\n\n");
+                    continue;
+                }
+            }
 
             // Add input connections
             for (i, input_id) in cell.inputs.iter().enumerate() {
@@ -1936,6 +1984,15 @@ fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&
         return format!("I{}", index);
     }
 
+    // Lattice carry cells (Nexus CCU2, ECP5 CCU2C)
+    if cell_type == "CCU2" || cell_type == "CCU2C" {
+        const PINS: [&str; 9] = ["A0", "B0", "C0", "D0", "A1", "B1", "C1", "D1", "CIN"];
+        return PINS
+            .get(index)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| format!("I{}", index));
+    }
+
     // Nexus FPGA primitives (OXIDE_COMB, OXIDE_FF, etc.)
     if cell_type.starts_with("OXIDE_COMB") {
         return match index {
@@ -2046,6 +2103,15 @@ fn get_output_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<
         } else {
             return format!("Y{}", index);
         }
+    }
+
+    // Lattice carry cells (Nexus CCU2, ECP5 CCU2C)
+    if cell_type == "CCU2" || cell_type == "CCU2C" {
+        return match index {
+            0 => "S0".to_string(),
+            1 => "S1".to_string(),
+            _ => "COUT".to_string(),
+        };
     }
 
     // Nexus FPGA primitives

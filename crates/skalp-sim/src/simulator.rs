@@ -59,6 +59,9 @@ pub struct SimulationState {
 /// Trait for simulation runtime implementations
 ///
 /// Implemented by `CompiledCpuRuntime` and `GpuRuntime`.
+// async_trait marks each generated method #[must_use] on a boxed future, which
+// clippy 1.99 reports as double_must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SimulationRuntime: Send + Sync {
     /// Initialize the runtime with a SIR module

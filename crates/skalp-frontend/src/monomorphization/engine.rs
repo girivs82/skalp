@@ -1033,7 +1033,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                             &gf.iterator,
                             i as i64,
                         );
-                        conn.expr = Self::remap_expr_signals(&conn.expr, &read_map, &var_map, &inst_vars);
+                        conn.expr =
+                            Self::remap_expr_signals(&conn.expr, &read_map, &var_map, &inst_vars);
                     }
                     ni.generic_args = ni
                         .generic_args
@@ -1195,16 +1196,22 @@ impl<'hir> MonomorphizationEngine<'hir> {
         match lv {
             L::Signal(id) => L::Signal(write_map.get(id).copied().unwrap_or(*id)),
             L::Index(base, idx) => L::Index(
-                Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
+                Box::new(Self::remap_lvalue_signals(
+                    base, write_map, read_map, vars, insts,
+                )),
                 Self::remap_expr_signals(idx, read_map, vars, insts),
             ),
             L::Range(base, lo, hi) => L::Range(
-                Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
+                Box::new(Self::remap_lvalue_signals(
+                    base, write_map, read_map, vars, insts,
+                )),
                 Self::remap_expr_signals(lo, read_map, vars, insts),
                 Self::remap_expr_signals(hi, read_map, vars, insts),
             ),
             L::FieldAccess { base, field } => L::FieldAccess {
-                base: Box::new(Self::remap_lvalue_signals(base, write_map, read_map, vars, insts)),
+                base: Box::new(Self::remap_lvalue_signals(
+                    base, write_map, read_map, vars, insts,
+                )),
                 field: field.clone(),
             },
             other => other.clone(),

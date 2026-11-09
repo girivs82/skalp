@@ -14,6 +14,12 @@ use crate::device::{Device, PipId, WireId, WireType};
 use crate::error::Result;
 use crate::placer::PlacementResult;
 use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
+use skalp_lir::tech_library::CellFunction;
+
+/// CCU2 output index of COUT (outputs are S0, S1, COUT)
+const CCU2_COUT: usize = 2;
+/// CCU2 input index of CIN (inputs are A0, B0, C0, D0, A1, B1, C1, D1, CIN)
+const CCU2_CIN: usize = 8;
 
 /// Carry chain router for dedicated carry routing
 pub struct CarryChainRouter<'a, D: Device> {
@@ -33,19 +39,35 @@ impl<'a, D: Device> CarryChainRouter<'a, D> {
         net: &skalp_lir::gate_netlist::GateNet,
         netlist: &GateNetlist,
     ) -> bool {
+        let is_ccu2 =
+            |cell: &skalp_lir::gate_netlist::Cell| cell.function == Some(CellFunction::Ccu2);
+
         // Check if driver is a carry cell
         if let Some(driver_id) = net.driver {
-            if let Some(cell) = netlist.cells.iter().find(|c| c.id == driver_id) {
+            if let Some(cell) = crate::utils::find_cell(netlist, driver_id) {
+                if is_ccu2(cell) {
+                    // A Lattice CCU2's only dedicated carry wire is COUT ->
+                    // CIN; its sum outputs use general routing
+                    return cell.outputs.get(CCU2_COUT) == Some(&net.id)
+                        && net.fanout.iter().all(|&(sink, pin)| {
+                            pin == CCU2_CIN
+                                && crate::utils::find_cell(netlist, sink).is_some_and(is_ccu2)
+                        });
+                }
                 if cell.cell_type.contains("CARRY") || cell.cell_type == "SB_CARRY" {
                     return true;
                 }
             }
         }
 
-        // Check if any sink is a carry cell expecting carry input
+        // Check if any sink is a carry cell expecting carry input (CCU2 data
+        // inputs come over general routing, and a CCU2 CIN is only ever fed
+        // by the previous CCU2's COUT, handled above)
         for (sink_id, _) in &net.fanout {
-            if let Some(cell) = netlist.cells.iter().find(|c| c.id == *sink_id) {
-                if cell.cell_type.contains("CARRY") || cell.cell_type == "SB_CARRY" {
+            if let Some(cell) = crate::utils::find_cell(netlist, *sink_id) {
+                if !is_ccu2(cell)
+                    && (cell.cell_type.contains("CARRY") || cell.cell_type == "SB_CARRY")
+                {
                     return true;
                 }
             }
@@ -112,16 +134,17 @@ impl<'a, D: Device> CarryChainRouter<'a, D> {
 
             // Check if source and sink are in same tile or adjacent tiles
             // Carry chain routing is simple when cells are properly placed
-            if source_loc.tile_x == sink_loc.tile_x {
-                // Same column - carry can propagate directly
-                self.route_vertical_carry(
-                    source_loc.tile_y,
-                    sink_loc.tile_y,
-                    source_loc.tile_x,
+            if source_loc.tile_x == sink_loc.tile_x || source_loc.tile_y == sink_loc.tile_y {
+                // Same column (iCE40 chains run up columns) or same row
+                // (Lattice Nexus/ECP5 chains run along rows): the carry
+                // propagates directly through each tile in between
+                self.route_straight_carry(
+                    (source_loc.tile_x, source_loc.tile_y),
+                    (sink_loc.tile_x, sink_loc.tile_y),
                     &mut route,
                 );
             } else {
-                // Different columns - need to use general routing for hop
+                // Neither: needs general routing for the hop.
                 // This shouldn't happen with proper carry placement
                 // Add sink wire to route
                 if !route.wires.contains(&sink_wire) {
@@ -180,19 +203,20 @@ impl<'a, D: Device> CarryChainRouter<'a, D> {
         None
     }
 
-    /// Route carry signal vertically through tiles
-    fn route_vertical_carry(&self, source_y: u32, sink_y: u32, tile_x: u32, route: &mut Route) {
-        // Carry chain propagates from lower y to higher y (typically)
-        let (min_y, max_y) = if source_y < sink_y {
-            (source_y, sink_y)
+    /// Route a carry signal along a column or a row of tiles, from `source`
+    /// to `sink` (which share x or y)
+    fn route_straight_carry(&self, source: (u32, u32), sink: (u32, u32), route: &mut Route) {
+        let tiles: Vec<(u32, u32)> = if source.0 == sink.0 {
+            let (lo, hi) = (source.1.min(sink.1), source.1.max(sink.1));
+            (lo..=hi).map(|y| (source.0, y)).collect()
         } else {
-            (sink_y, source_y)
+            let (lo, hi) = (source.0.min(sink.0), source.0.max(sink.0));
+            (lo..=hi).map(|x| (x, source.1)).collect()
         };
 
-        // Add intermediate carry wires for each tile in the chain
-        for y in min_y..=max_y {
-            // Find any carry chain wires in this tile
-            for wire_id in self.device.tile_wires(tile_x, y) {
+        // Add one carry chain wire for each tile in the chain
+        for (x, y) in tiles {
+            for wire_id in self.device.tile_wires(x, y) {
                 if let Some(wire) = self.device.wire(wire_id) {
                     if matches!(wire.wire_type, WireType::CarryChain) {
                         if !route.wires.contains(&wire_id) {

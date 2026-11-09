@@ -963,6 +963,8 @@ impl BitstreamGenerator {
         for loc in placement.placements.values() {
             match loc.bel_type {
                 crate::device::BelType::Lut4 | crate::device::BelType::Lut6 => luts += 1,
+                // A distributed RAM site is built from six of the tile's LUTs
+                crate::device::BelType::DistRam => luts += 6,
                 crate::device::BelType::Dff
                 | crate::device::BelType::DffE
                 | crate::device::BelType::DffSr

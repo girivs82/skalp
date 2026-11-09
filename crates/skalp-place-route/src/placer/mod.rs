@@ -10,6 +10,7 @@ mod analytical;
 mod annealing;
 mod constraints;
 mod legalization;
+mod sites;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
@@ -39,6 +40,59 @@ pub(crate) fn is_constant_cell(cell_type: &str) -> bool {
         || cell_type == "SB_VCC"
         || cell_type == "GND"
         || cell_type == "VCC"
+}
+
+/// The BEL type a cell needs.
+///
+/// Vendor primitive names are matched first (iCE40 `SB_*`, generic `LUT4`,
+/// `DFFE`, ...). Names that say nothing (Nexus `OXIDE_FF`, `OXIDE_COMB_MUX2`,
+/// `CCU2`, `DP16K`) fall back to the cell's library function, so a flip-flop
+/// is never placed on a LUT BEL just because its name lacks "DFF".
+pub(crate) fn cell_bel_type(cell: &skalp_lir::gate_netlist::Cell) -> BelType {
+    let t = cell.cell_type.as_str();
+    if cell.function == Some(CellFunction::DistRam16x4) {
+        BelType::DistRam
+    } else if t.contains("LUT") {
+        BelType::Lut4
+    } else if t.contains("DFFE") || t.starts_with("SB_SDFFE") {
+        BelType::DffE
+    } else if t.contains("DFFSR") {
+        BelType::DffSr
+    } else if t.contains("DFF") {
+        BelType::Dff
+    } else if t.contains("CARRY") {
+        BelType::Carry
+    } else if t.contains("IO") {
+        BelType::IoCell
+    } else if t.contains("RAM") {
+        BelType::RamSlice
+    } else if t.contains("GB") {
+        BelType::GlobalBuf
+    } else if t.contains("PLL") {
+        BelType::Pll
+    } else if t.contains("MAC") || t.contains("MULT") {
+        BelType::DspSlice
+    } else {
+        match cell.function {
+            Some(CellFunction::Dff) => BelType::Dff,
+            Some(CellFunction::DffE) => BelType::DffE,
+            Some(CellFunction::DffR) => BelType::DffSr,
+            Some(CellFunction::DffRE) => BelType::DffSrE,
+            Some(CellFunction::Carry) | Some(CellFunction::Ccu2) => BelType::Carry,
+            Some(CellFunction::Ram) => BelType::RamSlice,
+            Some(CellFunction::Dsp) => BelType::DspSlice,
+            Some(CellFunction::Pll) => BelType::Pll,
+            Some(CellFunction::ClkBuf) => BelType::GlobalBuf,
+            Some(
+                CellFunction::InputPad
+                | CellFunction::OutputPad
+                | CellFunction::BidirPad
+                | CellFunction::ClockPad,
+            ) => BelType::IoCell,
+            // Everything else is combinational logic in a LUT
+            _ => BelType::Lut4,
+        }
+    }
 }
 
 /// Placement algorithm selection
@@ -279,6 +333,7 @@ impl<D: Device + Clone> Placer<D> {
                     )
                 }
                 .with_parallel(self.config.parallel)
+                .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_carry_chains(carry_chains.to_vec());
 
@@ -375,6 +430,7 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.max_iterations / 2,
                 )
                 .with_parallel(self.config.parallel)
+                .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(legalized, netlist)?
             }
@@ -411,6 +467,7 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.timing_weight,
                 )
                 .with_parallel(self.config.parallel)
+                .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(legalized, netlist)?
             }
@@ -630,7 +687,7 @@ impl<D: Device + Clone> Placer<D> {
 
             let cell_id = cell.id;
             // Determine required BEL type
-            let bel_type = self.cell_to_bel_type(&cell.cell_type);
+            let bel_type = cell_bel_type(cell);
             let tile_type = self.bel_to_tile_type(bel_type);
 
             // Find a random valid location
@@ -679,40 +736,6 @@ impl<D: Device + Clone> Placer<D> {
         Ok(result)
     }
 
-    /// Convert cell type to BEL type
-    fn cell_to_bel_type(&self, cell_type: &str) -> BelType {
-        if cell_type.contains("LUT") || cell_type.starts_with("SB_LUT") {
-            BelType::Lut4
-        } else if cell_type.contains("DFFE")
-            || cell_type.starts_with("SB_DFFE")
-            || cell_type.starts_with("SB_SDFFE")
-        {
-            BelType::DffE
-        } else if cell_type.contains("DFFSR") || cell_type.starts_with("SB_DFFSR") {
-            BelType::DffSr
-        } else if cell_type.contains("DFF") || cell_type.starts_with("SB_DFF") {
-            BelType::Dff
-        } else if cell_type.contains("CARRY") || cell_type.starts_with("SB_CARRY") {
-            BelType::Carry
-        } else if cell_type.contains("IO") || cell_type.starts_with("SB_IO") {
-            BelType::IoCell
-        } else if cell_type.contains("RAM") || cell_type.starts_with("SB_RAM") {
-            BelType::RamSlice
-        } else if cell_type.contains("GB") || cell_type.starts_with("SB_GB") {
-            BelType::GlobalBuf
-        } else if cell_type.contains("PLL") || cell_type.starts_with("SB_PLL") {
-            BelType::Pll
-        } else if cell_type.contains("MAC")
-            || cell_type.starts_with("SB_MAC")
-            || cell_type.contains("MULT")
-        {
-            BelType::DspSlice
-        } else {
-            // Default to LUT for unknown cells
-            BelType::Lut4
-        }
-    }
-
     /// Convert BEL type to tile type
     fn bel_to_tile_type(&self, bel_type: BelType) -> TileType {
         match bel_type {
@@ -722,7 +745,8 @@ impl<D: Device + Clone> Placer<D> {
             | BelType::DffE
             | BelType::DffSr
             | BelType::DffSrE
-            | BelType::Carry => TileType::Logic,
+            | BelType::Carry
+            | BelType::DistRam => TileType::Logic,
             BelType::IoCell => TileType::IoTop, // Will be refined during placement
             BelType::RamSlice => TileType::RamTop,
             BelType::GlobalBuf => TileType::GlobalBuf,

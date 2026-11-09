@@ -1,0 +1,18 @@
+// Values assigned to narrower signals must be truncated when read: the carry of
+// a 32-bit add and the bits a 32-bit shift moves past bit 31 must not reach a
+// 64-bit reader.
+entity Trunc {
+    in a: bit[32]
+    in b: bit[32]
+    in sh: bit[5]
+    out sum64: bit[64]
+    out shl64: bit[64]
+}
+impl Trunc {
+    signal s: bit[32]
+    signal l: bit[32]
+    s = a + b
+    l = a << sh
+    sum64 = {32'b0, s}
+    shl64 = {32'b0, l}
+}

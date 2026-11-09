@@ -96,6 +96,19 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
     // Find buffer LUTs: cell_id → (passthrough_input_net, is_inverted)
     let mut buffer_rewires: Vec<(CellId, GateNetId, GateNetId, bool)> = Vec::new();
 
+    // A buffer driving a primary output from a primary input (or from another
+    // primary output) must stay: eliminating it would move the output's name
+    // onto that port net, so a passthrough `y = a` would rename input `a` to
+    // `y` and the input port would disappear from the netlist.
+    let primary_outputs: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    let is_port = |net: GateNetId| {
+        primary_outputs.contains(&net)
+            || netlist
+                .nets
+                .get(net.0 as usize)
+                .is_some_and(|n| n.is_input || n.is_output)
+    };
+
     for cell in &netlist.cells {
         let init = match cell.lut_init {
             Some(init) => init & 0xFFFF, // mask to 16 bits for LUT4
@@ -108,6 +121,9 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
                 // Buffer: output = input[i]
                 let passthrough = cell.inputs[i];
                 let output = cell.outputs[0];
+                if primary_outputs.contains(&output) && is_port(passthrough) {
+                    break;
+                }
                 buffer_rewires.push((cell.id, output, passthrough, false));
                 break;
             }
@@ -452,13 +468,21 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
             }
         }
 
-        // Pad combined_inputs to 4 with the first input (unused inputs don't matter
-        // since the truth table is already computed for the actual number of inputs)
+        // Pad combined_inputs to 4 with the first input. The padded pins carry a live
+        // signal, so the table must ignore them: repeat the num_combined-input table
+        // across all 16 entries. (Leaving the upper entries 0 made e.g. a 3-input AND
+        // padded with its first input read 0 whenever that input was 1.)
         while combined_inputs.len() < 4 {
-            // Pad with the first input — truth table already handles this correctly
-            // since higher input bits beyond num_combined are unused
             combined_inputs.push(combined_inputs[0]);
         }
+        let mask = (1u64 << num_combined) - 1;
+        let mut padded_tt: u64 = 0;
+        for entry in 0..16u64 {
+            if (composed_tt >> (entry & mask)) & 1 == 1 {
+                padded_tt |= 1 << entry;
+            }
+        }
+        let composed_tt = padded_tt;
 
         // Update cell B to be the combined LUT
         netlist.cells[cell_b_idx].lut_init = Some(composed_tt & 0xFFFF);
@@ -483,6 +507,32 @@ mod tests {
 
     fn make_test_netlist() -> GateNetlist {
         GateNetlist::new("test".to_string(), "fpga".to_string())
+    }
+
+    #[test]
+    fn test_passthrough_buffer_keeps_input_port() {
+        // y = a through an identity LUT: eliminating it would rename input
+        // `a` to `y`, so the buffer must stay and both ports keep their nets.
+        let mut netlist = make_test_netlist();
+        let a = netlist.add_input("a".to_string());
+        let y = netlist.add_output("y".to_string());
+        netlist.add_cell(Cell::new_lut(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "fpga".to_string(),
+            0.1,
+            "buf".to_string(),
+            vec![a, a, a, a],
+            vec![y],
+            0xAAAA,
+        ));
+
+        let stats = eliminate_buffer_luts(&mut netlist);
+        assert_eq!(stats.buffers_eliminated, 0);
+        assert_eq!(netlist.nets[a.0 as usize].name, "a");
+        assert_eq!(netlist.nets[y.0 as usize].name, "y");
+        assert_eq!(netlist.outputs, vec![y]);
+        assert_eq!(netlist.cells.len(), 1);
     }
 
     #[test]
@@ -666,25 +716,41 @@ mod tests {
 
     #[test]
     fn test_optimize_luts_full() {
+        // An identity LUT between internal logic and an output port goes away;
+        // the output name moves onto the logic's net. (A port-to-port
+        // passthrough stays: see test_passthrough_buffer_keeps_input_port.)
         let mut netlist = make_test_netlist();
         let a = netlist.add_input("a".to_string());
+        let b = netlist.add_input("b".to_string());
+        let n = netlist.add_net(GateNet::new(GateNetId(0), "n".to_string()));
         let y = netlist.add_output("y".to_string());
 
-        // Simple buffer: output = I3 (identity)
-        let buf = Cell::new_lut(
+        netlist.add_cell(Cell::new_lut(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "fpga".to_string(),
+            0.1,
+            "and".to_string(),
+            vec![a, b, a, a],
+            vec![n],
+            0x8888, // I0 & I1
+        ));
+        netlist.add_cell(Cell::new_lut(
             CellId(0),
             "SB_LUT4".to_string(),
             "fpga".to_string(),
             0.1,
             "buf".to_string(),
-            vec![a, a, a, a],
+            vec![n, n, n, n],
             vec![y],
-            0xAAAA, // identity of I3
-        );
-        netlist.add_cell(buf);
+            0xAAAA, // identity of I0
+        ));
 
         let stats = optimize_luts(&mut netlist);
         assert_eq!(stats.buffers_eliminated, 1);
-        assert_eq!(netlist.cells.len(), 0);
+        assert_eq!(netlist.cells.len(), 1);
+        assert_eq!(netlist.outputs, vec![n]);
+        assert_eq!(netlist.nets[n.0 as usize].name, "y");
+        assert_eq!(netlist.nets[a.0 as usize].name, "a");
     }
 }

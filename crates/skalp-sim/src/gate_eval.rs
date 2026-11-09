@@ -214,6 +214,11 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![co]
         }
 
+        PrimitiveType::Ccu2 { init0, init1 } => {
+            // inputs: [A0, B0, C0, D0, A1, B1, C1, D1, CIN], outputs: [S0, S1, COUT]
+            skalp_lir::carry_chain::ccu2_eval(*init0, *init1, inputs).to_vec()
+        }
+
         PrimitiveType::CompBit => {
             // inputs: [a, b, lt_in, eq_in], outputs: [lt_out, eq_out]
             let a = inputs.first().copied().unwrap_or(false);
@@ -304,6 +309,11 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             // Return all-zero as fallback (actual read is done by simulator's RAM state).
             vec![false; *data_width as usize]
         }
+
+        // Distributed RAM ports read and write the simulator's memory state
+        // (gate_simulator.rs); stateless evaluation has no memory to read.
+        PrimitiveType::DistRamWrite { .. } => vec![],
+        PrimitiveType::DistRamRead { data_width, .. } => vec![false; *data_width as usize],
 
         // === Power Infrastructure ===
         PrimitiveType::LevelShifter { .. } => {

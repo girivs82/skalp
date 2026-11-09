@@ -1,0 +1,39 @@
+// Arithmetic that maps onto an FPGA carry chain (Lattice CCU2): add, add of a
+// constant, subtract, unsigned and signed compares, and a narrow add that stays
+// in LUTs (below the carry-chain width threshold).
+entity CarryOps {
+    in a: bit[16]
+    in b: bit[16]
+    in sa: int[16]
+    in sb: int[16]
+    in n: bit[3]
+    in m: bit[3]
+    out sum: bit[16]
+    out sum_c: bit[16]
+    out diff: bit[16]
+    out wide: bit[17]
+    out ltu: bit
+    out leu: bit
+    out gtu: bit
+    out geu: bit
+    out lts: bit
+    out les: bit
+    out gts: bit
+    out ges: bit
+    out nsum: bit[3]
+}
+impl CarryOps {
+    sum = a + b
+    sum_c = a + 1234
+    diff = a - b
+    wide = {1'b0, a} + {1'b0, b}
+    ltu = a < b
+    leu = a <= b
+    gtu = a > b
+    geu = a >= b
+    lts = sa < sb
+    les = sa <= sb
+    gts = sa > sb
+    ges = sa >= sb
+    nsum = n + m
+}

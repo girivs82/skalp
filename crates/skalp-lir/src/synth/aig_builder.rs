@@ -216,6 +216,33 @@ impl<'a> AigBuilder<'a> {
         result
     }
 
+    /// AIG literal for a LUT with truth table `init` over `inputs` (input 0 is
+    /// the least significant index bit), by Shannon expansion on the top input.
+    fn lut_lit(&mut self, init: u64, inputs: &[AigLit]) -> AigLit {
+        let n = inputs.len();
+        let mask = if n >= 6 {
+            u64::MAX
+        } else {
+            (1u64 << (1 << n)) - 1
+        };
+        let init = init & mask;
+        if init == 0 {
+            return AigLit::false_lit();
+        }
+        if init == mask {
+            return AigLit::true_lit();
+        }
+        let half = 1usize << (n - 1);
+        let low = init & ((1u64 << half) - 1);
+        let high = init >> half;
+        let f0 = self.lut_lit(low, &inputs[..n - 1]);
+        let f1 = self.lut_lit(high, &inputs[..n - 1]);
+        if f0 == f1 {
+            return f0;
+        }
+        self.aig.add_mux(inputs[n - 1], f1, f0)
+    }
+
     /// Process a single cell
     fn process_cell(&mut self, cell: &Cell) {
         // Get input literals
@@ -451,6 +478,32 @@ impl<'a> AigBuilder<'a> {
                 let i1_and_ci = self.aig.add_and(i1, ci);
                 let ab_or_ac = self.aig.add_or(i0_and_i1, i0_and_ci);
                 self.aig.add_or(ab_or_ac, i1_and_ci)
+            }
+
+            // Lattice CCU2: two LUT4 propagate / LUT2 generate halves on a carry chain
+            CellFunction::Ccu2 => {
+                let Some((init0, init1)) = crate::carry_chain::ccu2_inits(cell) else {
+                    panic!("CCU2 cell '{}' has no INIT0/INIT1 parameters", cell.path);
+                };
+                let pin = |i: usize| inputs.get(i).copied().unwrap_or(AigLit::false_lit());
+                let mut carry = pin(8);
+                let mut outs = Vec::with_capacity(3);
+                for (half, init) in [(0usize, init0), (1usize, init1)] {
+                    let base = half * 4;
+                    let p = self.lut_lit(
+                        init as u64,
+                        &[pin(base), pin(base + 1), pin(base + 2), pin(base + 3)],
+                    );
+                    let g = self.lut_lit((init & 0xF) as u64, &[pin(base), pin(base + 1)]);
+                    outs.push(self.aig.add_xor(p, carry));
+                    carry = self.aig.add_mux(p, carry, g);
+                }
+                outs.push(carry);
+                for (&net, &lit) in cell.outputs.iter().zip(outs.iter()) {
+                    self.net_map[net.0 as usize] = Some(lit);
+                    self.aig.register_net(net, lit);
+                }
+                return;
             }
 
             // HalfAdder: Sum = A ⊕ B, Cout = A & B (single output = Sum for AIG)
@@ -826,6 +879,12 @@ impl<'a> AigBuilder<'a> {
                     "Cannot convert blackbox cell '{}' to AIG. \
                      Blackboxes should be preserved in the gate netlist.",
                     name
+                );
+            }
+            CellFunction::DistRam16x4 => {
+                panic!(
+                    "Cannot convert distributed RAM cell to AIG. \
+                     RAM cells should be preserved in the gate netlist."
                 );
             }
             CellFunction::Ram => {
