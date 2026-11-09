@@ -528,6 +528,7 @@ pub fn place_and_route_nexus_real(
     };
     use crate::bitstream::prepare;
     use crate::bitstream::BitstreamFormat;
+    use crate::device::nexus::clock_route;
     use crate::device::nexus::emit::NexusConfig;
     use crate::device::nexus::prjoxide_load::load_tilegrid;
     use crate::device::nexus::prjoxide_pack::NexusBitWriter;
@@ -545,9 +546,16 @@ pub fn place_and_route_nexus_real(
         .filter_map(|loc| packages.values().find_map(|p| p.pins.get(loc)))
         .map(|&(x, y, _)| (x, y))
         .collect();
-    let region = sites::routing_region(&tiles, &pad_sites);
-    let device = NexusDevice::from_prjoxide_bbox(variant, db_root, region)
-        .map_err(PlaceRouteError::BitstreamFailed)?;
+    let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
+        db_root,
+        variant.prjoxide_family(),
+        variant.prjoxide_device(),
+    )
+    .map_err(PlaceRouteError::BitstreamFailed)?;
+    let region = sites::design_region(&tiles, &clocks, &pad_sites);
+    let device =
+        NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
+            .map_err(PlaceRouteError::BitstreamFailed)?;
 
     let logic = prepare::logic_only_netlist(netlist);
     let mut packer = CellPacker::new(&logic);
@@ -560,14 +568,33 @@ pub fn place_and_route_nexus_real(
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
 
-    let (routable, tied) = prepare::prepare_for_routing(netlist);
+    let (mut routable, tied) = prepare::prepare_for_routing(netlist);
+    let clock_routes = clock_route::route_clock_nets(&device, &routable, &placement)?;
+    for net in &mut routable.nets {
+        net.fanout
+            .retain(|(_, pin)| *pin != crate::device::FF_PIN_CLK);
+    }
+    let router_device = device.without_wires(&clock_routes.claimed);
     let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
         RouterConfig::for_design_size(routable.nets.len())
     } else {
         config.router.clone()
     };
-    let mut router = Router::new(router_config, device.clone());
-    let routing = router.route(&routable, &placement)?;
+    let mut router = Router::new(router_config, router_device);
+    let mut routing = router.route(&routable, &placement)?;
+    for clock_route in clock_routes.routes {
+        match routing.routes.get_mut(&clock_route.net_id) {
+            Some(route) => {
+                route.pips.extend(clock_route.pips);
+                route.wires.extend(clock_route.wires);
+                route.sinks.extend(clock_route.sinks);
+            }
+            None => {
+                routing.wirelength += clock_route.wires.len() as u64;
+                routing.routes.insert(clock_route.net_id, clock_route);
+            }
+        }
+    }
     if !routing.success {
         return Err(PlaceRouteError::RoutingFailed(
             "Some nets could not be routed on the real device".to_string(),

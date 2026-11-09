@@ -358,6 +358,19 @@ impl ClockRegions {
             .map(|b| b.branch_col)
     }
 
+    /// Rows served by the clock spine that covers `row`.
+    pub fn spine_rows(&self, row: u32) -> Option<(u32, u32)> {
+        self.spines
+            .iter()
+            .find(|s| row >= s.from_row && row <= s.to_row)
+            .map(|s| (s.from_row, s.to_row))
+    }
+
+    /// The first clock spine's rows.
+    pub fn first_spine_rows(&self) -> Option<(u32, u32)> {
+        self.spines.first().map(|s| (s.from_row, s.to_row))
+    }
+
     fn spine_row(&self, row: u32) -> Option<u32> {
         self.spines
             .iter()

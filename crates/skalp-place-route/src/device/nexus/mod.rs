@@ -12,6 +12,7 @@
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
+pub mod clock_route;
 pub mod data;
 pub mod emit;
 pub mod prjoxide_bels;
@@ -217,6 +218,16 @@ impl NexusDevice {
         db_root: &std::path::Path,
         bbox: (u32, u32, u32, u32),
     ) -> Result<Self, String> {
+        Self::from_prjoxide_region(variant, db_root, bbox, None)
+    }
+
+    /// [`Self::from_prjoxide_bbox`], with logic placement limited to `logic_rows`.
+    pub fn from_prjoxide_region(
+        variant: NexusVariant,
+        db_root: &std::path::Path,
+        bbox: (u32, u32, u32, u32),
+        logic_rows: Option<(u32, u32)>,
+    ) -> Result<Self, String> {
         use prjoxide_graph::{node_name, resolve_wire};
 
         let (width, height) = variant.grid_size();
@@ -260,7 +271,10 @@ impl NexusDevice {
         }
 
         for (&(x, y), t) in &primary {
-            let bels = if t.tiletype == "PLC" {
+            let placeable = logic_rows.is_none_or(|(from, to)| y >= from && y <= to);
+            let bels = if t.tiletype == "PLC" && !placeable {
+                Vec::new()
+            } else if t.tiletype == "PLC" {
                 let mut bels = Vec::with_capacity(16);
                 for pb in prjoxide_bels::plc_bels() {
                     let mut pins = Vec::with_capacity(pb.pins.len());
@@ -382,6 +396,27 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             dsp_tiles: Vec::new(),
         })
+    }
+
+    /// Remove wires from routing, leaving them to whatever claimed them.
+    pub fn without_wires(&self, claimed: &std::collections::HashSet<WireId>) -> Self {
+        let mut device = self.clone();
+        let usable = |device: &Self, pip: &PipId| {
+            device
+                .pips
+                .get(pip.0 as usize)
+                .is_some_and(|p| !claimed.contains(&p.src_wire) && !claimed.contains(&p.dst_wire))
+        };
+        let snapshot = device.clone();
+        device
+            .wire_to_pips
+            .values_mut()
+            .for_each(|pips| pips.retain(|p| usable(&snapshot, p)));
+        device
+            .wire_src_pips
+            .values_mut()
+            .for_each(|pips| pips.retain(|p| usable(&snapshot, p)));
+        device
     }
 
     /// Configuration bits of a PIP (real-silicon model only).

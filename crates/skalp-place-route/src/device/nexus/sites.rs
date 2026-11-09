@@ -4,6 +4,7 @@
 //! exists for CrossLink-NX; CertusPro-NX has none, so its pins are the ones
 //! confirmed from the Versa board schematic and user guide (FPGA-EB-02053).
 
+use super::prjoxide_graph::ClockRegions;
 use super::{NexusVariant, PrjoxideTile};
 use crate::device::PackagePins;
 use serde::Deserialize;
@@ -111,16 +112,37 @@ pub fn package_pins(
 /// Narrowest routing window, leaving logic room beside the clock path.
 const MIN_REGION_COLUMNS: u32 = 40;
 
-/// Grid window holding every site a design uses and its clock path.
+/// The part of a device a design is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesignRegion {
+    /// Grid window loaded for routing: `(x0, y0, x1, y1)`
+    pub window: (u32, u32, u32, u32),
+    /// Rows logic may be placed in
+    pub logic_rows: (u32, u32),
+}
+
+/// The region holding a design's pads, its logic, and its clock path.
 ///
 /// The on-chip clock reaches the fabric through the TMID and CMUX tiles, so the
-/// window always includes them; `sites` are the design's pad locations.
-pub fn routing_region(tiles: &[PrjoxideTile], sites: &[(u32, u32)]) -> (u32, u32, u32, u32) {
+/// window always includes them. Logic stays within one clock spine's rows,
+/// because a clock pin can only be reached from the spine that serves its row.
+pub fn design_region(
+    tiles: &[PrjoxideTile],
+    clocks: &ClockRegions,
+    sites: &[(u32, u32)],
+) -> DesignRegion {
     let clock_tiles = tiles
         .iter()
         .filter(|t| t.tiletype.starts_with("TMID") || t.tiletype.contains("_GSR"));
     let first_col = clock_tiles.clone().map(|t| t.x).min().unwrap_or(0);
     let last_row = clock_tiles.map(|t| t.y).max().unwrap_or(0);
+
+    let logic_rows = sites
+        .iter()
+        .find_map(|&(_, y)| clocks.spine_rows(y))
+        .or_else(|| clocks.first_spine_rows())
+        .unwrap_or((0, last_row));
+
     let x0 = sites
         .iter()
         .map(|s| s.0)
@@ -139,8 +161,12 @@ pub fn routing_region(tiles: &[PrjoxideTile], sites: &[(u32, u32)]) -> (u32, u32
         .max()
         .unwrap_or(last_row)
         .max(last_row)
+        .max(logic_rows.1)
         + 2;
-    (x0, 0, x1, y1)
+    DesignRegion {
+        window: (x0, 0, x1, y1),
+        logic_rows,
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +209,9 @@ mod tests {
             return;
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
-        assert_eq!(routing_region(&tiles, &[(159, 31)]), (73, 0, 159, 40));
+        let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
+        let region = design_region(&tiles, &clocks, &[(159, 31)]);
+        assert_eq!(region.window, (73, 0, 159, 40));
+        assert_eq!(region.logic_rows, (1, 37));
     }
 }
