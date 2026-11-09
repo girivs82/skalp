@@ -954,6 +954,14 @@ pub enum LirOp {
         /// same cycle, so the memory cannot live in a synchronous-read block RAM.
         #[serde(default)]
         async_read: bool,
+        /// Read data appears on the output a cycle after the address, as from a
+        /// block RAM's own register: the design's read register has been merged
+        /// into the memory.
+        #[serde(default)]
+        registered_read: bool,
+        /// The last input enables the read register.
+        #[serde(default)]
+        read_enable: bool,
     },
 
     // === Special ===
@@ -1148,12 +1156,14 @@ impl LirOp {
             LirOp::Latch { .. } => 2,    // en, d
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
-            LirOp::MemBlock { has_write, .. } => {
-                if *has_write {
-                    4
-                } else {
-                    1
-                } // [raddr, waddr, wdata, we] or [raddr]
+            LirOp::MemBlock {
+                has_write,
+                read_enable,
+                ..
+            } => {
+                // [raddr, waddr, wdata, we] or [raddr], then the read enable
+                let ports = if *has_write { 4 } else { 1 };
+                ports + usize::from(*read_enable)
             }
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,

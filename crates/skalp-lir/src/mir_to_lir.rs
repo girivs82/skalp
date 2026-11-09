@@ -732,6 +732,8 @@ impl MirToLirTransform {
                 has_write: !read_only,
                 read_only,
                 async_read: false,
+                registered_read: false,
+                read_enable: false,
             },
             inputs,
             rdata_signal,

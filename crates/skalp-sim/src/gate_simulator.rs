@@ -839,14 +839,6 @@ impl GateLevelSimulator {
             self.update_sequential(*clock_id, edge.clone());
         }
 
-        // Phase 3.5: Re-evaluate RAM block reads after sequential writes.
-        // RAM blocks are sequential (have clock) so they're only in seq_blocks.
-        // After Phase 3 writes new data, the read outputs must be refreshed
-        // so that Phase 4's combinational evaluation sees current memory contents.
-        // This models the combinational read path (rd_data = memory[rd_ptr])
-        // that the source code expresses outside the clock process.
-        self.refresh_ram_reads();
-
         // Phase 4: Re-evaluate combinational with new register values
         self.evaluate_combinational();
 
@@ -995,13 +987,8 @@ impl GateLevelSimulator {
                     return;
                 }
 
-                // RAM blocks need special handling with persistent state
-                if let PrimitiveType::RamBlock {
-                    addr_width,
-                    data_width,
-                } = ptype
-                {
-                    self.evaluate_ram_block(*id, *addr_width, *data_width, inputs, outputs);
+                // A RAM block is sequential and only updates on its clock edge.
+                if matches!(ptype, PrimitiveType::RamBlock { .. }) {
                     return;
                 }
 
@@ -1081,7 +1068,7 @@ impl GateLevelSimulator {
         data_width: u8,
         inputs: &[SirSignalId],
         outputs: &[SirSignalId],
-    ) {
+    ) -> Vec<(u32, Vec<bool>)> {
         let aw = addr_width as usize;
         let dw = data_width as usize;
 
@@ -1101,6 +1088,7 @@ impl GateLevelSimulator {
         // raddr[0..aw], RCLK, RCLKE, RE, wdata[0..dw], waddr[0..aw], WCLK, WCLKE, WE
         let raddr_bits = &input_values[..aw];
         // RCLK at aw, RCLKE at aw+1, RE at aw+2
+        let read_clock_enable = input_values.get(aw + 1).copied().unwrap_or(true);
         let re = input_values.get(aw + 2).copied().unwrap_or(true);
 
         let wdata_start = aw + 3;
@@ -1127,16 +1115,7 @@ impl GateLevelSimulator {
 
         let depth = 1usize << aw;
 
-        // Write operation: if WE active, store wdata at waddr
-        if we {
-            if let Some(mem) = self.ram_state.get_mut(&prim_id.0) {
-                if waddr < depth {
-                    mem[waddr] = wdata_bits.to_vec();
-                }
-            }
-        }
-
-        // Read operation: read from raddr
+        // Read from raddr: the old contents, sampled at this clock edge
         let read_data = if re {
             if let Some(mem) = self.ram_state.get(&prim_id.0) {
                 if raddr < depth {
@@ -1151,89 +1130,28 @@ impl GateLevelSimulator {
             vec![false; dw]
         };
 
-        // Set output signals (each output is a single-bit signal)
-        for (i, out_id) in outputs.iter().enumerate() {
-            let bit = read_data.get(i).copied().unwrap_or(false);
-            let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-            let mut bits = vec![false; width];
-            bits[0] = bit;
-            self.state.signals.insert(out_id.0, bits);
-        }
-    }
-
-    /// Re-evaluate RAM block reads (without writing) after sequential updates.
-    /// This refreshes the BRAM read output signals so that combinational logic
-    /// downstream (Phase 4) sees the current memory contents.
-    fn refresh_ram_reads(&mut self) {
-        let mut found_ram = false;
-        for block in &self.sir.top_module.seq_blocks.clone() {
-            for op in &block.operations {
-                if let SirOperation::Primitive {
-                    id,
-                    ptype:
-                        PrimitiveType::RamBlock {
-                            addr_width,
-                            data_width,
-                        },
-                    inputs,
-                    outputs,
-                    ..
-                } = op
-                {
-                    found_ram = true;
-                    let aw = *addr_width as usize;
-                    let dw = *data_width as usize;
-
-                    // Read current input signal values
-                    let input_values: Vec<bool> = inputs
-                        .iter()
-                        .map(|sig_id| {
-                            self.state
-                                .signals
-                                .get(&sig_id.0)
-                                .and_then(|v| v.first().copied())
-                                .unwrap_or(false)
-                        })
-                        .collect();
-
-                    // Parse raddr and RE from input layout
-                    let raddr_bits = &input_values[..aw];
-                    let re = input_values.get(aw + 2).copied().unwrap_or(true);
-
-                    let raddr: usize = raddr_bits
-                        .iter()
-                        .enumerate()
-                        .fold(0, |acc, (i, &b)| acc | ((b as usize) << i));
-
-                    // Read-only: no write side effects
-                    let read_data = if re {
-                        if let Some(mem) = self.ram_state.get(&id.0) {
-                            let depth = 1usize << aw;
-                            if raddr < depth {
-                                mem[raddr].clone()
-                            } else {
-                                vec![false; dw]
-                            }
-                        } else {
-                            vec![false; dw]
-                        }
-                    } else {
-                        vec![false; dw]
-                    };
-
-                    // Update output signals
-                    for (i, out_id) in outputs.iter().enumerate() {
-                        let bit = read_data.get(i).copied().unwrap_or(false);
-                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                        let mut bits = vec![false; width];
-                        bits[0] = bit;
-                        self.state.signals.insert(out_id.0, bits);
-                    }
+        // Write operation: if WE active, store wdata at waddr
+        if we {
+            if let Some(mem) = self.ram_state.get_mut(&prim_id.0) {
+                if waddr < depth {
+                    mem[waddr] = wdata_bits.to_vec();
                 }
             }
         }
-        // refresh_ram_reads is a no-op for designs without RamBlock — that's fine.
-        let _ = found_ram;
+
+        if !read_clock_enable {
+            return Vec::new();
+        }
+        outputs
+            .iter()
+            .enumerate()
+            .map(|(i, out_id)| {
+                let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                let mut bits = vec![false; width];
+                bits[0] = read_data.get(i).copied().unwrap_or(false);
+                (out_id.0, bits)
+            })
+            .collect()
     }
 
     /// Evaluate a behavioral expression (fallback)
@@ -1312,19 +1230,19 @@ impl GateLevelSimulator {
                                 continue;
                             }
 
-                            // RAM blocks have side effects (persistent state) — evaluate immediately
+                            // RAM writes take effect now; the read output updates with the registers
                             if let PrimitiveType::RamBlock {
                                 addr_width,
                                 data_width,
                             } = ptype
                             {
-                                self.evaluate_ram_block(
+                                pending_updates.extend(self.evaluate_ram_block(
                                     *id,
                                     *addr_width,
                                     *data_width,
                                     inputs,
                                     outputs,
-                                );
+                                ));
                                 continue;
                             }
 

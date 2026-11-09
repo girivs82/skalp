@@ -1,0 +1,32 @@
+// Fills a memory spread over two block RAMs, with the read address going elsewhere
+// while it writes, then reads it back on a one-cycle-old address.
+entity RamTiled {
+    in clk: clock
+    out bad: bit
+}
+impl RamTiled {
+    signal c: nat[12] = 0
+    signal mem: bit[18][2048]
+    signal q: bit[18] = 0
+    signal last_read: bit[11] = 0
+    signal failed: bit = 0
+    signal writing: bit
+    signal index: bit[11]
+    signal raddr: bit[11]
+    writing = c[11] == 0
+    index = c[10:0]
+    raddr = if writing { ~index } else { index }
+    on(clk.rise) {
+        c = c + 1
+        last_read = raddr
+        q = mem[raddr]
+        if writing {
+            mem[index] = {index[6:0], index}
+        } else {
+            if q != {last_read[6:0], last_read} {
+                failed = 1
+            }
+        }
+    }
+    bad = failed
+}

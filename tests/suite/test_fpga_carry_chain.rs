@@ -282,3 +282,30 @@ async fn test_nested_if_guards_gate_level() {
     .unwrap();
     check_nested_if_guards(tb).await;
 }
+
+async fn block_ram_design_never_reports_bad(fixture: &str, top: &str, cycles: usize) {
+    let mut tb = Testbench::gate_level_with_top_and_library(&fixture_path(fixture), top, "nexus")
+        .await
+        .unwrap();
+    tb.clock(cycles).await;
+    assert_eq!(tb.get_u64("bad").await, 0, "{top} read back the wrong data");
+}
+
+#[tokio::test]
+async fn test_block_ram_reads_on_the_next_cycle() {
+    block_ram_design_never_reports_bad("nexus_blockram_latency.sk", "RamCheck", 400).await;
+}
+
+#[tokio::test]
+async fn test_block_ram_banks_decode_their_own_addresses() {
+    block_ram_design_never_reports_bad("nexus_blockram_tiled.sk", "RamTiled", 4200).await;
+}
+
+#[test]
+fn test_block_ram_read_used_as_logic_stays_out_of_block_ram() {
+    let net = synthesize("nexus_blockram_comb_read.sk", "nexus");
+    assert!(
+        !net.cells.iter().any(|c| c.ram_ports().is_some()),
+        "a read feeding logic directly needs its data in the same cycle"
+    );
+}

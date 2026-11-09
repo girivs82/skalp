@@ -213,6 +213,45 @@ impl<'a> CnfGenerator<'a> {
         }
     }
 
+    /// A new variable equal to `a AND b`.
+    fn add_and(&mut self, a: Lit, b: Lit) -> Lit {
+        let out = Lit::pos(self.next_var);
+        self.next_var += 1;
+        self.solver.add_clause(vec![out.negate(), a]);
+        self.solver.add_clause(vec![out.negate(), b]);
+        self.solver.add_clause(vec![out, a.negate(), b.negate()]);
+        out
+    }
+
+    /// Encode a resubstitution pattern, numbered as the resubstitution pass does.
+    fn pattern_lit(&mut self, kind: u8, lits: &[Lit]) -> Lit {
+        let or = |cnf: &mut Self, a: Lit, b: Lit| cnf.add_and(a.negate(), b.negate()).negate();
+        match kind {
+            0 => lits[0],
+            1 => self.add_and(lits[0], lits[1]),
+            2 => or(self, lits[0], lits[1]),
+            3 => {
+                let a_nb = self.add_and(lits[0], lits[1].negate());
+                let na_b = self.add_and(lits[0].negate(), lits[1]);
+                or(self, a_nb, na_b)
+            }
+            4 => {
+                let ab = self.add_and(lits[0], lits[1]);
+                or(self, ab, lits[2])
+            }
+            5 => {
+                let ab = or(self, lits[0], lits[1]);
+                self.add_and(ab, lits[2])
+            }
+            6 => {
+                let selected = self.add_and(lits[0], lits[1]);
+                let other = self.add_and(lits[0].negate(), lits[2]);
+                or(self, selected, other)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     /// Check if two nodes are functionally equivalent
     /// Returns: Some(true) if equivalent, Some(false) if not, None if unknown
     fn check_equivalence(
@@ -270,6 +309,59 @@ impl<'a> CnfGenerator<'a> {
         // For now, return empty (we'll use random refinement instead)
         Vec::new()
     }
+}
+
+/// Whether a node always equals a resubstitution pattern over other nodes.
+///
+/// `kind` and `lits` follow the pattern numbering of the resubstitution pass.
+/// An undecided proof counts as not equal.
+pub(super) fn prove_resub(
+    aig: &Aig,
+    target: AigNodeId,
+    kind: u8,
+    lits: &[AigLit],
+    conflict_limit: u64,
+) -> bool {
+    // Size the solver for the cones in the proof, not the whole design.
+    let mut cone = HashSet::new();
+    let mut pending: Vec<AigNodeId> = lits.iter().map(|lit| lit.node).collect();
+    pending.push(target);
+    while let Some(node) = pending.pop() {
+        if !cone.insert(node) {
+            continue;
+        }
+        match aig.get_node(node) {
+            Some(AigNode::And { left, right }) => {
+                pending.push(left.node);
+                pending.push(right.node);
+            }
+            Some(AigNode::Latch { data, .. }) | Some(AigNode::Barrier { data, .. }) => {
+                pending.push(data.node);
+            }
+            _ => {}
+        }
+    }
+    const PATTERN_VARS: u32 = 16;
+    let mut cnf = CnfGenerator {
+        aig,
+        solver: Solver::new(cone.len() as u32 + PATTERN_VARS),
+        node_to_var: IndexMap::new(),
+        next_var: 0,
+    };
+    cnf.solver.set_conflict_limit(conflict_limit);
+
+    let mut visited = HashSet::new();
+    cnf.add_cone(target, &mut visited);
+    for lit in lits {
+        cnf.add_cone(lit.node, &mut visited);
+    }
+    let sat_lits: Vec<Lit> = lits.iter().map(|&lit| cnf.get_lit(lit)).collect();
+    let pattern = cnf.pattern_lit(kind, &sat_lits);
+    let target_lit = cnf.get_lit(AigLit::new(target));
+    let difference = cnf.add_and(target_lit, pattern.negate());
+    let opposite = cnf.add_and(target_lit.negate(), pattern);
+    let differs = cnf.add_and(difference.negate(), opposite.negate()).negate();
+    cnf.solver.solve_with_assumptions(&[differs]) == SatResult::Unsat
 }
 
 /// FRAIG optimization pass
