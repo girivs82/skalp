@@ -196,6 +196,29 @@ async fn test_carry_ops_gate_level_ecp5() {
     check_carry_ops(tb, "ecp5").await;
 }
 
+async fn check_counter_counts(tb: Testbench) {
+    let mut tb = tb;
+    tb.set("rst", 1u8);
+    tb.clock(2).await;
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+    let first = tb.get_u64("count").await;
+    tb.clock(5).await;
+    assert_eq!(tb.get_u64("count").await, first + 5);
+}
+
+#[tokio::test]
+async fn test_carry_counter_gate_level_nexus() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("fpga_carry_chain_counter.sk"),
+        "CarryCounter",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_counter_counts(tb).await;
+}
+
 #[test]
 fn test_ccu2_verilog_carries_init_parameters() {
     let net = synthesize("fpga_carry_chain_ops.sk", "nexus");
