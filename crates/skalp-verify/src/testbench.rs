@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 /// Testbench builder
@@ -461,15 +461,8 @@ where
 }
 
 // No-op waker for simple polling
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
 fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+    Waker::noop().clone()
 }
 
 // Transaction-level modeling

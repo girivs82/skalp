@@ -60,7 +60,7 @@ mod sequential_debug_tests {
         // Generate and print Metal shader for debugging
         let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
-        println!("{}", &shader_code);
+        println!("{}", shader_code);
 
         // Check if pipeline_valid assignment is present and correct
         let has_pipeline_addition = shader_code.contains("pipeline_valid")

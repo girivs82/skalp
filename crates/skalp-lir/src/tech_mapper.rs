@@ -61,6 +61,22 @@ impl LibraryCellInfo {
     }
 }
 
+/// Input order for a MUX2 cell computing `sel ? d1 : d0`. A generic MUX2 takes
+/// `[sel, d0, d1]`; an FPGA MUX2 is a LUT whose library INIT (0xCACA) reads
+/// `[d0, d1, sel]`, so passing the generic order to it computes a different function.
+fn mux2_inputs(
+    ci: &LibraryCellInfo,
+    sel: GateNetId,
+    d0: GateNetId,
+    d1: GateNetId,
+) -> Vec<GateNetId> {
+    if ci.lut_init.is_some() {
+        vec![d0, d1, sel]
+    } else {
+        vec![sel, d0, d1]
+    }
+}
+
 /// Look up a library cell by function, falling back to a default if not found.
 fn lookup_cell(
     library: &TechLibrary,
@@ -1020,6 +1036,7 @@ fn map_memblock_standalone(
     addr_width: u32,
     depth: u32,
     has_write: bool,
+    async_read: bool,
     inputs: &[Vec<GateNetId>],
     outputs: &[GateNetId],
     path: &str,
@@ -1034,7 +1051,10 @@ fn map_memblock_standalone(
     let total_bits = data_width * depth;
 
     // Query library for RAM cell
-    let ram_lookup = if total_bits < BRAM_MIN_BITS {
+    // Block RAM reads are synchronous; a memory read combinationally (a register
+    // file read in the same cycle) would see its data a cycle late, so it is built
+    // from registers instead.
+    let ram_lookup = if total_bits < BRAM_MIN_BITS || async_read {
         None
     } else {
         library.find_ram_cell()
@@ -1369,7 +1389,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d0_w{}_rmux{}", path, wb, i - bit_lo),
-                            vec![bank_sel, tie_low, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, tie_low, block_out[i - bit_lo]),
                             vec![result_net],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1390,7 +1410,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            vec![bank_sel, prev_result, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
                             vec![final_out],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1412,7 +1432,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            vec![bank_sel, prev_result, block_out[i - bit_lo]],
+                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
                             vec![new_result],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1589,9 +1609,31 @@ fn decompose_memblock_to_dffs(
         acc.unwrap_or(tie_low)
     };
 
+    // A read-port replica (`<memory>_rd<n>`, see mir_to_lir's handle_memory_read)
+    // shares the write port of its primary block, so in registers it can share the
+    // primary's storage and add only a read mux.
+    let shared_storage: Option<Vec<Vec<GateNetId>>> = path
+        .rsplit_once("_rd")
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|(primary, _)| {
+            (0..depth as usize)
+                .map(|word| {
+                    (0..dw)
+                        .map(|b| netlist.get_net_id(&format!("{}_w{}_q{}", primary, word, b)))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+
     // Storage: depth × data_width DFFs with write-select muxes
     let mut q_nets: Vec<Vec<GateNetId>> = Vec::with_capacity(depth as usize);
+    if let Some(shared) = shared_storage {
+        q_nets = shared;
+    }
     for word in 0..depth as usize {
+        if q_nets.len() == depth as usize {
+            break;
+        }
         let word_we = if has_write {
             mk_decode(netlist, word, waddr_nets, &waddr_inv, Some(we_net), "w")
         } else {
@@ -1613,7 +1655,7 @@ fn decompose_memblock_to_dffs(
                 mk_cell(
                     netlist,
                     &mux_ci,
-                    vec![word_we, q, wbit],
+                    mux2_inputs(&mux_ci, word_we, q, wbit),
                     din,
                     format!("{}_w{}_wmux{}", path, word, b),
                 );
@@ -1671,7 +1713,7 @@ fn decompose_memblock_to_dffs(
             mk_cell(
                 netlist,
                 &mux_ci,
-                vec![read_sel[word - 1], acc, q_nets[word][b]],
+                mux2_inputs(&mux_ci, read_sel[word - 1], acc, q_nets[word][b]),
                 stage_out,
                 format!("{}_rmux_w{}_b{}", path, word, b),
             );
@@ -2704,6 +2746,7 @@ fn merge_physical_nodes_into_netlist(
                 addr_width,
                 depth,
                 has_write,
+                async_read,
                 ..
             } => {
                 // TRIAGE #35: the clock input net may not EXIST yet — when
@@ -2737,6 +2780,7 @@ fn merge_physical_nodes_into_netlist(
                     *addr_width,
                     *depth,
                     *has_write,
+                    *async_read,
                     &input_nets,
                     &output_nets,
                     path,

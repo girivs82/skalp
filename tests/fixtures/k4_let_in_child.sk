@@ -1,0 +1,23 @@
+entity Inner {
+    in clk: clock
+    in x: bit[32]
+    out a: bit[7]
+}
+impl Inner {
+    signal r: bit[32] = 0
+    let lo: bit[7] = r[6:0]
+    let isj: bit = if lo == 7'b1101111 { 1 } else { 0 }
+    on(clk.rise) {
+        r = x
+    }
+    a = lo
+}
+entity K {
+    in clk: clock
+    in x: bit[32]
+    out a: bit[7]
+}
+impl K {
+    inst i = Inner { clk: clk, x: x }
+    a = i.a
+}

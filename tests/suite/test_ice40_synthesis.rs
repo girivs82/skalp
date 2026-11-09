@@ -445,8 +445,15 @@ impl AndOr {
 
 // Helper to write test files to a location where stdlib can be found
 fn write_test_file(filename: &str, content: &str) -> String {
-    // Write to the examples directory so stdlib can be found
-    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), filename);
+    // Write to the examples directory so stdlib can be found. Use a scratch
+    // name: examples/ also holds tracked files with these names, which the
+    // cleanup used to delete.
+    let path = format!(
+        "{}/examples/.scratch_{}_{}",
+        env!("CARGO_MANIFEST_DIR"),
+        std::process::id(),
+        filename
+    );
     std::fs::write(&path, content).expect("Failed to write test file");
     path
 }
@@ -897,6 +904,7 @@ fn build_memblock_lir(data_width: u32, addr_width: u32, depth: u32) -> Lir {
             depth,
             has_write: true,
             read_only: false,
+            async_read: false,
         },
         vec![raddr, waddr, wdata, we],
         rdata,
@@ -1103,6 +1111,7 @@ fn test_bram_rom_inference() {
             depth: 256,
             has_write: false,
             read_only: true,
+            async_read: false,
         },
         vec![raddr],
         rdata,

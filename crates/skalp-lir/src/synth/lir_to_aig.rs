@@ -897,12 +897,27 @@ impl<'a> LirToSynthAig<'a> {
                     .map(|s| s.width)
                     .unwrap_or(1);
 
+                // Only the low clog2(data_width) index bits pick a bit; any higher
+                // index bit set means out of range, which reads 0. Building the
+                // tree over the full index width allocated 2^sel_width entries
+                // (a 32-bit index ran the machine out of memory).
+                let mut tree_bits = 0u32;
+                while (1usize << tree_bits) < values.len() {
+                    tree_bits += 1;
+                }
+                let tree_bits = tree_bits.min(sel_width);
+                let mut in_range = AigLit::true_lit();
+                for stage in tree_bits..sel_width {
+                    let bit = self.get_input_bit(index, stage);
+                    in_range = self.aig.add_and(in_range, bit.invert());
+                }
+
                 // Pad to power of 2
-                while values.len() < (1usize << sel_width) {
+                while values.len() < (1usize << tree_bits) {
                     values.push(AigLit::false_lit());
                 }
 
-                for stage in 0..sel_width {
+                for stage in 0..tree_bits {
                     let sel_bit = self.get_input_bit(index, stage);
                     let mut next = Vec::new();
                     for pair in values.chunks(2) {
@@ -913,7 +928,8 @@ impl<'a> LirToSynthAig<'a> {
                     values = next;
                 }
 
-                self.set_output_bit(node.output, 0, values[0]);
+                let selected = self.aig.add_and(values[0], in_range);
+                self.set_output_bit(node.output, 0, selected);
             }
 
             LirOp::RangeSelect { high, low, .. } => {

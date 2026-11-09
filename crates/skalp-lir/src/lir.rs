@@ -887,6 +887,10 @@ pub enum LirOp {
         depth: u32,
         has_write: bool,
         read_only: bool,
+        /// Read outside a clocked process: read data must follow the address in the
+        /// same cycle, so the memory cannot live in a synchronous-read block RAM.
+        #[serde(default)]
+        async_read: bool,
     },
 
     // === Special ===

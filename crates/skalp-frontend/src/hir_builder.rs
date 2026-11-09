@@ -2024,6 +2024,22 @@ impl HirBuilderContext {
                                 let_stmt.name,
                                 let_stmt.id
                             );
+                            // A `let` with a port's name hides the port for the rest of the
+                            // impl, so the port is never driven. Say so where it happens.
+                            if let Some(port) = ports.iter().find(|p| p.name == let_stmt.name) {
+                                let hint = if matches!(port.direction, HirPortDirection::Input) {
+                                    String::new()
+                                } else {
+                                    format!("; to drive the port write `{} = ...`", port.name)
+                                };
+                                self.errors.push(HirError {
+                                    message: format!(
+                                        "`let {}` shadows port `{}` of `{}`{}",
+                                        let_stmt.name, port.name, entity_name, hint
+                                    ),
+                                    span: self.make_span(&child),
+                                });
+                            }
                             // BUG #65/#66 DEBUG: Log if creating variable with Float16 type
                             if matches!(let_stmt.var_type, HirType::Float16) {
                                 trace!("[BUG #65/#66 FOUND IT IN HIR!] Creating HIR variable '{}' with Float16 type", let_stmt.name);

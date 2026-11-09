@@ -363,6 +363,12 @@ impl SynthEngine {
     /// This is the main synthesis path: LIR → AIG → optimize → technology map → GateNetlist.
     /// Skips the GateNetlist→AIG→GateNetlist round-trip of the old flow.
     pub fn optimize_from_aig(&mut self, mut aig: Aig, library: &TechLibrary) -> SynthResult {
+        // Auto: run the candidate presets on copies of the AIG and keep the smallest
+        // netlist, as optimize() does for a GateNetlist.
+        if self.config.preset == SynthPreset::Auto {
+            return self.optimize_from_aig_auto(aig, library);
+        }
+
         let start = Instant::now();
         self.pass_results.clear();
 
@@ -462,6 +468,36 @@ impl SynthEngine {
     }
 
     /// Run multiple optimization presets in parallel and return the best result
+    /// Auto preset for `optimize_from_aig`: see `optimize_auto`.
+    fn optimize_from_aig_auto(&mut self, aig: Aig, library: &TechLibrary) -> SynthResult {
+        let start = Instant::now();
+        let presets = [SynthPreset::Resyn2, SynthPreset::Compress2];
+        let library_clone = library.clone();
+        let results: Vec<(SynthPreset, SynthResult)> = presets
+            .par_iter()
+            .map(|&preset| {
+                let mut engine = SynthEngine::with_preset(preset);
+                let result = engine.optimize_from_aig(aig.clone(), &library_clone);
+                (preset, result)
+            })
+            .collect();
+        let (_, mut best_result) = results
+            .into_iter()
+            .min_by_key(|(_, result)| result.netlist.cell_count())
+            .expect("At least one preset should run");
+
+        let total_time = start.elapsed().as_millis() as u64;
+        best_result.total_time_ms = total_time;
+        self.pass_results = best_result.pass_results.clone();
+        self.timing_result = best_result.timing_result.clone();
+        self.mapping_result = best_result.mapping_result.clone();
+        if let Some(ref annotations) = best_result.pipeline_annotations {
+            self.pipeline_annotations = annotations.clone();
+        }
+        self.total_time_ms = total_time;
+        best_result
+    }
+
     fn optimize_auto(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
         let start = Instant::now();
 

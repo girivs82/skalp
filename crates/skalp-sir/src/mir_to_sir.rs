@@ -87,6 +87,9 @@ struct MirToSirConverter<'a> {
     /// BUG #226 FIX: Stores default values from unconditional assignments in a sequential block
     /// These are used by conditional handlers (if/case) when their branches don't override the target.
     sequential_defaults: HashMap<String, usize>,
+    /// Width-truncated read of a combinational signal, per internal signal name
+    /// (see get_or_create_signal_driver).
+    truncated_signal_reads: HashMap<String, usize>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -107,6 +110,7 @@ impl<'a> MirToSirConverter<'a> {
             instance_parent_module_ids: HashMap::new(),
             mir_to_internal_name: HashMap::new(),
             sequential_defaults: HashMap::new(),
+            truncated_signal_reads: HashMap::new(),
         }
     }
 
@@ -5860,6 +5864,72 @@ impl<'a> MirToSirConverter<'a> {
         node_id
     }
 
+    /// Read a combinational signal through its driver node, truncated to the
+    /// signal's declared width.
+    ///
+    /// A reader is wired straight to the signal's driver node. Arithmetic,
+    /// shift and mux nodes may carry bits above the signal's width (the
+    /// backends size an add one bit wider to keep the carry, a shift left
+    /// keeps the bits shifted out), and those bits used to leak into every
+    /// reader: `let r: bit[32] = a32 + b32` followed by `{{32{r[31]}}, r}`
+    /// placed the carry at bit 32, and `let m: bit[8] = ...; m << off`
+    /// returned bits above 8. Assignment to a declared-width signal truncates
+    /// in hardware, so the reader gets a slice of the declared width.
+    fn truncated_signal_read(
+        &mut self,
+        internal_name: &str,
+        driver: usize,
+        width: usize,
+        is_float: bool,
+    ) -> usize {
+        if is_float || width == 0 || width > 128 {
+            return driver;
+        }
+        let may_overflow = self
+            .sir
+            .combinational_nodes
+            .iter()
+            .find(|n| n.id == driver)
+            .is_some_and(|n| {
+                match &n.kind {
+                    // Comparisons produce exactly one bit.
+                    SirNodeKind::BinaryOp(op) => !matches!(
+                        op,
+                        BinaryOperation::Eq
+                            | BinaryOperation::Neq
+                            | BinaryOperation::Lt
+                            | BinaryOperation::Lte
+                            | BinaryOperation::Gt
+                            | BinaryOperation::Gte
+                            | BinaryOperation::Slt
+                            | BinaryOperation::Slte
+                            | BinaryOperation::Sgt
+                            | BinaryOperation::Sgte
+                            | BinaryOperation::FEq
+                            | BinaryOperation::FNeq
+                            | BinaryOperation::FLt
+                            | BinaryOperation::FLte
+                            | BinaryOperation::FGt
+                            | BinaryOperation::FGte
+                    ),
+                    SirNodeKind::UnaryOp(_)
+                    | SirNodeKind::Mux
+                    | SirNodeKind::ParallelMux { .. } => true,
+                    _ => false,
+                }
+            });
+        if !may_overflow {
+            return driver;
+        }
+        if let Some(&slice) = self.truncated_signal_reads.get(internal_name) {
+            return slice;
+        }
+        let slice = self.create_slice_node(driver, width - 1, 0);
+        self.truncated_signal_reads
+            .insert(internal_name.to_string(), slice);
+        slice
+    }
+
     fn get_or_create_signal_driver(&mut self, name: &str) -> usize {
         // Translate MIR name to internal name for all SIR lookups and SignalRef creation
         let internal_name = self.translate_to_internal_name(name);
@@ -5873,7 +5943,8 @@ impl<'a> MirToSirConverter<'a> {
             // For non-state signals, return existing driver if available
             if let Some(signal) = self.sir.signals.iter().find(|s| s.name == internal_name) {
                 if let Some(driver) = signal.driver_node {
-                    return driver;
+                    let (width, is_float) = (signal.width, signal.sir_type.is_float());
+                    return self.truncated_signal_read(&internal_name, driver, width, is_float);
                 }
             }
         }
@@ -7813,6 +7884,17 @@ impl<'a> MirToSirConverter<'a> {
                     } else {
                         format!("{}.unknown_port", inst_prefix)
                     }
+                }
+            }
+            // An impl-level `let` in the child. Its signal was created under
+            // `<inst>.<name>_<id>` (flatten_instances, step 1b); without this
+            // arm the drive went to a placeholder `complex_lhs` and every
+            // reader of the `let` saw 0.
+            LValue::Variable(var_id) => {
+                if let Some(var) = child_module.variables.iter().find(|v| v.id == *var_id) {
+                    format!("{}.{}_{}", inst_prefix, var.name, var_id.0)
+                } else {
+                    format!("{}.unknown_variable", inst_prefix)
                 }
             }
             _ => {
