@@ -846,6 +846,29 @@ mod tests {
         assert_ne!(a, place(7), "seed 7 placed exactly like seed 42");
     }
 
+    /// The router routes nets side by side on however many threads there
+    /// are; the result must not depend on how many that is
+    #[test]
+    fn test_routing_does_not_depend_on_thread_count() {
+        let netlist = create_mesh_netlist(60);
+        let run = |threads| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let r = place_and_route_nexus(
+                    &netlist,
+                    crate::device::nexus::NexusVariant::Lifcl40,
+                    PnrConfig::default(),
+                )
+                .unwrap();
+                (pnr_fingerprint(&r), r.bitstream.data)
+            })
+        };
+        assert!(run(1) == run(4), "one thread and four routed differently");
+    }
+
     #[test]
     fn test_nexus_place_and_route_is_repeatable() {
         let netlist = create_mesh_netlist(60);

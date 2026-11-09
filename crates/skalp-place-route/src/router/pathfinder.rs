@@ -13,14 +13,21 @@ use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, CellPin, Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::{PlacementLoc, PlacementResult};
+use rayon::prelude::*;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::ncl_constraints::MatchedDelayGroup;
 
 /// How many tiles beyond a net's bounding box its route searches may go at
 /// first. A net that stays congested gets twice the margin each time it is
-/// rerouted, so it can detour further; a search that finds no path inside its
-/// region retries over the whole device.
+/// rerouted, so it can detour further; a search that finds no path inside
+/// its region retries over the whole device. (Capping the margin at 12
+/// tiles left CLE-µ on the real LFCPNX-100 stuck at about 100 overused
+/// wires: the congestion sits at the edge of the placed region, and nets
+/// must detour well around it.)
 const SEARCH_MARGIN: u32 = 3;
+
+/// Most nets routed side by side in one wave
+const MAX_WAVE: usize = 256;
 
 /// How many times a net is rerouted keeping its uncongested branches before
 /// it is rerouted whole
@@ -298,35 +305,30 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         // Initial routing - use congestion-aware routing from the start
         // This reduces the number of conflicts that need to be resolved
         let t_start = std::time::Instant::now();
-        for &net_id in &nets_to_route {
-            // Get criticality for this net
-            let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
-            let is_matched = matched_delay_lookup.contains_key(&net_id);
-
-            // Use route_net_with_costs even for initial routing to consider existing usage
-            let route = self.route_net_with_costs_internal(
+        let initial: Vec<NetJob> = nets_to_route
+            .iter()
+            .map(|&net_id| NetJob {
                 net_id,
-                netlist,
-                placement,
-                &congestion,
-                &astar,
-                net_criticality,
-                self.present_factor,
-                self.history_factor,
-                is_matched,
-                SEARCH_MARGIN,
-                None,
-            )?;
-
-            // Track wire usage for intermediate routing wires only
-            // Source and sink wires are BEL pin wires — dedicated per cell,
-            // not shared routing resources
-            for wire in Self::shared_wires(&route) {
-                congestion.add_usage(wire);
-            }
-
-            result.routes.insert(net_id, route);
-        }
+                margin: SEARCH_MARGIN,
+                keep: false,
+                bounds: self.search_bounds(
+                    &netlist.nets[net_id.0 as usize],
+                    placement,
+                    SEARCH_MARGIN,
+                ),
+            })
+            .collect();
+        self.route_in_waves(
+            initial,
+            netlist,
+            placement,
+            &mut congestion,
+            &astar,
+            &criticality_map,
+            &matched_delay_lookup,
+            (self.present_factor, self.history_factor),
+            &mut result,
+        )?;
 
         // Iterative rip-up and reroute with convergence detection
         // Classic PathFinder: escalate present_factor each iteration to force
@@ -411,50 +413,46 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 .collect();
             log::info!("pathfinder: rerouting {} nets", reroute_list.len());
 
-            // Rip up and reroute one net at a time, so each net is routed
-            // against the current routes of all the others. (Ripping up
-            // every congested net first let the early ones spread into wires
-            // the rest still needed, and congestion barely fell.)
-            for &net_id in &reroute_list {
-                let previous = result.routes.remove(&net_id);
-                if let Some(route) = &previous {
-                    for wire in Self::shared_wires(route) {
-                        congestion.remove_usage(wire);
+            // Rip up and reroute in waves of nets whose search regions don't
+            // overlap, so each net is routed against the current routes of
+            // all the others outside its wave, and those inside it cannot
+            // reach the same wires. (Ripping up every congested net first
+            // let the early ones spread into wires the rest still needed,
+            // and congestion barely fell.)
+            let jobs: Vec<NetJob> = reroute_list
+                .iter()
+                .map(|&net_id| {
+                    // A net still congested gets a wider search region each
+                    // time. Its first reroutes keep the branches clear of
+                    // other nets; one that stays congested is rerouted whole,
+                    // since the branches it keeps may be what blocks the
+                    // others.
+                    let reroutes = reroute_counts.entry(net_id).or_insert(0);
+                    *reroutes += 1;
+                    let margin = SEARCH_MARGIN.saturating_mul(1 << (*reroutes).min(16));
+                    NetJob {
+                        net_id,
+                        margin,
+                        keep: *reroutes <= PARTIAL_REROUTES,
+                        bounds: self.search_bounds(
+                            &netlist.nets[net_id.0 as usize],
+                            placement,
+                            margin,
+                        ),
                     }
-                }
-                // A net still congested gets a wider search region each
-                // time. Its first reroutes keep the branches clear of other
-                // nets; one that stays congested is rerouted whole, since
-                // the branches it keeps may be what blocks the others.
-                let reroutes = reroute_counts.entry(net_id).or_insert(0);
-                *reroutes += 1;
-                let margin = SEARCH_MARGIN.saturating_mul(1 << (*reroutes).min(16));
-                let keep = previous.as_ref().filter(|_| *reroutes <= PARTIAL_REROUTES);
-
-                let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
-                let is_matched = matched_delay_lookup.contains_key(&net_id);
-
-                let route = self.route_net_with_costs_internal(
-                    net_id,
-                    netlist,
-                    placement,
-                    &congestion,
-                    &astar,
-                    net_criticality,
-                    iter_present_factor,
-                    iter_history_factor,
-                    is_matched,
-                    margin,
-                    keep,
-                )?;
-
-                // Track wire usage (intermediate wires only)
-                for wire in Self::shared_wires(&route) {
-                    congestion.add_usage(wire);
-                }
-
-                result.routes.insert(net_id, route);
-            }
+                })
+                .collect();
+            self.route_in_waves(
+                jobs,
+                netlist,
+                placement,
+                &mut congestion,
+                &astar,
+                &criticality_map,
+                &matched_delay_lookup,
+                (iter_present_factor, iter_history_factor),
+                &mut result,
+            )?;
 
             result.iterations = iteration + 1;
         }
@@ -488,6 +486,98 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         result.success = result.congestion <= 1.0 && result.unrouted_connections == 0;
 
         Ok(result)
+    }
+
+    /// Route `jobs` (in routing order), ripping up each net's current route
+    /// first. Nets go in waves of ones whose search regions don't overlap
+    /// ([`next_wave`]): a wave's old routes are ripped up, its nets routed
+    /// in parallel against the congestion as it stands, and the new routes
+    /// recorded in order. The waves depend only on the jobs, never on the
+    /// number of threads, so the result is the same on any machine.
+    #[allow(clippy::too_many_arguments)]
+    fn route_in_waves(
+        &self,
+        jobs: Vec<NetJob>,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+        congestion: &mut CongestionTracker,
+        astar: &AStarRouter<D>,
+        criticality_map: &HashMap<GateNetId, f64>,
+        matched_delay_lookup: &HashMap<GateNetId, &MatchedDelayGroup>,
+        (present_factor, history_factor): (f64, f64),
+        result: &mut RoutingResult,
+    ) -> Result<()> {
+        let mut pending = jobs;
+        let total = pending.len();
+        let (mut waves, mut largest) = (0usize, 0usize);
+        let mut serial_time = std::time::Duration::ZERO;
+        let t_start = std::time::Instant::now();
+        while !pending.is_empty() {
+            let wave = next_wave(&mut pending, MAX_WAVE);
+            let t_wave = std::time::Instant::now();
+            waves += 1;
+            largest = largest.max(wave.len());
+            let previous: Vec<Option<Route>> = wave
+                .iter()
+                .map(|job| {
+                    let previous = result.routes.remove(&job.net_id);
+                    if let Some(route) = &previous {
+                        for wire in Self::shared_wires(route) {
+                            congestion.remove_usage(wire);
+                        }
+                    }
+                    previous
+                })
+                .collect();
+            let frozen: &CongestionTracker = congestion;
+            let routes: Vec<Result<Route>> = wave
+                .par_iter()
+                .zip(previous.par_iter())
+                .map(|(job, previous)| {
+                    self.route_net_with_costs_internal(
+                        job.net_id,
+                        netlist,
+                        placement,
+                        frozen,
+                        astar,
+                        criticality_map.get(&job.net_id).copied().unwrap_or(0.0),
+                        present_factor,
+                        history_factor,
+                        matched_delay_lookup.contains_key(&job.net_id),
+                        job.margin,
+                        previous.as_ref().filter(|_| job.keep),
+                    )
+                })
+                .collect();
+            for (job, route) in wave.iter().zip(routes) {
+                let route = route?;
+                for wire in Self::shared_wires(&route) {
+                    congestion.add_usage(wire);
+                }
+                result.routes.insert(job.net_id, route);
+            }
+            if wave.len() == 1 {
+                let elapsed = t_wave.elapsed();
+                serial_time += elapsed;
+                if elapsed.as_secs_f64() > 1.0 {
+                    let net = &netlist.nets[wave[0].net_id.0 as usize];
+                    log::debug!(
+                        "pathfinder: net {} ({} sinks, region {:?}) took {:.1} s",
+                        net.name,
+                        net.fanout.len(),
+                        wave[0].bounds,
+                        elapsed.as_secs_f64()
+                    );
+                }
+            }
+        }
+        log::debug!(
+            "pathfinder: routed {total} nets in {waves} waves (largest {largest}) in {:.1} s, \
+             {:.1} s of it in waves of one net",
+            t_start.elapsed().as_secs_f64(),
+            serial_time.as_secs_f64()
+        );
+        Ok(())
     }
 
     /// The routing wires a route occupies: all but its source and sink wires,
@@ -1622,6 +1712,46 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     }
 }
 
+/// One net to (re)route in a routing pass
+#[derive(Debug, Clone, Copy)]
+struct NetJob {
+    net_id: GateNetId,
+    /// Search margin beyond the net's bounding box
+    margin: u32,
+    /// Keep the uncongested part of the net's current route
+    keep: bool,
+    /// The region its searches stay in (`None`: the whole device)
+    bounds: Option<SearchBounds>,
+}
+
+/// Take from `pending` the next wave of nets to route side by side: in
+/// order, every net whose search region overlaps none already in the wave,
+/// up to `max` of them. A net whose search covers the whole device goes in
+/// a wave of its own. The nets left behind keep their order.
+fn next_wave(pending: &mut Vec<NetJob>, max: usize) -> Vec<NetJob> {
+    let mut wave: Vec<NetJob> = Vec::new();
+    let mut rest = Vec::with_capacity(pending.len());
+    let mut closed = false;
+    for job in pending.drain(..) {
+        let fits = !closed
+            && wave.len() < max
+            && match job.bounds {
+                None => wave.is_empty(),
+                Some(b) => wave
+                    .iter()
+                    .all(|w| w.bounds.is_some_and(|wb| !wb.overlaps(&b))),
+            };
+        if fits {
+            closed = job.bounds.is_none();
+            wave.push(job);
+        } else {
+            rest.push(job);
+        }
+    }
+    *pending = rest;
+    wave
+}
+
 /// Whether the best of the last `window` values of `history` is less than
 /// `fraction` below the best before them
 fn stalled(history: &[f64], window: usize, fraction: f64) -> bool {
@@ -1679,6 +1809,42 @@ mod tests {
                 .insert(*cell, PlacementLoc::new(x, y, 0, BelType::Lut4));
         }
         (netlist, placement, [nets[1], nets[3]])
+    }
+
+    #[test]
+    fn waves_hold_nets_whose_regions_do_not_overlap() {
+        let job = |id: u32, b: Option<(u32, u32, u32, u32)>| NetJob {
+            net_id: GateNetId(id),
+            margin: SEARCH_MARGIN,
+            keep: false,
+            bounds: b.map(|(min_x, min_y, max_x, max_y)| SearchBounds {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+            }),
+        };
+        let mut pending = vec![
+            job(0, Some((0, 0, 5, 5))),
+            job(1, Some((4, 4, 9, 9))),   // overlaps 0
+            job(2, Some((10, 0, 15, 5))), // clear of 0
+            job(3, None),                 // whole device
+            job(4, Some((0, 10, 5, 15))), // clear of 0 and 2
+        ];
+        let ids = |w: &[NetJob]| w.iter().map(|j| j.net_id.0).collect::<Vec<_>>();
+        let wave = next_wave(&mut pending, MAX_WAVE);
+        assert_eq!(ids(&wave), [0, 2, 4]);
+        assert_eq!(ids(&pending), [1, 3]);
+        // 1 fits an empty wave; the whole-device net then waits for its own
+        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [1]);
+        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [3]);
+        assert!(pending.is_empty());
+        // The size cap holds
+        let mut many: Vec<NetJob> = (0..10)
+            .map(|i| job(i, Some((i * 10, 0, i * 10 + 5, 5))))
+            .collect();
+        assert_eq!(next_wave(&mut many, 4).len(), 4);
+        assert_eq!(many.len(), 6);
     }
 
     #[test]

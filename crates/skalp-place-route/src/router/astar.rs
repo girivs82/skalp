@@ -2,14 +2,14 @@
 //!
 //! Implements A* pathfinding for FPGA routing.
 
-use super::graph::RoutingGraph;
+use super::graph::{RoutingGraph, SinkApproach};
 use crate::collections::{HashMap, HashMapExt, HashSet};
 use crate::device::{Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::timing::DelayModel;
-use std::cell::{OnceCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::{Mutex, OnceLock};
 
 /// A* search node
 #[derive(Clone)]
@@ -120,6 +120,51 @@ impl SearchScratch {
     }
 }
 
+/// A [`SearchScratch`] borrowed from a router's pool for one search and
+/// returned to it when the search ends
+struct ScratchGuard<'p> {
+    pool: &'p Mutex<Vec<SearchScratch>>,
+    scratch: Option<SearchScratch>,
+}
+
+impl<'p> ScratchGuard<'p> {
+    fn take(pool: &'p Mutex<Vec<SearchScratch>>) -> Self {
+        let scratch = pool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
+        Self {
+            pool,
+            scratch: Some(scratch),
+        }
+    }
+}
+
+impl std::ops::Deref for ScratchGuard<'_> {
+    type Target = SearchScratch;
+    fn deref(&self) -> &SearchScratch {
+        self.scratch.as_ref().expect("scratch is held until drop")
+    }
+}
+
+impl std::ops::DerefMut for ScratchGuard<'_> {
+    fn deref_mut(&mut self) -> &mut SearchScratch {
+        self.scratch.as_mut().expect("scratch is held until drop")
+    }
+}
+
+impl Drop for ScratchGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(scratch) = self.scratch.take() {
+            self.pool
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(scratch);
+        }
+    }
+}
+
 /// Tiles a search may enter: wires whose tile lies outside are not expanded.
 /// Routing a net inside its bounding box (plus a margin) keeps a search from
 /// flooding the whole device when the direct way is congested.
@@ -137,6 +182,14 @@ impl SearchBounds {
     pub fn contains(&self, x: u32, y: u32) -> bool {
         x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
     }
+
+    /// Whether the two regions share a tile
+    pub fn overlaps(&self, other: &SearchBounds) -> bool {
+        self.min_x <= other.max_x
+            && other.min_x <= self.max_x
+            && self.min_y <= other.max_y
+            && other.min_y <= self.max_y
+    }
 }
 
 /// A* router
@@ -144,8 +197,10 @@ pub struct AStarRouter<'a, D: Device> {
     device: &'a D,
     delay_model: Option<DelayModel>,
     /// The device's routing graph, built on the first search
-    graph: OnceCell<RoutingGraph>,
-    scratch: RefCell<SearchScratch>,
+    graph: OnceLock<RoutingGraph>,
+    /// Search scratch not in use: a search takes one (or makes one) and
+    /// gives it back, so searches can run on several threads at once
+    scratch: Mutex<Vec<SearchScratch>>,
 }
 
 impl<'a, D: Device> AStarRouter<'a, D> {
@@ -154,8 +209,8 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         Self {
             device,
             delay_model: None,
-            graph: OnceCell::new(),
-            scratch: RefCell::default(),
+            graph: OnceLock::new(),
+            scratch: Mutex::default(),
         }
     }
 
@@ -164,8 +219,8 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         Self {
             device,
             delay_model: Some(delay_model),
-            graph: OnceCell::new(),
-            scratch: RefCell::default(),
+            graph: OnceLock::new(),
+            scratch: Mutex::default(),
         }
     }
 
@@ -282,8 +337,9 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         }
         let blocked_set: HashSet<_> = blocked.iter().copied().collect();
         let (target_x, target_y) = graph.tile(sink).unwrap_or((0, 0));
+        let approach = graph.sink_approach(sink);
 
-        let mut scratch = self.scratch.borrow_mut();
+        let mut scratch = ScratchGuard::take(&self.scratch);
         scratch.begin(num_wires);
         let mut open_set = BinaryHeap::new();
 
@@ -296,7 +352,7 @@ impl<'a, D: Device> AStarRouter<'a, D> {
             open_set.push(AStarNode {
                 wire: start,
                 g_score: 0.0,
-                f_score: self.heuristic(graph, start, target_x, target_y),
+                f_score: self.heuristic(graph, start, target_x, target_y, &approach),
             });
         }
 
@@ -336,7 +392,8 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                     open_set.push(AStarNode {
                         wire: neighbor,
                         g_score: tentative_g,
-                        f_score: tentative_g + self.heuristic(graph, neighbor, target_x, target_y),
+                        f_score: tentative_g
+                            + self.heuristic(graph, neighbor, target_x, target_y, &approach),
                     });
                 }
             }
@@ -353,22 +410,25 @@ impl<'a, D: Device> AStarRouter<'a, D> {
     /// device's own estimate when it has one, otherwise one derived from the
     /// routing graph's PIPs. It must never exceed a real path's cost, or the
     /// search returns needlessly long routes.
-    fn heuristic(&self, graph: &RoutingGraph, wire: WireId, target_x: u32, target_y: u32) -> f64 {
+    fn heuristic(
+        &self,
+        graph: &RoutingGraph,
+        wire: WireId,
+        target_x: u32,
+        target_y: u32,
+        approach: &SinkApproach,
+    ) -> f64 {
         let Some((x, y)) = graph.tile(wire) else {
             return 0.0;
         };
         let dx = x.abs_diff(target_x);
         let dy = y.abs_diff(target_y);
-        let dist = dx + dy;
-
-        if dist == 0 {
-            return 0.0;
-        }
         if let Some(estimate) = self.device.route_cost_estimate(dx, dy) {
-            return estimate;
+            return if dx + dy == 0 { 0.0 } else { estimate };
         }
-        // Derived from the routing graph itself: admissible for any device
-        graph.cost_lower_bound(dx, dy)
+        // Derived from the routing graph itself, for any device: a lower
+        // bound on paths through the general fabric
+        graph.cost_to_sink(wire, approach)
     }
 
     /// Reconstruct the path ending at `sink` from the search scratch
