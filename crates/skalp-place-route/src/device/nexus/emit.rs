@@ -6,6 +6,7 @@
 //!
 //! The settings mirror what nextpnr writes for the same cells.
 
+use super::ebr;
 use super::prjoxide_graph::{
     load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
 };
@@ -29,6 +30,8 @@ const OSC_HF_CLK_DIV: u64 = 24;
 pub const OSC_FREQUENCY_MHZ: f64 = 450.0 / (OSC_HF_CLK_DIV as f64 + 1.0);
 /// Divider for the configuration engine's clock.
 const OSC_SED_SEC_DIV: u64 = 1;
+/// Number given to a design's first block RAM; 0 and 1 are reserved.
+const FIRST_RAM_ID: u64 = 2;
 
 fn emit_err(message: String) -> PlaceRouteError {
     PlaceRouteError::BitstreamFailed(message)
@@ -124,11 +127,54 @@ fn set_always_on_bits(config: &mut ConfigDb<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Make a site pin read high by selecting an unused input on its CIB mux.
+///
+/// A CIB input left unconnected floats high only when its mux has an input
+/// selected that no net drives; the mux is otherwise undefined or follows
+/// whatever signal happens to reach it.
+fn float_high(
+    config: &mut ConfigDb<'_>,
+    pin: crate::device::WireId,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let device = config.device;
+    let name = || {
+        device
+            .wire(pin)
+            .map_or("?", |w| w.name.as_str())
+            .to_string()
+    };
+    let mux = find_cib_mux(device, pin)
+        .ok_or_else(|| emit_err(format!("No CIB mux feeds {}", name())))?;
+    if used_wires.contains(&mux) {
+        return Err(emit_err(format!(
+            "The CIB mux for {} is used by a routed net, so the pin cannot float",
+            name()
+        )));
+    }
+    let pip = device
+        .wire_pips(mux)
+        .into_iter()
+        .find(|&p| {
+            device
+                .pip(p)
+                .is_some_and(|i| !used_wires.contains(&i.src_wire))
+        })
+        .ok_or_else(|| emit_err(format!("No free input on the CIB mux for {}", name())))?;
+    config
+        .bits
+        .extend(device.pip_config_bits(pip).iter().cloned());
+    Ok(())
+}
+
 /// Hold the clock enable high on every clock buffer a route passes through.
 ///
-/// A buffer's enable comes from a CIB input mux; selecting any input on that
-/// mux reads as high, and a clock left without it never leaves the buffer.
-fn enable_clock_buffers(config: &mut ConfigDb<'_>, routing: &RoutingResult) -> Result<()> {
+/// A clock left without it never leaves the buffer.
+fn enable_clock_buffers(
+    config: &mut ConfigDb<'_>,
+    routing: &RoutingResult,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
     let device = config.device;
     let mut enable_wires = HashSet::new();
     for route in routing.routes.values() {
@@ -149,16 +195,7 @@ fn enable_clock_buffers(config: &mut ConfigDb<'_>, routing: &RoutingResult) -> R
         let wire = device
             .wire_by_name(enable)
             .ok_or_else(|| emit_err(format!("No clock buffer enable wire {enable}")))?;
-        let cib_mux = find_cib_mux(device, wire)
-            .ok_or_else(|| emit_err(format!("No CIB mux feeds {enable}")))?;
-        let pip = device
-            .wire_pips(cib_mux)
-            .into_iter()
-            .next()
-            .ok_or_else(|| emit_err(format!("Nothing drives the CIB mux for {enable}")))?;
-        config
-            .bits
-            .extend(device.pip_config_bits(pip).iter().cloned());
+        float_high(config, wire, used_wires)?;
     }
     Ok(())
 }
@@ -302,7 +339,12 @@ fn emit_bits(
         }
     }
 
-    enable_clock_buffers(&mut config, routing)?;
+    let used_wires: HashSet<crate::device::WireId> = routing
+        .routes
+        .values()
+        .flat_map(|r| r.wires.iter().copied())
+        .collect();
+    enable_clock_buffers(&mut config, routing, &used_wires)?;
 
     let is_tied_high = |cell: CellId, index: usize| tied.value(cell, index) == Some(true);
     let tied_low = |cell: CellId, first: usize, count: usize| -> Vec<usize> {
@@ -311,6 +353,7 @@ fn emit_bits(
             .collect()
     };
     let mut slices_with_ff: HashSet<(u32, u32, char, bool)> = HashSet::new();
+    let mut next_ram_id = FIRST_RAM_ID;
 
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
@@ -323,7 +366,18 @@ fn emit_bits(
         let (x, y) = (loc.tile_x, loc.tile_y);
 
         if is_pad(cell) {
-            emit_pad(&mut config, cell, x, y, loc.bel_index)?;
+            emit_pad(&mut config, cell, x, y, loc.bel_index, &used_wires)?;
+            continue;
+        }
+        if loc.bel_type == BelType::RamSlice {
+            let ram = PlacedRam {
+                cell,
+                site_x: x,
+                site_y: y,
+                id: next_ram_id,
+            };
+            emit_block_ram(&mut config, &ram, tied, &used_wires)?;
+            next_ram_id += 1;
             continue;
         }
 
@@ -385,7 +439,11 @@ fn emit_bits(
             BelType::Lut4 => {
                 let slice = slice_of(number);
                 let lut = number % 2;
-                let init = fold_tied_low(lut_init(cell)?, &tied_low(cell.id, 0, 4));
+                // A truth table covers the connected inputs with the rest at 0,
+                // but an unconnected input reads 1 on this silicon.
+                let mut low = tied_low(cell.id, 0, 4);
+                low.extend(cell.inputs.len()..4);
+                let init = fold_tied_low(lut_init(cell)?, &low);
                 config.set_word(&tile, &format!("SLICE{slice}.K{lut}.INIT"), init)?;
             }
             other => {
@@ -433,6 +491,196 @@ fn emit_dist_ram(config: &mut ConfigDb<'_>, tile: &PrjoxideTile, cell: &Cell) ->
     config.set_enum(tile, "SLICEC.LSRMUX", "LSR")
 }
 
+/// A block RAM cell and the site it was placed on.
+struct PlacedRam<'a> {
+    cell: &'a Cell,
+    site_x: u32,
+    site_y: u32,
+    /// Unique block number, used to address the memory after configuration
+    id: u64,
+}
+
+/// What a block RAM pin is connected to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RamPin {
+    Signal,
+    High,
+    Low,
+}
+
+/// Set a named option in whichever of a site's tiles define it.
+fn set_ram_enum(
+    config: &mut ConfigDb<'_>,
+    tiles: &[PrjoxideTile],
+    name: &str,
+    option: &str,
+) -> Result<()> {
+    let mut found = false;
+    for tile in tiles {
+        if config
+            .db(&tile.tiletype)?
+            .enum_option(name, option)
+            .is_some()
+        {
+            config.set_enum(tile, name, option)?;
+            found = true;
+        }
+    }
+    found
+        .then_some(())
+        .ok_or_else(|| emit_err(format!("No block RAM setting {name}.{option}")))
+}
+
+/// Set a word in whichever of a site's tiles defines it.
+fn set_ram_word(
+    config: &mut ConfigDb<'_>,
+    tiles: &[PrjoxideTile],
+    name: &str,
+    value: u64,
+) -> Result<()> {
+    let mut found = false;
+    for tile in tiles {
+        if config.db(&tile.tiletype)?.word(name).is_some() {
+            config.set_word(tile, name, value)?;
+            found = true;
+        }
+    }
+    found
+        .then_some(())
+        .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))
+}
+
+/// Configure a block RAM site and everything its unrouted pins must read.
+fn emit_block_ram(
+    config: &mut ConfigDb<'_>,
+    ram: &PlacedRam<'_>,
+    tied: &crate::bitstream::prepare::TiedInputs,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let PlacedRam {
+        cell,
+        site_x: x,
+        site_y: y,
+        id,
+    } = *ram;
+    let ports = cell
+        .ram_ports()
+        .ok_or_else(|| emit_err(format!("'{}' has no block RAM port layout", cell.path)))?;
+    let device = config.device;
+    let first = device
+        .prjoxide_tile(x, y, |t| ebr::site_of_tile(t).is_some())
+        .cloned()
+        .ok_or_else(|| emit_err(format!("No block RAM tile at column {x}, row {y}")))?;
+    let site = ebr::site_of_tile(&first.tiletype).expect("selected by this test");
+    let suffix = ebr::second_tile_suffix(site);
+    let second = device
+        .prjoxide_tile(x + 1, y, |t| t.ends_with(suffix))
+        .cloned()
+        .ok_or_else(|| emit_err(format!("No second block RAM tile at column {}", x + 1)))?;
+    let tiles = [first, second];
+
+    let width = ports.data_width();
+    let prefix = format!("EBR{site}");
+    let mode = if cell.inputs[ports.read_clk] == cell.inputs[ports.write_clk] {
+        "PDPSC16K_MODE"
+    } else {
+        "PDP16K_MODE"
+    };
+    set_ram_enum(config, &tiles, &format!("{prefix}.MODE"), mode)?;
+    set_ram_enum(config, &tiles, &format!("{prefix}.INIT_DATA"), "STATIC")?;
+    set_ram_enum(config, &tiles, &format!("{prefix}.GSR"), "DISABLED")?;
+    set_ram_word(config, &tiles, &format!("{prefix}.WID"), id)?;
+    let in_mode = format!("{prefix}.{mode}");
+    set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_W"), 0)?;
+    set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_R"), 0)?;
+    for (setting, value) in [
+        ("ASYNC_RST_RELEASE", "ASYNC".to_string()),
+        ("DATA_WIDTH_W", format!("X{width}")),
+        ("DATA_WIDTH_R", format!("X{width}")),
+        ("OUTREG", "BYPASSED".to_string()),
+        ("RESETMODE", "ASYNC".to_string()),
+    ] {
+        set_ram_enum(config, &tiles, &format!("{in_mode}.{setting}"), &value)?;
+    }
+
+    // Everything the design connects, by site pin.
+    let mut pins: HashMap<String, RamPin> = HashMap::new();
+    for input in 0..cell.inputs.len() {
+        let state = match tied.value(cell.id, input) {
+            Some(true) => RamPin::High,
+            Some(false) => RamPin::Low,
+            None => RamPin::Signal,
+        };
+        match ebr::input_pin(&ports, input) {
+            Some(pin) => {
+                pins.insert(pin, state);
+            }
+            None if ports.write_mask.contains(&input) && state == RamPin::High => {}
+            None if input == ports.write_clk_en && state != RamPin::Signal => {}
+            None => {
+                return Err(emit_err(format!(
+                    "Block RAM '{}' drives input {input}, which the backend does not support yet",
+                    cell.path
+                )))
+            }
+        }
+    }
+
+    // Muxes are named from the true dual-port view in every mode.
+    let mux = |pin: &str| format!("{prefix}.DP16K_MODE.{pin}MUX");
+    for pin in ["RSTA", "RSTB", "WEB"] {
+        set_ram_enum(config, &tiles, &mux(pin), "INV")?;
+    }
+    for pin in ["CLKA", "CLKB"] {
+        if pins.get(pin) != Some(&RamPin::Signal) {
+            return Err(emit_err(format!(
+                "Block RAM '{}' has no {pin} clock",
+                cell.path
+            )));
+        }
+        set_ram_enum(config, &tiles, &mux(pin), pin)?;
+    }
+    for pin in ebr::input_pins().iter().map(String::as_str) {
+        match pins.get(pin).copied() {
+            Some(RamPin::Signal) => {
+                if ebr::has_inverter(pin) {
+                    set_ram_enum(config, &tiles, &mux(pin), pin)?;
+                }
+            }
+            Some(RamPin::Low) if ebr::has_inverter(pin) => {
+                set_ram_enum(config, &tiles, &mux(pin), "INV")?;
+                float_ram_pin(config, x, y, pin, used_wires)?;
+            }
+            Some(RamPin::Low) => {
+                return Err(emit_err(format!(
+                    "Block RAM '{}' pin {pin} is tied low with no driver",
+                    cell.path
+                )))
+            }
+            Some(RamPin::High) | None => float_ram_pin(config, x, y, pin, used_wires)?,
+        }
+    }
+    Ok(())
+}
+
+/// Let a block RAM pin read high, if it has a CIB mux to set.
+fn float_ram_pin(
+    config: &mut ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    pin: &str,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    if !ebr::floats_through_cib(pin) {
+        return Ok(());
+    }
+    let device = config.device;
+    let wire = device
+        .bel_wire(x, y, &format!("RAM_{pin}"))
+        .ok_or_else(|| emit_err(format!("No wire for block RAM pin {pin} at ({x}, {y})")))?;
+    float_high(config, wire, used_wires)
+}
+
 /// Bank voltage a standard runs at.
 fn bank_voltage(standard: &str) -> Result<&'static str> {
     let voltage = standard.trim_start_matches(|c: char| c.is_alphabetic());
@@ -452,9 +700,10 @@ fn emit_pad(
     x: u32,
     y: u32,
     bel_index: usize,
+    used_wires: &HashSet<crate::device::WireId>,
 ) -> Result<()> {
     if cell.parameters.get("LOC").map(String::as_str) == Some(super::OSC_PIN) {
-        return emit_oscillator(config, x, y);
+        return emit_oscillator(config, x, y, used_wires);
     }
 
     let tile = config
@@ -503,7 +752,12 @@ fn emit_pad(
     )
 }
 
-fn emit_oscillator(config: &mut ConfigDb<'_>, x: u32, y: u32) -> Result<()> {
+fn emit_oscillator(
+    config: &mut ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
     let tile = config.tile(x, y, "EFB_1_OSC")?;
     config.set_enum(&tile, "OSC_CORE.HF_OSC_EN", "ENABLED")?;
     config.set_enum(&tile, "OSC_CORE.HFDIV_FABRIC_EN", "ENABLED")?;
@@ -517,17 +771,7 @@ fn emit_oscillator(config: &mut ConfigDb<'_>, x: u32, y: u32) -> Result<()> {
     let enable = resolve_wire(x, y, "S1:JHFOUTEN_OSC_CORE")
         .and_then(|n| device.wire_by_name(&node_name(&n)))
         .ok_or_else(|| emit_err("No oscillator enable wire".to_string()))?;
-    let cib_mux = find_cib_mux(device, enable)
-        .ok_or_else(|| emit_err("No CIB mux feeds the oscillator enable".to_string()))?;
-    let pip = device
-        .wire_pips(cib_mux)
-        .into_iter()
-        .next()
-        .ok_or_else(|| emit_err("Nothing drives the oscillator enable mux".to_string()))?;
-    config
-        .bits
-        .extend(device.pip_config_bits(pip).iter().cloned());
-    Ok(())
+    float_high(config, enable, used_wires)
 }
 
 #[cfg(test)]

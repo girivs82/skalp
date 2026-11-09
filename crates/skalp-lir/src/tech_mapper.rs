@@ -13,6 +13,7 @@
 
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
+    RAM_ADDR_BITS_PARAM, RAM_DATA_BITS_PARAM,
 };
 use crate::lir::{Lir, LirOp, LirSignalId};
 use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
@@ -1147,14 +1148,14 @@ fn map_memblock_standalone(
             let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
             let mut cell = Cell::new_comb(
                 CellId(0),
-                tie_info.name,
+                tie_info.name.clone(),
                 library.name.clone(),
                 tie_info.fit,
                 "tie_low".to_string(),
                 vec![],
                 vec![id],
             );
-            cell.function = Some(CellFunction::TieLow);
+            tie_info.apply_to_cell(&mut cell);
             netlist.add_cell(cell);
             id
         }
@@ -1264,6 +1265,12 @@ fn map_memblock_standalone(
             .insert("READ_MODE".to_string(), block_width.to_string());
         cell.parameters
             .insert("WRITE_MODE".to_string(), block_width.to_string());
+        cell.parameters.insert(
+            RAM_ADDR_BITS_PARAM.to_string(),
+            block_addr_width.to_string(),
+        );
+        cell.parameters
+            .insert(RAM_DATA_BITS_PARAM.to_string(), block_width.to_string());
         ram_cell_info.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
     };
@@ -1305,6 +1312,8 @@ fn map_memblock_standalone(
         // Need address decode for write enable and output MUX for read
         let upper_addr_bits = clog2(depth_blocks);
 
+        // The latest read mux output for each bit of each width slice.
+        let mut read_results: IndexMap<(u32, usize), GateNetId> = IndexMap::new();
         for db in 0..depth_blocks {
             // Decode upper address bits for this bank
             let mut bank_sel = tie_high;
@@ -1323,28 +1332,28 @@ fn map_memblock_standalone(
                     let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
                     let mut cell = Cell::new_comb(
                         CellId(0),
-                        inv_ci.name,
+                        inv_ci.name.clone(),
                         library.name.clone(),
                         inv_ci.fit,
                         format!("{}_d{}_addr_inv_{}", path, db, bit),
                         vec![addr_bit],
                         vec![match_net],
                     );
-                    cell.function = Some(CellFunction::Inv);
+                    inv_ci.apply_to_cell(&mut cell);
                     netlist.add_cell(cell);
                 } else {
                     // Buffer/pass through
                     let buf_ci = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
                     let mut cell = Cell::new_comb(
                         CellId(0),
-                        buf_ci.name,
+                        buf_ci.name.clone(),
                         library.name.clone(),
                         buf_ci.fit,
                         format!("{}_d{}_addr_buf_{}", path, db, bit),
                         vec![addr_bit],
                         vec![match_net],
                     );
-                    cell.function = Some(CellFunction::Buf);
+                    buf_ci.apply_to_cell(&mut cell);
                     netlist.add_cell(cell);
                 }
 
@@ -1356,14 +1365,14 @@ fn map_memblock_standalone(
                 let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
                 let mut cell = Cell::new_comb(
                     CellId(0),
-                    and_ci.name,
+                    and_ci.name.clone(),
                     library.name.clone(),
                     and_ci.fit,
                     format!("{}_d{}_bank_and_{}", path, db, bit),
                     vec![bank_sel, match_net],
                     vec![new_sel],
                 );
-                cell.function = Some(CellFunction::And2);
+                and_ci.apply_to_cell(&mut cell);
                 netlist.add_cell(cell);
                 bank_sel = new_sel;
             }
@@ -1376,14 +1385,14 @@ fn map_memblock_standalone(
             let we_and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
             let mut cell = Cell::new_comb(
                 CellId(0),
-                we_and_ci.name,
+                we_and_ci.name.clone(),
                 library.name.clone(),
                 we_and_ci.fit,
                 format!("{}_d{}_we_and", path, db),
                 vec![we_net, bank_sel],
                 vec![bank_we],
             );
-            cell.function = Some(CellFunction::And2);
+            we_and_ci.apply_to_cell(&mut cell);
             netlist.add_cell(cell);
 
             // For each width block in this depth slice
@@ -1429,6 +1438,7 @@ fn map_memblock_standalone(
                             GateNetId(0),
                             format!("{}_w{}_result{}", path, wb, i - bit_lo),
                         ));
+                        read_results.insert((wb, i - bit_lo), result_net);
                         // MUX: bank_sel ? block_out : tie_low
                         let mut cell = Cell::new_comb(
                             CellId(0),
@@ -1446,9 +1456,7 @@ fn map_memblock_standalone(
                 } else if db == depth_blocks - 1 {
                     // Last bank: MUX to final output
                     for i in bit_lo..bit_hi {
-                        let prev_result = netlist
-                            .get_net_id(&format!("{}_w{}_result{}", path, wb, i - bit_lo))
-                            .unwrap_or(tie_low);
+                        let prev_result = read_results[&(wb, i - bit_lo)];
                         let final_out = outputs.get(i).copied().unwrap_or(outputs[0]);
                         // MUX: bank_sel ? block_out : prev_result → final output
                         let mut cell = Cell::new_comb(
@@ -1467,8 +1475,7 @@ fn map_memblock_standalone(
                 } else {
                     // Middle bank: MUX with previous, store to new result net
                     for i in bit_lo..bit_hi {
-                        let prev_name = format!("{}_w{}_result{}", path, wb, i - bit_lo);
-                        let prev_result = netlist.get_net_id(&prev_name).unwrap_or(tie_low);
+                        let prev_result = read_results[&(wb, i - bit_lo)];
                         let new_result = netlist.add_net(GateNet::new(
                             GateNetId(0),
                             format!("{}_d{}_w{}_result{}", path, db, wb, i - bit_lo),
@@ -1485,11 +1492,7 @@ fn map_memblock_standalone(
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
                         mux_ci.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
-                        // Update the result name for next iteration
-                        // (we rename the new_result to the canonical name)
-                        if let Some(net) = netlist.nets.get_mut(new_result.0 as usize) {
-                            net.name = prev_name;
-                        }
+                        read_results.insert((wb, i - bit_lo), new_result);
                     }
                 }
             }

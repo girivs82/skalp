@@ -1267,19 +1267,16 @@ impl MirToLirTransform {
                     };
 
                     let directly_assigned = then_expr.is_some() || else_expr.is_some();
-                    let in_sibling_nested = then_has_nested && else_has_nested;
-                    let in_only_else_nested =
-                        !then_has_nested && else_has_nested && then_expr.is_none();
+                    // A synchronous reset branch keeps its integrated-reset form below.
+                    let keeps_sync_reset = is_reset_condition
+                        && !then_has_nested
+                        && (else_expr.is_some() || else_has_nested)
+                        && then_expr.and_then(Self::try_extract_constant).is_some();
 
-                    // Skip if only in nested else ifs - let them handle it
-                    // (But only if not directly assigned in then branch!)
-                    if in_only_else_nested {
-                        continue;
-                    }
-
-                    // If in sibling nested ifs, we MUST handle here to avoid multi-driver
-                    // Collect all conditional paths and build a combined mux chain
-                    if in_sibling_nested && !directly_assigned {
+                    // A target assigned under a nested if or case needs every guard
+                    // on the way to that assignment, and one register for the
+                    // whole tree: build one mux chain from the full path conditions.
+                    if (then_has_nested || else_has_nested) && !keeps_sync_reset {
                         handled_targets.push(target.clone());
                         handled_lir_signals.push(target_signal);
 

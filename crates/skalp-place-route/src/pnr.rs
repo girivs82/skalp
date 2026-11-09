@@ -551,11 +551,17 @@ pub fn place_and_route_nexus_real(
         variant.prjoxide_device(),
     )
     .map_err(PlaceRouteError::BitstreamFailed)?;
-    let region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len());
+    let ram_count = netlist
+        .cells
+        .iter()
+        .filter(|c| c.ram_ports().is_some())
+        .count();
+    let region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len(), ram_count);
     let device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
             .map_err(PlaceRouteError::BitstreamFailed)?;
 
+    let netlist = &prepare::drive_tied_low_ram_inputs(netlist, &device);
     let logic = prepare::logic_only_netlist(netlist);
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();
@@ -567,11 +573,11 @@ pub fn place_and_route_nexus_real(
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
 
-    let (mut routable, tied) = prepare::prepare_for_routing(netlist);
+    let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         net.fanout
-            .retain(|(_, pin)| *pin != crate::device::FF_PIN_CLK);
+            .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
     }
     let router_device = device.without_wires(&clock_routes.claimed);
     let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {

@@ -230,3 +230,55 @@ fn test_ccu2_verilog_carries_init_parameters() {
     assert!(v.contains(".INJECT(\"NO\")"));
     assert!(v.contains(".CIN(") && v.contains(".COUT("));
 }
+
+async fn block_ram_check_never_fails(mut tb: Testbench) {
+    // One write pass and one read pass of 32 addresses held for 8 cycles each.
+    tb.clock(1200).await;
+    assert_eq!(tb.get_u64("bad").await, 0);
+}
+
+#[tokio::test]
+async fn test_block_ram_check_gate_level_nexus() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nexus_blockram_check.sk"),
+        "RamCheck",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    block_ram_check_never_fails(tb).await;
+}
+
+/// A register assigned under nested conditions must honour every guard on the
+/// way to the assignment, in a then branch and in an else branch.
+async fn check_nested_if_guards(mut tb: Testbench) {
+    tb.set("a", 1u8);
+    tb.set("b", 0u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 0, "t needs both a and b");
+    assert_eq!(tb.get_u64("u").await, 0, "u needs !a and b");
+
+    tb.set("a", 1u8);
+    tb.set("b", 1u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 1, "t is set by a and b");
+    assert_eq!(tb.get_u64("u").await, 0, "u must not fire while a is set");
+
+    tb.set("a", 0u8);
+    tb.set("b", 1u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 1, "t holds its value");
+    assert_eq!(tb.get_u64("u").await, 1, "u is set by !a and b");
+}
+
+#[tokio::test]
+async fn test_nested_if_guards_gate_level() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nested_if_guards.sk"),
+        "NestedIfGuards",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_nested_if_guards(tb).await;
+}

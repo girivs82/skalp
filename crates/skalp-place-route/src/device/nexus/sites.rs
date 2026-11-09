@@ -137,6 +137,7 @@ pub fn design_region(
     clocks: &ClockRegions,
     sites: &[(u32, u32)],
     lut_count: usize,
+    ram_count: usize,
 ) -> DesignRegion {
     let clock_tiles = tiles
         .iter()
@@ -169,12 +170,19 @@ pub fn design_region(
     let fits = |region: &DesignRegion| {
         let (x0, _, x1, _) = region.window;
         let (from, to) = region.logic_rows;
+        let inside = |t: &&PrjoxideTile| t.x >= x0 && t.x <= x1 && t.y >= from && t.y <= to;
         let capacity = tiles
             .iter()
-            .filter(|t| t.tiletype == "PLC" && t.x >= x0 && t.x <= x1 && t.y >= from && t.y <= to)
+            .filter(inside)
+            .filter(|t| t.tiletype == "PLC")
             .count()
             * LUTS_PER_TILE;
-        lut_count as f64 <= capacity as f64 * MAX_REGION_FILL
+        let ram_sites = tiles
+            .iter()
+            .filter(inside)
+            .filter(|t| super::ebr::site_of_tile(&t.tiletype).is_some())
+            .count();
+        lut_count as f64 <= capacity as f64 * MAX_REGION_FILL && ram_count <= ram_sites
     };
 
     let right_edge = (first_col + MIN_REGION_COLUMNS).max(site_x1);
@@ -201,8 +209,8 @@ mod tests {
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
         let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
-        let small = design_region(&tiles, &clocks, &[(159, 31)], 100);
-        let large = design_region(&tiles, &clocks, &[(159, 31)], 45_000);
+        let small = design_region(&tiles, &clocks, &[(159, 31)], 100, 0);
+        let large = design_region(&tiles, &clocks, &[(159, 31)], 45_000, 0);
         assert_eq!(small.logic_rows, (1, 37));
         assert_eq!(large.logic_rows, (1, 73));
         assert!(large.window.3 > small.window.3);
@@ -244,7 +252,7 @@ mod tests {
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
         let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
-        let region = design_region(&tiles, &clocks, &[(159, 31)], 100);
+        let region = design_region(&tiles, &clocks, &[(159, 31)], 100, 0);
         assert_eq!(region.window, (73, 0, 159, 40));
         assert_eq!(region.logic_rows, (1, 37));
     }

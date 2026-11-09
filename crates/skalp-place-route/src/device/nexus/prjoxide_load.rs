@@ -220,7 +220,7 @@ mod tests {
 
         // Direct tile families map 1:1 to data.rs constants.
         assert_eq!(count_fam("PLC"), die.plc_tiles, "PLC tile count");
-        assert_eq!(count_fam("EBR"), die.ebr_blocks * 8, "EBR tiles (8/block)");
+        assert_eq!(count_fam("EBR"), die.ebr_blocks * 2, "EBR tiles (2/block)");
         assert_eq!(count_fam("LRAM"), die.lram_blocks, "LRAM tiles");
         assert_eq!(count_fam("GPLL"), die.plls as usize, "GPLL tiles");
         assert_eq!(count_fam("PCS"), die.pcs_channels as usize, "PCS channels");

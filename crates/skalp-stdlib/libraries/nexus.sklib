@@ -13,7 +13,7 @@
 #
 # Target device: LFCPNX-100 (LFCPNX-VERSA-EVN board)
 # - ~95K LUT4 (OXIDE_COMB)
-# - 320 DP16K BRAM blocks (5.12 Mbit EBR)
+# - 208 DP16K BRAM blocks (3.7 Mbit EBR)
 # - 56 MULT18X18 DSP slices (in 28 MULT36X36 blocks)
 # - 4 PLL + 4 DLL
 # - Hard PCIe Gen3 x4
@@ -378,7 +378,7 @@ mechanism = "single_event_upset"
 
 # =============================================================================
 # DP16K - 16Kbit True Dual-Port Block RAM (EBR)
-# The Nexus EBR primitive. 320 blocks on LFCPNX-100 = 5.12 Mbit total.
+# The Nexus EBR primitive. 208 blocks on LFCPNX-100 = 3.7 Mbit total.
 # Each block: 16Kbit data + 2Kbit parity = 18Kbit.
 # Supports various aspect ratios and byte-write enable.
 # =============================================================================

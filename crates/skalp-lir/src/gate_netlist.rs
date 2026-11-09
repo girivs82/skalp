@@ -71,7 +71,68 @@ pub struct Cell {
     pub parameters: IndexMap<String, String>,
 }
 
+/// Parameter holding a block RAM cell's address width in bits.
+pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
+/// Parameter holding a block RAM cell's data width in bits.
+pub const RAM_DATA_BITS_PARAM: &str = "RAM_DATA_BITS";
+
+/// Where each function of a block RAM cell sits in its input list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RamPorts {
+    /// Read address, least significant bit first
+    pub read_addr: std::ops::Range<usize>,
+    /// Read clock
+    pub read_clk: usize,
+    /// Read clock enable
+    pub read_clk_en: usize,
+    /// Read enable
+    pub read_en: usize,
+    /// Write data, least significant bit first
+    pub write_data: std::ops::Range<usize>,
+    /// Write address, least significant bit first
+    pub write_addr: std::ops::Range<usize>,
+    /// Write clock
+    pub write_clk: usize,
+    /// Write clock enable
+    pub write_clk_en: usize,
+    /// Write enable
+    pub write_en: usize,
+    /// Per-bit write mask, empty if the cell has none
+    pub write_mask: std::ops::Range<usize>,
+}
+
+impl RamPorts {
+    /// Data width of the block.
+    pub fn data_width(&self) -> usize {
+        self.write_data.len()
+    }
+}
+
 impl Cell {
+    /// The input layout of a block RAM cell, or `None` for any other cell.
+    pub fn ram_ports(&self) -> Option<RamPorts> {
+        let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
+        let addr = bits(RAM_ADDR_BITS_PARAM)?;
+        let data = bits(RAM_DATA_BITS_PARAM)?;
+        let read_clk = addr;
+        let write_data = read_clk + 3..read_clk + 3 + data;
+        let write_addr = write_data.end..write_data.end + addr;
+        let write_clk = write_addr.end;
+        let write_en = write_clk + 2;
+        Some(RamPorts {
+            read_addr: 0..addr,
+            read_clk,
+            read_clk_en: read_clk + 1,
+            read_en: read_clk + 2,
+            write_data,
+            write_addr,
+            write_clk,
+            write_clk_en: write_clk + 1,
+            write_en,
+            write_mask: write_en + 1..self.inputs.len(),
+        })
+    }
+
     /// Create a new combinational cell
     pub fn new_comb(
         id: CellId,

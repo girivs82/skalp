@@ -913,7 +913,7 @@ mod tests {
         // A 590-bit register: captured pad bits, then the 0s, then the 1s.
         let (bytes, length) = (256, 590);
         let mut rx = vec![0u8; 2 * bytes];
-        let high = |i: usize| i < length && i % 3 == 0 || i >= length + bytes * 8;
+        let high = |i: usize| i < length && i.is_multiple_of(3) || i >= length + bytes * 8;
         for i in 0..rx.len() * 8 {
             if high(i) {
                 rx[i / 8] |= 1 << (i % 8);

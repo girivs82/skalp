@@ -7,7 +7,7 @@
 //! Which wires count as general comes from
 //! [`Device::is_general_routing_wire`].
 
-use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
+use crate::device::{is_clock_pin, CellPin, Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use crate::router::Route;
@@ -86,17 +86,22 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         let mut clock_pins: Vec<_> = net
             .fanout
             .iter()
-            .filter(|(_, pin)| *pin == FF_PIN_CLK)
-            .map(|(cell, _)| *cell)
+            .filter(|(_, pin)| is_clock_pin(*pin))
+            .copied()
             .collect();
         if clock_pins.is_empty() {
             continue;
         }
-        clock_pins.sort_unstable_by_key(|cell| cell.0);
+        clock_pins.sort_unstable_by_key(|(cell, pin)| (cell.0, *pin));
 
-        let driver = net.driver.ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!("Clock net '{}' has no driver", net.name))
-        })?;
+        // A clock arriving on a bare input with no pad has nowhere to start from.
+        let Some(driver) = net.driver else {
+            eprintln!(
+                "warning: clock net '{}' has no pad or driver, so it is left unrouted",
+                net.name
+            );
+            continue;
+        };
         let source = clock_pin_wire(
             device,
             placement,
@@ -110,9 +115,9 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         let mut route = Route::new(net.id);
         route.source = source;
         let mut tree = HashSet::from([source]);
-        for cell in clock_pins {
-            let sink = clock_pin_wire(device, placement, cell, CellPin::Input(FF_PIN_CLK))
-                .ok_or_else(|| {
+        for (cell, pin) in clock_pins {
+            let sink =
+                clock_pin_wire(device, placement, cell, CellPin::Input(pin)).ok_or_else(|| {
                     PlaceRouteError::RoutingFailed(format!(
                         "A clock pin on net '{}' has no wire",
                         net.name

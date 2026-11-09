@@ -13,6 +13,7 @@
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
 pub mod data;
+pub mod ebr;
 pub mod emit;
 pub mod prjoxide_bels;
 pub mod prjoxide_graph;
@@ -271,6 +272,12 @@ impl NexusDevice {
             }
         }
 
+        let ram_sites: HashMap<(u32, u32), usize> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), ebr::site_of_tile(&t.tiletype)?)))
+            .collect();
+
         // Tile order sets BEL ids and placement order, so keep it stable.
         let mut ordered: Vec<_> = primary.iter().collect();
         ordered.sort_unstable_by_key(|(&(x, y), _)| (y, x));
@@ -375,6 +382,32 @@ impl NexusDevice {
                 // Other non-logic primary tiles: correct type, BELs deferred.
                 Vec::new()
             };
+            // A block RAM site shares its grid cell with a logic tile.
+            let mut bels = bels;
+            if let Some(&site) = ram_sites.get(&(x, y)).filter(|_| placeable) {
+                let mut wire_of = |pin: &str| {
+                    let wire = resolve_wire(x, y, &ebr::site_wire(pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("RAM_{pin}")), w);
+                    }
+                };
+                for pin in ebr::input_pins() {
+                    wire_of(pin);
+                }
+                wire_of("CLKA");
+                wire_of("CLKB");
+                for bit in 0..36 {
+                    wire_of(&ebr::output_pin(bit));
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::RamSlice,
+                    name: format!("EBR{site}"),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
@@ -421,6 +454,11 @@ impl NexusDevice {
             .values_mut()
             .for_each(|pips| pips.retain(|p| usable(&snapshot, p)));
         device
+    }
+
+    /// A BEL pin's wire, by its conventional key.
+    pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
+        self.bel_wires.get(&(x, y, key.to_string())).copied()
     }
 
     /// Configuration bits of a PIP (real-silicon model only).
@@ -1720,7 +1758,7 @@ impl Device for NexusDevice {
             "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
             "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
-            "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
+            "DP16K" | "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
             "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
             "EHXPLLL" | "PLL" => bel_type == BelType::Pll,
             _ => false,
@@ -1788,6 +1826,22 @@ impl Device for NexusDevice {
             .is_some_and(|w| is_general_wire_name(&w.name))
     }
 
+    fn ram_input_pin(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<usize> {
+        ebr::router_pin(&ebr::input_pin(ports, input)?)
+    }
+
+    fn ram_input_needs_low_driver(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> bool {
+        ebr::input_pin(ports, input).is_some_and(|pin| !ebr::has_inverter(&pin))
+    }
+
     fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
         let is_io = self
             .tile_at(x, y)
@@ -1803,6 +1857,18 @@ impl Device for NexusDevice {
                 .bel_wires
                 .get(&(x, y, format!("PIO{bel_index}_{suffix}")))
                 .copied();
+        }
+        let is_block_ram = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::RamSlice);
+        if is_block_ram {
+            let name = match pin {
+                CellPin::Output(bit) => ebr::output_pin(bit),
+                CellPin::Input(n) => ebr::pin_of_router_pin(n)?.to_string(),
+            };
+            return self.bel_wires.get(&(x, y, format!("RAM_{name}"))).copied();
         }
         let is_real_dist_ram = !self.prjoxide_tiles.is_empty()
             && self

@@ -262,6 +262,14 @@ pub const FF_PIN_LSR: usize = 102;
 /// First router pin number of a distributed RAM's read address connections:
 /// read-address bit `r` reaches LUT `j` of the RAM at `base + 4 * r + j`.
 pub const DIST_RAM_PIN_RAD: usize = 200;
+/// Router pin number of a block RAM's read clock. Its write clock is
+/// [`FF_PIN_CLK`].
+pub const RAM_PIN_READ_CLK: usize = 103;
+
+/// Whether a router pin number is a clock pin, routed on the clock network.
+pub fn is_clock_pin(pin: usize) -> bool {
+    pin == FF_PIN_CLK || pin == RAM_PIN_READ_CLK
+}
 
 /// [`Device::bel_pin_wire`] for a Lattice logic tile (Nexus, ECP5) whose
 /// BEL pin wires are named by LUT and FF number: `LUT{n}_A..D`,
@@ -700,6 +708,25 @@ pub trait Device: Send + Sync {
 
     /// Whether a wire is general fabric routing, which a clock must not use.
     fn is_general_routing_wire(&self, _wire: WireId) -> bool {
+        false
+    }
+
+    /// Router pin a block RAM input connects to, or `None` if it has no pin.
+    fn ram_input_pin(
+        &self,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<usize> {
+        Some(input)
+    }
+
+    /// Whether a block RAM input tied low must be driven by a real signal
+    /// because configuration alone cannot hold it low.
+    fn ram_input_needs_low_driver(
+        &self,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        _input: usize,
+    ) -> bool {
         false
     }
 

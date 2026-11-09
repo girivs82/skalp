@@ -4,7 +4,7 @@
 //! timing arcs. CertusPro-NX has no tables of its own and shares the Nexus
 //! fabric, so its numbers are CrossLink-NX's and are estimates.
 
-use super::{NexusDevice, NexusVariant};
+use super::{ebr, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
@@ -57,6 +57,8 @@ pub struct TimingDb {
     clk_to_q: i64,
     setup: HashMap<String, i64>,
     ccu2: HashMap<(String, String), i64>,
+    ram_clk_to_q: i64,
+    ram_setup: HashMap<String, i64>,
 }
 
 impl TimingDb {
@@ -102,6 +104,14 @@ impl TimingDb {
             .map(|p| ((p.from_pin.clone(), p.to_pin.clone()), p.maxv))
             .collect();
 
+        let ram = cell("PDPSC16K_MODE")?;
+        let ram_clk_to_q = ram.iopaths.iter().map(|p| p.maxv).max().unwrap_or(0);
+        let ram_setup = ram
+            .setupholds
+            .iter()
+            .map(|s| (s.pin.clone(), s.max_setup))
+            .collect();
+
         Ok(Self {
             pip_classes: interconnect
                 .pip_classes
@@ -112,6 +122,8 @@ impl TimingDb {
             clk_to_q,
             setup,
             ccu2,
+            ram_clk_to_q,
+            ram_setup,
         })
     }
 }
@@ -161,6 +173,17 @@ impl NexusTiming<'_> {
     fn is_carry(cell: &Cell) -> bool {
         cell.function == Some(CellFunction::Ccu2)
     }
+
+    /// Setup time of a block RAM pin, from the table's bus-wide entries.
+    fn ram_setup_ps(&self, pin: &str) -> i64 {
+        let bus = pin.trim_end_matches(|c: char| c.is_ascii_digit());
+        let key = match (bus, pin[bus.len()..].parse::<usize>()) {
+            ("ADA" | "ADB", Ok(bit)) if bit < 5 => format!("{bus}_4_0"),
+            ("ADA" | "ADB", Ok(_)) => format!("{bus}_13_5"),
+            _ => bus.to_string(),
+        };
+        self.db.ram_setup.get(&key).copied().unwrap_or(0)
+    }
 }
 
 impl TimingModel for NexusTiming<'_> {
@@ -188,6 +211,9 @@ impl TimingModel for NexusTiming<'_> {
         if Self::is_dist_ram(cell) {
             return None;
         }
+        if cell.ram_ports().is_some() {
+            return Some(self.db.ram_clk_to_q);
+        }
         cell.clock.map(|_| self.db.clk_to_q)
     }
 
@@ -204,6 +230,18 @@ impl TimingModel for NexusTiming<'_> {
 
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
         let setup = |name: &str| self.db.setup.get(name).copied().unwrap_or(0);
+        if let Some(ports) = cell.ram_ports() {
+            return (0..cell.inputs.len())
+                .filter_map(|input| {
+                    let name = ebr::input_pin(&ports, input)?;
+                    (name != "CLKA" && name != "CLKB").then(|| TimingEndpoint {
+                        input,
+                        pin: ebr::router_pin(&name).unwrap_or(input),
+                        setup_ps: self.ram_setup_ps(&name),
+                    })
+                })
+                .collect();
+        }
         if Self::is_dist_ram(cell) {
             return (0..=8)
                 .map(|input| TimingEndpoint {

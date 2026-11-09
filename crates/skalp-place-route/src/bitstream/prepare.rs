@@ -79,12 +79,61 @@ fn constant_nets(netlist: &GateNetlist) -> HashMap<GateNetId, bool> {
         .collect()
 }
 
+/// Give block RAM inputs tied low a real driver where the device needs one.
+///
+/// A device may be able to hold some RAM inputs high or low with configuration
+/// alone; the others must be driven. This adds a constant-zero LUT per RAM that
+/// needs one, so those inputs are routed like any signal.
+pub fn drive_tied_low_ram_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
+    let constants = constant_nets(netlist);
+    let mut driven = netlist.clone();
+    for ram in netlist.cells.iter() {
+        let Some(ports) = ram.ram_ports() else {
+            continue;
+        };
+        let inputs: Vec<usize> = (0..ram.inputs.len())
+            .filter(|&i| {
+                constants.get(&ram.inputs[i]) == Some(&false)
+                    && device.ram_input_needs_low_driver(&ports, i)
+            })
+            .collect();
+        if inputs.is_empty() {
+            continue;
+        }
+        let net = driven.add_net(GateNet::new(GateNetId(0), format!("{}.zero", ram.path)));
+        let mut zero = Cell::new_comb(
+            CellId(0),
+            "LUT4".to_string(),
+            ram.library.clone(),
+            0.0,
+            format!("{}.zero_driver", ram.path),
+            Vec::new(),
+            vec![net],
+        );
+        zero.function = Some(CellFunction::Lut4);
+        zero.lut_init = Some(0);
+        driven.add_cell(zero);
+        let copy = driven
+            .cells
+            .iter_mut()
+            .find(|c| c.id == ram.id)
+            .expect("the RAM cell was copied");
+        for input in inputs {
+            copy.inputs[input] = net;
+        }
+    }
+    driven
+}
+
 /// Rewrite a netlist's connectivity into what the router should route.
 ///
 /// Rebuilds every net's fanout from the cells, because clock pins are absent
 /// from it. Leaves out connections with no routing: constants (set with
 /// [`emit_bits`]) and the dedicated carry path from one `CCU2` to the next.
-pub fn prepare_for_routing(netlist: &GateNetlist) -> (GateNetlist, TiedInputs) {
+pub fn prepare_for_routing(
+    netlist: &GateNetlist,
+    device: &dyn Device,
+) -> (GateNetlist, TiedInputs) {
     let constants = constant_nets(netlist);
     let mut prepared = netlist.clone();
     let mut tied = TiedInputs::default();
@@ -100,6 +149,16 @@ pub fn prepare_for_routing(netlist: &GateNetlist) -> (GateNetlist, TiedInputs) {
     };
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
+            continue;
+        }
+        if let Some(ports) = cell.ram_ports() {
+            for (index, &net) in cell.inputs.iter().enumerate() {
+                if let Some(&value) = constants.get(&net) {
+                    tied.values.insert((cell.id, index), value);
+                } else if let Some(pin) = device.ram_input_pin(&ports, index) {
+                    connect(&mut prepared.nets, net, cell.id, pin);
+                }
+            }
             continue;
         }
         for (index, &net) in cell.inputs.iter().enumerate() {

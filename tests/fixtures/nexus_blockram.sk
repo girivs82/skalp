@@ -1,0 +1,18 @@
+// Writes a counter into block RAM and shows a bit of it on an LED.
+entity BlockRamBlink {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+impl BlockRamBlink {
+    signal counter: nat[27] = 0
+    signal mem: bit[18][1024]
+    signal q: bit[18] = 0
+    on(clk.rise) {
+        counter = counter + 1
+        if counter[0] == 1 {
+            mem[counter[10:1]] = counter[26:9]
+        }
+        q = mem[counter[10:1]]
+    }
+    led = q[17]
+}
