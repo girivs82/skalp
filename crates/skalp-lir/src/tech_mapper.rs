@@ -712,6 +712,12 @@ fn apply_io_constraints_standalone(
     if let Some(ref std) = constraints.io_standard {
         cell.parameters.insert("IO_STANDARD".into(), std.clone());
     }
+    if let Some(ref reason) = constraints.drive_override {
+        cell.parameters.insert(
+            crate::gate_netlist::DRIVE_OVERRIDE_PARAM.into(),
+            reason.clone(),
+        );
+    }
     if let Some(ref drive) = constraints.drive_strength {
         cell.parameters
             .insert("DRIVE_STRENGTH".into(), format!("{:?}", drive));

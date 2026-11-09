@@ -405,6 +405,7 @@ fn extract_skalp_constraint_from_comment(comment_text: &str) -> Option<PhysicalC
         pad_type,
         pad_cell,
         ldo_config: None,
+        drive_override: None,
     })
 }
 

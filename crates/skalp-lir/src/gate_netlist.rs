@@ -71,6 +71,9 @@ pub struct Cell {
     pub parameters: IndexMap<String, String>,
 }
 
+/// Parameter on an output pad: why it may drive a pin the board does not list as safe.
+pub const DRIVE_OVERRIDE_PARAM: &str = "DRIVE_OVERRIDE";
+
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 

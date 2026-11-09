@@ -4421,6 +4421,10 @@ fn run_nexus_pnr_on_netlist(
     use skalp_place_route::{PnrConfig, TimingConfig};
 
     let nexus = nexus_variant(variant)?;
+    if let Some(board) = skalp_place_route::boards::for_nexus_variant(nexus) {
+        skalp_place_route::boards::check_outputs(gate_netlist, board)
+            .map_err(|refusal| anyhow::anyhow!(refusal))?;
+    }
     let mut config = match preset.to_lowercase().as_str() {
         "fast" => PnrConfig::fast(),
         "default" => PnrConfig::default(),

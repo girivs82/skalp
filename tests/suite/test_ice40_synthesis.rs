@@ -1943,6 +1943,7 @@ fn test_io_constraint_propagation() {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         },
     );
     port_constraints.insert(
@@ -1959,6 +1960,7 @@ fn test_io_constraint_propagation() {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         },
     );
 

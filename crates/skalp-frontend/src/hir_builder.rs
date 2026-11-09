@@ -14039,6 +14039,7 @@ impl HirBuilderContext {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         for pair in node
@@ -14100,6 +14101,9 @@ impl HirBuilderContext {
                             });
                         }
                     }
+                }
+                "drive_override" => {
+                    constraints.drive_override = Some(value_text.trim_matches('"').to_string());
                 }
                 "io_standard" => {
                     constraints.io_standard = Some(value_text.trim_matches('"').to_string());

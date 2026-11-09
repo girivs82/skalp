@@ -3194,6 +3194,9 @@ pub struct PhysicalConstraints {
     pub pad_cell: Option<String>,
     /// LDO configuration (only valid when pad_type is PowerLdo)
     pub ldo_config: Option<LdoConfig>,
+    /// Why this output may drive a pin the board's safe list does not include
+    #[serde(default)]
+    pub drive_override: Option<String>,
 }
 
 /// Pin location specification
