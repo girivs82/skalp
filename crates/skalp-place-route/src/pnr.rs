@@ -511,6 +511,85 @@ pub fn place_and_route_nexus(
     })
 }
 
+/// Grid window searched for the real-silicon Nexus flow: `(x0, y0, x1, y1)`.
+///
+/// The clock reaches the fabric from the oscillator through columns 73 and 74, and the
+/// LEDs sit in column 159, so this region of the chip holds both.
+#[cfg(feature = "nexus-bitstream")]
+const REAL_NEXUS_REGION: (u32, u32, u32, u32) = (73, 0, 159, 40);
+
+/// Place and route on the real Nexus device data and emit a loadable bitstream.
+///
+/// `db_root` is the prjoxide database root. Unlike [`place_and_route_nexus`],
+/// which uses a synthetic device model, the output runs on real silicon.
+#[cfg(feature = "nexus-bitstream")]
+pub fn place_and_route_nexus_real(
+    netlist: &GateNetlist,
+    variant: crate::device::nexus::NexusVariant,
+    config: PnrConfig,
+    db_root: &std::path::Path,
+) -> Result<PnrResult> {
+    use crate::device::nexus::emit;
+    use crate::device::nexus::prjoxide_pack::pack_bitstream;
+    use crate::device::nexus::NexusDevice;
+    use crate::device::Device;
+    use crate::error::PlaceRouteError;
+
+    let device = NexusDevice::from_prjoxide_bbox(variant, db_root, REAL_NEXUS_REGION)
+        .map_err(PlaceRouteError::BitstreamFailed)?;
+
+    let logic = emit::logic_only_netlist(netlist);
+    let mut packer = CellPacker::new(&logic);
+    let packing = packer.pack();
+    let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let mut placement = if packing.carry_chains.is_empty() {
+        placer.place(&logic)?
+    } else {
+        placer.place_with_carry_chains(&logic, &packing.carry_chains)?
+    };
+    emit::place_pads(&device, netlist, &mut placement)?;
+
+    let (routable, tied) = emit::prepare_for_routing(netlist);
+    let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
+        RouterConfig::for_design_size(routable.nets.len())
+    } else {
+        config.router.clone()
+    };
+    let mut router = Router::new(router_config, device.clone());
+    let routing = router.route(&routable, &placement)?;
+    if !routing.success {
+        return Err(PlaceRouteError::RoutingFailed(
+            "Some nets could not be routed on the real device".to_string(),
+        ));
+    }
+
+    let bits = emit::emit_bits(
+        &device, variant, netlist, &placement, &routing, &tied, db_root,
+    )?;
+    let data = pack_bitstream(db_root, variant.idcode(), bits)
+        .map_err(PlaceRouteError::BitstreamFailed)?;
+    let mut bitstream = Bitstream::new(
+        device.name().to_string(),
+        crate::bitstream::BitstreamFormat::OxideBitstream,
+    );
+    bitstream.data = data;
+
+    let wire_delays: IndexMap<GateNetId, f64> = routing
+        .routes
+        .iter()
+        .map(|(&net_id, route)| (net_id, route.delay as f64))
+        .collect();
+
+    Ok(PnrResult {
+        placement,
+        routing,
+        bitstream,
+        timing: None,
+        variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
+        wire_delays,
+    })
+}
+
 /// Place and route targeting Lattice ECP5 devices.
 ///
 /// Uses the same generic placer/router pipeline with:

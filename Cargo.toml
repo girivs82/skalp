@@ -84,6 +84,8 @@ flate2 = "1.0"  # read back gzipped .skw waveforms in tests
 
 [features]
 default = []
+# Real Nexus device data and bitstream output (needs a prjoxide checkout)
+nexus-real = ["skalp-place-route/nexus-bitstream"]
 test-utils = ["proptest"]
 bench = ["criterion"]
 

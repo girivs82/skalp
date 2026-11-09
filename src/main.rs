@@ -4280,7 +4280,9 @@ fn synthesize_design(
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        let mut with_pads = gate_netlist.clone();
+        add_nexus_io_pads(&mut with_pads, &mir, &library);
+        run_nexus_pnr_on_netlist(&with_pads, variant, output_dir, pnr_preset, None)?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -4375,6 +4377,28 @@ fn nexus_variant(variant: &str) -> Result<skalp_place_route::NexusVariant> {
     }
 }
 
+/// Give every constrained top-level port an IO cell at its assigned pin.
+fn add_nexus_io_pads(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    mir: &skalp_mir::mir::Mir,
+    library: &skalp_lir::TechLibrary,
+) {
+    let Some(top) = find_top_level_module(mir) else {
+        return;
+    };
+    let port_constraints: indexmap::IndexMap<_, _> = top
+        .ports
+        .iter()
+        .filter_map(|p| {
+            let constraints = p.physical_constraints.clone()?;
+            Some((format!("top.{}", p.name), constraints))
+        })
+        .collect();
+    if !port_constraints.is_empty() {
+        skalp_lir::insert_io_buffers(netlist, library, &port_constraints);
+    }
+}
+
 /// Place and route a gate-level netlist on a Lattice Nexus device.
 fn run_nexus_pnr_on_netlist(
     gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
@@ -4383,7 +4407,7 @@ fn run_nexus_pnr_on_netlist(
     preset: &str,
     frequency: Option<f64>,
 ) -> Result<()> {
-    use skalp_place_route::{place_and_route_nexus, PnrConfig, TimingConfig};
+    use skalp_place_route::{PnrConfig, TimingConfig};
 
     let nexus = nexus_variant(variant)?;
     let mut config = match preset.to_lowercase().as_str() {
@@ -4406,7 +4430,7 @@ fn run_nexus_pnr_on_netlist(
     println!("Preset: {}", preset);
     println!();
     println!("Running placement...");
-    let result = place_and_route_nexus(gate_netlist, nexus, config)?;
+    let result = place_and_route_nexus_for_cli(gate_netlist, nexus, config)?;
 
     println!("Placement:");
     println!("  Cells placed: {}", result.placement.placements.len());
@@ -4446,6 +4470,43 @@ fn run_nexus_pnr_on_netlist(
         result.bitstream.data.len()
     );
     Ok(())
+}
+
+/// Use the real device data when this build and machine have it.
+#[cfg(feature = "nexus-real")]
+fn place_and_route_nexus_for_cli(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: skalp_place_route::NexusVariant,
+    config: skalp_place_route::PnrConfig,
+) -> Result<skalp_place_route::PnrResult> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+
+    let Some(db_root) = find_database() else {
+        anyhow::bail!(
+            "The prjoxide database was not found, so no usable bitstream can be built. \
+             Set PRJOXIDE_DB or clone prjoxide next to this repository."
+        );
+    };
+    println!("Using real device data from {:?}", db_root);
+    Ok(skalp_place_route::pnr::place_and_route_nexus_real(
+        netlist, variant, config, &db_root,
+    )?)
+}
+
+/// Without real device data the output is only a model of the flow.
+#[cfg(not(feature = "nexus-real"))]
+fn place_and_route_nexus_for_cli(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: skalp_place_route::NexusVariant,
+    config: skalp_place_route::PnrConfig,
+) -> Result<skalp_place_route::PnrResult> {
+    println!(
+        "⚠️  This build has no real Nexus device data; the bitstream it writes will not run on a chip."
+    );
+    println!("   Rebuild with --features nexus-real for a loadable bitstream.");
+    Ok(skalp_place_route::place_and_route_nexus(
+        netlist, variant, config,
+    )?)
 }
 
 /// Internal function to run P&R on a GateNetlist

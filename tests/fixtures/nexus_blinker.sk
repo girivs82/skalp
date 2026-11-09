@@ -1,0 +1,15 @@
+// Toggles an LED on the CertusPro-NX Versa board from the on-chip oscillator.
+entity Blinker {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl Blinker {
+    signal counter: nat[25] = 0
+
+    on(clk.rise) {
+        counter = counter + 1
+    }
+
+    led = !counter[24]
+}

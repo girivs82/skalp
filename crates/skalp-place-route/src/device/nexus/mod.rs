@@ -13,6 +13,7 @@
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
 pub mod data;
+pub mod emit;
 pub mod prjoxide_bels;
 pub mod prjoxide_graph;
 pub mod prjoxide_load;
@@ -155,6 +156,10 @@ pub struct NexusDevice {
     tile_wires: HashMap<(u32, u32), Vec<WireId>>,
     /// BEL pin to wire mapping
     bel_wires: HashMap<(u32, u32, String), WireId>,
+    /// Per-PIP configuration bits, indexed by `PipId` (real-silicon model only)
+    pip_bits: Vec<Vec<prjoxide_graph::GlobalBit>>,
+    /// prjoxide tiles of the grid (real-silicon model only)
+    prjoxide_tiles: Vec<PrjoxideTile>,
     /// Least routing cost per tile distance along one axis
     /// ([`Device::route_cost_estimate`]); empty when not modelled
     hop_costs: Vec<f64>,
@@ -210,14 +215,22 @@ impl NexusDevice {
         db_root: &std::path::Path,
         bbox: (u32, u32, u32, u32),
     ) -> Result<Self, String> {
-        use prjoxide_graph::{build_routing_graph, node_name, resolve_wire};
+        use prjoxide_graph::{node_name, resolve_wire};
 
         let (width, height) = variant.grid_size();
         let family = variant.prjoxide_family();
 
         // M1a: real tile grid. M1b: real routing graph for the window.
         let all_tiles = prjoxide_load::load_tilegrid(db_root, variant)?;
-        let graph = build_routing_graph(db_root, family, &all_tiles, Some(bbox))?;
+        let clocks =
+            prjoxide_graph::ClockRegions::load(db_root, family, variant.prjoxide_device())?;
+        let graph = prjoxide_graph::build_routing_graph_with_clocks(
+            db_root,
+            family,
+            &all_tiles,
+            Some(bbox),
+            Some(&clocks),
+        )?;
 
         let mut tiles: Vec<Vec<Option<NexusTile>>> =
             vec![vec![None; width as usize]; height as usize];
@@ -287,8 +300,51 @@ impl NexusDevice {
                     has_carry: true,
                 });
                 bels
+            } else if t.tiletype.starts_with("SYSIO_B") {
+                let mut bels = Vec::with_capacity(2);
+                for (pio, side) in ["A", "B"].iter().enumerate() {
+                    let mut wire_of = |key: String, site: String| {
+                        let wire = resolve_wire(x, y, &site)
+                            .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                        if let Some(w) = wire {
+                            bel_wires.insert((x, y, key), w);
+                        }
+                    };
+                    wire_of(
+                        format!("PIO{pio}_O"),
+                        format!("JPADDO_SEIO33_CORE_IO{side}"),
+                    );
+                    wire_of(
+                        format!("PIO{pio}_I"),
+                        format!("JPADDI_SEIO33_CORE_IO{side}"),
+                    );
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: BelType::IoCell,
+                        name: format!("PIO{side}"),
+                        pins: Vec::new(),
+                    });
+                    bel_id_counter += 1;
+                }
+                bels
+            } else if t.tiletype == "EFB_1_OSC" {
+                // The on-chip oscillator is modelled as an input pad: its
+                // output drives the design like a clock pin.
+                if let Some(w) = resolve_wire(x, y, "S1:JHFCLKOUT_OSC_CORE")
+                    .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                {
+                    bel_wires.insert((x, y, "PIO0_I".to_string()), w);
+                }
+                let bel = Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::IoCell,
+                    name: "OSC".to_string(),
+                    pins: Vec::new(),
+                };
+                bel_id_counter += 1;
+                vec![bel]
             } else {
-                // Non-logic primary tiles: correct type, BELs deferred (M3+).
+                // Other non-logic primary tiles: correct type, BELs deferred.
                 Vec::new()
             };
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
@@ -305,8 +361,10 @@ impl NexusDevice {
             wire_src_pips: graph.wire_src_pips,
             tile_wires: graph.tile_wires,
             bel_wires,
+            pip_bits: graph.pip_bits,
+            prjoxide_tiles: all_tiles,
             hop_costs: Vec::new(),
-            packages: HashMap::new(), // M3: package pins from prjoxide iodb
+            packages: Self::known_package_pins(variant),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles,
@@ -314,6 +372,64 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             dsp_tiles: Vec::new(),
         })
+    }
+
+    /// Package pins with confirmed locations.
+    ///
+    /// prjoxide has no pin data for LFCPNX, so these come from the Versa board
+    /// schematic and user guide (FPGA-EB-02053): the eight user LEDs, plus
+    /// `"OSC"`, the on-chip oscillator used as a clock source.
+    fn known_package_pins(variant: NexusVariant) -> HashMap<String, PackagePins> {
+        let mut packages = HashMap::new();
+        if variant == NexusVariant::Lfcpnx100 {
+            let pins: HashMap<String, (u32, u32, u8)> = [
+                ("P8", (159, 26, 1)), // LED7, PR26B
+                ("R4", (159, 28, 0)), // LED1, PR28A
+                ("R5", (159, 28, 1)), // LED0, PR28B
+                ("R6", (159, 29, 0)), // LED6, PR29A
+                ("R7", (159, 29, 1)), // LED5, PR29B
+                ("R8", (159, 31, 0)), // LED2, PR31A
+                ("R9", (159, 31, 1)), // LED3, PR31B
+                ("U8", (159, 33, 0)), // LED4, PR33A
+                ("OSC", (137, 0, 0)),
+            ]
+            .into_iter()
+            .map(|(pin, loc)| (pin.to_string(), loc))
+            .collect();
+            packages.insert(
+                "LFG672".to_string(),
+                PackagePins {
+                    name: "LFG672".to_string(),
+                    pins,
+                },
+            );
+        }
+        packages
+    }
+
+    /// Configuration bits of a PIP (real-silicon model only).
+    pub fn pip_config_bits(&self, pip: PipId) -> &[prjoxide_graph::GlobalBit] {
+        self.pip_bits
+            .get(pip.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Every prjoxide tile of the device (real-silicon model only).
+    pub fn prjoxide_tiles(&self) -> &[PrjoxideTile] {
+        &self.prjoxide_tiles
+    }
+
+    /// The prjoxide tile of a type at a grid location (real-silicon model only).
+    pub fn prjoxide_tile(
+        &self,
+        x: u32,
+        y: u32,
+        tiletype: impl Fn(&str) -> bool,
+    ) -> Option<&PrjoxideTile> {
+        self.prjoxide_tiles
+            .iter()
+            .find(|t| t.x == x && t.y == y && tiletype(&t.tiletype))
     }
 
     /// Create a synthetic Nexus device from datasheet parameters
@@ -332,6 +448,8 @@ impl NexusDevice {
             wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
             bel_wires: HashMap::new(),
+            pip_bits: Vec::new(),
+            prjoxide_tiles: Vec::new(),
             hop_costs: Vec::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(variant),
@@ -1623,6 +1741,21 @@ impl Device for NexusDevice {
     }
 
     fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
+        let is_io = self
+            .tile_at(x, y)
+            .and_then(|t| t.bels().get(bel_index))
+            .is_some_and(|b| b.bel_type == BelType::IoCell);
+        if is_io {
+            let suffix = match pin {
+                CellPin::Input(0) => "O",
+                CellPin::Output(0) => "I",
+                _ => return None,
+            };
+            return self
+                .bel_wires
+                .get(&(x, y, format!("PIO{bel_index}_{suffix}")))
+                .copied();
+        }
         crate::device::lattice_logic_pin_wire(self, x, y, bel_index, pin, "Z", |name| {
             self.bel_wires.get(&(x, y, name)).copied()
         })

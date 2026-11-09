@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 /// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
 /// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
-pub(crate) fn is_constant_cell(cell_type: &str) -> bool {
+pub fn is_constant_cell(cell_type: &str) -> bool {
     cell_type.starts_with("TIE_")
         || cell_type.starts_with("TIE0")
         || cell_type.starts_with("TIE1")

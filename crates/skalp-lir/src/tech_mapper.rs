@@ -545,7 +545,13 @@ pub fn insert_io_buffers(
 
     // Insert input IO buffers
     for &input_net_id in &input_nets {
-        if clock_nets.contains(&input_net_id) {
+        // A clock gets a pad only when the design assigns it to a pin.
+        let has_pin = netlist
+            .nets
+            .get(input_net_id.0 as usize)
+            .and_then(|n| port_constraints.get(&n.name))
+            .is_some_and(|c| c.pin_location.is_some());
+        if clock_nets.contains(&input_net_id) && !has_pin {
             continue;
         }
 

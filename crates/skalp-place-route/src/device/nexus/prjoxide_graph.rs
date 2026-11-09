@@ -139,15 +139,58 @@ struct ConnData {
 
 /// The per-tile-type bit database (`tiletypes/<TYPE>.ron`).
 ///
-/// Only the routing-relevant sections (`pips`, `conns`) are deserialized; `words`
-/// and `enums` (BEL config, used by M1c) are present in the file but ignored here —
-/// serde drops unknown fields.
-#[derive(Debug, Clone, Deserialize)]
+/// `pips` and `conns` describe routing; `words` and `enums` hold the settings
+/// of the tile's cells (LUT truth tables, flip-flop modes, IO standards).
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TileBitsDb {
     #[serde(default)]
     pips: BTreeMap<String, Vec<PipData>>,
     #[serde(default)]
     conns: BTreeMap<String, Vec<ConnData>>,
+    #[serde(default)]
+    words: BTreeMap<String, WordData>,
+    #[serde(default)]
+    enums: BTreeMap<String, EnumData>,
+    #[serde(default)]
+    always_on: Vec<ConfigBit>,
+}
+
+/// A multi-bit setting; `bits[i]` holds the cells behind bit `i`.
+#[derive(Debug, Clone, Deserialize)]
+struct WordData {
+    bits: Vec<Vec<ConfigBit>>,
+}
+
+/// A named-option setting.
+#[derive(Debug, Clone, Deserialize)]
+struct EnumData {
+    options: BTreeMap<String, Vec<ConfigBit>>,
+}
+
+impl TileBitsDb {
+    /// Bits that are set in every tile of this type.
+    pub fn always_on(&self) -> &[ConfigBit] {
+        &self.always_on
+    }
+
+    /// Bits of a word setting, per word bit, least significant first.
+    pub fn word(&self, name: &str) -> Option<&[Vec<ConfigBit>]> {
+        self.words.get(name).map(|w| w.bits.as_slice())
+    }
+
+    /// Bits that select `option` of an enum setting.
+    pub fn enum_option(&self, name: &str, option: &str) -> Option<&[ConfigBit]> {
+        self.enums.get(name)?.options.get(option).map(Vec::as_slice)
+    }
+
+    /// Bits that enable the pip from `src` to `dst`.
+    pub fn pip(&self, dst: &str, src: &str) -> Option<&[ConfigBit]> {
+        self.pips
+            .get(dst)?
+            .iter()
+            .find(|arc| arc.from_wire == src)
+            .map(|arc| arc.bits.as_slice())
+    }
 }
 
 /// A configuration bit in *global* (whole-bitstream) coordinates.
@@ -184,6 +227,56 @@ pub fn load_tiletype(
     family: &str,
     tiletype: &str,
 ) -> Result<Option<TileBitsDb>, String> {
+    let own = parse_tiletype(db_root, family, tiletype)?;
+    if family != "LFCPNX" {
+        return Ok(own);
+    }
+    let lifcl = parse_tiletype(db_root, "LIFCL", tiletype)?;
+    Ok(fill_lfcpnx_gaps(own, lifcl, tiletype))
+}
+
+/// Complete a CertusPro-NX tile description from CrossLink-NX.
+///
+/// prjoxide fuzzed only LFCPNX general routing, so it lacks the CIB input muxes,
+/// IO settings, and the tiles of hard blocks. The two families share the Nexus
+/// fabric: all 2,230 routing arcs of `CIB_LR` the two databases have in common
+/// carry identical bits, and an LFCPNX-100 configured from this merged data
+/// has run on real silicon.
+fn fill_lfcpnx_gaps(
+    own: Option<TileBitsDb>,
+    lifcl: Option<TileBitsDb>,
+    tiletype: &str,
+) -> Option<TileBitsDb> {
+    let Some(mut own) = own else { return lifcl };
+    let Some(lifcl) = lifcl else { return Some(own) };
+
+    let is_cib = matches!(tiletype, "CIB" | "CIB_LR" | "CIB_LR_A" | "CIB_T");
+    if is_cib {
+        for (dst, arcs) in lifcl.pips {
+            let existing = own.pips.entry(dst).or_default();
+            for arc in arcs {
+                if !existing.iter().any(|a| a.from_wire == arc.from_wire) {
+                    existing.push(arc);
+                }
+            }
+        }
+    }
+
+    let is_shared_io = tiletype.starts_with("SYSIO_B")
+        && (tiletype.ends_with("_0_EVEN") || tiletype.ends_with("_0_ODD"))
+        && ['0', '1', '2', '6', '7'].contains(&tiletype.as_bytes()[7].into());
+    if is_shared_io && own.enums.is_empty() && own.words.is_empty() {
+        own.enums = lifcl.enums;
+        own.words = lifcl.words;
+    }
+    Some(own)
+}
+
+fn parse_tiletype(
+    db_root: &Path,
+    family: &str,
+    tiletype: &str,
+) -> Result<Option<TileBitsDb>, String> {
     let path = db_root
         .join(family)
         .join("tiletypes")
@@ -198,10 +291,143 @@ pub fn load_tiletype(
     Ok(Some(db))
 }
 
+/// Flip-flop data muxes accept their nominal source only: the alternative arcs
+/// exist in the database but would select the wrong input.
+fn is_usable_pip(dst: &str, src: &str) -> bool {
+    let matches_index = |prefix: &str, suffix: &str, s: &str| {
+        s.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
+    };
+    if matches_index("JDI", "_DIMUX", dst) {
+        return matches_index("JM", "_DIMUX", src);
+    }
+    if matches_index("JDL", "_DRMUX", dst) {
+        return matches_index("JD", "_DRMUX", src);
+    }
+    true
+}
+
+/// The device's clock network layout (`globals.json`).
+///
+/// A clock wire is named the same from every tile it passes through, and only
+/// this layout says which physical branch, spine, or row a given tile sees.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClockRegions {
+    #[serde(default)]
+    branches: Vec<ClockBranch>,
+    #[serde(default)]
+    spines: Vec<ClockSpine>,
+    #[serde(default)]
+    hrows: Vec<ClockHrow>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClockBranch {
+    branch_col: u32,
+    from_col: u32,
+    to_col: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClockSpine {
+    from_row: u32,
+    spine_row: u32,
+    to_row: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClockHrow {
+    hrow_col: u32,
+    spine_cols: Vec<u32>,
+}
+
+impl ClockRegions {
+    /// Load the layout of one device from the prjoxide database.
+    pub fn load(db_root: &Path, family: &str, device: &str) -> Result<Self, String> {
+        let path = db_root.join(family).join(device).join("globals.json");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {}", path.display(), e))?;
+        serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))
+    }
+
+    fn branch_col(&self, col: i64) -> Option<u32> {
+        self.branches
+            .iter()
+            .find(|b| col >= b.from_col as i64 && col <= b.to_col as i64)
+            .map(|b| b.branch_col)
+    }
+
+    fn spine_row(&self, row: u32) -> Option<u32> {
+        self.spines
+            .iter()
+            .find(|s| row >= s.from_row && row <= s.to_row)
+            .map(|s| s.spine_row)
+    }
+
+    fn near(a: u32, b: u32) -> bool {
+        a.abs_diff(b) < 3
+    }
+
+    /// Canonical node for a clock-network wire seen from tile `(x, y)`.
+    fn resolve(&self, x: u32, y: u32, wire: &str) -> Option<NodeKey> {
+        let (prefix, base) = wire.split_once(':')?;
+        let local = |x: u32, y: u32, kind: &str| NodeKey::Local {
+            x,
+            y,
+            name: format!("{kind}:{base}"),
+        };
+        match prefix {
+            "BRANCH" => Some(local(self.branch_col(x as i64)?, y, "BRANCH")),
+            "BRANCH_L" => Some(local(self.branch_col(x as i64 - 2)?, y, "BRANCH")),
+            "BRANCH_R" => Some(local(self.branch_col(x as i64 + 2)?, y, "BRANCH")),
+            "SPINE" => {
+                let col = self
+                    .hrows
+                    .iter()
+                    .flat_map(|h| h.spine_cols.iter())
+                    .find(|&&c| Self::near(x, c))?;
+                Some(local(*col, self.spine_row(y)?, "SPINE"))
+            }
+            "HROW" => {
+                let hrow = self.hrows.iter().find(|h| {
+                    h.spine_cols.iter().any(|&c| Self::near(x, c)) || Self::near(x, h.hrow_col)
+                })?;
+                Some(local(hrow.hrow_col, self.spine_row(y)?, "HROW"))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// [`resolve_wire`], placing clock-network wires with the device's layout.
+fn resolve_with_clocks(
+    clocks: Option<&ClockRegions>,
+    x: u32,
+    y: u32,
+    wire: &str,
+) -> Option<NodeKey> {
+    let is_clock_wire = ["BRANCH_L:", "BRANCH_R:", "BRANCH:", "SPINE:", "HROW:"]
+        .iter()
+        .any(|p| wire.starts_with(p));
+    match clocks {
+        Some(regions) if is_clock_wire => regions.resolve(x, y, wire),
+        _ => resolve_wire(x, y, wire),
+    }
+}
+
 /// Resolve every pip and fixed connection in `tile` (of type `db`) into global
 /// routing edges, dropping any whose endpoint falls outside the grid (border
 /// artifact — see [`resolve_wire`]).
 pub fn tile_edges(tile: &PrjoxideTile, db: &TileBitsDb) -> Vec<ResolvedEdge> {
+    tile_edges_with_clocks(tile, db, None)
+}
+
+fn tile_edges_with_clocks(
+    tile: &PrjoxideTile,
+    db: &TileBitsDb,
+    clocks: Option<&ClockRegions>,
+) -> Vec<ResolvedEdge> {
     let (tx, ty) = (tile.x, tile.y);
     let mut edges = Vec::new();
 
@@ -212,11 +438,14 @@ pub fn tile_edges(tile: &PrjoxideTile, db: &TileBitsDb) -> Vec<ResolvedEdge> {
     };
 
     for (dst_name, arcs) in &db.pips {
-        let Some(dst) = resolve_wire(tx, ty, dst_name) else {
+        let Some(dst) = resolve_with_clocks(clocks, tx, ty, dst_name) else {
             continue;
         };
         for arc in arcs {
-            let Some(src) = resolve_wire(tx, ty, &arc.from_wire) else {
+            if !is_usable_pip(dst_name, &arc.from_wire) {
+                continue;
+            }
+            let Some(src) = resolve_with_clocks(clocks, tx, ty, &arc.from_wire) else {
                 continue;
             };
             edges.push(ResolvedEdge {
@@ -228,11 +457,11 @@ pub fn tile_edges(tile: &PrjoxideTile, db: &TileBitsDb) -> Vec<ResolvedEdge> {
         }
     }
     for (dst_name, conns) in &db.conns {
-        let Some(dst) = resolve_wire(tx, ty, dst_name) else {
+        let Some(dst) = resolve_with_clocks(clocks, tx, ty, dst_name) else {
             continue;
         };
         for conn in conns {
-            let Some(src) = resolve_wire(tx, ty, &conn.from_wire) else {
+            let Some(src) = resolve_with_clocks(clocks, tx, ty, &conn.from_wire) else {
                 continue;
             };
             edges.push(ResolvedEdge {
@@ -284,6 +513,9 @@ fn classify_wire(node: &NodeKey) -> WireType {
         NodeKey::Special(_) => return WireType::Global(0),
         NodeKey::Local { name, .. } => name.as_str(),
     };
+    if name.starts_with("BRANCH:") || name.starts_with("SPINE:") || name.starts_with("HROW:") {
+        return WireType::Global(0);
+    }
     if name.contains("FCOUT") || name.contains("FCIN") {
         return WireType::CarryChain;
     }
@@ -355,6 +587,17 @@ pub fn build_routing_graph(
     tiles: &[PrjoxideTile],
     bbox: Option<(u32, u32, u32, u32)>,
 ) -> Result<RoutingGraph, String> {
+    build_routing_graph_with_clocks(db_root, family, tiles, bbox, None)
+}
+
+/// [`build_routing_graph`] with the clock network connected across regions.
+pub fn build_routing_graph_with_clocks(
+    db_root: &Path,
+    family: &str,
+    tiles: &[PrjoxideTile],
+    bbox: Option<(u32, u32, u32, u32)>,
+    clocks: Option<&ClockRegions>,
+) -> Result<RoutingGraph, String> {
     let mut g = RoutingGraph::default();
     let mut cache: std::collections::HashMap<String, Option<TileBitsDb>> =
         std::collections::HashMap::new();
@@ -374,7 +617,7 @@ pub fn build_routing_graph(
         });
         let Some(db) = db.clone() else { continue };
 
-        for edge in tile_edges(tile, &db) {
+        for edge in tile_edges_with_clocks(tile, &db, clocks) {
             let src = g.intern(edge.src);
             let dst = g.intern(edge.dst);
             let pid = PipId(g.pips.len() as u32);

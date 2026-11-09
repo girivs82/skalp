@@ -253,6 +253,13 @@ pub enum CellPin {
     Output(usize),
 }
 
+/// Router pin number of a flip-flop's clock (data is pin 0).
+pub const FF_PIN_CLK: usize = 100;
+/// Router pin number of a flip-flop's clock enable.
+pub const FF_PIN_CE: usize = 101;
+/// Router pin number of a flip-flop's set/reset.
+pub const FF_PIN_LSR: usize = 102;
+
 /// [`Device::bel_pin_wire`] for a Lattice logic tile (Nexus, ECP5) whose
 /// BEL pin wires are named by LUT and FF number: `LUT{n}_A..D`,
 /// `LUT{n}_{lut_out}`, `FF{n}_D`, `FF{n}_Q`. LUTs and FFs are numbered in BEL
@@ -302,6 +309,9 @@ pub(crate) fn lattice_logic_pin_wire<D: Device + ?Sized>(
                 .count();
             match pin {
                 CellPin::Input(0) => wire(format!("FF{}_D", n)),
+                CellPin::Input(FF_PIN_CLK) => wire(format!("FF{}_CLK", n)),
+                CellPin::Input(FF_PIN_CE) => wire(format!("FF{}_CE", n)),
+                CellPin::Input(FF_PIN_LSR) => wire(format!("FF{}_LSR", n)),
                 CellPin::Input(_) => None,
                 CellPin::Output(_) => wire(format!("FF{}_Q", n)),
             }
