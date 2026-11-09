@@ -22,6 +22,9 @@ pub struct AnalyticalPlacer<'a, D: Device> {
     device: &'a D,
     /// Resolved I/O constraints: signal_name → (tile_x, tile_y, bel_idx)
     resolved_io_constraints: HashMap<String, (u32, u32, usize)>,
+    /// Share of each tile's BELs of a type cells may take
+    /// ([`SiteMap::with_fill_limit`])
+    fill_limit: f64,
 }
 
 impl<'a, D: Device> AnalyticalPlacer<'a, D> {
@@ -30,7 +33,14 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         Self {
             device,
             resolved_io_constraints: HashMap::new(),
+            fill_limit: 1.0,
         }
+    }
+
+    /// Fill each tile's BELs of a type at most this far (0..=1)
+    pub fn with_fill_limit(mut self, fill_limit: f64) -> Self {
+        self.fill_limit = fill_limit;
+        self
     }
 
     /// Perform analytical placement with carry chain column constraints
@@ -235,7 +245,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     ) -> Result<PlacementResult> {
         let (width, height) = self.device.grid_size();
         let mut result = PlacementResult::new();
-        let mut sites = SiteMap::new(self.device);
+        let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
 
         for cell in &netlist.cells {
             let idx = match cell_indices.get(&cell.id) {

@@ -830,6 +830,62 @@ mod tests {
         });
     }
 
+    /// Placement leaves room in each tile when the design allows it, and
+    /// fills tiles further when the design needs the space
+    #[test]
+    fn test_placement_fills_tiles_only_as_far_as_needed() {
+        use crate::device::{BelType, Device};
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let luts_per_tile = |placement: &PlacementResult| {
+            let mut per_tile = std::collections::BTreeMap::new();
+            for loc in placement.placements.values() {
+                if loc.bel_type == BelType::Lut4 {
+                    *per_tile.entry((loc.tile_x, loc.tile_y)).or_insert(0usize) += 1;
+                }
+            }
+            per_tile
+        };
+
+        // A small design: tiles hold at most 75% of their 8 LUTs
+        let small = create_mesh_netlist(60);
+        let mut placer = Placer::new(PlacerConfig::default(), device.clone());
+        assert_eq!(placer.fill_limit(&small), crate::placer::DEFAULT_TILE_FILL);
+        let placement = placer.place(&small).unwrap();
+        let per_tile = luts_per_tile(&placement);
+        assert!(per_tile.values().all(|&n| n <= 6), "{per_tile:?}");
+        assert!(per_tile.len() >= 10);
+
+        // A configured limit is used as given
+        let config = PlacerConfig {
+            max_tile_fill: Some(0.5),
+            ..Default::default()
+        };
+        let mut placer = Placer::new(config, device.clone());
+        assert_eq!(placer.fill_limit(&small), 0.5);
+        let per_tile = luts_per_tile(&placer.place(&small).unwrap());
+        assert!(per_tile.values().all(|&n| n <= 4), "{per_tile:?}");
+
+        // A design using most of the device: the limit rises so it fits
+        let total_luts = {
+            let (w, h) = device.grid_size();
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter_map(|(x, y)| device.tile_at(x, y))
+                .flat_map(|t| t.bels().iter().map(|b| b.bel_type))
+                .filter(|&t| t == BelType::Lut4)
+                .count()
+        };
+        let large = create_mesh_netlist(total_luts * 85 / 100);
+        let mut placer = Placer::new(PlacerConfig::default(), device);
+        let limit = placer.fill_limit(&large);
+        assert!(limit > 0.85 && limit <= 1.0, "limit {limit}");
+        let placement = placer.place(&large).unwrap();
+        assert_eq!(
+            luts_per_tile(&placement).values().sum::<usize>(),
+            total_luts * 85 / 100
+        );
+    }
+
     /// The placer's seed reaches its random choices: a different seed gives
     /// a different, equally repeatable placement
     #[test]

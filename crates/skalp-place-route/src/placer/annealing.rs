@@ -432,6 +432,10 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     /// Seed of every random stream the annealer draws from, so a placement
     /// is reproducible for a given seed
     seed: u64,
+    /// Share of each tile's BELs of a type cells may take
+    /// ([`super::sites::fill_cap`]): a move may not add a cell to a tile
+    /// already holding that many
+    fill_limit: f64,
 }
 
 /// Move-generation data that stays fixed for a whole annealing run, so a
@@ -534,6 +538,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chains: Vec::new(),
             refine: false,
             seed: DEFAULT_SEED,
+            fill_limit: 1.0,
         }
     }
 
@@ -558,7 +563,14 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chains: Vec::new(),
             refine: false,
             seed: DEFAULT_SEED,
+            fill_limit: 1.0,
         }
+    }
+
+    /// Fill each tile's BELs of a type at most this far (0..=1)
+    pub fn with_fill_limit(mut self, fill_limit: f64) -> Self {
+        self.fill_limit = fill_limit;
+        self
     }
 
     /// Seed the annealer's random moves and acceptances
@@ -1128,6 +1140,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let Some(tile) = self.device.tile_at(x, y) else {
                 continue;
             };
+            // Moving into another tile adds a cell to it, unless it swaps
+            // with one: a tile at its fill cap only takes swaps
+            let tile_full = self.fill_limit < 1.0
+                && (x, y) != (loc.tile_x, loc.tile_y)
+                && self.tile_at_fill_cap(tile, x, y, source_bel_type, loc_map, ctx);
             // Reservoir-sample one acceptable BEL of the tile
             let mut chosen = None;
             let mut seen = 0u32;
@@ -1138,7 +1155,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 {
                     continue;
                 }
-                if let Some(&occupant) = loc_map.get(&(x, y, bel_idx)) {
+                let occupant = loc_map.get(&(x, y, bel_idx));
+                if occupant.is_none() && tile_full {
+                    continue;
+                }
+                if let Some(&occupant) = occupant {
                     if self.carry_chain_membership.contains_key(&occupant)
                         || !Self::bel_types_compatible(
                             source_bel_type,
@@ -1159,6 +1180,31 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         Move::Relocate(cell_id, loc)
+    }
+
+    /// Whether tile (x, y) already holds as many cells on BELs of the
+    /// moving cell's BEL type (`bel_type`) as the fill limit allows. BELs
+    /// reserved under carry chains and distributed RAM count as held.
+    fn tile_at_fill_cap(
+        &self,
+        tile: &dyn crate::device::Tile,
+        x: u32,
+        y: u32,
+        bel_type: BelType,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        ctx: &MoveContext,
+    ) -> bool {
+        let (mut total, mut held) = (0usize, 0usize);
+        for (i, bel) in tile.bels().iter().enumerate() {
+            if bel.bel_type != bel_type {
+                continue;
+            }
+            total += 1;
+            if loc_map.contains_key(&(x, y, i)) || ctx.reserved.contains(&(x, y, i)) {
+                held += 1;
+            }
+        }
+        held >= super::sites::fill_cap(total, self.fill_limit)
     }
 
     /// Get all cells affected by a move, including displaced occupants.
