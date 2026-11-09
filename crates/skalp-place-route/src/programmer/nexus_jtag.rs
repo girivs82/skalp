@@ -10,6 +10,7 @@
 
 use crate::error::{PlaceRouteError, Result};
 use libftd2xx::{list_devices, BitMode, Ftdi, FtdiCommon};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// IDCODE of the LFCPNX-100, as read back from silicon.
@@ -43,6 +44,8 @@ pub struct NexusBoard {
     pub idcode: u32,
     /// Where to find the button wired to PROGRAMN.
     pub programn_button: &'static str,
+    /// Boundary-scan bits confirmed on this board, with what they connect to.
+    pub known_pads: &'static [(usize, &'static str)],
 }
 
 /// Boards with a confirmed PROGRAMN button. Add an entry for each new board
@@ -53,9 +56,18 @@ pub const NEXUS_BOARDS: [NexusBoard; 1] = [NexusBoard {
     name: "CertusPro-NX Versa",
     idcode: LFCPNX_100_IDCODE,
     programn_button: "SW2, labelled PROGRAMN, just below the Raspberry Pi connector",
+    known_pads: &[(533, "LED2 (pad PR31A)")],
 }];
 
 impl NexusBoard {
+    /// What a boundary-scan bit connects to on this board, if confirmed.
+    pub fn pad_name(&self, bit: usize) -> Option<&'static str> {
+        self.known_pads
+            .iter()
+            .find(|(b, _)| *b == bit)
+            .map(|(_, name)| *name)
+    }
+
     /// Look up a board by the name given to `--board`.
     pub fn by_name(name: &str) -> Option<&'static NexusBoard> {
         let name = name.to_lowercase();
@@ -88,11 +100,20 @@ const PROGRAMN_WAIT: Duration = Duration::from_secs(60);
 const PROGRAMN_CLEAR_READS: u32 = 5;
 const PROGRAMN_POLL: Duration = Duration::from_millis(100);
 
+/// Bytes in each half of the boundary-scan length probe. The LFCPNX-100
+/// register is 590 bits, and the register must be shorter than one half.
+const BOUNDARY_PROBE_BYTES: usize = 256;
+/// Pause between boundary-scan samples while watching pads.
+const PAD_WATCH_POLL: Duration = Duration::from_millis(5);
+/// Interval spread below which a pad counts as toggling regularly.
+const REGULAR_INTERVAL_SPREAD: f64 = 0.2;
+
 /// Bytes sent per progress report during the bitstream burst.
 const BURST_CHUNK: usize = 0x1_0000;
 
 // Nexus configuration opcodes.
 const IDCODE_PUB: u8 = 0xE0;
+const SAMPLE_PRELOAD: u8 = 0x1C;
 const ISC_ENABLE: u8 = 0xC6;
 const ISC_DISABLE: u8 = 0x26;
 const ISC_ERASE: u8 = 0x0E;
@@ -280,6 +301,67 @@ enum EraseOutcome {
     Erased,
     /// DONE stayed set: the device ignored the erase.
     Blocked,
+}
+
+/// One pad seen changing while watching boundary scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PadActivity {
+    /// Boundary-scan bit index.
+    pub bit: usize,
+    /// Changes seen.
+    pub changes: usize,
+    /// Mean seconds between changes, once at least two were seen.
+    pub mean_interval: Option<f64>,
+    /// The changes were evenly spaced, like a clocked output.
+    pub regular: bool,
+}
+
+impl PadActivity {
+    fn from_change_times(bit: usize, times: &[f64]) -> Self {
+        let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+        if gaps.is_empty() {
+            return Self {
+                bit,
+                changes: times.len(),
+                mean_interval: None,
+                regular: false,
+            };
+        }
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let variance = gaps.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / gaps.len() as f64;
+        Self {
+            bit,
+            changes: times.len(),
+            mean_interval: Some(mean),
+            regular: gaps.len() >= 2 && variance.sqrt() < mean * REGULAR_INTERVAL_SPREAD,
+        }
+    }
+}
+
+/// What a boundary-scan watch saw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PadWatch {
+    /// Boundary-scan register length.
+    pub bits: usize,
+    /// Samples taken.
+    pub samples: usize,
+    /// Seconds watched.
+    pub seconds: f64,
+    /// Pads that changed, by bit index.
+    pub active: Vec<PadActivity>,
+}
+
+/// Work out a shift register's length from a probe that shifted equal runs of
+/// 0s then 1s through it: the 1s reach TDO delayed by exactly its length.
+fn boundary_length(rx: &[u8]) -> Option<usize> {
+    let total = rx.len() * 8;
+    let half = total / 2;
+    let bit = |i: usize| (rx[i / 8] >> (i % 8)) & 1 == 1;
+    let first_one = (half..total).rev().take_while(|&i| bit(i)).last()?;
+    match first_one - half {
+        0 => None,
+        length => Some(length),
+    }
 }
 
 /// Which JTAG TAP state a shift should finish by way of.
@@ -494,6 +576,56 @@ impl NexusJtagProgrammer {
         let mut rx = [0u8; 4];
         self.query(IDCODE_PUB, &mut rx)?;
         Ok(u32::from_le_bytes(rx))
+    }
+
+    /// Measure the boundary-scan register, whose length varies by device.
+    fn boundary_scan_bits(&mut self) -> Result<usize> {
+        let mut tx = vec![0u8; BOUNDARY_PROBE_BYTES];
+        tx.resize(2 * BOUNDARY_PROBE_BYTES, 0xFF);
+        let mut rx = vec![0u8; tx.len()];
+        self.shift_ir(SAMPLE_PRELOAD, AfterIr::ShiftDr)?;
+        self.shift(&tx, Some(&mut rx))?;
+        self.finish_dr()?;
+        boundary_length(&rx).ok_or_else(|| {
+            PlaceRouteError::ProgrammingFailed(
+                "Could not measure the boundary-scan register".to_string(),
+            )
+        })
+    }
+
+    /// Watch every pad through boundary scan for `duration`.
+    ///
+    /// SAMPLE only captures pad values, so this does not disturb the design.
+    pub fn watch_pads(&mut self, duration: Duration) -> Result<PadWatch> {
+        let bits = self.boundary_scan_bits()?;
+        let bytes = bits.div_ceil(8);
+        let mut sample = vec![0u8; bytes];
+        let start = Instant::now();
+        self.query(SAMPLE_PRELOAD, &mut sample)?;
+        let mut changes: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+        let mut samples = 1;
+        while start.elapsed() < duration {
+            std::thread::sleep(PAD_WATCH_POLL);
+            let mut next = vec![0u8; bytes];
+            self.query(SAMPLE_PRELOAD, &mut next)?;
+            samples += 1;
+            let now = start.elapsed().as_secs_f64();
+            for bit in 0..bits {
+                if ((sample[bit / 8] ^ next[bit / 8]) >> (bit % 8)) & 1 == 1 {
+                    changes.entry(bit).or_default().push(now);
+                }
+            }
+            sample = next;
+        }
+        Ok(PadWatch {
+            bits,
+            samples,
+            seconds: start.elapsed().as_secs_f64(),
+            active: changes
+                .into_iter()
+                .map(|(bit, times)| PadActivity::from_change_times(bit, &times))
+                .collect(),
+        })
     }
 
     /// Read the configuration status register.
@@ -774,6 +906,45 @@ mod tests {
     fn rejects_files_without_verify_id() {
         let file = [0xFF, 0xFF, 0xFF, 0xBD, 0xB3, 0x3B, 0, 0, 0];
         assert!(parse_bitstream(&file).is_err());
+    }
+
+    #[test]
+    fn measures_boundary_register_length() {
+        // A 590-bit register: captured pad bits, then the 0s, then the 1s.
+        let (bytes, length) = (256, 590);
+        let mut rx = vec![0u8; 2 * bytes];
+        let high = |i: usize| i < length && i % 3 == 0 || i >= length + bytes * 8;
+        for i in 0..rx.len() * 8 {
+            if high(i) {
+                rx[i / 8] |= 1 << (i % 8);
+            }
+        }
+        assert_eq!(boundary_length(&rx), Some(length));
+    }
+
+    #[test]
+    fn rejects_a_chain_with_no_delay() {
+        assert_eq!(boundary_length(&[0x00, 0xFF]), None);
+    }
+
+    #[test]
+    fn evenly_spaced_changes_are_regular() {
+        let pad = PadActivity::from_change_times(7, &[0.0, 0.9, 1.8, 2.75]);
+        assert!(pad.regular);
+        assert!((pad.mean_interval.unwrap() - 0.9167).abs() < 0.001);
+    }
+
+    #[test]
+    fn scattered_changes_are_not_regular() {
+        let pad = PadActivity::from_change_times(7, &[0.0, 0.01, 0.5, 0.52, 1.5]);
+        assert!(!pad.regular);
+    }
+
+    #[test]
+    fn a_single_change_has_no_interval() {
+        let pad = PadActivity::from_change_times(7, &[1.0]);
+        assert_eq!(pad.mean_interval, None);
+        assert!(!pad.regular);
     }
 
     #[test]

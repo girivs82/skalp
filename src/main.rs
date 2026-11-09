@@ -282,7 +282,7 @@ enum Commands {
     /// Program the FPGA device
     Program {
         /// Bitstream file (.bit for Lattice Nexus, .bin for iCE40)
-        #[arg(required_unless_present_any = ["list", "reset_only"])]
+        #[arg(required_unless_present_any = ["list", "reset_only", "watch"])]
         bitstream: Option<PathBuf>,
 
         /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, certuspro-versa, auto)
@@ -296,6 +296,11 @@ enum Commands {
         /// List detected boards and exit
         #[arg(long)]
         list: bool,
+
+        /// Report which pins change on a Nexus device for this many seconds,
+        /// after loading if a bitstream is given
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
     },
 
     /// Format SKALP source files
@@ -825,8 +830,9 @@ fn main() -> Result<()> {
             board,
             reset_only,
             list,
+            watch,
         } => {
-            program_device(bitstream.as_ref(), &board, reset_only, list)?;
+            program_device(bitstream.as_ref(), &board, reset_only, list, watch)?;
         }
 
         Commands::Fmt { files, check } => {
@@ -4461,6 +4467,7 @@ fn program_nexus_board(
     bitstream: Option<&PathBuf>,
     board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
     reset_only: bool,
+    watch: Option<u64>,
 ) -> Result<()> {
     use skalp_place_route::programmer::nexus_jtag::{
         check_target, chip_name, parse_bitstream, LoadEvent, NexusJtagProgrammer,
@@ -4478,7 +4485,7 @@ fn program_nexus_board(
             std::fs::read(path)
                 .map_err(|e| anyhow::anyhow!("Cannot read bitstream {:?}: {}", path, e))?,
         ),
-        None if reset_only => None,
+        None if reset_only || watch.is_some() => None,
         None => anyhow::bail!("A bitstream file is required"),
     };
     // Validate the file before opening the hardware.
@@ -4524,7 +4531,7 @@ fn program_nexus_board(
 
     let (path, file, target) = match (bitstream, data.as_deref(), target) {
         (Some(path), Some(file), Some(target)) => (path, file, target),
-        _ => unreachable!("a bitstream was required above"),
+        _ => return report_pad_watch(&mut programmer, board, watch),
     };
     println!(
         "📦 {:?}: {:.2} MB, built for {}",
@@ -4584,6 +4591,57 @@ fn program_nexus_board(
     );
     println!("   Loaded into SRAM only; a power cycle clears it.");
     println!("   Status: {}", result.status);
+    report_pad_watch(&mut programmer, board, watch)
+}
+
+/// Report the device's state and which pads change over the watch period.
+fn report_pad_watch(
+    programmer: &mut skalp_place_route::programmer::nexus_jtag::NexusJtagProgrammer,
+    board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
+    watch: Option<u64>,
+) -> Result<()> {
+    let Some(seconds) = watch else {
+        return Ok(());
+    };
+    let status = programmer
+        .read_status()
+        .map_err(|e| anyhow::anyhow!("Cannot read status: {}", e))?;
+    if status.done() {
+        println!("🟢 Device is running a design. Status: {}", status);
+    } else {
+        println!("🔴 Device is not configured. Status: {}", status);
+    }
+    if let Some(error) = status.error_summary() {
+        println!("   Reported: {}", error);
+    }
+
+    println!("👀 Watching pads for {} s...", seconds);
+    let result = programmer
+        .watch_pads(std::time::Duration::from_secs(seconds))
+        .map_err(|e| anyhow::anyhow!("Could not read the pads: {}", e))?;
+    for pad in &result.active {
+        let name = board
+            .and_then(|b| b.pad_name(pad.bit))
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        match pad.mean_interval {
+            Some(interval) if pad.regular => println!(
+                "   ✓ Bit {}{}: toggling every {:.2} s ({} changes)",
+                pad.bit, name, interval, pad.changes
+            ),
+            _ => println!(
+                "   ~ Bit {}{}: changing irregularly ({} changes)",
+                pad.bit, name, pad.changes
+            ),
+        }
+    }
+    println!(
+        "   {} of {} pads changed, across {} samples in {:.1} s. Signals much faster than the sample rate look irregular.",
+        result.active.len(),
+        result.bits,
+        result.samples,
+        result.seconds
+    );
     Ok(())
 }
 
@@ -4593,6 +4651,7 @@ fn program_device(
     board: &str,
     reset_only: bool,
     list: bool,
+    watch: Option<u64>,
 ) -> Result<()> {
     use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
 
@@ -4611,13 +4670,13 @@ fn program_device(
             );
         }
         if nexus_board.is_some() || nexus_file {
-            return program_nexus_board(bitstream, nexus_board, reset_only);
+            return program_nexus_board(bitstream, nexus_board, reset_only, watch);
         }
         // Don't let auto-detection drive a Nexus board as an iCE40 SPI target.
         if board.to_lowercase() == "auto" {
             if let Some((device, _)) = probe_nexus_device() {
-                if reset_only {
-                    return program_nexus_board(bitstream, None, reset_only);
+                if reset_only || (bitstream.is_none() && watch.is_some()) {
+                    return program_nexus_board(bitstream, None, reset_only, watch);
                 }
                 anyhow::bail!(
                     "Connected device is {}, but this file is not a Lattice Nexus .bit bitstream.",
