@@ -413,9 +413,10 @@ impl NexusJtagProgrammer {
             if Instant::now() > deadline {
                 return Err(PlaceRouteError::BitstreamFailed(format!(
                     "SRAM erase had no effect: DONE is still set (status {status}). \
-                     The device is not accepting configuration over JTAG. If the \
-                     design in SPI flash disables the JTAG port, hold the PROGRAMN \
-                     button (SW2 on the Versa board) during the load."
+                     The device is not accepting configuration over JTAG, which \
+                     happens when the running design leaves the JTAG port disabled. \
+                     Hold the PROGRAMN button (SW2 on the Versa board) until the \
+                     erase completes."
                 )));
             }
         }
@@ -433,8 +434,12 @@ impl NexusJtagProgrammer {
     ///
     /// Refuses a bitstream built for a different device before changing
     /// anything on the chip.
-    pub fn program(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
-        let result = self.load(file);
+    ///
+    /// `after_erase` runs once the SRAM is confirmed erased. PROGRAMN has to
+    /// be high before ISC_DISABLE or the device stays in initialization, so
+    /// this is the moment to tell whoever is holding the button to let go.
+    pub fn program(&mut self, file: &[u8], after_erase: impl FnOnce()) -> Result<NexusLoadResult> {
+        let result = self.load(file, after_erase);
         if result.is_err() {
             // A failed load must not strand the device in configuration mode,
             // where user logic is halted and I/O is tri-stated.
@@ -455,7 +460,7 @@ impl NexusJtagProgrammer {
         self.reset_tap()
     }
 
-    fn load(&mut self, file: &[u8]) -> Result<NexusLoadResult> {
+    fn load(&mut self, file: &[u8], after_erase: impl FnOnce()) -> Result<NexusLoadResult> {
         let bitstream = parse_bitstream(file)?;
         let idcode = self.read_idcode()?;
         if bitstream.idcode != idcode {
@@ -488,6 +493,7 @@ impl NexusJtagProgrammer {
         log::debug!("after configuration reset: {}", self.read_status()?);
 
         self.erase_sram()?;
+        after_erase();
 
         self.command(LSC_INIT_ADDRESS)?;
         self.idle(1000)?;

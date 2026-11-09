@@ -4461,7 +4461,11 @@ fn program_nexus_board(bitstream: Option<&PathBuf>, reset_only: bool) -> Result<
     println!("🔌 LFCPNX-100 found (IDCODE 0x{:08x})", idcode);
     println!("📤 Loading {:?} into SRAM...", bitstream);
 
-    let result = programmer.program(&data).map_err(|e| {
+    let after_erase = || {
+        println!("   ✓ SRAM erased. If you are holding SW2 (PROGRAMN), release it now.");
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    };
+    let result = programmer.program(&data, after_erase).map_err(|e| {
         let state = programmer
             .read_status()
             .map(|s| s.to_string())
