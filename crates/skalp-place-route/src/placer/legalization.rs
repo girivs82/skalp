@@ -2,8 +2,9 @@
 //!
 //! Snaps analytical placement to valid BEL sites while minimizing displacement.
 
+use super::sites::{bel_types_compatible, SiteMap};
 use super::{BelType, PlacementLoc, PlacementResult};
-use crate::device::Device;
+use crate::device::{CarryChainLayout, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
@@ -33,15 +34,25 @@ impl<'a, D: Device> Legalizer<'a, D> {
     pub fn legalize_with_carry_chains(
         &self,
         placement: PlacementResult,
-        netlist: &GateNetlist,
+        _netlist: &GateNetlist,
         carry_chains: &[CarryChain],
     ) -> Result<PlacementResult> {
         let mut result = PlacementResult::new();
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
 
-        // Phase 1: Legalize carry chains into consecutive LC slots
-        let chain_cells =
-            self.legalize_carry_chains(&placement, carry_chains, &mut result, &mut used_bels)?;
+        // Phase 1: Legalize carry chains into consecutive carry positions
+        let chain_cells = match self.device.carry_chain_layout() {
+            Some(layout) => self.legalize_carry_chains_with_layout(
+                &placement,
+                carry_chains,
+                &layout,
+                &mut result,
+                &mut used_bels,
+            )?,
+            None => {
+                self.legalize_carry_chains(&placement, carry_chains, &mut result, &mut used_bels)?
+            }
+        };
 
         // Phase 2: Legalize remaining cells
         let mut cells: Vec<(CellId, PlacementLoc)> = placement
@@ -55,19 +66,34 @@ impl<'a, D: Device> Legalizer<'a, D> {
             a_score.cmp(&b_score)
         });
 
+        let mut sites = SiteMap::new(self.device);
+        for &(x, y, bel) in used_bels.keys() {
+            sites.take(x, y, bel);
+        }
         for (cell_id, loc) in cells {
-            let _cell = netlist.get_cell(cell_id);
             let bel_type = loc.bel_type;
-
-            let legal_loc =
-                self.find_legal_location(loc.tile_x, loc.tile_y, bel_type, &used_bels)?;
-
-            used_bels.insert(
-                (legal_loc.tile_x, legal_loc.tile_y, legal_loc.bel_index),
-                cell_id,
-            );
-
-            result.placements.insert(cell_id, legal_loc);
+            let (tx, ty, idx) = sites
+                .take_nearest(
+                    loc.tile_x as f64,
+                    loc.tile_y as f64,
+                    bel_type,
+                    bel_types_compatible,
+                )
+                .ok_or_else(|| {
+                    PlaceRouteError::PlacementFailed(format!(
+                        "No legal location found for BEL type {:?} near ({}, {})",
+                        bel_type, loc.tile_x, loc.tile_y
+                    ))
+                })?;
+            // Record the BEL's own type, as the ring search always has
+            let placed_type = self
+                .device
+                .tile_at(tx, ty)
+                .and_then(|t| t.bels().get(idx).map(|b| b.bel_type))
+                .unwrap_or(bel_type);
+            result
+                .placements
+                .insert(cell_id, PlacementLoc::new(tx, ty, idx, placed_type));
         }
 
         Ok(result)
@@ -269,7 +295,8 @@ impl<'a, D: Device> Legalizer<'a, D> {
         false
     }
 
-    /// Find a legal location near the given coordinates
+    /// Nearest unused BEL that can hold `bel_type`, given the BELs already used.
+    /// Only the carry-chain fallback needs this; bulk legalization uses [`SiteMap`].
     fn find_legal_location(
         &self,
         x: u32,
@@ -277,56 +304,155 @@ impl<'a, D: Device> Legalizer<'a, D> {
         bel_type: BelType,
         used: &HashMap<(u32, u32, usize), CellId>,
     ) -> Result<PlacementLoc> {
+        let mut sites = SiteMap::new(self.device);
+        for &(ux, uy, ubel) in used.keys() {
+            sites.take(ux, uy, ubel);
+        }
+        let (tx, ty, idx) = sites
+            .find_nearest(x as f64, y as f64, bel_type, &bel_types_compatible)
+            .ok_or_else(|| {
+                PlaceRouteError::PlacementFailed(format!(
+                    "No legal location found for BEL type {:?} near ({}, {})",
+                    bel_type, x, y
+                ))
+            })?;
+        let placed_type = self
+            .device
+            .tile_at(tx, ty)
+            .and_then(|t| t.bels().get(idx).map(|b| b.bel_type))
+            .unwrap_or(bel_type);
+        Ok(PlacementLoc::new(tx, ty, idx, placed_type))
+    }
+
+    /// Place each carry chain on consecutive carry positions of `layout`
+    /// (slot 0..n of a tile, then slot 0 of the tile one `step` along), as
+    /// close as possible to where analytical placement put its cells. A chain
+    /// position takes its carry BEL and the LUT BELs the carry cell uses.
+    fn legalize_carry_chains_with_layout(
+        &self,
+        placement: &PlacementResult,
+        carry_chains: &[CarryChain],
+        layout: &CarryChainLayout,
+        result: &mut PlacementResult,
+        used_bels: &mut HashMap<(u32, u32, usize), CellId>,
+    ) -> Result<HashSet<CellId>> {
+        let mut chain_cells = HashSet::new();
         let (width, height) = self.device.grid_size();
+        let slots = layout.slots.len();
+        if slots == 0 {
+            return Ok(chain_cells);
+        }
+        let max_bel = layout
+            .slots
+            .iter()
+            .flat_map(|s| std::iter::once(s.carry_bel).chain(s.lut_bels.iter().copied()))
+            .max()
+            .unwrap_or(0);
 
-        // Search in expanding rings
-        for radius in 0..width.max(height) {
-            // Generate coordinates in the ring
-            for dy in -(radius as i32)..=(radius as i32) {
-                for dx in -(radius as i32)..=(radius as i32) {
-                    // Only process the ring (not the interior)
-                    if dx.unsigned_abs() != radius && dy.unsigned_abs() != radius {
-                        continue;
-                    }
+        // Position `i` steps along the chain from (x, y, slot).
+        let advance = |x: u32, y: u32, slot: usize, i: usize| -> Option<(u32, u32, usize)> {
+            let p = slot + i;
+            let tiles = (p / slots) as i64;
+            let nx = x as i64 + layout.step.0 as i64 * tiles;
+            let ny = y as i64 + layout.step.1 as i64 * tiles;
+            if nx < 0 || ny < 0 || nx >= width as i64 || ny >= height as i64 {
+                return None;
+            }
+            Some((nx as u32, ny as u32, p % slots))
+        };
+        let position_free =
+            |used: &HashMap<(u32, u32, usize), CellId>, x: u32, y: u32, slot: usize| -> bool {
+                let Some(tile) = self.device.tile_at(x, y) else {
+                    return false;
+                };
+                if tile.tile_type() != TileType::Logic || tile.bels().len() <= max_bel {
+                    return false;
+                }
+                let s = &layout.slots[slot];
+                !used.contains_key(&(x, y, s.carry_bel))
+                    && s.lut_bels.iter().all(|&l| !used.contains_key(&(x, y, l)))
+            };
 
-                    let tx = (x as i32 + dx).clamp(0, (width - 1) as i32) as u32;
-                    let ty = (y as i32 + dy).clamp(0, (height - 1) as i32) as u32;
+        // Longest chains first: they are the hardest to fit.
+        let mut order: Vec<&CarryChain> = carry_chains
+            .iter()
+            .filter(|c| !c.cells.is_empty())
+            .collect();
+        order.sort_by_key(|c| std::cmp::Reverse(c.cells.len()));
 
-                    if let Some(tile) = self.device.tile_at(tx, ty) {
-                        // Find unused BEL of matching type
-                        for (idx, bel) in tile.bels().iter().enumerate() {
-                            let is_compatible = bel.bel_type == bel_type
-                                || self.bel_types_compatible(bel.bel_type, bel_type);
+        for chain in order {
+            let n = chain.cells.len();
+            // Target: centroid of the chain's analytical positions, shifted so
+            // the chain is centred on it along the chain direction.
+            let locs: Vec<&PlacementLoc> = chain
+                .cells
+                .iter()
+                .filter_map(|c| placement.placements.get(c))
+                .collect();
+            let (cx, cy) = if locs.is_empty() {
+                (width as f64 / 2.0, height as f64 / 2.0)
+            } else {
+                (
+                    locs.iter().map(|l| l.tile_x as f64).sum::<f64>() / locs.len() as f64,
+                    locs.iter().map(|l| l.tile_y as f64).sum::<f64>() / locs.len() as f64,
+                )
+            };
+            let span_tiles = n.div_ceil(slots) as f64;
+            let tx = (cx - layout.step.0 as f64 * span_tiles / 2.0).round();
+            let ty = (cy - layout.step.1 as f64 * span_tiles / 2.0).round();
+            let tx = tx.clamp(0.0, (width - 1) as f64) as i64;
+            let ty = ty.clamp(0.0, (height - 1) as f64) as i64;
 
-                            if is_compatible && !used.contains_key(&(tx, ty, idx)) {
-                                return Ok(PlacementLoc::new(tx, ty, idx, bel.bel_type));
+            let fits = |used: &HashMap<(u32, u32, usize), CellId>, x: u32, y: u32, slot: usize| {
+                (0..n).all(|i| {
+                    advance(x, y, slot, i)
+                        .is_some_and(|(px, py, ps)| position_free(used, px, py, ps))
+                })
+            };
+
+            // Nearest start (Chebyshev rings around the target) where the whole chain fits.
+            let mut start = None;
+            'search: for r in 0..=(width.max(height) as i64) {
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if dx.abs() != r && dy.abs() != r {
+                            continue;
+                        }
+                        let (x, y) = (tx + dx, ty + dy);
+                        if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
+                            continue;
+                        }
+                        for slot in 0..slots {
+                            if fits(used_bels, x as u32, y as u32, slot) {
+                                start = Some((x as u32, y as u32, slot));
+                                break 'search;
                             }
                         }
                     }
                 }
             }
+            let Some((sx, sy, sslot)) = start else {
+                return Err(PlaceRouteError::PlacementFailed(format!(
+                    "no room for a carry chain of {} cells",
+                    n
+                )));
+            };
+
+            for (i, &cell_id) in chain.cells.iter().enumerate() {
+                let (x, y, slot) = advance(sx, sy, sslot, i).expect("checked by fits");
+                let s = &layout.slots[slot];
+                used_bels.insert((x, y, s.carry_bel), cell_id);
+                for &l in &s.lut_bels {
+                    used_bels.insert((x, y, l), cell_id);
+                }
+                result.placements.insert(
+                    cell_id,
+                    PlacementLoc::new(x, y, s.carry_bel, BelType::Carry),
+                );
+                chain_cells.insert(cell_id);
+            }
         }
 
-        Err(PlaceRouteError::PlacementFailed(format!(
-            "No legal location found for BEL type {:?} near ({}, {})",
-            bel_type, x, y
-        )))
-    }
-
-    /// Check if BEL types are compatible
-    fn bel_types_compatible(&self, available: BelType, required: BelType) -> bool {
-        matches!(
-            (available, required),
-            // A basic Dff BEL can implement any DFF variant
-            (BelType::Dff, BelType::DffE)
-                | (BelType::Dff, BelType::DffSr)
-                | (BelType::Dff, BelType::DffSrE)
-                // Any FF type can implement a basic DFF
-                | (BelType::DffE, BelType::Dff)
-                | (BelType::DffSr, BelType::Dff)
-                | (BelType::DffSrE, BelType::Dff)
-                | (BelType::DffSrE, BelType::DffE)
-                | (BelType::DffSrE, BelType::DffSr)
-        )
+        Ok(chain_cells)
     }
 }

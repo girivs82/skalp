@@ -440,10 +440,16 @@ pub fn place_and_route_nexus(
     use crate::device::nexus::NexusDevice;
 
     let device = NexusDevice::new(variant);
+    let t0 = std::time::Instant::now();
 
     // Run packing
     let mut packer = CellPacker::new(netlist);
     let packing = packer.pack();
+    log::info!(
+        "nexus pnr: packed {} cells, {} carry chains",
+        netlist.cells.len(),
+        packing.carry_chains.len()
+    );
 
     // Run placement
     let mut placer = Placer::new(config.placer.clone(), device.clone());
@@ -452,6 +458,10 @@ pub fn place_and_route_nexus(
     } else {
         placer.place_with_carry_chains(netlist, &packing.carry_chains)?
     };
+    log::info!(
+        "nexus pnr: placement done at {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
 
     // Run routing
     let net_count = netlist.nets.len();
@@ -462,6 +472,10 @@ pub fn place_and_route_nexus(
     };
     let mut router = Router::new(router_config, device.clone());
     let routing = router.route(netlist, &placement)?;
+    log::info!(
+        "nexus pnr: routing done at {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
 
     // Run timing analysis with Nexus delay model
     let timing = if let Some(timing_config) = config.timing.clone() {

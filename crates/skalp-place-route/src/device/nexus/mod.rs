@@ -441,9 +441,9 @@ impl NexusDevice {
         }
     }
 
-    /// Create BELs for a logic tile (8 LUT4 + 8 DFF + carry chain)
+    /// Create BELs for a logic tile (8 LUT4 + 8 DFF + 4 CCU2 carry cells)
     fn make_logic_bels(bel_id: &mut u32, _x: u32, _y: u32) -> Vec<Bel> {
-        let mut bels = Vec::with_capacity(17);
+        let mut bels = Vec::with_capacity(20);
 
         // 8 LUT4s (2 slices × 4 LUTs)
         for i in 0..8 {
@@ -521,26 +521,28 @@ impl NexusDevice {
             });
         }
 
-        // 1 carry chain
-        let id = BelId(*bel_id);
-        *bel_id += 1;
-        bels.push(Bel {
-            id,
-            bel_type: BelType::Carry,
-            name: "CCU2C".to_string(),
-            pins: vec![
-                BelPin {
-                    name: "CIN".to_string(),
-                    direction: PinDirection::Input,
-                    wire: None,
-                },
-                BelPin {
-                    name: "COUT".to_string(),
-                    direction: PinDirection::Output,
-                    wire: None,
-                },
-            ],
-        });
+        // 4 carry cells, one per slice; carry k uses LUTs 2k and 2k+1
+        for slice in ['A', 'B', 'C', 'D'] {
+            let id = BelId(*bel_id);
+            *bel_id += 1;
+            bels.push(Bel {
+                id,
+                bel_type: BelType::Carry,
+                name: format!("CCU2_{}", slice),
+                pins: vec![
+                    BelPin {
+                        name: "CIN".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "COUT".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                ],
+            });
+        }
 
         bels
     }
@@ -1425,13 +1427,24 @@ impl Device for NexusDevice {
         match cell_type {
             "LUT4" | "OXIDE_COMB" => bel_type == BelType::Lut4,
             "DFF" | "OXIDE_FF" | "FD1P3IX" | "FD1P3DX" | "FD1S3BX" => bel_type.is_ff(),
-            "CCU2C" | "CARRY" => bel_type == BelType::Carry,
+            "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
             "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
             "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
             "EHXPLLL" | "PLL" => bel_type == BelType::Pll,
             _ => false,
         }
+    }
+
+    fn carry_chain_layout(&self) -> Option<crate::device::CarryChainLayout> {
+        // Carry chains run left to right: slice A..D of a tile, then slice A
+        // of the tile to the right.
+        let (width, height) = self.grid_size();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter_map(|(x, y)| self.tile_at(x, y))
+            .find(|t| t.tile_type() == TileType::Logic)
+            .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
     fn wire_count(&self) -> usize {
