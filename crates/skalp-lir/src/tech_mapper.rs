@@ -1203,7 +1203,7 @@ fn add_loaded_flag(
         LirOp::Reg {
             width: 1,
             has_enable: false,
-            has_reset: with_reset,
+            has_reset: with_reset && register.reset.is_some(),
             async_reset,
             reset_value: Some(0),
         },
@@ -1370,13 +1370,14 @@ fn absorb_block_ram_read_registers(lir: &Lir, library: &TechLibrary) -> Option<L
         let register = lir.nodes[found.register].clone();
         let q = register.output;
 
+        // With no reset, the fixed value is what the register powers up holding.
         let reset_value = match register.op {
             LirOp::Reg {
                 has_reset: true,
                 reset_value,
                 ..
             } => Some(reset_value.unwrap_or(0)),
-            _ => None,
+            _ => lir.signals[q.0 as usize].initial.filter(|&v| v != 0),
         };
         let has_override =
             reset_value.is_some() || matches!(found.capture, ReadCapture::Clear { .. });

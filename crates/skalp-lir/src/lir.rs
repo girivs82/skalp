@@ -1256,6 +1256,9 @@ pub struct LirSignal {
     /// Replaces name-based suffix matching (_t/_f/_dec/_sr) with structured metadata.
     #[serde(default)]
     pub ncl_info: Option<NclSignalKind>,
+    /// Value of a register at power-up, when the source gives one
+    #[serde(default)]
+    pub initial: Option<u64>,
 }
 
 /// NCL signal classification at LIR level.
@@ -1351,6 +1354,7 @@ impl Lir {
             is_output: false,
             is_detection: false,
             ncl_info: None,
+            initial: None,
         });
         id
     }

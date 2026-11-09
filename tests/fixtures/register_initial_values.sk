@@ -1,0 +1,16 @@
+// Registers that start at a value other than zero, with no reset.
+entity InitialValues {
+    in clk: clock
+    out flag: bit
+    out count: nat[4]
+}
+impl InitialValues {
+    signal flag_reg: bit = 1
+    signal count_reg: nat[4] = 9
+    on(clk.rise) {
+        flag_reg = !flag_reg
+        count_reg = count_reg + 1
+    }
+    flag = flag_reg
+    count = count_reg
+}

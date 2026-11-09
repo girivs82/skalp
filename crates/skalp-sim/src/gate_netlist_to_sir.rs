@@ -77,6 +77,7 @@ impl GateNetlistToSirConverter {
         // The tech_mapper creates: TIE_HIGH/TIE_LOW (source_op="ResetValue") -> MUX (source_op="ResetMux") -> DFF
         // We need to trace this pattern and set initial_value on DFF output signals
         self.extract_dff_reset_values(netlist, &mut sir.top_module);
+        self.apply_flip_flop_initial_values(netlist, &mut sir.top_module);
 
         // Phase 3: Build combinational and sequential blocks
         self.build_blocks(&mut sir.top_module, comb_ops, seq_ops, netlist);
@@ -494,6 +495,31 @@ impl GateNetlistToSirConverter {
                     }
                 }
             }
+        }
+    }
+
+    /// Set the power-up value of flip-flops marked as starting high.
+    fn apply_flip_flop_initial_values(&self, netlist: &GateNetlist, module: &mut SirModule) {
+        use bitvec::prelude::*;
+
+        for cell in &netlist.cells {
+            if cell
+                .parameters
+                .get(skalp_lir::gate_netlist::FF_INIT_PARAM)
+                .map(String::as_str)
+                != Some("1")
+            {
+                continue;
+            }
+            let signal_id = cell.outputs.first().and_then(|q| self.net_to_signal.get(q));
+            let Some(signal) =
+                signal_id.and_then(|&id| module.signals.iter_mut().find(|s| s.id == id))
+            else {
+                continue;
+            };
+            let mut bits: BitVec = BitVec::with_capacity(1);
+            bits.push(true);
+            signal.initial_value = Some(bits);
         }
     }
 

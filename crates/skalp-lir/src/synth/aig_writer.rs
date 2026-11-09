@@ -370,6 +370,7 @@ impl AigWriterState<'_> {
                     sync_reset: _,
                 } => {
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
+                    self.mark_power_up_high(aig, id, *init, *reset);
                 }
                 AigNode::Barrier {
                     barrier_type,
@@ -662,6 +663,37 @@ impl AigWriterState<'_> {
             // Normal case: cell output matches AIG node
             self.node_to_net.insert(id, output_net);
             self.lit_to_net.insert((id, false), output_net);
+        }
+    }
+
+    /// Record that a flip-flop powers up high.
+    ///
+    /// An asynchronous reset to one stores the inverted value, so it powers up
+    /// reading one without help.
+    fn mark_power_up_high(
+        &mut self,
+        aig: &Aig,
+        id: AigNodeId,
+        init: Option<bool>,
+        reset: Option<AigNodeId>,
+    ) {
+        if init != Some(true) || (reset.is_some() && !aig.is_latch_sync_reset(id)) {
+            return;
+        }
+        let Some(&q) = self.node_to_net.get(&id) else {
+            return;
+        };
+        if let Some(flip_flop) = self
+            .netlist
+            .cells
+            .iter_mut()
+            .rev()
+            .find(|c| c.clock.is_some() && c.outputs.contains(&q))
+        {
+            flip_flop.parameters.insert(
+                crate::gate_netlist::FF_INIT_PARAM.to_string(),
+                "1".to_string(),
+            );
         }
     }
 

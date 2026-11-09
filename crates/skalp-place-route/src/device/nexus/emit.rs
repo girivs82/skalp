@@ -420,7 +420,12 @@ fn emit_bits(
                 let reg = number % 2;
                 let prefix = format!("SLICE{slice}.REG{reg}");
                 config.set_enum(&tile, &format!("{prefix}.USED"), "YES")?;
-                config.set_enum(&tile, &format!("{prefix}.REGSET"), "RESET")?;
+                let powers_up_high = cell
+                    .parameters
+                    .get(skalp_lir::gate_netlist::FF_INIT_PARAM)
+                    .is_some_and(|v| v == "1");
+                let regset = if powers_up_high { "SET" } else { "RESET" };
+                config.set_enum(&tile, &format!("{prefix}.REGSET"), regset)?;
                 config.set_enum(&tile, &format!("{prefix}.LSRMODE"), "LSR")?;
                 config.set_enum(&tile, &format!("{prefix}.SEL"), "DF")?;
                 config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), "CLK")?;

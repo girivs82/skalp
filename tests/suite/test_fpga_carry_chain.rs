@@ -396,3 +396,19 @@ fn test_block_ram_read_register_with_reset_uses_block_ram() {
     let rams = net.cells.iter().filter(|c| c.ram_ports().is_some()).count();
     assert_eq!(rams, 2, "both memories should use block RAM");
 }
+
+#[tokio::test]
+async fn test_registers_power_up_at_their_initial_value() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("register_initial_values.sk"),
+        "InitialValues",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    assert_eq!(tb.get_u64("flag").await, 1);
+    assert_eq!(tb.get_u64("count").await, 9);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("flag").await, 0);
+    assert_eq!(tb.get_u64("count").await, 10);
+}

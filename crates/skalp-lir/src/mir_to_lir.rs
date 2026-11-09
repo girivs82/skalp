@@ -293,6 +293,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
         // When a module has instances with port connections that are expressions
@@ -423,6 +424,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
         // When a module has instances with port connections that are expressions
@@ -558,6 +560,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.record_initial_values(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -4703,6 +4706,20 @@ impl MirToLirTransform {
         nodes.extend(mem_info.read_ports.iter().map(|(_, _, n)| *n));
         for node in nodes {
             self.lir.set_node_clock(node, clk);
+        }
+    }
+
+    /// Record each register's power-up value on its LIR signal.
+    fn record_initial_values(&mut self, module: &Module) {
+        for signal in &module.signals {
+            let value = match signal.initial {
+                Some(Value::Integer(value)) => value as u64,
+                Some(Value::BitVector { value, .. }) => value,
+                _ => continue,
+            };
+            if let Some(&lir_signal) = self.signal_to_lir_signal.get(&signal.id) {
+                self.lir.signals[lir_signal.0 as usize].initial = Some(value);
+            }
         }
     }
 

@@ -71,6 +71,9 @@ pub struct Cell {
     pub parameters: IndexMap<String, String>,
 }
 
+/// Parameter set to "1" on a flip-flop that powers up high.
+pub const FF_INIT_PARAM: &str = "INIT";
+
 /// Parameter holding a block RAM cell's address width in bits.
 pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
 /// Parameter holding a block RAM cell's data width in bits.

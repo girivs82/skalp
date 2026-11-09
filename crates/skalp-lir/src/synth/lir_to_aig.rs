@@ -204,7 +204,14 @@ impl<'a> LirToSynthAig<'a> {
                 ..
             } = &node.op
             {
-                let reset_val = reset_value.unwrap_or(0);
+                // A register with no reset starts at its power-up value.
+                let reset_val = if *has_reset {
+                    reset_value.unwrap_or(0)
+                } else {
+                    self.lir.signals[node.output.0 as usize]
+                        .initial
+                        .unwrap_or(0)
+                };
                 for bit in 0..*width {
                     let init_value = if bit < 64 {
                         (reset_val >> bit) & 1 != 0
