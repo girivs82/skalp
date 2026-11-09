@@ -44,6 +44,8 @@ pub struct NexusBoard {
     pub idcode: u32,
     /// Where to find the button wired to PROGRAMN.
     pub programn_button: &'static str,
+    /// Package of the FPGA fitted to this board.
+    pub package: &'static str,
     /// Boundary-scan bits confirmed on this board, with what they connect to.
     pub known_pads: &'static [(usize, &'static str)],
 }
@@ -56,6 +58,7 @@ pub const NEXUS_BOARDS: [NexusBoard; 1] = [NexusBoard {
     name: "CertusPro-NX Versa",
     idcode: LFCPNX_100_IDCODE,
     programn_button: "SW2, labelled PROGRAMN, just below the Raspberry Pi connector",
+    package: "LFG672",
     known_pads: &[(533, "LED2 (pad PR31A)")],
 }];
 
@@ -66,6 +69,14 @@ impl NexusBoard {
             .iter()
             .find(|(b, _)| *b == bit)
             .map(|(_, name)| *name)
+    }
+
+    /// What a boundary-scan bit reads: the board's label if it has one, and
+    /// the device's pad and ball name otherwise.
+    pub fn pad_label(&self, bit: usize) -> Option<String> {
+        self.pad_name(bit)
+            .map(str::to_string)
+            .or_else(|| crate::device::nexus::sites::boundary_pad_names(self.package).remove(&bit))
     }
 
     /// Look up a board by the name given to `--board`.

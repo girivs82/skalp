@@ -4817,7 +4817,7 @@ fn report_pad_watch(
         .map_err(|e| anyhow::anyhow!("Could not read the pads: {}", e))?;
     for pad in &result.active {
         let name = board
-            .and_then(|b| b.pad_name(pad.bit))
+            .and_then(|b| b.pad_label(pad.bit))
             .map(|n| format!(" {n}"))
             .unwrap_or_default();
         match pad.mean_interval {

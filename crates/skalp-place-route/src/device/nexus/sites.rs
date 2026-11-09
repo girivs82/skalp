@@ -1,8 +1,7 @@
 //! Where a Nexus device's pins and hard blocks are.
 //!
-//! Locations come from the device database wherever it has them. Pin data
-//! exists for CrossLink-NX; CertusPro-NX has none, so its pins are the ones
-//! confirmed from the Versa board schematic and user guide (FPGA-EB-02053).
+//! Locations come from the device database wherever it has them. prjoxide has
+//! pin data for CrossLink-NX; CertusPro-NX's comes from Lattice's own pinout.
 
 use super::prjoxide_graph::ClockRegions;
 use super::{NexusVariant, PrjoxideTile};
@@ -14,18 +13,9 @@ use std::path::Path;
 /// Pin name that assigns a clock input to the on-chip oscillator.
 pub const OSC_PIN: &str = "OSC";
 
-/// Package pins of the LFCPNX-100 LFG672 with confirmed locations: the eight
-/// user LEDs of the Versa board.
-const LFCPNX_100_LFG672_PINS: [(&str, (u32, u32, u8)); 8] = [
-    ("P8", (159, 26, 1)), // LED7, PR26B
-    ("R4", (159, 28, 0)), // LED1, PR28A
-    ("R5", (159, 28, 1)), // LED0, PR28B
-    ("R6", (159, 29, 0)), // LED6, PR29A
-    ("R7", (159, 29, 1)), // LED5, PR29B
-    ("R8", (159, 31, 0)), // LED2, PR31A
-    ("R9", (159, 31, 1)), // LED3, PR31B
-    ("U8", (159, 33, 0)), // LED4, PR33A
-];
+/// IO data generated from Lattice's pinout and BSDL, for devices prjoxide has
+/// none for (see scripts/gen_nexus_iodb.py).
+const LFCPNX_100_IODB: &str = include_str!("../../../data/lfcpnx-100-iodb.json");
 
 #[derive(Debug, Deserialize)]
 struct IoDatabase {
@@ -33,15 +23,31 @@ struct IoDatabase {
     packages: Vec<String>,
     #[serde(default)]
     pads: Vec<IoPad>,
+    #[serde(default)]
+    boundary: Vec<BoundaryCell>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BoundaryCell {
+    bit: usize,
+    pad: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct IoPad {
     offset: i64,
+    #[serde(default)]
+    name: Option<String>,
     pins: Vec<String>,
     /// PIO within the tile; negative for dedicated pins that have none
     pio: i32,
     side: String,
+}
+
+/// Whether an IO tile belongs to a high-performance (1.8 V and below) bank.
+pub fn is_high_performance_io(tiletype: &str) -> bool {
+    matches!(tiletype.as_bytes().get(7), Some(b'3' | b'4' | b'5'))
+        && tiletype.starts_with("SYSIO_B")
 }
 
 /// The pins of each package, plus the oscillator pseudo-pin.
@@ -56,8 +62,12 @@ pub fn package_pins(
         .join("iodb.json");
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
-    let io: IoDatabase =
+    let mut io: IoDatabase =
         serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))?;
+    if io.pads.is_empty() && variant == NexusVariant::Lfcpnx100 {
+        io = serde_json::from_str(LFCPNX_100_IODB)
+            .map_err(|e| format!("parsing the bundled LFCPNX-100 pins: {e}"))?;
+    }
 
     let (width, height) = variant.grid_size();
     let mut packages: HashMap<String, PackagePins> = HashMap::new();
@@ -84,19 +94,6 @@ pub fn package_pins(
             PackagePins {
                 name: package.clone(),
                 pins,
-            },
-        );
-    }
-
-    if variant == NexusVariant::Lfcpnx100 && packages.is_empty() {
-        packages.insert(
-            "LFG672".to_string(),
-            PackagePins {
-                name: "LFG672".to_string(),
-                pins: LFCPNX_100_LFG672_PINS
-                    .iter()
-                    .map(|(pin, location)| (pin.to_string(), *location))
-                    .collect(),
             },
         );
     }
@@ -204,6 +201,34 @@ pub fn design_region(
     .unwrap_or_else(|| build(all_spines, 0, last_col))
 }
 
+/// Name of the pad a boundary-scan bit reads, with its ball on `package`.
+pub fn boundary_pad_names(package: &str) -> HashMap<usize, String> {
+    let Ok(io) = serde_json::from_str::<IoDatabase>(LFCPNX_100_IODB) else {
+        return HashMap::new();
+    };
+    let Some(index) = io.packages.iter().position(|p| p == package) else {
+        return HashMap::new();
+    };
+    let ball = |pad: &str| {
+        io.pads
+            .iter()
+            .find(|p| p.name.as_deref() == Some(pad))
+            .and_then(|p| p.pins.get(index))
+            .filter(|pin| pin.as_str() != "-")
+            .cloned()
+    };
+    io.boundary
+        .iter()
+        .map(|cell| {
+            let label = match ball(&cell.pad) {
+                Some(pin) => format!("{} (ball {pin})", cell.pad),
+                None => cell.pad.clone(),
+            };
+            (cell.bit, label)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::prjoxide_load::{find_database, load_tilegrid};
@@ -235,6 +260,10 @@ mod tests {
         let packages = package_pins(&db, variant, &tiles).unwrap();
         let pins = &packages["LFG672"].pins;
         assert_eq!(pins["R8"], (159, 31, 0));
+        assert_eq!(pins["M4"], (159, 13, 1), "SEG_A, pad PR13B");
+        assert_eq!(pins["AC21"], (46, 74, 0), "K_DIG1, pad PB46A");
+        assert_eq!(pins["P24"], (0, 42, 0), "the 125 MHz clock, pad PL42A");
+        assert_eq!(boundary_pad_names("LFG672")[&533], "PR31A (ball R8)");
         assert_eq!(pins[OSC_PIN], (137, 0, 0));
     }
 

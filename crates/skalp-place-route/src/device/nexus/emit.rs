@@ -810,13 +810,14 @@ fn emit_multiplier(
 
 /// Bank voltage a standard runs at.
 fn bank_voltage(standard: &str) -> Result<&'static str> {
-    let voltage = standard.trim_start_matches(|c: char| c.is_alphabetic());
+    let voltage = standard.trim_matches(|c: char| c.is_alphabetic());
     match voltage {
         "33" => Ok("3V3"),
         "25" => Ok("2V5"),
         "18" => Ok("1V8"),
         "15" => Ok("1V5"),
         "12" => Ok("1V2"),
+        "10" => Ok("1V0"),
         _ => Err(emit_err(format!("Unknown IO standard '{standard}'"))),
     }
 }
@@ -838,6 +839,12 @@ fn emit_pad(
         .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
         .cloned()
         .ok_or_else(|| emit_err(format!("Pad '{}' has no IO tile", cell.path)))?;
+    if tile.tiletype.ends_with("_C") {
+        return Err(emit_err(format!(
+            "Pad '{}' is on a {} site, whose settings are not known to work on this device yet",
+            cell.path, tile.tiletype
+        )));
+    }
     let bank = tile
         .tiletype
         .strip_prefix("SYSIO_B")
@@ -845,38 +852,58 @@ fn emit_pad(
         .ok_or_else(|| emit_err(format!("Unrecognized IO tile {}", tile.tiletype)))?;
     let side = ['A', 'B'][bel_index];
     let is_output = cell.function == Some(CellFunction::OutputPad);
+    let high_performance = super::sites::is_high_performance_io(&tile.tiletype);
     let standard = cell
         .parameters
         .get("IO_STANDARD")
         .map(String::as_str)
-        .unwrap_or("LVCMOS33");
+        .unwrap_or(if high_performance {
+            "LVCMOS18H"
+        } else {
+            "LVCMOS33"
+        });
     let direction = if is_output { "OUTPUT" } else { "INPUT" };
-    let prefix = format!("PIO{side}");
+    let voltage = bank_voltage(standard)?;
+    // In a high-performance bank the B pad's settings sit in the next tile.
+    let (settings_tile, prefix) = if high_performance {
+        let column = if side == 'A' { x } else { x + 1 };
+        let tile = config
+            .device
+            .prjoxide_tile(column, y, |t| t.starts_with("SYSIO_B"))
+            .cloned()
+            .ok_or_else(|| emit_err(format!("Pad '{}' has no settings tile", cell.path)))?;
+        (tile, format!("PIO{side}.SEIO18"))
+    } else {
+        (tile, format!("PIO{side}"))
+    };
     config.set_enum(
-        &tile,
+        &settings_tile,
         &format!("{prefix}.BASE_TYPE"),
         &format!("{direction}_{standard}"),
     )?;
-    config.set_enum(&tile, &format!("{prefix}.PULLMODE"), "NONE")?;
-    config.set_enum(&tile, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
+    config.set_enum(&settings_tile, &format!("{prefix}.PULLMODE"), "NONE")?;
+    if !high_performance {
+        config.set_enum(&settings_tile, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
+    }
     if is_output {
-        let voltage = bank_voltage(standard)?;
-        config.set_enum(&tile, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
-        config.set_enum(&tile, &format!("{prefix}.SLEWRATE"), "MED")?;
-        config.set_enum(&tile, &format!("{prefix}.TMUX"), "INV")?;
+        config.set_enum(&settings_tile, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
+        config.set_enum(&settings_tile, &format!("{prefix}.SLEWRATE"), "MED")?;
+        config.set_enum(&settings_tile, &format!("PIO{side}.TMUX"), "INV")?;
     }
 
-    let bank_ref = format!("BANKREF{bank}");
-    let bank_tile = config
-        .device
-        .prjoxide_tile_of_type(&bank_ref)
-        .cloned()
-        .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
-    config.set_enum(
-        &bank_tile,
-        &format!("BANK{bank}.VCC"),
-        bank_voltage(standard)?,
-    )
+    // High-performance banks have no VCC setting to make.
+    if !high_performance {
+        let bank_ref = format!("BANKREF{bank}");
+        let bank_tile = config
+            .device
+            .prjoxide_tiles()
+            .iter()
+            .find(|t| t.tiletype.starts_with(&bank_ref))
+            .cloned()
+            .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
+        config.set_enum(&bank_tile, &format!("BANK{bank}.VCC"), voltage)?;
+    }
+    Ok(())
 }
 
 fn emit_oscillator(

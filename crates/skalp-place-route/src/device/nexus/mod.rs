@@ -70,6 +70,14 @@ pub enum NexusVariant {
 
 impl NexusVariant {
     /// Get the data record for this variant
+    /// The package whose pin names designs use, on boards SKALP knows.
+    pub fn default_package(&self) -> Option<&'static str> {
+        match self {
+            NexusVariant::Lfcpnx100 => Some("LFG672"),
+            _ => None,
+        }
+    }
+
     pub fn die_data(&self) -> &'static data::NexusDieData {
         match self {
             NexusVariant::Lifcl40 => &data::LIFCL_40,
@@ -351,13 +359,29 @@ impl NexusDevice {
                             bel_wires.insert((x, y, key), w);
                         }
                     };
+                    // A high-performance bank's A pad is its differential site;
+                    // CertusPro-NX suffixes these core names with A.
+                    let candidates: &[&str] =
+                        match (sites::is_high_performance_io(&t.tiletype), *side) {
+                            (false, _) => &["SEIO33"],
+                            (true, "A") => &["DIFFIO18A", "DIFFIO18"],
+                            (true, _) => &["SEIO18A", "SEIO18"],
+                        };
+                    let core = candidates
+                        .iter()
+                        .find(|core| {
+                            resolve_wire(x, y, &format!("JPADDO_{core}_CORE_IO{side}"))
+                                .is_some_and(|n| graph.wire_names.contains_key(&node_name(&n)))
+                        })
+                        .copied()
+                        .unwrap_or(candidates[0]);
                     wire_of(
                         format!("PIO{pio}_O"),
-                        format!("JPADDO_SEIO33_CORE_IO{side}"),
+                        format!("JPADDO_{core}_CORE_IO{side}"),
                     );
                     wire_of(
                         format!("PIO{pio}_I"),
-                        format!("JPADDI_SEIO33_CORE_IO{side}"),
+                        format!("JPADDI_{core}_CORE_IO{side}"),
                     );
                     bels.push(Bel {
                         id: BelId(bel_id_counter),
@@ -1881,6 +1905,10 @@ impl Device for NexusDevice {
     fn is_general_routing_wire(&self, wire: WireId) -> bool {
         self.wire(wire)
             .is_some_and(|w| is_general_wire_name(&w.name))
+    }
+
+    fn default_package(&self) -> Option<&str> {
+        self.variant.default_package()
     }
 
     fn dsp_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {

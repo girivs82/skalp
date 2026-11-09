@@ -231,8 +231,34 @@ pub fn load_tiletype(
     if family != "LFCPNX" {
         return Ok(own);
     }
-    let lifcl = parse_tiletype(db_root, "LIFCL", tiletype)?;
+    let mut lifcl = parse_tiletype(db_root, "LIFCL", tiletype)?;
+    if lifcl.is_none() && tiletype.starts_with("BANKREF") {
+        lifcl = load_bank_reference_variant(db_root, tiletype)?;
+    }
     Ok(fill_lfcpnx_gaps(own, lifcl, tiletype))
+}
+
+/// CrossLink-NX bank reference tiles carry a suffix (such as `BANKREF7_RBB_2`)
+/// that CertusPro-NX's do not; the bank settings are the same.
+fn load_bank_reference_variant(
+    db_root: &Path,
+    tiletype: &str,
+) -> Result<Option<TileBitsDb>, String> {
+    let directory = db_root.join("LIFCL").join("tiletypes");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Ok(None);
+    };
+    let prefix = format!("{tiletype}_");
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter_map(|name| name.strip_suffix(".ron").map(String::from))
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    names.sort_unstable();
+    match names.first() {
+        Some(name) => parse_tiletype(db_root, "LIFCL", name),
+        None => Ok(None),
+    }
 }
 
 /// Complete a CertusPro-NX tile description from CrossLink-NX.
@@ -262,9 +288,9 @@ fn fill_lfcpnx_gaps(
         }
     }
 
-    let is_shared_io = tiletype.starts_with("SYSIO_B")
-        && (tiletype.ends_with("_0_EVEN") || tiletype.ends_with("_0_ODD"))
-        && ['0', '1', '2', '6', '7'].contains(&tiletype.as_bytes()[7].into());
+    // CertusPro-NX's IO tiles have routing but no settings; the banks match
+    // CrossLink-NX's, whose settings were confirmed on silicon.
+    let is_shared_io = tiletype.starts_with("SYSIO_B");
     if is_shared_io && own.enums.is_empty() && own.words.is_empty() {
         own.enums = lifcl.enums;
         own.words = lifcl.words;

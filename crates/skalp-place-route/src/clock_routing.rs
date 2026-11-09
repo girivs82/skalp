@@ -21,6 +21,8 @@ pub struct ClockRouting {
     pub routes: Vec<Route>,
     /// Every wire the routes use
     pub claimed: HashSet<WireId>,
+    /// Clock nets left to general routing: their source has no dedicated path
+    pub general: HashSet<GateNetId>,
 }
 
 fn clock_pin_wire<D: Device + ?Sized>(
@@ -115,6 +117,7 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         let mut route = Route::new(net.id);
         route.source = source;
         let mut tree = HashSet::from([source]);
+        let mut dedicated = true;
         for (cell, pin) in clock_pins {
             let sink =
                 clock_pin_wire(device, placement, cell, CellPin::Input(pin)).ok_or_else(|| {
@@ -127,13 +130,10 @@ pub fn route_clock_nets<D: Device + ?Sized>(
             if tree.contains(&sink) {
                 continue;
             }
-            let path = find_path(device, sink, &tree, &owners).ok_or_else(|| {
-                PlaceRouteError::RoutingFailed(format!(
-                    "Clock net '{}' has no dedicated path to {}",
-                    net.name,
-                    device.wire(sink).map_or("a clock pin", |w| w.name.as_str())
-                ))
-            })?;
+            let Some(path) = find_path(device, sink, &tree, &owners) else {
+                dedicated = false;
+                break;
+            };
             for pip_id in path {
                 let Some(pip) = device.pip(pip_id) else {
                     continue;
@@ -143,6 +143,14 @@ pub fn route_clock_nets<D: Device + ?Sized>(
                 route.wires.push(pip.dst_wire);
                 tree.insert(pip.dst_wire);
             }
+        }
+        if !dedicated {
+            eprintln!(
+                "warning: clock net '{}' has no dedicated path from its source, so it uses general routing and may have high skew",
+                net.name
+            );
+            routing.general.insert(net.id);
+            continue;
         }
         route.wires.push(source);
         for &wire in &tree {

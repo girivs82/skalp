@@ -278,9 +278,10 @@ pub fn place_pads(
     placement: &mut PlacementResult,
 ) -> Result<()> {
     let packages = device.packages();
-    let pins = packages
-        .values()
-        .next()
+    let pins = device
+        .default_package()
+        .and_then(|name| packages.get(name))
+        .or_else(|| packages.values().next())
         .map(|p| &p.pins)
         .ok_or_else(|| emit_err("No package pin data for this device".to_string()))?;
 
@@ -301,6 +302,15 @@ pub fn place_pads(
                 known.join(", ")
             ))
         })?;
+        let pad_wire = device
+            .bel_pin_wire(x, y, bel as usize, crate::device::CellPin::Input(0))
+            .or_else(|| device.bel_pin_wire(x, y, bel as usize, crate::device::CellPin::Output(0)));
+        if pad_wire.is_none() {
+            return Err(emit_err(format!(
+                "Pin '{loc}' on '{}' is on an IO site with no device data",
+                cell.path
+            )));
+        }
         placement.placements.insert(
             cell.id,
             crate::placer::PlacementLoc::new(x, y, bel as usize, BelType::IoCell),

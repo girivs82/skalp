@@ -542,7 +542,13 @@ pub fn place_and_route_nexus_real(
         .cells
         .iter()
         .filter_map(|c| c.parameters.get("LOC"))
-        .filter_map(|loc| packages.values().find_map(|p| p.pins.get(loc)))
+        .filter_map(|loc| {
+            let package = variant
+                .default_package()
+                .and_then(|name| packages.get(name))
+                .or_else(|| packages.values().next())?;
+            package.pins.get(loc)
+        })
         .map(|&(x, y, _)| (x, y))
         .collect();
     let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
@@ -588,8 +594,10 @@ pub fn place_and_route_nexus_real(
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
-        net.fanout
-            .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+        if !clock_routes.general.contains(&net.id) {
+            net.fanout
+                .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+        }
     }
     let router_device = device.without_wires(&clock_routes.claimed);
     let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {

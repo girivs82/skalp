@@ -714,6 +714,11 @@ pub trait Device: Send + Sync {
         false
     }
 
+    /// The package whose pin names a design's constraints use, if the device has several.
+    fn default_package(&self) -> Option<&str> {
+        None
+    }
+
     /// Router pin a multiplier input connects to, or `None` if it has no pin.
     fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
         None
