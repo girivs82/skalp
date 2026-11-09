@@ -1,0 +1,35 @@
+// Block RAM read registers with a reset and with a synchronous clear.
+entity RamReset {
+    in clk: clock
+    in rst: reset
+    in clear: bit
+    in we: bit
+    in addr: bit[9]
+    in wdata: bit[8]
+    out q: bit[8]
+    out p: bit[8]
+}
+impl RamReset {
+    signal mem_a: bit[8][512]
+    signal mem_b: bit[8][512]
+    signal q_reg: bit[8] = 0
+    signal p_reg: bit[8] = 0
+    on(clk.rise) {
+        if we == 1 {
+            mem_a[addr] = wdata
+            mem_b[addr] = wdata
+        }
+        if rst {
+            q_reg = 0
+        } else {
+            q_reg = mem_a[addr]
+        }
+        if clear == 1 {
+            p_reg = 8'd165
+        } else {
+            p_reg = mem_b[addr]
+        }
+    }
+    q = q_reg
+    p = p_reg
+}

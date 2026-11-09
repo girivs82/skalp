@@ -353,3 +353,46 @@ async fn test_repeated_assignment_gate_level() {
     .unwrap();
     check_repeated_assignment(tb).await;
 }
+
+#[tokio::test]
+async fn test_block_ram_read_registers_reset_and_clear() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nexus_blockram_reset.sk"),
+        "RamReset",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    tb.set("rst", 0u8);
+    tb.set("clear", 0u8);
+    tb.set("addr", 7u16);
+    tb.set("wdata", 42u8);
+    tb.set("we", 1u8);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 42, "q reads the stored word");
+    assert_eq!(tb.get_u64("p").await, 42, "p reads the stored word");
+
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("p").await, 165, "clear loads its value");
+    assert_eq!(tb.get_u64("q").await, 42, "clear only affects p");
+    tb.set("clear", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("p").await, 42, "p reads the RAM again");
+
+    tb.set("rst", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 0, "reset clears q");
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 42, "q reads the RAM after reset");
+}
+
+#[test]
+fn test_block_ram_read_register_with_reset_uses_block_ram() {
+    let net = synthesize("nexus_blockram_reset.sk", "nexus");
+    let rams = net.cells.iter().filter(|c| c.ram_ports().is_some()).count();
+    assert_eq!(rams, 2, "both memories should use block RAM");
+}

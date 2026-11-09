@@ -1063,12 +1063,28 @@ fn map_dsp_standalone(
 /// Smallest memory, in bits, worth a block RAM.
 const BRAM_MIN_BITS: u32 = 256;
 
+/// How a read register merged into a block RAM takes in new data.
+enum ReadCapture {
+    /// Every clock
+    Always,
+    /// Only while `enable` is true; otherwise it holds
+    Hold { enable: EnableSignal },
+    /// Every clock, but reads as `value` when `clear` is true
+    Clear { clear: EnableSignal, value: u64 },
+}
+
+/// A control signal and whether it is active low.
+#[derive(Clone, Copy)]
+struct EnableSignal {
+    signal: LirSignalId,
+    active_low: bool,
+}
+
 /// A register merged into a block RAM.
 struct ReadRegister {
     register: usize,
-    hold_mux: Option<usize>,
-    /// The select that enables the register, and whether it is active low
-    enable: Option<(LirSignalId, bool)>,
+    d_mux: Option<usize>,
+    capture: ReadCapture,
 }
 
 /// The register a memory's read data goes straight into, if it goes nowhere else.
@@ -1084,8 +1100,7 @@ fn find_read_register(
         Some([reader]) if !is_output(s) => Some(*reader),
         _ => None,
     };
-    // A set/reset value on the register has no equivalent in the RAM's output.
-    let is_plain_register = |index: usize, d: LirSignalId| {
+    let is_register = |index: usize, d: LirSignalId| {
         let node = &lir.nodes[index];
         matches!(
             node.op,
@@ -1094,16 +1109,22 @@ fn find_read_register(
                 ..
             }
         ) && node.clock == clock
-            && node.reset.is_none()
             && node.inputs.first() == Some(&d)
+    };
+    let constant = |s: LirSignalId| {
+        let driver = lir.signals[s.0 as usize].driver?;
+        match lir.nodes[driver.0 as usize].op {
+            LirOp::Constant { value, .. } => Some(value),
+            _ => None,
+        }
     };
 
     let reader = only_reader(rdata)?;
-    if is_plain_register(reader, rdata) {
+    if is_register(reader, rdata) {
         return Some(ReadRegister {
             register: reader,
-            hold_mux: None,
-            enable: None,
+            d_mux: None,
+            capture: ReadCapture::Always,
         });
     }
     let mux = &lir.nodes[reader];
@@ -1114,20 +1135,183 @@ fn find_read_register(
         return None;
     };
     let register = only_reader(mux.output)?;
-    if !is_plain_register(register, mux.output) {
+    if !is_register(register, mux.output) {
         return None;
     }
     let q = lir.nodes[register].output;
-    let active_low = match (d0 == q, d1 == q) {
-        (true, false) if d1 == rdata => false,
-        (false, true) if d0 == rdata => true,
+    // Which select value picks the read data, and what the other input is.
+    let (other, rdata_when_low) = match (d0 == rdata, d1 == rdata) {
+        (false, true) => (d0, false),
+        (true, false) => (d1, true),
         _ => return None,
+    };
+    let capture = if other == q {
+        ReadCapture::Hold {
+            enable: EnableSignal {
+                signal: select,
+                active_low: rdata_when_low,
+            },
+        }
+    } else {
+        ReadCapture::Clear {
+            clear: EnableSignal {
+                signal: select,
+                active_low: !rdata_when_low,
+            },
+            value: constant(other)?,
+        }
     };
     Some(ReadRegister {
         register,
-        hold_mux: Some(reader),
-        enable: Some((select, active_low)),
+        d_mux: Some(reader),
+        capture,
     })
+}
+
+/// Emit a control signal as active high.
+fn active_high(lir: &mut Lir, control: EnableSignal, name: &str) -> LirSignalId {
+    if !control.active_low {
+        return control.signal;
+    }
+    let inverted = lir.add_signal(name.to_string(), 1);
+    lir.add_node(
+        LirOp::Not { width: 1 },
+        vec![control.signal],
+        inverted,
+        format!("{name}.not"),
+    );
+    inverted
+}
+
+/// A register recording that the last clock loaded the read register from the RAM.
+fn add_loaded_flag(
+    lir: &mut Lir,
+    next: LirSignalId,
+    flag: LirSignalId,
+    register: &crate::lir::LirNode,
+    with_reset: bool,
+    name: &str,
+) {
+    let async_reset = matches!(
+        register.op,
+        LirOp::Reg {
+            async_reset: true,
+            ..
+        }
+    );
+    lir.add_seq_node(
+        LirOp::Reg {
+            width: 1,
+            has_enable: false,
+            has_reset: with_reset,
+            async_reset,
+            reset_value: Some(0),
+        },
+        vec![next],
+        flag,
+        name.to_string(),
+        register.clock.expect("a read register has a clock"),
+        register.reset.filter(|_| with_reset),
+    );
+}
+
+/// `output = loaded ? data : value`.
+fn add_fixed_value_mux(
+    lir: &mut Lir,
+    loaded: LirSignalId,
+    data: LirSignalId,
+    value: u64,
+    output: LirSignalId,
+    name: &str,
+) {
+    let width = lir.signals[data.0 as usize].width;
+    let fixed = lir.add_signal(format!("{name}_fixed"), width);
+    lir.add_node(
+        LirOp::Constant { width, value },
+        Vec::new(),
+        fixed,
+        format!("{name}.fixed"),
+    );
+    lir.add_node(
+        LirOp::Mux2 { width },
+        vec![loaded, fixed, data],
+        output,
+        format!("{name}.value"),
+    );
+}
+
+/// Make a merged read register's reset and clear values appear on its output.
+///
+/// A block RAM's output has no general set or clear, so a flag records whether
+/// the last clock loaded the register from the RAM, and the output is the fixed
+/// value until it did. `q` then behaves just as the register would have.
+fn add_read_value_overrides(
+    lir: &mut Lir,
+    rdata: LirSignalId,
+    q: LirSignalId,
+    capture: &ReadCapture,
+    register: &crate::lir::LirNode,
+    reset_value: Option<u64>,
+    path: &str,
+) {
+    let width = lir.signals[rdata.0 as usize].width;
+    let mut data = rdata;
+
+    if let ReadCapture::Clear { clear, value } = capture {
+        let name = format!("{path}_read_clear");
+        let flag = lir.add_signal(format!("{name}_loaded"), 1);
+        let not_clear = active_high(
+            lir,
+            EnableSignal {
+                signal: clear.signal,
+                active_low: !clear.active_low,
+            },
+            &format!("{name}_inactive"),
+        );
+        add_loaded_flag(
+            lir,
+            not_clear,
+            flag,
+            register,
+            false,
+            &format!("{name}.loaded"),
+        );
+        let output = if reset_value.is_some() {
+            lir.add_signal(format!("{name}_data"), width)
+        } else {
+            q
+        };
+        add_fixed_value_mux(lir, flag, data, *value, output, &name);
+        data = output;
+    }
+
+    if let Some(value) = reset_value {
+        let name = format!("{path}_read_reset");
+        let flag = lir.add_signal(format!("{name}_loaded"), 1);
+        let one = lir.add_signal(format!("{name}_one"), 1);
+        lir.add_node(
+            LirOp::Constant { width: 1, value: 1 },
+            Vec::new(),
+            one,
+            format!("{name}.one"),
+        );
+        let next = match capture {
+            ReadCapture::Hold { enable } => {
+                let enable = active_high(lir, *enable, &format!("{name}_enable"));
+                let held = lir.add_signal(format!("{name}_loaded_d"), 1);
+                lir.add_node(
+                    LirOp::Mux2 { width: 1 },
+                    vec![enable, flag, one],
+                    held,
+                    format!("{name}.loaded_d"),
+                );
+                held
+            }
+            _ => one,
+        };
+        add_loaded_flag(lir, next, flag, register, true, &format!("{name}.loaded"));
+        add_fixed_value_mux(lir, flag, data, value, q, &name);
+    }
 }
 
 /// Merge each block RAM's read register into the RAM.
@@ -1174,23 +1358,53 @@ fn absorb_block_ram_read_registers(lir: &Lir, library: &TechLibrary) -> Option<L
             let node = &lir.nodes[memory];
             (node.output, node.clock, node.path.clone())
         };
-        let found = find_read_register(lir, &readers, rdata, clock);
-        let enable = found.as_ref().and_then(|f| f.enable).map(|(select, low)| {
-            if !low {
-                return select;
-            }
-            let inverted = result.add_signal(format!("{path}_read_enable"), 1);
-            result.add_node(
-                LirOp::Not { width: 1 },
-                vec![select],
-                inverted,
-                format!("{path}.read_enable"),
+        let Some(found) = find_read_register(lir, &readers, rdata, clock) else {
+            eprintln!(
+                "warning: memory read at '{path}' feeds logic directly, so it uses LUT RAM or registers instead of block RAM"
             );
-            inverted
-        });
+            if let LirOp::MemBlock { async_read, .. } = &mut result.nodes[memory].op {
+                *async_read = true;
+            }
+            continue;
+        };
+        let register = lir.nodes[found.register].clone();
+        let q = register.output;
+
+        let reset_value = match register.op {
+            LirOp::Reg {
+                has_reset: true,
+                reset_value,
+                ..
+            } => Some(reset_value.unwrap_or(0)),
+            _ => None,
+        };
+        let has_override =
+            reset_value.is_some() || matches!(found.capture, ReadCapture::Clear { .. });
+
+        // A Hold enable goes to the RAM's clock enable. A clear does not stop the
+        // RAM capturing, since the design's register would load either way.
+        let enable = match &found.capture {
+            ReadCapture::Hold { enable } => Some(active_high(
+                &mut result,
+                *enable,
+                &format!("{path}_read_enable_ram"),
+            )),
+            _ => None,
+        };
+        if has_override {
+            add_read_value_overrides(
+                &mut result,
+                rdata,
+                q,
+                &found.capture,
+                &register,
+                reset_value,
+                &path,
+            );
+        }
+
         let node = &mut result.nodes[memory];
         let LirOp::MemBlock {
-            async_read,
             registered_read,
             read_enable,
             ..
@@ -1198,19 +1412,14 @@ fn absorb_block_ram_read_registers(lir: &Lir, library: &TechLibrary) -> Option<L
         else {
             continue;
         };
-        let Some(found) = found else {
-            eprintln!(
-                "warning: memory read at '{path}' feeds logic directly, so it uses LUT RAM or registers instead of block RAM"
-            );
-            *async_read = true;
-            continue;
-        };
         *registered_read = true;
         *read_enable = enable.is_some();
-        node.output = lir.nodes[found.register].output;
+        if !has_override {
+            node.output = q;
+        }
         node.inputs.extend(enable);
         removed.insert(found.register);
-        removed.extend(found.hold_mux);
+        removed.extend(found.d_mux);
     }
 
     let mut index = 0;
