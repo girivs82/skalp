@@ -978,7 +978,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             if keep[j] {
                 let parent = order[j]
                     .0
-                    .and_then(|p| pip_ends(p))
+                    .and_then(&pip_ends)
                     .and_then(|(src, _)| index.get(&src).copied());
                 if let Some(pj) = parent {
                     keep[pj] = true;
