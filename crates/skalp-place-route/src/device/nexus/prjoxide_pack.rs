@@ -23,7 +23,7 @@ use std::path::Path;
 /// Pack a set of configuration bits into a programmable Nexus bitstream.
 ///
 /// `db_root` is the prjoxide database root (with `devices.json`); `idcode`
-/// selects the device (e.g. `0x010F_1043` for LFCPNX-100). `bits` are the global
+/// selects the device (e.g. `0x010F_4043` for LFCPNX-100). `bits` are the global
 /// config bits to assert — typically gathered from used PIPs' `pip_bits` and BEL
 /// config words. A `ConfigBit` with `invert = true` is stored as `0` when asserted
 /// (prjoxide convention: the cram value is `!invert`).

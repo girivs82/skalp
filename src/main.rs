@@ -285,7 +285,7 @@ enum Commands {
         #[arg(required_unless_present_any = ["list", "reset_only"])]
         bitstream: Option<PathBuf>,
 
-        /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto)
+        /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, certuspro-versa, auto)
         #[arg(short, long, default_value = "auto")]
         board: String,
 
@@ -4435,6 +4435,46 @@ fn run_pnr_on_netlist(
     Ok(())
 }
 
+/// Load a bitstream into the SRAM of a Lattice CertusPro-NX Versa board over JTAG
+fn program_nexus_board(bitstream: Option<&PathBuf>, reset_only: bool) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::{NexusJtagProgrammer, LFCPNX_100_IDCODE};
+
+    if reset_only {
+        anyhow::bail!("--reset-only is not supported for Nexus boards");
+    }
+    let bitstream = bitstream.ok_or_else(|| anyhow::anyhow!("Bitstream file is required"))?;
+    let data = std::fs::read(bitstream)
+        .map_err(|e| anyhow::anyhow!("Cannot read bitstream {:?}: {}", bitstream, e))?;
+
+    let mut programmer = NexusJtagProgrammer::open()
+        .map_err(|e| anyhow::anyhow!("Cannot open programmer: {}", e))?;
+    let idcode = programmer
+        .read_idcode()
+        .map_err(|e| anyhow::anyhow!("Cannot read IDCODE: {}", e))?;
+    if idcode != LFCPNX_100_IDCODE {
+        anyhow::bail!(
+            "Expected an LFCPNX-100 (IDCODE 0x{:08x}) but the JTAG chain reports 0x{:08x}",
+            LFCPNX_100_IDCODE,
+            idcode
+        );
+    }
+    println!("🔌 LFCPNX-100 found (IDCODE 0x{:08x})", idcode);
+    println!("📤 Loading {:?} into SRAM...", bitstream);
+
+    let result = programmer.program(&data).map_err(|e| {
+        let state = programmer
+            .read_status()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|e| format!("unreadable ({})", e));
+        anyhow::anyhow!("Programming failed: {}\nDevice status now: {}", e, state)
+    })?;
+    println!(
+        "   ✓ Configured: {} bytes in {} ms, status {}",
+        result.bytes, result.time_ms, result.status
+    );
+    Ok(())
+}
+
 /// Program FPGA device
 fn program_device(
     bitstream: Option<&PathBuf>,
@@ -4443,6 +4483,14 @@ fn program_device(
     list: bool,
 ) -> Result<()> {
     use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
+
+    if matches!(
+        board.to_lowercase().as_str(),
+        "certuspro-versa" | "lfcpnx-versa"
+    ) && !list
+    {
+        return program_nexus_board(bitstream, reset_only);
+    }
 
     // List mode: just show detected boards (doesn't need board selection)
     if list {

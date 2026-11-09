@@ -69,7 +69,7 @@ pub const LIFCL_40: NexusDieData = NexusDieData {
     plls: 3, // GPLL_ULC, GPLL_LLC, GPLL_LRC
     global_clocks: 16,
     pcs_channels: 0,
-    idcode: 0x0111_0043,
+    idcode: 0x110F_1043,
     bitstream_frames: 9172,
     bits_per_frame: 662,
     packages: &["QFN72", "csfBGA289", "caBGA400"],
@@ -89,7 +89,7 @@ pub const LFCPNX_100: NexusDieData = NexusDieData {
     plls: 4,           // GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
     global_clocks: 26, // 13 branches × 2 spines
     pcs_channels: 8,
-    idcode: 0x010F_1043,
+    idcode: 0x010F_4043,
     bitstream_frames: 16822,
     bits_per_frame: 878,
     packages: &["ASG256", "CBG256", "BBG484", "BFG484", "LFG672"],

@@ -1,6 +1,7 @@
-//! FPGA Programmer for iCE40 devices
+//! FPGA programmers: iCE40 over SPI and Lattice Nexus over JTAG
 //!
-//! Native Rust implementation of iCE40 SPI programming, compatible with:
+//! Nexus devices are handled by [`nexus_jtag`]. iCE40 SPI programming is
+//! compatible with:
 //! - iCEBreaker (FT2232H)
 //! - Lattice iCE40-HX8K Breakout (FT2232H)
 //! - Other FTDI-based iCE40 programmers
@@ -18,6 +19,8 @@
 mod ftdi;
 #[cfg(feature = "programmer")]
 mod ice40_spi;
+#[cfg(feature = "programmer")]
+pub mod nexus_jtag;
 
 #[cfg(feature = "programmer")]
 pub use ftdi::FtdiDevice;
