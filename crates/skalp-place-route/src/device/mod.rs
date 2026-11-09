@@ -259,6 +259,9 @@ pub const FF_PIN_CLK: usize = 100;
 pub const FF_PIN_CE: usize = 101;
 /// Router pin number of a flip-flop's set/reset.
 pub const FF_PIN_LSR: usize = 102;
+/// First router pin number of a distributed RAM's read address connections:
+/// read-address bit `r` reaches LUT `j` of the RAM at `base + 4 * r + j`.
+pub const DIST_RAM_PIN_RAD: usize = 200;
 
 /// [`Device::bel_pin_wire`] for a Lattice logic tile (Nexus, ECP5) whose
 /// BEL pin wires are named by LUT and FF number: `LUT{n}_A..D`,

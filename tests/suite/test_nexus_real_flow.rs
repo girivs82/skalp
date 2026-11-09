@@ -9,9 +9,9 @@ use skalp_place_route::{NexusVariant, PnrConfig};
 
 const LFCPNX_100_IDCODE: [u8; 4] = [0x01, 0x0F, 0x40, 0x43];
 
-fn blinker_netlist() -> GateNetlist {
+fn netlist_with_pads(fixture: &str, top_name: &str) -> GateNetlist {
     let path = std::path::PathBuf::from(format!(
-        "{}/tests/fixtures/nexus_blinker.sk",
+        "{}/tests/fixtures/{fixture}",
         env!("CARGO_MANIFEST_DIR")
     ));
     let ctx = skalp_frontend::parse_and_build_compilation_context(&path).unwrap();
@@ -25,7 +25,7 @@ fn blinker_netlist() -> GateNetlist {
         skalp_lir::synthesize_hierarchical(&hier, &library, skalp_lir::synth::SynthPreset::Quick)
             .flatten();
 
-    let top = mir.modules.iter().find(|m| m.name == "Blinker").unwrap();
+    let top = mir.modules.iter().find(|m| m.name == top_name).unwrap();
     let constraints: indexmap::IndexMap<_, _> = top
         .ports
         .iter()
@@ -42,7 +42,7 @@ fn blinker_builds_a_bitstream_for_the_real_device() {
         return;
     };
 
-    let netlist = blinker_netlist();
+    let netlist = netlist_with_pads("nexus_blinker.sk", "Blinker");
     let result = skalp_place_route::pnr::place_and_route_nexus_real(
         &netlist,
         NexusVariant::Lfcpnx100,
@@ -59,4 +59,30 @@ fn blinker_builds_a_bitstream_for_the_real_device() {
         .windows(8)
         .any(|w| w[..4] == [0xE2, 0, 0, 0] && w[4..] == LFCPNX_100_IDCODE);
     assert!(verify_id, "bitstream should target the LFCPNX-100");
+}
+
+#[test]
+fn distributed_ram_places_and_routes_on_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("prjoxide database not found; skipping");
+        return;
+    };
+
+    let netlist = netlist_with_pads("nexus_distram.sk", "RamBlink");
+    assert!(
+        netlist
+            .cells
+            .iter()
+            .any(|c| c.function == Some(skalp_lir::CellFunction::DistRam16x4)),
+        "the design should use distributed RAM"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the RAM design should place and route");
+    assert!(result.routing.success);
+    assert_eq!(result.routing.unrouted_connections, 0);
 }

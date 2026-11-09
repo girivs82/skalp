@@ -4,7 +4,7 @@
 //! bitstream emitters need, handling the connections with no routing (constants
 //! and dedicated carry paths) and fixing IO cells on their assigned sites.
 
-use crate::device::{BelType, Device, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR};
+use crate::device::{BelType, Device, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
@@ -108,6 +108,14 @@ pub fn prepare_for_routing(netlist: &GateNetlist) -> (GateNetlist, TiedInputs) {
                 continue;
             }
             if is_carry(cell) && index == 8 {
+                continue;
+            }
+            if cell.function == Some(CellFunction::DistRam16x4) && (9..=12).contains(&index) {
+                // Each read address bit feeds all four storage LUTs.
+                for lut in 0..4 {
+                    let pin = DIST_RAM_PIN_RAD + 4 * (index - 9) + lut;
+                    connect(&mut prepared.nets, net, cell.id, pin);
+                }
                 continue;
             }
             let pin = if is_flip_flop(cell) {

@@ -371,6 +371,15 @@ fn emit_bits(
                 let uses_reset = cell.reset.is_some() || cell.cell_type.contains("RST");
                 slices_with_ff.insert((x, y, slice, uses_reset));
             }
+            BelType::DistRam => {
+                if (0..cell.inputs.len()).any(|i| tied.value(cell.id, i).is_some()) {
+                    return Err(emit_err(format!(
+                        "Distributed RAM '{}' has a constant input, which is not supported yet",
+                        cell.path
+                    )));
+                }
+                emit_dist_ram(&mut config, &tile, cell)?;
+            }
             BelType::Lut4 => {
                 let slice = slice_of(number);
                 let lut = number % 2;
@@ -395,6 +404,31 @@ fn emit_bits(
     }
 
     Ok(config.bits)
+}
+
+/// Configure a logic tile's slices A and B as RAM storage and C as its write port.
+fn emit_dist_ram(config: &mut ConfigDb<'_>, tile: &PrjoxideTile, cell: &Cell) -> Result<()> {
+    let init = cell
+        .parameters
+        .get("INITVAL")
+        .map(|v| {
+            u64::from_str_radix(v.trim_start_matches("0x"), 16)
+                .map_err(|_| emit_err(format!("Bad INITVAL on '{}': {v}", cell.path)))
+        })
+        .transpose()?
+        .unwrap_or(0);
+
+    for (index, (slice, lut)) in [('A', 0), ('A', 1), ('B', 0), ('B', 1)].iter().enumerate() {
+        // INITVAL holds 4-bit words; each LUT stores one bit of every word.
+        let contents = (0..16).fold(0u64, |word, entry| {
+            word | (((init >> (4 * entry + index)) & 1) << entry)
+        });
+        config.set_enum(tile, &format!("SLICE{slice}.MODE"), "DPRAM")?;
+        config.set_word(tile, &format!("SLICE{slice}.K{lut}.INIT"), contents)?;
+    }
+    config.set_enum(tile, "SLICEC.MODE", "RAMW")?;
+    config.set_enum(tile, "SLICEC.CLKMUX", "CLK")?;
+    config.set_enum(tile, "SLICEC.LSRMUX", "LSR")
 }
 
 /// Bank voltage a standard runs at.

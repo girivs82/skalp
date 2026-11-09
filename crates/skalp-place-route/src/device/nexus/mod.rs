@@ -289,6 +289,13 @@ impl NexusDevice {
                     });
                     bel_id_counter += 1;
                 }
+                for (key, site_wire) in prjoxide_bels::dist_ram_wires() {
+                    if let Some(w) = resolve_wire(x, y, &site_wire)
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                    {
+                        bel_wires.insert((x, y, key), w);
+                    }
+                }
                 // Coarse per-tile clock wire for Device::clock_wire.
                 if let Some(w) = resolve_wire(x, y, prjoxide_bels::plc_clock_site_wire())
                     .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
@@ -1683,25 +1690,36 @@ impl Device for NexusDevice {
 
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
         // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
-        // slice C); each of those LUTs, when used, blocks the RAM site.
+        // slice C); each of those LUTs, when used, blocks the RAM site. On real
+        // silicon slices C and D share clock and set/reset settings, and those
+        // carry the RAM's write port, so both slices' flip-flops are taken too.
         const RAM_LUTS: usize = 6;
+        const RAMW_FFS: std::ops::Range<usize> = 4..8;
         let Some(tile) = self.tile_at(x, y) else {
             return Vec::new();
         };
         let bels = tile.bels();
-        let luts: Vec<usize> = bels
+        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
+            return Vec::new();
+        };
+        let mut footprint: Vec<usize> = bels
             .iter()
             .enumerate()
             .filter(|(_, b)| b.bel_type == BelType::Lut4)
             .map(|(i, _)| i)
             .take(RAM_LUTS)
             .collect();
-        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
-            return Vec::new();
-        };
+        if !self.prjoxide_tiles.is_empty() {
+            let ffs = bels
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.bel_type.is_ff())
+                .map(|(i, _)| i);
+            footprint.extend(ffs.skip(RAMW_FFS.start).take(RAMW_FFS.len()));
+        }
         match bels.get(bel_index).map(|b| b.bel_type) {
-            Some(BelType::DistRam) => luts,
-            Some(BelType::Lut4) if luts.contains(&bel_index) => vec![ram],
+            Some(BelType::DistRam) => footprint,
+            Some(_) if footprint.contains(&bel_index) => vec![ram],
             _ => Vec::new(),
         }
     }
@@ -1730,6 +1748,26 @@ impl Device for NexusDevice {
                 .bel_wires
                 .get(&(x, y, format!("PIO{bel_index}_{suffix}")))
                 .copied();
+        }
+        let is_real_dist_ram = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::DistRam);
+        if is_real_dist_ram {
+            let key = match pin {
+                CellPin::Output(o) => format!("DPR_DO{o}"),
+                CellPin::Input(i @ 0..=3) => format!("DPR_DI{i}"),
+                CellPin::Input(i @ 4..=7) => format!("DPR_WAD{}", i - 4),
+                CellPin::Input(8) => "DPR_WRE".to_string(),
+                CellPin::Input(crate::device::FF_PIN_CLK) => "DPR_WCK".to_string(),
+                CellPin::Input(i) if i >= crate::device::DIST_RAM_PIN_RAD => {
+                    let n = i - crate::device::DIST_RAM_PIN_RAD;
+                    format!("DPR_RAD{}_{}", n / 4, n % 4)
+                }
+                CellPin::Input(_) => return None,
+            };
+            return self.bel_wires.get(&(x, y, key)).copied();
         }
         crate::device::lattice_logic_pin_wire(self, x, y, bel_index, pin, "Z", |name| {
             self.bel_wires.get(&(x, y, name)).copied()
