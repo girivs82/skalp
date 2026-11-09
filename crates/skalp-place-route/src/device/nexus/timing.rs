@@ -420,7 +420,6 @@ pub fn analyze(
         meets_timing: failing_paths == 0,
         clock_summaries,
         critical_paths: paths,
-        ..Default::default()
     }
 }
 
