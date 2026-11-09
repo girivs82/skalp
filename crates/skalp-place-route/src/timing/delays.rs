@@ -238,7 +238,10 @@ impl DelayModel {
             self.lut4_delay
         } else if cell_type.contains("DFF") || cell_type.starts_with("SB_DFF") {
             self.dff_clk_to_q
-        } else if cell_type.contains("CARRY") || cell_type.starts_with("SB_CARRY") {
+        } else if cell_type.contains("CARRY")
+            || cell_type.starts_with("SB_CARRY")
+            || cell_type.starts_with("CCU2")
+        {
             self.carry_delay
         } else if cell_type.contains("IO") || cell_type.starts_with("SB_IO") {
             self.io_input_delay // Conservative estimate

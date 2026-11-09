@@ -491,6 +491,18 @@ impl Default for BramSwapper {
     }
 }
 
+/// The cell with id `id`. Cell ids are indices into `netlist.cells`, so this is
+/// O(1); a netlist whose ids drifted from their positions falls back to a scan.
+pub fn find_cell(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    id: skalp_lir::gate_netlist::CellId,
+) -> Option<&skalp_lir::gate_netlist::Cell> {
+    match netlist.cells.get(id.0 as usize) {
+        Some(cell) if cell.id == id => Some(cell),
+        _ => netlist.cells.iter().find(|c| c.id == id),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

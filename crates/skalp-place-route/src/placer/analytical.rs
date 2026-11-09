@@ -6,12 +6,16 @@
 //! 2. Solves Lx = b using conjugate gradient
 //! 3. Produces continuous cell positions
 
-use super::{is_constant_cell, BelType, PlacementLoc, PlacementResult};
+use super::sites::{bel_types_compatible, SiteMap};
+use super::{is_constant_cell, PlacementLoc, PlacementResult};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use std::collections::HashMap;
+
+/// Nets with more pins than this use a star model instead of a clique.
+const CLIQUE_MAX_PINS: usize = 8;
 
 /// Analytical placer using quadratic wirelength minimization
 pub struct AnalyticalPlacer<'a, D: Device> {
@@ -123,17 +127,35 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 continue;
             }
 
-            let weight = 1.0 / connected_cells.len() as f64;
-
-            for i in 0..connected_cells.len() {
-                for j in (i + 1)..connected_cells.len() {
-                    let ci = cell_indices[&connected_cells[i]];
-                    let cj = cell_indices[&connected_cells[j]];
-
-                    diag[ci] += weight;
-                    diag[cj] += weight;
-                    laplacian[ci].push((cj, -weight));
-                    laplacian[cj].push((ci, -weight));
+            let k = connected_cells.len();
+            let mut connect = |ci: usize, cj: usize, weight: f64| {
+                diag[ci] += weight;
+                diag[cj] += weight;
+                laplacian[ci].push((cj, -weight));
+                laplacian[cj].push((ci, -weight));
+            };
+            if k <= CLIQUE_MAX_PINS {
+                // Clique model: every pin pair, weight 1/k
+                let weight = 1.0 / k as f64;
+                for i in 0..k {
+                    for j in (i + 1)..k {
+                        connect(
+                            cell_indices[&connected_cells[i]],
+                            cell_indices[&connected_cells[j]],
+                            weight,
+                        );
+                    }
+                }
+            } else {
+                // Star model around the first pin (the driver when there is
+                // one): k-1 edges instead of k(k-1)/2, which on a 2,000-pin
+                // register-file address net is the difference between ~2K and
+                // ~2M matrix entries. Weight 1/2 per edge keeps the net's total
+                // weight equal to the clique's (k(k-1)/2 pairs × 1/k).
+                let hub = cell_indices[&connected_cells[0]];
+                let weight = 0.5;
+                for cell in &connected_cells[1..] {
+                    connect(hub, cell_indices[cell], weight);
                 }
             }
         }
@@ -207,30 +229,35 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     fn positions_to_placement(
         &self,
         netlist: &GateNetlist,
-        _cell_indices: &HashMap<CellId, usize>,
+        cell_indices: &HashMap<CellId, usize>,
         x_positions: &[f64],
         y_positions: &[f64],
     ) -> Result<PlacementResult> {
         let (width, height) = self.device.grid_size();
         let mut result = PlacementResult::new();
-        let mut used_locations: HashMap<(u32, u32, usize), bool> = HashMap::new();
+        let mut sites = SiteMap::new(self.device);
 
         for cell in &netlist.cells {
-            let idx = match _cell_indices.get(&cell.id) {
+            let idx = match cell_indices.get(&cell.id) {
                 Some(&i) => i,
                 None => continue, // constant cell, not placed
             };
-            let cell_id = cell.id;
-            let bel_type = self.cell_to_bel_type(&cell.cell_type);
+            let bel_type = super::cell_bel_type(cell);
 
             let x = x_positions[idx].clamp(0.0, (width - 1) as f64);
             let y = y_positions[idx].clamp(0.0, (height - 1) as f64);
 
-            let (tile_x, tile_y, bel_index) =
-                self.find_nearest_valid_location(x, y, bel_type, &mut used_locations)?;
+            let (tile_x, tile_y, bel_index) = sites
+                .take_nearest(x, y, bel_type, bel_types_compatible)
+                .ok_or_else(|| {
+                    PlaceRouteError::PlacementFailed(format!(
+                        "No valid location for BEL type {:?}",
+                        bel_type
+                    ))
+                })?;
 
             result.placements.insert(
-                cell_id,
+                cell.id,
                 PlacementLoc::new(tile_x, tile_y, bel_index, bel_type),
             );
         }
@@ -457,97 +484,6 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             } else {
                 (0.5, (2 * w + 2 * h - pos) as f64) // Left
             }
-        }
-    }
-
-    /// Convert cell type to BEL type
-    fn cell_to_bel_type(&self, cell_type: &str) -> BelType {
-        if cell_type.contains("LUT") || cell_type.starts_with("SB_LUT") {
-            BelType::Lut4
-        } else if cell_type.contains("DFFE") || cell_type.starts_with("SB_DFFE") {
-            BelType::DffE
-        } else if cell_type.contains("DFF") || cell_type.starts_with("SB_DFF") {
-            BelType::Dff
-        } else if cell_type.contains("CARRY") || cell_type.starts_with("SB_CARRY") {
-            BelType::Carry
-        } else if cell_type.contains("IO") || cell_type.starts_with("SB_IO") {
-            BelType::IoCell
-        } else if cell_type.contains("RAM") || cell_type.starts_with("SB_RAM") {
-            BelType::RamSlice
-        } else if cell_type.contains("GB") || cell_type.starts_with("SB_GB") {
-            BelType::GlobalBuf
-        } else if cell_type.contains("PLL") || cell_type.starts_with("SB_PLL") {
-            BelType::Pll
-        } else if cell_type.contains("MAC")
-            || cell_type.starts_with("SB_MAC")
-            || cell_type.contains("MULT")
-        {
-            BelType::DspSlice
-        } else {
-            BelType::Lut4
-        }
-    }
-
-    /// Find nearest valid location for a BEL type
-    fn find_nearest_valid_location(
-        &self,
-        x: f64,
-        y: f64,
-        bel_type: BelType,
-        used: &mut HashMap<(u32, u32, usize), bool>,
-    ) -> Result<(u32, u32, usize)> {
-        let (width, height) = self.device.grid_size();
-
-        // Search in expanding squares
-        for radius in 0..width.max(height) {
-            let x_start = (x as i32 - radius as i32).max(0) as u32;
-            let x_end = (x as u32 + radius).min(width - 1);
-            let y_start = (y as i32 - radius as i32).max(0) as u32;
-            let y_end = (y as u32 + radius).min(height - 1);
-
-            for ty in y_start..=y_end {
-                for tx in x_start..=x_end {
-                    if let Some(tile) = self.device.tile_at(tx, ty) {
-                        // Check each BEL in the tile
-                        for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                            if bel.bel_type == bel_type && !used.contains_key(&(tx, ty, bel_idx)) {
-                                used.insert((tx, ty, bel_idx), true);
-                                return Ok((tx, ty, bel_idx));
-                            }
-                            // Also allow compatible BEL types
-                            if self.bel_types_compatible(bel.bel_type, bel_type)
-                                && !used.contains_key(&(tx, ty, bel_idx))
-                            {
-                                used.insert((tx, ty, bel_idx), true);
-                                return Ok((tx, ty, bel_idx));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(PlaceRouteError::PlacementFailed(format!(
-            "No valid location for BEL type {:?}",
-            bel_type
-        )))
-    }
-
-    /// Check if two BEL types are compatible
-    fn bel_types_compatible(&self, available: BelType, required: BelType) -> bool {
-        match (available, required) {
-            // A basic Dff BEL can implement any DFF variant
-            // (iCE40 DFFs are all the same hardware with different config bits)
-            (BelType::Dff, BelType::DffE) => true,
-            (BelType::Dff, BelType::DffSr) => true,
-            (BelType::Dff, BelType::DffSrE) => true,
-            // Any FF type can implement a basic DFF
-            (BelType::DffE, BelType::Dff) => true,
-            (BelType::DffSr, BelType::Dff) => true,
-            (BelType::DffSrE, BelType::Dff) => true,
-            (BelType::DffSrE, BelType::DffE) => true,
-            (BelType::DffSrE, BelType::DffSr) => true,
-            _ => available == required,
         }
     }
 }

@@ -187,7 +187,14 @@ pub fn synthesize(
         .find_dsp_cell()
         .map(|(_, info)| info.a_width.min(info.b_width))
         .unwrap_or(0);
-    let converter = LirToSynthAig::new(lir).with_dsp_max_width(dsp_max_width);
+    // Adders, subtractors and comparators go on the carry chain when the
+    // target has one (Lattice CCU2); otherwise they are AIG logic.
+    let carry_chain_min_width = library
+        .find_best_cell(&CellFunction::Ccu2)
+        .map(|_| crate::carry_chain::CARRY_CHAIN_MIN_WIDTH);
+    let converter = LirToSynthAig::new(lir)
+        .with_dsp_max_width(dsp_max_width)
+        .with_carry_chain_min_width(carry_chain_min_width);
     let lir_to_aig_result = converter.build();
 
     // Step 2: Run synthesis engine on the AIG
@@ -369,6 +376,26 @@ pub fn synthesize(
         }
     }
     result.netlist.rebuild_cache();
+
+    // The AIG exported physical-node inputs as outputs only to keep their
+    // logic alive; now that the physical cells read them they are ordinary
+    // internal nets, not module ports. This runs last, after the cleanup
+    // passes above, which treat output nets as fixed points: dropping the
+    // exports before buffer removal broke NCL gate-level simulation (an
+    // async FP32 adder stopped converging) (left as outputs, every carry-chain
+    // operand bit would become a top-level output and an I/O cell in PnR).
+    if !lir_to_aig_result.internal_exports.is_empty() {
+        let internal: std::collections::HashSet<&str> = lir_to_aig_result
+            .internal_exports
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        let nets = &result.netlist.nets;
+        result.netlist.outputs.retain(|id| {
+            nets.get(id.0 as usize)
+                .is_none_or(|n| !internal.contains(n.name.as_str()))
+        });
+    }
 
     // Sync is_output flags with netlist.outputs — post-processing passes may
     // have moved output references without updating the per-net flag.
@@ -1749,6 +1776,16 @@ fn merge_physical_nodes_into_netlist(
     // Build set of LIR input signal IDs
     let lir_input_signals: HashSet<u32> = lir.inputs.iter().map(|s| s.0).collect();
 
+    // Values of constant-driven signals (folded into carry-chain truth tables)
+    let constant_signals: std::collections::HashMap<u32, u64> = lir
+        .nodes
+        .iter()
+        .filter_map(|n| match n.op {
+            LirOp::Constant { value, .. } => Some((n.output.0, value)),
+            _ => None,
+        })
+        .collect();
+
     // Resolve a LIR signal to a vector of GateNetIds in the netlist.
     // Creates missing input nets on the fly (module inputs consumed only by
     // physical nodes aren't in the AIG-derived netlist).
@@ -1965,11 +2002,19 @@ fn merge_physical_nodes_into_netlist(
         let node = &lir.nodes[idx];
         let path = &node.path;
 
-        // Resolve input signals to net ID vectors
+        // Resolve input signals to net ID vectors. A carry chain folds
+        // constant operands into its truth tables, so those need no nets.
+        let folds_constants = crate::carry_chain::is_carry_chain_op(&node.op, 0);
         let input_nets: Vec<Vec<GateNetId>> = node
             .inputs
             .iter()
-            .map(|&sig_id| resolve_signal(netlist, sig_id))
+            .map(|&sig_id| {
+                if folds_constants && constant_signals.contains_key(&sig_id.0) {
+                    Vec::new()
+                } else {
+                    resolve_signal(netlist, sig_id)
+                }
+            })
             .collect();
 
         // Resolve output signal to net ID vector (__phys_* nets)
@@ -2789,6 +2834,31 @@ fn merge_physical_nodes_into_netlist(
             }
             LirOp::MemRead { .. } | LirOp::MemWrite { .. } => {
                 // MemRead/MemWrite are part of MemBlock — handled above
+            }
+
+            op if crate::carry_chain::is_carry_chain_op(op, 0) => {
+                let operands: Vec<crate::carry_chain::Operand> = node
+                    .inputs
+                    .iter()
+                    .zip(input_nets.iter())
+                    .map(|(sig, nets)| crate::carry_chain::Operand {
+                        nets: nets.clone(),
+                        constant: constant_signals.get(&sig.0).copied(),
+                    })
+                    .collect();
+                if !crate::carry_chain::map_carry_chain(
+                    netlist,
+                    library,
+                    op,
+                    &operands,
+                    &output_nets,
+                    path,
+                ) {
+                    eprintln!(
+                        "warning: no carry-chain cell in library '{}' for {:?} at {}",
+                        library.name, op, path
+                    );
+                }
             }
 
             LirOp::Mul {

@@ -234,6 +234,58 @@ pub struct PackagePins {
     pub pins: HashMap<String, (u32, u32, u8)>,
 }
 
+/// One carry position in a logic tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarrySlot {
+    /// Index of the carry BEL in the tile's BEL list
+    pub carry_bel: usize,
+    /// LUT BELs the carry cell occupies (a `CCU2` uses its slice's two LUTs)
+    pub lut_bels: Vec<usize>,
+}
+
+/// How carry chains run through logic tiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryChainLayout {
+    /// Carry positions of a logic tile, in chain order
+    pub slots: Vec<CarrySlot>,
+    /// Offset from a tile to the next tile along the chain
+    pub step: (i32, i32),
+}
+
+impl CarryChainLayout {
+    /// Layout of a tile whose carry cells each take two LUTs, in BEL order:
+    /// carry `k` occupies the `2k`-th and `2k+1`-th LUT BELs (one slice).
+    /// `None` unless the tile has exactly two LUT BELs per carry BEL.
+    pub fn paired_luts(bels: &[Bel], step: (i32, i32)) -> Option<Self> {
+        let carries: Vec<usize> = bels
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.bel_type == BelType::Carry)
+            .map(|(i, _)| i)
+            .collect();
+        let luts: Vec<usize> = bels
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.bel_type == BelType::Lut4)
+            .map(|(i, _)| i)
+            .collect();
+        if carries.is_empty() || luts.len() != 2 * carries.len() {
+            return None;
+        }
+        Some(Self {
+            slots: carries
+                .iter()
+                .enumerate()
+                .map(|(k, &carry_bel)| CarrySlot {
+                    carry_bel,
+                    lut_bels: vec![luts[2 * k], luts[2 * k + 1]],
+                })
+                .collect(),
+            step,
+        })
+    }
+}
+
 /// Device trait that all FPGA devices must implement
 pub trait Device: Send + Sync {
     /// Get the device family
@@ -284,6 +336,13 @@ pub trait Device: Send + Sync {
     /// Total number of wires in the device (for Vec-indexed data structures)
     fn wire_count(&self) -> usize {
         0
+    }
+
+    /// Carry-chain geometry for chain-aware placement of two-bit carry cells
+    /// (Lattice `CCU2`). `None`: the device has no such layout, and carry
+    /// cells (e.g. iCE40 `SB_CARRY`) use the logic-cell chain placement.
+    fn carry_chain_layout(&self) -> Option<CarryChainLayout> {
+        None
     }
 
     // BEL pin wire methods (optional, for proper routing endpoints)

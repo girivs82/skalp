@@ -154,8 +154,19 @@ impl GpuGateRuntime {
 
         runtime.initialize()?;
 
+        // The shader evaluates primitives with at most 4 inputs and 2 outputs;
+        // a design with a wider cell (a CCU2 carry cell has 9 inputs and 3
+        // outputs) runs on the CPU path, which evaluates every primitive.
+        let gpu_capable = runtime
+            .primitives
+            .iter()
+            .all(|p| !matches!(p.ptype, PrimitiveType::Ccu2 { .. }));
+        if !gpu_capable {
+            runtime.use_gpu = false;
+        }
+
         // Try to compile GPU shaders, fall back to CPU if it fails
-        if let Err(e) = runtime.compile_shaders() {
+        if runtime.use_gpu && runtime.compile_shaders().is_err() {
             runtime.use_gpu = false;
         }
 

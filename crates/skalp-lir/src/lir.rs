@@ -177,6 +177,17 @@ pub enum PrimitiveType {
         /// 64-bit initialization value (truth table)
         init: u64,
     },
+    /// Lattice two-bit carry cell (Nexus `CCU2`, ECP5 `CCU2C`), `INJECT = "NO"`.
+    ///
+    /// Inputs: [A0, B0, C0, D0, A1, B1, C1, D1, CIN]; outputs: [S0, S1, COUT].
+    /// Half `i`: `P = init_i(A, B, C, D)`, `G = init_i[3:0](A, B)`,
+    /// `S_i = P ^ c_i`, `c_(i+1) = P ? c_i : G`, with `c_0 = CIN`, `COUT = c_2`.
+    Ccu2 {
+        /// INIT0: truth table of the low half
+        init0: u16,
+        /// INIT1: truth table of the high half
+        init1: u16,
+    },
 
     // === Power Infrastructure ===
     /// Level shifter for voltage domain crossing
@@ -334,6 +345,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 3,
             PrimitiveType::CarryCell => 3,
+            PrimitiveType::Ccu2 { .. } => 9,
             PrimitiveType::CompBit => 4,
             PrimitiveType::MemCell => 3,
             PrimitiveType::RegCell => 3,
@@ -385,6 +397,7 @@ impl PrimitiveType {
         match self {
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 2,
+            PrimitiveType::Ccu2 { .. } => 3,
             PrimitiveType::CompBit => 2,
             PrimitiveType::RamBlock { data_width, .. } => *data_width,
             PrimitiveType::PowerSwitch { .. } => 0,
@@ -430,6 +443,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => 0.2,
             PrimitiveType::FullAdder => 0.3,
             PrimitiveType::CarryCell => 0.1, // Simpler than full adder
+            PrimitiveType::Ccu2 { .. } => 1.2, // two LUT4s + two carry muxes
             PrimitiveType::CompBit => 0.15,
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
@@ -516,6 +530,7 @@ impl PrimitiveType {
             PrimitiveType::HalfAdder => "HA",
             PrimitiveType::FullAdder => "FA",
             PrimitiveType::CarryCell => "CARRY",
+            PrimitiveType::Ccu2 { .. } => "CCU2",
             PrimitiveType::CompBit => "COMP",
             PrimitiveType::MemCell => "MEM",
             PrimitiveType::RegCell => "REG",
@@ -571,6 +586,9 @@ impl std::fmt::Display for PrimitiveType {
             }
             PrimitiveType::Constant { value } => write!(f, "CONST{}", if *value { 1 } else { 0 }),
             PrimitiveType::Lut4 { init } => write!(f, "LUT4[{:#06x}]", init),
+            PrimitiveType::Ccu2 { init0, init1 } => {
+                write!(f, "CCU2[{:#06x},{:#06x}]", init0, init1)
+            }
             PrimitiveType::Lut6 { init } => write!(f, "LUT6[{:#018x}]", init),
             PrimitiveType::LevelShifter {
                 from_voltage,

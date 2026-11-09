@@ -7,6 +7,7 @@
 //! - Packing statistics
 
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetlist};
+use skalp_lir::tech_library::CellFunction;
 use std::collections::{HashMap, HashSet};
 
 /// Packed cell type representing combined primitives
@@ -370,12 +371,12 @@ impl<'a> CellPacker<'a> {
     /// Builds ordered chains from chain head (no carry input) to tail,
     /// and finds associated LUTs and DFFs at each position.
     fn detect_carry_chains(&self) -> Vec<CarryChain> {
-        // Find all carry cells
+        // Find all carry cells: SB_CARRY-style cells and Lattice CCU2 cells
         let carry_cells: Vec<CellId> = self
             .netlist
             .cells
             .iter()
-            .filter(|c| c.cell_type.to_uppercase().contains("CARRY"))
+            .filter(|c| Self::is_carry(c))
             .map(|c| c.id)
             .collect();
 
@@ -385,8 +386,10 @@ impl<'a> CellPacker<'a> {
 
         let carry_set: HashSet<CellId> = carry_cells.iter().copied().collect();
 
-        // Build carry_out→carry_in map by tracing nets where driver is SB_CARRY
-        // and sink is SB_CARRY. The carry output (CO) drives the next carry's CI input.
+        // Build carry_out→carry_in map by tracing nets where driver and sink
+        // are carry cells. An SB_CARRY's CO only drives the next CI (or a LUT);
+        // a CCU2's sum outputs can feed another chain's operands, so for CCU2
+        // only COUT (output 2) → CIN (input 8) links a chain.
         let mut carry_successor: HashMap<CellId, CellId> = HashMap::new();
         let mut carry_predecessor: HashSet<CellId> = HashSet::new();
 
@@ -395,12 +398,22 @@ impl<'a> CellPacker<'a> {
                 Some(d) if carry_set.contains(&d) => d,
                 _ => continue,
             };
+            let driver_cell = &self.netlist.cells[driver.0 as usize];
+            let driver_is_ccu2 = Self::is_ccu2(driver_cell);
+            if driver_is_ccu2 && driver_cell.outputs.get(2) != Some(&net.id) {
+                continue;
+            }
 
             for (sink_id, _pin) in &net.fanout {
-                if carry_set.contains(sink_id) && *sink_id != driver {
-                    carry_successor.insert(driver, *sink_id);
-                    carry_predecessor.insert(*sink_id);
+                if !carry_set.contains(sink_id) || *sink_id == driver {
+                    continue;
                 }
+                let sink_cell = &self.netlist.cells[sink_id.0 as usize];
+                if Self::is_ccu2(sink_cell) && sink_cell.inputs.get(8) != Some(&net.id) {
+                    continue;
+                }
+                carry_successor.insert(driver, *sink_id);
+                carry_predecessor.insert(*sink_id);
             }
         }
 
@@ -425,16 +438,26 @@ impl<'a> CellPacker<'a> {
                 }
             }
 
-            // Find associated LUTs and DFFs for each carry position
-            let associated_luts: Vec<Option<CellId>> = cells
-                .iter()
-                .map(|&carry_id| self.find_associated_lut(carry_id))
-                .collect();
+            // Find associated LUTs and DFFs for each carry position. A CCU2
+            // computes its sums in its own LUTs, so nothing is co-packed with it.
+            let is_ccu2_chain = Self::is_ccu2(&self.netlist.cells[head.0 as usize]);
+            let associated_luts: Vec<Option<CellId>> = if is_ccu2_chain {
+                vec![None; cells.len()]
+            } else {
+                cells
+                    .iter()
+                    .map(|&carry_id| self.find_associated_lut(carry_id))
+                    .collect()
+            };
 
-            let associated_dffs: Vec<Option<CellId>> = cells
-                .iter()
-                .map(|&carry_id| self.find_associated_dff(carry_id))
-                .collect();
+            let associated_dffs: Vec<Option<CellId>> = if is_ccu2_chain {
+                vec![None; cells.len()]
+            } else {
+                cells
+                    .iter()
+                    .map(|&carry_id| self.find_associated_dff(carry_id))
+                    .collect()
+            };
 
             let chain_id = chains.len();
             chains.push(CarryChain {
@@ -567,6 +590,20 @@ impl<'a> CellPacker<'a> {
     fn is_lut(cell: &Cell) -> bool {
         let cell_type = cell.cell_type.to_uppercase();
         cell_type.contains("LUT") || cell_type == "SB_LUT4"
+    }
+
+    /// Check if a cell is a carry cell (SB_CARRY-style or Lattice CCU2)
+    fn is_carry(cell: &Cell) -> bool {
+        cell.cell_type.to_uppercase().contains("CARRY")
+            || matches!(
+                cell.function,
+                Some(CellFunction::Carry) | Some(CellFunction::Ccu2)
+            )
+    }
+
+    /// Check if a cell is a Lattice two-bit carry cell (CCU2 / CCU2C)
+    fn is_ccu2(cell: &Cell) -> bool {
+        cell.function == Some(CellFunction::Ccu2)
     }
 
     /// Check if a cell is a DFF

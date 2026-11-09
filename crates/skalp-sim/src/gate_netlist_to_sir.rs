@@ -236,6 +236,16 @@ impl GateNetlistToSirConverter {
                     addr_width,
                     data_width,
                 }
+            } else if cell.function.as_ref() == Some(&CellFunction::Ccu2) {
+                // Lattice carry cell: the truth tables are cell parameters
+                let (init0, init1) =
+                    skalp_lir::carry_chain::ccu2_inits(cell).unwrap_or_else(|| {
+                        panic!(
+                            "CCU2 cell '{}' has no valid INIT0/INIT1 parameters",
+                            cell.path
+                        )
+                    });
+                PrimitiveType::Ccu2 { init0, init1 }
             } else if let Some(func) = &cell.function {
                 // Use the library-provided function for accurate mapping
                 self.cell_function_to_primitive(func)

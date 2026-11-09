@@ -216,6 +216,12 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             }
         }
 
+        // First entry per net (as a linear search would find)
+        let mut criticality_by_net: HashMap<GateNetId, usize> = HashMap::new();
+        for (i, c) in net_criticalities.iter().enumerate() {
+            criticality_by_net.entry(c.net_id).or_insert(i);
+        }
+
         // Collect nets to route with their criticality score
         // Clock/reset nets are routed here when GBUF routing is unavailable
         let mut nets_with_criticality: Vec<_> = netlist
@@ -223,10 +229,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             .iter()
             .filter(|net| net.driver.is_some() && !net.fanout.is_empty())
             .map(|net| {
-                let crit = net_criticalities
-                    .iter()
-                    .find(|c| c.net_id == net.id)
-                    .cloned()
+                let crit = criticality_by_net
+                    .get(&net.id)
+                    .map(|&i| net_criticalities[i].clone())
                     .unwrap_or(NetCriticality {
                         net_id: net.id,
                         criticality: 0.0,
@@ -282,10 +287,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             // Track wire usage for intermediate routing wires only
             // Source and sink wires are BEL pin wires — dedicated per cell,
             // not shared routing resources
-            for &wire in &route.wires {
-                if wire != route.source && !route.sinks.contains(&wire) {
-                    congestion.add_usage(wire);
-                }
+            for wire in Self::shared_wires(&route) {
+                congestion.add_usage(wire);
             }
 
             result.routes.insert(net_id, route);
@@ -346,10 +349,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             // Rip up (only intermediate wires tracked)
             for &net_id in &reroute_list {
                 if let Some(route) = result.routes.get(&net_id) {
-                    for &wire in &route.wires {
-                        if wire != route.source && !route.sinks.contains(&wire) {
-                            congestion.remove_usage(wire);
-                        }
+                    for wire in Self::shared_wires(route) {
+                        congestion.remove_usage(wire);
                     }
                 }
             }
@@ -372,10 +373,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 )?;
 
                 // Track wire usage (intermediate wires only)
-                for &wire in &route.wires {
-                    if wire != route.source && !route.sinks.contains(&wire) {
-                        congestion.add_usage(wire);
-                    }
+                for wire in Self::shared_wires(&route) {
+                    congestion.add_usage(wire);
                 }
 
                 result.routes.insert(net_id, route);
@@ -405,6 +404,19 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         result.success = result.congestion <= 1.0;
 
         Ok(result)
+    }
+
+    /// The routing wires a route occupies: all but its source and sink wires,
+    /// which are BEL pin wires dedicated to their cells, not shared routing
+    /// resources.
+    fn shared_wires(route: &Route) -> Vec<WireId> {
+        let sinks: HashSet<WireId> = route.sinks.iter().copied().collect();
+        route
+            .wires
+            .iter()
+            .copied()
+            .filter(|w| *w != route.source && !sinks.contains(w))
+            .collect()
     }
 
     /// Compute total skew (cell_delay + wire_delay) across branches.
@@ -624,27 +636,29 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let adjusted_present_factor = present_factor * (1.0 - timing_factor * 0.5);
         let adjusted_history_factor = history_factor * (1.0 - timing_factor * 0.3);
 
-        let wire_costs: HashMap<WireId, f64> = congestion
-            .usage
-            .keys()
-            .map(|&wire| {
-                let congestion_cost =
-                    congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor);
-
-                let delay_cost = if timing_factor > 0.0 {
-                    if let Some(wire_info) = self.device.wire(wire) {
-                        let base_delay = wire_info.delay as f64 / 100.0;
-                        timing_factor * base_delay
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-
-                (wire, congestion_cost + delay_cost)
-            })
-            .collect();
+        // Cost multiplier for entering a wire: 1.0 for a wire no net has
+        // used, the PathFinder congestion cost (plus a delay term for
+        // critical nets) otherwise. Computed on demand for the wires the
+        // search reaches; building it as a map of every used wire for every
+        // net made routing quadratic in design size.
+        let wire_cost = |wire: WireId| -> f64 {
+            if !congestion.usage.contains_key(&wire) {
+                return 1.0;
+            }
+            let congestion_cost =
+                congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor);
+            let delay_cost = if timing_factor > 0.0 {
+                self.device
+                    .wire(wire)
+                    .map(|w| timing_factor * (w.delay as f64 / 100.0))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            congestion_cost + delay_cost
+        };
+        // Wires already in the route (route.wires keeps first-use order)
+        let mut route_wire_set: HashSet<WireId> = HashSet::new();
 
         let timing_weight = net_criticality * self.timing_weight;
 
@@ -662,13 +676,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             route.sinks.push(sink_wire);
 
             // Find path using A* with timing-aware costs
-            let path_result = astar.find_path_timing_aware(
-                source_wire,
-                sink_wire,
-                &[],
-                &wire_costs,
-                timing_weight,
-            );
+            let path_result =
+                astar.find_path_with_cost_fn(source_wire, sink_wire, &[], wire_cost, timing_weight);
 
             match path_result {
                 Ok((wires, pips)) => {
@@ -680,7 +689,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
                     // Add wires/PIPs to the route-level aggregates
                     for wire in &wires {
-                        if !route.wires.contains(wire) {
+                        if route_wire_set.insert(*wire) {
                             route.wires.push(*wire);
                         }
                     }
@@ -706,7 +715,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                                 *sink_id,
                                 sink_loc,
                                 source_wire,
-                                &wire_costs,
+                                &wire_cost,
                                 timing_weight,
                                 astar,
                                 netlist,
@@ -725,7 +734,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                             route.sinks.push(alt_wire);
 
                             for wire in &alt_wires {
-                                if !route.wires.contains(wire) {
+                                if route_wire_set.insert(*wire) {
                                     route.wires.push(*wire);
                                 }
                             }
@@ -937,7 +946,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         };
 
         // Get cell type to determine which wire to use
-        let cell = netlist.cells.iter().find(|c| c.id == cell_id)?;
+        let cell = crate::utils::find_cell(netlist, cell_id)?;
 
         match loc.bel_type {
             BelType::Lut4 => {
@@ -985,7 +994,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         };
 
         // Get cell type to determine which wire to use
-        let cell = netlist.cells.iter().find(|c| c.id == cell_id)?;
+        let cell = crate::utils::find_cell(netlist, cell_id)?;
 
         match loc.bel_type {
             BelType::Lut4 => {
@@ -1065,7 +1074,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         _sink_id: CellId,
         sink_loc: &PlacementLoc,
         source_wire: WireId,
-        wire_costs: &HashMap<WireId, f64>,
+        wire_cost: &dyn Fn(WireId) -> f64,
         timing_weight: f64,
         astar: &AStarRouter<D>,
         _netlist: &GateNetlist,
@@ -1092,7 +1101,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
             // Try routing to this alternate input
             if let Ok((wires, pips)) =
-                astar.find_path_timing_aware(source_wire, alt_wire, &[], wire_costs, timing_weight)
+                astar.find_path_with_cost_fn(source_wire, alt_wire, &[], wire_cost, timing_weight)
             {
                 // Found a route to an alternate LUT input
                 // Note: The caller should update the LUT permutation accordingly
@@ -1251,7 +1260,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     ) -> bool {
         // Check if driver is a register
         if let Some(driver_id) = net.driver {
-            if let Some(cell) = netlist.cells.iter().find(|c| c.id == driver_id) {
+            if let Some(cell) = crate::utils::find_cell(netlist, driver_id) {
                 if cell.clock.is_some() {
                     return true;
                 }
@@ -1260,7 +1269,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
         // Check if any sink is a register
         for (sink_id, _) in &net.fanout {
-            if let Some(cell) = netlist.cells.iter().find(|c| c.id == *sink_id) {
+            if let Some(cell) = crate::utils::find_cell(netlist, *sink_id) {
                 if cell.clock.is_some() {
                     return true;
                 }
