@@ -54,15 +54,19 @@ pub(crate) fn is_pad(cell: &Cell) -> bool {
     )
 }
 
+fn is_multiplier(cell: &Cell) -> bool {
+    cell.dsp_ports().is_some()
+}
+
 fn is_flip_flop(cell: &Cell) -> bool {
     cell.clock.is_some()
 }
 
 /// Router pin number of a flip-flop's `index`-th input.
 fn ff_pin(cell: &Cell, index: usize) -> usize {
-    match (cell.cell_type.as_str(), index) {
-        ("OXIDE_FF_EN", 1) | ("OXIDE_FF_RSTE", 2) => FF_PIN_CE,
-        ("OXIDE_FF_RST", 1) | ("OXIDE_FF_RSTE", 1) => FF_PIN_LSR,
+    match (cell.function.as_ref(), index) {
+        (Some(CellFunction::DffE), 1) | (Some(CellFunction::DffRE), 2) => FF_PIN_CE,
+        (Some(CellFunction::DffR), 1) | (Some(CellFunction::DffRE), 1) => FF_PIN_LSR,
         _ => index,
     }
 }
@@ -79,25 +83,31 @@ fn constant_nets(netlist: &GateNetlist) -> HashMap<GateNetId, bool> {
         .collect()
 }
 
-/// Give block RAM inputs tied low a real driver where the device needs one.
+/// Give block RAM and multiplier inputs tied low a real driver where the device
+/// needs one.
 ///
 /// A device may be able to hold some RAM inputs high or low with configuration
 /// alone; the others must be driven. This adds a constant-zero LUT per RAM that
 /// needs one, so those inputs are routed like any signal.
-pub fn drive_tied_low_ram_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
+pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
     let constants = constant_nets(netlist);
     let mut driven = netlist.clone();
     for ram in netlist.cells.iter() {
-        let Some(ports) = ram.ram_ports() else {
+        let ports = ram.ram_ports();
+        if ports.is_none() && !is_multiplier(ram) {
             continue;
-        };
+        }
         let inputs: Vec<usize> = (0..ram.inputs.len())
             .filter(|&i| {
                 constants.get(&ram.inputs[i]) == Some(&false)
-                    && device.ram_input_needs_low_driver(&ports, i)
+                    && match &ports {
+                        Some(ports) => device.ram_input_needs_low_driver(ports, i),
+                        None => device.dsp_input_needs_low_driver(ram, i),
+                    }
             })
             .collect();
-        if inputs.is_empty() {
+        let extra_low_inputs = device.dsp_low_driven_input_count(ram);
+        if inputs.is_empty() && extra_low_inputs == 0 {
             continue;
         }
         let net = driven.add_net(GateNet::new(GateNetId(0), format!("{}.zero", ram.path)));
@@ -121,8 +131,52 @@ pub fn drive_tied_low_ram_inputs(netlist: &GateNetlist, device: &dyn Device) -> 
         for input in inputs {
             copy.inputs[input] = net;
         }
+        if extra_low_inputs > 0 {
+            copy.parameters.insert(
+                crate::device::DSP_EXTRA_INPUTS_PARAM.to_string(),
+                copy.inputs.len().to_string(),
+            );
+            copy.inputs.extend(vec![net; extra_low_inputs]);
+        }
     }
+    drive_constant_flip_flop_data(&mut driven, &constants);
     driven
+}
+
+/// Replace a constant flip-flop data input with a LUT that outputs it.
+///
+/// A flip-flop's data input cannot be held at a constant by configuration, so
+/// one constant LUT per value drives every flip-flop that needs it.
+fn drive_constant_flip_flop_data(netlist: &mut GateNetlist, constants: &HashMap<GateNetId, bool>) {
+    let mut drivers: HashMap<bool, GateNetId> = HashMap::new();
+    for index in 0..netlist.cells.len() {
+        let cell = &netlist.cells[index];
+        if !is_flip_flop(cell) || cell.ram_ports().is_some() || is_multiplier(cell) {
+            continue;
+        }
+        let Some(&value) = cell.inputs.first().and_then(|net| constants.get(net)) else {
+            continue;
+        };
+        let library = cell.library.clone();
+        let net = *drivers.entry(value).or_insert_with(|| {
+            let name = format!("constant_ff_data_{}", u8::from(value));
+            let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
+            let mut driver = Cell::new_comb(
+                CellId(0),
+                "LUT4".to_string(),
+                library,
+                0.0,
+                format!("{name}_driver"),
+                Vec::new(),
+                vec![net],
+            );
+            driver.function = Some(CellFunction::Lut4);
+            driver.lut_init = Some(if value { 0xFFFF } else { 0 });
+            netlist.add_cell(driver);
+            net
+        });
+        netlist.cells[index].inputs[0] = net;
+    }
 }
 
 /// Rewrite a netlist's connectivity into what the router should route.
@@ -149,6 +203,16 @@ pub fn prepare_for_routing(
     };
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
+            continue;
+        }
+        if is_multiplier(cell) {
+            for (index, &net) in cell.inputs.iter().enumerate() {
+                if let Some(&value) = constants.get(&net) {
+                    tied.values.insert((cell.id, index), value);
+                } else if let Some(pin) = device.dsp_input_pin(cell, index) {
+                    connect(&mut prepared.nets, net, cell.id, pin);
+                }
+            }
             continue;
         }
         if let Some(ports) = cell.ram_ports() {

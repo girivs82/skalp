@@ -6,10 +6,10 @@
 //!
 //! The settings mirror what nextpnr writes for the same cells.
 
-use super::ebr;
 use super::prjoxide_graph::{
     load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
 };
+use super::{dsp, ebr};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
 use crate::bitstream::config::{ConfigGenerator, DesignBit, PlacedDesign};
 use crate::bitstream::prepare::{constant_value, is_pad};
@@ -354,6 +354,7 @@ fn emit_bits(
     };
     let mut slices_with_ff: HashSet<(u32, u32, char, bool)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
+    let mut used_multipliers: HashSet<(u32, u32, usize)> = HashSet::new();
 
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
@@ -367,6 +368,17 @@ fn emit_bits(
 
         if is_pad(cell) {
             emit_pad(&mut config, cell, x, y, loc.bel_index, &used_wires)?;
+            continue;
+        }
+        if loc.bel_type == BelType::DspSlice {
+            emit_multiplier(&mut config, cell, x, y, tied, &used_wires)?;
+            if let Some(tile) = device.prjoxide_tile(x, y, |t| dsp::slot_of_tile(t).is_some()) {
+                used_multipliers.insert((
+                    y,
+                    dsp::row_base_column(&tile.tiletype, x).unwrap_or(x),
+                    dsp::slot_of_tile(&tile.tiletype).unwrap_or(0),
+                ));
+            }
             continue;
         }
         if loc.bel_type == BelType::RamSlice {
@@ -459,6 +471,8 @@ fn emit_bits(
             }
         }
     }
+
+    set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
 
     for &(x, y, slice, uses_reset) in &slices_with_ff {
         if !uses_reset {
@@ -684,6 +698,114 @@ fn float_ram_pin(
         .bel_wire(x, y, &format!("RAM_{pin}"))
         .ok_or_else(|| emit_err(format!("No wire for block RAM pin {pin} at ({x}, {y})")))?;
     float_high(config, wire, used_wires)
+}
+
+/// Give every multiplier block the design does not use its idle configuration.
+fn set_unused_multiplier_defaults(
+    config: &mut ConfigDb<'_>,
+    used: &HashSet<(u32, u32, usize)>,
+) -> Result<()> {
+    let mut rows: HashMap<(u32, u32), Vec<PrjoxideTile>> = HashMap::new();
+    for tile in config.device.prjoxide_tiles() {
+        if let Some(base) = dsp::row_base_column(&tile.tiletype, tile.x) {
+            rows.entry((tile.y, base)).or_default().push(tile.clone());
+        }
+    }
+    for ((y, base), tiles) in rows {
+        // Both output registers of a pair serve one slot; accumulators are shared.
+        for slot in 0..dsp::SLOTS {
+            if used.contains(&(y, base, slot)) {
+                continue;
+            }
+            let mut idle = |bel: String, settings: &[(&str, &str)]| -> Result<()> {
+                for (name, option) in settings {
+                    set_ram_enum(config, &tiles, &format!("{bel}.{name}"), option)?;
+                }
+                Ok(())
+            };
+            for half in 0..2 {
+                idle(dsp::preadd(slot, half), dsp::UNUSED_PREADD_SETTINGS)?;
+                idle(dsp::mult9(slot, half), dsp::UNUSED_MULT9_SETTINGS)?;
+                idle(dsp::reg18(slot, half), dsp::UNUSED_REG18_SETTINGS)?;
+            }
+        }
+        for slot in [0, 2] {
+            for (name, option) in dsp::ACC54_SETTINGS {
+                set_ram_enum(
+                    config,
+                    &tiles,
+                    &format!("{}.{name}", dsp::acc54(slot)),
+                    option,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Configure the hard blocks of one multiplier and hold its unused inputs.
+fn emit_multiplier(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    x: u32,
+    y: u32,
+    tied: &crate::bitstream::prepare::TiedInputs,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let device = config.device;
+    let first = device
+        .prjoxide_tile(x, y, |t| dsp::slot_of_tile(t).is_some())
+        .cloned()
+        .ok_or_else(|| emit_err(format!("No multiplier tile at column {x}, row {y}")))?;
+    let slot = dsp::slot_of_tile(&first.tiletype).expect("selected by this test");
+    let base = dsp::row_base_column(&first.tiletype, x)
+        .ok_or_else(|| emit_err(format!("Unrecognized multiplier tile {}", first.tiletype)))?;
+    let tiles: Vec<PrjoxideTile> = device
+        .prjoxide_tiles()
+        .iter()
+        .filter(|t| t.y == y && dsp::tile_in_row(&t.tiletype, t.x, base))
+        .cloned()
+        .collect();
+
+    let mut configure = |bel: String, settings: &[(&str, &str)]| -> Result<()> {
+        for (name, option) in settings {
+            set_ram_enum(config, &tiles, &format!("{bel}.{name}"), option)?;
+        }
+        Ok(())
+    };
+    for half in 0..2 {
+        configure(dsp::preadd(slot, half), dsp::PREADD_SETTINGS)?;
+        configure(dsp::mult9(slot, half), dsp::MULT9_SETTINGS)?;
+        configure(dsp::reg18(slot, half), dsp::REG18_SETTINGS)?;
+    }
+    configure(dsp::mult18(slot), dsp::MULT18_SETTINGS)?;
+    configure(dsp::acc54(slot), dsp::ACC54_SETTINGS)?;
+
+    let float = |config: &mut ConfigDb<'_>, pin: &str| -> Result<()> {
+        let wire = device
+            .bel_wire(x, y, &format!("DSP_{pin}"))
+            .ok_or_else(|| emit_err(format!("No wire for multiplier pin {pin} at ({x}, {y})")))?;
+        float_high(config, wire, used_wires)
+    };
+    for input in 0..cell.inputs.len() {
+        let Some(pin) = dsp::input_pin(cell, input) else {
+            continue;
+        };
+        match tied.value(cell.id, input) {
+            Some(true) => float(config, &pin)?,
+            Some(false) => {
+                return Err(emit_err(format!(
+                    "Multiplier '{}' pin {pin} is tied low with no driver",
+                    cell.path
+                )))
+            }
+            None => {}
+        }
+    }
+    for bit in 0..dsp::SHIFT_CONTROL_PINS {
+        float(config, &format!("SFTCTRL{bit}"))?;
+    }
+    Ok(())
 }
 
 /// Bank voltage a standard runs at.

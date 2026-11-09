@@ -412,3 +412,30 @@ async fn test_registers_power_up_at_their_initial_value() {
     assert_eq!(tb.get_u64("flag").await, 0);
     assert_eq!(tb.get_u64("count").await, 10);
 }
+
+/// Products of operands wider than one hard multiplier must carry correctly
+/// between their partial products.
+#[tokio::test]
+async fn test_wide_multiply_gate_level() {
+    for library in ["nexus", "ecp5"] {
+        let mut tb = Testbench::gate_level_with_top_and_library(
+            &fixture_path("multiply_wide.sk"),
+            "MultiplyWide",
+            library,
+        )
+        .await
+        .unwrap();
+        for (a, b) in [
+            (12_345_678u64, 7_654_321u64),
+            (0xFF_FFFF, 0xFF_FFFF),
+            (0x3_FFFF, 0x3_FFFF),
+            (0x4_0000, 0x4_0000),
+            (1, 0xFF_FFFF),
+        ] {
+            tb.set("a", a);
+            tb.set("b", b);
+            tb.step().await;
+            assert_eq!(tb.get_u64("p").await, a * b, "{a} x {b} on {library}");
+        }
+    }
+}

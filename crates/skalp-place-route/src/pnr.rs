@@ -556,12 +556,24 @@ pub fn place_and_route_nexus_real(
         .iter()
         .filter(|c| c.ram_ports().is_some())
         .count();
-    let region = sites::design_region(&tiles, &clocks, &pad_sites, netlist.cells.len(), ram_count);
+    let dsp_count = netlist
+        .cells
+        .iter()
+        .filter(|c| c.dsp_ports().is_some())
+        .count();
+    let region = sites::design_region(
+        &tiles,
+        &clocks,
+        &pad_sites,
+        netlist.cells.len(),
+        ram_count,
+        dsp_count,
+    );
     let device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
             .map_err(PlaceRouteError::BitstreamFailed)?;
 
-    let netlist = &prepare::drive_tied_low_ram_inputs(netlist, &device);
+    let netlist = &prepare::drive_constant_inputs(netlist, &device);
     let logic = prepare::logic_only_netlist(netlist);
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();

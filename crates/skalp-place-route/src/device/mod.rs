@@ -266,6 +266,9 @@ pub const DIST_RAM_PIN_RAD: usize = 200;
 /// [`FF_PIN_CLK`].
 pub const RAM_PIN_READ_CLK: usize = 103;
 
+/// Cell parameter holding where a multiplier's added low-driven inputs start.
+pub const DSP_EXTRA_INPUTS_PARAM: &str = "DSP_EXTRA_INPUTS_FROM";
+
 /// Whether a router pin number is a clock pin, routed on the clock network.
 pub fn is_clock_pin(pin: usize) -> bool {
     pin == FF_PIN_CLK || pin == RAM_PIN_READ_CLK
@@ -708,6 +711,25 @@ pub trait Device: Send + Sync {
 
     /// Whether a wire is general fabric routing, which a clock must not use.
     fn is_general_routing_wire(&self, _wire: WireId) -> bool {
+        false
+    }
+
+    /// Router pin a multiplier input connects to, or `None` if it has no pin.
+    fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
+        None
+    }
+
+    /// Extra multiplier inputs the device needs held low with a real signal.
+    fn dsp_low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
+        0
+    }
+
+    /// Whether a multiplier input tied low must be driven by a real signal.
+    fn dsp_input_needs_low_driver(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _input: usize,
+    ) -> bool {
         false
     }
 

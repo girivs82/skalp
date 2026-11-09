@@ -13,6 +13,7 @@
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
 
 pub mod data;
+pub mod dsp;
 pub mod ebr;
 pub mod emit;
 pub mod prjoxide_bels;
@@ -272,6 +273,11 @@ impl NexusDevice {
             }
         }
 
+        let dsp_sites: HashMap<(u32, u32), usize> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), dsp::slot_of_tile(&t.tiletype)?)))
+            .collect();
         let ram_sites: HashMap<(u32, u32), usize> = all_tiles
             .iter()
             .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
@@ -382,8 +388,41 @@ impl NexusDevice {
                 // Other non-logic primary tiles: correct type, BELs deferred.
                 Vec::new()
             };
-            // A block RAM site shares its grid cell with a logic tile.
             let mut bels = bels;
+            if let Some(&slot) = dsp_sites.get(&(x, y)).filter(|_| placeable) {
+                for pin in (0..18)
+                    .flat_map(|bit| [format!("A{bit}"), format!("B{bit}")])
+                    .chain(["ASIGNED".to_string(), "BSIGNED".to_string()])
+                    .chain((0..dsp::SHIFT_CONTROL_PINS).map(|bit| format!("SFTCTRL{bit}")))
+                    .chain(dsp::low_driven_pins())
+                {
+                    let wire = dsp::input_wire(slot, &pin)
+                        .and_then(|site| resolve_wire(x, y, &site))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("DSP_{pin}")), w);
+                    }
+                }
+                for bit in 0..dsp::PRODUCT_BITS {
+                    let wire = resolve_wire(
+                        dsp::register_column(slot, x),
+                        y,
+                        &dsp::product_wire(slot, bit),
+                    )
+                    .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("DSP_Z{bit}")), w);
+                    }
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::DspSlice,
+                    name: format!("MULT18_{slot}"),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
+            // A block RAM site shares its grid cell with a logic tile.
             if let Some(&site) = ram_sites.get(&(x, y)).filter(|_| placeable) {
                 let mut wire_of = |pin: &str| {
                     let wire = resolve_wire(x, y, &ebr::site_wire(pin))
@@ -1694,12 +1733,30 @@ impl Device for NexusDevice {
     }
 
     fn stats(&self) -> DeviceStats {
+        // The real-device model only places what its tiles' BELs offer.
+        let real_sites = |kind: BelType| {
+            self.tiles
+                .iter()
+                .flatten()
+                .flatten()
+                .flat_map(|tile| tile.bels())
+                .filter(|bel| bel.bel_type == kind)
+                .count()
+        };
+        let (total_brams, total_dsps) = if self.prjoxide_tiles.is_empty() {
+            (
+                self.memory_blocks.len(),
+                self.dsp_tiles.len() * data::DSP_MACS_PER_TILE as usize,
+            )
+        } else {
+            (real_sites(BelType::RamSlice), real_sites(BelType::DspSlice))
+        };
         DeviceStats {
             total_luts: self.logic_tiles.len() * data::LOGIC_LUTS_PER_TILE as usize,
             total_ffs: self.logic_tiles.len() * data::LOGIC_FFS_PER_TILE as usize,
             total_ios: self.io_tiles.len() * data::IO_CELLS_PER_TILE as usize,
-            total_brams: self.memory_blocks.len(),
-            total_dsps: self.dsp_tiles.len() * data::DSP_MACS_PER_TILE as usize,
+            total_brams,
+            total_dsps,
             total_gclks: self.variant.global_clocks() as usize,
         }
     }
@@ -1759,7 +1816,7 @@ impl Device for NexusDevice {
             "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
             "DP16K" | "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
-            "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
+            "MULT18X18" | "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
             "EHXPLLL" | "PLL" => bel_type == BelType::Pll,
             _ => false,
         }
@@ -1826,6 +1883,26 @@ impl Device for NexusDevice {
             .is_some_and(|w| is_general_wire_name(&w.name))
     }
 
+    fn dsp_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
+        dsp::router_pin(&dsp::input_pin(cell, input)?).filter(|_| dsp::is_multiplier(cell))
+    }
+
+    fn dsp_input_needs_low_driver(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+    ) -> bool {
+        dsp::is_multiplier(cell) && dsp::input_pin(cell, input).is_some()
+    }
+
+    fn dsp_low_driven_input_count(&self, cell: &skalp_lir::gate_netlist::Cell) -> usize {
+        if dsp::is_multiplier(cell) {
+            dsp::low_driven_pins().len()
+        } else {
+            0
+        }
+    }
+
     fn ram_input_pin(
         &self,
         ports: &skalp_lir::gate_netlist::RamPorts,
@@ -1857,6 +1934,18 @@ impl Device for NexusDevice {
                 .bel_wires
                 .get(&(x, y, format!("PIO{bel_index}_{suffix}")))
                 .copied();
+        }
+        let is_multiplier = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::DspSlice);
+        if is_multiplier {
+            let name = match pin {
+                CellPin::Output(bit) => format!("Z{bit}"),
+                CellPin::Input(n) => dsp::pin_of_router_pin(n)?,
+            };
+            return self.bel_wires.get(&(x, y, format!("DSP_{name}"))).copied();
         }
         let is_block_ram = !self.prjoxide_tiles.is_empty()
             && self

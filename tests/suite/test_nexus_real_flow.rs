@@ -115,3 +115,24 @@ fn block_ram_builds_a_bitstream_for_the_real_device() {
     assert!(result.routing.success);
     assert!(result.timing.is_some());
 }
+
+#[test]
+fn multiplier_builds_a_bitstream_for_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_multiplier.sk", "MulBlink");
+    assert!(
+        netlist.cells.iter().any(|c| c.cell_type == "MULT18X18"),
+        "the product should map to a hard multiplier"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .unwrap();
+    assert!(result.routing.success);
+}

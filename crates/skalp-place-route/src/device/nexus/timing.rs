@@ -4,7 +4,7 @@
 //! timing arcs. CertusPro-NX has no tables of its own and shares the Nexus
 //! fabric, so its numbers are CrossLink-NX's and are estimates.
 
-use super::{ebr, NexusDevice, NexusVariant};
+use super::{dsp, ebr, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
 use crate::error::{PlaceRouteError, Result};
@@ -57,6 +57,7 @@ pub struct TimingDb {
     clk_to_q: i64,
     setup: HashMap<String, i64>,
     ccu2: HashMap<(String, String), i64>,
+    multiplier: i64,
     ram_clk_to_q: i64,
     ram_setup: HashMap<String, i64>,
 }
@@ -104,6 +105,20 @@ impl TimingDb {
             .map(|p| ((p.from_pin.clone(), p.to_pin.clone()), p.maxv))
             .collect();
 
+        // The worst path through each of a multiplier's chained blocks.
+        let worst_arc = |name: &str| -> Result<i64> {
+            Ok(cell(name)?
+                .iopaths
+                .iter()
+                .map(|p| p.maxv)
+                .max()
+                .unwrap_or(0))
+        };
+        let multiplier = worst_arc("PREADD9_CORE")?
+            + worst_arc("MULT9_CORE")?
+            + worst_arc("MULT18_CORE")?
+            + worst_arc("REG18_CORE")?;
+
         let ram = cell("PDPSC16K_MODE")?;
         let ram_clk_to_q = ram.iopaths.iter().map(|p| p.maxv).max().unwrap_or(0);
         let ram_setup = ram
@@ -122,6 +137,7 @@ impl TimingDb {
             clk_to_q,
             setup,
             ccu2,
+            multiplier,
             ram_clk_to_q,
             ram_setup,
         })
@@ -218,6 +234,9 @@ impl TimingModel for NexusTiming<'_> {
     }
 
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        if dsp::is_multiplier(cell) {
+            return dsp::input_pin(cell, input).map(|_| self.db.multiplier);
+        }
         if Self::is_dist_ram(cell) {
             return (9..=12).contains(&input).then_some(self.db.lut);
         }
@@ -268,6 +287,12 @@ impl TimingModel for NexusTiming<'_> {
     }
 
     fn input_pins(&self, cell: &Cell, input: usize) -> Vec<usize> {
+        if dsp::is_multiplier(cell) {
+            return dsp::input_pin(cell, input)
+                .and_then(|pin| dsp::router_pin(&pin))
+                .into_iter()
+                .collect();
+        }
         if Self::is_dist_ram(cell) && (9..=12).contains(&input) {
             let base = DIST_RAM_PIN_RAD + 4 * (input - 9);
             return (0..4).map(|lut| base + lut).collect();

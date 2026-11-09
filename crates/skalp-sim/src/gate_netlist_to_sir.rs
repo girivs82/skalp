@@ -237,6 +237,12 @@ impl GateNetlistToSirConverter {
                     addr_width,
                     data_width,
                 }
+            } else if let Some(ports) = cell.dsp_ports() {
+                PrimitiveType::Multiplier {
+                    a_width: ports.a.len() as u8,
+                    b_width: ports.b.len() as u8,
+                    p_width: ports.product_width as u8,
+                }
             } else if cell.function.as_ref() == Some(&CellFunction::Ccu2) {
                 // Lattice carry cell: the truth tables are cell parameters
                 let (init0, init1) =

@@ -79,6 +79,30 @@ pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
 /// Parameter holding a block RAM cell's data width in bits.
 pub const RAM_DATA_BITS_PARAM: &str = "RAM_DATA_BITS";
 
+/// Parameter holding a hard multiplier's A operand width in bits.
+pub const DSP_A_BITS_PARAM: &str = "DSP_A_WIDTH";
+/// Parameter holding a hard multiplier's B operand width in bits.
+pub const DSP_B_BITS_PARAM: &str = "DSP_B_WIDTH";
+/// Parameter holding a hard multiplier's product width in bits.
+pub const DSP_P_BITS_PARAM: &str = "DSP_P_WIDTH";
+/// Bits of the third operand bus every hard multiplier cell carries.
+pub const DSP_C_BITS: usize = 18;
+
+/// Where each function of a hard multiplier cell sits in its input list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DspPorts {
+    /// A operand, least significant bit first
+    pub a: std::ops::Range<usize>,
+    /// B operand, least significant bit first
+    pub b: std::ops::Range<usize>,
+    /// A operand sign control
+    pub signed_a: usize,
+    /// B operand sign control
+    pub signed_b: usize,
+    /// Width of the product, which comes first in the outputs
+    pub product_width: usize,
+}
+
 /// Where each function of a block RAM cell sits in its input list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RamPorts {
@@ -112,6 +136,23 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// The input layout of a hard multiplier cell, or `None` for any other cell.
+    pub fn dsp_ports(&self) -> Option<DspPorts> {
+        let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
+        let a_width = bits(DSP_A_BITS_PARAM)?;
+        let b_width = bits(DSP_B_BITS_PARAM)?;
+        let a = 0..a_width;
+        let b = a.end..a.end + b_width;
+        let signed_a = b.end + DSP_C_BITS;
+        Some(DspPorts {
+            a,
+            b,
+            signed_a,
+            signed_b: signed_a + 1,
+            product_width: bits(DSP_P_BITS_PARAM)?,
+        })
+    }
+
     /// The input layout of a block RAM cell, or `None` for any other cell.
     pub fn ram_ports(&self) -> Option<RamPorts> {
         let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();

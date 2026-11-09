@@ -1,0 +1,9 @@
+// A multiply wider than one hard multiplier block.
+entity MultiplyWide {
+    in a: nat[24]
+    in b: nat[24]
+    out p: nat[48]
+}
+impl MultiplyWide {
+    p = a * b
+}

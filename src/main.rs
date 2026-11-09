@@ -4394,6 +4394,17 @@ fn add_nexus_io_pads(
             Some((format!("top.{}", p.name), constraints))
         })
         .collect();
+    // Hierarchical synthesis promotes signals shared with child instances to
+    // ports of their module; those are internal nets and get no pad.
+    let is_real_port = |name: &str| {
+        let base = name.split('[').next().unwrap_or(name);
+        let port = base.strip_prefix("top.").unwrap_or(base);
+        top.ports.iter().any(|p| p.name == port)
+    };
+    let nets = netlist.nets.clone();
+    let name_of = |net: &skalp_lir::gate_netlist::GateNetId| nets[net.0 as usize].name.clone();
+    netlist.inputs.retain(|net| is_real_port(&name_of(net)));
+    netlist.outputs.retain(|net| is_real_port(&name_of(net)));
     if !port_constraints.is_empty() {
         skalp_lir::insert_io_buffers(netlist, library, &port_constraints);
     }

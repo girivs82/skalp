@@ -13,7 +13,8 @@
 
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
-    RAM_ADDR_BITS_PARAM, RAM_DATA_BITS_PARAM,
+    DSP_A_BITS_PARAM, DSP_B_BITS_PARAM, DSP_C_BITS, DSP_P_BITS_PARAM, RAM_ADDR_BITS_PARAM,
+    RAM_DATA_BITS_PARAM,
 };
 use crate::lir::{Lir, LirNodeId, LirOp, LirSignalId};
 use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
@@ -810,6 +811,8 @@ fn map_dsp_standalone(
                            out: &[GateNetId],
                            a_ext: GateNetId,
                            b_ext: GateNetId,
+                           a_signed: GateNetId,
+                           b_signed: GateNetId,
                            suffix: &str| {
         let mut cell_inputs = Vec::new();
 
@@ -830,12 +833,12 @@ fn map_dsp_standalone(
             }
         }
         // C input — tie low
-        for _ in 0..18 {
+        for _ in 0..DSP_C_BITS {
             cell_inputs.push(tie_low);
         }
         // SIGNEDA, SIGNEDB
-        cell_inputs.push(signed_net);
-        cell_inputs.push(signed_net);
+        cell_inputs.push(a_signed);
+        cell_inputs.push(b_signed);
         // SOURCEA, SOURCEB — direct input
         cell_inputs.push(tie_low);
         cell_inputs.push(tie_low);
@@ -894,6 +897,12 @@ fn map_dsp_standalone(
         );
         cell.source_op = Some("DspMultiply".to_string());
         cell.parameters
+            .insert(DSP_A_BITS_PARAM.to_string(), dsp_info.a_width.to_string());
+        cell.parameters
+            .insert(DSP_B_BITS_PARAM.to_string(), dsp_info.b_width.to_string());
+        cell.parameters
+            .insert(DSP_P_BITS_PARAM.to_string(), dsp_info.p_width.to_string());
+        cell.parameters
             .insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
         cell.parameters
             .insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
@@ -929,6 +938,8 @@ fn map_dsp_standalone(
             outputs,
             a_sign,
             b_sign,
+            signed_net,
+            signed_net,
             "",
         );
     } else if width <= dsp_info.a_width * 2 && width <= dsp_info.b_width * 2 {
@@ -950,105 +961,94 @@ fn map_dsp_standalone(
         let a_hi_w = width - half;
         let b_hi_w = width - half;
 
-        // P_ll = A_lo * B_lo (contributes to bits [0..2*half])
+        let product_nets = |netlist: &mut GateNetlist, width: u32, tag: &str| -> Vec<GateNetId> {
+            (0..width as usize)
+                .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{tag}_p{i}"))))
+                .collect()
+        };
+
+        // The low halves are unsigned; a signed multiply has signed high halves.
         let ll_width = (2 * half).min(dsp_info.p_width);
-        let ll_out: Vec<GateNetId> = (0..ll_width as usize)
-            .map(|i| {
-                if i < result_width as usize && i < outputs.len() {
-                    outputs[i]
-                } else {
-                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.ll_p{}", path, i)))
-                }
-            })
-            .collect();
+        let ll_out = product_nets(netlist, ll_width, "ll");
         instantiate_dsp(
-            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, "_ll",
+            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, tie_low,
+            tie_low, "_ll",
+        );
+        let lh_width = (half + b_hi_w).min(dsp_info.p_width);
+        let lh_out = product_nets(netlist, lh_width, "lh");
+        instantiate_dsp(
+            netlist, &a_lo, &b_hi, half, b_hi_w, lh_width, &lh_out, tie_low, b_sign, tie_low,
+            signed_net, "_lh",
+        );
+        let hl_width = (a_hi_w + half).min(dsp_info.p_width);
+        let hl_out = product_nets(netlist, hl_width, "hl");
+        instantiate_dsp(
+            netlist, &a_hi, &b_lo, a_hi_w, half, hl_width, &hl_out, a_sign, tie_low, signed_net,
+            tie_low, "_hl",
+        );
+        let hh_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
+        let hh_out = product_nets(netlist, hh_width, "hh");
+        instantiate_dsp(
+            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_width, &hh_out, a_sign, b_sign, signed_net,
+            signed_net, "_hh",
         );
 
-        // P_lh = A_lo * B_hi (contributes to bits [half..half+2*max(half,b_hi_w)])
-        // P_hl = A_hi * B_lo (contributes to bits [half..half+2*max(a_hi_w,half)])
-        // P_hh = A_hi * B_hi (contributes to bits [2*half..])
-        // These partial products need adder logic to combine — for now create the 4 DSP
-        // blocks and use gate-level adders to sum the shifted partial products.
-        // This matches the old TechMapper behavior.
-
-        let lh_p_width = (half + b_hi_w).min(dsp_info.p_width);
-        let lh_out: Vec<GateNetId> = (0..lh_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.lh_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_lo, &b_hi, half, b_hi_w, lh_p_width, &lh_out, tie_low, b_sign, "_lh",
-        );
-
-        let hl_p_width = (a_hi_w + half).min(dsp_info.p_width);
-        let hl_out: Vec<GateNetId> = (0..hl_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hl_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_hi, &b_lo, a_hi_w, half, hl_p_width, &hl_out, a_sign, tie_low, "_hl",
-        );
-
-        let hh_p_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
-        let hh_out: Vec<GateNetId> = (0..hh_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hh_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_p_width, &hh_out, a_sign, b_sign, "_hh",
-        );
-
-        // For remaining output bits [half..result_width], we need to add the partial products.
-        // The full result is: outputs[i] = ll[i] + (lh[i-half] + hl[i-half]) + hh[i-2*half]
-        // with carry propagation. For the test assertions, which only check DSP cell count
-        // (not functional correctness of the adder tree), wire outputs [half..] with
-        // placeholder XOR gates to combine partial products.
-        // A proper implementation would use a carry-chain adder here.
-        let xor_info = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
-
-        for i in half as usize..result_width.min(result_width) as usize {
-            if i >= outputs.len() {
-                break;
-            }
-            let lh_bit = lh_out.get(i - half as usize).copied().unwrap_or(tie_low);
-            let hl_bit = hl_out.get(i - half as usize).copied().unwrap_or(tie_low);
-
-            // Simple combine: XOR partial products into output bit
-            // (not carry-accurate, but tests only check DSP cell count)
-            let combined = netlist.add_net(GateNet::new(
-                GateNetId(0),
-                format!("{}.dsp_combine_{}", path, i),
-            ));
-            let mut xc1 = Cell::new_comb(
-                CellId(0),
-                xor_info.name.clone(),
-                library.name.clone(),
-                xor_info.fit,
-                format!("{}.dsp_xor_{}", path, i),
-                vec![lh_bit, hl_bit],
-                vec![combined],
-            );
-            xor_info.apply_to_cell(&mut xc1);
-            netlist.add_cell(xc1);
-
-            // XOR with hh contribution if applicable
-            let hh_bit = if i >= 2 * half as usize {
-                hh_out
-                    .get(i - 2 * half as usize)
-                    .copied()
-                    .unwrap_or(tie_low)
+        // Line each partial product up at its weight, extended to the full result.
+        let total = result_width as usize;
+        let shifted = |product: &[GateNetId], shift: usize, sign: GateNetId| -> Vec<GateNetId> {
+            (0..total)
+                .map(|bit| {
+                    if bit < shift {
+                        tie_low
+                    } else {
+                        product.get(bit - shift).copied().unwrap_or(sign)
+                    }
+                })
+                .collect()
+        };
+        let top_bit = |product: &[GateNetId]| {
+            if signed {
+                product.last().copied().unwrap_or(tie_low)
             } else {
                 tie_low
-            };
-            let mut xc2 = Cell::new_comb(
+            }
+        };
+        let h = half as usize;
+        let ll = shifted(&ll_out, 0, tie_low);
+        let lh = shifted(&lh_out, h, top_bit(&lh_out));
+        let hl = shifted(&hl_out, h, top_bit(&hl_out));
+        let hh = shifted(&hh_out, 2 * h, top_bit(&hh_out));
+
+        let sum = add_nets(netlist, library, &ll, &lh, tie_low, &format!("{path}.sum0"));
+        let sum = add_nets(
+            netlist,
+            library,
+            &sum,
+            &hl,
+            tie_low,
+            &format!("{path}.sum1"),
+        );
+        let sum = add_nets(
+            netlist,
+            library,
+            &sum,
+            &hh,
+            tie_low,
+            &format!("{path}.sum2"),
+        );
+        let buffer = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+        for (bit, &output) in outputs.iter().enumerate().take(total) {
+            let mut cell = Cell::new_comb(
                 CellId(0),
-                xor_info.name.clone(),
+                buffer.name.clone(),
                 library.name.clone(),
-                xor_info.fit,
-                format!("{}.dsp_xor2_{}", path, i),
-                vec![combined, hh_bit],
-                vec![outputs[i]],
+                buffer.fit,
+                format!("{path}.product_buf{bit}"),
+                vec![sum[bit]],
+                vec![output],
             );
-            xor_info.apply_to_cell(&mut xc2);
-            netlist.add_cell(xc2);
+            buffer.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
         }
     } else {
         // Too wide for DSP — should not happen since the AIG path would handle it,
@@ -1058,6 +1058,109 @@ fn map_dsp_standalone(
             path, width
         );
     }
+}
+
+/// Add two equal-width buses, on a carry chain when the library has one.
+fn add_nets(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    a: &[GateNetId],
+    b: &[GateNetId],
+    tie_low: GateNetId,
+    name: &str,
+) -> Vec<GateNetId> {
+    let width = a.len();
+    let outputs: Vec<GateNetId> = (0..width)
+        .map(|bit| netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_{bit}"))))
+        .collect();
+    let operand = |nets: &[GateNetId]| crate::carry_chain::Operand {
+        nets: nets.to_vec(),
+        constant: None,
+    };
+    let add = LirOp::Add {
+        width: width as u32,
+        has_carry: false,
+        const_b: None,
+    };
+    if crate::carry_chain::map_carry_chain(
+        netlist,
+        library,
+        &add,
+        &[operand(a), operand(b)],
+        &outputs,
+        name,
+    ) {
+        return outputs;
+    }
+
+    // No carry chain in this library: a ripple adder from basic gates.
+    let xor = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
+    let and = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let or = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+    let gate = |netlist: &mut GateNetlist,
+                info: &LibraryCellInfo,
+                inputs: Vec<GateNetId>,
+                output: GateNetId,
+                tag: String| {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            info.name.clone(),
+            library.name.clone(),
+            info.fit,
+            tag,
+            inputs,
+            vec![output],
+        );
+        info.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+    };
+    let mut carry = tie_low;
+    for bit in 0..width {
+        let net = |netlist: &mut GateNetlist, tag: &str| {
+            netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_{tag}{bit}")))
+        };
+        let half_sum = net(netlist, "x");
+        let generate = net(netlist, "g");
+        let propagate = net(netlist, "p");
+        let carry_out = net(netlist, "c");
+        gate(
+            netlist,
+            &xor,
+            vec![a[bit], b[bit]],
+            half_sum,
+            format!("{name}.x{bit}"),
+        );
+        gate(
+            netlist,
+            &xor,
+            vec![half_sum, carry],
+            outputs[bit],
+            format!("{name}.s{bit}"),
+        );
+        gate(
+            netlist,
+            &and,
+            vec![a[bit], b[bit]],
+            generate,
+            format!("{name}.g{bit}"),
+        );
+        gate(
+            netlist,
+            &and,
+            vec![half_sum, carry],
+            propagate,
+            format!("{name}.p{bit}"),
+        );
+        gate(
+            netlist,
+            &or,
+            vec![generate, propagate],
+            carry_out,
+            format!("{name}.c{bit}"),
+        );
+        carry = carry_out;
+    }
+    outputs
 }
 
 /// Smallest memory, in bits, worth a block RAM.
