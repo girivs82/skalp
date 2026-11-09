@@ -132,6 +132,9 @@ pub struct Route {
     /// Empty for regular nets (zero overhead).
     #[serde(default)]
     pub branches: Vec<BranchInfo>,
+    /// Sinks the router found no path (or no pin wire) to
+    #[serde(default)]
+    pub unrouted_sinks: usize,
 }
 
 impl Route {
@@ -145,6 +148,7 @@ impl Route {
             pips: Vec::new(),
             delay: 0,
             branches: Vec::new(),
+            unrouted_sinks: 0,
         }
     }
 
@@ -197,6 +201,10 @@ pub struct RoutingResult {
     /// Maximum skew violation in ps (0 if none)
     #[serde(default)]
     pub max_skew_violation_ps: f64,
+    /// Sink connections left unrouted (no path, or no pin wire); a result
+    /// with any is not a success
+    #[serde(default)]
+    pub unrouted_connections: usize,
 }
 
 impl RoutingResult {
@@ -211,6 +219,7 @@ impl RoutingResult {
             extra_bits: Vec::new(),
             skew_violations: 0,
             max_skew_violation_ps: 0.0,
+            unrouted_connections: 0,
         }
     }
 }
@@ -343,12 +352,15 @@ impl<D: Device + Clone> Router<D> {
         result.congestion = pathfinder_result.congestion;
         result.iterations = pathfinder_result.iterations;
         result.skew_violations = pathfinder_result.skew_violations;
+        // Counted over the routes kept: PathFinder's own count includes its
+        // attempts at nets the global and carry routers routed above
+        result.unrouted_connections = result.routes.values().map(|r| r.unrouted_sinks).sum();
         result.max_skew_violation_ps = pathfinder_result.max_skew_violation_ps;
         // In strict mode, require congestion <= 1.0; in relaxed mode, accept <= 4.0
         if self.config.strict_congestion {
-            result.success = pathfinder_result.success;
+            result.success = result.congestion <= 1.0 && result.unrouted_connections == 0;
         } else {
-            result.success = result.congestion <= 4.0;
+            result.success = result.congestion <= 4.0 && result.unrouted_connections == 0;
         }
 
         Ok(result)

@@ -1086,6 +1086,20 @@ fn map_memblock_standalone(
     } else {
         library.find_ram_cell()
     };
+    // A memory read combinationally goes into distributed RAM when the target
+    // has it and that is cheaper than registers (it nearly always is beyond a
+    // couple of words).
+    if ram_lookup.is_none()
+        && async_read
+        && has_write
+        && library.find_best_cell(&CellFunction::DistRam16x4).is_some()
+        && distram_is_cheaper(data_width, depth)
+    {
+        map_memblock_to_distram(
+            netlist, library, data_width, addr_width, depth, inputs, outputs, path, clk,
+        );
+        return;
+    }
     let (ram_cell, ram_info) = match ram_lookup {
         Some(info) => info,
         None => {
@@ -1473,6 +1487,222 @@ fn map_memblock_standalone(
                     }
                 }
             }
+        }
+    }
+}
+
+/// LUT-equivalent cost of a `DistRam16x4` cell: four RAM LUTs plus the write
+/// port slice that drives them.
+const DISTRAM_CELL_COST: u32 = 6;
+
+/// Whether a `data_width` × `depth` memory costs less as 16×4 distributed RAM
+/// than as registers. Registers: one FF per bit, a 2:1 mux per bit and word
+/// for the read tree, and a write mux per bit. Distributed RAM: the cells,
+/// plus a read mux tree across 16-word banks.
+fn distram_is_cheaper(data_width: u32, depth: u32) -> bool {
+    let (dw, depth) = (data_width.max(1), depth.max(1));
+    let register_cost = dw * depth + dw * (depth - 1) + dw * depth;
+    let banks = depth.div_ceil(16);
+    let distram_cost = banks * dw.div_ceil(4) * DISTRAM_CELL_COST + dw * (banks - 1);
+    distram_cost < register_cost
+}
+
+/// Map an asynchronous-read MemBlock onto 16×4 distributed RAM cells
+/// (`CellFunction::DistRam16x4`: Lattice DPR16X4 / DPR16X4C).
+///
+/// The memory is tiled into 16-word banks of 4-bit slices. Each bank's write
+/// enable is `we` qualified by the upper write-address bits; the read data is
+/// a mux tree over the banks selected by the upper read-address bits. Each
+/// read port of a memory is its own MemBlock (see mir_to_lir), so a register
+/// file with two read ports becomes two copies sharing the write port.
+#[allow(clippy::too_many_arguments)]
+fn map_memblock_to_distram(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    data_width: u32,
+    addr_width: u32,
+    depth: u32,
+    inputs: &[Vec<GateNetId>],
+    outputs: &[GateNetId],
+    path: &str,
+    clk: GateNetId,
+) {
+    const WORDS: usize = 16;
+    const BITS: usize = 4;
+    const CELL_ADDR_BITS: usize = 4;
+
+    let ram_ci = lookup_cell(library, CellFunction::DistRam16x4, "DPR16X4", 0.16);
+    let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
+    let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let mux_ci = lookup_cell(library, CellFunction::Mux2, "MUX2", 0.3);
+    let tie_low = crate::carry_chain::get_or_create_tie(netlist, false);
+
+    let dw = data_width as usize;
+    let aw = addr_width as usize;
+    let banks = (depth as usize).div_ceil(WORDS);
+    let empty = Vec::new();
+    let raddr = inputs.first().unwrap_or(&empty);
+    let waddr = inputs.get(1).unwrap_or(&empty);
+    let wdata = inputs.get(2).unwrap_or(&empty);
+    let we = inputs
+        .get(3)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(tie_low);
+    let bit =
+        |nets: &Vec<GateNetId>, i: usize| -> GateNetId { nets.get(i).copied().unwrap_or(tie_low) };
+
+    let add_comb = |netlist: &mut GateNetlist,
+                    ci: &LibraryCellInfo,
+                    cell_path: String,
+                    ins: Vec<GateNetId>,
+                    out_name: String|
+     -> GateNetId {
+        let out = netlist.add_net(GateNet::new(GateNetId(0), out_name));
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            ci.name.clone(),
+            library.name.clone(),
+            ci.fit,
+            cell_path,
+            ins,
+            vec![out],
+        );
+        cell.source_op = Some("MemBlock_DistRam".to_string());
+        ci.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+        out
+    };
+
+    // Per-bank write enable: we & (waddr[upper] == bank)
+    let upper_bits = aw.saturating_sub(CELL_ADDR_BITS);
+    let mut inverted_waddr: Vec<Option<GateNetId>> = vec![None; upper_bits];
+    let mut bank_we = Vec::with_capacity(banks);
+    for b in 0..banks {
+        let mut sel = we;
+        for (u, inverted) in inverted_waddr.iter_mut().enumerate() {
+            let a = bit(waddr, CELL_ADDR_BITS + u);
+            let term = if (b >> u) & 1 == 1 {
+                a
+            } else {
+                *inverted.get_or_insert_with(|| {
+                    add_comb(
+                        netlist,
+                        &inv_ci,
+                        format!("{}.waddr_inv{}", path, u),
+                        vec![a],
+                        format!("{}.waddr_n{}", path, u),
+                    )
+                })
+            };
+            sel = add_comb(
+                netlist,
+                &and_ci,
+                format!("{}.bank{}_we_and{}", path, b, u),
+                vec![sel, term],
+                format!("{}.bank{}_we{}", path, b, u),
+            );
+        }
+        bank_we.push(sel);
+    }
+
+    // RAM cells. bank_data[b][i] = bank b's read data bit i.
+    let mut bank_data: Vec<Vec<GateNetId>> = Vec::with_capacity(banks);
+    for (b, &wre) in bank_we.iter().enumerate() {
+        let mut data = Vec::with_capacity(dw);
+        for s in 0..dw.div_ceil(BITS) {
+            let mut ins = Vec::with_capacity(2 * BITS + 1 + CELL_ADDR_BITS);
+            for i in 0..BITS {
+                let d = s * BITS + i;
+                ins.push(if d < dw { bit(wdata, d) } else { tie_low });
+            }
+            for i in 0..CELL_ADDR_BITS {
+                ins.push(if i < aw { bit(waddr, i) } else { tie_low });
+            }
+            ins.push(wre);
+            for i in 0..CELL_ADDR_BITS {
+                ins.push(if i < aw { bit(raddr, i) } else { tie_low });
+            }
+            let outs: Vec<GateNetId> = (0..BITS)
+                .map(|i| {
+                    let d = s * BITS + i;
+                    // A single bank drives the memory's outputs directly
+                    if banks == 1 && d < dw {
+                        outputs.get(d).copied().unwrap_or_else(|| {
+                            netlist.add_net(GateNet::new(
+                                GateNetId(0),
+                                format!("{}.b{}s{}.do{}", path, b, s, i),
+                            ))
+                        })
+                    } else {
+                        netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.b{}s{}.do{}", path, b, s, i),
+                        ))
+                    }
+                })
+                .collect();
+            data.extend(outs.iter().take(dw.saturating_sub(s * BITS).min(BITS)));
+            let mut cell = Cell::new_seq(
+                CellId(0),
+                ram_ci.name.clone(),
+                library.name.clone(),
+                ram_ci.fit,
+                format!("{}.b{}s{}", path, b, s),
+                ins,
+                outs,
+                clk,
+                None,
+            );
+            cell.source_op = Some("MemBlock_DistRam".to_string());
+            cell.parameters
+                .insert("INITVAL".to_string(), "0x0000000000000000".to_string());
+            ram_ci.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
+        }
+        bank_data.push(data);
+    }
+    if banks == 1 {
+        return;
+    }
+
+    // Read mux tree over the banks: level u halves the candidates using
+    // raddr[4 + u]. Banks past the memory's depth read as 0.
+    for i in 0..dw {
+        let mut level: Vec<GateNetId> = bank_data.iter().map(|d| d[i]).collect();
+        let mut u = 0;
+        while level.len() > 1 {
+            let sel = bit(raddr, CELL_ADDR_BITS + u);
+            let last_level = level.len() <= 2;
+            level = level
+                .chunks(2)
+                .enumerate()
+                .map(|(k, pair)| {
+                    let d0 = pair[0];
+                    let d1 = pair.get(1).copied().unwrap_or(tie_low);
+                    let out = if last_level {
+                        outputs[i]
+                    } else {
+                        netlist.add_net(GateNet::new(
+                            GateNetId(0),
+                            format!("{}.rmux{}_{}_{}", path, i, u, k),
+                        ))
+                    };
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        mux_ci.name.clone(),
+                        library.name.clone(),
+                        mux_ci.fit,
+                        format!("{}.rmux{}_{}_{}", path, i, u, k),
+                        mux2_inputs(&mux_ci, sel, d0, d1),
+                        vec![out],
+                    );
+                    cell.source_op = Some("MemBlock_DistRam".to_string());
+                    mux_ci.apply_to_cell(&mut cell);
+                    netlist.add_cell(cell);
+                    out
+                })
+                .collect();
+            u += 1;
         }
     }
 }

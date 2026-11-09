@@ -60,10 +60,13 @@ impl<'a, D: Device> Legalizer<'a, D> {
             .into_iter()
             .filter(|(id, _)| !chain_cells.contains(id))
             .collect();
-        cells.sort_by(|a, b| {
-            let a_score = a.1.tile_y * 1000 + a.1.tile_x;
-            let b_score = b.1.tile_y * 1000 + b.1.tile_x;
-            a_score.cmp(&b_score)
+        // Distributed RAM first: its site needs six free LUTs of one tile,
+        // which ordinary logic placed earlier would scatter
+        cells.sort_by_key(|(_, loc)| {
+            (
+                loc.bel_type != BelType::DistRam,
+                loc.tile_y * 1000 + loc.tile_x,
+            )
         });
 
         let mut sites = SiteMap::new(self.device);

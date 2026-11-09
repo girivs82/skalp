@@ -36,6 +36,9 @@ struct TileSites {
     bels: Vec<(BelType, bool)>,
     /// Number of BELs not taken
     free: usize,
+    /// Per BEL index, the other BELs a cell there uses up
+    /// ([`Device::bel_footprint`]); empty for most tiles
+    footprint: Vec<Vec<usize>>,
 }
 
 /// Occupancy of every BEL on the device.
@@ -58,7 +61,19 @@ impl SiteMap {
                     .map(|t| t.bels().iter().map(|b| (b.bel_type, false)).collect())
                     .unwrap_or_default();
                 let free = bels.len();
-                tiles.push(TileSites { bels, free });
+                let footprint: Vec<Vec<usize>> = (0..bels.len())
+                    .map(|i| device.bel_footprint(x, y, i))
+                    .collect();
+                let footprint = if footprint.iter().all(Vec::is_empty) {
+                    Vec::new()
+                } else {
+                    footprint
+                };
+                tiles.push(TileSites {
+                    bels,
+                    free,
+                    footprint,
+                });
             }
         }
         Self {
@@ -72,7 +87,9 @@ impl SiteMap {
         (y * self.width + x) as usize
     }
 
-    /// Mark a BEL taken. Returns false if it was already taken or does not exist.
+    /// Mark a BEL taken, along with the BELs in its footprint (which no
+    /// other cell may then use). Returns false if it was already taken or
+    /// does not exist.
     pub fn take(&mut self, x: u32, y: u32, bel_index: usize) -> bool {
         if x >= self.width || y >= self.height {
             return false;
@@ -83,10 +100,20 @@ impl SiteMap {
             Some((_, taken)) if !*taken => {
                 *taken = true;
                 tile.free -= 1;
-                true
             }
-            _ => false,
+            _ => return false,
         }
+        if let Some(blocked) = tile.footprint.get(bel_index) {
+            for &b in blocked {
+                if let Some((_, taken)) = tile.bels.get_mut(b) {
+                    if !*taken {
+                        *taken = true;
+                        tile.free -= 1;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Whether a BEL is taken (a missing BEL counts as taken).

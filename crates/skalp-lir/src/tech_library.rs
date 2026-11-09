@@ -897,6 +897,14 @@ pub enum CellFunction {
     // Memory
     /// RAM/BRAM cell (vendor-specific block RAM primitive)
     Ram,
+    /// 16-word × 4-bit distributed (LUT) RAM with a synchronous write port
+    /// and an asynchronous read port (Lattice Nexus `DPR16X4`, ECP5
+    /// `DPR16X4C`).
+    ///
+    /// Inputs: DI0..DI3, WAD0..WAD3, WRE, RAD0..RAD3; output: DO0..DO3; the
+    /// write clock WCK is the cell's clock. On a rising WCK edge with WRE
+    /// high, `mem[WAD] = DI`; `DO = mem[RAD]` at all times.
+    DistRam16x4,
 
     /// DSP/multiplier hard block (vendor-specific DSP primitive)
     Dsp,
@@ -1031,6 +1039,7 @@ impl CellFunction {
             | CellFunction::Pll
             | CellFunction::ClkDiv
             | CellFunction::Ram
+            | CellFunction::DistRam16x4
             | CellFunction::Dsp
             | CellFunction::Blackbox { .. } => false,
 
@@ -1199,6 +1208,13 @@ impl CellFunction {
                 vec!["q".into()],
             ),
             CellFunction::Latch => (vec!["en".into(), "d".into()], vec!["q".into()]),
+            CellFunction::DistRam16x4 => {
+                let mut inputs: Vec<String> = (0..4).map(|i| format!("DI{}", i)).collect();
+                inputs.extend((0..4).map(|i| format!("WAD{}", i)));
+                inputs.push("WRE".into());
+                inputs.extend((0..4).map(|i| format!("RAD{}", i)));
+                (inputs, (0..4).map(|i| format!("DO{}", i)).collect())
+            }
             CellFunction::Ram => {
                 // Default RAM pins — overridden by library cell's explicit pin lists
                 (
@@ -1355,6 +1371,7 @@ impl CellFunction {
                 | CellFunction::DffRE
                 | CellFunction::Latch
                 | CellFunction::Ram
+                | CellFunction::DistRam16x4
                 | CellFunction::RetentionDff
                 | CellFunction::RetentionDffR
                 | CellFunction::IsolationLatch
@@ -3325,6 +3342,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "dffre" | "dff_re" => Ok(CellFunction::DffRE),
         "latch" => Ok(CellFunction::Latch),
         "ram" | "bram" | "sram" => Ok(CellFunction::Ram),
+        "dpr16x4" | "dist_ram16x4" => Ok(CellFunction::DistRam16x4),
         "dsp" | "multiplier" | "mult" => Ok(CellFunction::Dsp),
         "clk_buf" | "clkbuf" | "global_buffer" | "gb" => Ok(CellFunction::ClkBuf),
         "pll" | "phase_locked_loop" => Ok(CellFunction::Pll),
@@ -3420,6 +3438,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::DffRE => "dffre".to_string(),
         CellFunction::Latch => "latch".to_string(),
         CellFunction::Ram => "ram".to_string(),
+        CellFunction::DistRam16x4 => "dpr16x4".to_string(),
         CellFunction::Dsp => "dsp".to_string(),
         CellFunction::ClkBuf => "clk_buf".to_string(),
         CellFunction::Pll => "pll".to_string(),

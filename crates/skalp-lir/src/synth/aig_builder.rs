@@ -881,6 +881,12 @@ impl<'a> AigBuilder<'a> {
                     name
                 );
             }
+            CellFunction::DistRam16x4 => {
+                panic!(
+                    "Cannot convert distributed RAM cell to AIG. \
+                     RAM cells should be preserved in the gate netlist."
+                );
+            }
             CellFunction::Ram => {
                 // RAM cells should not be converted to AIG - they are
                 // preserved as technology primitives in the gate netlist.

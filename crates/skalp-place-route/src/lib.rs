@@ -70,7 +70,7 @@ pub use device::ice40::{Ice40ChipDb, Ice40Device, Ice40Variant};
 pub use device::nexus::{NexusDevice, NexusTile, NexusVariant};
 pub use device::xc7::{Xc7Device, Xc7Tile, Xc7Variant};
 pub use device::{
-    Bel, BelId, BelType, CarryChainLayout, CarrySlot, Device, DeviceFamily, DeviceStats,
+    Bel, BelId, BelType, CarryChainLayout, CarrySlot, CellPin, Device, DeviceFamily, DeviceStats,
     PackagePins, Pip, PipId, Tile, TileType, Wire, WireId, WireType,
 };
 pub use error::{PlaceRouteError, Result};
