@@ -1029,7 +1029,22 @@ impl GateNetlist {
             } else {
                 &cell.cell_type
             };
-            output.push_str(&format!("    {} U{} (\n", cell_type_display, cell.id.0));
+            if cell.parameters.is_empty() {
+                output.push_str(&format!("    {} U{} (\n", cell_type_display, cell.id.0));
+            } else {
+                // Vendor parameters (e.g. a CCU2's INIT0/INIT1/INJECT)
+                let params: Vec<String> = cell
+                    .parameters
+                    .iter()
+                    .map(|(k, v)| format!(".{}(\"{}\")", k, v))
+                    .collect();
+                output.push_str(&format!(
+                    "    {} #({}) U{} (\n",
+                    cell_type_display,
+                    params.join(", "),
+                    cell.id.0
+                ));
+            }
 
             // Collect all port connections
             let mut connections = Vec::new();
@@ -1936,6 +1951,15 @@ fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&
         return format!("I{}", index);
     }
 
+    // Lattice carry cells (Nexus CCU2, ECP5 CCU2C)
+    if cell_type == "CCU2" || cell_type == "CCU2C" {
+        const PINS: [&str; 9] = ["A0", "B0", "C0", "D0", "A1", "B1", "C1", "D1", "CIN"];
+        return PINS
+            .get(index)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| format!("I{}", index));
+    }
+
     // Nexus FPGA primitives (OXIDE_COMB, OXIDE_FF, etc.)
     if cell_type.starts_with("OXIDE_COMB") {
         return match index {
@@ -2046,6 +2070,15 @@ fn get_output_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<
         } else {
             return format!("Y{}", index);
         }
+    }
+
+    // Lattice carry cells (Nexus CCU2, ECP5 CCU2C)
+    if cell_type == "CCU2" || cell_type == "CCU2C" {
+        return match index {
+            0 => "S0".to_string(),
+            1 => "S1".to_string(),
+            _ => "COUT".to_string(),
+        };
     }
 
     // Nexus FPGA primitives

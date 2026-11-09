@@ -860,6 +860,14 @@ pub enum CellFunction {
     /// Inputs: a, b, cin; Output: cout
     /// Used with LUT4 that computes sum = a XOR b XOR cin
     Carry,
+    /// Lattice two-bit carry cell (Nexus `CCU2`, ECP5 `CCU2C`).
+    ///
+    /// Inputs: A0, B0, C0, D0, A1, B1, C1, D1, CIN; outputs: S0, S1, COUT.
+    /// Each half `i` has a LUT4 `P_i = INITi(Ai, Bi, Ci, Di)` (propagate) and a
+    /// LUT2 `G_i = INITi[3:0](Ai, Bi)` (generate). With `INJECT = "NO"`:
+    /// `S_i = P_i ^ c_i`, `c_{i+1} = P_i ? c_i : G_i`, `c_0 = CIN`, `COUT = c_2`.
+    /// The truth tables live in the cell's `INIT0` / `INIT1` parameters.
+    Ccu2,
 
     // Floating-Point (IEEE 754 soft macros)
     /// FP32 Adder: result = a + b
@@ -1054,7 +1062,10 @@ impl CellFunction {
             CellFunction::Lut4 | CellFunction::Lut6 => false,
 
             // Arithmetic primitives — preserve carry chain structure, optimize via datapath pass
-            CellFunction::FullAdder | CellFunction::HalfAdder | CellFunction::Carry => false,
+            CellFunction::FullAdder
+            | CellFunction::HalfAdder
+            | CellFunction::Carry
+            | CellFunction::Ccu2 => false,
 
             // I/O pads — physical interface cells, not representable in AIG
             CellFunction::InputPad
@@ -1145,6 +1156,20 @@ impl CellFunction {
             CellFunction::Carry => (
                 vec!["a".into(), "b".into(), "cin".into()],
                 vec!["cout".into()],
+            ),
+            CellFunction::Ccu2 => (
+                vec![
+                    "A0".into(),
+                    "B0".into(),
+                    "C0".into(),
+                    "D0".into(),
+                    "A1".into(),
+                    "B1".into(),
+                    "C1".into(),
+                    "D1".into(),
+                    "CIN".into(),
+                ],
+                vec!["S0".into(), "S1".into(), "COUT".into()],
             ),
             CellFunction::Adder(n) => {
                 let mut inputs = Vec::new();
@@ -3293,6 +3318,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "ha" | "half_adder" | "halfadder" => Ok(CellFunction::HalfAdder),
         "fa" | "full_adder" | "fulladder" => Ok(CellFunction::FullAdder),
         "carry" | "carry_chain" => Ok(CellFunction::Carry),
+        "ccu2" | "ccu2c" => Ok(CellFunction::Ccu2),
         "dff" => Ok(CellFunction::Dff),
         "dffr" | "dff_r" => Ok(CellFunction::DffR),
         "dffe" | "dff_e" => Ok(CellFunction::DffE),
@@ -3386,6 +3412,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::HalfAdder => "half_adder".to_string(),
         CellFunction::FullAdder => "full_adder".to_string(),
         CellFunction::Carry => "carry".to_string(),
+        CellFunction::Ccu2 => "ccu2".to_string(),
         CellFunction::Adder(n) => format!("adder{}", n),
         CellFunction::Dff => "dff".to_string(),
         CellFunction::DffR => "dffr".to_string(),
