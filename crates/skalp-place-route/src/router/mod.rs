@@ -8,12 +8,14 @@
 mod astar;
 mod carry_chain;
 mod global_nets;
+mod graph;
 mod lut_permutation;
 mod pathfinder;
 
-pub use astar::AStarRouter;
+pub use astar::{AStarRouter, SearchBounds};
 pub use carry_chain::CarryChainRouter;
 pub use global_nets::GlobalNetRouter;
+pub use graph::RoutingGraph;
 pub use lut_permutation::{
     all_lut4_permutations, permute_lut4_init, LutPermutation, LutPermutationOptimizer,
 };
@@ -280,6 +282,12 @@ impl<D: Device + Clone> Router<D> {
             }
         }
 
+        log::info!(
+            "router: {} global, {} carry, {} regular nets",
+            global_net_ids.len(),
+            carry_net_ids.len(),
+            regular_net_ids.len()
+        );
         // Route global nets through GBUF network
         for net_id in &global_net_ids {
             match global_router.route_clock(*net_id, netlist, placement) {
@@ -320,7 +328,7 @@ impl<D: Device + Clone> Router<D> {
                     self.config.history_cost_factor,
                     self.config.present_congestion_factor,
                 );
-                pathfinder.route(netlist, placement)
+                pathfinder.route_nets(netlist, placement, &regular_net_ids)
             }
             RoutingAlgorithm::MazeRouting => {
                 let astar = AStarRouter::with_delay_model(
@@ -337,10 +345,14 @@ impl<D: Device + Clone> Router<D> {
                     self.config.present_congestion_factor,
                     self.config.timing_weight,
                 );
-                pathfinder.route(netlist, placement)
+                pathfinder.route_nets(netlist, placement, &regular_net_ids)
             }
         }?;
 
+        log::info!(
+            "router: after dedicated routing, {} nets left for the general fabric",
+            regular_net_ids.len()
+        );
         // Merge PathFinder results (only for non-global/carry nets)
         for (net_id, route) in pathfinder_result.routes {
             if let std::collections::hash_map::Entry::Vacant(e) = result.routes.entry(net_id) {

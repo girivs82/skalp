@@ -7,7 +7,7 @@
 //! 3. Rip up congested nets and reroute with increased costs
 //! 4. Iterate until no congestion
 
-use super::astar::AStarRouter;
+use super::astar::{AStarRouter, SearchBounds};
 use super::{BranchInfo, Route, RoutingResult};
 use crate::device::{BelType, CellPin, Device, WireId};
 use crate::error::{PlaceRouteError, Result};
@@ -16,7 +16,10 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::ncl_constraints::MatchedDelayGroup;
 use std::collections::{HashMap, HashSet};
 
-/// Wire congestion tracking
+/// How many tiles beyond a net's bounding box its route searches may go,
+/// tried in turn before an unbounded search
+const SEARCH_MARGINS: &[u32] = &[3, 12];
+
 /// Wire usage and PathFinder history cost, indexed by wire. Every routing
 /// wire has capacity 1. Dense, because the router's search asks for the
 /// cost of every wire it reaches; `touched` lists the wires ever used, so
@@ -61,6 +64,11 @@ impl CongestionTracker {
             self.seen[i] = true;
             self.touched.push(wire);
         }
+    }
+
+    /// Nets using a wire
+    fn usage(&self, wire: WireId) -> u32 {
+        self.usage.get(wire.0 as usize).copied().unwrap_or(0)
     }
 
     /// Remove usage for a wire
@@ -182,11 +190,26 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         }
     }
 
-    /// Route all nets using PathFinder
+    /// Route every net that has a driver and a sink using PathFinder
     pub fn route(
         &self,
         netlist: &GateNetlist,
         placement: &PlacementResult,
+    ) -> Result<RoutingResult> {
+        let nets: Vec<GateNetId> = netlist.nets.iter().map(|n| n.id).collect();
+        self.route_nets(netlist, placement, &nets)
+    }
+
+    /// Route the nets `nets` (those with a driver and a sink) using
+    /// PathFinder. Nets another router handles (global networks, carry
+    /// chains) must be left out: routing them here as well would spend time
+    /// on routes that are thrown away, and their wires would count as
+    /// congestion against the nets that keep theirs.
+    pub fn route_nets(
+        &self,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+        nets: &[GateNetId],
     ) -> Result<RoutingResult> {
         let mut result = RoutingResult::new();
         let mut congestion = CongestionTracker::new(self.device.wire_count());
@@ -223,9 +246,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
         // Collect nets to route with their criticality score
         // Clock/reset nets are routed here when GBUF routing is unavailable
-        let mut nets_with_criticality: Vec<_> = netlist
-            .nets
+        let mut nets_with_criticality: Vec<_> = nets
             .iter()
+            .filter_map(|id| netlist.nets.get(id.0 as usize))
             .filter(|net| net.driver.is_some() && !net.fanout.is_empty())
             .map(|net| {
                 let crit = criticality_by_net
@@ -265,6 +288,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
         // Initial routing - use congestion-aware routing from the start
         // This reduces the number of conflicts that need to be resolved
+        let t_start = std::time::Instant::now();
         for &net_id in &nets_to_route {
             // Get criticality for this net
             let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
@@ -301,6 +325,23 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let base_history_factor = self.history_factor;
 
         for iteration in 0..self.max_iterations {
+            log::info!(
+                "pathfinder: iteration {iteration} at {:.1} s: {} overused wires, total overuse {}",
+                t_start.elapsed().as_secs_f64(),
+                congestion.overused_wires().len(),
+                congestion.total_overuse()
+            );
+            if log::log_enabled!(log::Level::Debug) {
+                let mut by_type: HashMap<String, usize> = HashMap::new();
+                for w in congestion.overused_wires() {
+                    let kind = self.device.wire(w).map_or("?".to_string(), |w| {
+                        let t = format!("{:?}", w.wire_type);
+                        t.split('(').next().unwrap_or("").to_string()
+                    });
+                    *by_type.entry(kind).or_default() += 1;
+                }
+                log::debug!("pathfinder: overused wires by type: {by_type:?}");
+            }
             // Check convergence: no congestion
             if !congestion.has_overuse() {
                 result.iterations = iteration;
@@ -344,7 +385,14 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 .map(|(&id, _)| id)
                 .collect();
 
-            let reroute_list: Vec<GateNetId> = reroute_nets.into_iter().collect();
+            // In the initial routing order (largest or most critical first),
+            // so a run is deterministic
+            let reroute_list: Vec<GateNetId> = nets_to_route
+                .iter()
+                .copied()
+                .filter(|id| reroute_nets.contains(id))
+                .collect();
+            log::info!("pathfinder: rerouting {} nets", reroute_list.len());
 
             // Rip up (only intermediate wires tracked)
             for &net_id in &reroute_list {
@@ -649,14 +697,12 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         // critical nets) otherwise. Computed on demand for the wires the
         // search reaches; building it as a map of every used wire for every
         // net made routing quadratic in design size.
+        let graph = astar.graph();
         let wire_cost = |wire: WireId| -> f64 {
             let congestion_cost =
                 congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor);
             let delay_cost = if timing_factor > 0.0 {
-                self.device
-                    .wire(wire)
-                    .map(|w| timing_factor * (w.delay as f64 / 100.0))
-                    .unwrap_or(0.0)
+                timing_factor * (graph.wire_delay(wire) as f64 / 100.0)
             } else {
                 0.0
             };
@@ -669,6 +715,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let mut arrival: HashMap<WireId, u32> = HashMap::from([(source_wire, 0)]);
 
         let timing_weight = net_criticality * self.timing_weight;
+        let bounds = self.search_bounds(net, placement);
 
         for (sink_id, pin_idx) in &net.fanout {
             let sink_loc = match placement.get(*sink_id) {
@@ -689,11 +736,38 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             // Find path using A* with timing-aware costs. A sink branches off
             // the net's route so far; a matched-delay (NCL fork) net keeps a
             // separate path per sink so each branch's delay is its own.
-            let path_result = if is_matched || route.wires.is_empty() {
-                astar.find_path_with_cost_fn(source_wire, sink_wire, &[], wire_cost, timing_weight)
+            // The search starts inside the net's bounding box plus a small
+            // margin, since an unbounded search floods the device. It widens
+            // when no path fits or the path found shares a wire with another
+            // net, keeping the cheapest path: a detour outside the box may be
+            // what resolves the congestion.
+            let tree = if is_matched || route.wires.is_empty() {
+                std::slice::from_ref(&source_wire)
             } else {
-                astar.find_path_from_tree(&route.wires, sink_wire, &[], wire_cost, timing_weight)
+                &route.wires[..]
             };
+            let mut path_result = Err(PlaceRouteError::RoutingFailed(
+                "no route search ran".to_string(),
+            ));
+            let mut best_cost = f64::INFINITY;
+            for &b in &bounds {
+                let Ok((wires, pips, cost)) =
+                    astar.find_path_bounded(tree, sink_wire, &[], wire_cost, timing_weight, b)
+                else {
+                    continue;
+                };
+                let shared = wires
+                    .iter()
+                    .skip(1)
+                    .any(|&w| w != sink_wire && congestion.usage(w) > 0);
+                if cost < best_cost {
+                    best_cost = cost;
+                    path_result = Ok((wires, pips));
+                }
+                if !shared {
+                    break;
+                }
+            }
 
             match path_result {
                 Ok((wires, pips)) => {
@@ -1183,6 +1257,49 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         None
     }
 
+    /// The regions a net's route searches try in turn: the bounding box of
+    /// its driver and sinks widened by each of [`SEARCH_MARGINS`] tiles,
+    /// then the whole device (`None`). Small margins first, so a route
+    /// detours around congestion near the net before it goes far.
+    fn search_bounds(
+        &self,
+        net: &skalp_lir::gate_netlist::GateNet,
+        placement: &PlacementResult,
+    ) -> Vec<Option<SearchBounds>> {
+        let mut tiles = net
+            .driver
+            .iter()
+            .chain(net.fanout.iter().map(|(c, _)| c))
+            .filter_map(|&c| placement.get(c))
+            .map(|loc| (loc.tile_x, loc.tile_y));
+        let Some((x, y)) = tiles.next() else {
+            return vec![None];
+        };
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
+        for (x, y) in tiles {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        let (width, height) = self.device.grid_size();
+        let mut regions = Vec::new();
+        for &m in SEARCH_MARGINS {
+            let b = SearchBounds {
+                min_x: min_x.saturating_sub(m),
+                min_y: min_y.saturating_sub(m),
+                max_x: max_x.saturating_add(m),
+                max_y: max_y.saturating_add(m),
+            };
+            if b.min_x == 0 && b.min_y == 0 && b.max_x + 1 >= width && b.max_y + 1 >= height {
+                break; // covers the device: same as unbounded
+            }
+            regions.push(Some(b));
+        }
+        regions.push(None);
+        regions
+    }
+
     /// Calculate bounding box size (half-perimeter wirelength) for a net
     fn calculate_net_bbox(
         &self,
@@ -1348,5 +1465,76 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::nexus::{NexusDevice, NexusVariant};
+    use skalp_lir::gate_netlist::{Cell, GateNet};
+
+    /// Two LUT-to-LUT nets in separate logic tiles of a Nexus device
+    fn two_nets(device: &NexusDevice) -> (GateNetlist, PlacementResult, [GateNetId; 2]) {
+        let mut netlist = GateNetlist::new("two_nets".to_string(), "nexus".to_string());
+        let mut nets = Vec::new();
+        for i in 0..4 {
+            nets.push(netlist.add_net(GateNet::new(GateNetId(i), format!("n{i}"))));
+        }
+        let mut cells = Vec::new();
+        // a -> b over n1, c -> d over n3 (n0 and n2 are undriven inputs)
+        for (inputs, outputs) in [
+            (vec![nets[0]], vec![nets[1]]),
+            (vec![nets[1]], vec![]),
+            (vec![nets[2]], vec![nets[3]]),
+            (vec![nets[3]], vec![]),
+        ] {
+            let id = CellId(cells.len() as u32);
+            cells.push(netlist.add_cell(Cell::new_comb(
+                id,
+                "OXIDE_COMB".to_string(),
+                "nexus".to_string(),
+                0.0,
+                format!("c{}", id.0),
+                inputs,
+                outputs,
+            )));
+        }
+
+        let (w, h) = device.grid_size();
+        let logic: Vec<(u32, u32)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| device.bel_pin_wire(x, y, 0, CellPin::Output(0)).is_some())
+            .collect();
+        let mut placement = PlacementResult::new();
+        for (cell, &(x, y)) in cells.iter().zip(&logic[logic.len() / 2..]) {
+            placement
+                .placements
+                .insert(*cell, PlacementLoc::new(x, y, 0, BelType::Lut4));
+        }
+        (netlist, placement, [nets[1], nets[3]])
+    }
+
+    #[test]
+    fn routes_only_the_nets_it_is_given() {
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let (netlist, placement, [first, second]) = two_nets(&device);
+        let pathfinder = PathFinder::new(&device, 10, 1.0, 1.5);
+
+        let one = pathfinder
+            .route_nets(&netlist, &placement, &[first])
+            .unwrap();
+        assert!(one.success);
+        assert_eq!(one.routes.keys().copied().collect::<Vec<_>>(), vec![first]);
+        let route = &one.routes[&first];
+        assert_eq!(route.unrouted_sinks, 0);
+        assert_eq!(route.sinks.len(), 1);
+        assert!(route.wires.contains(&route.sinks[0]));
+
+        let all = pathfinder.route(&netlist, &placement).unwrap();
+        assert!(all.success);
+        let mut routed: Vec<_> = all.routes.keys().copied().collect();
+        routed.sort_by_key(|n| n.0);
+        assert_eq!(routed, vec![first, second]);
     }
 }
