@@ -4456,6 +4456,12 @@ fn run_nexus_pnr_on_netlist(
             println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
             println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
         }
+        if let Some(path) = timing.critical_paths.first() {
+            println!(
+                "  Critical path: {:.3} ns, ending at {}",
+                path.delay, path.destination
+            );
+        }
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);

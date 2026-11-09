@@ -25,6 +25,8 @@ const SLICES: [char; 4] = ['A', 'B', 'C', 'D'];
 
 /// Oscillator divider: 450 MHz / (24 + 1) = 18 MHz.
 const OSC_HF_CLK_DIV: u64 = 24;
+/// Clock frequency the oscillator produces with this divider, in MHz.
+pub const OSC_FREQUENCY_MHZ: f64 = 450.0 / (OSC_HF_CLK_DIV as f64 + 1.0);
 /// Divider for the configuration engine's clock.
 const OSC_SED_SEC_DIV: u64 = 1;
 

@@ -21,6 +21,8 @@ pub mod prjoxide_load;
 pub mod prjoxide_pack;
 pub mod sites;
 mod tiles;
+#[cfg(feature = "nexus-bitstream")]
+pub mod timing;
 
 pub use prjoxide_graph::{resolve_wire, NodeKey};
 pub use prjoxide_load::{load_tilegrid, PrjoxideTile};

@@ -601,6 +601,20 @@ pub fn place_and_route_nexus_real(
         ));
     }
 
+    let uses_oscillator = netlist
+        .cells
+        .iter()
+        .any(|c| c.parameters.get("LOC").map(String::as_str) == Some(sites::OSC_PIN));
+    let target_mhz = if uses_oscillator {
+        crate::device::nexus::emit::OSC_FREQUENCY_MHZ
+    } else {
+        config.timing.as_ref().map_or(100.0, |t| t.target_frequency)
+    };
+    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, "LIFCL")?;
+    let timing = crate::device::nexus::timing::analyze(
+        &device, netlist, &placement, &routing, &tied, &timing_db, target_mhz,
+    );
+
     let generator = NexusConfig {
         device: &device,
         variant,
@@ -632,7 +646,7 @@ pub fn place_and_route_nexus_real(
         placement,
         routing,
         bitstream,
-        timing: None,
+        timing: Some(timing),
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
     })

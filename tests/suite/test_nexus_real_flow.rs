@@ -59,6 +59,13 @@ fn blinker_builds_a_bitstream_for_the_real_device() {
         .windows(8)
         .any(|w| w[..4] == [0xE2, 0, 0, 0] && w[4..] == LFCPNX_100_IDCODE);
     assert!(verify_id, "bitstream should target the LFCPNX-100");
+
+    // A 25-bit counter comfortably exceeds the 18 MHz oscillator it runs on.
+    let timing = result.timing.expect("the real flow reports timing");
+    assert!(timing.meets_timing);
+    assert_eq!(timing.target_frequency, 18.0);
+    assert!(timing.design_frequency > 100.0);
+    assert!(!timing.critical_paths.is_empty());
 }
 
 #[test]
