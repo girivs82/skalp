@@ -431,6 +431,7 @@ struct MoveContext {
     /// Cells on critical nets (criticality > 0.5), most critical quarter
     critical: Vec<CellId>,
     /// BELs no move may target: the LUTs under fixed two-bit carry cells
+    /// and under distributed-RAM cells
     reserved: HashSet<(u32, u32, usize)>,
 }
 
@@ -439,14 +440,27 @@ impl MoveContext {
     /// the legalizer has placed every chain on consecutive carry positions;
     /// those chains stay fixed (they are not moved and are not move targets)
     /// and the LUTs under them are reserved.
+    ///
+    /// Distributed-RAM cells stay fixed too: a RAM BEL uses up LUTs of its
+    /// tile (`footprint`, [`Device::bel_footprint`]), which the legalizer
+    /// kept free and which no move may then fill.
     fn build(
         placement: &PlacementResult,
         netlist: &GateNetlist,
         net_criticalities: &HashMap<GateNetId, f64>,
         chain_membership: &HashMap<CellId, usize>,
         carry_layout: Option<&crate::device::CarryChainLayout>,
+        footprint: &dyn Fn(u32, u32, usize) -> Vec<usize>,
     ) -> Self {
         let mut reserved = HashSet::new();
+        for loc in placement.placements.values() {
+            if loc.bel_type == BelType::DistRam {
+                reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
+                for lut in footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
+                    reserved.insert((loc.tile_x, loc.tile_y, lut));
+                }
+            }
+        }
         if let Some(layout) = carry_layout {
             for cell in chain_membership.keys() {
                 if let Some(loc) = placement.placements.get(cell) {
@@ -460,9 +474,12 @@ impl MoveContext {
         }
         let cells: Vec<CellId> = placement
             .placements
-            .keys()
-            .copied()
-            .filter(|c| carry_layout.is_none() || !chain_membership.contains_key(c))
+            .iter()
+            .filter(|(c, loc)| {
+                loc.bel_type != BelType::DistRam
+                    && (carry_layout.is_none() || !chain_membership.contains_key(c))
+            })
+            .map(|(&c, _)| c)
             .collect();
         let mut critical: Vec<(CellId, f64)> = Vec::new();
         if !net_criticalities.is_empty() {
@@ -710,6 +727,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &net_criticalities,
             &self.carry_chain_membership,
             carry_layout.as_ref(),
+            &|x, y, bel| self.device.bel_footprint(x, y, bel),
         );
         if move_ctx.cells.is_empty() {
             current.cost = current_cost;
@@ -871,6 +889,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &net_criticalities,
             &self.carry_chain_membership,
             carry_layout.as_ref(),
+            &|x, y, bel| self.device.bel_footprint(x, y, bel),
         );
         if move_ctx.cells.is_empty() {
             current.cost = current_cost;

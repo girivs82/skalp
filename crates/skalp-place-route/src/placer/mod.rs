@@ -50,7 +50,9 @@ pub(crate) fn is_constant_cell(cell_type: &str) -> bool {
 /// is never placed on a LUT BEL just because its name lacks "DFF".
 pub(crate) fn cell_bel_type(cell: &skalp_lir::gate_netlist::Cell) -> BelType {
     let t = cell.cell_type.as_str();
-    if t.contains("LUT") {
+    if cell.function == Some(CellFunction::DistRam16x4) {
+        BelType::DistRam
+    } else if t.contains("LUT") {
         BelType::Lut4
     } else if t.contains("DFFE") || t.starts_with("SB_SDFFE") {
         BelType::DffE
@@ -743,7 +745,8 @@ impl<D: Device + Clone> Placer<D> {
             | BelType::DffE
             | BelType::DffSr
             | BelType::DffSrE
-            | BelType::Carry => TileType::Logic,
+            | BelType::Carry
+            | BelType::DistRam => TileType::Logic,
             BelType::IoCell => TileType::IoTop, // Will be refined during placement
             BelType::RamSlice => TileType::RamTop,
             BelType::GlobalBuf => TileType::GlobalBuf,

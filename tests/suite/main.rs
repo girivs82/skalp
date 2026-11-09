@@ -59,6 +59,7 @@ mod test_fp_metal_simple;
 mod test_fp_minmax_bug191;
 mod test_fpadd_standalone;
 mod test_fpga_carry_chain;
+mod test_fpga_distram;
 mod test_fpmul_debug;
 mod test_fpmul_direct;
 mod test_fpmul_entity;

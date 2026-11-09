@@ -153,6 +153,49 @@ arcs = [
     { arc = "A0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "B0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "C0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "D0->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "A1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "B1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "C1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "D1->S0", rise_base_ps = 150, rise_slope_ps_per_ff = 0.18, fall_base_ps = 150, fall_slope_ps_per_ff = 0.18 }, { arc = "CIN->S0", rise_base_ps = 48, rise_slope_ps_per_ff = 0.18, fall_base_ps = 48, fall_slope_ps_per_ff = 0.18 },
 ]
 # =============================================================================
+# DPR16X4C - 16 x 4 distributed RAM (ECP5)
+# Synchronous write port (WCK, WRE, WAD[3:0], DI[3:0]) and asynchronous read
+# port (RAD[3:0] -> DO[3:0]); built from a slice pair's LUTs plus a RAMW slice.
+# Used for small memories read combinationally (register files), which block
+# RAM (synchronous read) cannot implement.
+# =============================================================================
+
+[[cells]]
+name = "DPR16X4C"
+function = "dpr16x4"
+fit = 0.16
+inputs = ["DI0", "DI1", "DI2", "DI3", "WAD0", "WAD1", "WAD2", "WAD3", "WRE", "RAD0", "RAD1", "RAD2", "RAD3"]
+outputs = ["DO0", "DO1", "DO2", "DO3"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 200
+hold_ps = 50
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.10
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.025
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.025
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.01
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+# =============================================================================
 # Flip-Flops - TRELLIS_FF family
 # All DFFs are positive-edge triggered.
 # =============================================================================

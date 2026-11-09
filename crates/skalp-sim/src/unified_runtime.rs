@@ -414,11 +414,29 @@ impl UnifiedSimulator {
         // e.g., "bms__connected" -> user can reference as "bms.connected"
         self.build_gate_level_name_registry(sir);
 
-        let use_gpu = match self.config.hw_accel {
-            HwAccel::Cpu => false,
-            HwAccel::Gpu => true,
-            HwAccel::Auto => cfg!(target_os = "macos"),
-        };
+        // The GPU runtime keeps no memory state: a design with RAM primitives
+        // (block or distributed) runs on the CPU gate-level simulator, which does.
+        let top = &sir.top_module;
+        let has_memory = top
+            .seq_blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .chain(top.comb_blocks.iter().flat_map(|b| b.operations.iter()))
+            .any(|op| match op {
+                crate::sir::SirOperation::Primitive { ptype, .. } => matches!(
+                    ptype,
+                    skalp_lir::lir::PrimitiveType::RamBlock { .. }
+                        | skalp_lir::lir::PrimitiveType::DistRamWrite { .. }
+                        | skalp_lir::lir::PrimitiveType::DistRamRead { .. }
+                ),
+                _ => false,
+            });
+        let use_gpu = !has_memory
+            && match self.config.hw_accel {
+                HwAccel::Cpu => false,
+                HwAccel::Gpu => true,
+                HwAccel::Auto => cfg!(target_os = "macos"),
+            };
 
         if use_gpu {
             #[cfg(target_os = "macos")]

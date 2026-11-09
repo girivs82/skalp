@@ -397,7 +397,7 @@ pub fn map_carry_chain(
 }
 
 /// The netlist's shared constant net (`tie_low` / `tie_high`), created on first use.
-fn get_or_create_tie(netlist: &mut GateNetlist, high: bool) -> GateNetId {
+pub(crate) fn get_or_create_tie(netlist: &mut GateNetlist, high: bool) -> GateNetId {
     let (name, alt) = if high {
         ("tie_high", "vdd")
     } else {

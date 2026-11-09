@@ -153,6 +153,29 @@ pub enum PrimitiveType {
         /// Number of data bits
         data_width: u8,
     },
+    /// Write port of a distributed RAM with an asynchronous read port
+    /// (`CellFunction::DistRam16x4`). Sequential: on the clock edge with WE
+    /// high, `mem[waddr] = wdata`.
+    /// Inputs: [wdata[0..dw], waddr[0..aw], WE]; no outputs.
+    /// Pairs with the [`PrimitiveType::DistRamRead`] that has the same `ram`.
+    DistRamWrite {
+        /// Memory this port writes (shared with its read port)
+        ram: u32,
+        /// Number of address bits
+        addr_width: u8,
+        /// Number of data bits
+        data_width: u8,
+    },
+    /// Asynchronous read port of a distributed RAM: `rdata = mem[raddr]`,
+    /// combinationally. Inputs: [raddr[0..aw]]; outputs: [rdata[0..dw]].
+    DistRamRead {
+        /// Memory this port reads (shared with its write port)
+        ram: u32,
+        /// Number of address bits
+        addr_width: u8,
+        /// Number of data bits
+        data_width: u8,
+    },
 
     // === Special ===
     /// Clock buffer (special timing properties)
@@ -285,6 +308,7 @@ impl PrimitiveType {
                 | PrimitiveType::MemCell
                 | PrimitiveType::RegCell
                 | PrimitiveType::RamBlock { .. }
+                | PrimitiveType::DistRamWrite { .. }
                 | PrimitiveType::RetentionDff { .. }
                 // NCL threshold gates are state-holding (hysteresis behavior)
                 | PrimitiveType::Th12
@@ -356,6 +380,12 @@ impl PrimitiveType {
                 // raddr[aw] + RCLK + RCLKE + RE + wdata[dw] + waddr[aw] + WCLK + WCLKE + WE
                 *addr_width * 2 + *data_width + 6
             }
+            PrimitiveType::DistRamWrite {
+                addr_width,
+                data_width,
+                ..
+            } => *data_width + *addr_width + 1,
+            PrimitiveType::DistRamRead { addr_width, .. } => *addr_width,
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
             PrimitiveType::Lut4 { .. } => 4,
@@ -400,6 +430,8 @@ impl PrimitiveType {
             PrimitiveType::Ccu2 { .. } => 3,
             PrimitiveType::CompBit => 2,
             PrimitiveType::RamBlock { data_width, .. } => *data_width,
+            PrimitiveType::DistRamWrite { .. } => 0,
+            PrimitiveType::DistRamRead { data_width, .. } => *data_width,
             PrimitiveType::PowerSwitch { .. } => 0,
             // FP32 arithmetic operations have 32 output bits
             PrimitiveType::Fp32Add
@@ -454,6 +486,13 @@ impl PrimitiveType {
                 // FIT scales with memory size
                 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64)
             }
+            // The storage FIT sits on the write port (it holds the state)
+            PrimitiveType::DistRamWrite {
+                addr_width,
+                data_width,
+                ..
+            } => 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64),
+            PrimitiveType::DistRamRead { .. } => 0.1,
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0,
             // FPGA LUTs - SRAM-based configuration memory
@@ -492,7 +531,11 @@ impl PrimitiveType {
     pub fn is_memory(&self) -> bool {
         matches!(
             self,
-            PrimitiveType::MemCell | PrimitiveType::RegCell | PrimitiveType::RamBlock { .. }
+            PrimitiveType::MemCell
+                | PrimitiveType::RegCell
+                | PrimitiveType::RamBlock { .. }
+                | PrimitiveType::DistRamWrite { .. }
+                | PrimitiveType::DistRamRead { .. }
         )
     }
 
@@ -535,6 +578,8 @@ impl PrimitiveType {
             PrimitiveType::MemCell => "MEM",
             PrimitiveType::RegCell => "REG",
             PrimitiveType::RamBlock { .. } => "RAM",
+            PrimitiveType::DistRamWrite { .. } => "DPRAM_W",
+            PrimitiveType::DistRamRead { .. } => "DPRAM_R",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
             PrimitiveType::Lut4 { .. } => "LUT4",

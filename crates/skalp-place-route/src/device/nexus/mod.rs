@@ -24,11 +24,22 @@ pub use prjoxide_load::{load_tilegrid, PrjoxideTile};
 pub use tiles::NexusTile;
 
 use super::{
-    Bel, BelId, BelPin, BelType, ClockDomain, ClockResources, Device, DeviceFamily, DeviceStats,
-    DspTile, IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip, PipId,
-    RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment,
-    WireType,
+    Bel, BelId, BelPin, BelType, CellPin, ClockDomain, ClockResources, Device, DeviceFamily,
+    DeviceStats, DspTile, IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip,
+    PipId, RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId,
+    WireSegment, WireType,
 };
+
+/// Local wires per tile in the synthetic routing graph: the input-mux and
+/// switching wires of a logic tile, which every pin connection and every
+/// route through the tile uses one of.
+const LOCAL_WIRES: usize = 48;
+
+/// Local wires each BEL input pin can select from, `INPUT_MUX_STRIDE` apart
+/// (coprime with [`LOCAL_WIRES`]). With a few adjacent locals per pin, the
+/// pins of a fully used tile shared too few locals to all be fed at once.
+const INPUT_MUX_WIDTH: usize = 8;
+const INPUT_MUX_STRIDE: usize = 11;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -144,6 +155,9 @@ pub struct NexusDevice {
     tile_wires: HashMap<(u32, u32), Vec<WireId>>,
     /// BEL pin to wire mapping
     bel_wires: HashMap<(u32, u32, String), WireId>,
+    /// Least routing cost per tile distance along one axis
+    /// ([`Device::route_cost_estimate`]); empty when not modelled
+    hop_costs: Vec<f64>,
     /// Package pin mappings
     packages: HashMap<String, PackagePins>,
     /// Routing architecture
@@ -291,6 +305,7 @@ impl NexusDevice {
             wire_src_pips: graph.wire_src_pips,
             tile_wires: graph.tile_wires,
             bel_wires,
+            hop_costs: Vec::new(),
             packages: HashMap::new(), // M3: package pins from prjoxide iodb
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
@@ -317,6 +332,7 @@ impl NexusDevice {
             wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
             bel_wires: HashMap::new(),
+            hop_costs: Vec::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
@@ -544,6 +560,17 @@ impl NexusDevice {
             });
         }
 
+        // One distributed RAM site: a 16 x 4 RAM (DPR16X4) built from the
+        // LUTs of slices A and B plus slice C as its write port (RAMW), so it
+        // takes LUTs 0..5 (see bel_footprint)
+        let id = BelId(*bel_id);
+        *bel_id += 1;
+        bels.push(Bel {
+            id,
+            bel_type: BelType::DistRam,
+            name: "DPRAM".to_string(),
+            pins: Vec::new(),
+        });
         bels
     }
 
@@ -722,8 +749,8 @@ impl NexusDevice {
                     .unwrap()
                     .tile_type();
 
-                // Local routing wires (Nexus has ~24 local wires per tile)
-                for i in 0..24u8 {
+                // Local routing wires (48 per tile: the input-mux and switching wires of a PLC)
+                for i in 0..LOCAL_WIRES as u8 {
                     let w = Wire {
                         id: WireId(wire_id),
                         name: format!("R{}C{}_LOCAL{}", y, x, i),
@@ -736,6 +763,32 @@ impl NexusDevice {
                     self.tile_wires.entry((x, y)).or_default().push(w.id);
                     self.wires.push(w);
                     wire_id += 1;
+                }
+
+                // Switch box: each local wire drives two others (+1 and +7
+                // around the tile), so a signal landing on any local wire
+                // can reach every other local wire of the tile, and through
+                // them every outgoing span and every BEL input. Without it a
+                // route could only continue from the few locals that happen
+                // to drive an outgoing span, and most of the fabric was
+                // unreachable.
+                let locals: Vec<WireId> = self.tile_wires[&(x, y)][..LOCAL_WIRES].to_vec();
+                for (k, &src_wire) in locals.iter().enumerate() {
+                    for step in [1, 7] {
+                        let p = Pip {
+                            id: PipId(pip_id),
+                            src_wire,
+                            dst_wire: locals[(k + step) % LOCAL_WIRES],
+                            delay: 20,
+                            configurable: true,
+                            tile_x: x,
+                            tile_y: y,
+                        };
+                        self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                        self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+                        self.pips.push(p);
+                        pip_id += 1;
+                    }
                 }
 
                 // BEL pin wires for logic tiles
@@ -754,6 +807,7 @@ impl NexusDevice {
                         self.bel_wires
                             .insert((x, y, format!("LUT{}_Z", lc)), out_wire.id);
                         self.tile_wires.entry((x, y)).or_default().push(out_wire.id);
+                        let lut_out_id = out_wire.id;
                         self.wires.push(out_wire);
                         wire_id += 1;
 
@@ -792,9 +846,57 @@ impl NexusDevice {
                         self.wires.push(ff_wire);
                         wire_id += 1;
 
+                        // FF data input; the FF output and input reach the
+                        // tile's local wires like the LUT's (one local out,
+                        // a few locals in)
+                        let ff_d_wire = Wire {
+                            id: WireId(wire_id),
+                            name: format!("R{}C{}_FF{}_D", y, x, lc),
+                            wire_type: WireType::BelPin,
+                            tile_x: x,
+                            tile_y: y,
+                            delay: 0,
+                        };
+                        self.wire_names.insert(ff_d_wire.name.clone(), ff_d_wire.id);
+                        self.bel_wires
+                            .insert((x, y, format!("FF{}_D", lc)), ff_d_wire.id);
+                        self.tile_wires
+                            .entry((x, y))
+                            .or_default()
+                            .push(ff_d_wire.id);
+                        let (ff_q_id, ff_d_id) = (WireId(wire_id - 1), ff_d_wire.id);
+                        self.wires.push(ff_d_wire);
+                        wire_id += 1;
+                        let locals = self.tile_wires.get(&(x, y)).cloned().unwrap_or_default();
+                        let mut ff_pips = Vec::new();
+                        if let Some(&lw) = locals.get((lc * 6 + 1) % LOCAL_WIRES) {
+                            ff_pips.push((ff_q_id, lw, 20));
+                        }
+                        for j in 0..INPUT_MUX_WIDTH {
+                            if let Some(&lw) =
+                                locals.get((lc * 6 + 5 + j * INPUT_MUX_STRIDE) % LOCAL_WIRES)
+                            {
+                                ff_pips.push((lw, ff_d_id, 15));
+                            }
+                        }
+                        for (src_wire, dst_wire, delay) in ff_pips {
+                            let p = Pip {
+                                id: PipId(pip_id),
+                                src_wire,
+                                dst_wire,
+                                delay,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+                            self.pips.push(p);
+                            pip_id += 1;
+                        }
+
                         // Connect LUT output → local wire (BEL pin PIP)
-                        let lut_out_id = WireId(wire_id - 7); // LUT_Z wire
-                        let local_idx = (lc * 3) % 24;
+                        let local_idx = (lc * 6) % LOCAL_WIRES;
                         if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                             if let Some(&local_wire) = local_wires.get(local_idx) {
                                 let p = Pip {
@@ -820,9 +922,12 @@ impl NexusDevice {
                                 self.bel_wires
                                     .get(&(x, y, format!("LUT{}_{}", lc, pin_name)))
                             {
-                                // Connect from a few local wires
-                                for local_offset in 0..4u8 {
-                                    let local_idx = (lc * 3 + inp + local_offset as usize) % 24;
+                                // Input mux: INPUT_MUX_WIDTH local wires spread
+                                // over the tile, so a full tile can still feed
+                                // every pin from a different local
+                                for j in 0..INPUT_MUX_WIDTH {
+                                    let local_idx =
+                                        (lc * 6 + inp + 2 + j * INPUT_MUX_STRIDE) % LOCAL_WIRES;
                                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                                         if let Some(&local_wire) = local_wires.get(local_idx) {
                                             let p = Pip {
@@ -933,7 +1038,7 @@ impl NexusDevice {
                     wire_id += 1;
 
                     // PIP: local → H2 (drive span wire)
-                    let local_idx = (i as usize * 3) % 24;
+                    let local_idx = (i as usize * 6) % LOCAL_WIRES;
                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                         if let Some(&local_wire) = local_wires.get(local_idx) {
                             let p = Pip {
@@ -955,7 +1060,7 @@ impl NexusDevice {
                     // PIP: H2 → local in destination tile (x+2)
                     let dest_x = x + 2;
                     if dest_x < width - 1 {
-                        let dest_local_idx = (i as usize * 3 + 1) % 24;
+                        let dest_local_idx = (i as usize * 6 + 1) % LOCAL_WIRES;
                         if let Some(dest_locals) = self.tile_wires.get(&(dest_x, y)) {
                             if let Some(&dest_local) = dest_locals.get(dest_local_idx) {
                                 let p = Pip {
@@ -993,7 +1098,7 @@ impl NexusDevice {
                     wire_id += 1;
 
                     // PIP: local → V2
-                    let local_idx = (i as usize * 3 + 2) % 24;
+                    let local_idx = (i as usize * 6 + 2) % LOCAL_WIRES;
                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                         if let Some(&local_wire) = local_wires.get(local_idx) {
                             let p = Pip {
@@ -1015,7 +1120,7 @@ impl NexusDevice {
                     // PIP: V2 → local in destination tile (y+2)
                     let dest_y = y + 2;
                     if dest_y < height - 1 {
-                        let dest_local_idx = (i as usize * 3 + 1) % 24;
+                        let dest_local_idx = (i as usize * 6 + 1) % LOCAL_WIRES;
                         if let Some(dest_locals) = self.tile_wires.get(&(x, dest_y)) {
                             if let Some(&dest_local) = dest_locals.get(dest_local_idx) {
                                 let p = Pip {
@@ -1054,7 +1159,7 @@ impl NexusDevice {
                     wire_id += 1;
 
                     // PIP: local → H12
-                    let local_idx = (i as usize * 6) % 24;
+                    let local_idx = (i as usize * 12) % LOCAL_WIRES;
                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                         if let Some(&local_wire) = local_wires.get(local_idx) {
                             let p = Pip {
@@ -1076,7 +1181,7 @@ impl NexusDevice {
                     // PIP: H12 → local at x+12
                     let dest_x = x + 12;
                     if dest_x < width - 1 {
-                        let dest_local_idx = (i as usize * 6 + 3) % 24;
+                        let dest_local_idx = (i as usize * 12 + 3) % LOCAL_WIRES;
                         if let Some(dest_locals) = self.tile_wires.get(&(dest_x, y)) {
                             if let Some(&dest_local) = dest_locals.get(dest_local_idx) {
                                 let p = Pip {
@@ -1112,7 +1217,7 @@ impl NexusDevice {
                     wire_id += 1;
 
                     // PIP: local → V12
-                    let local_idx = (i as usize * 6 + 1) % 24;
+                    let local_idx = (i as usize * 12 + 1) % LOCAL_WIRES;
                     if let Some(local_wires) = self.tile_wires.get(&(x, y)) {
                         if let Some(&local_wire) = local_wires.get(local_idx) {
                             let p = Pip {
@@ -1134,7 +1239,7 @@ impl NexusDevice {
                     // PIP: V12 → local at y+12
                     let dest_y = y + 12;
                     if dest_y < height - 1 {
-                        let dest_local_idx = (i as usize * 6 + 4) % 24;
+                        let dest_local_idx = (i as usize * 12 + 4) % LOCAL_WIRES;
                         if let Some(dest_locals) = self.tile_wires.get(&(x, dest_y)) {
                             if let Some(&dest_local) = dest_locals.get(dest_local_idx) {
                                 let p = Pip {
@@ -1249,6 +1354,41 @@ impl NexusDevice {
             self.wires.push(w);
             wire_id += 1;
         }
+
+        // Switch boxes (see synthetic_switch_box_pips)
+        debug_assert!(self
+            .wires
+            .iter()
+            .enumerate()
+            .all(|(i, w)| w.id.0 as usize == i));
+        debug_assert!(self
+            .pips
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.id.0 as usize == i));
+        for (src_wire, dst_wire, delay, tile_x, tile_y) in
+            crate::device::synthetic_switch_box_pips(&self.wires, &self.pips, LOCAL_WIRES, 6)
+        {
+            let p = Pip {
+                id: PipId(self.pips.len() as u32),
+                src_wire,
+                dst_wire,
+                delay,
+                configurable: true,
+                tile_x,
+                tile_y,
+            };
+            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
+            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
+            self.pips.push(p);
+        }
+        // Inter-tile wires (neighbour, spans) and the cost of the PIP into
+        // each, as built above
+        let (width, height) = self.grid_size();
+        self.hop_costs = crate::device::span_hop_costs(
+            width.max(height) as usize,
+            &[(1, 1.0), (2, 1.0), (12, 1.0)],
+        );
     }
 
     /// Build synthetic package pin mappings
@@ -1404,11 +1544,11 @@ impl Device for NexusDevice {
         self.wire_to_pips.get(&wire_id).cloned().unwrap_or_default()
     }
 
-    fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId> {
+    fn wire_src_pips(&self, wire_id: WireId) -> &[PipId] {
         self.wire_src_pips
             .get(&wire_id)
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {
@@ -1428,6 +1568,7 @@ impl Device for NexusDevice {
             "LUT4" | "OXIDE_COMB" => bel_type == BelType::Lut4,
             "DFF" | "OXIDE_FF" | "FD1P3IX" | "FD1P3DX" | "FD1S3BX" => bel_type.is_ff(),
             "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
+            "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
             "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
             "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
@@ -1447,8 +1588,44 @@ impl Device for NexusDevice {
             .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
+    fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
+        // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
+        // slice C); each of those LUTs, when used, blocks the RAM site.
+        const RAM_LUTS: usize = 6;
+        let Some(tile) = self.tile_at(x, y) else {
+            return Vec::new();
+        };
+        let bels = tile.bels();
+        let luts: Vec<usize> = bels
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.bel_type == BelType::Lut4)
+            .map(|(i, _)| i)
+            .take(RAM_LUTS)
+            .collect();
+        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
+            return Vec::new();
+        };
+        match bels.get(bel_index).map(|b| b.bel_type) {
+            Some(BelType::DistRam) => luts,
+            Some(BelType::Lut4) if luts.contains(&bel_index) => vec![ram],
+            _ => Vec::new(),
+        }
+    }
+
     fn wire_count(&self) -> usize {
         self.wires.len()
+    }
+
+    fn route_cost_estimate(&self, dx: u32, dy: u32) -> Option<f64> {
+        let last = self.hop_costs.len().checked_sub(1)?;
+        Some(self.hop_costs[(dx as usize).min(last)] + self.hop_costs[(dy as usize).min(last)])
+    }
+
+    fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
+        crate::device::lattice_logic_pin_wire(self, x, y, bel_index, pin, "Z", |name| {
+            self.bel_wires.get(&(x, y, name)).copied()
+        })
     }
 
     fn lut_output_wire(&self, tile_x: u32, tile_y: u32, lc_idx: usize) -> Option<WireId> {
@@ -1492,6 +1669,16 @@ impl Device for NexusDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_synthetic_routing_reaches_every_tile() {
+        crate::device::check_synthetic_routing(&NexusDevice::new(NexusVariant::Lifcl40));
+    }
+
+    #[test]
+    fn test_logic_tile_pin_wires() {
+        crate::device::check_lattice_logic_pin_wires(&NexusDevice::new(NexusVariant::Lifcl40));
+    }
 
     #[test]
     fn test_nexus_device_creation_lifcl40() {

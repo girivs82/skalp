@@ -310,6 +310,11 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![false; *data_width as usize]
         }
 
+        // Distributed RAM ports read and write the simulator's memory state
+        // (gate_simulator.rs); stateless evaluation has no memory to read.
+        PrimitiveType::DistRamWrite { .. } => vec![],
+        PrimitiveType::DistRamRead { data_width, .. } => vec![false; *data_width as usize],
+
         // === Power Infrastructure ===
         PrimitiveType::LevelShifter { .. } => {
             // Level shifter passes signal through with voltage translation

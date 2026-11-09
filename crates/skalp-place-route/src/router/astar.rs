@@ -27,11 +27,19 @@ impl PartialEq for AStarNode {
 
 impl Ord for AStarNode {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse for min-heap
+        // Reverse for min-heap. Among equal f-scores, expand the node
+        // nearest the sink first (largest g): wires of the same cost are
+        // common, and without the tie-break the search widens over every
+        // equal-cost prefix before it goes deeper.
         other
             .f_score
             .partial_cmp(&self.f_score)
             .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                self.g_score
+                    .partial_cmp(&other.g_score)
+                    .unwrap_or(Ordering::Equal)
+            })
     }
 }
 
@@ -190,6 +198,31 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         wire_cost: impl Fn(WireId) -> f64,
         timing_weight: f64,
     ) -> Result<(Vec<WireId>, Vec<PipId>)> {
+        self.find_path_from_tree(
+            std::slice::from_ref(&source),
+            sink,
+            blocked,
+            wire_cost,
+            timing_weight,
+        )
+    }
+
+    /// [`Self::find_path_with_cost_fn`] from any wire of `tree` (a net's
+    /// route so far, starting with its source wire): the search starts from
+    /// all of them at cost 0, so a new sink branches off the nearest point of
+    /// the tree instead of running a separate path back to the source. The
+    /// returned path starts at the tree wire it branches from.
+    pub fn find_path_from_tree(
+        &self,
+        tree: &[WireId],
+        sink: WireId,
+        blocked: &[WireId],
+        wire_cost: impl Fn(WireId) -> f64,
+        timing_weight: f64,
+    ) -> Result<(Vec<WireId>, Vec<PipId>)> {
+        let source = *tree.first().ok_or_else(|| {
+            PlaceRouteError::RoutingFailed("route search with no source wire".to_string())
+        })?;
         let blocked_set: HashSet<_> = blocked.iter().copied().collect();
 
         // Get target coordinates for heuristic
@@ -243,18 +276,23 @@ impl<'a, D: Device> AStarRouter<'a, D> {
             };
         }
 
-        // Initialize with source
-        let h = self.heuristic(source, target_x, target_y);
-        if use_vec {
-            scratch.set(source, 0.0, None);
-        } else {
-            g_scores_map.insert(source, 0.0);
+        // Initialize with the source (and the rest of the tree)
+        for &start in tree {
+            if blocked_set.contains(&start) || get_g!(start) == 0.0 {
+                continue;
+            }
+            let h = self.heuristic(start, target_x, target_y);
+            if use_vec {
+                scratch.set(start, 0.0, None);
+            } else {
+                g_scores_map.insert(start, 0.0);
+            }
+            open_set.push(AStarNode {
+                wire: start,
+                g_score: 0.0,
+                f_score: h,
+            });
         }
-        open_set.push(AStarNode {
-            wire: source,
-            g_score: 0.0,
-            f_score: h,
-        });
 
         while let Some(current) = open_set.pop() {
             // Check if we reached the sink
@@ -276,7 +314,7 @@ impl<'a, D: Device> AStarRouter<'a, D> {
             let current_g = current.g_score;
 
             // Expand neighbors via PIPs (forward routing - current wire is source)
-            for pip_id in self.device.wire_src_pips(current.wire) {
+            for &pip_id in self.device.wire_src_pips(current.wire) {
                 let pip = match self.device.pip(pip_id) {
                     Some(p) => p,
                     None => continue,
@@ -363,6 +401,9 @@ impl<'a, D: Device> AStarRouter<'a, D> {
 
         if dist == 0 {
             return 0.0;
+        }
+        if let Some(estimate) = self.device.route_cost_estimate(dx, dy) {
+            return estimate;
         }
 
         // Estimate minimum hops using available wire types:

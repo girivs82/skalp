@@ -357,6 +357,9 @@ pub struct GateLevelSimulator {
     total_fit: f64,
     /// RAM block state: primitive_id -> memory contents (Vec of data_width-bit words)
     ram_state: IndexMap<u32, Vec<Vec<bool>>>,
+    /// Distributed RAM state: memory key (`ram` of DistRamWrite/DistRamRead)
+    /// -> words, each `data_width` bits
+    distram_state: IndexMap<u32, Vec<Vec<bool>>>,
 }
 
 impl GateLevelSimulator {
@@ -377,6 +380,7 @@ impl GateLevelSimulator {
             detection_signals: Vec::new(),
             total_fit: 0.0,
             ram_state: IndexMap::new(),
+            distram_state: IndexMap::new(),
         };
         sim.initialize();
         sim.initialize_ram_state();
@@ -487,7 +491,84 @@ impl GateLevelSimulator {
                     // Initialize memory to all zeros
                     self.ram_state.insert(id.0, vec![vec![false; dw]; depth]);
                 }
+                if let SirOperation::Primitive {
+                    ptype:
+                        PrimitiveType::DistRamWrite {
+                            ram,
+                            addr_width,
+                            data_width,
+                        },
+                    ..
+                } = op
+                {
+                    let depth = 1usize << *addr_width;
+                    self.distram_state
+                        .insert(*ram, vec![vec![false; *data_width as usize]; depth]);
+                }
             }
+        }
+    }
+
+    /// Current boolean value of a signal (bit 0)
+    fn signal_bit(&self, id: SirSignalId) -> bool {
+        self.state
+            .signals
+            .get(&id.0)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(false)
+    }
+
+    /// Unsigned value of `bits` (LSB first)
+    fn signals_to_index(&self, bits: &[SirSignalId]) -> usize {
+        bits.iter()
+            .enumerate()
+            .filter(|(_, &b)| self.signal_bit(b))
+            .fold(0usize, |acc, (i, _)| acc | (1 << i))
+    }
+
+    /// Asynchronous read port of a distributed RAM: outputs = mem[raddr]
+    fn evaluate_distram_read(
+        &mut self,
+        ram: u32,
+        data_width: u8,
+        inputs: &[SirSignalId],
+        outputs: &[SirSignalId],
+    ) {
+        let addr = self.signals_to_index(inputs);
+        let word = self
+            .distram_state
+            .get(&ram)
+            .and_then(|mem| mem.get(addr).cloned())
+            .unwrap_or_else(|| vec![false; data_width as usize]);
+        for (i, out) in outputs.iter().enumerate() {
+            let width = self.signal_widths.get(&out.0).copied().unwrap_or(1);
+            let mut bits = vec![false; width];
+            bits[0] = word.get(i).copied().unwrap_or(false);
+            self.state.signals.insert(out.0, bits);
+        }
+    }
+
+    /// Write port of a distributed RAM, on its clock edge:
+    /// if WE, mem[waddr] = wdata. Inputs: [wdata[0..dw], waddr[0..aw], WE].
+    fn evaluate_distram_write(
+        &mut self,
+        ram: u32,
+        addr_width: u8,
+        data_width: u8,
+        inputs: &[SirSignalId],
+    ) {
+        let (dw, aw) = (data_width as usize, addr_width as usize);
+        if inputs.len() < dw + aw + 1 || !self.signal_bit(inputs[dw + aw]) {
+            return;
+        }
+        let addr = self.signals_to_index(&inputs[dw..dw + aw]);
+        let word: Vec<bool> = inputs[..dw].iter().map(|&b| self.signal_bit(b)).collect();
+        if let Some(slot) = self
+            .distram_state
+            .get_mut(&ram)
+            .and_then(|mem| mem.get_mut(addr))
+        {
+            *slot = word;
         }
     }
 
@@ -906,6 +987,14 @@ impl GateLevelSimulator {
                 outputs,
                 path,
             } => {
+                if let PrimitiveType::DistRamRead {
+                    ram, data_width, ..
+                } = ptype
+                {
+                    self.evaluate_distram_read(*ram, *data_width, inputs, outputs);
+                    return;
+                }
+
                 // RAM blocks need special handling with persistent state
                 if let PrimitiveType::RamBlock {
                     addr_width,
@@ -1212,6 +1301,17 @@ impl GateLevelSimulator {
                             path: cell_path,
                         } = op
                         {
+                            // Distributed RAM write port: memory state, no outputs
+                            if let PrimitiveType::DistRamWrite {
+                                ram,
+                                addr_width,
+                                data_width,
+                            } = ptype
+                            {
+                                self.evaluate_distram_write(*ram, *addr_width, *data_width, inputs);
+                                continue;
+                            }
+
                             // RAM blocks have side effects (persistent state) — evaluate immediately
                             if let PrimitiveType::RamBlock {
                                 addr_width,
