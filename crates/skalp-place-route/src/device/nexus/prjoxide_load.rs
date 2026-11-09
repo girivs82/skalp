@@ -20,8 +20,8 @@
 
 use super::super::TileType;
 use super::NexusVariant;
+use crate::collections::HashMap;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// One tile's bit region within the global bitstream, plus its position/type.

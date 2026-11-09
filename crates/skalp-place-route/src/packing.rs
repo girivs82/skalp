@@ -6,9 +6,9 @@
 //! - I/O cell packing
 //! - Packing statistics
 
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::{HashMap, HashSet};
 
 /// Packed cell type representing combined primitives
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -7,6 +7,11 @@
 //! whole square at every radius and probed a hash map per BEL, which made
 //! initial placement cubic in the filled area — on a 15K-cell Nexus design it
 //! did not finish within an hour.
+//!
+//! A fill limit ([`SiteMap::with_fill_limit`]) caps how many BELs of each
+//! type a tile hands out, so a design spreads over more tiles instead of
+//! packing every tile full: a full tile needs more signals in and out than
+//! its local routing can carry once its neighbours are full too.
 
 use super::BelType;
 use crate::device::Device;
@@ -39,6 +44,30 @@ struct TileSites {
     /// Per BEL index, the other BELs a cell there uses up
     /// ([`Device::bel_footprint`]); empty for most tiles
     footprint: Vec<Vec<usize>>,
+    /// Per BEL type in the tile: (type, BELs of it, BELs of it taken)
+    kinds: Vec<(BelType, usize, usize)>,
+}
+
+impl TileSites {
+    fn note_taken(&mut self, bel_type: BelType) {
+        if let Some(k) = self.kinds.iter_mut().find(|k| k.0 == bel_type) {
+            k.2 += 1;
+        }
+    }
+
+    /// Whether another BEL of `bel_type` may be taken under `fill_limit`
+    fn below_limit(&self, bel_type: BelType, fill_limit: f64) -> bool {
+        self.kinds
+            .iter()
+            .find(|k| k.0 == bel_type)
+            .is_some_and(|&(_, total, taken)| taken < fill_cap(total, fill_limit))
+    }
+}
+
+/// Most of `total` BELs of one type a tile may hold under `fill_limit`
+/// (at least one, so every tile stays usable)
+pub fn fill_cap(total: usize, fill_limit: f64) -> usize {
+    ((total as f64 * fill_limit).ceil() as usize).clamp(1.min(total), total)
 }
 
 /// Occupancy of every BEL on the device.
@@ -47,6 +76,8 @@ pub struct SiteMap {
     width: u32,
     height: u32,
     tiles: Vec<TileSites>,
+    /// Share of each tile's BELs of a type that may be taken (1.0: all)
+    fill_limit: f64,
 }
 
 impl SiteMap {
@@ -69,10 +100,18 @@ impl SiteMap {
                 } else {
                     footprint
                 };
+                let mut kinds: Vec<(BelType, usize, usize)> = Vec::new();
+                for &(t, _) in &bels {
+                    match kinds.iter_mut().find(|k| k.0 == t) {
+                        Some(k) => k.1 += 1,
+                        None => kinds.push((t, 1, 0)),
+                    }
+                }
                 tiles.push(TileSites {
                     bels,
                     free,
                     footprint,
+                    kinds,
                 });
             }
         }
@@ -80,7 +119,15 @@ impl SiteMap {
             width,
             height,
             tiles,
+            fill_limit: 1.0,
         }
+    }
+
+    /// Hand out at most `fill_limit` (0..=1) of each tile's BELs of a type
+    /// ([`fill_cap`]). BELs taken with [`Self::take`] still count.
+    pub fn with_fill_limit(mut self, fill_limit: f64) -> Self {
+        self.fill_limit = fill_limit.clamp(0.0, 1.0);
+        self
     }
 
     fn tile_index(&self, x: u32, y: u32) -> usize {
@@ -97,18 +144,22 @@ impl SiteMap {
         let idx = self.tile_index(x, y);
         let tile = &mut self.tiles[idx];
         match tile.bels.get_mut(bel_index) {
-            Some((_, taken)) if !*taken => {
+            Some((t, taken)) if !*taken => {
                 *taken = true;
+                let t = *t;
                 tile.free -= 1;
+                tile.note_taken(t);
             }
             _ => return false,
         }
-        if let Some(blocked) = tile.footprint.get(bel_index) {
-            for &b in blocked {
-                if let Some((_, taken)) = tile.bels.get_mut(b) {
+        if let Some(blocked) = tile.footprint.get(bel_index).cloned() {
+            for b in blocked {
+                if let Some((t, taken)) = tile.bels.get_mut(b) {
                     if !*taken {
                         *taken = true;
+                        let t = *t;
                         tile.free -= 1;
+                        tile.note_taken(t);
                     }
                 }
             }
@@ -141,13 +192,14 @@ impl SiteMap {
         if tile.free == 0 {
             return None;
         }
+        let open = |t: BelType, taken: bool| !taken && tile.below_limit(t, self.fill_limit);
         tile.bels
             .iter()
-            .position(|&(t, taken)| !taken && t == required)
+            .position(|&(t, taken)| t == required && open(t, taken))
             .or_else(|| {
                 tile.bels
                     .iter()
-                    .position(|&(t, taken)| !taken && compatible(t, required))
+                    .position(|&(t, taken)| compatible(t, required) && open(t, taken))
             })
     }
 
@@ -267,5 +319,37 @@ mod tests {
             taken += 1;
         }
         assert_eq!(taken, total_luts, "every LUT is handed out exactly once");
+    }
+
+    #[test]
+    fn fill_limit_spreads_cells_over_more_tiles() {
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let (w, h) = device.grid_size();
+        let tiles_used = |limit: f64| {
+            let mut sites = SiteMap::new(&device).with_fill_limit(limit);
+            let mut used = std::collections::BTreeMap::new();
+            for _ in 0..64 {
+                let (x, y, _) = sites
+                    .take_nearest(
+                        w as f64 / 2.0,
+                        h as f64 / 2.0,
+                        BelType::Lut4,
+                        bel_types_compatible,
+                    )
+                    .expect("a free LUT");
+                *used.entry((x, y)).or_insert(0usize) += 1;
+            }
+            used
+        };
+        let full = tiles_used(1.0);
+        let half = tiles_used(0.5);
+        // iCE40 logic tiles have 8 LUTs: 4 per tile at half fill
+        assert_eq!(full.len(), 8);
+        assert_eq!(half.len(), 16);
+        assert!(half.values().all(|&n| n <= 4));
+        assert_eq!(fill_cap(8, 0.5), 4);
+        assert_eq!(fill_cap(8, 0.7), 6);
+        assert_eq!(fill_cap(8, 0.0), 1);
+        assert_eq!(fill_cap(0, 0.5), 0);
     }
 }

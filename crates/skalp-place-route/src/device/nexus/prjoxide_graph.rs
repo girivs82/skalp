@@ -262,16 +262,16 @@ use super::super::{Pip, PipId, Wire, WireId, WireType};
 pub struct RoutingGraph {
     pub wires: Vec<Wire>,
     pub pips: Vec<Pip>,
-    pub wire_names: std::collections::HashMap<String, WireId>,
+    pub wire_names: crate::collections::HashMap<String, WireId>,
     /// Pips driving each wire (indexed by destination) — `Device::wire_pips`.
-    pub wire_to_pips: std::collections::HashMap<WireId, Vec<PipId>>,
+    pub wire_to_pips: crate::collections::HashMap<WireId, Vec<PipId>>,
     /// Pips sourced by each wire — `Device::wire_src_pips`.
-    pub wire_src_pips: std::collections::HashMap<WireId, Vec<PipId>>,
+    pub wire_src_pips: crate::collections::HashMap<WireId, Vec<PipId>>,
     /// Wires whose home is each grid cell — `Device::tile_wires`.
-    pub tile_wires: std::collections::HashMap<(u32, u32), Vec<WireId>>,
+    pub tile_wires: crate::collections::HashMap<(u32, u32), Vec<WireId>>,
     /// Per-pip config bits in global bitstream coordinates (parallel to `pips`).
     pub pip_bits: Vec<Vec<GlobalBit>>,
-    intern: std::collections::HashMap<NodeKey, WireId>,
+    intern: crate::collections::HashMap<NodeKey, WireId>,
 }
 
 /// Classify a canonical fabric wire name into SKALP's `WireType` (informational;
@@ -356,8 +356,8 @@ pub fn build_routing_graph(
     bbox: Option<(u32, u32, u32, u32)>,
 ) -> Result<RoutingGraph, String> {
     let mut g = RoutingGraph::default();
-    let mut cache: std::collections::HashMap<String, Option<TileBitsDb>> =
-        std::collections::HashMap::new();
+    let mut cache: crate::collections::HashMap<String, Option<TileBitsDb>> =
+        crate::collections::HashMap::default();
     let t = &super::data::TIMING_GRADE10;
     let pip_delay = (t.pip_local_to_local * 1000.0) as u32;
 

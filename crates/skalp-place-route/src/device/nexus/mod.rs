@@ -40,8 +40,8 @@ const LOCAL_WIRES: usize = 48;
 /// pins of a fully used tile shared too few locals to all be fed at once.
 const INPUT_MUX_WIDTH: usize = 8;
 const INPUT_MUX_STRIDE: usize = 11;
+use crate::collections::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Nexus device variants
 ///

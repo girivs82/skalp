@@ -2,13 +2,13 @@
 //!
 //! Models the configuration memory of iCE40 FPGAs.
 
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::ice40::Ice40Device;
 use crate::device::{BelType, Device};
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::GateNetlist;
-use std::collections::HashMap;
 
 /// CRAM bank
 #[derive(Debug, Clone, Serialize, Deserialize)]

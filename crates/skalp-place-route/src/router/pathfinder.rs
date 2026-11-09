@@ -9,16 +9,32 @@
 
 use super::astar::{AStarRouter, SearchBounds};
 use super::{BranchInfo, Route, RoutingResult};
-use crate::device::{BelType, CellPin, Device, WireId};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
+use crate::device::{BelType, CellPin, Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::{PlacementLoc, PlacementResult};
+use rayon::prelude::*;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::ncl_constraints::MatchedDelayGroup;
-use std::collections::{HashMap, HashSet};
 
-/// How many tiles beyond a net's bounding box its route searches may go,
-/// tried in turn before an unbounded search
-const SEARCH_MARGINS: &[u32] = &[3, 12];
+/// How many tiles beyond a net's bounding box its route searches may go at
+/// first. A net that stays congested gets twice the margin each time it is
+/// rerouted, so it can detour further; a search that finds no path inside
+/// its region retries over the whole device. (Capping the margin at 12
+/// tiles left CLE-µ on the real LFCPNX-100 stuck at about 100 overused
+/// wires: the congestion sits at the edge of the placed region, and nets
+/// must detour well around it.)
+const SEARCH_MARGIN: u32 = 3;
+
+/// Most nets routed side by side in one wave
+const MAX_WAVE: usize = 256;
+
+/// How many times a net is rerouted keeping its uncongested branches before
+/// it is rerouted whole
+const PARTIAL_REROUTES: u32 = 2;
+
+/// Factor by which the present-congestion cost grows each rip-up iteration
+const PRESENT_FACTOR_GROWTH: f64 = 1.3;
 
 /// Wire usage and PathFinder history cost, indexed by wire. Every routing
 /// wire has capacity 1. Dense, because the router's search asks for the
@@ -289,38 +305,37 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         // Initial routing - use congestion-aware routing from the start
         // This reduces the number of conflicts that need to be resolved
         let t_start = std::time::Instant::now();
-        for &net_id in &nets_to_route {
-            // Get criticality for this net
-            let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
-            let is_matched = matched_delay_lookup.contains_key(&net_id);
-
-            // Use route_net_with_costs even for initial routing to consider existing usage
-            let route = self.route_net_with_costs_internal(
+        let initial: Vec<NetJob> = nets_to_route
+            .iter()
+            .map(|&net_id| NetJob {
                 net_id,
-                netlist,
-                placement,
-                &congestion,
-                &astar,
-                net_criticality,
-                self.present_factor,
-                self.history_factor,
-                is_matched,
-            )?;
-
-            // Track wire usage for intermediate routing wires only
-            // Source and sink wires are BEL pin wires — dedicated per cell,
-            // not shared routing resources
-            for wire in Self::shared_wires(&route) {
-                congestion.add_usage(wire);
-            }
-
-            result.routes.insert(net_id, route);
-        }
+                margin: SEARCH_MARGIN,
+                keep: false,
+                bounds: self.search_bounds(
+                    &netlist.nets[net_id.0 as usize],
+                    placement,
+                    SEARCH_MARGIN,
+                ),
+            })
+            .collect();
+        self.route_in_waves(
+            initial,
+            netlist,
+            placement,
+            &mut congestion,
+            &astar,
+            &criticality_map,
+            &matched_delay_lookup,
+            (self.present_factor, self.history_factor),
+            &mut result,
+        )?;
 
         // Iterative rip-up and reroute with convergence detection
         // Classic PathFinder: escalate present_factor each iteration to force
         // nets off congested wires
         let mut congestion_history: Vec<f64> = Vec::new();
+        // Times each net has been rerouted
+        let mut reroute_counts: HashMap<GateNetId, u32> = HashMap::new();
         let base_present_factor = self.present_factor;
         let base_history_factor = self.history_factor;
 
@@ -341,6 +356,13 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     *by_type.entry(kind).or_default() += 1;
                 }
                 log::debug!("pathfinder: overused wires by type: {by_type:?}");
+                let sample: Vec<String> = congestion
+                    .overused_wires()
+                    .into_iter()
+                    .take(40)
+                    .filter_map(|w| self.device.wire(w).map(|wire| wire.name.clone()))
+                    .collect();
+                log::debug!("pathfinder: some overused wires: {sample:?}");
             }
             // Check convergence: no congestion
             if !congestion.has_overuse() {
@@ -348,27 +370,24 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 break;
             }
 
-            // Convergence check: require minimum 15 iterations before checking,
-            // then stop if total overuse improved < 2% over 8 iterations. (The
-            // maximum overuse is no measure of progress: it sits at 2 while
-            // the number of shared wires falls.)
+            // Stall check, after at least 15 iterations: stop once the best
+            // total overuse of the last 8 iterations is under 2% below the
+            // best before them. The best, not the latest: as the present
+            // factor climbs, overuse wanders up and down while still falling
+            // overall, and comparing two single iterations stopped such runs
+            // at an upswing. (The maximum overuse is no measure of progress:
+            // it sits at 2 while the number of shared wires falls.)
             congestion_history.push(congestion.total_overuse() as f64);
-            if congestion_history.len() >= 15 {
-                let window = 8;
-                if congestion_history.len() >= window {
-                    let recent = &congestion_history[congestion_history.len() - window..];
-                    let oldest = recent[0];
-                    let newest = recent[window - 1];
-                    if oldest > 0.0 && (oldest - newest) / oldest < 0.02 {
-                        result.iterations = iteration;
-                        break;
-                    }
-                }
+            if congestion_history.len() >= 15 && stalled(&congestion_history, 8, 0.02) {
+                result.iterations = iteration;
+                break;
             }
 
-            // Classic PathFinder: escalate cost factors each iteration
-            // This creates increasing pressure to avoid congested wires
-            let iter_present_factor = base_present_factor * (1.0 + iteration as f64 * 0.5);
+            // PathFinder: the cost of sharing a wire grows geometrically, so a
+            // dense region that only resolves through long detours still
+            // converges; the history term grows linearly.
+            let iter_present_factor =
+                base_present_factor * PRESENT_FACTOR_GROWTH.powi(iteration as i32);
             let iter_history_factor = base_history_factor * (1.0 + iteration as f64 * 0.2);
 
             // Update history costs BEFORE rip-up so we capture the actual congestion
@@ -394,39 +413,46 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 .collect();
             log::info!("pathfinder: rerouting {} nets", reroute_list.len());
 
-            // Rip up (only intermediate wires tracked)
-            for &net_id in &reroute_list {
-                if let Some(route) = result.routes.get(&net_id) {
-                    for wire in Self::shared_wires(route) {
-                        congestion.remove_usage(wire);
+            // Rip up and reroute in waves of nets whose search regions don't
+            // overlap, so each net is routed against the current routes of
+            // all the others outside its wave, and those inside it cannot
+            // reach the same wires. (Ripping up every congested net first
+            // let the early ones spread into wires the rest still needed,
+            // and congestion barely fell.)
+            let jobs: Vec<NetJob> = reroute_list
+                .iter()
+                .map(|&net_id| {
+                    // A net still congested gets a wider search region each
+                    // time. Its first reroutes keep the branches clear of
+                    // other nets; one that stays congested is rerouted whole,
+                    // since the branches it keeps may be what blocks the
+                    // others.
+                    let reroutes = reroute_counts.entry(net_id).or_insert(0);
+                    *reroutes += 1;
+                    let margin = SEARCH_MARGIN.saturating_mul(1 << (*reroutes).min(16));
+                    NetJob {
+                        net_id,
+                        margin,
+                        keep: *reroutes <= PARTIAL_REROUTES,
+                        bounds: self.search_bounds(
+                            &netlist.nets[net_id.0 as usize],
+                            placement,
+                            margin,
+                        ),
                     }
-                }
-            }
-
-            // Reroute with escalated costs
-            for &net_id in &reroute_list {
-                let net_criticality = criticality_map.get(&net_id).copied().unwrap_or(0.0);
-                let is_matched = matched_delay_lookup.contains_key(&net_id);
-
-                let route = self.route_net_with_costs_internal(
-                    net_id,
-                    netlist,
-                    placement,
-                    &congestion,
-                    &astar,
-                    net_criticality,
-                    iter_present_factor,
-                    iter_history_factor,
-                    is_matched,
-                )?;
-
-                // Track wire usage (intermediate wires only)
-                for wire in Self::shared_wires(&route) {
-                    congestion.add_usage(wire);
-                }
-
-                result.routes.insert(net_id, route);
-            }
+                })
+                .collect();
+            self.route_in_waves(
+                jobs,
+                netlist,
+                placement,
+                &mut congestion,
+                &astar,
+                &criticality_map,
+                &matched_delay_lookup,
+                (iter_present_factor, iter_history_factor),
+                &mut result,
+            )?;
 
             result.iterations = iteration + 1;
         }
@@ -460,6 +486,98 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         result.success = result.congestion <= 1.0 && result.unrouted_connections == 0;
 
         Ok(result)
+    }
+
+    /// Route `jobs` (in routing order), ripping up each net's current route
+    /// first. Nets go in waves of ones whose search regions don't overlap
+    /// ([`next_wave`]): a wave's old routes are ripped up, its nets routed
+    /// in parallel against the congestion as it stands, and the new routes
+    /// recorded in order. The waves depend only on the jobs, never on the
+    /// number of threads, so the result is the same on any machine.
+    #[allow(clippy::too_many_arguments)]
+    fn route_in_waves(
+        &self,
+        jobs: Vec<NetJob>,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+        congestion: &mut CongestionTracker,
+        astar: &AStarRouter<D>,
+        criticality_map: &HashMap<GateNetId, f64>,
+        matched_delay_lookup: &HashMap<GateNetId, &MatchedDelayGroup>,
+        (present_factor, history_factor): (f64, f64),
+        result: &mut RoutingResult,
+    ) -> Result<()> {
+        let mut pending = jobs;
+        let total = pending.len();
+        let (mut waves, mut largest) = (0usize, 0usize);
+        let mut serial_time = std::time::Duration::ZERO;
+        let t_start = std::time::Instant::now();
+        while !pending.is_empty() {
+            let wave = next_wave(&mut pending, MAX_WAVE);
+            let t_wave = std::time::Instant::now();
+            waves += 1;
+            largest = largest.max(wave.len());
+            let previous: Vec<Option<Route>> = wave
+                .iter()
+                .map(|job| {
+                    let previous = result.routes.remove(&job.net_id);
+                    if let Some(route) = &previous {
+                        for wire in Self::shared_wires(route) {
+                            congestion.remove_usage(wire);
+                        }
+                    }
+                    previous
+                })
+                .collect();
+            let frozen: &CongestionTracker = congestion;
+            let routes: Vec<Result<Route>> = wave
+                .par_iter()
+                .zip(previous.par_iter())
+                .map(|(job, previous)| {
+                    self.route_net_with_costs_internal(
+                        job.net_id,
+                        netlist,
+                        placement,
+                        frozen,
+                        astar,
+                        criticality_map.get(&job.net_id).copied().unwrap_or(0.0),
+                        present_factor,
+                        history_factor,
+                        matched_delay_lookup.contains_key(&job.net_id),
+                        job.margin,
+                        previous.as_ref().filter(|_| job.keep),
+                    )
+                })
+                .collect();
+            for (job, route) in wave.iter().zip(routes) {
+                let route = route?;
+                for wire in Self::shared_wires(&route) {
+                    congestion.add_usage(wire);
+                }
+                result.routes.insert(job.net_id, route);
+            }
+            if wave.len() == 1 {
+                let elapsed = t_wave.elapsed();
+                serial_time += elapsed;
+                if elapsed.as_secs_f64() > 1.0 {
+                    let net = &netlist.nets[wave[0].net_id.0 as usize];
+                    log::debug!(
+                        "pathfinder: net {} ({} sinks, region {:?}) took {:.1} s",
+                        net.name,
+                        net.fanout.len(),
+                        wave[0].bounds,
+                        elapsed.as_secs_f64()
+                    );
+                }
+            }
+        }
+        log::debug!(
+            "pathfinder: routed {total} nets in {waves} waves (largest {largest}) in {:.1} s, \
+             {:.1} s of it in waves of one net",
+            t_start.elapsed().as_secs_f64(),
+            serial_time.as_secs_f64()
+        );
+        Ok(())
     }
 
     /// The routing wires a route occupies: all but its source and sink wires,
@@ -639,6 +757,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             self.present_factor,
             self.history_factor,
             false,
+            SEARCH_MARGIN,
+            None,
         )
     }
 
@@ -659,6 +779,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         present_factor: f64,
         history_factor: f64,
         is_matched: bool,
+        margin: u32,
+        previous: Option<&Route>,
     ) -> Result<Route> {
         let net = &netlist.nets[net_id.0 as usize];
         let mut route = Route::new(net_id);
@@ -712,18 +834,60 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let mut route_wire_set: HashSet<WireId> = HashSet::new();
         // Delay from the source to each wire of the route; route.delay is
         // the largest over the sinks
-        let mut arrival: HashMap<WireId, u32> = HashMap::from([(source_wire, 0)]);
+        let mut arrival: HashMap<WireId, u32> = [(source_wire, 0)].into_iter().collect();
 
         let timing_weight = net_criticality * self.timing_weight;
-        let bounds = self.search_bounds(net, placement);
+        let bounds = self.search_bounds(net, placement, margin);
 
-        for (sink_id, pin_idx) in &net.fanout {
-            let sink_loc = match placement.get(*sink_id) {
-                Some(loc) => loc,
-                None => continue,
-            };
+        // Each sink's pin wire (None: placed, but no pin wire)
+        let sinks: Vec<(CellId, &PlacementLoc, Option<WireId>)> = net
+            .fanout
+            .iter()
+            .filter_map(|&(sink_id, pin_idx)| {
+                let loc = placement.get(sink_id)?;
+                Some((
+                    sink_id,
+                    loc,
+                    self.get_sink_wire(sink_id, loc, pin_idx, netlist),
+                ))
+            })
+            .collect();
 
-            let sink_wire = match self.get_sink_wire(*sink_id, sink_loc, *pin_idx, netlist) {
+        // Rerouting a net: keep the part of its previous route that shares
+        // no wire with another net, and route only the sinks it no longer
+        // reaches. A net with hundreds of sinks and one congested branch
+        // then costs one branch, not a whole new tree.
+        let mut kept_sinks: HashMap<WireId, usize> = HashMap::new();
+        if let Some(previous) = previous.filter(|p| !is_matched && p.source == source_wire) {
+            let expected: Vec<WireId> = sinks.iter().filter_map(|s| s.2).collect();
+            if let Some((wires, pips, reached)) = Self::prune_route(
+                previous,
+                &expected,
+                |w| congestion.usage(w) > 0,
+                |p| self.device.pip(p).map(|pip| (pip.src_wire, pip.dst_wire)),
+            ) {
+                for &w in &wires {
+                    route_wire_set.insert(w);
+                }
+                route.wires = wires;
+                // In tree order, so each PIP's source already has its time
+                for &pip in &pips {
+                    if let Some(p) = self.device.pip(pip) {
+                        let t = arrival.get(&p.src_wire).copied().unwrap_or(0) + p.delay;
+                        arrival.entry(p.dst_wire).or_insert(t);
+                    }
+                }
+                route.pips = pips;
+                for w in reached {
+                    route.delay = route.delay.max(arrival.get(&w).copied().unwrap_or(0));
+                    *kept_sinks.entry(w).or_default() += 1;
+                }
+            }
+        }
+
+        for (sink_id, sink_loc, sink_wire) in sinks {
+            let sink_id = &sink_id;
+            let sink_wire = match sink_wire {
                 Some(w) => w,
                 None => {
                     route.unrouted_sinks += 1;
@@ -732,42 +896,36 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             };
 
             route.sinks.push(sink_wire);
+            if let Some(n) = kept_sinks.get_mut(&sink_wire).filter(|n| **n > 0) {
+                *n -= 1; // still reached by the kept part of the route
+                continue;
+            }
 
             // Find path using A* with timing-aware costs. A sink branches off
             // the net's route so far; a matched-delay (NCL fork) net keeps a
             // separate path per sink so each branch's delay is its own.
-            // The search starts inside the net's bounding box plus a small
-            // margin, since an unbounded search floods the device. It widens
-            // when no path fits or the path found shares a wire with another
-            // net, keeping the cheapest path: a detour outside the box may be
-            // what resolves the congestion.
+            // The search stays inside the net's bounding box plus `margin`
+            // tiles, since an unbounded search for a congested net floods
+            // the device; only if no path fits there does it go further.
             let tree = if is_matched || route.wires.is_empty() {
                 std::slice::from_ref(&source_wire)
             } else {
                 &route.wires[..]
             };
-            let mut path_result = Err(PlaceRouteError::RoutingFailed(
-                "no route search ran".to_string(),
-            ));
-            let mut best_cost = f64::INFINITY;
-            for &b in &bounds {
-                let Ok((wires, pips, cost)) =
-                    astar.find_path_bounded(tree, sink_wire, &[], wire_cost, timing_weight, b)
-                else {
-                    continue;
-                };
-                let shared = wires
-                    .iter()
-                    .skip(1)
-                    .any(|&w| w != sink_wire && congestion.usage(w) > 0);
-                if cost < best_cost {
-                    best_cost = cost;
-                    path_result = Ok((wires, pips));
-                }
-                if !shared {
-                    break;
-                }
-            }
+            let path_result = astar
+                .find_path_bounded(tree, sink_wire, &[], wire_cost, timing_weight, bounds)
+                .or_else(|e| match bounds {
+                    Some(_) => astar.find_path_bounded(
+                        tree,
+                        sink_wire,
+                        &[],
+                        wire_cost,
+                        timing_weight,
+                        None,
+                    ),
+                    None => Err(e),
+                })
+                .map(|(wires, pips, _)| (wires, pips));
 
             match path_result {
                 Ok((wires, pips)) => {
@@ -846,6 +1004,100 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         }
 
         Ok(route)
+    }
+
+    /// The part of a net's previous route worth keeping when it is rerouted:
+    /// its tree from the source with every wire `shared(w)` (used by
+    /// another net) removed, along with everything downstream of such a
+    /// wire, and then trimmed to the branches that still reach a sink.
+    /// Returns the kept wires, PIPs (in tree order, parents first) and the
+    /// sinks still reached; `None` if the route is not a plain tree over
+    /// `expected` sinks (a matched-delay or alternate-pin route), which is
+    /// then rerouted whole.
+    fn prune_route(
+        route: &Route,
+        expected: &[WireId],
+        shared: impl Fn(WireId) -> bool,
+        pip_ends: impl Fn(PipId) -> Option<(WireId, WireId)>,
+    ) -> Option<(Vec<WireId>, Vec<PipId>, Vec<WireId>)> {
+        let mut a = route.sinks.clone();
+        let mut b = expected.to_vec();
+        a.sort_by_key(|w| w.0);
+        b.sort_by_key(|w| w.0);
+        if a != b || route.wires.is_empty() {
+            return None;
+        }
+        // Children of each wire; every wire but the source has one parent
+        let mut children: HashMap<WireId, Vec<(PipId, WireId)>> = HashMap::new();
+        let mut has_parent: HashSet<WireId> = HashSet::new();
+        for &pip in &route.pips {
+            let (src, dst) = pip_ends(pip)?;
+            if !has_parent.insert(dst) || dst == route.source {
+                return None;
+            }
+            children.entry(src).or_default().push((pip, dst));
+        }
+        // Breadth-first from the source, not entering shared wires
+        let sink_set: HashSet<WireId> = route.sinks.iter().copied().collect();
+        let mut order: Vec<(Option<PipId>, WireId)> = vec![(None, route.source)];
+        let mut i = 0;
+        while i < order.len() {
+            let w = order[i].1;
+            i += 1;
+            for &(pip, child) in children.get(&w).map(Vec::as_slice).unwrap_or(&[]) {
+                if !sink_set.contains(&child) && shared(child) {
+                    continue;
+                }
+                order.push((Some(pip), child));
+            }
+        }
+        // Keep a wire if a reached sink lies at or below it (children come
+        // after their parent in `order`, so walk it backwards)
+        let index: HashMap<WireId, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, w))| (w, i))
+            .collect();
+        let mut keep = vec![false; order.len()];
+        keep[0] = true;
+        for j in (1..order.len()).rev() {
+            let w = order[j].1;
+            if sink_set.contains(&w) {
+                keep[j] = true;
+            }
+            if keep[j] {
+                let parent = order[j]
+                    .0
+                    .and_then(&pip_ends)
+                    .and_then(|(src, _)| index.get(&src).copied());
+                if let Some(pj) = parent {
+                    keep[pj] = true;
+                }
+            }
+        }
+        let mut wires = Vec::new();
+        let mut pips = Vec::new();
+        let mut reached = Vec::new();
+        for (j, &(pip, w)) in order.iter().enumerate() {
+            if !keep[j] {
+                continue;
+            }
+            wires.push(w);
+            if let Some(p) = pip {
+                pips.push(p);
+            }
+            if sink_set.contains(&w) {
+                reached.push(w);
+            }
+        }
+        // A sink wire listed twice (two pins on one wire) is reached for both
+        let reached: Vec<WireId> = route
+            .sinks
+            .iter()
+            .copied()
+            .filter(|s| reached.contains(s))
+            .collect();
+        Some((wires, pips, reached))
     }
 
     /// Record the arrival time (delay from the net's source) of each wire of
@@ -1257,24 +1509,22 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         None
     }
 
-    /// The regions a net's route searches try in turn: the bounding box of
-    /// its driver and sinks widened by each of [`SEARCH_MARGINS`] tiles,
-    /// then the whole device (`None`). Small margins first, so a route
-    /// detours around congestion near the net before it goes far.
+    /// The region a net's route searches stay in: the bounding box of its
+    /// driver and sinks widened by `margin` tiles, or `None` (the whole
+    /// device) once that covers the device.
     fn search_bounds(
         &self,
         net: &skalp_lir::gate_netlist::GateNet,
         placement: &PlacementResult,
-    ) -> Vec<Option<SearchBounds>> {
+        margin: u32,
+    ) -> Option<SearchBounds> {
         let mut tiles = net
             .driver
             .iter()
             .chain(net.fanout.iter().map(|(c, _)| c))
             .filter_map(|&c| placement.get(c))
             .map(|loc| (loc.tile_x, loc.tile_y));
-        let Some((x, y)) = tiles.next() else {
-            return vec![None];
-        };
+        let (x, y) = tiles.next()?;
         let (mut min_x, mut min_y, mut max_x, mut max_y) = (x, y, x, y);
         for (x, y) in tiles {
             min_x = min_x.min(x);
@@ -1283,21 +1533,15 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             max_y = max_y.max(y);
         }
         let (width, height) = self.device.grid_size();
-        let mut regions = Vec::new();
-        for &m in SEARCH_MARGINS {
-            let b = SearchBounds {
-                min_x: min_x.saturating_sub(m),
-                min_y: min_y.saturating_sub(m),
-                max_x: max_x.saturating_add(m),
-                max_y: max_y.saturating_add(m),
-            };
-            if b.min_x == 0 && b.min_y == 0 && b.max_x + 1 >= width && b.max_y + 1 >= height {
-                break; // covers the device: same as unbounded
-            }
-            regions.push(Some(b));
-        }
-        regions.push(None);
-        regions
+        let b = SearchBounds {
+            min_x: min_x.saturating_sub(margin),
+            min_y: min_y.saturating_sub(margin),
+            max_x: max_x.saturating_add(margin),
+            max_y: max_y.saturating_add(margin),
+        };
+        let covers_device =
+            b.min_x == 0 && b.min_y == 0 && b.max_x + 1 >= width && b.max_y + 1 >= height;
+        (!covers_device).then_some(b)
     }
 
     /// Calculate bounding box size (half-perimeter wirelength) for a net
@@ -1468,6 +1712,58 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     }
 }
 
+/// One net to (re)route in a routing pass
+#[derive(Debug, Clone, Copy)]
+struct NetJob {
+    net_id: GateNetId,
+    /// Search margin beyond the net's bounding box
+    margin: u32,
+    /// Keep the uncongested part of the net's current route
+    keep: bool,
+    /// The region its searches stay in (`None`: the whole device)
+    bounds: Option<SearchBounds>,
+}
+
+/// Take from `pending` the next wave of nets to route side by side: in
+/// order, every net whose search region overlaps none already in the wave,
+/// up to `max` of them. A net whose search covers the whole device goes in
+/// a wave of its own. The nets left behind keep their order.
+fn next_wave(pending: &mut Vec<NetJob>, max: usize) -> Vec<NetJob> {
+    let mut wave: Vec<NetJob> = Vec::new();
+    let mut rest = Vec::with_capacity(pending.len());
+    let mut closed = false;
+    for job in pending.drain(..) {
+        let fits = !closed
+            && wave.len() < max
+            && match job.bounds {
+                None => wave.is_empty(),
+                Some(b) => wave
+                    .iter()
+                    .all(|w| w.bounds.is_some_and(|wb| !wb.overlaps(&b))),
+            };
+        if fits {
+            closed = job.bounds.is_none();
+            wave.push(job);
+        } else {
+            rest.push(job);
+        }
+    }
+    *pending = rest;
+    wave
+}
+
+/// Whether the best of the last `window` values of `history` is less than
+/// `fraction` below the best before them
+fn stalled(history: &[f64], window: usize, fraction: f64) -> bool {
+    if history.len() <= window {
+        return false;
+    }
+    let (before, recent) = history.split_at(history.len() - window);
+    let best_before = before.iter().copied().fold(f64::INFINITY, f64::min);
+    let best_recent = recent.iter().copied().fold(f64::INFINITY, f64::min);
+    best_before > 0.0 && (best_before - best_recent) / best_before < fraction
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1513,6 +1809,93 @@ mod tests {
                 .insert(*cell, PlacementLoc::new(x, y, 0, BelType::Lut4));
         }
         (netlist, placement, [nets[1], nets[3]])
+    }
+
+    #[test]
+    fn waves_hold_nets_whose_regions_do_not_overlap() {
+        let job = |id: u32, b: Option<(u32, u32, u32, u32)>| NetJob {
+            net_id: GateNetId(id),
+            margin: SEARCH_MARGIN,
+            keep: false,
+            bounds: b.map(|(min_x, min_y, max_x, max_y)| SearchBounds {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+            }),
+        };
+        let mut pending = vec![
+            job(0, Some((0, 0, 5, 5))),
+            job(1, Some((4, 4, 9, 9))),   // overlaps 0
+            job(2, Some((10, 0, 15, 5))), // clear of 0
+            job(3, None),                 // whole device
+            job(4, Some((0, 10, 5, 15))), // clear of 0 and 2
+        ];
+        let ids = |w: &[NetJob]| w.iter().map(|j| j.net_id.0).collect::<Vec<_>>();
+        let wave = next_wave(&mut pending, MAX_WAVE);
+        assert_eq!(ids(&wave), [0, 2, 4]);
+        assert_eq!(ids(&pending), [1, 3]);
+        // 1 fits an empty wave; the whole-device net then waits for its own
+        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [1]);
+        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [3]);
+        assert!(pending.is_empty());
+        // The size cap holds
+        let mut many: Vec<NetJob> = (0..10)
+            .map(|i| job(i, Some((i * 10, 0, i * 10 + 5, 5))))
+            .collect();
+        assert_eq!(next_wave(&mut many, 4).len(), 4);
+        assert_eq!(many.len(), 6);
+    }
+
+    #[test]
+    fn stall_check_looks_at_the_best_not_the_latest() {
+        // Falling, then wandering above an earlier low: not stalled while the
+        // window holds a new best
+        let history = [
+            400.0, 300.0, 250.0, 182.0, 174.0, 160.0, 157.0, 156.0, 139.0, 150.0, 173.0,
+        ];
+        assert!(!stalled(&history, 8, 0.02));
+        // Eight iterations without beating 139 by 2%: stalled
+        let flat = [
+            400.0, 139.0, 150.0, 141.0, 145.0, 139.0, 142.0, 160.0, 140.0, 138.0,
+        ];
+        assert!(stalled(&flat, 8, 0.02));
+        // Too short to judge
+        assert!(!stalled(&[5.0, 5.0], 8, 0.02));
+    }
+
+    #[test]
+    fn rerouting_keeps_the_branches_clear_of_other_nets() {
+        // source 0 -> 1 -> 2 -> sink 3, and 1 -> 4 -> 5 -> sink 6, plus a
+        // dead end 1 -> 7; pip k drives wire k
+        let w = WireId;
+        let ends = |p: PipId| {
+            let parent = [0, 0, 1, 2, 1, 4, 5, 1][p.0 as usize];
+            Some((WireId(parent), WireId(p.0)))
+        };
+        let mut route = Route::new(GateNetId(0));
+        route.source = w(0);
+        route.sinks = vec![w(3), w(6)];
+        route.wires = (0..8).map(w).collect();
+        route.pips = (1..8).map(PipId).collect();
+
+        // Wire 5 is shared: the branch to sink 6 goes, and so does the dead end
+        let (wires, pips, reached) =
+            PathFinder::<NexusDevice>::prune_route(&route, &[w(6), w(3)], |x| x == w(5), ends)
+                .unwrap();
+        assert_eq!(wires, vec![w(0), w(1), w(2), w(3)]);
+        assert_eq!(pips, vec![PipId(1), PipId(2), PipId(3)]);
+        assert_eq!(reached, vec![w(3)]);
+
+        // Nothing shared: both branches stay, the dead end still goes
+        let (wires, _, reached) =
+            PathFinder::<NexusDevice>::prune_route(&route, &[w(3), w(6)], |_| false, ends).unwrap();
+        assert_eq!(wires.len(), 7);
+        assert!(!wires.contains(&w(7)));
+        assert_eq!(reached, vec![w(3), w(6)]);
+
+        // Sinks that differ from the net's pins: rerouted whole
+        assert!(PathFinder::<NexusDevice>::prune_route(&route, &[w(3)], |_| false, ends).is_none());
     }
 
     #[test]

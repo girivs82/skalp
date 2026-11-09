@@ -4,21 +4,33 @@
 
 use super::sites::{bel_types_compatible, SiteMap};
 use super::{BelType, PlacementLoc, PlacementResult};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CarryChainLayout, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
-use std::collections::{HashMap, HashSet};
 
 /// Legalizer for snapping placements to valid BEL sites
 pub struct Legalizer<'a, D: Device> {
     device: &'a D,
+    /// Share of each tile's BELs of a type cells may take
+    /// ([`SiteMap::with_fill_limit`])
+    fill_limit: f64,
 }
 
 impl<'a, D: Device> Legalizer<'a, D> {
     /// Create a new legalizer
     pub fn new(device: &'a D) -> Self {
-        Self { device }
+        Self {
+            device,
+            fill_limit: 1.0,
+        }
+    }
+
+    /// Fill each tile's BELs of a type at most this far (0..=1)
+    pub fn with_fill_limit(mut self, fill_limit: f64) -> Self {
+        self.fill_limit = fill_limit;
+        self
     }
 
     /// Legalize a placement result
@@ -69,7 +81,7 @@ impl<'a, D: Device> Legalizer<'a, D> {
             )
         });
 
-        let mut sites = SiteMap::new(self.device);
+        let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
         for &(x, y, bel) in used_bels.keys() {
             sites.take(x, y, bel);
         }
@@ -307,7 +319,7 @@ impl<'a, D: Device> Legalizer<'a, D> {
         bel_type: BelType,
         used: &HashMap<(u32, u32, usize), CellId>,
     ) -> Result<PlacementLoc> {
-        let mut sites = SiteMap::new(self.device);
+        let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
         for &(ux, uy, ubel) in used.keys() {
             sites.take(ux, uy, ubel);
         }

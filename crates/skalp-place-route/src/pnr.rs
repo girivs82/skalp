@@ -245,8 +245,8 @@ pub fn place_and_route(
 fn collect_frequency_constraints(
     netlist: &GateNetlist,
     config: &PnrConfig,
-) -> std::collections::HashMap<String, f64> {
-    let mut constraints = std::collections::HashMap::new();
+) -> crate::collections::HashMap<String, f64> {
+    let mut constraints = crate::collections::HashMap::default();
 
     // From placer IO constraints
     for fc in config.placer.io_constraints.frequency_constraints() {
@@ -705,6 +705,237 @@ mod tests {
         netlist.add_cell(cell);
 
         netlist
+    }
+
+    /// A random-looking but fixed netlist: `luts` four-input LUTs reading
+    /// primary inputs and earlier cells, and a flip-flop after every third
+    /// LUT feeding back into later logic
+    fn create_mesh_netlist(luts: usize) -> GateNetlist {
+        let mut netlist = GateNetlist::new("mesh".to_string(), "ice40".to_string());
+        let clock = netlist.add_net({
+            let mut net = GateNet::new_input(GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+        let mut pool: Vec<GateNetId> = (0..8)
+            .map(|i| netlist.add_net(GateNet::new_input(GateNetId(0), format!("in{i}"))))
+            .collect();
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for i in 0..luts {
+            let out = netlist.add_net(GateNet::new(GateNetId(0), format!("lut{i}")));
+            let inputs = (0..4).map(|_| pool[next(pool.len())]).collect();
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(0),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("mesh.lut{i}"),
+                inputs,
+                vec![out],
+            ));
+            pool.push(out);
+            if i % 3 == 2 {
+                let q = netlist.add_net(GateNet::new(GateNetId(0), format!("ff{i}")));
+                let mut ff = Cell::new_seq(
+                    skalp_lir::gate_netlist::CellId(0),
+                    "SB_DFF".to_string(),
+                    "ice40".to_string(),
+                    0.0,
+                    format!("mesh.ff{i}"),
+                    vec![out],
+                    vec![q],
+                    clock,
+                    None,
+                );
+                ff.clock = Some(clock);
+                netlist.add_cell(ff);
+                pool.push(q);
+            }
+        }
+        netlist
+    }
+
+    /// Placement and routes in a form two runs can be compared in
+    #[allow(clippy::type_complexity)]
+    fn pnr_fingerprint(
+        r: &PnrResult,
+    ) -> (
+        Vec<(u32, u32, u32, usize)>,
+        Vec<(u32, u32, Vec<u32>, Vec<u32>, Vec<u32>)>,
+    ) {
+        let mut cells: Vec<_> = r
+            .placement
+            .placements
+            .iter()
+            .map(|(c, l)| (c.0, l.tile_x, l.tile_y, l.bel_index))
+            .collect();
+        cells.sort();
+        let mut routes: Vec<_> = r
+            .routing
+            .routes
+            .iter()
+            .map(|(n, route)| {
+                (
+                    n.0,
+                    route.source.0,
+                    route.sinks.iter().map(|w| w.0).collect(),
+                    route.wires.iter().map(|w| w.0).collect(),
+                    route.pips.iter().map(|p| p.0).collect(),
+                )
+            })
+            .collect();
+        routes.sort();
+        (cells, routes)
+    }
+
+    /// Placement and routing are deterministic: the same netlist and seed
+    /// give the same placement, routes and bitstream every time. With std's
+    /// randomly seeded hash maps, iterating one wherever the order decides
+    /// something made every build different (see [`crate::collections`]);
+    /// repeating the flow in one process catches any such map, since each
+    /// one gets a fresh random seed.
+    fn check_repeatable(what: &str, run: impl Fn() -> PnrResult) {
+        let first = run();
+        assert!(!first.routing.routes.is_empty());
+        let expected = pnr_fingerprint(&first);
+        for attempt in 1..4 {
+            let again = run();
+            let got = pnr_fingerprint(&again);
+            assert_eq!(
+                expected.0, got.0,
+                "{what}: placement differs on run {attempt}"
+            );
+            assert_eq!(
+                expected.1, got.1,
+                "{what}: routing differs on run {attempt}"
+            );
+            assert_eq!(
+                first.bitstream.data, again.bitstream.data,
+                "{what}: bitstream differs on run {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ice40_place_and_route_is_repeatable() {
+        let netlist = create_mesh_netlist(60);
+        check_repeatable("ice40", || {
+            place_and_route(&netlist, Ice40Variant::Hx1k, PnrConfig::default()).unwrap()
+        });
+    }
+
+    /// Placement leaves room in each tile when the design allows it, and
+    /// fills tiles further when the design needs the space
+    #[test]
+    fn test_placement_fills_tiles_only_as_far_as_needed() {
+        use crate::device::{BelType, Device};
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let luts_per_tile = |placement: &PlacementResult| {
+            let mut per_tile = std::collections::BTreeMap::new();
+            for loc in placement.placements.values() {
+                if loc.bel_type == BelType::Lut4 {
+                    *per_tile.entry((loc.tile_x, loc.tile_y)).or_insert(0usize) += 1;
+                }
+            }
+            per_tile
+        };
+
+        // A small design: tiles hold at most 75% of their 8 LUTs
+        let small = create_mesh_netlist(60);
+        let mut placer = Placer::new(PlacerConfig::default(), device.clone());
+        assert_eq!(placer.fill_limit(&small), crate::placer::DEFAULT_TILE_FILL);
+        let placement = placer.place(&small).unwrap();
+        let per_tile = luts_per_tile(&placement);
+        assert!(per_tile.values().all(|&n| n <= 6), "{per_tile:?}");
+        assert!(per_tile.len() >= 10);
+
+        // A configured limit is used as given
+        let config = PlacerConfig {
+            max_tile_fill: Some(0.5),
+            ..Default::default()
+        };
+        let mut placer = Placer::new(config, device.clone());
+        assert_eq!(placer.fill_limit(&small), 0.5);
+        let per_tile = luts_per_tile(&placer.place(&small).unwrap());
+        assert!(per_tile.values().all(|&n| n <= 4), "{per_tile:?}");
+
+        // A design using most of the device: the limit rises so it fits
+        let total_luts = {
+            let (w, h) = device.grid_size();
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter_map(|(x, y)| device.tile_at(x, y))
+                .flat_map(|t| t.bels().iter().map(|b| b.bel_type))
+                .filter(|&t| t == BelType::Lut4)
+                .count()
+        };
+        let large = create_mesh_netlist(total_luts * 85 / 100);
+        let mut placer = Placer::new(PlacerConfig::default(), device);
+        let limit = placer.fill_limit(&large);
+        assert!(limit > 0.85 && limit <= 1.0, "limit {limit}");
+        let placement = placer.place(&large).unwrap();
+        assert_eq!(
+            luts_per_tile(&placement).values().sum::<usize>(),
+            total_luts * 85 / 100
+        );
+    }
+
+    /// The placer's seed reaches its random choices: a different seed gives
+    /// a different, equally repeatable placement
+    #[test]
+    fn test_placement_follows_the_seed() {
+        let netlist = create_mesh_netlist(60);
+        let place = |seed| {
+            let mut config = PnrConfig::default();
+            config.placer.seed = seed;
+            let r = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+            pnr_fingerprint(&r).0
+        };
+        let a = place(42);
+        assert_eq!(a, place(42));
+        assert_ne!(a, place(7), "seed 7 placed exactly like seed 42");
+    }
+
+    /// The router routes nets side by side on however many threads there
+    /// are; the result must not depend on how many that is
+    #[test]
+    fn test_routing_does_not_depend_on_thread_count() {
+        let netlist = create_mesh_netlist(60);
+        let run = |threads| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let r = place_and_route_nexus(
+                    &netlist,
+                    crate::device::nexus::NexusVariant::Lifcl40,
+                    PnrConfig::default(),
+                )
+                .unwrap();
+                (pnr_fingerprint(&r), r.bitstream.data)
+            })
+        };
+        assert!(run(1) == run(4), "one thread and four routed differently");
+    }
+
+    #[test]
+    fn test_nexus_place_and_route_is_repeatable() {
+        let netlist = create_mesh_netlist(60);
+        check_repeatable("nexus", || {
+            place_and_route_nexus(
+                &netlist,
+                crate::device::nexus::NexusVariant::Lifcl40,
+                PnrConfig::default(),
+            )
+            .unwrap()
+        });
     }
 
     #[test]
@@ -2798,7 +3029,7 @@ set_io btn A6
         }
         for i in 0..4 {
             let mut lut = Cell::new_comb(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_LUT4".to_string(),
                 "ice40".to_string(),
                 0.0,
@@ -2817,7 +3048,7 @@ set_io btn A6
                 .push((lut_id, 1));
 
             let carry = Cell::new_comb(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_CARRY".to_string(),
                 "ice40".to_string(),
                 0.0,
@@ -2835,7 +3066,7 @@ set_io btn A6
                 .push((carry_id, 1));
 
             let mut dff = Cell::new_seq(
-                CellId(0),
+                skalp_lir::gate_netlist::CellId(0),
                 "SB_DFF".to_string(),
                 "ice40".to_string(),
                 0.0,

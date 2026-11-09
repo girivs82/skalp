@@ -53,6 +53,7 @@
 //! - Critical path reporting
 
 pub mod bitstream;
+pub mod collections;
 pub mod device;
 pub mod error;
 pub mod packing;

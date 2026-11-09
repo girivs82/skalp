@@ -5,6 +5,7 @@
 //! Includes parallel move evaluation for improved performance on multi-core systems.
 
 use super::{PlacementLoc, PlacementResult};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::Result;
 use crate::packing::CarryChain;
@@ -12,7 +13,6 @@ use crate::timing::DelayModel;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Result of a placement-move cost evaluation:
@@ -33,6 +33,14 @@ const CALIBRATION_MOVES: usize = 1000;
 /// Freeze when the temperature drops below this fraction of the average
 /// cost per net (VPR uses 0.005)
 const FREEZE_FRACTION: f64 = 0.005;
+
+/// Seed used unless [`SimulatedAnnealing::with_seed`] gives another
+/// (the default of [`super::PlacerConfig::seed`])
+const DEFAULT_SEED: u64 = 42;
+
+/// Offset of the temperature-calibration stream from the annealer's seed,
+/// so calibration draws different moves from the first annealing moves
+const CALIBRATION_STREAM: u64 = 12_303;
 
 /// NCL proximity group for placement co-location enforcement.
 /// Tracks which cells must be placed close together and the tile distance limit.
@@ -421,6 +429,13 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     /// The initial placement is already good (analytical + legalized):
     /// refine it locally instead of re-annealing from a hot, global start
     refine: bool,
+    /// Seed of every random stream the annealer draws from, so a placement
+    /// is reproducible for a given seed
+    seed: u64,
+    /// Share of each tile's BELs of a type cells may take
+    /// ([`super::sites::fill_cap`]): a move may not add a cell to a tile
+    /// already holding that many
+    fill_limit: f64,
 }
 
 /// Move-generation data that stays fixed for a whole annealing run, so a
@@ -522,6 +537,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
             refine: false,
+            seed: DEFAULT_SEED,
+            fill_limit: 1.0,
         }
     }
 
@@ -545,7 +562,21 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             carry_chain_membership: HashMap::new(),
             carry_chains: Vec::new(),
             refine: false,
+            seed: DEFAULT_SEED,
+            fill_limit: 1.0,
         }
+    }
+
+    /// Fill each tile's BELs of a type at most this far (0..=1)
+    pub fn with_fill_limit(mut self, fill_limit: f64) -> Self {
+        self.fill_limit = fill_limit;
+        self
+    }
+
+    /// Seed the annealer's random moves and acceptances
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
     }
 
     /// Set carry chains for chain-aware moves
@@ -615,7 +646,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         net_criticalities: &HashMap<GateNetId, f64>,
         rlim: u32,
     ) -> f64 {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(CALIBRATION_STREAM));
         let mut cal_placement = placement.clone();
         let mut cal_loc_map = loc_map.clone();
         let mut uphill_sum = 0.0f64;
@@ -701,7 +732,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         initial: PlacementResult,
         netlist: &GateNetlist,
     ) -> Result<PlacementResult> {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
         let mut current = initial;
 
         // Compute net criticalities for timing-driven mode
@@ -933,7 +964,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     .into_par_iter()
                     .map(|i| {
                         let mut rng = rand::rngs::StdRng::seed_from_u64(
-                            42 + _iteration as u64 * 1000 + i as u64,
+                            self.seed
+                                .wrapping_add(_iteration as u64 * 1000)
+                                .wrapping_add(i as u64),
                         );
                         if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
                             self.generate_critical_path_move(
@@ -995,7 +1028,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 // Find the best improving move (or best move if temperature allows)
                 let mut best_move_idx: Option<usize> = None;
                 let mut best_delta = f64::MAX;
-                let mut rng = rand::rngs::StdRng::seed_from_u64(42 + _iteration as u64);
+                let mut rng =
+                    rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(_iteration as u64));
 
                 for (idx, (_, _, _, delta, _, _)) in evaluated.iter().enumerate() {
                     // Check acceptance
@@ -1106,6 +1140,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let Some(tile) = self.device.tile_at(x, y) else {
                 continue;
             };
+            // Moving into another tile adds a cell to it, unless it swaps
+            // with one: a tile at its fill cap only takes swaps
+            let tile_full = self.fill_limit < 1.0
+                && (x, y) != (loc.tile_x, loc.tile_y)
+                && self.tile_at_fill_cap(tile, x, y, source_bel_type, loc_map, ctx);
             // Reservoir-sample one acceptable BEL of the tile
             let mut chosen = None;
             let mut seen = 0u32;
@@ -1116,7 +1155,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 {
                     continue;
                 }
-                if let Some(&occupant) = loc_map.get(&(x, y, bel_idx)) {
+                let occupant = loc_map.get(&(x, y, bel_idx));
+                if occupant.is_none() && tile_full {
+                    continue;
+                }
+                if let Some(&occupant) = occupant {
                     if self.carry_chain_membership.contains_key(&occupant)
                         || !Self::bel_types_compatible(
                             source_bel_type,
@@ -1137,6 +1180,31 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         Move::Relocate(cell_id, loc)
+    }
+
+    /// Whether tile (x, y) already holds as many cells on BELs of the
+    /// moving cell's BEL type (`bel_type`) as the fill limit allows. BELs
+    /// reserved under carry chains and distributed RAM count as held.
+    fn tile_at_fill_cap(
+        &self,
+        tile: &dyn crate::device::Tile,
+        x: u32,
+        y: u32,
+        bel_type: BelType,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        ctx: &MoveContext,
+    ) -> bool {
+        let (mut total, mut held) = (0usize, 0usize);
+        for (i, bel) in tile.bels().iter().enumerate() {
+            if bel.bel_type != bel_type {
+                continue;
+            }
+            total += 1;
+            if loc_map.contains_key(&(x, y, i)) || ctx.reserved.contains(&(x, y, i)) {
+                held += 1;
+            }
+        }
+        held >= super::sites::fill_cap(total, self.fill_limit)
     }
 
     /// Get all cells affected by a move, including displaced occupants.
