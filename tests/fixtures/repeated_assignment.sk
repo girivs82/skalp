@@ -1,0 +1,41 @@
+// Registers assigned by more than one statement of a clocked block.
+entity RepeatedAssignment {
+    in clk: clock
+    in set: bit
+    in clear: bit
+    out latched: bit
+    out pulse: bit
+    out count: nat[4]
+    out state: nat[2]
+}
+impl RepeatedAssignment {
+    signal latched_reg: bit = 0
+    signal pulse_reg: bit = 0
+    signal count_reg: nat[4] = 0
+    signal state_reg: nat[2] = 0
+    on(clk.rise) {
+        pulse_reg = 0
+        if set == 1 {
+            pulse_reg = 1
+            latched_reg = 1
+        }
+        if clear == 1 {
+            latched_reg = 0
+        }
+
+        count_reg = count_reg + 1
+        if clear == 1 {
+            count_reg = 0
+        }
+
+        state_reg = 1
+        match set {
+            1 => { state_reg = 2 }
+            _ => {}
+        }
+    }
+    latched = latched_reg
+    pulse = pulse_reg
+    count = count_reg
+    state = state_reg
+}

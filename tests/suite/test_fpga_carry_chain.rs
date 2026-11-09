@@ -309,3 +309,47 @@ fn test_block_ram_read_used_as_logic_stays_out_of_block_ram() {
         "a read feeding logic directly needs its data in the same cycle"
     );
 }
+
+/// Later assignments win over earlier ones, whatever statements they are in.
+async fn check_repeated_assignment(mut tb: Testbench) {
+    tb.set("set", 0u8);
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    tb.set("clear", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("count").await, 3, "count keeps counting");
+    assert_eq!(
+        tb.get_u64("pulse").await,
+        0,
+        "the default applies without set"
+    );
+    assert_eq!(tb.get_u64("state").await, 1, "the leading value applies");
+
+    tb.set("set", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("pulse").await, 1, "set overrides the default");
+    assert_eq!(tb.get_u64("latched").await, 1);
+    assert_eq!(tb.get_u64("state").await, 2, "the match arm overrides");
+
+    tb.set("set", 0u8);
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("latched").await, 0, "the later statement wins");
+    assert_eq!(
+        tb.get_u64("count").await,
+        0,
+        "clear overrides the increment"
+    );
+}
+
+#[tokio::test]
+async fn test_repeated_assignment_gate_level() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("repeated_assignment.sk"),
+        "RepeatedAssignment",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_repeated_assignment(tb).await;
+}

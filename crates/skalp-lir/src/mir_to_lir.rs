@@ -1044,6 +1044,164 @@ impl MirToLirTransform {
         clock_signal: Option<LirSignalId>,
         reset_signal: Option<LirSignalId>,
     ) {
+        // A register assigned by more than one statement gets one driver: the
+        // last assignment that applies, in source order.
+        let repeated = self.targets_of_several_statements(block);
+        if !repeated.is_empty() {
+            for stmt in &block.statements {
+                if !matches!(stmt, Statement::Assignment(_)) {
+                    let nested = Block {
+                        statements: vec![stmt.clone()],
+                    };
+                    self.transform_blocking_assignments_recursive(&nested);
+                }
+            }
+            for target in &repeated {
+                let paths = Self::collect_conditional_paths_for_target(block, target, None);
+                self.add_register_from_paths(target, paths, clock_signal, reset_signal);
+            }
+            let remaining = Self::without_handled_assignments(block, &repeated, true);
+            self.transform_sequential_statements(&remaining, clock_signal, reset_signal);
+            return;
+        }
+        self.transform_sequential_statements(block, clock_signal, reset_signal);
+    }
+
+    /// Targets assigned by more than one statement of a block, memories aside.
+    fn targets_of_several_statements(&self, block: &Block) -> Vec<LValue> {
+        let mut seen: Vec<LValue> = Vec::new();
+        let mut repeated: Vec<LValue> = Vec::new();
+        for stmt in &block.statements {
+            let single = Block {
+                statements: vec![stmt.clone()],
+            };
+            let mut targets: Vec<LValue> = Vec::new();
+            for (target, _) in Self::collect_all_assignments_recursive(&single) {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            for target in targets {
+                let is_memory = match &target {
+                    LValue::BitSelect { base, .. } => self.get_memory_signal_id(base).is_some(),
+                    LValue::Signal(id) => self.memory_signals.contains_key(id),
+                    _ => false,
+                };
+                if is_memory {
+                    continue;
+                }
+                if seen.contains(&target) {
+                    if !repeated.contains(&target) {
+                        repeated.push(target);
+                    }
+                } else {
+                    seen.push(target);
+                }
+            }
+        }
+        repeated
+    }
+
+    /// A copy of a block without assignments that have already been lowered:
+    /// those to `targets`, and blocking ones below the top level.
+    fn without_handled_assignments(block: &Block, targets: &[LValue], top_level: bool) -> Block {
+        let prune = |inner: &Block| Self::without_handled_assignments(inner, targets, false);
+        let mut statements = Vec::with_capacity(block.statements.len());
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let handled = match assign.kind {
+                        AssignmentKind::NonBlocking => targets.contains(&assign.lhs),
+                        _ => !top_level,
+                    };
+                    if !handled {
+                        statements.push(stmt.clone());
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    let mut pruned = if_stmt.clone();
+                    pruned.then_block = prune(&if_stmt.then_block);
+                    pruned.else_block = if_stmt.else_block.as_ref().map(prune);
+                    statements.push(Statement::If(pruned));
+                }
+                Statement::Case(case_stmt) => {
+                    let mut pruned = case_stmt.clone();
+                    for item in &mut pruned.items {
+                        item.block = prune(&item.block);
+                    }
+                    pruned.default = case_stmt.default.as_ref().map(prune);
+                    statements.push(Statement::Case(pruned));
+                }
+                Statement::Block(inner) => statements.push(Statement::Block(prune(inner))),
+                Statement::ResolvedConditional(resolved) if targets.contains(&resolved.target) => {}
+                _ => statements.push(stmt.clone()),
+            }
+        }
+        Block { statements }
+    }
+
+    /// Create one register whose next value is the last of `paths` that applies.
+    fn add_register_from_paths(
+        &mut self,
+        target: &LValue,
+        paths: Vec<(Option<Expression>, Expression)>,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+    ) {
+        let target_signal = self.get_lvalue_signal(target);
+        let target_width = self.get_lvalue_width(target);
+        let mut current_value = target_signal;
+        for (condition, expr) in paths {
+            let expr_signal = self.transform_expression(&expr, target_width);
+            let Some(cond) = condition else {
+                current_value = expr_signal;
+                continue;
+            };
+            let cond_signal = self.transform_expression(&cond, 1);
+            let mux_out = self.alloc_temp_signal(target_width);
+            let path = self.unique_node_path("mux");
+            self.lir.add_node(
+                LirOp::Mux2 {
+                    width: target_width,
+                },
+                vec![cond_signal, current_value, expr_signal],
+                mux_out,
+                path,
+            );
+            current_value = mux_out;
+        }
+
+        let reg_op = LirOp::Reg {
+            width: target_width,
+            has_enable: false,
+            has_reset: reset_signal.is_some(),
+            async_reset: self.async_reset,
+            reset_value: Some(0),
+        };
+        let target_name = self.get_signal_name(target_signal);
+        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+        if let Some(clk) = clock_signal {
+            self.lir.add_seq_node(
+                reg_op,
+                vec![current_value],
+                target_signal,
+                reg_path,
+                clk,
+                reset_signal,
+            );
+        } else {
+            self.lir
+                .add_node(reg_op, vec![current_value], target_signal, reg_path);
+        }
+    }
+
+    /// Lower a block's statements one at a time.
+    fn transform_sequential_statements(
+        &mut self,
+        block: &Block,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+    ) {
         // BUG #237 FIX: Collect leading assignments (before any if/case) as defaults
         // These serve as implicit defaults for conditionals that don't assign to a target
         // Key is the LValue converted to a comparable form
@@ -1318,60 +1476,7 @@ impl MirToLirTransform {
                             paths.extend(else_paths);
                         }
 
-                        // Build priority mux chain: last matching condition wins (sequential semantics)
-                        // In sequential code, later assignments override earlier ones
-                        // Start with feedback (keep current value) as the default
-                        let mut current_value = target_signal;
-
-                        // Process paths in forward order so later paths have higher priority
-                        for (condition, expr) in paths.into_iter() {
-                            let expr_signal = self.transform_expression(&expr, target_width);
-
-                            if let Some(cond) = condition {
-                                let cond_signal = self.transform_expression(&cond, 1);
-                                let mux_out = self.alloc_temp_signal(target_width);
-                                let path = self.unique_node_path("mux");
-                                self.lir.add_node(
-                                    LirOp::Mux2 {
-                                        width: target_width,
-                                    },
-                                    vec![cond_signal, current_value, expr_signal],
-                                    mux_out,
-                                    path,
-                                );
-                                current_value = mux_out;
-                            } else {
-                                // Unconditional - this becomes the new base value
-                                current_value = expr_signal;
-                            }
-                        }
-
-                        // Create ONE register for this target
-                        let reg_op = LirOp::Reg {
-                            width: target_width,
-                            has_enable: false,
-                            has_reset: reset_signal.is_some(),
-                            async_reset: self.async_reset,
-                            reset_value: Some(0),
-                        };
-
-                        // BUG FIX: Include target signal name in path to avoid naming collisions
-                        let target_name = self.get_signal_name(target_signal);
-                        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
-
-                        if let Some(clk) = clock_signal {
-                            self.lir.add_seq_node(
-                                reg_op,
-                                vec![current_value],
-                                target_signal,
-                                reg_path,
-                                clk,
-                                reset_signal,
-                            );
-                        } else {
-                            self.lir
-                                .add_node(reg_op, vec![current_value], target_signal, reg_path);
-                        }
+                        self.add_register_from_paths(target, paths, clock_signal, reset_signal);
                         continue;
                     }
 
@@ -2178,9 +2283,10 @@ impl MirToLirTransform {
                     }
                 }
                 Statement::ResolvedConditional(rc) if &rc.target == target => {
-                    // ResolvedConditional is a priority mux for the target
-                    // Add each case condition-value pair
-                    for case in &rc.resolved.cases {
+                    // Later paths win, so the fallback goes first and the highest
+                    // priority case last.
+                    paths.push((outer_condition.cloned(), rc.resolved.default.clone()));
+                    for case in rc.resolved.cases.iter().rev() {
                         let combined_condition = if let Some(outer) = outer_condition {
                             Some(Expression {
                                 kind: ExpressionKind::Binary {
@@ -2196,8 +2302,6 @@ impl MirToLirTransform {
                         };
                         paths.push((combined_condition, case.value.clone()));
                     }
-                    // Add default as the fallback (with outer condition if present)
-                    paths.push((outer_condition.cloned(), rc.resolved.default.clone()));
                 }
                 _ => {}
             }
@@ -2629,8 +2733,10 @@ impl MirToLirTransform {
         assigns: &'a [(LValue, Expression)],
         target: &LValue,
     ) -> Option<&'a Expression> {
+        // The last assignment to a target is the one that takes effect.
         assigns
             .iter()
+            .rev()
             .find(|(lv, _)| lv == target)
             .map(|(_, expr)| expr)
     }
