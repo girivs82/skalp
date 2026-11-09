@@ -35,6 +35,14 @@ pub struct RoutingGraph {
     tile: Vec<(u32, u32)>,
     /// Intrinsic delay of each wire (ps)
     delay: Vec<u32>,
+    /// Least cost of moving `d` tiles along x (`hop_cost_x[d]`) or y,
+    /// beyond which it grows linearly at `hop_slope_*` per tile
+    hop_cost_x: Vec<f64>,
+    hop_cost_y: Vec<f64>,
+    hop_slope_x: f64,
+    hop_slope_y: f64,
+    /// Whether some PIP moves along both axes at once
+    diagonal: bool,
 }
 
 impl RoutingGraph {
@@ -73,11 +81,105 @@ impl RoutingGraph {
             }
             offsets.push(edges.len() as u32);
         }
-        Self {
+        let mut graph = Self {
             offsets,
             edges,
             tile,
             delay,
+            ..Self::default()
+        };
+        graph.compute_hop_costs();
+        graph
+    }
+
+    /// Lower bounds on the cost of moving a given number of tiles, from the
+    /// PIPs' own displacements (the change of tile from the wire they leave
+    /// to the wire they drive) and costs. A path that moves `d` tiles along
+    /// an axis uses PIPs whose displacements along it add up to at least
+    /// `d`, so the cheapest such multiset of PIPs bounds its cost.
+    fn compute_hop_costs(&mut self) {
+        // Cheapest PIP per displacement length, per axis
+        let mut best_x: Vec<f64> = Vec::new();
+        let mut best_y: Vec<f64> = Vec::new();
+        let note = |best: &mut Vec<f64>, d: u32, cost: f64| {
+            let d = d as usize;
+            if best.len() <= d {
+                best.resize(d + 1, f64::INFINITY);
+            }
+            best[d] = best[d].min(cost);
+        };
+        for w in 0..self.wire_count() {
+            let (sx, sy) = self.tile[w];
+            for e in &self.edges[self.offsets[w] as usize..self.offsets[w + 1] as usize] {
+                let Some(&(tx, ty)) = self.tile.get(e.dst.0 as usize) else {
+                    continue;
+                };
+                let (dx, dy) = (sx.abs_diff(tx), sy.abs_diff(ty));
+                if dx > 0 && dy > 0 {
+                    self.diagonal = true;
+                }
+                if dx > 0 {
+                    note(&mut best_x, dx, e.cost as f64);
+                }
+                if dy > 0 {
+                    note(&mut best_y, dy, e.cost as f64);
+                }
+            }
+        }
+        (self.hop_cost_x, self.hop_slope_x) = Self::covering_costs(&best_x);
+        (self.hop_cost_y, self.hop_slope_y) = Self::covering_costs(&best_y);
+    }
+
+    /// From the cheapest PIP per displacement (`best[k]` for `k` tiles), the
+    /// least cost of PIPs whose displacements add up to at least `d`, for
+    /// `d` up to twice the longest displacement, and the least cost per
+    /// tile (which bounds the cost of longer moves).
+    fn covering_costs(best: &[f64]) -> (Vec<f64>, f64) {
+        let longest = best.len().saturating_sub(1);
+        if longest == 0 {
+            return (vec![0.0], 0.0);
+        }
+        let slope = (1..=longest)
+            .filter(|&k| best[k].is_finite())
+            .map(|k| best[k] / k as f64)
+            .fold(f64::INFINITY, f64::min);
+        let n = 2 * longest + 1;
+        let mut cost = vec![0.0; n];
+        for d in 1..n {
+            cost[d] = (1..=longest)
+                .filter(|&k| best[k].is_finite())
+                .map(|k| best[k] + cost[d.saturating_sub(k)])
+                .fold(f64::INFINITY, f64::min);
+        }
+        (cost, slope)
+    }
+
+    fn axis_cost(table: &[f64], slope: f64, d: u32) -> f64 {
+        let d = d as usize;
+        match table.get(d) {
+            Some(&c) => c,
+            None => {
+                // Past the table: its last entry plus the cheapest rate
+                let last = table.len() - 1;
+                table[last] + slope * (d - last) as f64
+            }
+        }
+    }
+
+    /// A lower bound on the cost of a path from a wire to one `dx` and `dy`
+    /// tiles away (A*'s heuristic). Never more than any real path's cost,
+    /// since every wire entered costs at least its PIP's base cost.
+    pub fn cost_lower_bound(&self, dx: u32, dy: u32) -> f64 {
+        if self.hop_cost_x.is_empty() {
+            return 0.0;
+        }
+        let x = Self::axis_cost(&self.hop_cost_x, self.hop_slope_x, dx);
+        let y = Self::axis_cost(&self.hop_cost_y, self.hop_slope_y, dy);
+        if self.diagonal {
+            // One PIP may serve both axes: only the larger part is certain
+            x.max(y)
+        } else {
+            x + y
         }
     }
 
@@ -135,5 +237,44 @@ mod tests {
             total += from_device.len();
         }
         assert!(total > 0);
+    }
+
+    #[test]
+    fn cost_lower_bound_never_exceeds_a_shortest_path() {
+        use crate::router::AStarRouter;
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let graph = RoutingGraph::build(&device, None);
+        let astar = AStarRouter::new(&device);
+        assert_eq!(graph.cost_lower_bound(0, 0), 0.0);
+        assert!(graph.cost_lower_bound(5, 0) > 0.0);
+        assert!(graph.cost_lower_bound(10, 3) >= graph.cost_lower_bound(5, 3));
+        // Against exact path costs (unit wire costs: the sum of PIP costs)
+        let (w, h) = device.grid_size();
+        let pin = |x, y| {
+            Device::bel_pin_wire(&device, x, y, 0, crate::device::CellPin::Output(0))
+                .or_else(|| Device::lut_output_wire(&device, x, y, 0))
+        };
+        let sink = |x, y| Device::lut_input_wire(&device, x, y, 0, 0);
+        let mut checked = 0;
+        for (x0, y0, x1, y1) in [
+            (2, 2, w - 3, h - 3),
+            (3, 5, 9, 5),
+            (6, 2, 6, 12),
+            (4, 4, 5, 6),
+        ] {
+            let (Some(src), Some(dst)) = (pin(x0, y0), sink(x1, y1)) else {
+                continue;
+            };
+            let Ok((_, _, cost)) = astar.find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, None)
+            else {
+                continue;
+            };
+            let (sx, sy) = graph.tile(src).unwrap();
+            let (tx, ty) = graph.tile(dst).unwrap();
+            let bound = graph.cost_lower_bound(sx.abs_diff(tx), sy.abs_diff(ty));
+            assert!(bound <= cost + 1e-9, "bound {bound} above path cost {cost}");
+            checked += 1;
+        }
+        assert!(checked > 0);
     }
 }

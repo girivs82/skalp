@@ -348,12 +348,10 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         )))
     }
 
-    /// Wire-type-aware Manhattan distance heuristic.
-    ///
-    /// Estimates minimum cost to reach the target tile, accounting for
-    /// available wire types: span-12 covers 12 tiles/hop, span-4 covers
-    /// 4 tiles/hop, local covers 1 tile/hop. This provides a tighter
-    /// (but still admissible) heuristic than flat Manhattan distance.
+    /// A lower bound on the cost from `wire` to the target tile: the
+    /// device's own estimate when it has one, otherwise one derived from the
+    /// routing graph's PIPs. It must never exceed a real path's cost, or the
+    /// search returns needlessly long routes.
     fn heuristic(&self, graph: &RoutingGraph, wire: WireId, target_x: u32, target_y: u32) -> f64 {
         let Some((x, y)) = graph.tile(wire) else {
             return 0.0;
@@ -368,19 +366,8 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         if let Some(estimate) = self.device.route_cost_estimate(dx, dy) {
             return estimate;
         }
-
-        // Estimate minimum hops using available wire types:
-        // span-12: ~2 cost units per hop, covers 12 tiles
-        // span-4: ~2 cost units per hop, covers 4 tiles
-        // local: ~1 cost unit per hop, covers 1 tile
-        let span12_hops = dist / 12;
-        let remaining = dist % 12;
-        let span4_hops = remaining / 4;
-        let local_hops = remaining % 4;
-
-        // Cost per hop: span-12 PIP ≈ 2.0, span-4 PIP ≈ 2.0, local PIP ≈ 1.5
-        // This is admissible (≤ actual cost) since real paths may need more hops
-        span12_hops as f64 * 2.0 + span4_hops as f64 * 2.0 + local_hops as f64 * 1.5
+        // Derived from the routing graph itself: admissible for any device
+        graph.cost_lower_bound(dx, dy)
     }
 
     /// Reconstruct the path ending at `sink` from the search scratch
