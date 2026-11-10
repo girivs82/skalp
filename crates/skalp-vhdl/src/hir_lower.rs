@@ -2691,8 +2691,7 @@ impl VhdlHirBuilder {
             match el.kind() {
                 SyntaxKind::WhenKw | SyntaxKind::ElseKw => {
                     if !current.is_empty() {
-                        segments.push(current);
-                        current = Vec::new();
+                        segments.push(std::mem::take(&mut current));
                     }
                 }
                 _ => {

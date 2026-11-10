@@ -8662,8 +8662,7 @@ impl HirBuilderContext {
                     // Comma delimits elements
                     && !current_group.is_empty() =>
                 {
-                    element_groups.push(current_group);
-                    current_group = Vec::new();
+                    element_groups.push(std::mem::take(&mut current_group));
                 }
                 rowan::NodeOrToken::Node(n) => {
                     // Only collect expression nodes, not parens

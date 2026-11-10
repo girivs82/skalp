@@ -46,8 +46,7 @@ struct IoPad {
 
 /// Whether an IO tile belongs to a high-performance (1.8 V and below) bank.
 pub fn is_high_performance_io(tiletype: &str) -> bool {
-    matches!(tiletype.as_bytes().get(7), Some(b'3' | b'4' | b'5'))
-        && tiletype.starts_with("SYSIO_B")
+    matches!(tiletype.as_bytes().get(7), Some(b'3'..=b'5')) && tiletype.starts_with("SYSIO_B")
 }
 
 /// The pins of each package, plus the oscillator pseudo-pin.
