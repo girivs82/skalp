@@ -7,13 +7,16 @@
 use super::{dsp, ebr, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::HashMap;
-use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR};
+use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR, WIDE_LUT_PIN_SEL};
 use crate::error::{PlaceRouteError, Result};
 use crate::timing::sta::{TimingEndpoint, TimingModel};
 use serde::Deserialize;
 use skalp_lir::gate_netlist::Cell;
 use skalp_lir::tech_library::CellFunction;
 use std::path::Path;
+
+/// Index of a wide LUT's select input; the inputs before it are data.
+const WIDE_LUT_SELECT: usize = 4;
 
 #[derive(Debug, Deserialize)]
 struct InterconnectFile {
@@ -54,6 +57,10 @@ struct SetupHold {
 pub struct TimingDb {
     pip_classes: HashMap<String, i64>,
     lut: i64,
+    /// A wide LUT (two LUT4s and the slice mux): data inputs to the output
+    wide_data: i64,
+    /// A wide LUT's mux select to the output
+    wide_select: i64,
     clk_to_q: i64,
     setup: HashMap<String, i64>,
     ccu2: HashMap<(String, String), i64>,
@@ -92,6 +99,17 @@ impl TimingDb {
             .map(|p| p.maxv)
             .max()
             .unwrap_or(0);
+        let wide = cell("OXIDE_COMB:WIDEFN9")?;
+        let wide_arc = |pins: &[&str]| {
+            wide.iopaths
+                .iter()
+                .filter(|p| pins.contains(&p.from_pin.as_str()))
+                .map(|p| p.maxv)
+                .max()
+                .unwrap_or(0)
+        };
+        let wide_data = wide_arc(&["A", "B", "C", "D"]);
+        let wide_select = wide_arc(&["SEL"]);
         let ff = cell("OXIDE_FF:PPP:SYNC")?;
         let clk_to_q = ff.iopaths.iter().map(|p| p.maxv).max().unwrap_or(0);
         let setup = ff
@@ -134,6 +152,8 @@ impl TimingDb {
                 .map(|(name, class)| (name, class.base.1))
                 .collect(),
             lut,
+            wide_data,
+            wide_select,
             clk_to_q,
             setup,
             ccu2,
@@ -190,6 +210,10 @@ impl NexusTiming<'_> {
         cell.function == Some(CellFunction::Ccu2)
     }
 
+    fn is_wide_lut(cell: &Cell) -> bool {
+        cell.function == Some(CellFunction::Lut5)
+    }
+
     /// Setup time of a block RAM pin, from the table's bus-wide entries.
     fn ram_setup_ps(&self, pin: &str) -> i64 {
         let bus = pin.trim_end_matches(|c: char| c.is_ascii_digit());
@@ -244,6 +268,13 @@ impl TimingModel for NexusTiming<'_> {
             let arc = (ccu2_input(input), ccu2_output(output).to_string());
             return self.db.ccu2.get(&arc).copied();
         }
+        if Self::is_wide_lut(cell) {
+            return Some(if input < WIDE_LUT_SELECT {
+                self.db.wide_data
+            } else {
+                self.db.wide_select
+            });
+        }
         Some(self.db.lut)
     }
 
@@ -296,6 +327,14 @@ impl TimingModel for NexusTiming<'_> {
         if Self::is_dist_ram(cell) && (9..=12).contains(&input) {
             let base = DIST_RAM_PIN_RAD + 4 * (input - 9);
             return (0..4).map(|lut| base + lut).collect();
+        }
+        if Self::is_wide_lut(cell) {
+            // Data inputs feed both LUTs; the last input is the mux select.
+            return if input < WIDE_LUT_SELECT {
+                vec![input, WIDE_LUT_SELECT + input]
+            } else {
+                vec![WIDE_LUT_PIN_SEL]
+            };
         }
         vec![input]
     }

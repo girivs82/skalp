@@ -82,7 +82,7 @@ impl CutMapperConfig {
     /// For FPGA libraries with lut_size, uses that as the cut size.
     /// For ASIC libraries, uses a larger cut size for more optimization freedom.
     pub fn for_library(library: &crate::tech_library::TechLibrary) -> Self {
-        let cut_size = library.get_lut_size();
+        let cut_size = library.max_lut_inputs();
         Self {
             cut_size,
             max_cuts: if cut_size <= 4 { 12 } else { 16 },
@@ -96,7 +96,7 @@ impl CutMapperConfig {
     /// Fast configuration optimized for a specific library
     pub fn fast_for_library(library: &crate::tech_library::TechLibrary) -> Self {
         Self {
-            cut_size: library.get_lut_size(),
+            cut_size: library.max_lut_inputs(),
             max_cuts: 4,
             use_priority_cuts: false,
             area_recovery: false,
@@ -107,7 +107,7 @@ impl CutMapperConfig {
 
     /// Quality configuration optimized for a specific library
     pub fn quality_for_library(library: &crate::tech_library::TechLibrary) -> Self {
-        let cut_size = library.get_lut_size();
+        let cut_size = library.max_lut_inputs();
         Self {
             cut_size,
             max_cuts: if cut_size <= 4 { 16 } else { 20 },
@@ -321,9 +321,13 @@ impl CutMapper {
         self.map_internal(aig, &cuts)
     }
 
-    /// Basic mapping without priority cuts
+    /// Single-pass mapping on a small cut set, ranked by depth so the
+    /// cuts that save levels are kept (the forward pass picks the
+    /// delay-optimal cut of each node).
     fn map_basic(&self, aig: &Aig) -> MappingResult {
-        let cuts = CutEnumeration::enumerate(aig, self.cut_params.clone());
+        let mut params = self.cut_params.clone();
+        params.priority = CutPriority::Delay;
+        let cuts = CutEnumeration::enumerate_with_priority(aig, params);
         self.map_internal(aig, &cuts)
     }
 
@@ -997,6 +1001,34 @@ impl Default for MappingResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A five-input XOR, one level deep on a library with 5-input LUTs.
+    #[test]
+    fn five_input_function_maps_to_one_wide_lut() {
+        let library = crate::get_stdlib_library("nexus").unwrap();
+        assert_eq!(library.max_lut_inputs(), 5);
+        let mut aig = Aig::new("xor5".to_string());
+        let inputs: Vec<AigLit> = (0..5)
+            .map(|i| AigLit::new(aig.add_input(format!("x{i}"), None)))
+            .collect();
+        let xor = inputs[1..]
+            .iter()
+            .fold(inputs[0], |acc, &x| aig.add_xor(acc, x));
+        aig.add_output("y".to_string(), xor);
+
+        for config in [
+            CutMapperConfig::fast_for_library(&library),
+            CutMapperConfig::quality_for_library(&library),
+        ] {
+            let result = CutMapper::from_library_with_config(&library, config).map(&aig);
+            let cells: Vec<&str> = result
+                .mapped_nodes
+                .values()
+                .map(|n| n.cell_type.as_str())
+                .collect();
+            assert_eq!(cells, ["OXIDE_LUT5"], "{cells:?}");
+        }
+    }
 
     #[test]
     fn test_cut_mapper_simple() {

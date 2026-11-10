@@ -74,12 +74,15 @@ impl<'a, D: Device> Legalizer<'a, D> {
             .filter(|(id, _)| !chain_cells.contains(id))
             .collect();
         // Distributed RAM first: its site needs six free LUTs of one tile,
-        // which ordinary logic placed earlier would scatter
+        // which ordinary logic placed earlier would scatter. Wide LUTs next,
+        // for the same reason: each needs both LUTs of one slice.
         cells.sort_by_key(|(_, loc)| {
-            (
-                loc.bel_type != BelType::DistRam,
-                loc.tile_y * 1000 + loc.tile_x,
-            )
+            let rank = match loc.bel_type {
+                BelType::DistRam => 0,
+                BelType::WideLut => 1,
+                _ => 2,
+            };
+            (rank, loc.tile_y * 1000 + loc.tile_x)
         });
 
         // Flip-flops share a control group only with the same control set

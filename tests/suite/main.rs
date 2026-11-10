@@ -164,5 +164,6 @@ mod test_vendor_ip_attribute;
 mod test_vhdl_integration;
 mod test_vhdl_tutorial;
 mod test_wide_arithmetic;
+mod test_wide_lut;
 mod test_wide_ncl;
 mod test_with_intent_assignment;

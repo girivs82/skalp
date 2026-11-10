@@ -403,8 +403,24 @@ impl CutSet {
                         {
                             self.cuts[worst_idx] = cut;
                         }
+                    } else {
+                        // Every size has one cut: the new size replaces the
+                        // worst cut if it ranks better, so a larger cut that
+                        // saves a level is not lost to a full set.
+                        if let Some((worst_idx, worst_score)) = self
+                            .cuts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| (i, c.priority_score(priority, delay_bound)))
+                            .max_by(|(_, a), (_, b)| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        {
+                            if new_score < worst_score {
+                                self.cuts[worst_idx] = cut;
+                            }
+                        }
                     }
-                    // If all sizes have exactly 1 cut, don't replace (max diversity)
                 }
             }
         }
@@ -551,70 +567,11 @@ impl CutEnumeration {
     /// This variant uses the priority mode specified in params to decide
     /// which cuts to keep when the cut set is full.
     pub fn enumerate_with_priority(aig: &Aig, params: CutParams) -> Self {
-        let mut node_cuts: IndexMap<AigNodeId, CutSet> = IndexMap::new();
-        let priority = params.priority;
-        let delay_bound = params.delay_bound;
-
-        // Process nodes in topological order
-        for (id, node) in aig.iter_nodes() {
-            let cut_set = match node {
-                AigNode::Const => CutSet::trivial(id),
-                AigNode::Input { .. } => CutSet::trivial(id),
-                AigNode::Latch { .. } => CutSet::trivial(id),
-                AigNode::Barrier { .. } => CutSet::trivial(id),
-                AigNode::And { left, right } => {
-                    let left_cuts = node_cuts.get(&left.node).cloned().unwrap_or_default();
-                    let right_cuts = node_cuts.get(&right.node).cloned().unwrap_or_default();
-
-                    let mut new_cuts = CutSet::new();
-
-                    // Always include the trivial cut
-                    new_cuts.add_with_priority(
-                        Cut::trivial(id),
-                        params.max_cuts,
-                        priority,
-                        delay_bound,
-                    );
-
-                    // Merge all pairs of cuts from left and right
-                    for left_cut in &left_cuts.cuts {
-                        for right_cut in &right_cuts.cuts {
-                            let merged = left_cut.merge(right_cut);
-                            if merged.is_k_feasible(params.k) {
-                                let mut cut = merged;
-                                // Update arrival time: add 1 unit delay for the AND gate
-                                cut.arrival_time += 1.0;
-
-                                if params.compute_truth_tables {
-                                    cut.truth_table = compute_and_truth_table(
-                                        aig,
-                                        id,
-                                        &cut.leaves,
-                                        left,
-                                        right,
-                                        &node_cuts,
-                                    );
-                                }
-                                new_cuts.add_with_priority(
-                                    cut,
-                                    params.max_cuts,
-                                    priority,
-                                    delay_bound,
-                                );
-                            }
-                        }
-                    }
-
-                    // Sort by priority for consistent ordering
-                    new_cuts.sort_by_priority(priority, delay_bound);
-                    new_cuts
-                }
-            };
-
-            node_cuts.insert(id, cut_set);
-        }
-
-        Self { node_cuts, params }
+        let params = CutParams {
+            use_choices: false,
+            ..params
+        };
+        Self::enumerate_ranked(aig, params)
     }
 
     /// Enumerate cuts including choice nodes
@@ -622,49 +579,81 @@ impl CutEnumeration {
     /// When `use_choices` is enabled in params, this method will also consider
     /// alternative implementations stored in the AIG's choice nodes.
     pub fn enumerate_with_choices(aig: &Aig, params: CutParams) -> Self {
+        Self::enumerate_ranked(aig, params)
+    }
+
+    /// Priority cut enumeration (Mishchenko et al., DAC 2007).
+    ///
+    /// A cut's arrival time is its depth in LUTs when its leaves are mapped
+    /// by their own best cuts: one more than its deepest leaf, where a node's
+    /// depth is the smallest arrival time among its cuts and inputs, latches
+    /// and constants have depth 0. Each node keeps its `max_cuts` best cuts
+    /// by the priority mode, plus its trivial cut, which only serves to build
+    /// the cuts of its fanouts and does not take one of those places.
+    fn enumerate_ranked(aig: &Aig, params: CutParams) -> Self {
         let mut node_cuts: IndexMap<AigNodeId, CutSet> = IndexMap::new();
+        let mut depth: IndexMap<AigNodeId, f32> = IndexMap::new();
         let priority = params.priority;
         let delay_bound = params.delay_bound;
+        let cut_depth = |cut: &Cut, depth: &IndexMap<AigNodeId, f32>| {
+            1.0 + cut
+                .leaves
+                .iter()
+                .map(|leaf| depth.get(leaf).copied().unwrap_or(0.0))
+                .fold(0.0f32, f32::max)
+        };
 
-        // Process nodes in topological order
         for (id, node) in aig.iter_nodes() {
             let cut_set = match node {
-                AigNode::Const => CutSet::trivial(id),
-                AigNode::Input { .. } => CutSet::trivial(id),
-                AigNode::Latch { .. } => CutSet::trivial(id),
-                AigNode::Barrier { .. } => CutSet::trivial(id),
+                AigNode::Const
+                | AigNode::Input { .. }
+                | AigNode::Latch { .. }
+                | AigNode::Barrier { .. } => {
+                    depth.insert(id, 0.0);
+                    CutSet::trivial(id)
+                }
                 AigNode::And { left, right } => {
-                    let left_cuts = node_cuts.get(&left.node).cloned().unwrap_or_default();
-                    let right_cuts = node_cuts.get(&right.node).cloned().unwrap_or_default();
-
                     let mut new_cuts = CutSet::new();
-
-                    // Always include the trivial cut
-                    new_cuts.add_with_priority(
-                        Cut::trivial(id),
-                        params.max_cuts,
-                        priority,
-                        delay_bound,
-                    );
-
-                    // Merge all pairs of cuts from left and right
+                    let (Some(left_cuts), Some(right_cuts)) =
+                        (node_cuts.get(&left.node), node_cuts.get(&right.node))
+                    else {
+                        depth.insert(id, 0.0);
+                        node_cuts.insert(id, CutSet::trivial(id));
+                        continue;
+                    };
                     for left_cut in &left_cuts.cuts {
                         for right_cut in &right_cuts.cuts {
-                            let merged = left_cut.merge(right_cut);
-                            if merged.is_k_feasible(params.k) {
-                                let mut cut = merged;
-                                cut.arrival_time += 1.0;
+                            let mut cut = left_cut.merge(right_cut);
+                            if !cut.is_k_feasible(params.k) {
+                                continue;
+                            }
+                            cut.arrival_time = cut_depth(&cut, &depth);
+                            if params.compute_truth_tables {
+                                cut.truth_table = compute_and_truth_table(
+                                    aig,
+                                    id,
+                                    &cut.leaves,
+                                    left,
+                                    right,
+                                    &node_cuts,
+                                );
+                            }
+                            new_cuts.add_with_priority(cut, params.max_cuts, priority, delay_bound);
+                        }
+                    }
 
-                                if params.compute_truth_tables {
-                                    cut.truth_table = compute_and_truth_table(
-                                        aig,
-                                        id,
-                                        &cut.leaves,
-                                        left,
-                                        right,
-                                        &node_cuts,
-                                    );
+                    // Alternative implementations stored as choice nodes
+                    if params.use_choices && aig.has_choices(id) {
+                        for choice_lit in aig.get_choices(id) {
+                            let Some(choice_cuts) = node_cuts.get(&choice_lit.node) else {
+                                continue;
+                            };
+                            for choice_cut in &choice_cuts.cuts {
+                                let mut cut = choice_cut.clone();
+                                if choice_lit.inverted {
+                                    cut.truth_table = !cut.truth_table;
                                 }
+                                cut.arrival_time = cut_depth(&cut, &depth);
                                 new_cuts.add_with_priority(
                                     cut,
                                     params.max_cuts,
@@ -675,28 +664,21 @@ impl CutEnumeration {
                         }
                     }
 
-                    // If choices are enabled, also enumerate cuts through choice alternatives
-                    if params.use_choices && aig.has_choices(id) {
-                        for choice_lit in aig.get_choices(id) {
-                            if let Some(choice_cuts) = node_cuts.get(&choice_lit.node) {
-                                for choice_cut in &choice_cuts.cuts {
-                                    let mut cut = choice_cut.clone();
-                                    // Adjust for inversion if needed
-                                    if choice_lit.inverted {
-                                        cut.truth_table = !cut.truth_table;
-                                    }
-                                    new_cuts.add_with_priority(
-                                        cut,
-                                        params.max_cuts,
-                                        priority,
-                                        delay_bound,
-                                    );
-                                }
-                            }
-                        }
-                    }
-
                     new_cuts.sort_by_priority(priority, delay_bound);
+                    let node_depth = new_cuts
+                        .cuts
+                        .iter()
+                        .map(|c| c.arrival_time)
+                        .fold(f32::INFINITY, f32::min);
+                    let node_depth = if node_depth.is_finite() {
+                        node_depth
+                    } else {
+                        0.0
+                    };
+                    depth.insert(id, node_depth);
+                    let mut trivial = Cut::trivial(id);
+                    trivial.arrival_time = node_depth;
+                    new_cuts.cuts.push(trivial);
                     new_cuts
                 }
             };

@@ -95,7 +95,14 @@ impl CapacityMap {
                         if !shares_luts {
                             *uses.entry(Resource::of(bel.bel_type)).or_default() += 1.0;
                         }
-                        for b in footprint.iter().filter_map(|&b| bels.get(b)) {
+                        // Only the LUTs and flip-flops it uses up: a BEL that
+                        // itself sits on LUTs (RAM, wide LUT) is in the
+                        // footprint because the two exclude each other.
+                        for b in footprint
+                            .iter()
+                            .filter_map(|&b| bels.get(b))
+                            .filter(|b| b.bel_type.is_lut() || b.bel_type.is_ff())
+                        {
                             *uses.entry(Resource::of(b.bel_type)).or_default() += 1.0;
                         }
                         let mut uses: Demand = uses.into_iter().collect();

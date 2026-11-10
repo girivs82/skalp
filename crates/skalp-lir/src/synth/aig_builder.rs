@@ -835,7 +835,7 @@ impl<'a> AigBuilder<'a> {
             }
 
             // LUT cells — FPGA primitives, should be partitioned out before AIG optimization
-            CellFunction::Lut4 | CellFunction::Lut6 => {
+            CellFunction::Lut4 | CellFunction::Lut5 | CellFunction::Lut6 => {
                 panic!(
                     "Cannot convert LUT cell to AIG — LUT cells should be partitioned out. \
                      LUT4/LUT6 are FPGA output primitives, not AIG input cells."

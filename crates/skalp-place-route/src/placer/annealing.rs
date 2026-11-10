@@ -454,15 +454,21 @@ struct MoveContext {
     control_sets: HashMap<CellId, ControlSet>,
 }
 
+/// Whether cells of `bel_type` use up other BELs of their tile and so stay
+/// where the legalizer put them.
+fn has_footprint(bel_type: BelType) -> bool {
+    matches!(bel_type, BelType::DistRam | BelType::WideLut)
+}
+
 impl MoveContext {
     /// `carry_layout`: on a device whose carry cells take LUTs (Lattice CCU2),
     /// the legalizer has placed every chain on consecutive carry positions;
     /// those chains stay fixed (they are not moved and are not move targets)
     /// and the LUTs under them are reserved.
     ///
-    /// Distributed-RAM cells stay fixed too: a RAM BEL uses up LUTs of its
-    /// tile (`footprint`, [`Device::bel_footprint`]), which the legalizer
-    /// kept free and which no move may then fill.
+    /// Distributed-RAM and wide-LUT cells stay fixed too: their BELs use up
+    /// LUTs of their tile (`footprint`, [`Device::bel_footprint`]), which the
+    /// legalizer kept free and which no move may then fill.
     fn build(
         placement: &PlacementResult,
         netlist: &GateNetlist,
@@ -473,7 +479,7 @@ impl MoveContext {
     ) -> Self {
         let mut reserved = HashSet::new();
         for loc in placement.placements.values() {
-            if loc.bel_type == BelType::DistRam {
+            if has_footprint(loc.bel_type) {
                 reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
                 for lut in footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
                     reserved.insert((loc.tile_x, loc.tile_y, lut));
@@ -495,7 +501,7 @@ impl MoveContext {
             .placements
             .iter()
             .filter(|(c, loc)| {
-                loc.bel_type != BelType::DistRam
+                !has_footprint(loc.bel_type)
                     && (carry_layout.is_none() || !chain_membership.contains_key(c))
             })
             .map(|(&c, _)| c)

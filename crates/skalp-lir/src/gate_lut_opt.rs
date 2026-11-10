@@ -111,8 +111,8 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
 
     for cell in &netlist.cells {
         let init = match cell.lut_init {
-            Some(init) => init & 0xFFFF, // mask to 16 bits for LUT4
-            None => continue,
+            Some(init) if cell.inputs.len() <= 4 => init & 0xFFFF, // LUT4
+            _ => continue,
         };
 
         // Check identity patterns
@@ -203,8 +203,8 @@ fn project_constant_inputs(netlist: &mut GateNetlist) -> LutOptStats {
     // Process each LUT cell
     for cell in &mut netlist.cells {
         let init = match cell.lut_init {
-            Some(init) => init & 0xFFFF,
-            None => continue,
+            Some(init) if cell.inputs.len() <= 4 => init & 0xFFFF,
+            _ => continue,
         };
 
         // Find which inputs are constant
@@ -327,7 +327,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
     let mut already_merged: HashSet<CellId> = HashSet::new();
 
     for cell_a in &netlist.cells {
-        if cell_a.lut_init.is_none() || cell_a.outputs.is_empty() {
+        if cell_a.lut_init.is_none() || cell_a.outputs.is_empty() || cell_a.inputs.len() > 4 {
             continue;
         }
         if already_merged.contains(&cell_a.id) {
@@ -358,7 +358,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
         };
         let cell_b = &netlist.cells[cell_b_idx];
 
-        if cell_b.lut_init.is_none() {
+        if cell_b.lut_init.is_none() || cell_b.inputs.len() > 4 {
             continue;
         }
 
@@ -562,11 +562,8 @@ fn is_inverter_cell(cell: &crate::gate_netlist::Cell) -> bool {
 
 /// Whether `cell` is a single-output LUT whose truth table can take a
 /// rewritten input.
-fn is_lut4(cell: &crate::gate_netlist::Cell) -> bool {
-    cell.lut_init.is_some()
-        && cell.outputs.len() == 1
-        && cell.inputs.len() <= 4
-        && cell.clock.is_none()
+fn is_rewritable_lut(cell: &crate::gate_netlist::Cell) -> bool {
+    cell.lut_variables().is_some() && cell.outputs.len() == 1 && cell.clock.is_none()
 }
 
 /// Remove buffer cells that do not drive a design output, wiring their
@@ -633,13 +630,14 @@ fn absorb_flat_inverters(netlist: &mut GateNetlist) -> usize {
         return 0;
     }
     for cell in &mut netlist.cells {
-        if !is_lut4(cell) || inverters.contains_key(&cell.outputs[0]) {
+        if !is_rewritable_lut(cell) || inverters.contains_key(&cell.outputs[0]) {
             continue;
         }
         for pin in 0..cell.inputs.len() {
             if let Some(&(_, source)) = inverters.get(&cell.inputs[pin]) {
                 let init = cell.lut_init.unwrap_or(0);
-                cell.lut_init = Some(complement_input(init, pin));
+                let vars = cell.lut_variables().unwrap_or(4);
+                cell.lut_init = Some(complement_input(init, pin, vars));
                 cell.inputs[pin] = source;
             }
         }
@@ -659,9 +657,9 @@ fn absorb_flat_inverters(netlist: &mut GateNetlist) -> usize {
     dead.len()
 }
 
-/// `tt` with LUT4 input `pin` complemented.
-fn complement_input(tt: u64, pin: usize) -> u64 {
-    (0..16)
+/// `tt`, a truth table over `vars` inputs, with input `pin` complemented.
+fn complement_input(tt: u64, pin: usize, vars: usize) -> u64 {
+    (0..1usize << vars)
         .filter(|&i| (tt >> (i ^ (1 << pin))) & 1 == 1)
         .fold(0u64, |acc, i| acc | (1 << i))
 }

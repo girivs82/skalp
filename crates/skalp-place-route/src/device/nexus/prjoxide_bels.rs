@@ -2,7 +2,8 @@
 //! database's real site-pin wire names.
 //!
 //! A PLC tile holds 4 slices (A–D). Each slice provides two `OXIDE_COMB` LUT4s
-//! (K0/K1) and two `OXIDE_FF` registers (REG0/REG1). Site-pin wires follow the
+//! (K0/K1), the MUX2 that joins them into a 5-input LUT, and two `OXIDE_FF`
+//! registers (REG0/REG1). Site-pin wires follow the
 //! `J<pin>_SLICE<ch>` convention seen in `tiletypes/PLC.ron`:
 //!   - LUT `l` inputs:  `J{A,B,C,D}{l}_SLICE{ch}`   output: `JF{l}_SLICE{ch}`
 //!   - FF `r` data in:  `JM{r}_SLICE{ch}` (general routing, `SEL.DF`)
@@ -85,6 +86,17 @@ pub fn plc_bels() -> Vec<PlcBel> {
             name: format!("CCU2{ch}"),
             pins: Vec::new(),
         });
+        // The slice's two LUTs and the MUX2 between them as one 5-input LUT
+        // (WIDEFN9 with both LUTs on the same inputs): OFX0 = SEL ? F1 : F0.
+        // SEL comes from the slice's M0 input; the output leaves on OFX0.
+        bels.push(PlcBel {
+            bel_type: BelType::WideLut,
+            name: format!("WIDEFN{ch}"),
+            pins: vec![
+                (format!("WIDE{si}_SEL"), format!("JSEL_SLICE{ch}"), Input),
+                (format!("WIDE{si}_Z"), format!("JOFX0_SLICE{ch}"), Output),
+            ],
+        });
     }
     bels.push(PlcBel {
         bel_type: BelType::DistRam,
@@ -151,7 +163,11 @@ mod tests {
     #[test]
     fn plc_bels_shape() {
         let bels = plc_bels();
-        assert_eq!(bels.len(), 21, "8 LUT4 + 8 FF + 4 carry + 1 RAM");
+        assert_eq!(
+            bels.len(),
+            25,
+            "8 LUT4 + 8 FF + 4 carry + 4 wide LUT + 1 RAM"
+        );
         assert_eq!(
             bels.iter().filter(|b| b.bel_type == BelType::Lut4).count(),
             8

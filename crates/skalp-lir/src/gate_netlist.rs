@@ -152,6 +152,13 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// Number of variables of this cell's truth table, if it is a LUT whose
+    /// table can be rewritten (at most 6 inputs). LUT4-sized cells with fewer
+    /// inputs keep a 4-variable table, with the unused inputs as don't-cares.
+    pub fn lut_variables(&self) -> Option<usize> {
+        (self.lut_init.is_some() && self.inputs.len() <= 6).then(|| self.inputs.len().max(4))
+    }
+
     /// The input layout of a hard multiplier cell, or `None` for any other cell.
     pub fn dsp_ports(&self) -> Option<DspPorts> {
         let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
@@ -2927,5 +2934,14 @@ mod tests {
         assert!(verilog.contains("input wire a"));
         assert!(verilog.contains("input wire b"));
         assert!(verilog.contains("output wire sum"));
+    }
+}
+
+/// The bits of a truth table over `variables` inputs (at most 6).
+pub fn truth_table_mask(variables: usize) -> u64 {
+    if variables >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << variables)) - 1
     }
 }
