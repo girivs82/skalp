@@ -15,6 +15,7 @@ pub mod formatter;
 pub mod generics;
 pub mod hir;
 pub mod hir_builder;
+pub mod hir_calls;
 pub mod lexer;
 pub mod macros;
 pub mod module_resolver;
@@ -37,7 +38,7 @@ pub use parser::Parser;
 pub use span::{LineIndex, SourceSpan};
 
 use anyhow::{Context, Result};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use module_resolver::ModuleResolver;
 use std::path::{Path, PathBuf};
 
@@ -1720,6 +1721,14 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             }
 
             target.implementations.push(imported_impl);
+
+            // The imported implementation is compiled from the merged HIR alone,
+            // so the free functions it calls (and the ones those call) have to
+            // come with it. Without them every call is left unresolved and the
+            // assignment that makes it cannot be lowered: importing `Core` alone
+            // failed with "`port = Call('helper', ..)` could not be lowered" while
+            // importing `{Core, helper}` worked.
+            merge_called_functions(target, source, impl_block)?;
         }
 
         // Also merge GLOBAL_IMPL constants from source — imported entities may reference them.
@@ -1944,6 +1953,53 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
 
     // Symbol not found - this might be okay if it's a type or other symbol
     // For now, we don't error
+    Ok(())
+}
+
+/// A free function defined in `hir`: at file level, or in an implementation
+/// block that holds file-level functions.
+fn find_free_function<'a>(hir: &'a Hir, name: &str) -> Option<&'a hir::HirFunction> {
+    hir.functions.iter().find(|f| f.name == name).or_else(|| {
+        hir.implementations
+            .iter()
+            .filter(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+            .flat_map(|i| i.functions.iter())
+            .find(|f| f.name == name)
+    })
+}
+
+/// Merge into `target` every free function of `source` that `impl_block`
+/// calls, directly or through other functions of `source`. Functions the
+/// implementation defines itself, names `source` does not define (builtins,
+/// trait methods, other modules' functions) and functions `target` already
+/// has are left alone.
+fn merge_called_functions(
+    target: &mut Hir,
+    source: &Hir,
+    impl_block: &hir::HirImplementation,
+) -> Result<()> {
+    let local: IndexSet<&str> = impl_block
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut pending: Vec<String> = hir_calls::called_in_implementation(impl_block)
+        .into_iter()
+        .filter(|name| !local.contains(name.as_str()))
+        .collect();
+    let mut visited = IndexSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(function) = find_free_function(source, &name) else {
+            continue;
+        };
+        if find_free_function(target, &name).is_none() {
+            merge_symbol(target, source, &name)?;
+        }
+        pending.extend(hir_calls::called_in_function(function));
+    }
     Ok(())
 }
 

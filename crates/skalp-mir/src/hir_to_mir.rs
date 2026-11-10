@@ -14284,17 +14284,25 @@ impl<'hir> HirToMir<'hir> {
                         }
 
                         hir::HirExpression::Signal(id) => {
+                            // Signal ids are only unique within one source file, and an
+                            // imported entity keeps the ids of the file it came from, so
+                            // the current entity's implementation must be searched first.
+                            // Searching every implementation in order gave `por + 1` in a
+                            // top module the type of the imported core's 64x32 register
+                            // file (same id), and the add became 2048 bits wide.
                             let ty = if let Some(hir) = self.hir {
-                                let mut found = Type::Unknown;
-                                for impl_block in &hir.implementations {
-                                    if let Some(signal) =
-                                        impl_block.signals.iter().find(|s| s.id == *id)
-                                    {
-                                        found = self.hir_type_to_type(&signal.signal_type);
-                                        break;
-                                    }
-                                }
-                                found
+                                let current = self.current_entity_id;
+                                hir.implementations
+                                    .iter()
+                                    .filter(|i| Some(i.entity) == current)
+                                    .chain(
+                                        hir.implementations
+                                            .iter()
+                                            .filter(|i| Some(i.entity) != current),
+                                    )
+                                    .find_map(|i| i.signals.iter().find(|s| s.id == *id))
+                                    .map(|signal| self.hir_type_to_type(&signal.signal_type))
+                                    .unwrap_or(Type::Unknown)
                             } else {
                                 Type::Unknown
                             };
@@ -14438,18 +14446,23 @@ impl<'hir> HirToMir<'hir> {
             ExpressionKind::Concat(elements) => {
                 let mut total = 0u32;
                 for elem in elements {
-                    total += self.try_mir_expr_width(elem)?;
+                    total = total.checked_add(self.try_mir_expr_width(elem)?)?;
                 }
                 Some(total)
             }
             ExpressionKind::Replicate { count, value } => {
+                // A negative or oversized count (e.g. `{(32 - W){1'b0}}` in a
+                // specialization where W > 32) has no width: wrapping it to u32
+                // overflowed the sum above.
                 let count_val = match &count.kind {
-                    ExpressionKind::Literal(Value::Integer(n)) => Some(*n as u32),
-                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => Some(*n as u32),
+                    ExpressionKind::Literal(Value::Integer(n)) => u32::try_from(*n).ok(),
+                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => {
+                        u32::try_from(*n).ok()
+                    }
                     _ => None,
                 }?;
                 let value_width = self.try_mir_expr_width(value)?;
-                Some(count_val * value_width)
+                count_val.checked_mul(value_width)
             }
             _ => None,
         }
