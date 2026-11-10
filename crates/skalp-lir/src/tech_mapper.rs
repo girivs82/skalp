@@ -3994,6 +3994,44 @@ pub fn synthesize_hierarchical(
     result
 }
 
+/// A blackbox cell's parameters: the instance's own, unquoted, and the
+/// names of its input and output pins in cell pin order
+/// ([`crate::gate_netlist::BLACKBOX_INPUTS_PARAM`]).
+fn blackbox_parameters(info: &crate::mir_to_lir::BlackboxInfo) -> IndexMap<String, String> {
+    let pins = |ports: &[String]| -> String {
+        ports
+            .iter()
+            .flat_map(|port| {
+                let width = info.port_widths.get(port).copied().unwrap_or(1);
+                (0..width).map(move |bit| {
+                    if width == 1 {
+                        port.clone()
+                    } else {
+                        format!("{port}[{bit}]")
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut parameters: IndexMap<String, String> = info
+        .parameters
+        .iter()
+        .map(|(k, v)| (k.clone(), v.trim_matches('"').to_string()))
+        .collect();
+    let inputs: Vec<String> = info.inputs.iter().chain(&info.inouts).cloned().collect();
+    let outputs: Vec<String> = info.outputs.iter().chain(&info.inouts).cloned().collect();
+    parameters.insert(
+        crate::gate_netlist::BLACKBOX_INPUTS_PARAM.to_string(),
+        pins(&inputs),
+    );
+    parameters.insert(
+        crate::gate_netlist::BLACKBOX_OUTPUTS_PARAM.to_string(),
+        pins(&outputs),
+    );
+    parameters
+}
+
 /// Create a GateNetlist containing a single blackbox cell
 ///
 /// This is used for vendor IP modules that should not be synthesized.
@@ -4130,7 +4168,7 @@ fn create_blackbox_netlist(
         source_op: Some(format!("blackbox:{}", blackbox_info.cell_name)),
         safety_classification: CellSafetyClassification::Functional,
         lut_init: None,
-        parameters: IndexMap::new(),
+        parameters: blackbox_parameters(blackbox_info),
     };
     netlist.cells.push(blackbox_cell);
 

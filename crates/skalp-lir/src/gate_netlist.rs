@@ -82,6 +82,14 @@ pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 
+/// Parameter naming a blackbox cell's input pins, comma-separated in
+/// `inputs` order (a bus bit as `NAME[i]`).
+pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
+
+/// Parameter naming a blackbox cell's output pins, as
+/// [`BLACKBOX_INPUTS_PARAM`] does its inputs.
+pub const BLACKBOX_OUTPUTS_PARAM: &str = "BLACKBOX_OUTPUTS";
+
 /// Parameter holding a block RAM cell's address width in bits.
 pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
 /// Parameter holding a block RAM cell's data width in bits.
@@ -159,6 +167,21 @@ impl Cell {
             signed_b: signed_a + 1,
             product_width: bits(DSP_P_BITS_PARAM)?,
         })
+    }
+
+    /// The name of a blackbox cell's `index`-th input or output pin
+    /// ([`BLACKBOX_INPUTS_PARAM`]).
+    pub fn blackbox_pin(&self, output: bool, index: usize) -> Option<&str> {
+        let param = if output {
+            BLACKBOX_OUTPUTS_PARAM
+        } else {
+            BLACKBOX_INPUTS_PARAM
+        };
+        self.parameters
+            .get(param)?
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .nth(index)
     }
 
     /// A memory cell's initial contents, one word per address from address 0
