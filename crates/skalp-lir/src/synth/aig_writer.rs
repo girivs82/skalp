@@ -2046,6 +2046,10 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
     removed
 }
 
+/// Consumer-map pin numbers for a cell's clock and reset inputs.
+const CLOCK_PIN: usize = usize::MAX;
+const RESET_PIN: usize = usize::MAX - 1;
+
 /// Post-processing pass: push INV cells backward into producing LUT truth tables.
 ///
 /// Complements `absorb_inverters_into_luts` which absorbs INV→LUT (forward).
@@ -2073,13 +2077,13 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             net_consumers
                 .entry(clk)
                 .or_default()
-                .push((cell_idx, usize::MAX));
+                .push((cell_idx, CLOCK_PIN));
         }
         if let Some(rst) = cell.reset {
             net_consumers
                 .entry(rst)
                 .or_default()
-                .push((cell_idx, usize::MAX));
+                .push((cell_idx, RESET_PIN));
         }
     }
 
@@ -2145,7 +2149,7 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
 
             if is_inv {
                 inv_consumers.push(ci);
-            } else if pin != usize::MAX && c.lut_variables().is_some() {
+            } else if pin < RESET_PIN && c.lut_variables().is_some() {
                 lut_consumers.push((ci, pin));
             } else {
                 other_count += 1;
@@ -2206,43 +2210,45 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             }
         }
 
-        // Rewire: each INV cell's output consumers now connect to the (flipped) LUT output
+        // The flipped LUT drives the port an inverter drove, if any, so the
+        // port keeps its net and name; otherwise it keeps its own net.
+        let target = flip_info
+            .iter()
+            .map(|&(_, out, _)| out)
+            .find(|out| output_nets.contains(out))
+            .unwrap_or(producer_output);
+        let rewire = |netlist: &mut GateNetlist, consumers: &[(usize, usize)]| {
+            for &(ci, pin_idx) in consumers {
+                let cell = &mut netlist.cells[ci];
+                match pin_idx {
+                    CLOCK_PIN => cell.clock = Some(target),
+                    RESET_PIN => cell.reset = Some(target),
+                    _ if pin_idx < cell.inputs.len() => cell.inputs[pin_idx] = target,
+                    _ => {}
+                }
+            }
+        };
+        if target != producer_output {
+            netlist.cells[*producer_idx].outputs[0] = target;
+            if let Some(consumers) = net_consumers.get(&producer_output) {
+                rewire(netlist, consumers);
+            }
+            if let Some(net) = netlist.nets.get_mut(producer_output.0 as usize) {
+                net.driver = None;
+            }
+            let producer_id = netlist.cells[*producer_idx].id;
+            if let Some(net) = netlist.nets.get_mut(target.0 as usize) {
+                net.driver = Some(producer_id);
+            }
+        }
+
+        // Each inverter's readers now read the flipped LUT
         for &(inv_idx, inv_output_net, _) in flip_info {
-            if let Some(consumers) = net_consumers.get(&inv_output_net) {
-                for &(ci, pin_idx) in consumers {
-                    if pin_idx == usize::MAX {
-                        netlist.cells[ci].clock = Some(producer_output);
-                    } else if pin_idx < netlist.cells[ci].inputs.len() {
-                        netlist.cells[ci].inputs[pin_idx] = producer_output;
-                    }
+            if inv_output_net != target {
+                if let Some(consumers) = net_consumers.get(&inv_output_net) {
+                    rewire(netlist, consumers);
                 }
             }
-
-            // Also rewire output ports, transferring is_output flag and name
-            let mut was_output = false;
-            for out in &mut netlist.outputs {
-                if *out == inv_output_net {
-                    *out = producer_output;
-                    was_output = true;
-                }
-            }
-            if was_output {
-                let output_name = netlist
-                    .nets
-                    .get(inv_output_net.0 as usize)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default();
-                if let Some(old_net) = netlist.nets.get_mut(inv_output_net.0 as usize) {
-                    old_net.is_output = false;
-                }
-                if let Some(new_net) = netlist.nets.get_mut(producer_output.0 as usize) {
-                    new_net.is_output = true;
-                    if !output_name.is_empty() {
-                        new_net.name = output_name;
-                    }
-                }
-            }
-
             inv_to_remove.push(inv_idx);
             total_removed += 1;
         }
@@ -2600,6 +2606,43 @@ mod tests {
         assert_eq!(lut.lut_init, Some(0x9669_6996));
         let ff = n.cells.iter().find(|c| c.path == "ff").unwrap();
         assert_eq!(ff.inputs[0], lut.outputs[0]);
+    }
+
+    #[test]
+    fn folded_inverter_leaves_the_port_on_its_own_net() {
+        let mut n = GateNetlist::new("t".to_string(), "ice40".to_string());
+        let a = n.add_input("a".to_string());
+        let b = n.add_input("b".to_string());
+        let out = n.add_net(GateNet::new(GateNetId(0), "out".to_string()));
+        let y = n.add_output("y".to_string());
+        n.add_cell(Cell::new_lut(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "lut".to_string(),
+            vec![a, b],
+            vec![out],
+            0x8888,
+        ));
+        let mut not = Cell::new_comb(
+            CellId(0),
+            "SB_LUT4_INV".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "inv".to_string(),
+            vec![out],
+            vec![y],
+        );
+        not.function = Some(CellFunction::Inv);
+        n.add_cell(not);
+
+        assert_eq!(push_inverters_into_producing_luts(&mut n), 1);
+        assert_eq!(n.cells.len(), 1);
+        assert_eq!(n.cells[0].outputs, vec![y]);
+        assert_eq!(n.cells[0].lut_init, Some(0x7777));
+        assert_eq!(n.outputs, vec![y]);
+        assert_eq!(n.nets[y.0 as usize].name, "y");
     }
 
     #[test]

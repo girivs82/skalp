@@ -1363,7 +1363,13 @@ impl GateNetlist {
 
             // Add parameters for LUT4 cells
             if needs_init {
-                if let Some(init) = self.compute_lut4_init(&cell.cell_type) {
+                // The cell's own truth table wins: passes that fold inverters
+                // or merge LUTs rewrite it without renaming the cell.
+                let init = cell
+                    .lut_init
+                    .map(|t| (t & 0xFFFF) as u16)
+                    .or_else(|| self.compute_lut4_init(&cell.cell_type));
+                if let Some(init) = init {
                     output.push_str(&format!("#(.LUT_INIT(16'h{:04X})) ", init));
                 }
             }
