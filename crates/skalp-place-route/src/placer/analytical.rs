@@ -8,11 +8,13 @@
 
 use super::sites::{bel_types_compatible, SiteMap};
 use super::spreading::{spread, CapacityMap, SpreadCell};
+use super::timing_estimate;
 use super::{is_constant_cell, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
+use crate::timing::DelayModel;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 
 /// Nets with more pins than this use a star model instead of a clique.
@@ -110,9 +112,18 @@ fn hpwl(pins: &[Vec<usize>], x: &[f64], y: &[f64]) -> f64 {
         .sum()
 }
 
+/// Extra weight of a net on the worst path in timing-driven placement (a net
+/// with slack to spare keeps weight 1).
+const TIMING_NET_WEIGHT: f64 = 8.0;
+/// How sharply the extra weight falls off with slack: criticality is raised
+/// to this power, so only nets near the worst path gain much.
+const TIMING_CRITICALITY_EXPONENT: i32 = 4;
+
 /// Analytical placer using quadratic wirelength minimization
 pub struct AnalyticalPlacer<'a, D: Device> {
     device: &'a D,
+    /// Delays for timing-driven net weights; `None` places for wirelength only
+    delay_model: Option<DelayModel>,
     /// Resolved I/O constraints: signal_name → (tile_x, tile_y, bel_idx)
     resolved_io_constraints: HashMap<String, (u32, u32, usize)>,
     /// Share of each tile's BELs of a type cells may take
@@ -125,9 +136,16 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     pub fn new(device: &'a D) -> Self {
         Self {
             device,
+            delay_model: None,
             resolved_io_constraints: HashMap::new(),
             fill_limit: 1.0,
         }
+    }
+
+    /// Weight nets by timing criticality, estimated with these delays
+    pub fn with_timing(mut self, delay_model: DelayModel) -> Self {
+        self.delay_model = Some(delay_model);
+        self
     }
 
     /// Fill each tile's BELs of a type at most this far (0..=1)
@@ -194,6 +212,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         &self,
         netlist: &GateNetlist,
         cell_indices: &HashMap<CellId, usize>,
+        net_weights: Option<&[f64]>,
     ) -> QuadraticSystem {
         let n = cell_indices.len();
 
@@ -206,7 +225,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let mut by = vec![0.0f64; n];
 
         // Process each net to build connectivity
-        for net in &netlist.nets {
+        for (net_index, net) in netlist.nets.iter().enumerate() {
+            let net_weight = net_weights.map_or(1.0, |w| w[net_index]);
             let mut connected_cells: Vec<CellId> = Vec::new();
 
             if let Some(driver) = net.driver {
@@ -234,7 +254,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             };
             if k <= CLIQUE_MAX_PINS {
                 // Clique model: every pin pair, weight 1/k
-                let weight = 1.0 / k as f64;
+                let weight = net_weight / k as f64;
                 for i in 0..k {
                     for j in (i + 1)..k {
                         connect(
@@ -251,7 +271,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 // ~2M matrix entries. Weight 1/2 per edge keeps the net's total
                 // weight equal to the clique's (k(k-1)/2 pairs × 1/k).
                 let hub = cell_indices[&connected_cells[0]];
-                let weight = 0.5;
+                let weight = 0.5 * net_weight;
                 for cell in &connected_cells[1..] {
                     connect(hub, cell_indices[cell], weight);
                 }
@@ -385,7 +405,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         carry_chains: &[CarryChain],
     ) -> Result<(Vec<f64>, Vec<f64>)> {
         let n = cell_indices.len();
-        let system = self.build_system(netlist, cell_indices);
+        let mut system = self.build_system(netlist, cell_indices, None);
         let (width, height) = self.device.grid_size();
         let centre = || vec![width as f64 / 2.0; n];
         let mut x =
@@ -438,6 +458,19 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             targets = movable.iter().map(|c| (tx[c.index], ty[c.index])).collect();
             if solved_wl >= SPREAD_CONVERGED * spread_wl {
                 break;
+            }
+
+            // Timing-driven: weight each net by how critical it is with the
+            // cells where spreading put them.
+            if let Some(model) = &self.delay_model {
+                let critical = timing_estimate::net_criticalities(netlist, model, |id| {
+                    cell_indices.get(&id).map(|&i| (tx[i], ty[i]))
+                });
+                let weights: Vec<f64> = critical
+                    .iter()
+                    .map(|c| 1.0 + TIMING_NET_WEIGHT * c.powi(TIMING_CRITICALITY_EXPONENT))
+                    .collect();
+                system = self.build_system(netlist, cell_indices, Some(&weights));
             }
 
             // Pull every movable cell towards its spread position, harder

@@ -1593,95 +1593,19 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         netlist: &GateNetlist,
         placement: &PlacementResult,
     ) -> HashMap<GateNetId, f64> {
-        let mut criticalities: HashMap<GateNetId, f64> = HashMap::new();
-        let mut path_delays: HashMap<GateNetId, f64> = HashMap::new();
-
-        // Forward pass: compute arrival times (estimated delays to each net)
-        for net in &netlist.nets {
-            let delay = self.estimate_arrival_time(
-                net.id,
-                netlist,
-                placement,
-                &path_delays,
-                &mut HashSet::new(),
-            );
-            path_delays.insert(net.id, delay);
-        }
-
-        // Find maximum delay (worst slack point)
-        let max_delay = path_delays.values().copied().fold(0.0f64, f64::max);
-
-        // Compute criticalities: 1.0 for critical path, 0.0 for slack
-        if max_delay > 0.0 {
-            for (net_id, delay) in &path_delays {
-                let criticality = delay / max_delay;
-                criticalities.insert(*net_id, criticality);
-            }
-        }
-
-        criticalities
-    }
-
-    /// Estimate arrival time for a net (forward propagation)
-    fn estimate_arrival_time(
-        &self,
-        net_id: GateNetId,
-        netlist: &GateNetlist,
-        placement: &PlacementResult,
-        memo: &HashMap<GateNetId, f64>,
-        visited: &mut HashSet<GateNetId>,
-    ) -> f64 {
-        // Check memo
-        if let Some(&delay) = memo.get(&net_id) {
-            return delay;
-        }
-
-        // Prevent cycles
-        if visited.contains(&net_id) {
-            return 0.0;
-        }
-        visited.insert(net_id);
-
-        let net = match netlist.nets.get(net_id.0 as usize) {
-            Some(n) => n,
-            None => return 0.0,
-        };
-
-        // If this is a primary input or clock, arrival time is 0
-        if net.is_input || net.is_clock {
-            return 0.0;
-        }
-
-        // Get the driver cell
-        let driver_id = match net.driver {
-            Some(id) => id,
-            None => return 0.0,
-        };
-
-        let driver = match netlist.get_cell(driver_id) {
-            Some(c) => c,
-            None => return 0.0,
-        };
-
-        // If driver is sequential, this starts a new timing path
-        if driver.clock.is_some() {
-            return self.delay_model.dff_clk_to_q;
-        }
-
-        // Driver is combinational - get max input arrival + cell delay
-        let cell_delay = self.delay_model.cell_delay(&driver.cell_type);
-        let mut max_input_arrival = 0.0f64;
-
-        for &input_net in &driver.inputs {
-            let input_arrival =
-                self.estimate_arrival_time(input_net, netlist, placement, memo, visited);
-            max_input_arrival = max_input_arrival.max(input_arrival);
-        }
-
-        // Add routing delay estimate based on placement
-        let routing_delay = self.estimate_net_delay(net_id, placement, netlist);
-
-        max_input_arrival + cell_delay + routing_delay * 0.5 // Partial routing delay
+        let critical =
+            super::timing_estimate::net_criticalities(netlist, &self.delay_model, |id| {
+                placement
+                    .placements
+                    .get(&id)
+                    .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
+            });
+        netlist
+            .nets
+            .iter()
+            .zip(critical)
+            .map(|(net, c)| (net.id, c))
+            .collect()
     }
 
     /// Generate a move biased toward cells on critical paths

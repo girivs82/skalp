@@ -13,6 +13,7 @@ pub mod control_sets;
 mod legalization;
 mod sites;
 mod spreading;
+mod timing_estimate;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
@@ -275,6 +276,11 @@ impl<D: Device + Clone> Placer<D> {
         Self { config, device }
     }
 
+    /// Delays for timing-driven placement on this device
+    fn delay_model(&self) -> crate::timing::DelayModel {
+        crate::timing::DelayModel::for_family(self.device.family())
+    }
+
     /// Place a design with carry chain constraints
     pub fn place_with_carry_chains(
         &mut self,
@@ -316,7 +322,14 @@ impl<D: Device + Clone> Placer<D> {
             PlacementAlgorithm::AnalyticalWithRefinement
             | PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical with carry chain column constraints
-                let analytical = AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                let mut analytical =
+                    AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                if matches!(
+                    self.config.algorithm,
+                    PlacementAlgorithm::AnalyticalTimingDriven
+                ) {
+                    analytical = analytical.with_timing(self.delay_model());
+                }
                 let t_stage = std::time::Instant::now();
                 let initial = if carry_chains.is_empty() {
                     analytical.place(netlist)?
@@ -371,6 +384,7 @@ impl<D: Device + Clone> Placer<D> {
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
                 .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model())
                 .with_carry_chains(carry_chains.to_vec());
 
                 let t_stage = std::time::Instant::now();
@@ -538,6 +552,7 @@ impl<D: Device + Clone> Placer<D> {
                 // Analytical + legalization + timing-driven SA refinement
                 let analytical = AnalyticalPlacer::new(&self.device)
                     .with_fill_limit(fill_limit)
+                    .with_timing(self.delay_model())
                     .with_resolved_constraints(resolved_constraints.clone());
                 let initial = analytical.place(netlist)?;
 
@@ -557,7 +572,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
-                .with_fill_limit(fill_limit);
+                .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model());
                 annealer.optimize(legalized, netlist)?
             }
         };
