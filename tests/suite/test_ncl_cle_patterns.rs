@@ -1,7 +1,7 @@
-//! NCL tests derived from Karythra CLE V2 async design patterns.
+//! NCL tests derived from asynchronous processor datapath patterns.
 //!
 //! These test the NCL boundary synthesis path with realistic patterns
-//! extracted from the async CLE: completion detection, dual-rail muxing,
+//! extracted from an async execution unit: completion detection, dual-rail muxing,
 //! multi-output bitwise ops, subtraction, comparators, mux chains,
 //! priority encoding, mode control, systolic forwarding, and handshake ack.
 //!

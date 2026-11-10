@@ -184,6 +184,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -210,6 +211,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -239,6 +241,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -279,6 +282,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -308,6 +312,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -337,6 +342,7 @@ mod tests {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         let port_type = HirType::Bit(1);

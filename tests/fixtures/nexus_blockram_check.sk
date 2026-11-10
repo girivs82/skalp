@@ -1,0 +1,29 @@
+// Writes every address, reads it back, and latches any mismatch on `bad`.
+entity RamCheck {
+    in clk: clock
+    out bad: bit
+}
+impl RamCheck {
+    signal c: nat[9] = 0
+    signal mem: bit[18][32]
+    signal q: bit[18] = 0
+    signal failed: bit = 0
+    signal addr: bit[5]
+    signal pattern: bit[18]
+    addr = c[7:3]
+    pattern = {(addr[2] ^ 0), (addr[1] ^ 0), (addr[0] ^ 1), (addr[4] ^ 0), (addr[3] ^ 0), (addr[2] ^ 1), (addr[1] ^ 0), (addr[0] ^ 0), (addr[4] ^ 1), (addr[3] ^ 0), (addr[2] ^ 0), (addr[1] ^ 1), (addr[0] ^ 0), (addr[4] ^ 0), (addr[3] ^ 1), (addr[2] ^ 0), (addr[1] ^ 0), (addr[0] ^ 1)}
+    on(clk.rise) {
+        c = c + 1
+        if c[8] == 0 {
+            if c[2:0] == 3 {
+                mem[addr] = pattern
+            }
+        } else {
+            q = mem[addr]
+            if c[2:0] == 3 && ((q[0] ^ pattern[0]) | (q[1] ^ pattern[1]) | (q[2] ^ pattern[2]) | (q[3] ^ pattern[3]) | (q[4] ^ pattern[4]) | (q[5] ^ pattern[5]) | (q[6] ^ pattern[6]) | (q[7] ^ pattern[7]) | (q[8] ^ pattern[8]) | (q[9] ^ pattern[9]) | (q[10] ^ pattern[10]) | (q[11] ^ pattern[11]) | (q[12] ^ pattern[12]) | (q[13] ^ pattern[13]) | (q[14] ^ pattern[14]) | (q[15] ^ pattern[15]) | (q[16] ^ pattern[16]) | (q[17] ^ pattern[17])) == 1 {
+                failed = 1
+            }
+        }
+    }
+    bad = failed
+}

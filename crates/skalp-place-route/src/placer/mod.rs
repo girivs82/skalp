@@ -30,7 +30,7 @@ use skalp_lir::tech_library::CellFunction;
 
 /// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
 /// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
-pub(crate) fn is_constant_cell(cell_type: &str) -> bool {
+pub fn is_constant_cell(cell_type: &str) -> bool {
     cell_type.starts_with("TIE_")
         || cell_type.starts_with("TIE0")
         || cell_type.starts_with("TIE1")
@@ -149,7 +149,7 @@ pub struct PlacerConfig {
 /// How full placement fills a tile's BELs of each type when the design
 /// leaves room. Packing every tile full left the busiest part of a design
 /// needing more signals in and out of each tile than the local routing
-/// carries (CLE-µ on the LFCPNX-100 never finished routing).
+/// carries (a 15K-cell processor core on the LFCPNX-100 never finished routing).
 pub const DEFAULT_TILE_FILL: f64 = 0.75;
 
 /// Room above the fill a design needs at the least, so the nearest-site

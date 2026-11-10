@@ -370,6 +370,7 @@ impl AigWriterState<'_> {
                     sync_reset: _,
                 } => {
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
+                    self.mark_power_up_high(aig, id, *init, *reset);
                 }
                 AigNode::Barrier {
                     barrier_type,
@@ -665,6 +666,37 @@ impl AigWriterState<'_> {
         }
     }
 
+    /// Record that a flip-flop powers up high.
+    ///
+    /// An asynchronous reset to one stores the inverted value, so it powers up
+    /// reading one without help.
+    fn mark_power_up_high(
+        &mut self,
+        aig: &Aig,
+        id: AigNodeId,
+        init: Option<bool>,
+        reset: Option<AigNodeId>,
+    ) {
+        if init != Some(true) || (reset.is_some() && !aig.is_latch_sync_reset(id)) {
+            return;
+        }
+        let Some(&q) = self.node_to_net.get(&id) else {
+            return;
+        };
+        if let Some(flip_flop) = self
+            .netlist
+            .cells
+            .iter_mut()
+            .rev()
+            .find(|c| c.clock.is_some() && c.outputs.contains(&q))
+        {
+            flip_flop.parameters.insert(
+                crate::gate_netlist::FF_INIT_PARAM.to_string(),
+                "1".to_string(),
+            );
+        }
+    }
+
     /// Process a latch node
     fn process_latch_node(
         &mut self,
@@ -769,16 +801,23 @@ impl AigWriterState<'_> {
                     .netlist
                     .add_net(GateNet::new(GateNetId(0), format!("latch{}_rstmux", id.0)));
                 let (mux_type, mux_fit) = self.find_mux2_cell();
+                let library_init = self.library.get_cell(&mux_type).and_then(|c| c.lut_init);
                 let mut mux = Cell::new_comb(
                     CellId(self.next_cell_id),
                     mux_type.clone(),
                     self.library.name.clone(),
                     mux_fit,
                     format!("aig.latch{}_rstmux", id.0),
-                    // Mux2 inputs: [sel, d0 (sel=0), d1 (sel=1)]
-                    vec![reset_net.unwrap(), data_net, init_net],
+                    // A generic MUX2 takes [sel, d0, d1]; an FPGA MUX2 is a LUT
+                    // whose truth table reads [d0, d1, sel].
+                    if library_init.is_some() {
+                        vec![data_net, init_net, reset_net.unwrap()]
+                    } else {
+                        vec![reset_net.unwrap(), data_net, init_net]
+                    },
                     vec![mux_out],
                 );
+                mux.lut_init = library_init;
                 mux.source_op = Some("ResetMux".to_string());
                 if let Some(func) = self.lookup_cell_function(&mux_type) {
                     mux = mux.with_function(func);

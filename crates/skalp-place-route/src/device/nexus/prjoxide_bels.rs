@@ -5,7 +5,8 @@
 //! (K0/K1) and two `OXIDE_FF` registers (REG0/REG1). Site-pin wires follow the
 //! `J<pin>_SLICE<ch>` convention seen in `tiletypes/PLC.ron`:
 //!   - LUT `l` inputs:  `J{A,B,C,D}{l}_SLICE{ch}`   output: `JF{l}_SLICE{ch}`
-//!   - FF `r` data in:  `JDI{r}_SLICE{ch}`           out:    `JQ{r}_SLICE{ch}`
+//!   - FF `r` data in:  `JM{r}_SLICE{ch}` (general routing, `SEL.DF`)
+//!     out: `JQ{r}_SLICE{ch}`
 //!   - per-slice clock/CE/reset: `JCLK_SLICE{ch}` / `JCE_SLICE{ch}` / `JLSR_SLICE{ch}`
 //!
 //! These site wires are already nodes in the routing graph (they appear as fixed
@@ -63,7 +64,7 @@ pub fn plc_bels() -> Vec<PlcBel> {
         for reg in 0..2 {
             let ff = si * 2 + reg;
             let pins = vec![
-                (format!("FF{ff}_D"), format!("JDI{reg}_SLICE{ch}"), Input),
+                (format!("FF{ff}_D"), format!("JM{reg}_SLICE{ch}"), Input),
                 (format!("FF{ff}_Q"), format!("JQ{reg}_SLICE{ch}"), Output),
                 // Per-slice control. "CLK" (unsuffixed, slice A) is what the coarse
                 // Device::clock_wire helper returns; per-slice keys are also emitted.
@@ -77,8 +78,49 @@ pub fn plc_bels() -> Vec<PlcBel> {
                 pins,
             });
         }
+        // The slice's two LUTs double as a two-bit carry cell. Its pins are
+        // those LUTs' pins; CIN/COUT are the dedicated carry path.
+        bels.push(PlcBel {
+            bel_type: BelType::Carry,
+            name: format!("CCU2{ch}"),
+            pins: Vec::new(),
+        });
     }
+    bels.push(PlcBel {
+        bel_type: BelType::DistRam,
+        name: "DPRAM".to_string(),
+        pins: Vec::new(),
+    });
     bels
+}
+
+/// `(key, site wire)` of each distributed RAM connection in a logic tile.
+///
+/// The RAM is built from slices A and B (the storage LUTs) and slice C (the
+/// write port, `RAMW`). The input orderings are fixed by the silicon.
+pub fn dist_ram_wires() -> Vec<(String, String)> {
+    const COMBS: [(char, usize); 4] = [('A', 0), ('A', 1), ('B', 0), ('B', 1)];
+    const WAD_PINS: [char; 4] = ['D', 'B', 'C', 'A'];
+    const DI_PINS: [char; 4] = ['D', 'C', 'A', 'B'];
+    const RAD_EVEN: [char; 4] = ['D', 'B', 'C', 'A'];
+    const RAD_ODD: [char; 4] = ['C', 'B', 'D', 'A'];
+
+    let mut wires = vec![
+        ("DPR_WRE".to_string(), "JLSR_SLICEC".to_string()),
+        ("DPR_WCK".to_string(), "JCLK_SLICEC".to_string()),
+    ];
+    for (i, &(ch, lut)) in COMBS.iter().enumerate() {
+        wires.push((format!("DPR_DO{i}"), format!("JF{lut}_SLICE{ch}")));
+    }
+    for i in 0..4 {
+        wires.push((format!("DPR_WAD{i}"), format!("J{}0_SLICEC", WAD_PINS[i])));
+        wires.push((format!("DPR_DI{i}"), format!("J{}1_SLICEC", DI_PINS[i])));
+        for (j, &(ch, lut)) in COMBS.iter().enumerate() {
+            let pin = if j % 2 == 0 { RAD_EVEN[i] } else { RAD_ODD[i] };
+            wires.push((format!("DPR_RAD{i}_{j}"), format!("J{pin}{lut}_SLICE{ch}")));
+        }
+    }
+    wires
 }
 
 /// The site wire that `Device::clock_wire` resolves for a PLC tile (slice-A clock).
@@ -94,9 +136,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dist_ram_connections_are_complete() {
+        let wires = dist_ram_wires();
+        // WRE + WCK + 4 DO + 4 WAD + 4 DI + 4 RAD bits to each of 4 LUTs.
+        assert_eq!(wires.len(), 2 + 4 + 4 + 4 + 16);
+        assert!(wires
+            .iter()
+            .any(|(k, w)| k == "DPR_WAD0" && w == "JD0_SLICEC"));
+        assert!(wires
+            .iter()
+            .any(|(k, w)| k == "DPR_RAD0_1" && w == "JC1_SLICEA"));
+    }
+
+    #[test]
     fn plc_bels_shape() {
         let bels = plc_bels();
-        assert_eq!(bels.len(), 16, "8 LUT4 + 8 FF");
+        assert_eq!(bels.len(), 21, "8 LUT4 + 8 FF + 4 carry + 1 RAM");
         assert_eq!(
             bels.iter().filter(|b| b.bel_type == BelType::Lut4).count(),
             8

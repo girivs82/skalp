@@ -165,6 +165,7 @@ mod tests {
     fn test_validate_scalar_types_ok() {
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "TestModule".to_string(),
             parameters: vec![],
@@ -256,6 +257,7 @@ mod tests {
 
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "BadModule".to_string(),
             parameters: vec![],
@@ -315,6 +317,7 @@ mod tests {
     fn test_validate_composite_signal_type_fails() {
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "BadModule".to_string(),
             parameters: vec![],
@@ -382,6 +385,7 @@ mod tests {
         // Arrays of scalar types are intentionally preserved
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "GoodModule".to_string(),
             parameters: vec![],
@@ -446,6 +450,7 @@ mod tests {
         // Arrays of composite types (like Vec3) should still be flattened
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "BadModule".to_string(),
             parameters: vec![],

@@ -196,6 +196,29 @@ async fn test_carry_ops_gate_level_ecp5() {
     check_carry_ops(tb, "ecp5").await;
 }
 
+async fn check_counter_counts(tb: Testbench) {
+    let mut tb = tb;
+    tb.set("rst", 1u8);
+    tb.clock(2).await;
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+    let first = tb.get_u64("count").await;
+    tb.clock(5).await;
+    assert_eq!(tb.get_u64("count").await, first + 5);
+}
+
+#[tokio::test]
+async fn test_carry_counter_gate_level_nexus() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("fpga_carry_chain_counter.sk"),
+        "CarryCounter",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_counter_counts(tb).await;
+}
+
 #[test]
 fn test_ccu2_verilog_carries_init_parameters() {
     let net = synthesize("fpga_carry_chain_ops.sk", "nexus");
@@ -206,4 +229,213 @@ fn test_ccu2_verilog_carries_init_parameters() {
     );
     assert!(v.contains(".INJECT(\"NO\")"));
     assert!(v.contains(".CIN(") && v.contains(".COUT("));
+}
+
+async fn block_ram_check_never_fails(mut tb: Testbench) {
+    // One write pass and one read pass of 32 addresses held for 8 cycles each.
+    tb.clock(1200).await;
+    assert_eq!(tb.get_u64("bad").await, 0);
+}
+
+#[tokio::test]
+async fn test_block_ram_check_gate_level_nexus() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nexus_blockram_check.sk"),
+        "RamCheck",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    block_ram_check_never_fails(tb).await;
+}
+
+/// A register assigned under nested conditions must honour every guard on the
+/// way to the assignment, in a then branch and in an else branch.
+async fn check_nested_if_guards(mut tb: Testbench) {
+    tb.set("a", 1u8);
+    tb.set("b", 0u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 0, "t needs both a and b");
+    assert_eq!(tb.get_u64("u").await, 0, "u needs !a and b");
+
+    tb.set("a", 1u8);
+    tb.set("b", 1u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 1, "t is set by a and b");
+    assert_eq!(tb.get_u64("u").await, 0, "u must not fire while a is set");
+
+    tb.set("a", 0u8);
+    tb.set("b", 1u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("t").await, 1, "t holds its value");
+    assert_eq!(tb.get_u64("u").await, 1, "u is set by !a and b");
+}
+
+#[tokio::test]
+async fn test_nested_if_guards_gate_level() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nested_if_guards.sk"),
+        "NestedIfGuards",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_nested_if_guards(tb).await;
+}
+
+async fn block_ram_design_never_reports_bad(fixture: &str, top: &str, cycles: usize) {
+    let mut tb = Testbench::gate_level_with_top_and_library(&fixture_path(fixture), top, "nexus")
+        .await
+        .unwrap();
+    tb.clock(cycles).await;
+    assert_eq!(tb.get_u64("bad").await, 0, "{top} read back the wrong data");
+}
+
+#[tokio::test]
+async fn test_block_ram_reads_on_the_next_cycle() {
+    block_ram_design_never_reports_bad("nexus_blockram_latency.sk", "RamCheck", 400).await;
+}
+
+#[tokio::test]
+async fn test_block_ram_banks_decode_their_own_addresses() {
+    block_ram_design_never_reports_bad("nexus_blockram_tiled.sk", "RamTiled", 4200).await;
+}
+
+#[test]
+fn test_block_ram_read_used_as_logic_stays_out_of_block_ram() {
+    let net = synthesize("nexus_blockram_comb_read.sk", "nexus");
+    assert!(
+        !net.cells.iter().any(|c| c.ram_ports().is_some()),
+        "a read feeding logic directly needs its data in the same cycle"
+    );
+}
+
+/// Later assignments win over earlier ones, whatever statements they are in.
+async fn check_repeated_assignment(mut tb: Testbench) {
+    tb.set("set", 0u8);
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    tb.set("clear", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("count").await, 3, "count keeps counting");
+    assert_eq!(
+        tb.get_u64("pulse").await,
+        0,
+        "the default applies without set"
+    );
+    assert_eq!(tb.get_u64("state").await, 1, "the leading value applies");
+
+    tb.set("set", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("pulse").await, 1, "set overrides the default");
+    assert_eq!(tb.get_u64("latched").await, 1);
+    assert_eq!(tb.get_u64("state").await, 2, "the match arm overrides");
+
+    tb.set("set", 0u8);
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("latched").await, 0, "the later statement wins");
+    assert_eq!(
+        tb.get_u64("count").await,
+        0,
+        "clear overrides the increment"
+    );
+}
+
+#[tokio::test]
+async fn test_repeated_assignment_gate_level() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("repeated_assignment.sk"),
+        "RepeatedAssignment",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_repeated_assignment(tb).await;
+}
+
+#[tokio::test]
+async fn test_block_ram_read_registers_reset_and_clear() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("nexus_blockram_reset.sk"),
+        "RamReset",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    tb.set("rst", 0u8);
+    tb.set("clear", 0u8);
+    tb.set("addr", 7u16);
+    tb.set("wdata", 42u8);
+    tb.set("we", 1u8);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 42, "q reads the stored word");
+    assert_eq!(tb.get_u64("p").await, 42, "p reads the stored word");
+
+    tb.set("clear", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("p").await, 165, "clear loads its value");
+    assert_eq!(tb.get_u64("q").await, 42, "clear only affects p");
+    tb.set("clear", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("p").await, 42, "p reads the RAM again");
+
+    tb.set("rst", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 0, "reset clears q");
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 42, "q reads the RAM after reset");
+}
+
+#[test]
+fn test_block_ram_read_register_with_reset_uses_block_ram() {
+    let net = synthesize("nexus_blockram_reset.sk", "nexus");
+    let rams = net.cells.iter().filter(|c| c.ram_ports().is_some()).count();
+    assert_eq!(rams, 2, "both memories should use block RAM");
+}
+
+#[tokio::test]
+async fn test_registers_power_up_at_their_initial_value() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("register_initial_values.sk"),
+        "InitialValues",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    assert_eq!(tb.get_u64("flag").await, 1);
+    assert_eq!(tb.get_u64("count").await, 9);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("flag").await, 0);
+    assert_eq!(tb.get_u64("count").await, 10);
+}
+
+/// Products of operands wider than one hard multiplier must carry correctly
+/// between their partial products.
+#[tokio::test]
+async fn test_wide_multiply_gate_level() {
+    for library in ["nexus", "ecp5"] {
+        let mut tb = Testbench::gate_level_with_top_and_library(
+            &fixture_path("multiply_wide.sk"),
+            "MultiplyWide",
+            library,
+        )
+        .await
+        .unwrap();
+        for (a, b) in [
+            (12_345_678u64, 7_654_321u64),
+            (0xFF_FFFF, 0xFF_FFFF),
+            (0x3_FFFF, 0x3_FFFF),
+            (0x4_0000, 0x4_0000),
+            (1, 0xFF_FFFF),
+        ] {
+            tb.set("a", a);
+            tb.set("b", b);
+            tb.step().await;
+            assert_eq!(tb.get_u64("p").await, a * b, "{a} x {b} on {library}");
+        }
+    }
 }

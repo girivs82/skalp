@@ -10,17 +10,24 @@
 //! # Supported Variants
 //!
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
-//! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
+//! - LFCPNX-100 — 79,872 LUT4, 160x75 grid (LFCPNX-VERSA-EVN board)
 
 pub mod data;
+pub mod dsp;
+pub mod ebr;
+pub mod emit;
 pub mod prjoxide_bels;
 pub mod prjoxide_graph;
 pub mod prjoxide_load;
 pub mod prjoxide_pack;
+pub mod sites;
 mod tiles;
+#[cfg(feature = "nexus-bitstream")]
+pub mod timing;
 
 pub use prjoxide_graph::{resolve_wire, NodeKey};
 pub use prjoxide_load::{load_tilegrid, PrjoxideTile};
+pub use sites::OSC_PIN;
 pub use tiles::NexusTile;
 
 use super::{
@@ -42,6 +49,7 @@ const INPUT_MUX_WIDTH: usize = 8;
 const INPUT_MUX_STRIDE: usize = 11;
 use crate::collections::{HashMap, HashMapExt};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Nexus device variants
 ///
@@ -53,7 +61,7 @@ pub enum NexusVariant {
     /// 21 EBR (18Kb), 2 LRAM (32Kb), ~14 DSP blocks, 3 PLLs
     /// Packages: QFN72, csfBGA289, caBGA400
     Lifcl40,
-    /// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
+    /// LFCPNX-100 (CertusPro-NX)
     /// 9,984 PLC tiles = 79,872 LUT4 + 79,872 FF
     /// 52 EBR (18Kb), 7 LRAM (32Kb), ~39 DSP blocks, 4 PLLs
     /// Hard PCIe (1x PCIE_LL), 8x PCS (SerDes)
@@ -63,6 +71,14 @@ pub enum NexusVariant {
 
 impl NexusVariant {
     /// Get the data record for this variant
+    /// The package whose pin names designs use, on boards SKALP knows.
+    pub fn default_package(&self) -> Option<&'static str> {
+        match self {
+            NexusVariant::Lfcpnx100 => Some("LFG672"),
+            _ => None,
+        }
+    }
+
     pub fn die_data(&self) -> &'static data::NexusDieData {
         match self {
             NexusVariant::Lifcl40 => &data::LIFCL_40,
@@ -140,21 +156,29 @@ pub struct NexusDevice {
     /// Grid dimensions
     grid_size: (u32, u32),
     /// Tiles indexed by [y][x]
-    tiles: Vec<Vec<Option<NexusTile>>>,
+    tiles: Arc<Vec<Vec<Option<NexusTile>>>>,
     /// All wires
-    wires: Vec<Wire>,
+    wires: Arc<Vec<Wire>>,
     /// Wire name to ID mapping
-    wire_names: HashMap<String, WireId>,
+    wire_names: Arc<HashMap<String, WireId>>,
     /// All PIPs
-    pips: Vec<Pip>,
+    pips: Arc<Vec<Pip>>,
     /// Wire to PIP mapping (PIPs that drive this wire)
-    wire_to_pips: HashMap<WireId, Vec<PipId>>,
+    wire_to_pips: Arc<HashMap<WireId, Vec<PipId>>>,
     /// Wire to PIP mapping (PIPs driven by this wire)
-    wire_src_pips: HashMap<WireId, Vec<PipId>>,
+    wire_src_pips: Arc<HashMap<WireId, Vec<PipId>>>,
+    /// Replacement `wire_to_pips` lists for wires touched by [`Self::without_wires`]
+    uphill_override: Arc<HashMap<WireId, Vec<PipId>>>,
+    /// Replacement `wire_src_pips` lists for wires touched by [`Self::without_wires`]
+    downhill_override: Arc<HashMap<WireId, Vec<PipId>>>,
     /// Tile to wire mapping
-    tile_wires: HashMap<(u32, u32), Vec<WireId>>,
+    tile_wires: Arc<HashMap<(u32, u32), Vec<WireId>>>,
     /// BEL pin to wire mapping
-    bel_wires: HashMap<(u32, u32, String), WireId>,
+    bel_wires: Arc<HashMap<(u32, u32, String), WireId>>,
+    /// Per-PIP configuration bits, indexed by `PipId` (real-silicon model only)
+    pip_bits: Arc<Vec<Vec<prjoxide_graph::GlobalBit>>>,
+    /// prjoxide tiles of the grid (real-silicon model only)
+    prjoxide_tiles: Arc<Vec<PrjoxideTile>>,
     /// Least routing cost per tile distance along one axis
     /// ([`Device::route_cost_estimate`]); empty when not modelled
     hop_costs: Vec<f64>,
@@ -210,14 +234,33 @@ impl NexusDevice {
         db_root: &std::path::Path,
         bbox: (u32, u32, u32, u32),
     ) -> Result<Self, String> {
-        use prjoxide_graph::{build_routing_graph, node_name, resolve_wire};
+        Self::from_prjoxide_region(variant, db_root, bbox, None)
+    }
+
+    /// [`Self::from_prjoxide_bbox`], with logic placement limited to `logic_rows`.
+    pub fn from_prjoxide_region(
+        variant: NexusVariant,
+        db_root: &std::path::Path,
+        bbox: (u32, u32, u32, u32),
+        logic_rows: Option<(u32, u32)>,
+    ) -> Result<Self, String> {
+        use prjoxide_graph::{node_name, resolve_wire};
 
         let (width, height) = variant.grid_size();
         let family = variant.prjoxide_family();
 
         // M1a: real tile grid. M1b: real routing graph for the window.
         let all_tiles = prjoxide_load::load_tilegrid(db_root, variant)?;
-        let graph = build_routing_graph(db_root, family, &all_tiles, Some(bbox))?;
+        let clocks =
+            prjoxide_graph::ClockRegions::load(db_root, family, variant.prjoxide_device())?;
+        let all_tiles_for_pins = all_tiles.clone();
+        let graph = prjoxide_graph::build_routing_graph_with_clocks(
+            db_root,
+            family,
+            &all_tiles,
+            Some(bbox),
+            Some(&clocks),
+        )?;
 
         let mut tiles: Vec<Vec<Option<NexusTile>>> =
             vec![vec![None; width as usize]; height as usize];
@@ -243,8 +286,25 @@ impl NexusDevice {
             }
         }
 
-        for (&(x, y), t) in &primary {
-            let bels = if t.tiletype == "PLC" {
+        let dsp_sites: HashMap<(u32, u32), usize> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), dsp::slot_of_tile(&t.tiletype)?)))
+            .collect();
+        let ram_sites: HashMap<(u32, u32), usize> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), ebr::site_of_tile(&t.tiletype)?)))
+            .collect();
+
+        // Tile order sets BEL ids and placement order, so keep it stable.
+        let mut ordered: Vec<_> = primary.iter().collect();
+        ordered.sort_unstable_by_key(|(&(x, y), _)| (y, x));
+        for (&(x, y), t) in ordered {
+            let placeable = logic_rows.is_none_or(|(from, to)| y >= from && y <= to);
+            let bels = if t.tiletype == "PLC" && !placeable {
+                Vec::new()
+            } else if t.tiletype == "PLC" {
                 let mut bels = Vec::with_capacity(16);
                 for pb in prjoxide_bels::plc_bels() {
                     let mut pins = Vec::with_capacity(pb.pins.len());
@@ -273,6 +333,13 @@ impl NexusDevice {
                     });
                     bel_id_counter += 1;
                 }
+                for (key, site_wire) in prjoxide_bels::dist_ram_wires() {
+                    if let Some(w) = resolve_wire(x, y, &site_wire)
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                    {
+                        bel_wires.insert((x, y, key), w);
+                    }
+                }
                 // Coarse per-tile clock wire for Device::clock_wire.
                 if let Some(w) = resolve_wire(x, y, prjoxide_bels::plc_clock_site_wire())
                     .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
@@ -287,26 +354,148 @@ impl NexusDevice {
                     has_carry: true,
                 });
                 bels
+            } else if t.tiletype.starts_with("SYSIO_B") {
+                let mut bels = Vec::with_capacity(2);
+                for (pio, side) in ["A", "B"].iter().enumerate() {
+                    let mut wire_of = |key: String, site: String| {
+                        let wire = resolve_wire(x, y, &site)
+                            .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                        if let Some(w) = wire {
+                            bel_wires.insert((x, y, key), w);
+                        }
+                    };
+                    // A high-performance bank's A pad is its differential site;
+                    // CertusPro-NX suffixes these core names with A.
+                    let candidates: &[&str] =
+                        match (sites::is_high_performance_io(&t.tiletype), *side) {
+                            (false, _) => &["SEIO33"],
+                            (true, "A") => &["DIFFIO18A", "DIFFIO18"],
+                            (true, _) => &["SEIO18A", "SEIO18"],
+                        };
+                    let core = candidates
+                        .iter()
+                        .find(|core| {
+                            resolve_wire(x, y, &format!("JPADDO_{core}_CORE_IO{side}"))
+                                .is_some_and(|n| graph.wire_names.contains_key(&node_name(&n)))
+                        })
+                        .copied()
+                        .unwrap_or(candidates[0]);
+                    wire_of(
+                        format!("PIO{pio}_O"),
+                        format!("JPADDO_{core}_CORE_IO{side}"),
+                    );
+                    wire_of(
+                        format!("PIO{pio}_I"),
+                        format!("JPADDI_{core}_CORE_IO{side}"),
+                    );
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: BelType::IoCell,
+                        name: format!("PIO{side}"),
+                        pins: Vec::new(),
+                    });
+                    bel_id_counter += 1;
+                }
+                bels
+            } else if t.tiletype == "EFB_1_OSC" {
+                // The on-chip oscillator is modelled as an input pad: its
+                // output drives the design like a clock pin.
+                if let Some(w) = resolve_wire(x, y, "S1:JHFCLKOUT_OSC_CORE")
+                    .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                {
+                    bel_wires.insert((x, y, "PIO0_I".to_string()), w);
+                }
+                let bel = Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::IoCell,
+                    name: "OSC".to_string(),
+                    pins: Vec::new(),
+                };
+                bel_id_counter += 1;
+                vec![bel]
             } else {
-                // Non-logic primary tiles: correct type, BELs deferred (M3+).
+                // Other non-logic primary tiles: correct type, BELs deferred.
                 Vec::new()
             };
+            let mut bels = bels;
+            if let Some(&slot) = dsp_sites.get(&(x, y)).filter(|_| placeable) {
+                for pin in (0..18)
+                    .flat_map(|bit| [format!("A{bit}"), format!("B{bit}")])
+                    .chain(["ASIGNED".to_string(), "BSIGNED".to_string()])
+                    .chain((0..dsp::SHIFT_CONTROL_PINS).map(|bit| format!("SFTCTRL{bit}")))
+                    .chain(dsp::low_driven_pins())
+                {
+                    let wire = dsp::input_wire(slot, &pin)
+                        .and_then(|site| resolve_wire(x, y, &site))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("DSP_{pin}")), w);
+                    }
+                }
+                for bit in 0..dsp::PRODUCT_BITS {
+                    let wire = resolve_wire(
+                        dsp::register_column(slot, x),
+                        y,
+                        &dsp::product_wire(slot, bit),
+                    )
+                    .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("DSP_Z{bit}")), w);
+                    }
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::DspSlice,
+                    name: format!("MULT18_{slot}"),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
+            // A block RAM site shares its grid cell with a logic tile.
+            if let Some(&site) = ram_sites.get(&(x, y)).filter(|_| placeable) {
+                let mut wire_of = |pin: &str| {
+                    let wire = resolve_wire(x, y, &ebr::site_wire(pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        bel_wires.insert((x, y, format!("RAM_{pin}")), w);
+                    }
+                };
+                for pin in ebr::input_pins() {
+                    wire_of(pin);
+                }
+                wire_of("CLKA");
+                wire_of("CLKB");
+                for bit in 0..36 {
+                    wire_of(&ebr::output_pin(bit));
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::RamSlice,
+                    name: format!("EBR{site}"),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
         Ok(Self {
             variant,
             grid_size: (width, height),
-            tiles,
-            wires: graph.wires,
-            wire_names: graph.wire_names,
-            pips: graph.pips,
-            wire_to_pips: graph.wire_to_pips,
-            wire_src_pips: graph.wire_src_pips,
-            tile_wires: graph.tile_wires,
-            bel_wires,
+            tiles: Arc::new(tiles),
+            wires: Arc::new(graph.wires),
+            wire_names: Arc::new(graph.wire_names),
+            pips: Arc::new(graph.pips),
+            wire_to_pips: Arc::new(graph.wire_to_pips),
+            wire_src_pips: Arc::new(graph.wire_src_pips),
+            uphill_override: Arc::new(HashMap::new()),
+            downhill_override: Arc::new(HashMap::new()),
+            tile_wires: Arc::new(graph.tile_wires),
+            bel_wires: Arc::new(bel_wires),
+            pip_bits: Arc::new(graph.pip_bits),
+            prjoxide_tiles: Arc::new(all_tiles),
             hop_costs: Vec::new(),
-            packages: HashMap::new(), // M3: package pins from prjoxide iodb
+            packages: sites::package_pins(db_root, variant, &all_tiles_for_pins)?,
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles,
@@ -314,6 +503,109 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             dsp_tiles: Vec::new(),
         })
+    }
+
+    /// Remove wires from routing, leaving them to whatever claimed them.
+    pub fn without_wires(&self, claimed: &crate::collections::HashSet<WireId>) -> Self {
+        // The routing graph is shared between copies. Only the adjacency
+        // lists that touch a claimed wire are rebuilt, into small override
+        // maps, instead of copying the whole (multi-gigabyte) graph.
+        let usable = |pip: &PipId| {
+            self.pips
+                .get(pip.0 as usize)
+                .is_some_and(|p| !claimed.contains(&p.src_wire) && !claimed.contains(&p.dst_wire))
+        };
+        let mut uphill = (*self.uphill_override).clone();
+        let mut downhill = (*self.downhill_override).clone();
+        for &wire in claimed {
+            let mut uphill_touched = vec![wire];
+            let mut downhill_touched = vec![wire];
+            for pip in self.pips_driven_by(wire) {
+                if let Some(p) = self.pips.get(pip.0 as usize) {
+                    uphill_touched.push(p.dst_wire);
+                }
+            }
+            for pip in self.pips_driving(wire) {
+                if let Some(p) = self.pips.get(pip.0 as usize) {
+                    downhill_touched.push(p.src_wire);
+                }
+            }
+            for w in uphill_touched {
+                let kept = self
+                    .pips_driving(w)
+                    .iter()
+                    .copied()
+                    .filter(usable)
+                    .collect();
+                uphill.insert(w, kept);
+            }
+            for w in downhill_touched {
+                let kept = self
+                    .pips_driven_by(w)
+                    .iter()
+                    .copied()
+                    .filter(usable)
+                    .collect();
+                downhill.insert(w, kept);
+            }
+        }
+        let mut device = self.clone();
+        device.uphill_override = Arc::new(uphill);
+        device.downhill_override = Arc::new(downhill);
+        device
+    }
+
+    /// PIPs that drive `wire`, after any wires removed by [`Self::without_wires`].
+    fn pips_driving(&self, wire: WireId) -> &[PipId] {
+        self.uphill_override
+            .get(&wire)
+            .or_else(|| self.wire_to_pips.get(&wire))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// PIPs that `wire` drives, after any wires removed by [`Self::without_wires`].
+    fn pips_driven_by(&self, wire: WireId) -> &[PipId] {
+        self.downhill_override
+            .get(&wire)
+            .or_else(|| self.wire_src_pips.get(&wire))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// A BEL pin's wire, by its conventional key.
+    pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
+        self.bel_wires.get(&(x, y, key.to_string())).copied()
+    }
+
+    /// Configuration bits of a PIP (real-silicon model only).
+    pub fn pip_config_bits(&self, pip: PipId) -> &[prjoxide_graph::GlobalBit] {
+        self.pip_bits
+            .get(pip.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The first prjoxide tile of a type (real-silicon model only).
+    pub fn prjoxide_tile_of_type(&self, tiletype: &str) -> Option<&PrjoxideTile> {
+        self.prjoxide_tiles.iter().find(|t| t.tiletype == tiletype)
+    }
+
+    /// Every prjoxide tile of the device (real-silicon model only).
+    pub fn prjoxide_tiles(&self) -> &[PrjoxideTile] {
+        &self.prjoxide_tiles
+    }
+
+    /// The prjoxide tile of a type at a grid location (real-silicon model only).
+    pub fn prjoxide_tile(
+        &self,
+        x: u32,
+        y: u32,
+        tiletype: impl Fn(&str) -> bool,
+    ) -> Option<&PrjoxideTile> {
+        self.prjoxide_tiles
+            .iter()
+            .find(|t| t.x == x && t.y == y && tiletype(&t.tiletype))
     }
 
     /// Create a synthetic Nexus device from datasheet parameters
@@ -324,14 +616,18 @@ impl NexusDevice {
         let mut device = Self {
             variant,
             grid_size,
-            tiles: vec![vec![None; width as usize]; height as usize],
-            wires: Vec::new(),
-            wire_names: HashMap::new(),
-            pips: Vec::new(),
-            wire_to_pips: HashMap::new(),
-            wire_src_pips: HashMap::new(),
-            tile_wires: HashMap::new(),
-            bel_wires: HashMap::new(),
+            tiles: Arc::new(vec![vec![None; width as usize]; height as usize]),
+            wires: Arc::default(),
+            wire_names: Arc::new(HashMap::new()),
+            pips: Arc::default(),
+            wire_to_pips: Arc::new(HashMap::new()),
+            wire_src_pips: Arc::new(HashMap::new()),
+            uphill_override: Arc::new(HashMap::new()),
+            downhill_override: Arc::new(HashMap::new()),
+            tile_wires: Arc::new(HashMap::new()),
+            bel_wires: Arc::new(HashMap::new()),
+            pip_bits: Arc::default(),
+            prjoxide_tiles: Arc::default(),
             hop_costs: Vec::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(variant),
@@ -396,7 +692,7 @@ impl NexusDevice {
 
                     // Skip corners — they're empty
                     if (is_top || is_bottom) && (is_left || is_right) {
-                        self.tiles[y as usize][x as usize] =
+                        Arc::make_mut(&mut self.tiles)[y as usize][x as usize] =
                             Some(NexusTile::new(TileType::Empty, x, y, Vec::new()));
                         continue;
                     }
@@ -417,7 +713,8 @@ impl NexusDevice {
                         drive_strengths: data::IO_DRIVE_STRENGTHS.to_vec(),
                         diff_pairs: data::IO_DIFF_PAIRS,
                     });
-                    self.tiles[y as usize][x as usize] = Some(NexusTile::new(side, x, y, io_bels));
+                    Arc::make_mut(&mut self.tiles)[y as usize][x as usize] =
+                        Some(NexusTile::new(side, x, y, io_bels));
                 } else if is_bram_col && !is_dsp_col {
                     // EBR (Embedded Block RAM) — 18Kb
                     let bram_bels = Self::make_bram_bels(&mut bel_id_counter, x, y);
@@ -428,7 +725,7 @@ impl NexusDevice {
                         widths: data::EBR_WIDTHS.to_vec(),
                     });
                     // Use RamTop as the tile type (Nexus EBR occupies a single tile)
-                    self.tiles[y as usize][x as usize] =
+                    Arc::make_mut(&mut self.tiles)[y as usize][x as usize] =
                         Some(NexusTile::new(TileType::RamTop, x, y, bram_bels));
                 } else if is_dsp_col {
                     // DSP block (18x18 MAC)
@@ -438,7 +735,7 @@ impl NexusDevice {
                         y,
                         mac_count: data::DSP_MACS_PER_TILE,
                     });
-                    self.tiles[y as usize][x as usize] =
+                    Arc::make_mut(&mut self.tiles)[y as usize][x as usize] =
                         Some(NexusTile::new(TileType::Dsp, x, y, dsp_bels));
                 } else {
                     // Logic tile — Nexus CLC: 2 slices × 4 LUT4+FF = 8 LUT4 per tile
@@ -450,7 +747,7 @@ impl NexusDevice {
                         ff_count: data::LOGIC_FFS_PER_TILE,
                         has_carry: true,
                     });
-                    self.tiles[y as usize][x as usize] =
+                    Arc::make_mut(&mut self.tiles)[y as usize][x as usize] =
                         Some(NexusTile::new(TileType::Logic, x, y, logic_bels));
                 }
             }
@@ -759,9 +1056,12 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 30, // 30ps — Nexus 28nm is faster than iCE40 40nm
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
                 }
 
@@ -784,9 +1084,15 @@ impl NexusDevice {
                             tile_x: x,
                             tile_y: y,
                         };
-                        self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                        self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                        self.pips.push(p);
+                        Arc::make_mut(&mut self.wire_to_pips)
+                            .entry(p.dst_wire)
+                            .or_default()
+                            .push(p.id);
+                        Arc::make_mut(&mut self.wire_src_pips)
+                            .entry(p.src_wire)
+                            .or_default()
+                            .push(p.id);
+                        Arc::make_mut(&mut self.pips).push(p);
                         pip_id += 1;
                     }
                 }
@@ -803,12 +1109,16 @@ impl NexusDevice {
                             tile_y: y,
                             delay: 0,
                         };
-                        self.wire_names.insert(out_wire.name.clone(), out_wire.id);
-                        self.bel_wires
+                        Arc::make_mut(&mut self.wire_names)
+                            .insert(out_wire.name.clone(), out_wire.id);
+                        Arc::make_mut(&mut self.bel_wires)
                             .insert((x, y, format!("LUT{}_Z", lc)), out_wire.id);
-                        self.tile_wires.entry((x, y)).or_default().push(out_wire.id);
+                        Arc::make_mut(&mut self.tile_wires)
+                            .entry((x, y))
+                            .or_default()
+                            .push(out_wire.id);
                         let lut_out_id = out_wire.id;
-                        self.wires.push(out_wire);
+                        Arc::make_mut(&mut self.wires).push(out_wire);
                         wire_id += 1;
 
                         // LUT input wires (4 inputs)
@@ -822,11 +1132,15 @@ impl NexusDevice {
                                 tile_y: y,
                                 delay: 0,
                             };
-                            self.wire_names.insert(in_wire.name.clone(), in_wire.id);
-                            self.bel_wires
+                            Arc::make_mut(&mut self.wire_names)
+                                .insert(in_wire.name.clone(), in_wire.id);
+                            Arc::make_mut(&mut self.bel_wires)
                                 .insert((x, y, format!("LUT{}_{}", lc, pin_name)), in_wire.id);
-                            self.tile_wires.entry((x, y)).or_default().push(in_wire.id);
-                            self.wires.push(in_wire);
+                            Arc::make_mut(&mut self.tile_wires)
+                                .entry((x, y))
+                                .or_default()
+                                .push(in_wire.id);
+                            Arc::make_mut(&mut self.wires).push(in_wire);
                             wire_id += 1;
                         }
 
@@ -839,11 +1153,15 @@ impl NexusDevice {
                             tile_y: y,
                             delay: 0,
                         };
-                        self.wire_names.insert(ff_wire.name.clone(), ff_wire.id);
-                        self.bel_wires
+                        Arc::make_mut(&mut self.wire_names)
+                            .insert(ff_wire.name.clone(), ff_wire.id);
+                        Arc::make_mut(&mut self.bel_wires)
                             .insert((x, y, format!("FF{}_Q", lc)), ff_wire.id);
-                        self.tile_wires.entry((x, y)).or_default().push(ff_wire.id);
-                        self.wires.push(ff_wire);
+                        Arc::make_mut(&mut self.tile_wires)
+                            .entry((x, y))
+                            .or_default()
+                            .push(ff_wire.id);
+                        Arc::make_mut(&mut self.wires).push(ff_wire);
                         wire_id += 1;
 
                         // FF data input; the FF output and input reach the
@@ -857,15 +1175,16 @@ impl NexusDevice {
                             tile_y: y,
                             delay: 0,
                         };
-                        self.wire_names.insert(ff_d_wire.name.clone(), ff_d_wire.id);
-                        self.bel_wires
+                        Arc::make_mut(&mut self.wire_names)
+                            .insert(ff_d_wire.name.clone(), ff_d_wire.id);
+                        Arc::make_mut(&mut self.bel_wires)
                             .insert((x, y, format!("FF{}_D", lc)), ff_d_wire.id);
-                        self.tile_wires
+                        Arc::make_mut(&mut self.tile_wires)
                             .entry((x, y))
                             .or_default()
                             .push(ff_d_wire.id);
                         let (ff_q_id, ff_d_id) = (WireId(wire_id - 1), ff_d_wire.id);
-                        self.wires.push(ff_d_wire);
+                        Arc::make_mut(&mut self.wires).push(ff_d_wire);
                         wire_id += 1;
                         let locals = self.tile_wires.get(&(x, y)).cloned().unwrap_or_default();
                         let mut ff_pips = Vec::new();
@@ -889,9 +1208,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
 
@@ -908,9 +1233,15 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                                self.pips.push(p);
+                                Arc::make_mut(&mut self.wire_to_pips)
+                                    .entry(p.dst_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.wire_src_pips)
+                                    .entry(p.src_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.pips).push(p);
                                 pip_id += 1;
                             }
                         }
@@ -939,15 +1270,15 @@ impl NexusDevice {
                                                 tile_x: x,
                                                 tile_y: y,
                                             };
-                                            self.wire_to_pips
+                                            Arc::make_mut(&mut self.wire_to_pips)
                                                 .entry(p.dst_wire)
                                                 .or_default()
                                                 .push(p.id);
-                                            self.wire_src_pips
+                                            Arc::make_mut(&mut self.wire_src_pips)
                                                 .entry(p.src_wire)
                                                 .or_default()
                                                 .push(p.id);
-                                            self.pips.push(p);
+                                            Arc::make_mut(&mut self.pips).push(p);
                                             pip_id += 1;
                                         }
                                     }
@@ -965,11 +1296,14 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 50,
                     };
-                    self.wire_names.insert(clk_wire.name.clone(), clk_wire.id);
-                    self.bel_wires
+                    Arc::make_mut(&mut self.wire_names).insert(clk_wire.name.clone(), clk_wire.id);
+                    Arc::make_mut(&mut self.bel_wires)
                         .insert((x, y, "CLK".to_string()), clk_wire.id);
-                    self.tile_wires.entry((x, y)).or_default().push(clk_wire.id);
-                    self.wires.push(clk_wire);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(clk_wire.id);
+                    Arc::make_mut(&mut self.wires).push(clk_wire);
                     wire_id += 1;
                 } else if matches!(
                     tile_type,
@@ -986,11 +1320,14 @@ impl NexusDevice {
                             tile_y: y,
                             delay: 0,
                         };
-                        self.wire_names.insert(i_wire.name.clone(), i_wire.id);
-                        self.bel_wires
+                        Arc::make_mut(&mut self.wire_names).insert(i_wire.name.clone(), i_wire.id);
+                        Arc::make_mut(&mut self.bel_wires)
                             .insert((x, y, format!("PIO{}_I", iob)), i_wire.id);
-                        self.tile_wires.entry((x, y)).or_default().push(i_wire.id);
-                        self.wires.push(i_wire);
+                        Arc::make_mut(&mut self.tile_wires)
+                            .entry((x, y))
+                            .or_default()
+                            .push(i_wire.id);
+                        Arc::make_mut(&mut self.wires).push(i_wire);
                         wire_id += 1;
 
                         // Input to pad (output from fabric)
@@ -1002,11 +1339,14 @@ impl NexusDevice {
                             tile_y: y,
                             delay: 0,
                         };
-                        self.wire_names.insert(o_wire.name.clone(), o_wire.id);
-                        self.bel_wires
+                        Arc::make_mut(&mut self.wire_names).insert(o_wire.name.clone(), o_wire.id);
+                        Arc::make_mut(&mut self.bel_wires)
                             .insert((x, y, format!("PIO{}_O", iob)), o_wire.id);
-                        self.tile_wires.entry((x, y)).or_default().push(o_wire.id);
-                        self.wires.push(o_wire);
+                        Arc::make_mut(&mut self.tile_wires)
+                            .entry((x, y))
+                            .or_default()
+                            .push(o_wire.id);
+                        Arc::make_mut(&mut self.wires).push(o_wire);
                         wire_id += 1;
                     }
                 }
@@ -1031,10 +1371,13 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 80,
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
                     let h2_id = w.id;
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
 
                     // PIP: local → H2 (drive span wire)
@@ -1050,9 +1393,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1072,9 +1421,15 @@ impl NexusDevice {
                                     tile_x: dest_x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                                self.pips.push(p);
+                                Arc::make_mut(&mut self.wire_to_pips)
+                                    .entry(p.dst_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.wire_src_pips)
+                                    .entry(p.src_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.pips).push(p);
                                 pip_id += 1;
                             }
                         }
@@ -1091,10 +1446,13 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 80,
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
                     let v2_id = w.id;
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
 
                     // PIP: local → V2
@@ -1110,9 +1468,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1132,9 +1496,15 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: dest_y,
                                 };
-                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                                self.pips.push(p);
+                                Arc::make_mut(&mut self.wire_to_pips)
+                                    .entry(p.dst_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.wire_src_pips)
+                                    .entry(p.src_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.pips).push(p);
                                 pip_id += 1;
                             }
                         }
@@ -1152,10 +1522,13 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 200,
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
                     let h12_id = w.id;
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
 
                     // PIP: local → H12
@@ -1171,9 +1544,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1193,9 +1572,15 @@ impl NexusDevice {
                                     tile_x: dest_x,
                                     tile_y: y,
                                 };
-                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                                self.pips.push(p);
+                                Arc::make_mut(&mut self.wire_to_pips)
+                                    .entry(p.dst_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.wire_src_pips)
+                                    .entry(p.src_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.pips).push(p);
                                 pip_id += 1;
                             }
                         }
@@ -1210,10 +1595,13 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 200,
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
                     let v12_id = w.id;
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
 
                     // PIP: local → V12
@@ -1229,9 +1617,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1251,9 +1645,15 @@ impl NexusDevice {
                                     tile_x: x,
                                     tile_y: dest_y,
                                 };
-                                self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                                self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                                self.pips.push(p);
+                                Arc::make_mut(&mut self.wire_to_pips)
+                                    .entry(p.dst_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.wire_src_pips)
+                                    .entry(p.src_wire)
+                                    .or_default()
+                                    .push(p.id);
+                                Arc::make_mut(&mut self.pips).push(p);
                                 pip_id += 1;
                             }
                         }
@@ -1281,10 +1681,13 @@ impl NexusDevice {
                         tile_y: y,
                         delay: 40,
                     };
-                    self.wire_names.insert(w.name.clone(), w.id);
-                    self.tile_wires.entry((x, y)).or_default().push(w.id);
+                    Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                    Arc::make_mut(&mut self.tile_wires)
+                        .entry((x, y))
+                        .or_default()
+                        .push(w.id);
                     let neigh_id = w.id;
-                    self.wires.push(w);
+                    Arc::make_mut(&mut self.wires).push(w);
                     wire_id += 1;
 
                     // PIP: local → neighbour
@@ -1305,9 +1708,15 @@ impl NexusDevice {
                                 tile_x: x,
                                 tile_y: y,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1330,9 +1739,15 @@ impl NexusDevice {
                                 tile_x: nx,
                                 tile_y: ny,
                             };
-                            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-                            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-                            self.pips.push(p);
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
                             pip_id += 1;
                         }
                     }
@@ -1350,8 +1765,8 @@ impl NexusDevice {
                 tile_y: 0,
                 delay: 50, // Nexus global clock network is very low-skew
             };
-            self.wire_names.insert(w.name.clone(), w.id);
-            self.wires.push(w);
+            Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+            Arc::make_mut(&mut self.wires).push(w);
             wire_id += 1;
         }
 
@@ -1378,9 +1793,15 @@ impl NexusDevice {
                 tile_x,
                 tile_y,
             };
-            self.wire_to_pips.entry(p.dst_wire).or_default().push(p.id);
-            self.wire_src_pips.entry(p.src_wire).or_default().push(p.id);
-            self.pips.push(p);
+            Arc::make_mut(&mut self.wire_to_pips)
+                .entry(p.dst_wire)
+                .or_default()
+                .push(p.id);
+            Arc::make_mut(&mut self.wire_src_pips)
+                .entry(p.src_wire)
+                .or_default()
+                .push(p.id);
+            Arc::make_mut(&mut self.pips).push(p);
         }
         // Inter-tile wires (neighbour, spans) and the cost of the PIP into
         // each, as built above
@@ -1492,6 +1913,17 @@ impl NexusDevice {
     }
 }
 
+/// Whether a wire name is general fabric routing: `H0x` or `V0x` after its
+/// `R<row>C<col>_` location prefix.
+fn is_general_wire_name(name: &str) -> bool {
+    let base = name
+        .strip_prefix('R')
+        .and_then(|rest| rest.split_once('_'))
+        .map_or(name, |(_, rest)| rest);
+    let mut chars = base.chars();
+    matches!(chars.next(), Some('H') | Some('V')) && chars.next() == Some('0')
+}
+
 impl Device for NexusDevice {
     fn family(&self) -> DeviceFamily {
         DeviceFamily::Nexus
@@ -1506,12 +1938,30 @@ impl Device for NexusDevice {
     }
 
     fn stats(&self) -> DeviceStats {
+        // The real-device model only places what its tiles' BELs offer.
+        let real_sites = |kind: BelType| {
+            self.tiles
+                .iter()
+                .flatten()
+                .flatten()
+                .flat_map(|tile| tile.bels())
+                .filter(|bel| bel.bel_type == kind)
+                .count()
+        };
+        let (total_brams, total_dsps) = if self.prjoxide_tiles.is_empty() {
+            (
+                self.memory_blocks.len(),
+                self.dsp_tiles.len() * data::DSP_MACS_PER_TILE as usize,
+            )
+        } else {
+            (real_sites(BelType::RamSlice), real_sites(BelType::DspSlice))
+        };
         DeviceStats {
             total_luts: self.logic_tiles.len() * data::LOGIC_LUTS_PER_TILE as usize,
             total_ffs: self.logic_tiles.len() * data::LOGIC_FFS_PER_TILE as usize,
             total_ios: self.io_tiles.len() * data::IO_CELLS_PER_TILE as usize,
-            total_brams: self.memory_blocks.len(),
-            total_dsps: self.dsp_tiles.len() * data::DSP_MACS_PER_TILE as usize,
+            total_brams,
+            total_dsps,
             total_gclks: self.variant.global_clocks() as usize,
         }
     }
@@ -1541,14 +1991,11 @@ impl Device for NexusDevice {
     }
 
     fn wire_pips(&self, wire_id: WireId) -> Vec<PipId> {
-        self.wire_to_pips.get(&wire_id).cloned().unwrap_or_default()
+        self.pips_driving(wire_id).to_vec()
     }
 
     fn wire_src_pips(&self, wire_id: WireId) -> &[PipId] {
-        self.wire_src_pips
-            .get(&wire_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.pips_driven_by(wire_id)
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {
@@ -1570,8 +2017,8 @@ impl Device for NexusDevice {
             "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
             "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
-            "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
-            "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
+            "DP16K" | "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
+            "MULT18X18" | "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
             "EHXPLLL" | "PLL" => bel_type == BelType::Pll,
             _ => false,
         }
@@ -1584,31 +2031,42 @@ impl Device for NexusDevice {
         (0..height)
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .filter_map(|(x, y)| self.tile_at(x, y))
-            .find(|t| t.tile_type() == TileType::Logic)
+            .find(|t| t.tile_type() == TileType::Logic && !t.bels().is_empty())
             .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
         // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
-        // slice C); each of those LUTs, when used, blocks the RAM site.
+        // slice C); each of those LUTs, when used, blocks the RAM site. On real
+        // silicon slices C and D share clock and set/reset settings, and those
+        // carry the RAM's write port, so both slices' flip-flops are taken too.
         const RAM_LUTS: usize = 6;
+        const RAMW_FFS: std::ops::Range<usize> = 4..8;
         let Some(tile) = self.tile_at(x, y) else {
             return Vec::new();
         };
         let bels = tile.bels();
-        let luts: Vec<usize> = bels
+        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
+            return Vec::new();
+        };
+        let mut footprint: Vec<usize> = bels
             .iter()
             .enumerate()
             .filter(|(_, b)| b.bel_type == BelType::Lut4)
             .map(|(i, _)| i)
             .take(RAM_LUTS)
             .collect();
-        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
-            return Vec::new();
-        };
+        if !self.prjoxide_tiles.is_empty() {
+            let ffs = bels
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.bel_type.is_ff())
+                .map(|(i, _)| i);
+            footprint.extend(ffs.skip(RAMW_FFS.start).take(RAMW_FFS.len()));
+        }
         match bels.get(bel_index).map(|b| b.bel_type) {
-            Some(BelType::DistRam) => luts,
-            Some(BelType::Lut4) if luts.contains(&bel_index) => vec![ram],
+            Some(BelType::DistRam) => footprint,
+            Some(_) if footprint.contains(&bel_index) => vec![ram],
             _ => Vec::new(),
         }
     }
@@ -1622,7 +2080,111 @@ impl Device for NexusDevice {
         Some(self.hop_costs[(dx as usize).min(last)] + self.hop_costs[(dy as usize).min(last)])
     }
 
+    fn is_general_routing_wire(&self, wire: WireId) -> bool {
+        self.wire(wire)
+            .is_some_and(|w| is_general_wire_name(&w.name))
+    }
+
+    fn default_package(&self) -> Option<&str> {
+        self.variant.default_package()
+    }
+
+    fn dsp_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
+        dsp::router_pin(&dsp::input_pin(cell, input)?).filter(|_| dsp::is_multiplier(cell))
+    }
+
+    fn dsp_input_needs_low_driver(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+    ) -> bool {
+        dsp::is_multiplier(cell) && dsp::input_pin(cell, input).is_some()
+    }
+
+    fn dsp_low_driven_input_count(&self, cell: &skalp_lir::gate_netlist::Cell) -> usize {
+        if dsp::is_multiplier(cell) {
+            dsp::low_driven_pins().len()
+        } else {
+            0
+        }
+    }
+
+    fn ram_input_pin(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<usize> {
+        ebr::router_pin(&ebr::input_pin(ports, input)?)
+    }
+
+    fn ram_input_needs_low_driver(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> bool {
+        ebr::input_pin(ports, input).is_some_and(|pin| !ebr::has_inverter(&pin))
+    }
+
     fn bel_pin_wire(&self, x: u32, y: u32, bel_index: usize, pin: CellPin) -> Option<WireId> {
+        let is_io = self
+            .tile_at(x, y)
+            .and_then(|t| t.bels().get(bel_index))
+            .is_some_and(|b| b.bel_type == BelType::IoCell);
+        if is_io {
+            let suffix = match pin {
+                CellPin::Input(0) => "O",
+                CellPin::Output(0) => "I",
+                _ => return None,
+            };
+            return self
+                .bel_wires
+                .get(&(x, y, format!("PIO{bel_index}_{suffix}")))
+                .copied();
+        }
+        let is_multiplier = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::DspSlice);
+        if is_multiplier {
+            let name = match pin {
+                CellPin::Output(bit) => format!("Z{bit}"),
+                CellPin::Input(n) => dsp::pin_of_router_pin(n)?,
+            };
+            return self.bel_wires.get(&(x, y, format!("DSP_{name}"))).copied();
+        }
+        let is_block_ram = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::RamSlice);
+        if is_block_ram {
+            let name = match pin {
+                CellPin::Output(bit) => ebr::output_pin(bit),
+                CellPin::Input(n) => ebr::pin_of_router_pin(n)?.to_string(),
+            };
+            return self.bel_wires.get(&(x, y, format!("RAM_{name}"))).copied();
+        }
+        let is_real_dist_ram = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::DistRam);
+        if is_real_dist_ram {
+            let key = match pin {
+                CellPin::Output(o) => format!("DPR_DO{o}"),
+                CellPin::Input(i @ 0..=3) => format!("DPR_DI{i}"),
+                CellPin::Input(i @ 4..=7) => format!("DPR_WAD{}", i - 4),
+                CellPin::Input(8) => "DPR_WRE".to_string(),
+                CellPin::Input(crate::device::FF_PIN_CLK) => "DPR_WCK".to_string(),
+                CellPin::Input(i) if i >= crate::device::DIST_RAM_PIN_RAD => {
+                    let n = i - crate::device::DIST_RAM_PIN_RAD;
+                    format!("DPR_RAD{}_{}", n / 4, n % 4)
+                }
+                CellPin::Input(_) => return None,
+            };
+            return self.bel_wires.get(&(x, y, key)).copied();
+        }
         crate::device::lattice_logic_pin_wire(self, x, y, bel_index, pin, "Z", |name| {
             self.bel_wires.get(&(x, y, name)).copied()
         })
@@ -1776,6 +2338,17 @@ mod tests {
     /// the exact `Device` trait the Placer/Router use, real BELs whose pins bind to
     /// real routing nodes that are reachable through the fabric. This is the first
     /// end-to-end exercise of the silicon-grounded device model.
+    #[test]
+    fn general_wires_are_recognized() {
+        assert!(is_general_wire_name("R2C97_H01W0300"));
+        assert!(is_general_wire_name("R2C97_V02S0601"));
+        assert!(is_general_wire_name("R2C97_H00L0100"));
+        assert!(!is_general_wire_name("R2C97_BRANCH:HPBX0000"));
+        assert!(!is_general_wire_name("R19C109_SPINE:VPSX0000"));
+        assert!(!is_general_wire_name("R36C76_JCLK0"));
+        assert!(!is_general_wire_name("G:JOSCHF_TMID_CORE_TMIDMUX"));
+    }
+
     #[test]
     fn from_prjoxide_device_is_placeable_and_routable() {
         let Some(db) = prjoxide_load::find_database() else {

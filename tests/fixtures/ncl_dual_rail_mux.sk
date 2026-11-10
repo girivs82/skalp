@@ -1,4 +1,4 @@
-// NCL Dual-Rail Mux — from Karythra CLE V2 operand selection
+// NCL Dual-Rail Mux
 // Mode-selected dual-rail mux: chooses between two 8-bit dual-rail sources
 // based on a single-bit decoded mode selector.
 

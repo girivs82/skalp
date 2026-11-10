@@ -253,6 +253,27 @@ pub enum CellPin {
     Output(usize),
 }
 
+/// Router pin number of a flip-flop's clock (data is pin 0).
+pub const FF_PIN_CLK: usize = 100;
+/// Router pin number of a flip-flop's clock enable.
+pub const FF_PIN_CE: usize = 101;
+/// Router pin number of a flip-flop's set/reset.
+pub const FF_PIN_LSR: usize = 102;
+/// First router pin number of a distributed RAM's read address connections:
+/// read-address bit `r` reaches LUT `j` of the RAM at `base + 4 * r + j`.
+pub const DIST_RAM_PIN_RAD: usize = 200;
+/// Router pin number of a block RAM's read clock. Its write clock is
+/// [`FF_PIN_CLK`].
+pub const RAM_PIN_READ_CLK: usize = 103;
+
+/// Cell parameter holding where a multiplier's added low-driven inputs start.
+pub const DSP_EXTRA_INPUTS_PARAM: &str = "DSP_EXTRA_INPUTS_FROM";
+
+/// Whether a router pin number is a clock pin, routed on the clock network.
+pub fn is_clock_pin(pin: usize) -> bool {
+    pin == FF_PIN_CLK || pin == RAM_PIN_READ_CLK
+}
+
 /// [`Device::bel_pin_wire`] for a Lattice logic tile (Nexus, ECP5) whose
 /// BEL pin wires are named by LUT and FF number: `LUT{n}_A..D`,
 /// `LUT{n}_{lut_out}`, `FF{n}_D`, `FF{n}_Q`. LUTs and FFs are numbered in BEL
@@ -302,6 +323,9 @@ pub(crate) fn lattice_logic_pin_wire<D: Device + ?Sized>(
                 .count();
             match pin {
                 CellPin::Input(0) => wire(format!("FF{}_D", n)),
+                CellPin::Input(FF_PIN_CLK) => wire(format!("FF{}_CLK", n)),
+                CellPin::Input(FF_PIN_CE) => wire(format!("FF{}_CE", n)),
+                CellPin::Input(FF_PIN_LSR) => wire(format!("FF{}_LSR", n)),
                 CellPin::Input(_) => None,
                 CellPin::Output(_) => wire(format!("FF{}_Q", n)),
             }
@@ -684,6 +708,54 @@ pub trait Device: Send + Sync {
     }
 
     // BEL pin wire methods (optional, for proper routing endpoints)
+
+    /// Whether a wire is general fabric routing, which a clock must not use.
+    fn is_general_routing_wire(&self, _wire: WireId) -> bool {
+        false
+    }
+
+    /// The package whose pin names a design's constraints use, if the device has several.
+    fn default_package(&self) -> Option<&str> {
+        None
+    }
+
+    /// Router pin a multiplier input connects to, or `None` if it has no pin.
+    fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
+        None
+    }
+
+    /// Extra multiplier inputs the device needs held low with a real signal.
+    fn dsp_low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
+        0
+    }
+
+    /// Whether a multiplier input tied low must be driven by a real signal.
+    fn dsp_input_needs_low_driver(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _input: usize,
+    ) -> bool {
+        false
+    }
+
+    /// Router pin a block RAM input connects to, or `None` if it has no pin.
+    fn ram_input_pin(
+        &self,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<usize> {
+        Some(input)
+    }
+
+    /// Whether a block RAM input tied low must be driven by a real signal
+    /// because configuration alone cannot hold it low.
+    fn ram_input_needs_low_driver(
+        &self,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        _input: usize,
+    ) -> bool {
+        false
+    }
 
     /// The wire that `pin` of a cell placed on BEL `bel_index` of tile
     /// (x, y) connects to. `None`: the device does not model it, and the

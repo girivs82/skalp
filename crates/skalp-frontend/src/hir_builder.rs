@@ -1700,6 +1700,7 @@ impl HirBuilderContext {
             seooc_config,
             compiled_ip_config,
             comments: Self::collect_leading_comments(node),
+            specialized_from: None,
         })
     }
 
@@ -8661,8 +8662,7 @@ impl HirBuilderContext {
                     // Comma delimits elements
                     && !current_group.is_empty() =>
                 {
-                    element_groups.push(current_group);
-                    current_group = Vec::new();
+                    element_groups.push(std::mem::take(&mut current_group));
                 }
                 rowan::NodeOrToken::Node(n) => {
                     // Only collect expression nodes, not parens
@@ -14039,6 +14039,7 @@ impl HirBuilderContext {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         };
 
         for pair in node
@@ -14100,6 +14101,9 @@ impl HirBuilderContext {
                             });
                         }
                     }
+                }
+                "drive_override" => {
+                    constraints.drive_override = Some(value_text.trim_matches('"').to_string());
                 }
                 "io_standard" => {
                     constraints.io_standard = Some(value_text.trim_matches('"').to_string());

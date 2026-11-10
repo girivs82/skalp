@@ -1,0 +1,44 @@
+// A core with a wide register file and a free helper function. Imported by
+// imported_core_top.sk, which uses only the entity name (`use regfile_core::RegfileCore;`).
+
+fn write_mask(size: bit[2], off: bit[2]) -> bit[4] {
+    return match size {
+        0 => 4'b0001 << off,
+        1 => 4'b0011 << off,
+        _ => 4'b1111,
+    };
+}
+
+fn pick(a: bit[8], b: bit[8], s: bit) -> bit[8] {
+    return if s { a } else { b };
+}
+
+entity RegfileCore {
+    in clk: clock
+    in we: bit
+    in waddr: bit[5]
+    in raddr: bit[5]
+    in wdata: bit[64]
+    in size: bit[2]
+    in off: bit[2]
+    in a: bit[8]
+    in b: bit[8]
+    in s: bit
+    out rdata: bit[64]
+    out mask: bit[4]
+    out q: bit[8]
+}
+
+impl RegfileCore {
+    signal rf: bit[64][32]
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        if we {
+            rf[waddr] = wdata
+        }
+        r = pick(a, b, s)
+    }
+    rdata = rf[raddr]
+    mask = write_mask(size, off)
+    q = r
+}

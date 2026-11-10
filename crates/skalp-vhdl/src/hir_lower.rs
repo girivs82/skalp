@@ -405,6 +405,7 @@ fn extract_skalp_constraint_from_comment(comment_text: &str) -> Option<PhysicalC
         pad_type,
         pad_cell,
         ldo_config: None,
+        drive_override: None,
     })
 }
 
@@ -831,6 +832,7 @@ impl VhdlHirBuilder {
             safety_mechanism_config: None,
             seooc_config: None,
             compiled_ip_config: None,
+            specialized_from: None,
         })
     }
 
@@ -2689,8 +2691,7 @@ impl VhdlHirBuilder {
             match el.kind() {
                 SyntaxKind::WhenKw | SyntaxKind::ElseKw => {
                     if !current.is_empty() {
-                        segments.push(current);
-                        current = Vec::new();
+                        segments.push(std::mem::take(&mut current));
                     }
                 }
                 _ => {

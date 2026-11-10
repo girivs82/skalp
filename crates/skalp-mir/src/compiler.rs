@@ -479,6 +479,21 @@ impl MirCompiler {
             });
         }
 
+        // Imported entities are merged into the main HIR, so every module looks
+        // like it came from the main file until provenance is applied: a
+        // module is the user's when its entity, or the generic entity it
+        // specializes, is declared in the main source file.
+        if !hir.main_entity_names.is_empty() {
+            let declared_here = |name: &str| hir.main_entity_names.iter().any(|n| n == name);
+            for module in &mut mir.modules {
+                module.is_from_main_source = declared_here(&module.name)
+                    || module
+                        .specialization_of
+                        .as_deref()
+                        .is_some_and(declared_here);
+            }
+        }
+
         Ok(mir)
     }
 

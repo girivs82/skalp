@@ -84,10 +84,24 @@ flate2 = "1.0"  # read back gzipped .skw waveforms in tests
 
 [features]
 default = []
+# Real Nexus device data and bitstream output (needs a prjoxide checkout)
+nexus-real = ["skalp-place-route/nexus-bitstream"]
 test-utils = ["proptest"]
 bench = ["criterion"]
 
 # GPU simulation support (Metal on macOS)
+# Memory footprint and machine size for the memory guard (src/memory_guard.rs)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27"
 objc = "0.2"

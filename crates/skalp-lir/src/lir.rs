@@ -166,6 +166,16 @@ pub enum PrimitiveType {
         /// Number of data bits
         data_width: u8,
     },
+    /// Combinational hard multiplier. Inputs: A, then B, then the unused C bus,
+    /// then the A and B sign controls; the product comes out first.
+    Multiplier {
+        /// Bits on the A input
+        a_width: u8,
+        /// Bits on the B input
+        b_width: u8,
+        /// Bits of the product
+        p_width: u8,
+    },
     /// Asynchronous read port of a distributed RAM: `rdata = mem[raddr]`,
     /// combinationally. Inputs: [raddr[0..aw]]; outputs: [rdata[0..dw]].
     DistRamRead {
@@ -386,6 +396,9 @@ impl PrimitiveType {
                 ..
             } => *data_width + *addr_width + 1,
             PrimitiveType::DistRamRead { addr_width, .. } => *addr_width,
+            PrimitiveType::Multiplier {
+                a_width, b_width, ..
+            } => *a_width + *b_width,
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
             PrimitiveType::Lut4 { .. } => 4,
@@ -432,6 +445,7 @@ impl PrimitiveType {
             PrimitiveType::RamBlock { data_width, .. } => *data_width,
             PrimitiveType::DistRamWrite { .. } => 0,
             PrimitiveType::DistRamRead { data_width, .. } => *data_width,
+            PrimitiveType::Multiplier { p_width, .. } => *p_width,
             PrimitiveType::PowerSwitch { .. } => 0,
             // FP32 arithmetic operations have 32 output bits
             PrimitiveType::Fp32Add
@@ -493,6 +507,7 @@ impl PrimitiveType {
                 ..
             } => 2.0 * (1u64 << *addr_width) as f64 * (*data_width as f64),
             PrimitiveType::DistRamRead { .. } => 0.1,
+            PrimitiveType::Multiplier { .. } => 0.4,
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0,
             // FPGA LUTs - SRAM-based configuration memory
@@ -580,6 +595,7 @@ impl PrimitiveType {
             PrimitiveType::RamBlock { .. } => "RAM",
             PrimitiveType::DistRamWrite { .. } => "DPRAM_W",
             PrimitiveType::DistRamRead { .. } => "DPRAM_R",
+            PrimitiveType::Multiplier { .. } => "MULT",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
             PrimitiveType::Lut4 { .. } => "LUT4",
@@ -954,6 +970,14 @@ pub enum LirOp {
         /// same cycle, so the memory cannot live in a synchronous-read block RAM.
         #[serde(default)]
         async_read: bool,
+        /// Read data appears on the output a cycle after the address, as from a
+        /// block RAM's own register: the design's read register has been merged
+        /// into the memory.
+        #[serde(default)]
+        registered_read: bool,
+        /// The last input enables the read register.
+        #[serde(default)]
+        read_enable: bool,
     },
 
     // === Special ===
@@ -1148,12 +1172,14 @@ impl LirOp {
             LirOp::Latch { .. } => 2,    // en, d
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
-            LirOp::MemBlock { has_write, .. } => {
-                if *has_write {
-                    4
-                } else {
-                    1
-                } // [raddr, waddr, wdata, we] or [raddr]
+            LirOp::MemBlock {
+                has_write,
+                read_enable,
+                ..
+            } => {
+                // [raddr, waddr, wdata, we] or [raddr], then the read enable
+                let ports = if *has_write { 4 } else { 1 };
+                ports + usize::from(*read_enable)
             }
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,
@@ -1246,6 +1272,9 @@ pub struct LirSignal {
     /// Replaces name-based suffix matching (_t/_f/_dec/_sr) with structured metadata.
     #[serde(default)]
     pub ncl_info: Option<NclSignalKind>,
+    /// Value of a register at power-up, when the source gives one
+    #[serde(default)]
+    pub initial: Option<u64>,
 }
 
 /// NCL signal classification at LIR level.
@@ -1341,6 +1370,7 @@ impl Lir {
             is_output: false,
             is_detection: false,
             ncl_info: None,
+            initial: None,
         });
         id
     }

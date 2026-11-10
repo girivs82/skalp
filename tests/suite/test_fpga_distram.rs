@@ -56,7 +56,7 @@ fn test_register_files_use_distributed_ram() {
             assert!(c.clock.is_some(), "{} needs its write clock", c.path);
         }
         // 8 x 32, two read ports: one bank of 8 slices per port
-        let net = synthesize("k4_regfile_two_reads.sk", lib);
+        let net = synthesize("regfile_two_reads.sk", lib);
         assert_eq!(count(&net, CellFunction::DistRam16x4), 16, "{lib}: 8 x 32");
     }
 }

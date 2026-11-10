@@ -264,7 +264,7 @@ impl CompiledCpuRuntime {
 
         let prev_clocks = vec![0u64; clock_names.len()];
 
-        Ok(Self {
+        let mut runtime = Self {
             _library: library,
             kernel,
             inputs,
@@ -279,7 +279,28 @@ impl CompiledCpuRuntime {
             module: module.clone(),
             clock_names,
             prev_clocks,
-        })
+        };
+        runtime.load_initial_values();
+        Ok(runtime)
+    }
+
+    /// Start every register at its declared initial value (`signal x: T = v`),
+    /// as the hardware does, instead of zero.
+    fn load_initial_values(&mut self) {
+        for (name, elem) in &self.module.state_elements {
+            let Some(value) = elem.reset_value else {
+                continue;
+            };
+            let sanitized = name.replace('.', "_");
+            if let Some(field) = self.register_fields.get(&sanitized) {
+                let bytes = value.to_le_bytes();
+                let len = field.size.min(bytes.len());
+                let mut padded = vec![0u8; field.size];
+                padded[..len].copy_from_slice(&bytes[..len]);
+                self.registers.write(field.offset, &padded);
+            }
+        }
+        self.shadow_registers.copy_from(&self.registers);
     }
 
     /// Build field offset maps by reading the C++ offset tables emitted via offsetof()/sizeof().
@@ -564,6 +585,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
         self.inputs.clear();
         self.registers.clear();
         self.signals.clear();
+        self.load_initial_values();
         self.current_cycle = 0;
         self.prev_clocks.iter_mut().for_each(|c| *c = 0);
         Ok(())
@@ -632,6 +654,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
     async fn reset(&mut self) -> SimulationResult<()> {
         self.registers.clear();
         self.signals.clear();
+        self.load_initial_values();
         self.current_cycle = 0;
         self.prev_clocks.iter_mut().for_each(|c| *c = 0);
 

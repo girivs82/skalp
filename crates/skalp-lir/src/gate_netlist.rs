@@ -71,7 +71,115 @@ pub struct Cell {
     pub parameters: IndexMap<String, String>,
 }
 
+/// Parameter on an output pad: why it may drive a pin the board does not list as safe.
+pub const DRIVE_OVERRIDE_PARAM: &str = "DRIVE_OVERRIDE";
+
+/// Parameter set to "1" on a flip-flop that powers up high.
+pub const FF_INIT_PARAM: &str = "INIT";
+
+/// Parameter holding a block RAM cell's address width in bits.
+pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
+/// Parameter holding a block RAM cell's data width in bits.
+pub const RAM_DATA_BITS_PARAM: &str = "RAM_DATA_BITS";
+
+/// Parameter holding a hard multiplier's A operand width in bits.
+pub const DSP_A_BITS_PARAM: &str = "DSP_A_WIDTH";
+/// Parameter holding a hard multiplier's B operand width in bits.
+pub const DSP_B_BITS_PARAM: &str = "DSP_B_WIDTH";
+/// Parameter holding a hard multiplier's product width in bits.
+pub const DSP_P_BITS_PARAM: &str = "DSP_P_WIDTH";
+/// Bits of the third operand bus every hard multiplier cell carries.
+pub const DSP_C_BITS: usize = 18;
+
+/// Where each function of a hard multiplier cell sits in its input list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DspPorts {
+    /// A operand, least significant bit first
+    pub a: std::ops::Range<usize>,
+    /// B operand, least significant bit first
+    pub b: std::ops::Range<usize>,
+    /// A operand sign control
+    pub signed_a: usize,
+    /// B operand sign control
+    pub signed_b: usize,
+    /// Width of the product, which comes first in the outputs
+    pub product_width: usize,
+}
+
+/// Where each function of a block RAM cell sits in its input list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RamPorts {
+    /// Read address, least significant bit first
+    pub read_addr: std::ops::Range<usize>,
+    /// Read clock
+    pub read_clk: usize,
+    /// Read clock enable
+    pub read_clk_en: usize,
+    /// Read enable
+    pub read_en: usize,
+    /// Write data, least significant bit first
+    pub write_data: std::ops::Range<usize>,
+    /// Write address, least significant bit first
+    pub write_addr: std::ops::Range<usize>,
+    /// Write clock
+    pub write_clk: usize,
+    /// Write clock enable
+    pub write_clk_en: usize,
+    /// Write enable
+    pub write_en: usize,
+    /// Per-bit write mask, empty if the cell has none
+    pub write_mask: std::ops::Range<usize>,
+}
+
+impl RamPorts {
+    /// Data width of the block.
+    pub fn data_width(&self) -> usize {
+        self.write_data.len()
+    }
+}
+
 impl Cell {
+    /// The input layout of a hard multiplier cell, or `None` for any other cell.
+    pub fn dsp_ports(&self) -> Option<DspPorts> {
+        let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
+        let a_width = bits(DSP_A_BITS_PARAM)?;
+        let b_width = bits(DSP_B_BITS_PARAM)?;
+        let a = 0..a_width;
+        let b = a.end..a.end + b_width;
+        let signed_a = b.end + DSP_C_BITS;
+        Some(DspPorts {
+            a,
+            b,
+            signed_a,
+            signed_b: signed_a + 1,
+            product_width: bits(DSP_P_BITS_PARAM)?,
+        })
+    }
+
+    /// The input layout of a block RAM cell, or `None` for any other cell.
+    pub fn ram_ports(&self) -> Option<RamPorts> {
+        let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
+        let addr = bits(RAM_ADDR_BITS_PARAM)?;
+        let data = bits(RAM_DATA_BITS_PARAM)?;
+        let read_clk = addr;
+        let write_data = read_clk + 3..read_clk + 3 + data;
+        let write_addr = write_data.end..write_data.end + addr;
+        let write_clk = write_addr.end;
+        let write_en = write_clk + 2;
+        Some(RamPorts {
+            read_addr: 0..addr,
+            read_clk,
+            read_clk_en: read_clk + 1,
+            read_en: read_clk + 2,
+            write_data,
+            write_addr,
+            write_clk,
+            write_clk_en: write_clk + 1,
+            write_en,
+            write_mask: write_en + 1..self.inputs.len(),
+        })
+    }
+
     /// Create a new combinational cell
     pub fn new_comb(
         id: CellId,

@@ -24,7 +24,7 @@ pub struct NexusDieData {
     // -- Resource counts (prjoxide tile database) --
     /// PLC tile count (each = 4 slices × 2 = 8 LUT4 + 8 FF)
     pub plc_tiles: usize,
-    /// EBR blocks (18 Kb each) — EBR tile groups / 8
+    /// EBR blocks (18 Kb each); each block spans two EBR tiles
     pub ebr_blocks: usize,
     /// LRAM blocks (32 Kb each)
     pub lram_blocks: usize,
@@ -62,14 +62,14 @@ pub const LIFCL_40: NexusDieData = NexusDieData {
     grid: (88, 57), // prjoxide: max_col=87, max_row=56
     name: "LIFCL-40",
     plc_tiles: 4_032, // = 32,256 LUT4
-    ebr_blocks: 21,   // 168 EBR tiles / 8
+    ebr_blocks: 84,   // 168 EBR tiles / 2
     lram_blocks: 2,
     dsp_blocks: 14, // DSP_L(88/11=8) + DSP_R(66/11=6)
     io_tiles: 196,
     plls: 3, // GPLL_ULC, GPLL_LLC, GPLL_LRC
     global_clocks: 16,
     pcs_channels: 0,
-    idcode: 0x0111_0043,
+    idcode: 0x110F_1043,
     bitstream_frames: 9172,
     bits_per_frame: 662,
     packages: &["QFN72", "csfBGA289", "caBGA400"],
@@ -77,19 +77,19 @@ pub const LIFCL_40: NexusDieData = NexusDieData {
     has_lpddr4: false,
 };
 
-/// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
+/// LFCPNX-100 (CertusPro-NX)
 pub const LFCPNX_100: NexusDieData = NexusDieData {
     grid: (160, 75), // prjoxide: max_col=159, max_row=74
     name: "LFCPNX-100",
     plc_tiles: 9_984, // = 79,872 LUT4
-    ebr_blocks: 52,   // 416 EBR tiles / 8
+    ebr_blocks: 208,  // 416 EBR tiles / 2
     lram_blocks: 7,
     dsp_blocks: 39, // DSP_L(198/11=18) + DSP_R(231/11=21)
     io_tiles: 380,
     plls: 4,           // GPLL_ULC, GPLL_URC, GPLL_LLC, GPLL_LRC
     global_clocks: 26, // 13 branches × 2 spines
     pcs_channels: 8,
-    idcode: 0x010F_1043,
+    idcode: 0x010F_4043,
     bitstream_frames: 16822,
     bits_per_frame: 878,
     packages: &["ASG256", "CBG256", "BBG484", "BFG484", "LFG672"],

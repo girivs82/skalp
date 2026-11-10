@@ -222,7 +222,7 @@ pub const XC7K160T: Xc7DieData = Xc7DieData {
     packages: &["FBG484", "FBG676", "FFG676"],
 };
 
-/// XC7K325T — KarythraGPU fallback target
+/// XC7K325T (Kintex-7)
 pub const XC7K325T: Xc7DieData = Xc7DieData {
     grid: (237, 365),
     name: "xc7k325t",

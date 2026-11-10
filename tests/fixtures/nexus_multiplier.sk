@@ -1,0 +1,17 @@
+entity MulBlink {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+impl MulBlink {
+    signal c: nat[27] = 0
+    signal a: nat[16] = 0
+    signal b: nat[16] = 0
+    signal p: nat[32] = 0
+    on(clk.rise) {
+        c = c + 1
+        a = c[26:11]
+        b = c[20:5]
+        p = a * b
+    }
+    led = p[16]
+}

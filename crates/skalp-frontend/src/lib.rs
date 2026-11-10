@@ -15,6 +15,7 @@ pub mod formatter;
 pub mod generics;
 pub mod hir;
 pub mod hir_builder;
+pub mod hir_calls;
 pub mod lexer;
 pub mod macros;
 pub mod module_resolver;
@@ -37,7 +38,7 @@ pub use parser::Parser;
 pub use span::{LineIndex, SourceSpan};
 
 use anyhow::{Context, Result};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use module_resolver::ModuleResolver;
 use std::path::{Path, PathBuf};
 
@@ -82,8 +83,19 @@ fn find_project_root(start_path: &Path) -> Option<PathBuf> {
 /// Parse and build HIR from a file with full module resolution
 /// Returns a CompilationContext containing both the main HIR and all module HIRs
 pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<CompilationContext> {
+    let source = std::fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
+    parse_and_build_compilation_context_from_source(file_path, source)
+}
+
+/// Like [`parse_and_build_compilation_context`], for source text held in
+/// memory, such as a design with generated debug logic added. `file_path`
+/// still locates the modules it imports.
+pub fn parse_and_build_compilation_context_from_source(
+    file_path: &Path,
+    source: String,
+) -> Result<CompilationContext> {
     use module_resolver::ModuleResolver;
-    use std::fs;
 
     // Find the project root by looking for skalp.toml
     let root_dir = find_project_root(file_path).unwrap_or_else(|| {
@@ -95,10 +107,6 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
 
     // Create module resolver
     let mut resolver = ModuleResolver::new(root_dir);
-
-    // Load the main file
-    let source = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
 
     // Parse source to syntax tree
     let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
@@ -182,7 +190,7 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     // Previously, when cc_cv.sk was parsed, PiController wasn't available yet,
     // so `let voltage_loop = PiController { ... }` failed to build as an instance.
     // Now we rebuild instances for all modules after the merge.
-    hir = rebuild_instances_for_all_modules(&hir, file_path, &resolver)
+    hir = rebuild_instances_for_all_modules(&hir, file_path, &source, &resolver)
         .context("Failed to rebuild instances with imports")?;
 
     // All imports are merged and instances rebuilt: any instance whose entity is
@@ -228,18 +236,21 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
 
 /// Rebuild instances with imported entities now available
 fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
-    use std::fs;
-
-    // Read the source file again
-    let source = fs::read_to_string(file_path)
+    let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file for rebuild: {:?}", file_path))?;
+    rebuild_instances_from_source(hir, file_path, &source)
+}
 
+/// Rebuild instances of `source`, the text of `file_path`, with imported
+/// entities now available. The text is passed in rather than re-read, so a
+/// design built from edited source (such as `synth --debug`) keeps its edits.
+fn rebuild_instances_from_source(hir: &Hir, file_path: &Path, source: &str) -> Result<Hir> {
     // Parse to syntax tree
-    let (syntax_tree, _) = parse::parse_with_errors(&source);
+    let (syntax_tree, _) = parse::parse_with_errors(source);
 
     // Create a new builder with all entities pre-registered
     let mut builder =
-        hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
+        hir_builder::HirBuilderContext::with_source(source, Some(file_path.to_path_buf()));
 
     // Pre-register all entities in the symbol table
     for entity in &hir.entities {
@@ -482,12 +493,13 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
 fn rebuild_instances_for_all_modules(
     hir: &Hir,
     main_file_path: &Path,
+    main_source: &str,
     resolver: &ModuleResolver,
 ) -> Result<Hir> {
     use std::collections::HashSet;
 
-    // Start with the main file rebuild
-    let mut result_hir = rebuild_instances_with_imports(hir, main_file_path)
+    // Start with the main file rebuild, from the text that was parsed
+    let mut result_hir = rebuild_instances_from_source(hir, main_file_path, main_source)
         .context("Failed to rebuild main file instances")?;
 
     // Collect all loaded module paths (excluding stdlib and main file)
@@ -1709,6 +1721,14 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             }
 
             target.implementations.push(imported_impl);
+
+            // The imported implementation is compiled from the merged HIR alone,
+            // so the free functions it calls (and the ones those call) have to
+            // come with it. Without them every call is left unresolved and the
+            // assignment that makes it cannot be lowered: importing `Core` alone
+            // failed with "`port = Call('helper', ..)` could not be lowered" while
+            // importing `{Core, helper}` worked.
+            merge_called_functions(target, source, impl_block)?;
         }
 
         // Also merge GLOBAL_IMPL constants from source — imported entities may reference them.
@@ -1933,6 +1953,53 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
 
     // Symbol not found - this might be okay if it's a type or other symbol
     // For now, we don't error
+    Ok(())
+}
+
+/// A free function defined in `hir`: at file level, or in an implementation
+/// block that holds file-level functions.
+fn find_free_function<'a>(hir: &'a Hir, name: &str) -> Option<&'a hir::HirFunction> {
+    hir.functions.iter().find(|f| f.name == name).or_else(|| {
+        hir.implementations
+            .iter()
+            .filter(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+            .flat_map(|i| i.functions.iter())
+            .find(|f| f.name == name)
+    })
+}
+
+/// Merge into `target` every free function of `source` that `impl_block`
+/// calls, directly or through other functions of `source`. Functions the
+/// implementation defines itself, names `source` does not define (builtins,
+/// trait methods, other modules' functions) and functions `target` already
+/// has are left alone.
+fn merge_called_functions(
+    target: &mut Hir,
+    source: &Hir,
+    impl_block: &hir::HirImplementation,
+) -> Result<()> {
+    let local: IndexSet<&str> = impl_block
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut pending: Vec<String> = hir_calls::called_in_implementation(impl_block)
+        .into_iter()
+        .filter(|name| !local.contains(name.as_str()))
+        .collect();
+    let mut visited = IndexSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let Some(function) = find_free_function(source, &name) else {
+            continue;
+        };
+        if find_free_function(target, &name).is_none() {
+            merge_symbol(target, source, &name)?;
+        }
+        pending.extend(hir_calls::called_in_function(function));
+    }
     Ok(())
 }
 

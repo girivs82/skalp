@@ -1,4 +1,4 @@
-//! Regressions found while writing the Karythra K4 CLE-µ RTL.
+//! Regressions found while writing a processor core in SKALP.
 //!
 //! The parser emits postfix operations (`.field`, `[i]`, `[h:l]`, `(args)`)
 //! as siblings of their base rather than as parents, and several builders
@@ -73,7 +73,7 @@ impl A {
 "#;
 
 #[test]
-fn test_k4_param_in_replication_is_substituted() {
+fn test_param_in_replication_is_substituted() {
     let sv = squash(&compile_to_sv(SEXT_FN));
     assert!(
         sv.contains("assignq={{32{a[31]}},a};"),
@@ -83,7 +83,7 @@ fn test_k4_param_in_replication_is_substituted() {
 }
 
 #[tokio::test]
-async fn test_k4_param_in_replication_simulates() {
+async fn test_param_in_replication_simulates() {
     let mut sim = simulator(SEXT_FN).await;
     for (a, expected) in [
         (0x8000_0001u64, 0xFFFF_FFFF_8000_0001u64),
@@ -99,7 +99,7 @@ async fn test_k4_param_in_replication_simulates() {
 }
 
 #[test]
-fn test_k4_replication_keeps_postfix_operations() {
+fn test_replication_keeps_postfix_operations() {
     // Each replicated value carries a postfix chain the builder used to cut
     // off after the first sibling, and the count can be an expression.
     let source = r#"
@@ -138,7 +138,7 @@ impl R {
 }
 
 #[tokio::test]
-async fn test_k4_replication_simulates() {
+async fn test_replication_simulates() {
     // Simulation used to ignore replication: `{N{v}}` became a single copy
     // or a 1-bit zero.
     let source = r#"
@@ -217,7 +217,7 @@ impl A {
 "#;
 
 #[test]
-fn test_k4_index_call_result_compiles() {
+fn test_index_call_result_compiles() {
     // Before the fix the `let` was dropped ("undefined identifier `lt`"),
     // the `return` lost its value, and `q5 = x(a, b)[5]` vanished.
     let sv = compile_to_sv(INDEX_CALL);
@@ -233,7 +233,7 @@ fn test_k4_index_call_result_compiles() {
 }
 
 #[tokio::test]
-async fn test_k4_index_call_result_simulates() {
+async fn test_index_call_result_simulates() {
     let mut sim = simulator(INDEX_CALL).await;
     for (a, b) in [(3u64, 5u64), (5, 3), (0xA5, 0x0F), (0xFF, 0x00), (0, 0)] {
         sim.set_input("a", a).await;
@@ -272,7 +272,7 @@ async fn test_k4_index_call_result_simulates() {
 }
 
 #[test]
-fn test_k4_function_module_let_declared_once() {
+fn test_function_module_let_declared_once() {
     // A function synthesized as its own module declares each `let` binding
     // as a wire and used to declare it again as a `logic` variable of the
     // same name — illegal SystemVerilog.
@@ -348,7 +348,7 @@ impl A {
 "#;
 
 #[test]
-fn test_k4_array_index_by_instance_output_slice() {
+fn test_array_index_by_instance_output_slice() {
     let sv = squash(&compile_to_sv(INSTANCE_SLICE_INDEX));
     assert!(
         sv.contains("mem[s_a[3:0]]<=wd;"),
@@ -370,7 +370,7 @@ async fn rising_edge(sim: &mut UnifiedSimulator) {
 }
 
 #[tokio::test]
-async fn test_k4_array_index_by_instance_output_slice_simulates() {
+async fn test_array_index_by_instance_output_slice_simulates() {
     let mut sim = simulator(INSTANCE_SLICE_INDEX).await;
     // Address = (x + 1)[3:0]; x = 0x00F1 and x = 0x0011 both hit address 2,
     // x = 0x0013 hits address 4.

@@ -511,6 +511,174 @@ pub fn place_and_route_nexus(
     })
 }
 
+/// Place and route on the real Nexus device data and emit a loadable bitstream.
+///
+/// `db_root` is the prjoxide database root. Unlike [`place_and_route_nexus`],
+/// which uses a synthetic device model, the output runs on real silicon. The
+/// output format follows `config.bitstream.format`.
+#[cfg(feature = "nexus-bitstream")]
+pub fn place_and_route_nexus_real(
+    netlist: &GateNetlist,
+    variant: crate::device::nexus::NexusVariant,
+    config: PnrConfig,
+    db_root: &std::path::Path,
+) -> Result<PnrResult> {
+    use crate::bitstream::config::{
+        generate_bitstream, ConfigTextWriter, FormatWriter, PlacedDesign,
+    };
+    use crate::bitstream::prepare;
+    use crate::bitstream::BitstreamFormat;
+    use crate::device::nexus::emit::NexusConfig;
+    use crate::device::nexus::prjoxide_load::load_tilegrid;
+    use crate::device::nexus::prjoxide_pack::NexusBitWriter;
+    use crate::device::nexus::sites;
+    use crate::device::nexus::NexusDevice;
+    use crate::error::PlaceRouteError;
+
+    let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
+    let packages =
+        sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
+    let pad_sites: Vec<(u32, u32)> = netlist
+        .cells
+        .iter()
+        .filter_map(|c| c.parameters.get("LOC"))
+        .filter_map(|loc| {
+            let package = variant
+                .default_package()
+                .and_then(|name| packages.get(name))
+                .or_else(|| packages.values().next())?;
+            package.pins.get(loc)
+        })
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
+        db_root,
+        variant.prjoxide_family(),
+        variant.prjoxide_device(),
+    )
+    .map_err(PlaceRouteError::BitstreamFailed)?;
+    let ram_count = netlist
+        .cells
+        .iter()
+        .filter(|c| c.ram_ports().is_some())
+        .count();
+    let dsp_count = netlist
+        .cells
+        .iter()
+        .filter(|c| c.dsp_ports().is_some())
+        .count();
+    let region = sites::design_region(
+        &tiles,
+        &clocks,
+        &pad_sites,
+        netlist.cells.len(),
+        ram_count,
+        dsp_count,
+    );
+    let device =
+        NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
+            .map_err(PlaceRouteError::BitstreamFailed)?;
+
+    let netlist = &prepare::drive_constant_inputs(netlist, &device);
+    let logic = prepare::logic_only_netlist(netlist);
+    let mut packer = CellPacker::new(&logic);
+    let packing = packer.pack();
+    let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let mut placement = if packing.carry_chains.is_empty() {
+        placer.place(&logic)?
+    } else {
+        placer.place_with_carry_chains(&logic, &packing.carry_chains)?
+    };
+    prepare::place_pads(&device, netlist, &mut placement)?;
+
+    let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
+    let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
+    for net in &mut routable.nets {
+        if !clock_routes.general.contains(&net.id) {
+            net.fanout
+                .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+        }
+    }
+    let router_device = device.without_wires(&clock_routes.claimed);
+    let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
+        RouterConfig::for_design_size(routable.nets.len())
+    } else {
+        config.router.clone()
+    };
+    let mut router = Router::new(router_config, router_device);
+    let mut routing = router.route(&routable, &placement)?;
+    for clock_route in clock_routes.routes {
+        match routing.routes.get_mut(&clock_route.net_id) {
+            Some(route) => {
+                route.pips.extend(clock_route.pips);
+                route.wires.extend(clock_route.wires);
+                route.sinks.extend(clock_route.sinks);
+            }
+            None => {
+                routing.wirelength += clock_route.wires.len() as u64;
+                routing.routes.insert(clock_route.net_id, clock_route);
+            }
+        }
+    }
+    if !routing.success {
+        return Err(PlaceRouteError::RoutingFailed(
+            "Some nets could not be routed on the real device".to_string(),
+        ));
+    }
+
+    let uses_oscillator = netlist
+        .cells
+        .iter()
+        .any(|c| c.parameters.get("LOC").map(String::as_str) == Some(sites::OSC_PIN));
+    let target_mhz = if uses_oscillator {
+        crate::device::nexus::emit::OSC_FREQUENCY_MHZ
+    } else {
+        config.timing.as_ref().map_or(100.0, |t| t.target_frequency)
+    };
+    let generator = NexusConfig {
+        device: &device,
+        variant,
+        db_root,
+    };
+    let design = PlacedDesign {
+        netlist,
+        placement: &placement,
+        routing: &routing,
+        tied: &tied,
+    };
+    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
+    let timing_model = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &timing_db,
+    };
+    let timing = crate::timing::sta::analyze(&device, &timing_model, &design, target_mhz);
+
+    let bit_writer = NexusBitWriter {
+        db_root,
+        idcode: variant.idcode(),
+    };
+    let writer: &dyn FormatWriter = match config.bitstream.format {
+        BitstreamFormat::ConfigBitsText => &ConfigTextWriter,
+        _ => &bit_writer,
+    };
+    let bitstream = generate_bitstream(&generator, writer, &design)?;
+
+    let wire_delays: IndexMap<GateNetId, f64> = routing
+        .routes
+        .iter()
+        .map(|(&net_id, route)| (net_id, route.delay as f64))
+        .collect();
+
+    Ok(PnrResult {
+        placement,
+        routing,
+        bitstream,
+        timing: Some(timing),
+        variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
+        wire_delays,
+    })
+}
+
 /// Place and route targeting Lattice ECP5 devices.
 ///
 /// Uses the same generic placer/router pipeline with:

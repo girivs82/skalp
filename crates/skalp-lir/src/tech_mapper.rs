@@ -13,8 +13,10 @@
 
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
+    DSP_A_BITS_PARAM, DSP_B_BITS_PARAM, DSP_C_BITS, DSP_P_BITS_PARAM, RAM_ADDR_BITS_PARAM,
+    RAM_DATA_BITS_PARAM,
 };
-use crate::lir::{Lir, LirOp, LirSignalId};
+use crate::lir::{Lir, LirNodeId, LirOp, LirSignalId};
 use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
 use indexmap::IndexMap;
 use skalp_frontend::hir::PhysicalConstraints;
@@ -179,6 +181,9 @@ pub fn synthesize(
     preset: crate::synth::SynthPreset,
 ) -> crate::synth::SynthResult {
     use crate::synth::{LirToSynthAig, SynthEngine};
+
+    let absorbed = absorb_block_ram_read_registers(lir, library);
+    let lir = absorbed.as_ref().unwrap_or(lir);
 
     // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist).
     // Physical ops (NCL, BRAM, DSP) become pseudo-inputs in the AIG so that
@@ -545,7 +550,13 @@ pub fn insert_io_buffers(
 
     // Insert input IO buffers
     for &input_net_id in &input_nets {
-        if clock_nets.contains(&input_net_id) {
+        // A clock gets a pad only when the design assigns it to a pin.
+        let has_pin = netlist
+            .nets
+            .get(input_net_id.0 as usize)
+            .and_then(|n| port_constraints.get(&n.name))
+            .is_some_and(|c| c.pin_location.is_some());
+        if clock_nets.contains(&input_net_id) && !has_pin {
             continue;
         }
 
@@ -701,6 +712,12 @@ fn apply_io_constraints_standalone(
     if let Some(ref std) = constraints.io_standard {
         cell.parameters.insert("IO_STANDARD".into(), std.clone());
     }
+    if let Some(ref reason) = constraints.drive_override {
+        cell.parameters.insert(
+            crate::gate_netlist::DRIVE_OVERRIDE_PARAM.into(),
+            reason.clone(),
+        );
+    }
     if let Some(ref drive) = constraints.drive_strength {
         cell.parameters
             .insert("DRIVE_STRENGTH".into(), format!("{:?}", drive));
@@ -800,6 +817,8 @@ fn map_dsp_standalone(
                            out: &[GateNetId],
                            a_ext: GateNetId,
                            b_ext: GateNetId,
+                           a_signed: GateNetId,
+                           b_signed: GateNetId,
                            suffix: &str| {
         let mut cell_inputs = Vec::new();
 
@@ -820,12 +839,12 @@ fn map_dsp_standalone(
             }
         }
         // C input — tie low
-        for _ in 0..18 {
+        for _ in 0..DSP_C_BITS {
             cell_inputs.push(tie_low);
         }
         // SIGNEDA, SIGNEDB
-        cell_inputs.push(signed_net);
-        cell_inputs.push(signed_net);
+        cell_inputs.push(a_signed);
+        cell_inputs.push(b_signed);
         // SOURCEA, SOURCEB — direct input
         cell_inputs.push(tie_low);
         cell_inputs.push(tie_low);
@@ -884,6 +903,12 @@ fn map_dsp_standalone(
         );
         cell.source_op = Some("DspMultiply".to_string());
         cell.parameters
+            .insert(DSP_A_BITS_PARAM.to_string(), dsp_info.a_width.to_string());
+        cell.parameters
+            .insert(DSP_B_BITS_PARAM.to_string(), dsp_info.b_width.to_string());
+        cell.parameters
+            .insert(DSP_P_BITS_PARAM.to_string(), dsp_info.p_width.to_string());
+        cell.parameters
             .insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
         cell.parameters
             .insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
@@ -919,6 +944,8 @@ fn map_dsp_standalone(
             outputs,
             a_sign,
             b_sign,
+            signed_net,
+            signed_net,
             "",
         );
     } else if width <= dsp_info.a_width * 2 && width <= dsp_info.b_width * 2 {
@@ -940,105 +967,94 @@ fn map_dsp_standalone(
         let a_hi_w = width - half;
         let b_hi_w = width - half;
 
-        // P_ll = A_lo * B_lo (contributes to bits [0..2*half])
+        let product_nets = |netlist: &mut GateNetlist, width: u32, tag: &str| -> Vec<GateNetId> {
+            (0..width as usize)
+                .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{tag}_p{i}"))))
+                .collect()
+        };
+
+        // The low halves are unsigned; a signed multiply has signed high halves.
         let ll_width = (2 * half).min(dsp_info.p_width);
-        let ll_out: Vec<GateNetId> = (0..ll_width as usize)
-            .map(|i| {
-                if i < result_width as usize && i < outputs.len() {
-                    outputs[i]
-                } else {
-                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.ll_p{}", path, i)))
-                }
-            })
-            .collect();
+        let ll_out = product_nets(netlist, ll_width, "ll");
         instantiate_dsp(
-            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, "_ll",
+            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, tie_low,
+            tie_low, "_ll",
+        );
+        let lh_width = (half + b_hi_w).min(dsp_info.p_width);
+        let lh_out = product_nets(netlist, lh_width, "lh");
+        instantiate_dsp(
+            netlist, &a_lo, &b_hi, half, b_hi_w, lh_width, &lh_out, tie_low, b_sign, tie_low,
+            signed_net, "_lh",
+        );
+        let hl_width = (a_hi_w + half).min(dsp_info.p_width);
+        let hl_out = product_nets(netlist, hl_width, "hl");
+        instantiate_dsp(
+            netlist, &a_hi, &b_lo, a_hi_w, half, hl_width, &hl_out, a_sign, tie_low, signed_net,
+            tie_low, "_hl",
+        );
+        let hh_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
+        let hh_out = product_nets(netlist, hh_width, "hh");
+        instantiate_dsp(
+            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_width, &hh_out, a_sign, b_sign, signed_net,
+            signed_net, "_hh",
         );
 
-        // P_lh = A_lo * B_hi (contributes to bits [half..half+2*max(half,b_hi_w)])
-        // P_hl = A_hi * B_lo (contributes to bits [half..half+2*max(a_hi_w,half)])
-        // P_hh = A_hi * B_hi (contributes to bits [2*half..])
-        // These partial products need adder logic to combine — for now create the 4 DSP
-        // blocks and use gate-level adders to sum the shifted partial products.
-        // This matches the old TechMapper behavior.
-
-        let lh_p_width = (half + b_hi_w).min(dsp_info.p_width);
-        let lh_out: Vec<GateNetId> = (0..lh_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.lh_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_lo, &b_hi, half, b_hi_w, lh_p_width, &lh_out, tie_low, b_sign, "_lh",
-        );
-
-        let hl_p_width = (a_hi_w + half).min(dsp_info.p_width);
-        let hl_out: Vec<GateNetId> = (0..hl_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hl_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_hi, &b_lo, a_hi_w, half, hl_p_width, &hl_out, a_sign, tie_low, "_hl",
-        );
-
-        let hh_p_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
-        let hh_out: Vec<GateNetId> = (0..hh_p_width as usize)
-            .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{}.hh_p{}", path, i))))
-            .collect();
-        instantiate_dsp(
-            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_p_width, &hh_out, a_sign, b_sign, "_hh",
-        );
-
-        // For remaining output bits [half..result_width], we need to add the partial products.
-        // The full result is: outputs[i] = ll[i] + (lh[i-half] + hl[i-half]) + hh[i-2*half]
-        // with carry propagation. For the test assertions, which only check DSP cell count
-        // (not functional correctness of the adder tree), wire outputs [half..] with
-        // placeholder XOR gates to combine partial products.
-        // A proper implementation would use a carry-chain adder here.
-        let xor_info = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
-
-        for i in half as usize..result_width.min(result_width) as usize {
-            if i >= outputs.len() {
-                break;
-            }
-            let lh_bit = lh_out.get(i - half as usize).copied().unwrap_or(tie_low);
-            let hl_bit = hl_out.get(i - half as usize).copied().unwrap_or(tie_low);
-
-            // Simple combine: XOR partial products into output bit
-            // (not carry-accurate, but tests only check DSP cell count)
-            let combined = netlist.add_net(GateNet::new(
-                GateNetId(0),
-                format!("{}.dsp_combine_{}", path, i),
-            ));
-            let mut xc1 = Cell::new_comb(
-                CellId(0),
-                xor_info.name.clone(),
-                library.name.clone(),
-                xor_info.fit,
-                format!("{}.dsp_xor_{}", path, i),
-                vec![lh_bit, hl_bit],
-                vec![combined],
-            );
-            xor_info.apply_to_cell(&mut xc1);
-            netlist.add_cell(xc1);
-
-            // XOR with hh contribution if applicable
-            let hh_bit = if i >= 2 * half as usize {
-                hh_out
-                    .get(i - 2 * half as usize)
-                    .copied()
-                    .unwrap_or(tie_low)
+        // Line each partial product up at its weight, extended to the full result.
+        let total = result_width as usize;
+        let shifted = |product: &[GateNetId], shift: usize, sign: GateNetId| -> Vec<GateNetId> {
+            (0..total)
+                .map(|bit| {
+                    if bit < shift {
+                        tie_low
+                    } else {
+                        product.get(bit - shift).copied().unwrap_or(sign)
+                    }
+                })
+                .collect()
+        };
+        let top_bit = |product: &[GateNetId]| {
+            if signed {
+                product.last().copied().unwrap_or(tie_low)
             } else {
                 tie_low
-            };
-            let mut xc2 = Cell::new_comb(
+            }
+        };
+        let h = half as usize;
+        let ll = shifted(&ll_out, 0, tie_low);
+        let lh = shifted(&lh_out, h, top_bit(&lh_out));
+        let hl = shifted(&hl_out, h, top_bit(&hl_out));
+        let hh = shifted(&hh_out, 2 * h, top_bit(&hh_out));
+
+        let sum = add_nets(netlist, library, &ll, &lh, tie_low, &format!("{path}.sum0"));
+        let sum = add_nets(
+            netlist,
+            library,
+            &sum,
+            &hl,
+            tie_low,
+            &format!("{path}.sum1"),
+        );
+        let sum = add_nets(
+            netlist,
+            library,
+            &sum,
+            &hh,
+            tie_low,
+            &format!("{path}.sum2"),
+        );
+        let buffer = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+        for (bit, &output) in outputs.iter().enumerate().take(total) {
+            let mut cell = Cell::new_comb(
                 CellId(0),
-                xor_info.name.clone(),
+                buffer.name.clone(),
                 library.name.clone(),
-                xor_info.fit,
-                format!("{}.dsp_xor2_{}", path, i),
-                vec![combined, hh_bit],
-                vec![outputs[i]],
+                buffer.fit,
+                format!("{path}.product_buf{bit}"),
+                vec![sum[bit]],
+                vec![output],
             );
-            xor_info.apply_to_cell(&mut xc2);
-            netlist.add_cell(xc2);
+            buffer.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
         }
     } else {
         // Too wide for DSP — should not happen since the AIG path would handle it,
@@ -1048,6 +1064,582 @@ fn map_dsp_standalone(
             path, width
         );
     }
+}
+
+/// Add two equal-width buses, on a carry chain when the library has one.
+fn add_nets(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    a: &[GateNetId],
+    b: &[GateNetId],
+    tie_low: GateNetId,
+    name: &str,
+) -> Vec<GateNetId> {
+    let width = a.len();
+    let outputs: Vec<GateNetId> = (0..width)
+        .map(|bit| netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_{bit}"))))
+        .collect();
+    let operand = |nets: &[GateNetId]| crate::carry_chain::Operand {
+        nets: nets.to_vec(),
+        constant: None,
+    };
+    let add = LirOp::Add {
+        width: width as u32,
+        has_carry: false,
+        const_b: None,
+    };
+    if crate::carry_chain::map_carry_chain(
+        netlist,
+        library,
+        &add,
+        &[operand(a), operand(b)],
+        &outputs,
+        name,
+    ) {
+        return outputs;
+    }
+
+    // No carry chain in this library: a ripple adder from basic gates.
+    let xor = lookup_cell(library, CellFunction::Xor2, "XOR2", 0.2);
+    let and = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let or = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+    let gate = |netlist: &mut GateNetlist,
+                info: &LibraryCellInfo,
+                inputs: Vec<GateNetId>,
+                output: GateNetId,
+                tag: String| {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            info.name.clone(),
+            library.name.clone(),
+            info.fit,
+            tag,
+            inputs,
+            vec![output],
+        );
+        info.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+    };
+    let mut carry = tie_low;
+    for bit in 0..width {
+        let net = |netlist: &mut GateNetlist, tag: &str| {
+            netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_{tag}{bit}")))
+        };
+        let half_sum = net(netlist, "x");
+        let generate = net(netlist, "g");
+        let propagate = net(netlist, "p");
+        let carry_out = net(netlist, "c");
+        gate(
+            netlist,
+            &xor,
+            vec![a[bit], b[bit]],
+            half_sum,
+            format!("{name}.x{bit}"),
+        );
+        gate(
+            netlist,
+            &xor,
+            vec![half_sum, carry],
+            outputs[bit],
+            format!("{name}.s{bit}"),
+        );
+        gate(
+            netlist,
+            &and,
+            vec![a[bit], b[bit]],
+            generate,
+            format!("{name}.g{bit}"),
+        );
+        gate(
+            netlist,
+            &and,
+            vec![half_sum, carry],
+            propagate,
+            format!("{name}.p{bit}"),
+        );
+        gate(
+            netlist,
+            &or,
+            vec![generate, propagate],
+            carry_out,
+            format!("{name}.c{bit}"),
+        );
+        carry = carry_out;
+    }
+    outputs
+}
+
+/// Smallest memory, in bits, worth a block RAM.
+const BRAM_MIN_BITS: u32 = 256;
+
+/// How a read register merged into a block RAM takes in new data.
+enum ReadCapture {
+    /// Every clock
+    Always,
+    /// Only while `enable` is true; otherwise it holds
+    Hold { enable: EnableSignal },
+    /// Every clock, but reads as `value` when `clear` is true
+    Clear { clear: EnableSignal, value: u64 },
+}
+
+/// A control signal and whether it is active low.
+#[derive(Clone, Copy)]
+struct EnableSignal {
+    signal: LirSignalId,
+    active_low: bool,
+}
+
+/// A register merged into a block RAM.
+struct ReadRegister {
+    register: usize,
+    d_mux: Option<usize>,
+    capture: ReadCapture,
+}
+
+/// The register a memory's read data goes straight into, if it goes nowhere else.
+fn find_read_register(
+    lir: &Lir,
+    readers: &IndexMap<LirSignalId, Vec<usize>>,
+    rdata: LirSignalId,
+    clock: Option<LirSignalId>,
+) -> Option<ReadRegister> {
+    let is_output =
+        |s: LirSignalId| lir.signals[s.0 as usize].is_output || lir.outputs.contains(&s);
+    let only_reader = |s: LirSignalId| match readers.get(&s).map(Vec::as_slice) {
+        Some([reader]) if !is_output(s) => Some(*reader),
+        _ => None,
+    };
+    let is_register = |index: usize, d: LirSignalId| {
+        let node = &lir.nodes[index];
+        matches!(
+            node.op,
+            LirOp::Reg {
+                has_enable: false,
+                ..
+            }
+        ) && node.clock == clock
+            && node.inputs.first() == Some(&d)
+    };
+    let constant = |s: LirSignalId| {
+        let driver = lir.signals[s.0 as usize].driver?;
+        match lir.nodes[driver.0 as usize].op {
+            LirOp::Constant { value, .. } => Some(value),
+            _ => None,
+        }
+    };
+
+    let reader = only_reader(rdata)?;
+    if is_register(reader, rdata) {
+        return Some(ReadRegister {
+            register: reader,
+            d_mux: None,
+            capture: ReadCapture::Always,
+        });
+    }
+    let mux = &lir.nodes[reader];
+    let LirOp::Mux2 { .. } = mux.op else {
+        return None;
+    };
+    let &[select, d0, d1] = mux.inputs.as_slice() else {
+        return None;
+    };
+    let register = only_reader(mux.output)?;
+    if !is_register(register, mux.output) {
+        return None;
+    }
+    let q = lir.nodes[register].output;
+    // Which select value picks the read data, and what the other input is.
+    let (other, rdata_when_low) = match (d0 == rdata, d1 == rdata) {
+        (false, true) => (d0, false),
+        (true, false) => (d1, true),
+        _ => return None,
+    };
+    let capture = if other == q {
+        ReadCapture::Hold {
+            enable: EnableSignal {
+                signal: select,
+                active_low: rdata_when_low,
+            },
+        }
+    } else {
+        ReadCapture::Clear {
+            clear: EnableSignal {
+                signal: select,
+                active_low: !rdata_when_low,
+            },
+            value: constant(other)?,
+        }
+    };
+    Some(ReadRegister {
+        register,
+        d_mux: Some(reader),
+        capture,
+    })
+}
+
+/// Emit a control signal as active high.
+fn active_high(lir: &mut Lir, control: EnableSignal, name: &str) -> LirSignalId {
+    if !control.active_low {
+        return control.signal;
+    }
+    let inverted = lir.add_signal(name.to_string(), 1);
+    lir.add_node(
+        LirOp::Not { width: 1 },
+        vec![control.signal],
+        inverted,
+        format!("{name}.not"),
+    );
+    inverted
+}
+
+/// A register recording that the last clock loaded the read register from the RAM.
+fn add_loaded_flag(
+    lir: &mut Lir,
+    next: LirSignalId,
+    flag: LirSignalId,
+    register: &crate::lir::LirNode,
+    with_reset: bool,
+    name: &str,
+) {
+    let async_reset = matches!(
+        register.op,
+        LirOp::Reg {
+            async_reset: true,
+            ..
+        }
+    );
+    lir.add_seq_node(
+        LirOp::Reg {
+            width: 1,
+            has_enable: false,
+            has_reset: with_reset && register.reset.is_some(),
+            async_reset,
+            reset_value: Some(0),
+        },
+        vec![next],
+        flag,
+        name.to_string(),
+        register.clock.expect("a read register has a clock"),
+        register.reset.filter(|_| with_reset),
+    );
+}
+
+/// `output = loaded ? data : value`.
+fn add_fixed_value_mux(
+    lir: &mut Lir,
+    loaded: LirSignalId,
+    data: LirSignalId,
+    value: u64,
+    output: LirSignalId,
+    name: &str,
+) {
+    let width = lir.signals[data.0 as usize].width;
+    let fixed = lir.add_signal(format!("{name}_fixed"), width);
+    lir.add_node(
+        LirOp::Constant { width, value },
+        Vec::new(),
+        fixed,
+        format!("{name}.fixed"),
+    );
+    lir.add_node(
+        LirOp::Mux2 { width },
+        vec![loaded, fixed, data],
+        output,
+        format!("{name}.value"),
+    );
+}
+
+/// Make a merged read register's reset and clear values appear on its output.
+///
+/// A block RAM's output has no general set or clear, so a flag records whether
+/// the last clock loaded the register from the RAM, and the output is the fixed
+/// value until it did. `q` then behaves just as the register would have.
+fn add_read_value_overrides(
+    lir: &mut Lir,
+    rdata: LirSignalId,
+    q: LirSignalId,
+    capture: &ReadCapture,
+    register: &crate::lir::LirNode,
+    reset_value: Option<u64>,
+    path: &str,
+) {
+    let width = lir.signals[rdata.0 as usize].width;
+    let mut data = rdata;
+
+    if let ReadCapture::Clear { clear, value } = capture {
+        let name = format!("{path}_read_clear");
+        let flag = lir.add_signal(format!("{name}_loaded"), 1);
+        let not_clear = active_high(
+            lir,
+            EnableSignal {
+                signal: clear.signal,
+                active_low: !clear.active_low,
+            },
+            &format!("{name}_inactive"),
+        );
+        add_loaded_flag(
+            lir,
+            not_clear,
+            flag,
+            register,
+            false,
+            &format!("{name}.loaded"),
+        );
+        let output = if reset_value.is_some() {
+            lir.add_signal(format!("{name}_data"), width)
+        } else {
+            q
+        };
+        add_fixed_value_mux(lir, flag, data, *value, output, &name);
+        data = output;
+    }
+
+    if let Some(value) = reset_value {
+        let name = format!("{path}_read_reset");
+        let flag = lir.add_signal(format!("{name}_loaded"), 1);
+        let one = lir.add_signal(format!("{name}_one"), 1);
+        lir.add_node(
+            LirOp::Constant { width: 1, value: 1 },
+            Vec::new(),
+            one,
+            format!("{name}.one"),
+        );
+        let next = match capture {
+            ReadCapture::Hold { enable } => {
+                let enable = active_high(lir, *enable, &format!("{name}_enable"));
+                let held = lir.add_signal(format!("{name}_loaded_d"), 1);
+                lir.add_node(
+                    LirOp::Mux2 { width: 1 },
+                    vec![enable, flag, one],
+                    held,
+                    format!("{name}.loaded_d"),
+                );
+                held
+            }
+            _ => one,
+        };
+        add_loaded_flag(lir, next, flag, register, true, &format!("{name}.loaded"));
+        add_fixed_value_mux(lir, flag, data, value, q, &name);
+    }
+}
+
+/// Merge each block RAM's read register into the RAM.
+///
+/// The LIR describes a read as a combinational memory output followed by the
+/// design's register, but a block RAM's output is itself registered: keeping
+/// both would delay reads by an extra cycle. A memory whose read data also feeds
+/// logic directly cannot use a block RAM at all and is marked `async_read`.
+fn absorb_block_ram_read_registers(lir: &Lir, library: &TechLibrary) -> Option<Lir> {
+    library.find_ram_cell()?;
+    let candidates: Vec<usize> = lir
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            matches!(
+                node.op,
+                LirOp::MemBlock {
+                    data_width,
+                    depth,
+                    async_read: false,
+                    registered_read: false,
+                    ..
+                } if data_width * depth >= BRAM_MIN_BITS
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut readers: IndexMap<LirSignalId, Vec<usize>> = IndexMap::new();
+    for (index, node) in lir.nodes.iter().enumerate() {
+        for &input in &node.inputs {
+            readers.entry(input).or_default().push(index);
+        }
+    }
+
+    let mut result = lir.clone();
+    let mut removed = std::collections::HashSet::new();
+    for memory in candidates {
+        let (rdata, clock, path) = {
+            let node = &lir.nodes[memory];
+            (node.output, node.clock, node.path.clone())
+        };
+        let Some(found) = find_read_register(lir, &readers, rdata, clock) else {
+            eprintln!(
+                "warning: memory read at '{path}' feeds logic directly, so it uses LUT RAM or registers instead of block RAM"
+            );
+            if let LirOp::MemBlock { async_read, .. } = &mut result.nodes[memory].op {
+                *async_read = true;
+            }
+            continue;
+        };
+        let register = lir.nodes[found.register].clone();
+        let q = register.output;
+
+        // With no reset, the fixed value is what the register powers up holding.
+        let reset_value = match register.op {
+            LirOp::Reg {
+                has_reset: true,
+                reset_value,
+                ..
+            } => Some(reset_value.unwrap_or(0)),
+            _ => lir.signals[q.0 as usize].initial.filter(|&v| v != 0),
+        };
+        let has_override =
+            reset_value.is_some() || matches!(found.capture, ReadCapture::Clear { .. });
+
+        // A Hold enable goes to the RAM's clock enable. A clear does not stop the
+        // RAM capturing, since the design's register would load either way.
+        let enable = match &found.capture {
+            ReadCapture::Hold { enable } => Some(active_high(
+                &mut result,
+                *enable,
+                &format!("{path}_read_enable_ram"),
+            )),
+            _ => None,
+        };
+        if has_override {
+            add_read_value_overrides(
+                &mut result,
+                rdata,
+                q,
+                &found.capture,
+                &register,
+                reset_value,
+                &path,
+            );
+        }
+
+        let node = &mut result.nodes[memory];
+        let LirOp::MemBlock {
+            registered_read,
+            read_enable,
+            ..
+        } = &mut node.op
+        else {
+            continue;
+        };
+        *registered_read = true;
+        *read_enable = enable.is_some();
+        if !has_override {
+            node.output = q;
+        }
+        node.inputs.extend(enable);
+        removed.insert(found.register);
+        removed.extend(found.d_mux);
+    }
+
+    let mut index = 0;
+    result.nodes.retain(|_| {
+        index += 1;
+        !removed.contains(&(index - 1))
+    });
+    for signal in &mut result.signals {
+        signal.driver = None;
+    }
+    for (index, node) in result.nodes.iter_mut().enumerate() {
+        node.id = LirNodeId(index as u32);
+        result.signals[node.output.0 as usize].driver = Some(node.id);
+    }
+    Some(result)
+}
+
+/// Add a flip-flop for `d`, optionally holding its value when not enabled.
+fn register_bit(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    d: GateNetId,
+    enable: Option<GateNetId>,
+    clk: GateNetId,
+    name: &str,
+) -> GateNetId {
+    let q = netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_q")));
+    let data = match enable {
+        None => d,
+        Some(enable) => {
+            let mux_ci = lookup_cell(library, CellFunction::Mux2, "MUX2", 0.3);
+            let held = netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_d")));
+            let mut mux = Cell::new_comb(
+                CellId(0),
+                mux_ci.name.clone(),
+                library.name.clone(),
+                mux_ci.fit,
+                format!("{name}_hold"),
+                mux2_inputs(&mux_ci, enable, q, d),
+                vec![held],
+            );
+            mux_ci.apply_to_cell(&mut mux);
+            netlist.add_cell(mux);
+            held
+        }
+    };
+    let dff_ci = lookup_cell(library, CellFunction::Dff, "DFF", 0.5);
+    let mut dff = Cell::new_seq(
+        CellId(0),
+        dff_ci.name.clone(),
+        library.name.clone(),
+        dff_ci.fit,
+        format!("{name}_dff"),
+        vec![data],
+        vec![q],
+        clk,
+        None,
+    );
+    dff_ci.apply_to_cell(&mut dff);
+    netlist.add_cell(dff);
+    q
+}
+
+/// Output high when the upper address bits select block RAM bank `bank`.
+fn decode_ram_bank(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    address_bits: &[GateNetId],
+    bank: u32,
+    tie_high: GateNetId,
+    name: &str,
+) -> GateNetId {
+    let mut selected = tie_high;
+    for (bit, &address_bit) in address_bits.iter().enumerate() {
+        let wanted_high = (bank >> bit) & 1 == 1;
+        let (function, fallback) = if wanted_high {
+            (CellFunction::Buf, "BUF")
+        } else {
+            (CellFunction::Inv, "INV")
+        };
+        let ci = lookup_cell(library, function, fallback, 0.1);
+        let matched = netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_match{bit}")));
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            ci.name.clone(),
+            library.name.clone(),
+            ci.fit,
+            format!("{name}_addr{bit}"),
+            vec![address_bit],
+            vec![matched],
+        );
+        ci.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+
+        let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+        let next = netlist.add_net(GateNet::new(GateNetId(0), format!("{name}_sel{bit}")));
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            and_ci.name.clone(),
+            library.name.clone(),
+            and_ci.fit,
+            format!("{name}_and{bit}"),
+            vec![selected, matched],
+            vec![next],
+        );
+        and_ci.apply_to_cell(&mut cell);
+        netlist.add_cell(cell);
+        selected = next;
+    }
+    selected
 }
 
 /// Map a LIR MemBlock node to RAM primitive cells (standalone version).
@@ -1064,6 +1656,7 @@ fn map_memblock_standalone(
     depth: u32,
     has_write: bool,
     async_read: bool,
+    read_enable: Option<GateNetId>,
     inputs: &[Vec<GateNetId>],
     outputs: &[GateNetId],
     path: &str,
@@ -1074,7 +1667,6 @@ fn map_memblock_standalone(
     // even when the target has BRAM (an iCE40 EBR is 4096 bits; spending
     // one on 32 bits wastes a scarce resource). The LIR MemBlock is the
     // canonical memory form; THIS is where BRAM-vs-DFF is decided.
-    const BRAM_MIN_BITS: u32 = 256;
     let total_bits = data_width * depth;
 
     // Query library for RAM cell
@@ -1141,14 +1733,14 @@ fn map_memblock_standalone(
             let tie_info = lookup_cell(library, CellFunction::TieLow, "TIE_LOW", 0.01);
             let mut cell = Cell::new_comb(
                 CellId(0),
-                tie_info.name,
+                tie_info.name.clone(),
                 library.name.clone(),
                 tie_info.fit,
                 "tie_low".to_string(),
                 vec![],
                 vec![id],
             );
-            cell.function = Some(CellFunction::TieLow);
+            tie_info.apply_to_cell(&mut cell);
             netlist.add_cell(cell);
             id
         }
@@ -1191,7 +1783,7 @@ fn map_memblock_standalone(
             cell_inputs.push(raddr.get(bit).copied().unwrap_or(tie_low));
         }
         cell_inputs.push(clk); // RCLK
-        cell_inputs.push(tie_high); // RCLKE
+        cell_inputs.push(read_enable.unwrap_or(tie_high)); // RCLKE
         cell_inputs.push(tie_high); // RE
 
         if has_write {
@@ -1258,6 +1850,12 @@ fn map_memblock_standalone(
             .insert("READ_MODE".to_string(), block_width.to_string());
         cell.parameters
             .insert("WRITE_MODE".to_string(), block_width.to_string());
+        cell.parameters.insert(
+            RAM_ADDR_BITS_PARAM.to_string(),
+            block_addr_width.to_string(),
+        );
+        cell.parameters
+            .insert(RAM_DATA_BITS_PARAM.to_string(), block_width.to_string());
         ram_cell_info.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
     };
@@ -1299,68 +1897,46 @@ fn map_memblock_standalone(
         // Need address decode for write enable and output MUX for read
         let upper_addr_bits = clog2(depth_blocks);
 
+        // A block RAM's output follows the address by a cycle, so the output mux
+        // must select on the address of that cycle.
+        let read_bank_bits: Vec<GateNetId> = (0..upper_addr_bits as usize)
+            .map(|bit| {
+                let addr_bit = raddr_nets
+                    .get(block_addr_width as usize + bit)
+                    .copied()
+                    .unwrap_or(tie_low);
+                let name = format!("{}_rbank{}", path, bit);
+                register_bit(netlist, library, addr_bit, read_enable, clk, &name)
+            })
+            .collect();
+
+        // The latest read mux output for each bit of each width slice.
+        let mut read_results: IndexMap<(u32, usize), GateNetId> = IndexMap::new();
         for db in 0..depth_blocks {
-            // Decode upper address bits for this bank
-            let mut bank_sel = tie_high;
-            for bit in 0..upper_addr_bits as usize {
-                let addr_bit_idx = block_addr_width as usize + bit;
-                let addr_bit = raddr_nets.get(addr_bit_idx).copied().unwrap_or(tie_low);
-                let expected = (db >> bit) & 1;
-
-                let match_net = netlist.add_net(GateNet::new(
-                    GateNetId(0),
-                    format!("{}_d{}_addr_match_{}", path, db, bit),
-                ));
-
-                if expected == 0 {
-                    // Need INV
-                    let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
-                    let mut cell = Cell::new_comb(
-                        CellId(0),
-                        inv_ci.name,
-                        library.name.clone(),
-                        inv_ci.fit,
-                        format!("{}_d{}_addr_inv_{}", path, db, bit),
-                        vec![addr_bit],
-                        vec![match_net],
-                    );
-                    cell.function = Some(CellFunction::Inv);
-                    netlist.add_cell(cell);
-                } else {
-                    // Buffer/pass through
-                    let buf_ci = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
-                    let mut cell = Cell::new_comb(
-                        CellId(0),
-                        buf_ci.name,
-                        library.name.clone(),
-                        buf_ci.fit,
-                        format!("{}_d{}_addr_buf_{}", path, db, bit),
-                        vec![addr_bit],
-                        vec![match_net],
-                    );
-                    cell.function = Some(CellFunction::Buf);
-                    netlist.add_cell(cell);
-                }
-
-                // AND with running bank_sel
-                let new_sel = netlist.add_net(GateNet::new(
-                    GateNetId(0),
-                    format!("{}_d{}_bank_sel_{}", path, db, bit),
-                ));
-                let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
-                let mut cell = Cell::new_comb(
-                    CellId(0),
-                    and_ci.name,
-                    library.name.clone(),
-                    and_ci.fit,
-                    format!("{}_d{}_bank_and_{}", path, db, bit),
-                    vec![bank_sel, match_net],
-                    vec![new_sel],
-                );
-                cell.function = Some(CellFunction::And2);
-                netlist.add_cell(cell);
-                bank_sel = new_sel;
-            }
+            let write_bank_bits: Vec<GateNetId> = (0..upper_addr_bits as usize)
+                .map(|bit| {
+                    waddr_nets
+                        .get(block_addr_width as usize + bit)
+                        .copied()
+                        .unwrap_or(tie_low)
+                })
+                .collect();
+            let write_sel = decode_ram_bank(
+                netlist,
+                library,
+                &write_bank_bits,
+                db,
+                tie_high,
+                &format!("{}_d{}_w", path, db),
+            );
+            let read_sel = decode_ram_bank(
+                netlist,
+                library,
+                &read_bank_bits,
+                db,
+                tie_high,
+                &format!("{}_d{}_r", path, db),
+            );
 
             // Bank-qualified write enable
             let bank_we = netlist.add_net(GateNet::new(
@@ -1370,14 +1946,14 @@ fn map_memblock_standalone(
             let we_and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
             let mut cell = Cell::new_comb(
                 CellId(0),
-                we_and_ci.name,
+                we_and_ci.name.clone(),
                 library.name.clone(),
                 we_and_ci.fit,
                 format!("{}_d{}_we_and", path, db),
-                vec![we_net, bank_sel],
+                vec![we_net, write_sel],
                 vec![bank_we],
             );
-            cell.function = Some(CellFunction::And2);
+            we_and_ci.apply_to_cell(&mut cell);
             netlist.add_cell(cell);
 
             // For each width block in this depth slice
@@ -1423,6 +1999,7 @@ fn map_memblock_standalone(
                             GateNetId(0),
                             format!("{}_w{}_result{}", path, wb, i - bit_lo),
                         ));
+                        read_results.insert((wb, i - bit_lo), result_net);
                         // MUX: bank_sel ? block_out : tie_low
                         let mut cell = Cell::new_comb(
                             CellId(0),
@@ -1430,7 +2007,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d0_w{}_rmux{}", path, wb, i - bit_lo),
-                            mux2_inputs(&mux_ci, bank_sel, tie_low, block_out[i - bit_lo]),
+                            mux2_inputs(&mux_ci, read_sel, tie_low, block_out[i - bit_lo]),
                             vec![result_net],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1440,9 +2017,7 @@ fn map_memblock_standalone(
                 } else if db == depth_blocks - 1 {
                     // Last bank: MUX to final output
                     for i in bit_lo..bit_hi {
-                        let prev_result = netlist
-                            .get_net_id(&format!("{}_w{}_result{}", path, wb, i - bit_lo))
-                            .unwrap_or(tie_low);
+                        let prev_result = read_results[&(wb, i - bit_lo)];
                         let final_out = outputs.get(i).copied().unwrap_or(outputs[0]);
                         // MUX: bank_sel ? block_out : prev_result → final output
                         let mut cell = Cell::new_comb(
@@ -1451,7 +2026,7 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
+                            mux2_inputs(&mux_ci, read_sel, prev_result, block_out[i - bit_lo]),
                             vec![final_out],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
@@ -1461,8 +2036,7 @@ fn map_memblock_standalone(
                 } else {
                     // Middle bank: MUX with previous, store to new result net
                     for i in bit_lo..bit_hi {
-                        let prev_name = format!("{}_w{}_result{}", path, wb, i - bit_lo);
-                        let prev_result = netlist.get_net_id(&prev_name).unwrap_or(tie_low);
+                        let prev_result = read_results[&(wb, i - bit_lo)];
                         let new_result = netlist.add_net(GateNet::new(
                             GateNetId(0),
                             format!("{}_d{}_w{}_result{}", path, db, wb, i - bit_lo),
@@ -1473,17 +2047,13 @@ fn map_memblock_standalone(
                             library.name.clone(),
                             mux_ci.fit,
                             format!("{}_d{}_w{}_rmux{}", path, db, wb, i - bit_lo),
-                            mux2_inputs(&mux_ci, bank_sel, prev_result, block_out[i - bit_lo]),
+                            mux2_inputs(&mux_ci, read_sel, prev_result, block_out[i - bit_lo]),
                             vec![new_result],
                         );
                         cell.source_op = Some("MemBlock_ReadMux".to_string());
                         mux_ci.apply_to_cell(&mut cell);
                         netlist.add_cell(cell);
-                        // Update the result name for next iteration
-                        // (we rename the new_result to the canonical name)
-                        if let Some(net) = netlist.nets.get_mut(new_result.0 as usize) {
-                            net.name = prev_name;
-                        }
+                        read_results.insert((wb, i - bit_lo), new_result);
                     }
                 }
             }
@@ -3022,6 +3592,7 @@ fn merge_physical_nodes_into_netlist(
                 depth,
                 has_write,
                 async_read,
+                read_enable,
                 ..
             } => {
                 // TRIAGE #35: the clock input net may not EXIST yet — when
@@ -3056,6 +3627,9 @@ fn merge_physical_nodes_into_netlist(
                     *depth,
                     *has_write,
                     *async_read,
+                    read_enable
+                        .then(|| input_nets.last()?.first().copied())
+                        .flatten(),
                     &input_nets,
                     &output_nets,
                     path,

@@ -107,10 +107,10 @@ impl<'a> LirToSynthAig<'a> {
             .map(|&idx| self.lir.nodes[idx].output.0)
             .collect();
         let mut consumed_phys_outputs: HashSet<u32> = HashSet::new();
-        for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if !self.is_physical_op(&node.op)
-                && !matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. })
-            {
+        for node in &self.lir.nodes {
+            // A register's data input counts: `counter <= counter + 1` reads
+            // the carry chain only through the register.
+            if !self.is_physical_op(&node.op) {
                 for &input_id in &node.inputs {
                     if phys_output_set.contains(&input_id.0) {
                         consumed_phys_outputs.insert(input_id.0);
@@ -204,7 +204,14 @@ impl<'a> LirToSynthAig<'a> {
                 ..
             } = &node.op
             {
-                let reset_val = reset_value.unwrap_or(0);
+                // A register with no reset starts at its power-up value.
+                let reset_val = if *has_reset {
+                    reset_value.unwrap_or(0)
+                } else {
+                    self.lir.signals[node.output.0 as usize]
+                        .initial
+                        .unwrap_or(0)
+                };
                 for bit in 0..*width {
                     let init_value = if bit < 64 {
                         (reset_val >> bit) & 1 != 0

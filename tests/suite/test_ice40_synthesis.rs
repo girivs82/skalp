@@ -905,6 +905,8 @@ fn build_memblock_lir(data_width: u32, addr_width: u32, depth: u32) -> Lir {
             has_write: true,
             read_only: false,
             async_read: false,
+            registered_read: true,
+            read_enable: false,
         },
         vec![raddr, waddr, wdata, we],
         rdata,
@@ -1112,6 +1114,8 @@ fn test_bram_rom_inference() {
             has_write: false,
             read_only: true,
             async_read: false,
+            registered_read: true,
+            read_enable: false,
         },
         vec![raddr],
         rdata,
@@ -1939,6 +1943,7 @@ fn test_io_constraint_propagation() {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         },
     );
     port_constraints.insert(
@@ -1955,6 +1960,7 @@ fn test_io_constraint_propagation() {
             pad_type: None,
             pad_cell: None,
             ldo_config: None,
+            drive_override: None,
         },
     );
 

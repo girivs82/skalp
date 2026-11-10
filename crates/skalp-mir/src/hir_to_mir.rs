@@ -596,10 +596,7 @@ impl<'hir> HirToMir<'hir> {
 
         // First pass: create modules for entities
         for entity in &hir.entities {
-            if entity.name.contains("FpAdd")
-                || entity.name == "KarythraCLEAsync"
-                || entity.name == "FpSub"
-            {
+            if entity.name.contains("FpAdd") || entity.name == "FpSub" {
                 trace!(
                     "[HIR_TO_MIR] First pass: entity '{}' with id {:?}",
                     entity.name,
@@ -616,10 +613,7 @@ impl<'hir> HirToMir<'hir> {
             self.entity_map.insert(entity.id, module_id);
             self.entity_name_to_module
                 .insert(entity.name.clone(), module_id);
-            if entity.name.contains("FpAdd")
-                || entity.name == "KarythraCLEAsync"
-                || entity.name == "FpSub"
-            {
+            if entity.name.contains("FpAdd") || entity.name == "FpSub" {
                 trace!(
                     "[HIR_TO_MIR] entity_map[{:?}] = {:?} for '{}'",
                     entity.id,
@@ -630,6 +624,7 @@ impl<'hir> HirToMir<'hir> {
 
             let mut module = Module::new(module_id, entity.name.clone());
             module.is_from_main_source = true;
+            module.specialization_of = entity.specialized_from.clone();
 
             // Propagate pipeline configuration from HIR entity to MIR module
             if let Some(ref config) = entity.pipeline_config {
@@ -14289,17 +14284,25 @@ impl<'hir> HirToMir<'hir> {
                         }
 
                         hir::HirExpression::Signal(id) => {
+                            // Signal ids are only unique within one source file, and an
+                            // imported entity keeps the ids of the file it came from, so
+                            // the current entity's implementation must be searched first.
+                            // Searching every implementation in order gave `por + 1` in a
+                            // top module the type of the imported core's 64x32 register
+                            // file (same id), and the add became 2048 bits wide.
                             let ty = if let Some(hir) = self.hir {
-                                let mut found = Type::Unknown;
-                                for impl_block in &hir.implementations {
-                                    if let Some(signal) =
-                                        impl_block.signals.iter().find(|s| s.id == *id)
-                                    {
-                                        found = self.hir_type_to_type(&signal.signal_type);
-                                        break;
-                                    }
-                                }
-                                found
+                                let current = self.current_entity_id;
+                                hir.implementations
+                                    .iter()
+                                    .filter(|i| Some(i.entity) == current)
+                                    .chain(
+                                        hir.implementations
+                                            .iter()
+                                            .filter(|i| Some(i.entity) != current),
+                                    )
+                                    .find_map(|i| i.signals.iter().find(|s| s.id == *id))
+                                    .map(|signal| self.hir_type_to_type(&signal.signal_type))
+                                    .unwrap_or(Type::Unknown)
                             } else {
                                 Type::Unknown
                             };
@@ -14443,18 +14446,23 @@ impl<'hir> HirToMir<'hir> {
             ExpressionKind::Concat(elements) => {
                 let mut total = 0u32;
                 for elem in elements {
-                    total += self.try_mir_expr_width(elem)?;
+                    total = total.checked_add(self.try_mir_expr_width(elem)?)?;
                 }
                 Some(total)
             }
             ExpressionKind::Replicate { count, value } => {
+                // A negative or oversized count (e.g. `{(32 - W){1'b0}}` in a
+                // specialization where W > 32) has no width: wrapping it to u32
+                // overflowed the sum above.
                 let count_val = match &count.kind {
-                    ExpressionKind::Literal(Value::Integer(n)) => Some(*n as u32),
-                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => Some(*n as u32),
+                    ExpressionKind::Literal(Value::Integer(n)) => u32::try_from(*n).ok(),
+                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => {
+                        u32::try_from(*n).ok()
+                    }
                     _ => None,
                 }?;
                 let value_width = self.try_mir_expr_width(value)?;
-                Some(count_val * value_width)
+                count_val.checked_mul(value_width)
             }
             _ => None,
         }
@@ -17948,7 +17956,7 @@ impl<'hir> HirToMir<'hir> {
                 // Dynamic variables are created during function inlining (e.g., in match arm blocks)
                 // and must be accessible for Index/Range operations.
                 //
-                // Example: In Karythra's exec_l0_l1, match arm 9 creates:
+                // Example: an inlined ALU function whose match arm creates:
                 //   let shift_amt = b[4:0];
                 //   if sign && shift_amt > 0 { ... }
                 // The condition references shift_amt, which is only in dynamic_variables.

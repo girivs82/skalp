@@ -23,7 +23,7 @@ use std::path::Path;
 /// Pack a set of configuration bits into a programmable Nexus bitstream.
 ///
 /// `db_root` is the prjoxide database root (with `devices.json`); `idcode`
-/// selects the device (e.g. `0x010F_1043` for LFCPNX-100). `bits` are the global
+/// selects the device (e.g. `0x010F_4043` for LFCPNX-100). `bits` are the global
 /// config bits to assert — typically gathered from used PIPs' `pip_bits` and BEL
 /// config words. A `ConfigBit` with `invert = true` is stored as `0` when asserted
 /// (prjoxide convention: the cram value is `!invert`).
@@ -50,6 +50,32 @@ pub fn pack_bitstream(
     }
 
     Ok(BitstreamParser::serialise_chip(&chip))
+}
+
+/// Writes Lattice `.bit` files for Nexus devices.
+#[cfg(feature = "nexus-bitstream")]
+pub struct NexusBitWriter<'a> {
+    /// prjoxide database root
+    pub db_root: &'a Path,
+    /// IDCODE of the target device
+    pub idcode: u32,
+}
+
+#[cfg(feature = "nexus-bitstream")]
+impl crate::bitstream::config::FormatWriter for NexusBitWriter<'_> {
+    fn format(&self) -> crate::bitstream::BitstreamFormat {
+        crate::bitstream::BitstreamFormat::OxideBitstream
+    }
+
+    fn write(&self, bits: &[crate::bitstream::config::DesignBit]) -> crate::error::Result<Vec<u8>> {
+        let bits = bits.iter().map(|b| GlobalBit {
+            frame: b.frame,
+            bit: b.bit,
+            invert: !b.value,
+        });
+        pack_bitstream(self.db_root, self.idcode, bits)
+            .map_err(crate::error::PlaceRouteError::BitstreamFailed)
+    }
 }
 
 #[cfg(all(test, feature = "nexus-bitstream"))]

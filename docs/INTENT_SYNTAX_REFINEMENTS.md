@@ -237,13 +237,13 @@ User-defined intents are first-class and work as attributes:
 
 ```skalp
 // User defines in their project:
-intent karythra_decode {
+intent cpu_decode {
     mux_style: parallel,
     timing: critical_path,
 }
 
 // Use as attribute - no different from stdlib intents:
-#[karythra_decode]
+#[cpu_decode]
 match opcode {
     OP_ADD => ...,
     OP_SUB => ...,

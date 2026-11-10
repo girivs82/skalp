@@ -1,0 +1,24 @@
+// Writes a counter into distributed RAM and shows a bit of it on an LED.
+entity RamBlink {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+impl RamBlink {
+    signal counter: nat[26] = 0
+    signal rf: bit[8][16]
+    signal we: bit = 0
+    signal wa: bit[4] = 0
+    signal wd: bit[8] = 0
+    signal ra: bit[4] = 0
+    on(clk.rise) {
+        counter = counter + 1
+        we = counter[0]
+        wa = counter[4:1]
+        wd = counter[25:18]
+        ra = counter[4:1]
+        if we == 1 {
+            rf[wa] = wd
+        }
+    }
+    led = rf[ra][7]
+}

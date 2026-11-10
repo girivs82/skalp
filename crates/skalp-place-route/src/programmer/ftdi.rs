@@ -41,8 +41,10 @@ impl FtdiDevice {
                 // Check if this device matches our VID:PID
                 // The interface index is encoded in the serial number suffix (A, B, etc.)
                 let interface_char = (b'A' + interface) as char;
-                d.serial_number.ends_with(interface_char)
-                    || (interface == 0 && !d.serial_number.ends_with('B'))
+                d.vendor_id == vid
+                    && d.product_id == pid
+                    && (d.serial_number.ends_with(interface_char)
+                        || (interface == 0 && !d.serial_number.ends_with('B')))
             })
             .ok_or_else(|| {
                 PlaceRouteError::BitstreamFailed(format!(

@@ -1,4 +1,4 @@
-// NCL Systolic Forwarding — from Karythra CLE V2 systolic path
+// NCL Systolic Forwarding
 // Conditional forwarding: when systolic mode is active, passes data through
 // with accumulation. When inactive, outputs zero. Exercises: conditional
 // forwarding, accumulator add, dual-rail zero generation.

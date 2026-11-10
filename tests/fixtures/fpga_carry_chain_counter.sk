@@ -1,0 +1,21 @@
+// A register fed only by a carry chain: `count` reads the adder solely through
+// its flip-flops, so the chain's outputs must survive logic optimization.
+entity CarryCounter {
+    in clk: clock
+    in rst: reset
+    out count: nat[8]
+}
+
+impl CarryCounter {
+    signal counter: nat[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+}

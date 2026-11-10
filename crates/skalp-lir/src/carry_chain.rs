@@ -9,7 +9,8 @@
 //! # Cell model (`INJECT = "NO"`)
 //!
 //! A `CCU2` has two halves. Half `i` has a LUT4 `P = INITi(Ai, Bi, Ci, Di)`
-//! (propagate) and a LUT2 `G = INITi[3:0](Ai, Bi)` (generate):
+//! (propagate) and a LUT3 `G = INITi[7:0](Ai, Bi, Ci)` (generate). The
+//! mapping below ties every `Ci` low, so `G` reads only `INITi[3:0](Ai, Bi)`:
 //!
 //! ```text
 //! S_i     = P_i ^ c_i

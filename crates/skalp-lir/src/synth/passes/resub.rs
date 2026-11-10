@@ -28,6 +28,8 @@ use indexmap::IndexMap;
 
 /// Maximum number of divisors to consider per target node
 const MAX_DIVISORS: usize = 150;
+/// Solver effort spent proving one substitution; unproved ones are dropped.
+const PROOF_CONFLICT_LIMIT: u64 = 1000;
 
 /// Resubstitution pass
 pub struct Resub {
@@ -815,6 +817,16 @@ impl Pass for Resub {
                         ),
                     };
 
+                    // Matching simulation is not a proof: a condition that is
+                    // almost never false, such as a wide OR, looks constant.
+                    let lits: Vec<AigLit> = divs
+                        .iter()
+                        .map(|&(node, inverted)| AigLit { node, inverted })
+                        .collect();
+                    if !super::fraig::prove_resub(aig, *target, kind, &lits, PROOF_CONFLICT_LIMIT) {
+                        continue;
+                    }
+
                     substituted_nodes.insert(*target);
                     for &mffc_node in &mffc_nodes {
                         substituted_nodes.insert(mffc_node);
@@ -987,6 +999,26 @@ mod tests {
 
         // Should include some fanin nodes (a, b, c, possibly ab)
         assert!(!divisors.is_empty());
+    }
+
+    #[test]
+    fn a_wide_condition_is_not_mistaken_for_a_constant() {
+        let mut aig = Aig::new("wide".to_string());
+        let select = aig.add_input("select".to_string(), None);
+        let mut any = AigLit::new(aig.add_input("s0".to_string(), None));
+        for i in 1..24 {
+            let input = AigLit::new(aig.add_input(format!("s{i}"), None));
+            any = aig.add_and(any.invert(), input.invert()).invert();
+        }
+        // True only when select is set and some input is; simulation of random
+        // patterns sees it equal `select` nearly every time.
+        let target = aig.add_and(AigLit::new(select), any);
+        aig.add_output("target".to_string(), target);
+        aig.add_output("select".to_string(), AigLit::new(select));
+
+        let before = aig.and_count();
+        Resub::new().run(&mut aig);
+        assert_eq!(aig.and_count(), before, "the wide condition must survive");
     }
 
     #[test]

@@ -49,6 +49,10 @@ pub enum PlaceRouteError {
     #[error("Bitstream generation failed: {0}")]
     BitstreamFailed(String),
 
+    /// Device programming failed; the message is complete as it stands
+    #[error("{0}")]
+    ProgrammingFailed(String),
+
     /// Timing constraint not met
     #[error("Timing constraint not met: {0}")]
     TimingFailed(String),

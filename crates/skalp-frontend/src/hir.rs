@@ -213,6 +213,10 @@ pub struct HirEntity {
     /// When present, indicates this entity is a reusable safety mechanism.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_mechanism_config: Option<SafetyMechanismConfig>,
+    /// The generic entity this one is a specialization of (`Core` for
+    /// `Core_8`), set by monomorphization
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialized_from: Option<String>,
     /// SEooC (Safety Element out of Context) configuration
     /// When present, this entity is developed without full system knowledge.
     /// Skalp will calculate required DC for external mechanisms.
@@ -3194,6 +3198,9 @@ pub struct PhysicalConstraints {
     pub pad_cell: Option<String>,
     /// LDO configuration (only valid when pad_type is PowerLdo)
     pub ldo_config: Option<LdoConfig>,
+    /// Why this output may drive a pin the board's safe list does not include
+    #[serde(default)]
+    pub drive_override: Option<String>,
 }
 
 /// Pin location specification

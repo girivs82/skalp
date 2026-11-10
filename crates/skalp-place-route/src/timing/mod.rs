@@ -2,6 +2,8 @@
 //!
 //! Implements static timing analysis (STA) for FPGA designs.
 
+pub mod sta;
+
 mod delays;
 
 pub use delays::DelayModel;

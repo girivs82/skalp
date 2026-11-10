@@ -1,0 +1,41 @@
+// Top module that imports only an entity from another file; the entity's
+// implementation calls free functions of that file, and the top's own counter
+// has the same signal id (within its file) as the core's 64x32 register file.
+mod regfile_core;
+use regfile_core::RegfileCore;
+
+entity ImportedCoreTop {
+    in clk: clock
+    in we: bit
+    in waddr: bit[5]
+    in raddr: bit[5]
+    in wdata: bit[64]
+    in size: bit[2]
+    in off: bit[2]
+    in a: bit[8]
+    in b: bit[8]
+    in s: bit
+    out rdata: bit[64]
+    out mask: bit[4]
+    out q: bit[8]
+    out count: bit[8]
+}
+
+impl ImportedCoreTop {
+    signal cnt: bit[8] = 0
+    signal spare: bit[8] = 0
+    inst core = RegfileCore {
+        clk: clk, we: we, waddr: waddr, raddr: raddr, wdata: wdata,
+        size: size, off: off, a: a, b: b, s: s
+    }
+    on(clk.rise) {
+        if cnt != 255 {
+            cnt = cnt + 1
+        }
+        spare = spare + 1
+    }
+    rdata = core.rdata
+    mask = core.mask
+    q = core.q
+    count = cnt
+}

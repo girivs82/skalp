@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+mod memory_guard;
+
 /// ISO 26262 Safety build options
 #[derive(Debug, Clone)]
 pub struct SafetyBuildOptions {
@@ -62,6 +64,13 @@ struct Cli {
     /// Verbosity level
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Most memory skalp may use before it stops, so a large build cannot
+    /// exhaust the machine: a size such as 12G, or a share of physical
+    /// memory such as 60%. Defaults to half of physical memory, or
+    /// SKALP_MAX_MEMORY when set; 0 turns the limit off.
+    #[arg(long, global = true, value_name = "SIZE")]
+    max_memory: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -255,6 +264,11 @@ enum Commands {
         /// islands.
         #[arg(long)]
         power_stub: bool,
+
+        /// Add an on-chip logic analyzer for the top entity's #[trace] signals,
+        /// triggered by its #[breakpoint] signals, sending over the board's UART
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -281,11 +295,11 @@ enum Commands {
 
     /// Program the FPGA device
     Program {
-        /// Bitstream file (.bin format)
-        #[arg(required_unless_present_any = ["list", "reset_only"])]
+        /// Bitstream file (.bit for Lattice Nexus, .bin for iCE40)
+        #[arg(required_unless_present_any = ["list", "reset_only", "watch"])]
         bitstream: Option<PathBuf>,
 
-        /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto)
+        /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, certuspro-versa, auto)
         #[arg(short, long, default_value = "auto")]
         board: String,
 
@@ -296,6 +310,36 @@ enum Commands {
         /// List detected boards and exit
         #[arg(long)]
         list: bool,
+
+        /// Report which pins change on a Nexus device for this many seconds,
+        /// after loading if a bitstream is given
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
+
+    /// Read a logic analyzer capture from a board running a `synth --debug` build
+    Debug {
+        /// Build directory of the `synth --debug` run
+        dir: PathBuf,
+        /// Board to read from
+        #[arg(short, long, default_value = "certuspro-versa")]
+        board: String,
+        /// How long to wait for the trigger, in seconds
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+
+    /// Print what a board's UART sends to the host
+    Uart {
+        /// Board whose UART to read
+        #[arg(short, long, default_value = "certuspro-versa")]
+        board: String,
+        /// Baud rate
+        #[arg(long, default_value_t = 1_000_000)]
+        baud: u32,
+        /// How long to listen, in seconds
+        #[arg(long, default_value_t = 2)]
+        seconds: u64,
     },
 
     /// Format SKALP source files
@@ -657,6 +701,12 @@ fn main() -> Result<()> {
         .with_target(true) // Show module path in logs
         .init();
 
+    match memory_guard::start(cli.max_memory.as_deref()) {
+        Ok(Some(budget)) => info!("memory budget: {}", memory_guard::format_bytes(budget)),
+        Ok(None) => info!("memory budget: none"),
+        Err(e) => anyhow::bail!("--max-memory: {e}"),
+    }
+
     match cli.command {
         Commands::New { name } => {
             create_new_project(&name)?;
@@ -797,6 +847,7 @@ fn main() -> Result<()> {
             pnr_preset,
             emit,
             power_stub,
+            debug,
         } => {
             synthesize_design(
                 &source,
@@ -807,6 +858,7 @@ fn main() -> Result<()> {
                 &pnr_preset,
                 emit.as_deref(),
                 power_stub,
+                debug,
             )?;
         }
 
@@ -820,13 +872,24 @@ fn main() -> Result<()> {
             run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
         }
 
+        Commands::Debug {
+            dir,
+            board,
+            timeout,
+        } => read_debug_capture(&dir, &board, timeout)?,
+        Commands::Uart {
+            board,
+            baud,
+            seconds,
+        } => read_board_uart(&board, baud, seconds)?,
         Commands::Program {
             bitstream,
             board,
             reset_only,
             list,
+            watch,
         } => {
-            program_device(bitstream.as_ref(), &board, reset_only, list)?;
+            program_device(bitstream.as_ref(), &board, reset_only, list, watch)?;
         }
 
         Commands::Fmt { files, check } => {
@@ -2829,56 +2892,7 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
 /// When multiple uninstantiated modules exist (e.g., unmonomorphized templates alongside
 /// their specialized variants), pick the one with the most content (instances + processes + signals).
 fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::Module> {
-    if mir.modules.is_empty() {
-        return None;
-    }
-    if mir.modules.len() == 1 {
-        return mir.modules.first();
-    }
-    // Collect all module IDs that are instantiated by some other module
-    let instantiated: std::collections::HashSet<skalp_mir::mir::ModuleId> = mir
-        .modules
-        .iter()
-        .flat_map(|m| m.instances.iter().map(|inst| inst.module))
-        .collect();
-    // Find all uninstantiated modules, pick the one with most content
-    // This handles monomorphization: both `Foo` (empty template) and `Foo_42` (specialized)
-    // are uninstantiated, but only the specialized one has actual logic
-    // Include assignments and ports in the score so designs with function calls
-    // (no sub-entity instances) still rank above imported library entities
-    // Prefer modules from the main source file over imported/stdlib modules
-    let candidates: Vec<_> = mir
-        .modules
-        .iter()
-        .filter(|m| !instantiated.contains(&m.id))
-        .collect();
-
-    // First try: uninstantiated modules from main source, pick largest
-    candidates
-        .iter()
-        .filter(|m| m.is_from_main_source)
-        .max_by_key(|m| {
-            m.instances.len()
-                + m.processes.len()
-                + m.signals.len()
-                + m.assignments.len()
-                + m.ports.len()
-        })
-        .copied()
-        // Fallback: any uninstantiated module
-        .or_else(|| {
-            candidates
-                .iter()
-                .max_by_key(|m| {
-                    m.instances.len()
-                        + m.processes.len()
-                        + m.signals.len()
-                        + m.assignments.len()
-                        + m.ports.len()
-                })
-                .copied()
-        })
-        .or_else(|| mir.modules.last())
+    mir.top_module()
 }
 
 /// Equivalence checking between RTL (LIR) and gate-level netlist
@@ -4107,6 +4121,7 @@ fn synthesize_design(
     pnr_preset: &str,
     emit: Option<&str>,
     power_stub: bool,
+    debug: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
@@ -4147,6 +4162,11 @@ fn synthesize_design(
 
     // Parse and build HIR with full module resolution (stdlib, imports)
     let context = parse_and_build_compilation_context(source).context("Failed to parse source")?;
+    let context = if debug {
+        add_logic_analyzer(source, context, family, variant, output_dir)?
+    } else {
+        context
+    };
     let hir = context.main_hir;
     let module_hirs = context.module_hirs;
 
@@ -4274,7 +4294,9 @@ fn synthesize_design(
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        let mut with_pads = gate_netlist.clone();
+        add_nexus_io_pads(&mut with_pads, &mir, &library);
+        run_nexus_pnr_on_netlist(&with_pads, variant, output_dir, pnr_preset, None)?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -4369,6 +4391,39 @@ fn nexus_variant(variant: &str) -> Result<skalp_place_route::NexusVariant> {
     }
 }
 
+/// Give every constrained top-level port an IO cell at its assigned pin.
+fn add_nexus_io_pads(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    mir: &skalp_mir::mir::Mir,
+    library: &skalp_lir::TechLibrary,
+) {
+    let Some(top) = find_top_level_module(mir) else {
+        return;
+    };
+    let port_constraints: indexmap::IndexMap<_, _> = top
+        .ports
+        .iter()
+        .filter_map(|p| {
+            let constraints = p.physical_constraints.clone()?;
+            Some((format!("top.{}", p.name), constraints))
+        })
+        .collect();
+    // Hierarchical synthesis promotes signals shared with child instances to
+    // ports of their module; those are internal nets and get no pad.
+    let is_real_port = |name: &str| {
+        let base = name.split('[').next().unwrap_or(name);
+        let port = base.strip_prefix("top.").unwrap_or(base);
+        top.ports.iter().any(|p| p.name == port)
+    };
+    let nets = netlist.nets.clone();
+    let name_of = |net: &skalp_lir::gate_netlist::GateNetId| nets[net.0 as usize].name.clone();
+    netlist.inputs.retain(|net| is_real_port(&name_of(net)));
+    netlist.outputs.retain(|net| is_real_port(&name_of(net)));
+    if !port_constraints.is_empty() {
+        skalp_lir::insert_io_buffers(netlist, library, &port_constraints);
+    }
+}
+
 /// Place and route a gate-level netlist on a Lattice Nexus device.
 fn run_nexus_pnr_on_netlist(
     gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
@@ -4377,9 +4432,13 @@ fn run_nexus_pnr_on_netlist(
     preset: &str,
     frequency: Option<f64>,
 ) -> Result<()> {
-    use skalp_place_route::{place_and_route_nexus, PnrConfig, TimingConfig};
+    use skalp_place_route::{PnrConfig, TimingConfig};
 
     let nexus = nexus_variant(variant)?;
+    if let Some(board) = skalp_place_route::boards::for_nexus_variant(nexus) {
+        skalp_place_route::boards::check_outputs(gate_netlist, board)
+            .map_err(|refusal| anyhow::anyhow!(refusal))?;
+    }
     let mut config = match preset.to_lowercase().as_str() {
         "fast" => PnrConfig::fast(),
         "default" => PnrConfig::default(),
@@ -4400,7 +4459,7 @@ fn run_nexus_pnr_on_netlist(
     println!("Preset: {}", preset);
     println!();
     println!("Running placement...");
-    let result = place_and_route_nexus(gate_netlist, nexus, config)?;
+    let result = place_and_route_nexus_for_cli(gate_netlist, nexus, config)?;
 
     println!("Placement:");
     println!("  Cells placed: {}", result.placement.placements.len());
@@ -4426,6 +4485,12 @@ fn run_nexus_pnr_on_netlist(
             println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
             println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
         }
+        if let Some(path) = timing.critical_paths.first() {
+            println!(
+                "  Critical path: {:.3} ns, ending at {}",
+                path.delay, path.destination
+            );
+        }
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -4440,6 +4505,43 @@ fn run_nexus_pnr_on_netlist(
         result.bitstream.data.len()
     );
     Ok(())
+}
+
+/// Use the real device data when this build and machine have it.
+#[cfg(feature = "nexus-real")]
+fn place_and_route_nexus_for_cli(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: skalp_place_route::NexusVariant,
+    config: skalp_place_route::PnrConfig,
+) -> Result<skalp_place_route::PnrResult> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+
+    let Some(db_root) = find_database() else {
+        anyhow::bail!(
+            "The prjoxide database was not found, so no usable bitstream can be built. \
+             Set PRJOXIDE_DB or clone prjoxide next to this repository."
+        );
+    };
+    println!("Using real device data from {:?}", db_root);
+    Ok(skalp_place_route::pnr::place_and_route_nexus_real(
+        netlist, variant, config, &db_root,
+    )?)
+}
+
+/// Without real device data the output is only a model of the flow.
+#[cfg(not(feature = "nexus-real"))]
+fn place_and_route_nexus_for_cli(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: skalp_place_route::NexusVariant,
+    config: skalp_place_route::PnrConfig,
+) -> Result<skalp_place_route::PnrResult> {
+    println!(
+        "⚠️  This build has no real Nexus device data; the bitstream it writes will not run on a chip."
+    );
+    println!("   Rebuild with --features nexus-real for a loadable bitstream.");
+    Ok(skalp_place_route::place_and_route_nexus(
+        netlist, variant, config,
+    )?)
 }
 
 /// Internal function to run P&R on a GateNetlist
@@ -4553,17 +4655,440 @@ fn run_pnr_on_netlist(
     Ok(())
 }
 
+/// Report a Nexus device on the JTAG chain, if there is one.
+fn probe_nexus_device() -> Option<(String, String)> {
+    use skalp_place_route::programmer::nexus_jtag::{chip_name, NexusJtagProgrammer};
+
+    let mut programmer = NexusJtagProgrammer::open().ok()?;
+    let idcode = programmer.identify().ok()?;
+    let name = chip_name(idcode)?;
+    let state = match programmer.read_status() {
+        Ok(status) if status.done() => "running a design".to_string(),
+        Ok(status) => format!(
+            "not configured{}",
+            status
+                .error_summary()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        ),
+        Err(e) => format!("status unreadable: {e}"),
+    };
+    Some((format!("{name} (IDCODE 0x{idcode:08x})"), state))
+}
+
+/// Load a bitstream into SRAM of a Lattice Nexus device over JTAG.
+fn program_nexus_board(
+    bitstream: Option<&PathBuf>,
+    board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
+    reset_only: bool,
+    watch: Option<u64>,
+) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::{
+        check_target, chip_name, parse_bitstream, LoadEvent, NexusJtagProgrammer,
+    };
+    use std::io::{IsTerminal, Write};
+
+    let describe = |idcode: u32| {
+        chip_name(idcode)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("unknown device 0x{idcode:08x}"))
+    };
+
+    let data = match bitstream {
+        Some(path) => Some(
+            std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("Cannot read bitstream {:?}: {}", path, e))?,
+        ),
+        None if reset_only || watch.is_some() => None,
+        None => anyhow::bail!("A bitstream file is required"),
+    };
+    // Validate the file before opening the hardware.
+    let target = data
+        .as_deref()
+        .map(parse_bitstream)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .map(|b| b.idcode);
+
+    let mut programmer = NexusJtagProgrammer::open().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let idcode = programmer
+        .identify()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!("🔌 Found {} (IDCODE 0x{:08x})", describe(idcode), idcode);
+    if chip_name(idcode).is_none() {
+        anyhow::bail!("This is not a Nexus device this tool knows how to program.");
+    }
+    if let Some(board) = board {
+        if board.idcode != idcode {
+            anyhow::bail!(
+                "--board selected {}, which fits {}, but the connected device is {}.",
+                board.name,
+                describe(board.idcode),
+                describe(idcode)
+            );
+        }
+        println!("🧩 Board: {}", board.name);
+    }
+
+    if reset_only {
+        let status = programmer
+            .refresh()
+            .map_err(|e| anyhow::anyhow!("Reset failed: {}", e))?;
+        if status.done() {
+            println!("🔄 Reset sent, but a design is still running. It may be blocking JTAG.");
+        } else {
+            println!("🔄 Device cleared and not configured.");
+        }
+        println!("   Status: {}", status);
+        return Ok(());
+    }
+
+    let (path, file, target) = match (bitstream, data.as_deref(), target) {
+        (Some(path), Some(file), Some(target)) => (path, file, target),
+        _ => return report_pad_watch(&mut programmer, board, watch),
+    };
+    println!(
+        "📦 {:?}: {:.2} MB, built for {}",
+        path,
+        file.len() as f64 / 1_048_576.0,
+        describe(target)
+    );
+    check_target(target, idcode).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let show_progress = std::io::stdout().is_terminal();
+    let mut last_percent = usize::MAX;
+    let on_event = |event: LoadEvent| match event {
+        LoadEvent::Erasing => println!("🧹 Erasing SRAM..."),
+        LoadEvent::NeedsProgramn { timeout } => {
+            println!("⚠️  The running design is blocking JTAG configuration.");
+            match board {
+                Some(board) => println!(
+                    "👉 Tap the PROGRAMN button once ({}). Waiting up to {} s...",
+                    board.programn_button,
+                    timeout.as_secs()
+                ),
+                None => println!(
+                    "👉 Tap this board's PROGRAMN button once. Waiting up to {} s...",
+                    timeout.as_secs()
+                ),
+            }
+        }
+        LoadEvent::ProgramnSeen => println!("   ✓ Button seen, continuing."),
+        LoadEvent::Loading { sent, total } => {
+            let percent = sent * 100 / total;
+            if show_progress && percent != last_percent {
+                last_percent = percent;
+                print!("\r📤 Loading bitstream: {percent:3}%");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        LoadEvent::Verifying => {
+            if show_progress {
+                println!();
+            }
+        }
+    };
+
+    let result = programmer.program(file, on_event).map_err(|e| {
+        let state = programmer
+            .read_status()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|e| format!("unreadable ({})", e));
+        anyhow::anyhow!("{}\nDevice status now: {}", e, state)
+    })?;
+
+    println!(
+        "✅ {} configured and running: {:.2} MB in {:.1} s",
+        describe(result.idcode),
+        result.bytes as f64 / 1_048_576.0,
+        result.time_ms as f64 / 1000.0
+    );
+    println!("   Loaded into SRAM only; a power cycle clears it.");
+    println!("   Status: {}", result.status);
+    report_pad_watch(&mut programmer, board, watch)
+}
+
+/// Report the device's state and which pads change over the watch period.
+/// Rebuild a design with the on-chip logic analyzer added.
+fn add_logic_analyzer(
+    source: &Path,
+    context: skalp_frontend::CompilationContext,
+    family: &str,
+    variant: &str,
+    output_dir: &Path,
+) -> Result<skalp_frontend::CompilationContext> {
+    use skalp_frontend::hir::PinLocation;
+    if family != "nexus" {
+        anyhow::bail!("--debug needs a board with a known UART; only Nexus boards have one so far");
+    }
+    let board = skalp_place_route::boards::for_nexus_variant(nexus_variant(variant)?)
+        .ok_or_else(|| anyhow::anyhow!("No known board for {}", variant))?;
+    let (tx_pin, io_standard) = board
+        .debug_uart_tx
+        .ok_or_else(|| anyhow::anyhow!("The {} has no UART to the host", board.name))?;
+
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+    let top = find_top_level_module(&mir)
+        .ok_or_else(|| anyhow::anyhow!("No top-level module in the design"))?;
+    let clock_pin = top
+        .ports
+        .iter()
+        .find(|p| matches!(p.port_type, skalp_mir::mir::DataType::Clock { .. }))
+        .and_then(|p| p.physical_constraints.as_ref()?.pin_location.as_ref())
+        .and_then(|pin| match pin {
+            PinLocation::Single(pin) => Some(pin.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("The design's clock has no pin assignment"))?;
+    let clock_hz =
+        skalp_place_route::boards::clock_frequency(board, &clock_pin).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The frequency of clock pin {} on the {} is unknown",
+                clock_pin,
+                board.name
+            )
+        })?;
+
+    let original = fs::read_to_string(source)?;
+    let link = skalp_mir::logic_analyzer::DebugLink {
+        tx_pin,
+        io_standard,
+        clock_hz,
+        depth_bits: skalp_mir::logic_analyzer::DEPTH_BITS,
+        baud: skalp_mir::logic_analyzer::BAUD,
+    };
+    let (edited, map) = skalp_mir::logic_analyzer::add_analyzer(&original, top, &link)?;
+    fs::create_dir_all(output_dir)?;
+    fs::write(output_dir.join("debug_source.sk"), &edited)?;
+    fs::write(
+        output_dir.join(skalp_mir::logic_analyzer::PROBE_MAP_FILE),
+        serde_json::to_string_pretty(&map)?,
+    )?;
+    println!(
+        "🔬 Logic analyzer: {} probe bits, {} samples, trigger {}, sent on pin {}",
+        map.probe_bytes * 8,
+        map.depth,
+        map.trigger,
+        tx_pin
+    );
+    skalp_frontend::parse_and_build_compilation_context_from_source(source, edited)
+        .context("Failed to build the design with the logic analyzer")
+}
+
+/// Read a logic analyzer capture from the board and save it as a waveform.
+fn read_debug_capture(dir: &Path, board: &str, timeout: u64) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::NexusBoard;
+    use skalp_place_route::programmer::uart::BoardUart;
+    let map = skalp_mir::logic_analyzer::read_probe_map(dir)?;
+    let board =
+        NexusBoard::by_name(board).ok_or_else(|| anyhow::anyhow!("Unknown board '{}'", board))?;
+    let (vid, pid, channel) = board.uart;
+    let mut uart =
+        BoardUart::open(vid, pid, channel, map.baud).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let capture_bytes = 4 + map.depth * map.probe_bytes;
+    println!(
+        "⏳ Waiting up to {} s for a capture from {}...",
+        timeout, map.design
+    );
+    // A capture may already be partly sent; reading two lets one arrive whole.
+    let stream = uart
+        .read_exact_within(2 * capture_bytes, std::time::Duration::from_secs(timeout))
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let samples = skalp_mir::logic_analyzer::parse_capture(&stream, &map)?;
+
+    let mut waveform = skalp_sim::waveform::Waveform::new();
+    for probe in &map.probes {
+        let radix = match probe.radix.as_deref() {
+            Some("hex") => skalp_frontend::hir::TraceRadix::Hex,
+            Some("unsigned") => skalp_frontend::hir::TraceRadix::Unsigned,
+            Some("signed") => skalp_frontend::hir::TraceRadix::Signed,
+            Some("ascii") => skalp_frontend::hir::TraceRadix::Ascii,
+            _ => skalp_frontend::hir::TraceRadix::Binary,
+        };
+        let config = skalp_frontend::hir::TraceConfig {
+            group: probe.group.clone(),
+            radix,
+            display_name: None,
+        };
+        waveform.add_traced_signal(probe.name.clone(), probe.width, config);
+    }
+    let mut previous: Vec<Option<Vec<u8>>> = vec![None; map.probes.len()];
+    for (cycle, sample) in samples.iter().enumerate() {
+        for (index, probe) in map.probes.iter().enumerate() {
+            let value = skalp_mir::logic_analyzer::probe_value(sample, probe);
+            if previous[index].as_ref() != Some(&value) {
+                waveform.add_value(&probe.name, cycle as u64, value.clone());
+                previous[index] = Some(value);
+            }
+        }
+    }
+    waveform.max_cycle = samples.len() as u64;
+    let path = dir.join("capture.skw.gz");
+    waveform.export_skw_compressed(&path, &map.design)?;
+
+    println!(
+        "✅ Captured {} samples around the trigger ({}), sample {}",
+        samples.len(),
+        map.trigger,
+        map.trigger_index
+    );
+    let around = map.trigger_index.saturating_sub(3)..(map.trigger_index + 4).min(samples.len());
+    for cycle in around {
+        let values: Vec<String> = map
+            .probes
+            .iter()
+            .map(|probe| {
+                let value = skalp_mir::logic_analyzer::probe_value(&samples[cycle], probe);
+                let number = value
+                    .iter()
+                    .rev()
+                    .fold(0u128, |n, byte| (n << 8) | u128::from(*byte));
+                format!("{}={}", probe.name, number)
+            })
+            .collect();
+        let marker = if cycle == map.trigger_index {
+            "▶"
+        } else {
+            " "
+        };
+        println!(
+            "   {marker} {:>5}: {}",
+            cycle as i64 - map.trigger_index as i64,
+            values.join("  ")
+        );
+    }
+    println!("   Waveform: {}", path.display());
+    Ok(())
+}
+
+/// Print what a board's UART sends, as hex.
+fn read_board_uart(board: &str, baud: u32, seconds: u64) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::NexusBoard;
+    use skalp_place_route::programmer::uart::BoardUart;
+    let board =
+        NexusBoard::by_name(board).ok_or_else(|| anyhow::anyhow!("Unknown board '{}'", board))?;
+    let (vid, pid, channel) = board.uart;
+    let mut uart =
+        BoardUart::open(vid, pid, channel, baud).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let data = uart
+        .read_for(std::time::Duration::from_secs(seconds))
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "📨 {} bytes in {} s from the {} UART",
+        data.len(),
+        seconds,
+        board.name
+    );
+    for line in data.chunks(32).take(16) {
+        let hex: Vec<String> = line.iter().map(|b| format!("{b:02x}")).collect();
+        println!("   {}", hex.join(" "));
+    }
+    Ok(())
+}
+
+fn report_pad_watch(
+    programmer: &mut skalp_place_route::programmer::nexus_jtag::NexusJtagProgrammer,
+    board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
+    watch: Option<u64>,
+) -> Result<()> {
+    let Some(seconds) = watch else {
+        return Ok(());
+    };
+    let status = programmer
+        .read_status()
+        .map_err(|e| anyhow::anyhow!("Cannot read status: {}", e))?;
+    if status.done() {
+        println!("🟢 Device is running a design. Status: {}", status);
+    } else {
+        println!("🔴 Device is not configured. Status: {}", status);
+    }
+    if let Some(error) = status.error_summary() {
+        println!("   Reported: {}", error);
+    }
+
+    println!("👀 Watching pads for {} s...", seconds);
+    let result = programmer
+        .watch_pads(std::time::Duration::from_secs(seconds))
+        .map_err(|e| anyhow::anyhow!("Could not read the pads: {}", e))?;
+    for pad in &result.active {
+        let name = board
+            .and_then(|b| b.pad_label(pad.bit))
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        match pad.mean_interval {
+            Some(interval) if pad.regular => println!(
+                "   ✓ Bit {}{}: toggling every {:.2} s ({} changes)",
+                pad.bit, name, interval, pad.changes
+            ),
+            _ => println!(
+                "   ~ Bit {}{}: changing irregularly ({} changes)",
+                pad.bit, name, pad.changes
+            ),
+        }
+    }
+    println!(
+        "   {} of {} pads changed, across {} samples in {:.1} s. Signals much faster than the sample rate look irregular.",
+        result.active.len(),
+        result.bits,
+        result.samples,
+        result.seconds
+    );
+    Ok(())
+}
+
 /// Program FPGA device
 fn program_device(
     bitstream: Option<&PathBuf>,
     board: &str,
     reset_only: bool,
     list: bool,
+    watch: Option<u64>,
 ) -> Result<()> {
     use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
 
+    let nexus_board = skalp_place_route::programmer::nexus_jtag::NexusBoard::by_name(board);
+    // A Lattice .bit file carries the device it targets, so it picks the path.
+    let nexus_file = bitstream
+        .and_then(|path| std::fs::read(path).ok())
+        .is_some_and(|file| {
+            skalp_place_route::programmer::nexus_jtag::parse_bitstream(&file).is_ok()
+        });
+    if !list {
+        if nexus_file && nexus_board.is_none() && board.to_lowercase() != "auto" {
+            anyhow::bail!(
+                "This is a Lattice Nexus bitstream, and board '{}' can't load it. Use --board auto or certuspro-versa.",
+                board
+            );
+        }
+        if nexus_board.is_some() || nexus_file {
+            return program_nexus_board(bitstream, nexus_board, reset_only, watch);
+        }
+        // Don't let auto-detection drive a Nexus board as an iCE40 SPI target.
+        if board.to_lowercase() == "auto" {
+            if let Some((device, _)) = probe_nexus_device() {
+                if reset_only || (bitstream.is_none() && watch.is_some()) {
+                    return program_nexus_board(bitstream, None, reset_only, watch);
+                }
+                anyhow::bail!(
+                    "Connected device is {}, but this file is not a Lattice Nexus .bit bitstream.",
+                    device
+                );
+            }
+        }
+    }
+
     // List mode: just show detected boards (doesn't need board selection)
     if list {
+        // An FT2232H also matches the iCE40 profiles below, so a Nexus device
+        // answering on JTAG settles it.
+        if let Some((device, state)) = probe_nexus_device() {
+            println!("🔍 Found on JTAG:\n");
+            println!("   ✓ {}: {}", device, state);
+            return Ok(());
+        }
         println!("🔍 Scanning for iCE40 boards...\n");
         let boards = [
             BoardConfig::IceBreaker,
@@ -4625,7 +5150,7 @@ fn program_device(
         }
         _ => {
             anyhow::bail!(
-                "Unknown board: {}. Supported: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto",
+                "Unknown board: {}. Supported: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, certuspro-versa, auto",
                 board
             );
         }

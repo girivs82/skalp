@@ -428,6 +428,7 @@ impl UnifiedSimulator {
                     skalp_lir::lir::PrimitiveType::RamBlock { .. }
                         | skalp_lir::lir::PrimitiveType::DistRamWrite { .. }
                         | skalp_lir::lir::PrimitiveType::DistRamRead { .. }
+                        | skalp_lir::lir::PrimitiveType::Multiplier { .. }
                 ),
                 _ => false,
             });

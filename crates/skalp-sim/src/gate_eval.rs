@@ -304,6 +304,31 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![data_in]
         }
 
+        PrimitiveType::Multiplier {
+            a_width,
+            b_width,
+            p_width,
+        } => {
+            let (a_width, b_width) = (*a_width as usize, *b_width as usize);
+            // A, B, the C bus, then the sign controls.
+            let sign_controls = a_width + b_width + skalp_lir::gate_netlist::DSP_C_BITS;
+            let signed = |index: usize| inputs.get(index).copied().unwrap_or(false);
+            let operand = |start: usize, width: usize, is_signed: bool| -> i128 {
+                let mut value = (0..width).fold(0i128, |value, bit| {
+                    value | (i128::from(inputs.get(start + bit).copied().unwrap_or(false)) << bit)
+                });
+                if is_signed && (value >> (width - 1)) & 1 == 1 {
+                    value -= 1i128 << width;
+                }
+                value
+            };
+            let product = operand(0, a_width, signed(sign_controls))
+                * operand(a_width, b_width, signed(sign_controls + 1));
+            (0..*p_width as usize)
+                .map(|bit| (product >> bit) & 1 == 1)
+                .collect()
+        }
+
         PrimitiveType::RamBlock { data_width, .. } => {
             // RAM evaluation is handled specially in gate_simulator.rs (needs persistent state).
             // Return all-zero as fallback (actual read is done by simulator's RAM state).
