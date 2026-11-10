@@ -12,7 +12,7 @@ indexmap = "2.0"
 petgraph = "0.6"
 
 # For formal verification
-z3 = { version = "0.12", optional = true }
+z3 = { version = "0.22", optional = true }
 ouroboros = { version = "0.18", optional = true }
 
 [features]
