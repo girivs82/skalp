@@ -26,7 +26,12 @@ fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
         "auto" => skalp_lir::synth::SynthPreset::Auto,
         _ => skalp_lir::synth::SynthPreset::Quick,
     };
-    let cache = path.with_extension(format!("{preset_name}.netlist.json"));
+    let flat = if std::env::var("FLAT").is_ok_and(|v| v == "1") {
+        ".flat"
+    } else {
+        ""
+    };
+    let cache = path.with_extension(format!("{preset_name}{flat}.netlist.json"));
     if let Ok(text) = std::fs::read_to_string(&cache) {
         return serde_json::from_str(&text).unwrap();
     }
@@ -37,7 +42,13 @@ fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
         .unwrap();
     let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
     let library = skalp_lir::get_stdlib_library("nexus").unwrap();
-    let mut netlist = skalp_lir::synthesize_hierarchical(&hier, &library, preset).flatten();
+    // FLAT=1: synthesize the flattened design in one piece instead of one
+    // module at a time (logic can then be optimized across module boundaries).
+    let mut netlist = if std::env::var("FLAT").is_ok_and(|v| v == "1") {
+        skalp_lir::synthesize(&hier.flatten(), &library, preset).netlist
+    } else {
+        skalp_lir::synthesize_hierarchical(&hier, &library, preset).flatten_for_library(&library)
+    };
     let top = mir.modules.iter().find(|m| m.name == top_name).unwrap();
     let constraints: indexmap::IndexMap<_, _> = top
         .ports

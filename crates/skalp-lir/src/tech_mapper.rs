@@ -3901,6 +3901,7 @@ pub fn synthesize_hierarchical(
 
         // Check if this instance has internal signals referenced by children
         let needs_promotion = signals_needed_by_children.get(path.as_str());
+        let mut internal_outputs = std::collections::HashSet::new();
 
         let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
@@ -3932,6 +3933,7 @@ pub fn synthesize_hierarchical(
                                 path
                             );
                             lir.outputs.push(sid);
+                            internal_outputs.insert(sig_name.clone());
                         }
                     } else {
                         // Signal has no driver in parent → it's driven by a child instance.
@@ -3944,10 +3946,6 @@ pub fn synthesize_hierarchical(
                             );
                             lir.inputs.push(sid);
                         }
-                        // Also promote to output if it feeds other logic (e.g., y = core_y)
-                        if !lir.outputs.contains(&sid) {
-                            lir.outputs.push(sid);
-                        }
                     }
                 }
             }
@@ -3957,6 +3955,7 @@ pub fn synthesize_hierarchical(
         };
 
         let mut inst_netlist = InstanceNetlist::new(inst_lir.module_name.clone(), netlist);
+        inst_netlist.internal_outputs = internal_outputs;
 
         let mut sorted_port_names: Vec<_> = inst_lir.port_connections.keys().collect();
         sorted_port_names.sort();
