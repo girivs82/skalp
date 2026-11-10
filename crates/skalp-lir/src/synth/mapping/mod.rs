@@ -501,10 +501,18 @@ impl CellMatcher {
             }
         }
 
+        // A LUT that holds the cut computes any function of its inputs, so
+        // on a LUT target a gate plus an output inverter is never better than
+        // one LUT: the inverter is another cell and another level.
+        let lut_covers = self
+            .universal_lut
+            .as_ref()
+            .is_some_and(|&(_, _, _, k)| num_inputs <= k);
+
         // Inverted match — fallback when no direct match exists, or when the
         // inverted cell has strictly better area/delay.
         let inverted_tt = !tt & mask;
-        if let Some(cells) = self.tt_to_cell.get(&inverted_tt) {
+        if let Some(cells) = self.tt_to_cell.get(&inverted_tt).filter(|_| !lut_covers) {
             for cell in cells {
                 if cell.input_pins.len() == num_inputs {
                     matches.push(CutMatch {

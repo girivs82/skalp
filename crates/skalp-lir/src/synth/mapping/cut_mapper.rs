@@ -426,78 +426,38 @@ impl CutMapper {
         // ──────────────────────────────────────────────────────────────
         // Start from outputs and latch data inputs, walk backward through
         // selected cuts. Only cut roots become mapped cells.
-        let mut required_nodes: HashSet<AigNodeId> = HashSet::new();
-        let mut worklist: Vec<AigNodeId> = Vec::new();
-
-        // Seed with output drivers and latch data inputs
-        for (_, lit) in aig.outputs() {
-            if lit.node != AigNodeId::FALSE {
-                worklist.push(lit.node);
-            }
-        }
-        for (id, node) in aig.iter_nodes() {
-            match node {
-                AigNode::Latch {
-                    data, clock, reset, ..
-                } => {
-                    worklist.push(data.node);
-                    if let Some(c) = clock {
-                        worklist.push(*c);
-                    }
-                    if let Some(r) = reset {
-                        worklist.push(*r);
-                    }
-                }
-                AigNode::Barrier {
-                    data,
-                    enable,
-                    clock,
-                    reset,
-                    ..
-                } => {
-                    worklist.push(data.node);
-                    if let Some(e) = enable {
-                        worklist.push(e.node);
-                    }
-                    if let Some(c) = clock {
-                        worklist.push(*c);
-                    }
-                    if let Some(r) = reset {
-                        worklist.push(*r);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        while let Some(node_id) = worklist.pop() {
-            if required_nodes.contains(&node_id) {
-                continue;
-            }
-            required_nodes.insert(node_id);
-
-            // If this node has a cut, its leaves become the next required nodes
-            if let Some(Some(match_)) = node_best_cut.get(&node_id) {
-                for &leaf in &match_.cut.leaves {
-                    worklist.push(leaf);
-                }
-            } else if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
-                // No cut — AND2 fallback, both children are required
-                worklist.push(left.node);
-                worklist.push(right.node);
-            }
-        }
+        let roots = Self::cover_roots(aig);
+        let mut required_nodes = Self::cover(aig, &roots, &node_best_cut);
 
         // ──────────────────────────────────────────────────────────────
-        // Phase 3: Area recovery iterations
+        // Phase 3: Area recovery under required times
         // ──────────────────────────────────────────────────────────────
-        // For each required AND node, try to find a cut with less area
-        // that still meets the delay bound. Update area flow and re-cover.
-        let delay_bound = global_required * 1.05;
+        // Each cell on the cover gets a required time: the delay-optimal
+        // depth at the roots, carried back through the chosen cuts. A pass
+        // then walks the nodes in topological order, recomputes each arrival
+        // from the cuts as they now stand, and takes the cut with the least
+        // area flow that still arrives by the node's required time. A node's
+        // previous cut always still meets it, so recovery never makes the
+        // mapping deeper than the delay-optimal one.
+        let target = roots
+            .iter()
+            .filter_map(|n| node_delay.get(n))
+            .copied()
+            .fold(0.0f64, f64::max);
         let recovery_iters = self.config.recovery_iterations.min(8);
+        const EPS: f64 = 1e-6;
 
         for _iter in 0..recovery_iters {
-            // Recompute area flow with exact local references (fanout-weighted)
+            let required = Self::required_times(
+                aig,
+                &topo_order,
+                &roots,
+                &required_nodes,
+                &node_best_cut,
+                target,
+            );
+
+            // References from the current cover, for area flow.
             let mut ref_counts: IndexMap<AigNodeId, usize> = IndexMap::new();
             for &nid in &required_nodes {
                 if let Some(Some(m)) = node_best_cut.get(&nid) {
@@ -509,149 +469,93 @@ impl CutMapper {
                     *ref_counts.entry(right.node).or_insert(0) += 1;
                 }
             }
-
-            // Recompute area flow using reference counts from covering (ABC-style)
-            for &node_id in &topo_order {
-                if !required_nodes.contains(&node_id) {
-                    continue;
-                }
-                if let Some(AigNode::And { .. }) = aig.get_node(node_id) {
-                    if let Some(Some(match_)) = node_best_cut.get(&node_id) {
-                        let leaf_area: f64 = match_
-                            .cut
-                            .leaves
-                            .iter()
-                            .map(|l| {
-                                let af = node_area_flow.get(l).copied().unwrap_or(0.0);
-                                let leaf_refs = ref_counts.get(l).copied().unwrap_or(1).max(1);
-                                af / leaf_refs as f64
-                            })
-                            .sum();
-                        let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
-                        node_area_flow.insert(node_id, (match_.area + leaf_area) / refs as f64);
-                    }
-                }
-            }
+            let refs_of = |n: &AigNodeId| ref_counts.get(n).copied().unwrap_or(1).max(1) as f64;
 
             let mut changed = false;
-
-            // Try to find better (smaller area) cuts for each required AND node
             for &node_id in &topo_order {
-                if !required_nodes.contains(&node_id) {
-                    continue;
-                }
-                if !matches!(aig.get_node(node_id), Some(AigNode::And { .. })) {
-                    continue;
-                }
-
-                let Some(cut_set) = cuts.get_cuts(node_id) else {
+                let Some(AigNode::And { left, right }) = aig.get_node(node_id) else {
                     continue;
                 };
+                let req = required.get(&node_id).copied().unwrap_or(f64::INFINITY);
+                let refs = refs_of(&node_id);
+                let flow_of = |cut: &Cut, area: f64| {
+                    let leaves: f64 = cut
+                        .leaves
+                        .iter()
+                        .map(|l| node_area_flow.get(l).copied().unwrap_or(0.0) / refs_of(l))
+                        .sum();
+                    (area + leaves) / refs
+                };
 
-                let mut best_area_flow = node_area_flow.get(&node_id).copied().unwrap_or(f64::MAX);
-
-                for cut in &cut_set.cuts {
-                    if cut.leaves.is_empty() || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
-                    {
-                        continue;
+                let current = node_best_cut.get(&node_id).cloned().flatten();
+                // (area flow, arrival, match)
+                let mut best: Option<(f64, f64, CutMatch)> = None;
+                let mut consider = |flow: f64, arrival: f64, m: CutMatch| {
+                    if arrival > req + EPS {
+                        return;
                     }
-
-                    // Check delay feasibility
-                    let arrival = self.compute_arrival(cut, &node_delay);
-                    let matches = self.matcher.find_matches(cut.truth_table, cut.leaves.len());
-
-                    for match_ in matches {
-                        let total_delay = arrival + match_.delay;
-                        if total_delay > delay_bound {
+                    let better = match &best {
+                        None => true,
+                        Some((f, a, _)) => flow < f - EPS || (flow < f + EPS && arrival < a - EPS),
+                    };
+                    if better {
+                        best = Some((flow, arrival, m));
+                    }
+                };
+                if let Some(m) = &current {
+                    let arrival = self.compute_arrival(&m.cut, &node_delay) + m.delay;
+                    consider(flow_of(&m.cut, m.area), arrival, m.clone());
+                }
+                if let Some(cut_set) = cuts.get_cuts(node_id) {
+                    for cut in &cut_set.cuts {
+                        if cut.leaves.is_empty()
+                            || (cut.leaves.len() == 1 && cut.leaves[0] == node_id)
+                        {
                             continue;
                         }
-
-                        // Compute area flow for this cut (ABC-style: leaf/fanout)
-                        let leaf_area: f64 = cut
-                            .leaves
-                            .iter()
-                            .map(|l| {
-                                let af = node_area_flow.get(l).copied().unwrap_or(0.0);
-                                let leaf_refs = ref_counts.get(l).copied().unwrap_or(1).max(1);
-                                af / leaf_refs as f64
-                            })
-                            .sum();
-                        let refs = ref_counts.get(&node_id).copied().unwrap_or(1).max(1);
-                        let new_area_flow = (match_.area + leaf_area) / refs as f64;
-
-                        // Track the BEST improvement across all cuts (not just the last)
-                        if new_area_flow < best_area_flow {
-                            best_area_flow = new_area_flow;
-                            let mut new_match = match_.clone();
-                            new_match.cut = cut.clone();
-                            node_best_cut.insert(node_id, Some(new_match));
-                            node_area_flow.insert(node_id, new_area_flow);
-                            changed = true;
-                            break; // Best match for this cut found; try next cut
+                        let arrival = self.compute_arrival(cut, &node_delay);
+                        for mut m in self.matcher.find_matches(cut.truth_table, cut.leaves.len()) {
+                            m.cut = cut.clone();
+                            let total = arrival + m.delay;
+                            let flow = flow_of(cut, m.area);
+                            consider(flow, total, m);
                         }
                     }
                 }
+
+                let chosen = match best {
+                    Some((_, _, m)) => Some(m),
+                    None => current.clone(),
+                };
+                let (arrival, flow) = match &chosen {
+                    Some(m) => (
+                        self.compute_arrival(&m.cut, &node_delay) + m.delay,
+                        flow_of(&m.cut, m.area),
+                    ),
+                    None => {
+                        let l = node_delay.get(&left.node).copied().unwrap_or(0.0);
+                        let r = node_delay.get(&right.node).copied().unwrap_or(0.0);
+                        (l.max(r) + 25.0, 2.0)
+                    }
+                };
+                let same = match (&chosen, &current) {
+                    (Some(a), Some(b)) => {
+                        a.cut.leaves == b.cut.leaves
+                            && a.cell_type == b.cell_type
+                            && a.output_inverted == b.output_inverted
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                changed |= !same;
+                node_delay.insert(node_id, arrival);
+                node_area_flow.insert(node_id, flow);
+                node_best_cut.insert(node_id, chosen);
             }
 
+            required_nodes = Self::cover(aig, &roots, &node_best_cut);
             if !changed {
                 break;
-            }
-
-            // Re-cover: recompute required_nodes with updated cuts
-            required_nodes.clear();
-            worklist.clear();
-            for (_, lit) in aig.outputs() {
-                if lit.node != AigNodeId::FALSE {
-                    worklist.push(lit.node);
-                }
-            }
-            for (_, node) in aig.iter_nodes() {
-                match node {
-                    AigNode::Latch {
-                        data, clock, reset, ..
-                    } => {
-                        worklist.push(data.node);
-                        if let Some(c) = clock {
-                            worklist.push(*c);
-                        }
-                        if let Some(r) = reset {
-                            worklist.push(*r);
-                        }
-                    }
-                    AigNode::Barrier {
-                        data,
-                        enable,
-                        clock,
-                        reset,
-                        ..
-                    } => {
-                        worklist.push(data.node);
-                        if let Some(e) = enable {
-                            worklist.push(e.node);
-                        }
-                        if let Some(c) = clock {
-                            worklist.push(*c);
-                        }
-                        if let Some(r) = reset {
-                            worklist.push(*r);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            while let Some(node_id) = worklist.pop() {
-                if required_nodes.contains(&node_id) {
-                    continue;
-                }
-                required_nodes.insert(node_id);
-                if let Some(Some(match_)) = node_best_cut.get(&node_id) {
-                    for &leaf in &match_.cut.leaves {
-                        worklist.push(leaf);
-                    }
-                } else if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
-                    worklist.push(left.node);
-                    worklist.push(right.node);
-                }
             }
         }
 
@@ -749,10 +653,107 @@ impl CutMapper {
         // Step 3: Add inverters for inverted output signals
         self.add_output_inverters(aig, &mut result, &node_delay);
 
-        // Update critical delay
-        result.stats.critical_delay = node_delay.values().copied().fold(0.0, f64::max);
+        // Critical delay of the cover: the latest arrival at a root.
+        result.stats.critical_delay = roots
+            .iter()
+            .filter_map(|n| node_delay.get(n))
+            .copied()
+            .fold(0.0, f64::max);
 
         result
+    }
+
+    /// Nodes the cover must compute: output drivers and the data, enable,
+    /// clock and reset inputs of latches and barriers.
+    fn cover_roots(aig: &Aig) -> Vec<AigNodeId> {
+        let mut roots: Vec<AigNodeId> = aig
+            .outputs()
+            .iter()
+            .map(|(_, lit)| lit.node)
+            .filter(|&n| n != AigNodeId::FALSE)
+            .collect();
+        for (_, node) in aig.iter_nodes() {
+            match node {
+                AigNode::Latch {
+                    data, clock, reset, ..
+                } => {
+                    roots.push(data.node);
+                    roots.extend(clock.iter().copied());
+                    roots.extend(reset.iter().copied());
+                }
+                AigNode::Barrier {
+                    data,
+                    enable,
+                    clock,
+                    reset,
+                    ..
+                } => {
+                    roots.push(data.node);
+                    roots.extend(enable.iter().map(|e| e.node));
+                    roots.extend(clock.iter().copied());
+                    roots.extend(reset.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        roots
+    }
+
+    /// The nodes that become cells: everything reachable from `roots`
+    /// through the chosen cuts (both inputs of an AND without one).
+    fn cover(
+        aig: &Aig,
+        roots: &[AigNodeId],
+        best_cut: &IndexMap<AigNodeId, Option<CutMatch>>,
+    ) -> HashSet<AigNodeId> {
+        let mut covered: HashSet<AigNodeId> = HashSet::new();
+        let mut worklist: Vec<AigNodeId> = roots.to_vec();
+        while let Some(node_id) = worklist.pop() {
+            if !covered.insert(node_id) {
+                continue;
+            }
+            if let Some(Some(m)) = best_cut.get(&node_id) {
+                worklist.extend(m.cut.leaves.iter().copied());
+            } else if let Some(AigNode::And { left, right }) = aig.get_node(node_id) {
+                worklist.push(left.node);
+                worklist.push(right.node);
+            }
+        }
+        covered
+    }
+
+    /// Required time of each covered node: `target` at the roots, less each
+    /// chosen cell's delay going back through the cover.
+    fn required_times(
+        aig: &Aig,
+        topo_order: &[AigNodeId],
+        roots: &[AigNodeId],
+        covered: &HashSet<AigNodeId>,
+        best_cut: &IndexMap<AigNodeId, Option<CutMatch>>,
+        target: f64,
+    ) -> std::collections::HashMap<AigNodeId, f64> {
+        let mut required: std::collections::HashMap<AigNodeId, f64> =
+            roots.iter().map(|&r| (r, target)).collect();
+        for &node_id in topo_order.iter().rev() {
+            if !covered.contains(&node_id) {
+                continue;
+            }
+            let Some(&req) = required.get(&node_id) else {
+                continue;
+            };
+            let (leaves, delay): (Vec<AigNodeId>, f64) = match best_cut.get(&node_id) {
+                Some(Some(m)) => (m.cut.leaves.clone(), m.delay),
+                _ => match aig.get_node(node_id) {
+                    Some(AigNode::And { left, right }) => (vec![left.node, right.node], 25.0),
+                    _ => continue,
+                },
+            };
+            for leaf in leaves {
+                let slot = required.entry(leaf).or_insert(f64::INFINITY);
+                *slot = slot.min(req - delay);
+            }
+        }
+        required
     }
 
     /// Find the best cut match for a node
