@@ -9,6 +9,7 @@
 mod analytical;
 mod annealing;
 mod constraints;
+pub mod control_sets;
 mod legalization;
 mod sites;
 mod spreading;
@@ -390,6 +391,7 @@ impl<D: Device + Clone> Placer<D> {
         if !resolved_constraints.is_empty() {
             self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
         }
+        Self::check_control_sets(&self.device, &result, netlist)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
@@ -397,6 +399,35 @@ impl<D: Device + Clone> Placer<D> {
         result.cost = self.calculate_cost(&result, netlist);
 
         Ok(result)
+    }
+
+    /// Refuse a placement that puts flip-flops with different clock, reset
+    /// or enable in one control group. Every algorithm keeps them apart; a
+    /// placement that does not would build hardware that misbehaves (a
+    /// flip-flop reset by its neighbour's reset, or held in reset).
+    fn check_control_sets(
+        device: &D,
+        result: &PlacementResult,
+        netlist: &GateNetlist,
+    ) -> Result<()> {
+        let sets = control_sets::control_sets(netlist);
+        match control_sets::control_set_conflicts(device, result, &sets)
+            .into_iter()
+            .next()
+        {
+            None => Ok(()),
+            Some((x, y, group, cells)) => {
+                let names: Vec<&str> = cells
+                    .iter()
+                    .filter_map(|&c| netlist.get_cell(c).map(|c| c.path.as_str()))
+                    .collect();
+                Err(PlaceRouteError::PlacementFailed(format!(
+                    "flip-flops with different clock, reset or enable share control group \
+                     {group} of tile ({x}, {y}): {}",
+                    names.join(", ")
+                )))
+            }
+        }
     }
 
     /// Place a design
@@ -535,6 +566,8 @@ impl<D: Device + Clone> Placer<D> {
         if !resolved_constraints.is_empty() {
             self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
         }
+
+        Self::check_control_sets(&self.device, &result, netlist)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
@@ -800,6 +833,8 @@ impl<D: Device + Clone> Placer<D> {
 
         // Track used BELs
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
+        // Flip-flops share a control group only with the same control set
+        let sets = control_sets::control_sets(netlist);
 
         for cell in &netlist.cells {
             // Skip constant cells (TIE_HIGH/TIE_LOW/GND/VCC) — on iCE40 these
@@ -832,6 +867,14 @@ impl<D: Device + Clone> Placer<D> {
                         for (bel_idx, bel) in tile.bels().iter().enumerate() {
                             if Self::bel_types_compatible(bel.bel_type, bel_type)
                                 && !used_bels.contains_key(&(x, y, bel_idx))
+                                && control_sets::fits_control_group(
+                                    &self.device,
+                                    &sets,
+                                    cell_id,
+                                    &PlacementLoc::new(x, y, bel_idx, bel_type),
+                                    &[],
+                                    |x, y, b| used_bels.get(&(x, y, b)).copied(),
+                                )
                             {
                                 used_bels.insert((x, y, bel_idx), cell_id);
                                 result

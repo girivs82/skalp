@@ -183,6 +183,18 @@ impl TileBitsDb {
         self.enums.get(name)?.options.get(option).map(Vec::as_slice)
     }
 
+    /// Names of every word setting.
+    pub fn word_names(&self) -> impl Iterator<Item = &str> {
+        self.words.keys().map(String::as_str)
+    }
+
+    /// Every enum setting, with the bits of each of its options.
+    pub fn enums(&self) -> impl Iterator<Item = (&str, &BTreeMap<String, Vec<ConfigBit>>)> {
+        self.enums
+            .iter()
+            .map(|(name, e)| (name.as_str(), &e.options))
+    }
+
     /// Bits that enable the pip from `src` to `dst`.
     pub fn pip(&self, dst: &str, src: &str) -> Option<&[ConfigBit]> {
         self.pips

@@ -269,6 +269,26 @@ pub const RAM_PIN_READ_CLK: usize = 103;
 /// Cell parameter holding where a multiplier's added low-driven inputs start.
 pub const DSP_EXTRA_INPUTS_PARAM: &str = "DSP_EXTRA_INPUTS_FROM";
 
+/// [`Device::ff_control_group`] for a tile whose flip-flops pair up into
+/// slices in BEL order (Lattice Nexus and ECP5: two per slice).
+pub(crate) fn ff_slice_group<D: Device + ?Sized>(
+    device: &D,
+    x: u32,
+    y: u32,
+    bel_index: usize,
+) -> Option<usize> {
+    let tile = device.tile_at(x, y)?;
+    let bels = tile.bels();
+    if !bels.get(bel_index)?.bel_type.is_ff() {
+        return None;
+    }
+    let ordinal = bels[..bel_index]
+        .iter()
+        .filter(|b| b.bel_type.is_ff())
+        .count();
+    Some(ordinal / 2)
+}
+
 /// Whether a router pin number is a clock pin, routed on the clock network.
 pub fn is_clock_pin(pin: usize) -> bool {
     pin == FF_PIN_CLK || pin == RAM_PIN_READ_CLK
@@ -698,6 +718,15 @@ pub trait Device: Send + Sync {
     /// RAM site. Empty for an ordinary BEL.
     fn bel_footprint(&self, _x: u32, _y: u32, _bel_index: usize) -> Vec<usize> {
         Vec::new()
+    }
+
+    /// The group of flip-flop BELs of tile (x, y) that BEL `bel_index`
+    /// belongs to, whose flip-flops share one clock, clock enable and
+    /// set/reset (a Lattice slice; a whole iCE40 logic tile). Flip-flops in
+    /// one group must have the same control signals. `None`: the BEL is not a
+    /// flip-flop, or its controls are its own.
+    fn ff_control_group(&self, _x: u32, _y: u32, _bel_index: usize) -> Option<usize> {
+        None
     }
 
     /// A lower bound on the routing cost (sum of [`Pip::cost`]) of a path

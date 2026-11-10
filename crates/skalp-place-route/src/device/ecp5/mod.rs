@@ -1441,6 +1441,11 @@ impl Device for Ecp5Device {
             .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
+    fn ff_control_group(&self, x: u32, y: u32, bel_index: usize) -> Option<usize> {
+        // A slice's two flip-flops share its CLK, CE and LSR
+        super::ff_slice_group(self, x, y, bel_index)
+    }
+
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
         // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
         // slice C); each of those LUTs, when used, blocks the RAM site.

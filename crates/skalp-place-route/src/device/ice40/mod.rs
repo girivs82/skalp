@@ -1648,6 +1648,12 @@ impl Device for Ice40Device {
         }
     }
 
+    fn ff_control_group(&self, x: u32, y: u32, bel_index: usize) -> Option<usize> {
+        // All eight logic cells of a tile share one clock, enable and set/reset
+        let tile = self.tile_at(x, y)?;
+        tile.bels().get(bel_index)?.bel_type.is_ff().then_some(0)
+    }
+
     fn tile_at(&self, x: u32, y: u32) -> Option<&dyn Tile> {
         self.tiles
             .get(y as usize)?

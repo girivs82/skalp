@@ -4,6 +4,7 @@
 //! Supports timing-driven placement by incorporating estimated path delays.
 //! Includes parallel move evaluation for improved performance on multi-core systems.
 
+use super::control_sets::{control_sets, fits_control_group, ControlSet};
 use super::{PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
@@ -448,6 +449,9 @@ struct MoveContext {
     /// BELs no move may target: the LUTs under fixed two-bit carry cells
     /// and under distributed-RAM cells
     reserved: HashSet<(u32, u32, usize)>,
+    /// Control set of every flip-flop: flip-flops of one control group
+    /// ([`Device::ff_control_group`]) must all have the same one
+    control_sets: HashMap<CellId, ControlSet>,
 }
 
 impl MoveContext {
@@ -518,6 +522,7 @@ impl MoveContext {
             cells,
             critical: critical[..top_n].iter().map(|&(c, _)| c).collect(),
             reserved,
+            control_sets: control_sets(netlist),
         }
     }
 }
@@ -655,6 +660,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let move_op = self.generate_move(&cal_placement, ctx, &cal_loc_map, rlim, &mut rng);
             let affected = self.moved_cells_with_displaced(&move_op, &cal_placement, &cal_loc_map);
             let undo = self.apply_move_in_place(&mut cal_placement, &mut cal_loc_map, &move_op);
+            if !self.control_sets_hold(ctx, &affected, &cal_placement, &cal_loc_map) {
+                Self::undo_move(&mut cal_placement, &mut cal_loc_map, undo);
+                continue;
+            }
             let affected_nets = cost_cache.affected_nets(&affected);
             let (delta, _, _) = cost_cache.compute_delta(
                 &affected_nets,
@@ -815,6 +824,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
                 // Apply move in-place (no clone), get undo record
                 let undo = self.apply_move_in_place(&mut current, &mut location_to_cell, &move_op);
+                if !self.control_sets_hold(&move_ctx, &affected, &current, &location_to_cell) {
+                    Self::undo_move(&mut current, &mut location_to_cell, undo);
+                    continue;
+                }
 
                 // Incremental cost delta: only recompute nets connected to moved cells
                 let affected_nets = cost_cache.affected_nets(&affected);
@@ -1004,6 +1017,22 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             self.apply_move(&current, &location_to_cell, &move_op);
                         let affected =
                             self.moved_cells_with_displaced(&move_op, &current, &location_to_cell);
+                        if !self.control_sets_hold(
+                            &move_ctx,
+                            &affected,
+                            &new_placement,
+                            &new_loc_map,
+                        ) {
+                            // An illegal move: never accepted
+                            return (
+                                move_op,
+                                new_placement,
+                                new_loc_map,
+                                f64::INFINITY,
+                                Vec::new(),
+                                Vec::new(),
+                            );
+                        }
                         let affected_nets = cost_cache.affected_nets(&affected);
                         let (delta, net_updates, prox_updates) = cost_cache.compute_delta(
                             &affected_nets,
@@ -1169,6 +1198,24 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                         continue;
                     }
                 }
+                // Flip-flops share a control group only with their own
+                // control set: the cell at its new BEL, and any occupant
+                // swapped back to the cell's old one
+                let lookup = |x: u32, y: u32, b: usize| loc_map.get(&(x, y, b)).copied();
+                let target = PlacementLoc::new(x, y, bel_idx, loc.bel_type);
+                let leaving: Vec<CellId> = occupant.copied().into_iter().collect();
+                if !fits_control_group(
+                    self.device,
+                    &ctx.control_sets,
+                    cell_id,
+                    &target,
+                    &leaving,
+                    lookup,
+                ) || occupant.is_some_and(|&o| {
+                    !fits_control_group(self.device, &ctx.control_sets, o, &loc, &[cell_id], lookup)
+                }) {
+                    continue;
+                }
                 seen += 1;
                 if rng.gen_range(0..seen) == 0 {
                     chosen = Some(bel_idx);
@@ -1180,6 +1227,25 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         Move::Relocate(cell_id, loc)
+    }
+
+    /// Whether every flip-flop a move touched (`affected`) shares its control
+    /// group, after the move (`placement`, `loc_map`), only with flip-flops
+    /// of its own control set.
+    fn control_sets_hold(
+        &self,
+        ctx: &MoveContext,
+        affected: &[CellId],
+        placement: &PlacementResult,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+    ) -> bool {
+        affected.iter().all(|&cell| {
+            placement.placements.get(&cell).is_none_or(|loc| {
+                fits_control_group(self.device, &ctx.control_sets, cell, loc, &[], |x, y, b| {
+                    loc_map.get(&(x, y, b)).copied()
+                })
+            })
+        })
     }
 
     /// Whether tile (x, y) already holds as many cells on BELs of the

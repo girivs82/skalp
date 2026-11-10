@@ -63,7 +63,7 @@ fn is_flip_flop(cell: &Cell) -> bool {
 }
 
 /// Router pin number of a flip-flop's `index`-th input.
-fn ff_pin(cell: &Cell, index: usize) -> usize {
+pub(crate) fn ff_pin(cell: &Cell, index: usize) -> usize {
     match (cell.function.as_ref(), index) {
         (Some(CellFunction::DffE), 1) | (Some(CellFunction::DffRE), 2) => FF_PIN_CE,
         (Some(CellFunction::DffR), 1) | (Some(CellFunction::DffRE), 1) => FF_PIN_LSR,

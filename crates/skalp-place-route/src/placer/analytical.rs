@@ -336,6 +336,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let (width, height) = self.device.grid_size();
         let mut result = PlacementResult::new();
         let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
+        // Flip-flops share a control group only with the same control set
+        let sets = super::control_sets::control_sets(netlist);
 
         for cell in &netlist.cells {
             let idx = match cell_indices.get(&cell.id) {
@@ -348,7 +350,13 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             let y = y_positions[idx].clamp(0.0, (height - 1) as f64);
 
             let (tile_x, tile_y, bel_index) = sites
-                .take_nearest(x, y, bel_type, bel_types_compatible)
+                .take_nearest(
+                    x,
+                    y,
+                    bel_type,
+                    sets.get(&cell.id).copied(),
+                    bel_types_compatible,
+                )
                 .ok_or_else(|| {
                     PlaceRouteError::PlacementFailed(format!(
                         "No valid location for BEL type {:?}",

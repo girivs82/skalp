@@ -16,6 +16,7 @@ use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::{PlaceRouteError, Result};
+use crate::placer::control_sets::ControlSet;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::{Cell, CellId};
 use skalp_lir::tech_library::CellFunction;
@@ -363,7 +364,12 @@ fn emit_bits(
             .filter(|&i| tied.value(cell, first + i) == Some(false))
             .collect()
     };
-    let mut slices_with_ff: HashSet<(u32, u32, char, bool)> = HashSet::new();
+    // The two flip-flops of a slice share its clock, enable and set/reset
+    // inputs: each slice's control set, and a flip-flop holding it
+    let control_sets = crate::placer::control_sets::control_sets(netlist);
+    let mut slices_with_ff: HashMap<(u32, u32, char), (ControlSet, &str)> = HashMap::new();
+    // Tiles whose slice C is a distributed RAM's write port
+    let mut ram_write_tiles: HashSet<(u32, u32)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
     let mut used_multipliers: HashSet<(u32, u32, usize)> = HashSet::new();
 
@@ -452,8 +458,23 @@ fn emit_bits(
                 config.set_enum(&tile, &format!("{prefix}.LSRMODE"), "LSR")?;
                 config.set_enum(&tile, &format!("{prefix}.SEL"), "DF")?;
                 config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), "CLK")?;
-                let uses_reset = cell.reset.is_some() || cell.cell_type.contains("RST");
-                slices_with_ff.insert((x, y, slice, uses_reset));
+                let set = control_sets
+                    .get(&cell.id)
+                    .copied()
+                    .ok_or_else(|| emit_err(format!("Flip-flop '{}' has no clock", cell.path)))?;
+                match slices_with_ff.get(&(x, y, slice)) {
+                    Some((held, other)) if *held != set => {
+                        return Err(emit_err(format!(
+                            "Flip-flops '{other}' and '{}' share slice {slice} of tile \
+                             ({x}, {y}) but not their clock, reset and enable",
+                            cell.path
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        slices_with_ff.insert((x, y, slice), (set, cell.path.as_str()));
+                    }
+                }
             }
             BelType::DistRam => {
                 if (0..cell.inputs.len()).any(|i| tied.value(cell.id, i).is_some()) {
@@ -463,6 +484,7 @@ fn emit_bits(
                     )));
                 }
                 emit_dist_ram(&mut config, &tile, cell)?;
+                ram_write_tiles.insert((x, y));
             }
             BelType::Lut4 => {
                 let slice = slice_of(number);
@@ -485,8 +507,16 @@ fn emit_bits(
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
 
-    for &(x, y, slice, uses_reset) in &slices_with_ff {
-        if !uses_reset {
+    for (&(x, y, slice), &(set, path)) in &slices_with_ff {
+        if matches!(slice, 'C' | 'D') && ram_write_tiles.contains(&(x, y)) {
+            // The RAM's write clock and write enable drive slice C's clock
+            // and set/reset inputs, which slice D shares
+            return Err(emit_err(format!(
+                "Flip-flop '{path}' is in slice {slice} of tile ({x}, {y}), which shares \
+                 the write port of a distributed RAM"
+            )));
+        }
+        if set.reset.is_none() {
             // An unconnected set/reset input reads high; this holds it inactive.
             let tile = config.tile(x, y, "PLC")?;
             config.set_enum(&tile, &format!("SLICE{slice}.LSRMUX"), "INV")?;
@@ -570,7 +600,7 @@ fn set_ram_enum(
     }
     found
         .then_some(())
-        .ok_or_else(|| emit_err(format!("No block RAM setting {name}.{option}")))
+        .ok_or_else(|| emit_err(format!("No site setting {name}.{option}")))
 }
 
 /// Set a word in whichever of a site's tiles defines it.
@@ -589,7 +619,7 @@ fn set_ram_word(
     }
     found
         .then_some(())
-        .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))
+        .ok_or_else(|| emit_err(format!("No site setting {name}")))
 }
 
 /// Write a block RAM's initial contents to its window on the configuration
@@ -961,7 +991,19 @@ fn emit_pad(
         tiles,
         &format!("{prefix}.BASE_TYPE"),
         &format!("{direction}_{standard}"),
-    )?;
+    )
+    .map_err(|_| {
+        let bank = if high_performance {
+            "a high-performance (1.8 V at most) I/O"
+        } else {
+            "a wide-range I/O"
+        };
+        emit_err(format!(
+            "Pad '{}' is on {bank}, which has no {} {standard}",
+            cell.path,
+            direction.to_lowercase()
+        ))
+    })?;
     set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
     if !high_performance {
         set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;

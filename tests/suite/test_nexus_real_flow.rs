@@ -203,3 +203,29 @@ fn preloaded_block_ram_contents_reach_the_bitstream() {
     let ones: u32 = expected.iter().map(|w| w.count_ones()).sum();
     assert_eq!(written, ones, "every one-bit of the contents is written");
 }
+
+/// Registers with and without a reset never share a slice: its two
+/// flip-flops share one clock, enable and set/reset input, and the bitstream
+/// holds a slice without a reset user's set/reset off by inverting it.
+#[test]
+fn registers_with_and_without_reset_get_their_own_slices() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_mixed_resets.sk", "MixedResets");
+    let sets = skalp_place_route::placer::control_sets::control_sets(&netlist);
+    let resets = sets.values().filter(|s| s.reset.is_some()).count();
+    assert!(resets > 0, "the counter has a reset");
+    assert!(resets < sets.len(), "the shift register has none");
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("mixed reset registers should place, route and emit");
+    // The placer refuses a slice of mixed control sets, and so does emit
+    assert!(result.routing.success);
+}
