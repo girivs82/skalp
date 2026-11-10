@@ -218,6 +218,18 @@ fn load_base_addresses(
     Some(file.regions)
 }
 
+/// Configuration-bus address of a hard block's registers: the region of
+/// that name (such as `PLL_LLC`) in the device's `baseaddr.json`.
+pub fn hard_block_base_address(db_root: &Path, variant: NexusVariant, region: &str) -> Option<u32> {
+    load_base_addresses(
+        db_root,
+        variant.prjoxide_family(),
+        variant.prjoxide_device(),
+    )?
+    .get(region)
+    .map(|r| r.addr)
+}
+
 /// Configuration-bus address of the initial contents of the block RAM whose
 /// `WID` setting is `wid`.
 ///

@@ -16,6 +16,7 @@ pub mod data;
 pub mod dsp;
 pub mod ebr;
 pub mod emit;
+pub mod pll;
 pub mod prjoxide_bels;
 pub mod prjoxide_graph;
 pub mod prjoxide_load;
@@ -297,6 +298,13 @@ impl NexusDevice {
             .filter_map(|t| Some(((t.x, t.y), ebr::site_of_tile(&t.tiletype)?)))
             .collect();
 
+        // PLL sites: the GPLL tile of each corner in the window
+        let pll_sites: HashMap<(u32, u32), String> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), pll::corner_of_tile(&t.tiletype)?.to_string())))
+            .collect();
+
         // Tile order sets BEL ids and placement order, so keep it stable.
         let mut ordered: Vec<_> = primary.iter().collect();
         ordered.sort_unstable_by_key(|(&(x, y), _)| (y, x));
@@ -482,6 +490,30 @@ impl NexusDevice {
                 });
                 bel_id_counter += 1;
             }
+            if let Some(corner) = pll_sites.get(&(x, y)) {
+                let wire_of = |step: &str, pin: &str| {
+                    resolve_wire(x, y, &pll::site_wire(step, pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                };
+                // The pins sit one tile into the fabric from the PLL's tile
+                let step = ["E1", "W1", "S1", "N1"]
+                    .into_iter()
+                    .find(|step| wire_of(step, "REFCK").is_some());
+                if let Some(step) = step {
+                    for pin in pll::input_pins().iter().chain(pll::output_pins()) {
+                        if let Some(w) = wire_of(step, pin) {
+                            bel_wires.insert((x, y, format!("PLL_{pin}")), w);
+                        }
+                    }
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: BelType::Pll,
+                        name: format!("PLL_{corner}"),
+                        pins: Vec::new(),
+                    });
+                    bel_id_counter += 1;
+                }
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
@@ -602,6 +634,11 @@ impl NexusDevice {
     }
 
     /// Every prjoxide tile of the device (real-silicon model only).
+    /// A site wire recorded for tile (x, y) under `key` (such as `PLL_REFCK`).
+    pub fn bel_pin_wire_by_name(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
+        self.bel_wires.get(&(x, y, key.to_string())).copied()
+    }
+
     pub fn prjoxide_tiles(&self) -> &[PrjoxideTile] {
         &self.prjoxide_tiles
     }
@@ -2104,6 +2141,14 @@ impl Device for NexusDevice {
         self.variant.default_package()
     }
 
+    fn pll_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
+        pll::input_router_pin(cell, input).filter(|_| pll::is_pll(cell))
+    }
+
+    fn pll_output_pin(&self, cell: &skalp_lir::gate_netlist::Cell, output: usize) -> Option<usize> {
+        pll::output_router_pin(cell, output).filter(|_| pll::is_pll(cell))
+    }
+
     fn dsp_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
         dsp::router_pin(&dsp::input_pin(cell, input)?).filter(|_| dsp::is_multiplier(cell))
     }
@@ -2179,6 +2224,18 @@ impl Device for NexusDevice {
                 CellPin::Input(n) => ebr::pin_of_router_pin(n)?.to_string(),
             };
             return self.bel_wires.get(&(x, y, format!("RAM_{name}"))).copied();
+        }
+        let is_pll = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::Pll);
+        if is_pll {
+            let name = match pin {
+                CellPin::Output(n) => pll::output_pins().get(n)?,
+                CellPin::Input(n) => pll::input_pins().get(n)?,
+            };
+            return self.bel_wires.get(&(x, y, format!("PLL_{name}"))).copied();
         }
         let is_real_dist_ram = !self.prjoxide_tiles.is_empty()
             && self

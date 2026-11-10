@@ -1,0 +1,40 @@
+// A PLL on the CertusPro-NX Versa board: the 125 MHz oscillator in, 100 MHz
+// out (VCO 1600 MHz). LED 0 toggles from a 125 MHz counter, LED 1 from a
+// counter on the PLL output, LED 2 shows lock.
+#[lattice_ip(name = "PLL_CORE", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
+entity PllCore {
+    in REFCK: clock
+    in RST: bit
+    out CLKOP: clock
+    out LOCK: bit
+}
+
+entity NexusPll {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out led: bit[3] @ { pins: ["R5", "R4", "R8"], io_standard: "LVCMOS33" }
+}
+
+impl NexusPll {
+    signal pll_clk: clock
+    signal locked: bit
+    signal slow: nat[27] = 0
+    signal fast: nat[27] = 0
+
+    inst pll = PllCore {
+        REFCK: clk,
+        RST: 0
+    }
+
+    pll_clk = pll.CLKOP
+    locked = pll.LOCK
+
+    on(clk.rise) {
+        slow = slow + 1
+    }
+
+    on(pll_clk.rise) {
+        fast = fast + 1
+    }
+
+    led = {locked, fast[26], slow[26]}
+}

@@ -140,7 +140,49 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
         }
     }
     drive_constant_flip_flop_data(&mut driven, &constants);
+    drive_constant_pll_inputs(&mut driven, &constants, device);
     driven
+}
+
+/// Replace each constant input of a PLL with a LUT that outputs it: a PLL's
+/// pins come through the fabric, whose input muxes cannot hold a constant.
+fn drive_constant_pll_inputs(
+    netlist: &mut GateNetlist,
+    constants: &HashMap<GateNetId, bool>,
+    device: &dyn Device,
+) {
+    let mut drivers: HashMap<bool, GateNetId> = HashMap::new();
+    for index in 0..netlist.cells.len() {
+        let cell = &netlist.cells[index];
+        let tied: Vec<(usize, bool)> = (0..cell.inputs.len())
+            .filter(|&i| device.pll_input_pin(cell, i).is_some())
+            .filter_map(|i| Some((i, *constants.get(&cell.inputs[i])?)))
+            .collect();
+        if tied.is_empty() {
+            continue;
+        }
+        let library = cell.library.clone();
+        for (input, value) in tied {
+            let net = *drivers.entry(value).or_insert_with(|| {
+                let name = format!("constant_pll_input_{}", u8::from(value));
+                let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
+                let mut driver = Cell::new_comb(
+                    CellId(0),
+                    "LUT4".to_string(),
+                    library.clone(),
+                    0.0,
+                    format!("{name}_driver"),
+                    Vec::new(),
+                    vec![net],
+                );
+                driver.function = Some(CellFunction::Lut4);
+                driver.lut_init = Some(if value { 0xFFFF } else { 0 });
+                netlist.add_cell(driver);
+                net
+            });
+            netlist.cells[index].inputs[input] = net;
+        }
+    }
 }
 
 /// Replace a constant flip-flop data input with a LUT that outputs it.
@@ -211,6 +253,23 @@ pub fn prepare_for_routing(
                     tied.values.insert((cell.id, index), value);
                 } else if let Some(pin) = device.dsp_input_pin(cell, index) {
                     connect(&mut prepared.nets, net, cell.id, pin);
+                }
+            }
+            continue;
+        }
+        let pll_pins = (0..cell.outputs.len().max(cell.inputs.len())).any(|i| {
+            device.pll_input_pin(cell, i).is_some() || device.pll_output_pin(cell, i).is_some()
+        });
+        if pll_pins {
+            // Constant inputs were given drivers ([`drive_constant_inputs`])
+            for (index, &net) in cell.inputs.iter().enumerate() {
+                if let Some(pin) = device.pll_input_pin(cell, index) {
+                    connect(&mut prepared.nets, net, cell.id, pin);
+                }
+            }
+            for (index, &net) in cell.outputs.iter().enumerate() {
+                if let Some(pin) = device.pll_output_pin(cell, index) {
+                    prepared.nets[net.0 as usize].driver_pin = Some(pin);
                 }
             }
             continue;

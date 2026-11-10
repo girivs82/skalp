@@ -247,6 +247,11 @@ pub fn load_tiletype(
     if lifcl.is_none() && tiletype.starts_with("BANKREF") {
         lifcl = load_bank_reference_variant(db_root, tiletype)?;
     }
+    // CrossLink-NX has no upper right PLL; the lower right one sits on the
+    // same (right) edge, so its tile, flipped top to bottom, stands in
+    if lifcl.is_none() && tiletype == "GPLL_URC" {
+        lifcl = parse_tiletype(db_root, "LIFCL", "GPLL_LRC")?.map(mirror_lower_right_pll);
+    }
     Ok(fill_lfcpnx_gaps(own, lifcl, tiletype))
 }
 
@@ -315,6 +320,9 @@ fn fill_lfcpnx_gaps(
     lifcl: Option<TileBitsDb>,
     tiletype: &str,
 ) -> Option<TileBitsDb> {
+    if tiletype.starts_with("GPLL_") {
+        return pll_tile(own, lifcl);
+    }
     let Some(mut own) = own else { return lifcl };
     let Some(lifcl) = lifcl else { return Some(own) };
 
@@ -338,6 +346,112 @@ fn fill_lfcpnx_gaps(
         own.words = lifcl.words;
     }
     Some(own)
+}
+
+/// A CertusPro-NX PLL tile: its own settings (fuzzed separately, and they
+/// differ: it has no mode bit), with CrossLink-NX's routing. Only the routing
+/// that stays within a tile of the PLL carries over: the connections from
+/// pads further away follow CrossLink-NX's floorplan, not this device's.
+fn pll_tile(own: Option<TileBitsDb>, lifcl: Option<TileBitsDb>) -> Option<TileBitsDb> {
+    let Some(lifcl) = lifcl else { return own };
+    let mut own = own.unwrap_or_default();
+    // The PLL's own pins reach the fabric a few tiles away (its reset comes
+    // from the LSR of a slice two rows from the corner); the reference
+    // clock inputs from pads come from tens of tiles away
+    let is_near = |wire: &str| match wire.split_once(':') {
+        None => true,
+        Some(("G", _)) => true,
+        Some((step, _)) => step
+            .split(|c: char| c.is_ascii_alphabetic())
+            .filter(|n| !n.is_empty())
+            .all(|n| n.parse::<u32>().is_ok_and(|n| n <= PLL_FABRIC_REACH)),
+    };
+    if own.pips.is_empty() {
+        own.pips = lifcl.pips;
+    }
+    if own.conns.is_empty() {
+        own.conns = lifcl
+            .conns
+            .into_iter()
+            .filter(|(dst, _)| is_near(dst))
+            .map(|(dst, conns)| {
+                let near = conns
+                    .into_iter()
+                    .filter(|c| is_near(&c.from_wire))
+                    .collect();
+                (dst, near)
+            })
+            .filter(|(_, conns): &(String, Vec<ConnData>)| !conns.is_empty())
+            .collect();
+    }
+    Some(own)
+}
+
+/// How many tiles from its corner tile a PLL's pins reach into the fabric
+/// (CrossLink-NX's reach at most three)
+const PLL_FABRIC_REACH: u32 = 4;
+
+/// The lower right PLL tile turned into the upper right one: the fabric it
+/// connects to flips from above it to below it, and its outputs feed the
+/// top and right clock muxes instead of the bottom and right ones. The
+/// edge clock banks are on the bottom edge only, so those connections go.
+fn mirror_lower_right_pll(mut db: TileBitsDb) -> TileBitsDb {
+    fn mirror_wire(wire: &str) -> Option<String> {
+        match wire.split_once(':') {
+            None => Some(wire.to_string()),
+            Some(("G", name)) => {
+                if name.contains("ECLK") {
+                    return None;
+                }
+                let name = name
+                    .replacen("JLRCLKO", "JURCLKO", 1)
+                    .replace("BMID", "TMID");
+                Some(format!("G:{name}"))
+            }
+            Some((step, name)) => {
+                let step: String = step
+                    .chars()
+                    .map(|c| match c {
+                        'N' => 'S',
+                        'S' => 'N',
+                        c => c,
+                    })
+                    .collect();
+                Some(format!("{step}:{name}"))
+            }
+        }
+    }
+    db.conns = db
+        .conns
+        .into_iter()
+        .filter_map(|(dst, conns)| {
+            let dst = mirror_wire(&dst)?;
+            let conns: Vec<ConnData> = conns
+                .into_iter()
+                .filter_map(|mut c| {
+                    c.from_wire = mirror_wire(&c.from_wire)?;
+                    Some(c)
+                })
+                .collect();
+            (!conns.is_empty()).then_some((dst, conns))
+        })
+        .collect();
+    db.pips = db
+        .pips
+        .into_iter()
+        .filter_map(|(dst, arcs)| {
+            let dst = mirror_wire(&dst)?;
+            let arcs: Vec<_> = arcs
+                .into_iter()
+                .filter_map(|mut a| {
+                    a.from_wire = mirror_wire(&a.from_wire)?;
+                    Some(a)
+                })
+                .collect();
+            (!arcs.is_empty()).then_some((dst, arcs))
+        })
+        .collect();
+    db
 }
 
 fn parse_tiletype(

@@ -749,6 +749,22 @@ pub trait Device: Send + Sync {
     }
 
     /// Router pin a multiplier input connects to, or `None` if it has no pin.
+    /// Router pin number of a PLL cell's `input`-th input, where the device
+    /// names PLL pins (`None`: the input's index).
+    fn pll_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
+        None
+    }
+
+    /// Router pin number of a PLL cell's `output`-th output, as
+    /// [`Self::pll_input_pin`].
+    fn pll_output_pin(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _output: usize,
+    ) -> Option<usize> {
+        None
+    }
+
     fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
         None
     }

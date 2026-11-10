@@ -32,6 +32,16 @@ fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
         .iter()
         .filter_map(|p| Some((format!("top.{}", p.name), p.physical_constraints.clone()?)))
         .collect();
+    // Like the CLI, drop ports hierarchical synthesis promoted for child instances
+    let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+    let is_real_port = |net: &skalp_lir::GateNetId| {
+        let name = &names[net.0 as usize];
+        let base = name.split('[').next().unwrap_or(name);
+        let port = base.strip_prefix("top.").unwrap_or(base);
+        top.ports.iter().any(|p| p.name == port)
+    };
+    netlist.inputs.retain(is_real_port);
+    netlist.outputs.retain(is_real_port);
     skalp_lir::insert_io_buffers(&mut netlist, &library, &constraints);
     std::fs::write(&cache, serde_json::to_string(&netlist).unwrap()).unwrap();
     netlist

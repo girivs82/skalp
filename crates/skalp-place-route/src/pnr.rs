@@ -551,6 +551,12 @@ pub fn place_and_route_nexus_real(
         })
         .map(|&(x, y, _)| (x, y))
         .collect();
+    // Each PLL goes to the corner its LOC names, or the corner nearest the
+    // design's pins; the region loaded must reach it
+    let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
+        .map_err(PlaceRouteError::PlacementFailed)?;
+    let mut pad_sites = pad_sites;
+    pad_sites.extend(pll_sites.values().copied());
     let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
         db_root,
         variant.prjoxide_family(),
@@ -580,7 +586,14 @@ pub fn place_and_route_nexus_real(
             .map_err(PlaceRouteError::BitstreamFailed)?;
 
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
-    let logic = prepare::logic_only_netlist(netlist);
+    let mut logic = prepare::logic_only_netlist(netlist);
+    for cell in &mut logic.cells {
+        if pll_sites.contains_key(&cell.id) {
+            cell.cell_type = "TIE_PLL".to_string();
+            cell.function = None;
+            cell.parameters.clear();
+        }
+    }
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();
     let mut placer = Placer::new(config.placer.clone(), device.clone());
@@ -591,6 +604,23 @@ pub fn place_and_route_nexus_real(
         placer.place_with_carry_chains(&logic, &packing.carry_chains)?
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
+    for (&cell, &(x, y)) in &pll_sites {
+        let bel = crate::device::Device::tile_at(&device, x, y)
+            .and_then(|t| {
+                t.bels()
+                    .iter()
+                    .position(|b| b.bel_type == crate::device::BelType::Pll)
+            })
+            .ok_or_else(|| {
+                PlaceRouteError::PlacementFailed(format!(
+                    "The PLL site at ({x}, {y}) has no routing data in the device database"
+                ))
+            })?;
+        placement.placements.insert(
+            cell,
+            crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::Pll),
+        );
+    }
     log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());
     Placer::<NexusDevice>::log_placement_stats(&placement, netlist);
 
@@ -624,9 +654,28 @@ pub fn place_and_route_nexus_real(
         }
     }
     if !routing.success {
-        return Err(PlaceRouteError::RoutingFailed(
-            "Some nets could not be routed on the real device".to_string(),
-        ));
+        let mut unrouted: Vec<&str> = routing
+            .routes
+            .iter()
+            .filter(|(_, r)| r.unrouted_sinks > 0)
+            .filter_map(|(id, _)| netlist.nets.get(id.0 as usize).map(|n| n.name.as_str()))
+            .collect();
+        unrouted.sort_unstable();
+        unrouted.truncate(10);
+        return Err(PlaceRouteError::RoutingFailed(format!(
+            "Some nets could not be routed on the real device: {} connections unrouted{}{}",
+            routing.unrouted_connections,
+            if unrouted.is_empty() {
+                String::new()
+            } else {
+                format!(" (nets {})", unrouted.join(", "))
+            },
+            if routing.congestion > 1.0 {
+                format!(", wires overused (congestion {:.2})", routing.congestion)
+            } else {
+                String::new()
+            }
+        )));
     }
 
     let uses_oscillator = netlist
