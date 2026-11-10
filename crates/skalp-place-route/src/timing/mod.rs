@@ -74,6 +74,29 @@ pub struct CriticalPath {
     pub destination: String,
     /// Path elements (cell names)
     pub path: Vec<String>,
+    /// Each net on the path with the cell driving it, from the launching
+    /// register to the endpoint (empty when the analyzer doesn't record them)
+    #[serde(default)]
+    pub steps: Vec<PathStep>,
+}
+
+/// One net on a critical path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathStep {
+    /// The net
+    pub net: String,
+    /// Cell driving the net (instance path)
+    pub cell: String,
+    /// Library cell type of the driver
+    pub cell_type: String,
+    /// Tile of the driver, if placed
+    pub tile: Option<(u32, u32)>,
+    /// Arrival time at the driver's output, in ns
+    pub arrival: f64,
+    /// Routing delay into the driver on the input the path comes through, in ns
+    pub route_in: f64,
+    /// Delay through the driver from that input (or clock-to-output), in ns
+    pub cell_delay: f64,
 }
 
 /// Timing analysis report
@@ -442,6 +465,7 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
                     let slack = required - delay;
 
                     paths.push(CriticalPath {
+                        steps: Vec::new(),
                         delay,
                         required,
                         slack,

@@ -3,7 +3,10 @@
 //!
 //! cargo run --release --features nexus-real --example nexus_pnr_bench -- design.sk Top [--route]
 //!
-//! The synthesized netlist is cached next to the source as `<source>.netlist.json`.
+//! The synthesized netlist is cached next to the source as
+//! `<source>.<preset>.netlist.json`. `PRESET=compress2` (etc.) picks the
+//! synthesis preset (default `quick`); `PATHS=n` prints the n worst paths
+//! after routing.
 
 use skalp_lir::GateNetlist;
 use skalp_place_route::device::nexus::prjoxide_load::{find_database, load_tilegrid};
@@ -12,7 +15,18 @@ use skalp_place_route::{NexusVariant, PnrConfig};
 use std::time::Instant;
 
 fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
-    let cache = path.with_extension("netlist.json");
+    let preset_name = std::env::var("PRESET").unwrap_or_else(|_| "quick".into());
+    let preset = match preset_name.as_str() {
+        "balanced" => skalp_lir::synth::SynthPreset::Balanced,
+        "full" => skalp_lir::synth::SynthPreset::Full,
+        "timing" => skalp_lir::synth::SynthPreset::Timing,
+        "area" => skalp_lir::synth::SynthPreset::Area,
+        "resyn2" => skalp_lir::synth::SynthPreset::Resyn2,
+        "compress2" => skalp_lir::synth::SynthPreset::Compress2,
+        "auto" => skalp_lir::synth::SynthPreset::Auto,
+        _ => skalp_lir::synth::SynthPreset::Quick,
+    };
+    let cache = path.with_extension(format!("{preset_name}.netlist.json"));
     if let Ok(text) = std::fs::read_to_string(&cache) {
         return serde_json::from_str(&text).unwrap();
     }
@@ -23,9 +37,7 @@ fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
         .unwrap();
     let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
     let library = skalp_lir::get_stdlib_library("nexus").unwrap();
-    let mut netlist =
-        skalp_lir::synthesize_hierarchical(&hier, &library, skalp_lir::synth::SynthPreset::Quick)
-            .flatten();
+    let mut netlist = skalp_lir::synthesize_hierarchical(&hier, &library, preset).flatten();
     let top = mir.modules.iter().find(|m| m.name == top_name).unwrap();
     let constraints: indexmap::IndexMap<_, _> = top
         .ports
@@ -77,16 +89,24 @@ fn main() {
             &db,
         );
         match result {
-            Ok(r) => println!(
-                "place+route: success {} in {} iterations, {} unrouted, wirelength {}, {:.1} MHz ({:.1} s)",
-                r.routing.success,
-                r.routing.iterations,
-                r.routing.unrouted_connections,
-                r.routing.wirelength,
-                r.timing.as_ref().map_or(0.0, |t| t.design_frequency),
+            Ok(r) => {
+                println!(
+                    "place+route: success {} in {} iterations, {} unrouted, wirelength {}, {:.1} MHz ({:.1} s)",
+                    r.routing.success,
+                    r.routing.iterations,
+                    r.routing.unrouted_connections,
+                    r.routing.wirelength,
+                    r.timing.as_ref().map_or(0.0, |t| t.design_frequency),
+                    t.elapsed().as_secs_f64()
+                );
+                if let Some(timing) = &r.timing {
+                    print_paths(timing);
+                }
+            }
+            Err(e) => println!(
+                "place+route failed: {e} ({:.1} s)",
                 t.elapsed().as_secs_f64()
             ),
-            Err(e) => println!("place+route failed: {e} ({:.1} s)", t.elapsed().as_secs_f64()),
         }
         return;
     }
@@ -112,4 +132,37 @@ fn main() {
         .unwrap();
     println!("placement: {:.1} s", t.elapsed().as_secs_f64());
     skalp_place_route::Placer::<NexusDevice>::log_placement_stats(&placement, &logic);
+}
+
+/// Print the worst paths, one line per net: arrival, routing into the driver,
+/// delay through it, driver type and tile.
+fn print_paths(timing: &skalp_place_route::timing::TimingReport) {
+    let count = std::env::var("PATHS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    for path in timing.critical_paths.iter().take(count) {
+        let route: f64 = path.steps.iter().map(|s| s.route_in).sum();
+        let cells: f64 = path.steps.iter().map(|s| s.cell_delay).sum();
+        println!(
+            "\npath {:.3} ns ({} nets, cells {:.3} ns, routing {:.3} ns) -> {}",
+            path.delay,
+            path.steps.len(),
+            cells,
+            route,
+            path.destination
+        );
+        for step in &path.steps {
+            println!(
+                "  {:8.3} +{:6.3} +{:6.3}  {:12} {:>10}  {}",
+                step.arrival,
+                step.route_in,
+                step.cell_delay,
+                step.cell_type,
+                step.tile
+                    .map_or(String::new(), |(x, y)| format!("({x},{y})")),
+                step.net
+            );
+        }
+    }
 }
