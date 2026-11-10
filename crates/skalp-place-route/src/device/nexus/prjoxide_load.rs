@@ -227,7 +227,8 @@ fn load_base_addresses(
 /// device whose `baseaddr.json` lacks these regions borrows them from another
 /// device of the Nexus database that has them: every device prjoxide has
 /// fuzzed (LIFCL-17, LIFCL-40, LFD2NX-40) places them identically. Returns
-/// the address and whether it was borrowed.
+/// the address and whether it is unconfirmed: borrowed for a device not in
+/// [`BLOCK_RAM_WINDOWS_CONFIRMED`].
 pub fn block_ram_init_address(
     db_root: &Path,
     variant: NexusVariant,
@@ -270,9 +271,17 @@ pub fn block_ram_init_address(
                 .as_ref()
                 .and_then(window)
         })
-        .map(|addr| (addr, true))
+        .map(|addr| {
+            let confirmed = BLOCK_RAM_WINDOWS_CONFIRMED.contains(&variant.prjoxide_device());
+            (addr, !confirmed)
+        })
         .ok_or_else(|| "no device in the prjoxide database locates block RAM contents".to_string())
 }
+
+/// Devices whose `baseaddr.json` lacks the block RAM windows, but where the
+/// borrowed windows were checked on silicon: a ROM preloaded this way read
+/// back its contents (LFCPNX-100 on a CertusPro-NX Versa board, 2026-11-10).
+pub const BLOCK_RAM_WINDOWS_CONFIRMED: &[&str] = &["LFCPNX-100"];
 
 #[cfg(test)]
 mod tests {
@@ -360,8 +369,10 @@ mod tests {
             block_ram_init_address(&db, NexusVariant::Lifcl40, 2).unwrap(),
             (0x2004_0000, false)
         );
-        // CertusPro-NX borrows them
-        let (addr, _) = block_ram_init_address(&db, NexusVariant::Lfcpnx100, 3).unwrap();
-        assert_eq!(addr, 0x2006_0000);
+        // CertusPro-NX borrows them, checked on silicon
+        assert_eq!(
+            block_ram_init_address(&db, NexusVariant::Lfcpnx100, 3).unwrap(),
+            (0x2006_0000, false)
+        );
     }
 }
