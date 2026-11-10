@@ -94,6 +94,7 @@ mod test_language_features;
 mod test_lir_synthesis;
 mod test_logic_analyzer;
 mod test_logic_analyzer_insertion;
+mod test_logic_depth;
 mod test_match_expressions;
 mod test_match_let_blocker;
 mod test_match_sub_mwe;
