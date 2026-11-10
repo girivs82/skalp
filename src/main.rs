@@ -4268,7 +4268,12 @@ fn synthesize_design(
 
     // Hierarchical synthesis: each module independently, then flatten
     let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
-    let gate_netlist = hier_netlist.flatten();
+    let mut gate_netlist = hier_netlist.flatten();
+    if family == "nexus" {
+        // Pads go in before the netlist is saved, so `skalp pnr` on the saved
+        // netlist gets the same pins (and the on-chip clock) as the full flow.
+        add_nexus_io_pads(&mut gate_netlist, &mir, &library);
+    }
     println!("Cells: {}", gate_netlist.cells.len());
     println!("Nets: {}", gate_netlist.nets.len());
 
@@ -4294,9 +4299,7 @@ fn synthesize_design(
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
-        let mut with_pads = gate_netlist.clone();
-        add_nexus_io_pads(&mut with_pads, &mir, &library);
-        run_nexus_pnr_on_netlist(&with_pads, variant, output_dir, pnr_preset, None)?;
+        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");

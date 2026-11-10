@@ -136,3 +136,32 @@ fn multiplier_builds_a_bitstream_for_the_real_device() {
     .unwrap();
     assert!(result.routing.success);
 }
+
+#[test]
+fn bus_port_pads_land_on_their_own_pins() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_bus_pins.sk", "Bus");
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the LED counter should place and route");
+    assert!(result.routing.success);
+
+    // Each of the eight LED pads sits on a different I/O site
+    let sites: std::collections::HashSet<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.path.starts_with("top.led[") && c.path.ends_with("_obuf"))
+        .map(|c| {
+            let loc = result.placement.placements[&c.id];
+            (loc.tile_x, loc.tile_y, loc.bel_index)
+        })
+        .collect();
+    assert_eq!(sites.len(), 8);
+}

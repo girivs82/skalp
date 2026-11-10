@@ -554,8 +554,8 @@ pub fn insert_io_buffers(
         let has_pin = netlist
             .nets
             .get(input_net_id.0 as usize)
-            .and_then(|n| port_constraints.get(&n.name))
-            .is_some_and(|c| c.pin_location.is_some());
+            .and_then(|n| port_constraint(port_constraints, &n.name))
+            .is_some_and(|(c, _)| c.pin_location.is_some());
         if clock_nets.contains(&input_net_id) && !has_pin {
             continue;
         }
@@ -685,26 +685,47 @@ fn rewire_consumers(netlist: &mut GateNetlist, old_net: GateNetId, new_net: Gate
     }
 }
 
+/// The constraints of the port a pad's net belongs to, with the net's bit
+/// index when it is one bit of a multi-bit port: the netlist has a net per
+/// bit (`top.led[2]`), while constraints are written per port (`top.led`).
+fn port_constraint<'a>(
+    port_constraints: &'a IndexMap<String, PhysicalConstraints>,
+    net_name: &str,
+) -> Option<(&'a PhysicalConstraints, Option<usize>)> {
+    if let Some(c) = port_constraints.get(net_name) {
+        return Some((c, None));
+    }
+    let (port, rest) = net_name.rsplit_once('[')?;
+    let bit = rest.strip_suffix(']')?.parse().ok()?;
+    port_constraints.get(port).map(|c| (c, Some(bit)))
+}
+
 /// Apply physical constraints to an IO cell.
 fn apply_io_constraints_standalone(
     cell: &mut Cell,
     port_name: &str,
     port_constraints: &IndexMap<String, PhysicalConstraints>,
 ) {
-    let constraints = match port_constraints.get(port_name) {
-        Some(c) => c,
-        None => return,
+    let Some((constraints, bit)) = port_constraint(port_constraints, port_name) else {
+        return;
     };
 
     if let Some(ref pin_loc) = constraints.pin_location {
         use skalp_frontend::hir::PinLocation;
-        match pin_loc {
-            PinLocation::Single(pin) => {
+        match (pin_loc, bit) {
+            (PinLocation::Single(pin), None | Some(0)) => {
                 cell.parameters.insert("LOC".into(), pin.clone());
             }
-            PinLocation::Differential { positive, negative } => {
+            (PinLocation::Differential { positive, negative }, None | Some(0)) => {
                 cell.parameters.insert("LOC".into(), positive.clone());
                 cell.parameters.insert("LOC_N".into(), negative.clone());
+            }
+            // `pins: [...]` lists one pin per bit, bit 0 first; a one-bit
+            // port's net carries no index
+            (PinLocation::Multiple(pins), bit) => {
+                if let Some(pin) = pins.get(bit.unwrap_or(0)) {
+                    cell.parameters.insert("LOC".into(), pin.clone());
+                }
             }
             _ => {}
         }

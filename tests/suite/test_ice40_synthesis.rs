@@ -1919,6 +1919,54 @@ outputs = ["Q"]
     assert_eq!(cell.name, "LEGACY_IO");
 }
 
+/// A multi-bit port with `pins: [...]` puts each bit's pad on its own pin:
+/// the netlist has a net per bit (`top.led[2]`), while the constraint is
+/// written once for the port.
+#[test]
+fn test_multi_pin_port_constraints() {
+    let path = std::path::PathBuf::from(format!(
+        "{}/tests/fixtures/nexus_bus_pins.sk",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).unwrap();
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .unwrap();
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let library = get_stdlib_library("nexus").unwrap();
+    let mut netlist =
+        skalp_lir::synthesize_hierarchical(&hier, &library, skalp_lir::synth::SynthPreset::Quick)
+            .flatten();
+    let top = mir.modules.iter().find(|m| m.name == "Bus").unwrap();
+    let constraints: indexmap::IndexMap<_, _> = top
+        .ports
+        .iter()
+        .filter_map(|p| Some((format!("top.{}", p.name), p.physical_constraints.clone()?)))
+        .collect();
+    insert_io_buffers(&mut netlist, &library, &constraints);
+
+    let loc = |pad: &str| {
+        let cell = netlist
+            .cells
+            .iter()
+            .find(|c| c.path == pad)
+            .unwrap_or_else(|| panic!("no pad {pad}"));
+        (
+            cell.parameters.get("LOC").cloned(),
+            cell.parameters.get("IO_STANDARD").cloned(),
+        )
+    };
+    let pins = ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"];
+    for (bit, pin) in pins.iter().enumerate() {
+        assert_eq!(
+            loc(&format!("top.led[{bit}]_obuf")),
+            (Some(pin.to_string()), Some("LVCMOS33".to_string()))
+        );
+    }
+    assert_eq!(loc("top.clk_ibuf").0, Some("OSC".to_string()));
+}
+
 #[test]
 fn test_io_constraint_propagation() {
     use indexmap::IndexMap;
