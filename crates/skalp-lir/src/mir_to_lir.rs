@@ -158,6 +158,8 @@ pub struct MirToLirTransform {
     node_counter: u32,
     /// Whether the current process uses async reset (Active/Inactive edge in sensitivity list)
     async_reset: bool,
+    /// Clock of the sequential process being lowered, if any
+    sequential_clock: Option<LirSignalId>,
     /// Memory signals: maps MIR SignalId to MemBlock port info
     memory_signals: IndexMap<SignalId, MemoryInfo>,
     /// Whether the target has BRAM (from tech library)
@@ -190,6 +192,7 @@ impl MirToLirTransform {
             temp_counter: 0,
             node_counter: 0,
             async_reset: false,
+            sequential_clock: None,
             memory_signals: IndexMap::new(),
             target_has_bram: false,
             expression_cache: HashMap::new(),
@@ -216,6 +219,12 @@ impl MirToLirTransform {
         element_width: u32,
         target_has_bram: bool,
     ) -> bool {
+        // Initial contents need the memory as a whole; spread over plain
+        // registers they would be lost. The tech mapper still chooses
+        // between block RAM, distributed RAM and registers.
+        if config.init.is_some() && config.style != MemoryStyle::Register {
+            return true;
+        }
         match config.style {
             MemoryStyle::Block | MemoryStyle::Ultra => true,
             MemoryStyle::Distributed | MemoryStyle::Register => false,
@@ -737,6 +746,7 @@ impl MirToLirTransform {
                 async_read: false,
                 registered_read: false,
                 read_enable: false,
+                init: mem_config.init.clone(),
             },
             inputs,
             rdata_signal,
@@ -868,9 +878,11 @@ impl MirToLirTransform {
                     if edges.iter().any(|e| matches!(e.edge, EdgeType::Active | EdgeType::Inactive)));
 
                 // Transform sequential statements (create registers)
+                self.sequential_clock = clock_signal;
                 self.transform_sequential_block(&process.body, clock_signal, reset_signal);
 
                 // Reset for next process
+                self.sequential_clock = None;
                 self.async_reset = false;
             }
             ProcessKind::Combinational | ProcessKind::General => {
@@ -4640,6 +4652,14 @@ impl MirToLirTransform {
     /// primitive (e.g., SB_RAM256x16) has internal registers on all ports.
     /// Adding an external Reg would double-register the address.
     fn handle_memory_read(&mut self, mem_signal_id: SignalId, index: &Expression) -> LirSignalId {
+        // A memory nothing writes (a ROM) takes its clock from the process
+        // that reads it; otherwise its read register has a clock it lacks.
+        if let Some(clk) = self.sequential_clock {
+            let primary = self.memory_signals[&mem_signal_id].node_id;
+            if self.lir.nodes[primary.0 as usize].clock.is_none() {
+                self.set_memory_clock(mem_signal_id, clk);
+            }
+        }
         let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index expression to get the address signal

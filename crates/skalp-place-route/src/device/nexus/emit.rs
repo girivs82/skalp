@@ -7,11 +7,11 @@
 //! The settings mirror what nextpnr writes for the same cells.
 
 use super::prjoxide_graph::{
-    load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
+    load_iptype, load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
 };
 use super::{dsp, ebr};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
-use crate::bitstream::config::{ConfigGenerator, DesignBit, PlacedDesign};
+use crate::bitstream::config::{ConfigGenerator, ConfigSpace, DesignBit, PlacedDesign};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
@@ -40,10 +40,14 @@ fn emit_err(message: String) -> PlaceRouteError {
 /// Tiletype settings, loaded once per type.
 struct ConfigDb<'a> {
     device: &'a NexusDevice,
+    variant: NexusVariant,
     db_root: &'a Path,
     family: &'static str,
     cache: HashMap<String, Option<TileBitsDb>>,
     bits: Vec<GlobalBit>,
+    /// Hard-block register bits on the configuration bus: (byte address,
+    /// bit, value)
+    bus_bits: Vec<(u32, u32, bool)>,
 }
 
 impl ConfigDb<'_> {
@@ -301,14 +305,19 @@ impl ConfigGenerator for NexusConfig<'_> {
             design.tied,
             self.db_root,
         )?;
-        Ok(bits
-            .into_iter()
-            .map(|b| DesignBit {
-                frame: b.frame,
-                bit: b.bit,
-                value: !b.invert,
-            })
-            .collect())
+        let frames = bits.frames.into_iter().map(|b| DesignBit {
+            frame: b.frame,
+            bit: b.bit,
+            value: !b.invert,
+            space: ConfigSpace::Frames,
+        });
+        let bus = bits.bus.into_iter().map(|(frame, bit, value)| DesignBit {
+            frame,
+            bit,
+            value,
+            space: ConfigSpace::Bus,
+        });
+        Ok(frames.chain(bus).collect())
     }
 }
 
@@ -321,13 +330,15 @@ fn emit_bits(
     routing: &RoutingResult,
     tied: &crate::bitstream::prepare::TiedInputs,
     db_root: &Path,
-) -> Result<Vec<GlobalBit>> {
+) -> Result<EmittedBits> {
     let mut config = ConfigDb {
         device,
+        variant,
         db_root,
         family: variant.prjoxide_family(),
         cache: HashMap::new(),
         bits: Vec::new(),
+        bus_bits: Vec::new(),
     };
 
     set_always_on_bits(&mut config)?;
@@ -482,7 +493,17 @@ fn emit_bits(
         }
     }
 
-    Ok(config.bits)
+    Ok(EmittedBits {
+        frames: config.bits,
+        bus: config.bus_bits,
+    })
+}
+
+/// A design's configuration: frame bits, and hard-block register bits on
+/// the configuration bus as (byte address, bit, value).
+struct EmittedBits {
+    frames: Vec<GlobalBit>,
+    bus: Vec<(u32, u32, bool)>,
 }
 
 /// Configure a logic tile's slices A and B as RAM storage and C as its write port.
@@ -571,6 +592,54 @@ fn set_ram_word(
         .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))
 }
 
+/// Write a block RAM's initial contents to its window on the configuration
+/// bus (chosen by its `WID`, see [`super::prjoxide_load::block_ram_init_address`]).
+fn write_block_ram_init(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    wid: u64,
+    width: usize,
+    words: &[u64],
+) -> Result<()> {
+    let image = ebr::init_image(width, words).ok_or_else(|| {
+        emit_err(format!(
+            "Block RAM '{}' has {} initial words, more than its {width}-bit mode holds",
+            cell.path,
+            words.len()
+        ))
+    })?;
+    let (base, borrowed) =
+        super::prjoxide_load::block_ram_init_address(config.db_root, config.variant, wid as u32)
+            .map_err(emit_err)?;
+    if borrowed {
+        log::warn!(
+            "{}: block RAM contents placed where other Nexus devices keep them; \
+             prjoxide has not located them on this device",
+            config.variant.prjoxide_device()
+        );
+    }
+    let db = load_iptype(config.db_root, config.family, ebr::INIT_IPTYPE)
+        .map_err(emit_err)?
+        .ok_or_else(|| {
+            emit_err("No block RAM initialisation data in the device database".to_string())
+        })?;
+    for (index, row) in image.iter().enumerate() {
+        let name = ebr::init_word_name(index);
+        let bits = db
+            .word(&name)
+            .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))?;
+        for (i, group) in bits.iter().enumerate() {
+            let on = row.get(i).copied().unwrap_or(false);
+            for bit in group {
+                config
+                    .bus_bits
+                    .push((base + bit.frame as u32, bit.bit as u32, on ^ bit.invert));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Configure a block RAM site and everything its unrouted pins must read.
 fn emit_block_ram(
     config: &mut ConfigDb<'_>,
@@ -611,6 +680,9 @@ fn emit_block_ram(
     set_ram_enum(config, &tiles, &format!("{prefix}.INIT_DATA"), "STATIC")?;
     set_ram_enum(config, &tiles, &format!("{prefix}.GSR"), "DISABLED")?;
     set_ram_word(config, &tiles, &format!("{prefix}.WID"), id)?;
+    if let Some(words) = cell.memory_init() {
+        write_block_ram_init(config, cell, id, width, &words)?;
+    }
     let in_mode = format!("{prefix}.{mode}");
     set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_W"), 0)?;
     set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_R"), 0)?;

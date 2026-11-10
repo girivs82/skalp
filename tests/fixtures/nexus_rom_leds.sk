@@ -1,0 +1,21 @@
+// Shows a block RAM's preloaded contents on the CertusPro-NX Versa board's
+// eight LEDs (bit 0 on R5). The ROM holds word a = a ^ 0xA5, and the address
+// steps about once a second, so the LEDs start at 0xA5, then 0xA4, 0xA7, 0xA6.
+entity NexusRomLeds {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+
+impl NexusRomLeds {
+    #[memory(depth = 1024, init = "nexus_rom_leds.hex", rom)]
+    signal rom: bit[8][1024]
+    signal counter: nat[34] = 0
+    signal q: bit[8] = 0
+
+    on(clk.rise) {
+        counter = counter + 1
+        q = rom[counter[33:24]]
+    }
+
+    led = q
+}

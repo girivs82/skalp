@@ -18,6 +18,7 @@ pub mod hir_builder;
 pub mod hir_calls;
 pub mod lexer;
 pub mod macros;
+pub mod memory_init;
 pub mod module_resolver;
 pub mod monomorphization;
 pub mod parse;

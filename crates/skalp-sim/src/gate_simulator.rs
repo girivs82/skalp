@@ -488,8 +488,9 @@ impl GateLevelSimulator {
                 {
                     let depth = 1usize << *addr_width;
                     let dw = *data_width as usize;
-                    // Initialize memory to all zeros
-                    self.ram_state.insert(id.0, vec![vec![false; dw]; depth]);
+                    let words = self.sir.top_module.memory_init.get(&id.0);
+                    self.ram_state
+                        .insert(id.0, initial_memory(words, depth, dw));
                 }
                 if let SirOperation::Primitive {
                     ptype:
@@ -502,8 +503,9 @@ impl GateLevelSimulator {
                 } = op
                 {
                     let depth = 1usize << *addr_width;
+                    let words = self.sir.top_module.memory_init.get(ram);
                     self.distram_state
-                        .insert(*ram, vec![vec![false; *data_width as usize]; depth]);
+                        .insert(*ram, initial_memory(words, depth, *data_width as usize));
                 }
             }
         }
@@ -1967,6 +1969,17 @@ impl GateLevelSimulator {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// A memory of `depth` words of `width` bits holding `words` from address 0,
+/// zero elsewhere.
+fn initial_memory(words: Option<&Vec<u64>>, depth: usize, width: usize) -> Vec<Vec<bool>> {
+    (0..depth)
+        .map(|address| {
+            let word = words.and_then(|w| w.get(address)).copied().unwrap_or(0);
+            (0..width).map(|b| b < 64 && (word >> b) & 1 == 1).collect()
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

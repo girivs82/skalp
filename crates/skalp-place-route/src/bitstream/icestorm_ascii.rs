@@ -1149,7 +1149,12 @@ impl<'a> IceStormAscii<'a> {
                     .and_then(|v| v.parse::<u8>().ok())
                     .unwrap_or(0);
 
-                let init_data = Self::parse_ram_init_data(&cell.parameters);
+                // The configuration bits take the low two bits of READ_MODE.
+                let mode = read_mode & 3;
+                let init_data = Self::parse_ram_init_data(&cell.parameters).or_else(|| {
+                    cell.memory_init()
+                        .map(|words| Self::ram_data_from_words(&words, mode))
+                });
 
                 ram_configs.insert(
                     (loc.tile_x, loc.tile_y),
@@ -1163,6 +1168,28 @@ impl<'a> IceStormAscii<'a> {
         }
 
         ram_configs
+    }
+
+    /// The 4096 initial bits of an SB_RAM40_4K holding `words` from address 0
+    /// in `mode` (0 = 256x16, 1 = 512x8, 2 = 1024x4, 3 = 2048x2), laid out
+    /// as INIT_0..INIT_F: 32 bytes per INIT, most significant first.
+    ///
+    /// The block is 256 rows of 16 bits. A word of a narrow mode lives in row
+    /// `address % 256`; its bit `d` is physical bit `k * d + address / 256`,
+    /// where `k = 16 / width` words share a row.
+    fn ram_data_from_words(words: &[u64], mode: u8) -> Vec<u8> {
+        let width = 16usize >> mode;
+        let per_row = 16 / width;
+        let mut data = vec![0u8; 512];
+        for (address, &word) in words.iter().enumerate().take(256 * per_row) {
+            let (row, select) = (address % 256, address / 256);
+            for bit in (0..width).filter(|&d| (word >> d) & 1 == 1) {
+                let physical = per_row * bit + select;
+                let global = 16 * (row % 16) + physical;
+                data[(row / 16) * 32 + 31 - global / 8] |= 1 << (global % 8);
+            }
+        }
+        data
     }
 
     /// Parse RAM initialization data from INIT_0..INIT_F parameters
@@ -1613,5 +1640,31 @@ impl<'a> IceStormAscii<'a> {
             }
             asc.push('\n');
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_words_land_where_init_parameters_put_them() {
+        // 256x16: word i is INIT_0[16i +: 16], and INIT_0 is written most
+        // significant byte first.
+        let data = IceStormAscii::ram_data_from_words(&[0x1234, 0xabcd], 0);
+        assert_eq!(&data[28..32], &[0xab, 0xcd, 0x12, 0x34]);
+        assert!(data[..28].iter().chain(&data[32..]).all(|&b| b == 0));
+        // Row 17 is word 1 of INIT_1
+        let mut words = vec![0; 18];
+        words[17] = 0x8001;
+        let data = IceStormAscii::ram_data_from_words(&words, 0);
+        assert_eq!(&data[60..62], &[0x80, 0x01]);
+
+        // 512x8: address 256 shares row 0 with address 0, on the odd bits
+        let mut words = vec![0; 257];
+        words[0] = 0x01;
+        words[256] = 0x81;
+        let data = IceStormAscii::ram_data_from_words(&words, 1);
+        assert_eq!(&data[30..32], &[0x80, 0x03]);
     }
 }

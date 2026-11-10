@@ -3259,9 +3259,16 @@ impl<'a> SharedCodegen<'a> {
         let index_signal = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
 
-        // Check if the source is a narrow scalar (bit extraction, not array access)
+        // Check if the source is a narrow scalar (bit extraction, not array access).
+        // An array whose elements together fit in 32 bits is still an array.
         let source_width = self.get_signal_width(array_signal);
-        if source_width <= 32 && !self.uses_array_storage(source_width) {
+        let source_is_array = self.get_array_type_for_signal(array_signal).is_some()
+            || self
+                .module
+                .signals
+                .iter()
+                .any(|s| s.name == *array_signal && matches!(s.sir_type, SirType::Array(..)));
+        if source_width <= 32 && !self.uses_array_storage(source_width) && !source_is_array {
             // Bit extraction from a scalar: (source >> index) & 1
             let source_loc = if self.module.state_elements.contains_key(array_signal) {
                 self.get_register_accessor(array_signal)

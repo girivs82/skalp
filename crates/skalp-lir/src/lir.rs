@@ -978,6 +978,10 @@ pub enum LirOp {
         /// The last input enables the read register.
         #[serde(default)]
         read_enable: bool,
+        /// Contents at power-up, one word per address from 0; later words
+        /// start at zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        init: Option<Vec<u64>>,
     },
 
     // === Special ===

@@ -327,6 +327,9 @@ pub struct StateElement {
     #[serde(default)]
     pub sir_type: Option<SirType>,
     pub reset_value: Option<u64>,
+    /// For a memory: its words at power-up, one per address from 0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_contents: Option<Vec<u64>>,
     pub clock: String,
     pub reset: Option<String>,
     /// Source location for error reporting

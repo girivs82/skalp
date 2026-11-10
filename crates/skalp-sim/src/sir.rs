@@ -53,6 +53,11 @@ pub struct SirModule {
     pub instances: Vec<SirInstance>,
     /// Signal connections between instances
     pub connections: Vec<SirConnection>,
+    /// Contents at power-up of the RAM primitives that have them, one word
+    /// per address from 0, keyed by the `RamBlock` primitive id or the
+    /// distributed RAM's `ram`
+    #[serde(default)]
+    pub memory_init: IndexMap<u32, Vec<u64>>,
 }
 
 /// Signal in SIR - represents a wire or register
@@ -417,6 +422,7 @@ impl SirModule {
             seq_blocks: Vec::new(),
             instances: Vec::new(),
             connections: Vec::new(),
+            memory_init: IndexMap::new(),
         }
     }
 }

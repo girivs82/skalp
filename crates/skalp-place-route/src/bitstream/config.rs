@@ -15,15 +15,30 @@ use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::GateNetlist;
 
+/// Which configuration memory a [`DesignBit`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ConfigSpace {
+    /// The fabric's configuration frames: `frame` is the frame, `bit` the
+    /// bit within it
+    #[default]
+    Frames,
+    /// A hard block's registers, written over the configuration bus (block
+    /// RAM contents, PLL settings): `frame` is the byte address, `bit` the
+    /// bit within the byte
+    Bus,
+}
+
 /// One bit of a device's configuration memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesignBit {
-    /// Configuration frame
+    /// Configuration frame, or byte address on the configuration bus
     pub frame: u32,
-    /// Bit within the frame
+    /// Bit within the frame or byte
     pub bit: u32,
     /// Value to store
     pub value: bool,
+    /// Memory the bit is in
+    pub space: ConfigSpace,
 }
 
 /// A design after placement and routing.
@@ -83,11 +98,16 @@ impl FormatWriter for ConfigTextWriter {
         // The last write to a bit wins, as it does in the configuration memory.
         let mut memory = std::collections::BTreeMap::new();
         for bit in bits {
-            memory.insert((bit.frame, bit.bit), bit.value);
+            memory.insert((bit.space, bit.frame, bit.bit), bit.value);
         }
         let mut text = String::new();
-        for ((frame, bit), value) in memory {
-            text.push_str(&format!("{frame} {bit} {}\n", value as u8));
+        for ((space, frame, bit), value) in memory {
+            match space {
+                ConfigSpace::Frames => text.push_str(&format!("{frame} {bit} {}\n", value as u8)),
+                ConfigSpace::Bus => {
+                    text.push_str(&format!("bus 0x{frame:08x} {bit} {}\n", value as u8))
+                }
+            }
         }
         Ok(text.into_bytes())
     }
@@ -104,19 +124,31 @@ mod tests {
                 frame: 2,
                 bit: 7,
                 value: true,
+                space: ConfigSpace::Frames,
             },
             DesignBit {
                 frame: 1,
                 bit: 3,
                 value: true,
+                space: ConfigSpace::Frames,
             },
             DesignBit {
                 frame: 2,
                 bit: 7,
                 value: false,
+                space: ConfigSpace::Frames,
             },
         ];
         let text = String::from_utf8(ConfigTextWriter.write(&bits).unwrap()).unwrap();
         assert_eq!(text, "1 3 1\n2 7 0\n");
+
+        let bus = DesignBit {
+            frame: 0x2000_0010,
+            bit: 3,
+            value: true,
+            space: ConfigSpace::Bus,
+        };
+        let text = String::from_utf8(ConfigTextWriter.write(&[bits[0], bus]).unwrap()).unwrap();
+        assert_eq!(text, "2 7 1\nbus 0x20000010 3 1\n");
     }
 }

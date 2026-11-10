@@ -165,3 +165,41 @@ fn bus_port_pads_land_on_their_own_pins() {
         .collect();
     assert_eq!(sites.len(), 8);
 }
+
+/// A ROM preloaded from a hex file reaches the bitstream: the configuration
+/// bus writes the block RAM's contents, one set bit per one-bit of the words.
+#[test]
+fn preloaded_block_ram_contents_reach_the_bitstream() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_rom_leds.sk", "NexusRomLeds");
+    let rams: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.ram_ports().is_some())
+        .collect();
+    assert_eq!(rams.len(), 1, "the 1024 x 8 ROM takes one block RAM");
+    let words = rams[0].memory_init().expect("the block RAM has contents");
+    let expected: Vec<u64> = (0..1024u64).map(|a| (a ^ 0xA5) & 0xFF).collect();
+    assert_eq!(words, expected);
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .unwrap();
+    assert!(result.routing.success);
+
+    let bus = skalp_place_route::device::nexus::prjoxide_pack::read_bus_config(
+        &db,
+        &result.bitstream.data,
+    )
+    .expect("the bitstream parses");
+    let written: u32 = bus.iter().map(|&(_, byte)| byte.count_ones()).sum();
+    let ones: u32 = expected.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(written, ones, "every one-bit of the contents is written");
+}

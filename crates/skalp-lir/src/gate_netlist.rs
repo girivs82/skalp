@@ -74,6 +74,11 @@ pub struct Cell {
 /// Parameter on an output pad: why it may drive a pin the board does not list as safe.
 pub const DRIVE_OVERRIDE_PARAM: &str = "DRIVE_OVERRIDE";
 
+/// Cell parameter holding a memory cell's initial contents: one hexadecimal
+/// word per address, in address order, separated by spaces. Addresses past
+/// the last word start as zero.
+pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
+
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 
@@ -154,6 +159,23 @@ impl Cell {
             signed_b: signed_a + 1,
             product_width: bits(DSP_P_BITS_PARAM)?,
         })
+    }
+
+    /// A memory cell's initial contents, one word per address from address 0
+    /// ([`MEMORY_INIT_PARAM`]); `None` if it has none, or they don't parse.
+    pub fn memory_init(&self) -> Option<Vec<u64>> {
+        self.parameters
+            .get(MEMORY_INIT_PARAM)?
+            .split_whitespace()
+            .map(|word| u64::from_str_radix(word, 16).ok())
+            .collect()
+    }
+
+    /// Set a memory cell's initial contents ([`Self::memory_init`]).
+    pub fn set_memory_init(&mut self, words: &[u64]) {
+        let text: Vec<String> = words.iter().map(|w| format!("{w:x}")).collect();
+        self.parameters
+            .insert(MEMORY_INIT_PARAM.to_string(), text.join(" "));
     }
 
     /// The input layout of a block RAM cell, or `None` for any other cell.

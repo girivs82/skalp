@@ -780,7 +780,17 @@ impl PipelineConfig {
 ///
 /// #[memory(depth=128, width=16, style=distributed)]
 /// signal small_mem: bit[16][128];  // Infers distributed RAM (LUT-based)
+///
+/// #[memory(depth=256, init="boot.hex")]
+/// signal rom: bit[32][256];  // Starts with the words in boot.hex
+///
+/// #[memory(depth=4)]
+/// signal table: bit[8][4] = [1, 2, 4, 8];  // Starts with these words
 /// ```
+///
+/// An init file is read relative to the source file. It holds hex words
+/// separated by whitespace, as `$readmemh` reads them: `//` and `/* */`
+/// comments are ignored, and `@addr` (hex) moves to that word address.
 ///
 /// # Memory Types
 ///
@@ -802,6 +812,11 @@ pub struct MemoryConfig {
     pub read_latency: u32,
     /// Whether memory is read-only (ROM)
     pub read_only: bool,
+    /// Contents at power-up, one value per word from address 0. Words past
+    /// the end start at zero. Comes from `#[memory(init = "file.hex")]` or
+    /// an array literal on the signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<Vec<u64>>,
 }
 
 /// Memory implementation style hints for synthesis tools
@@ -830,6 +845,7 @@ impl MemoryConfig {
             style: MemoryStyle::Auto,
             read_latency: 1,
             read_only: false,
+            init: None,
         }
     }
 
@@ -842,6 +858,7 @@ impl MemoryConfig {
             style: MemoryStyle::Auto,
             read_latency: 1,
             read_only: false,
+            init: None,
         }
     }
 }

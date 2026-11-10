@@ -99,8 +99,16 @@ impl<'a> AigBuilder<'a> {
                     .and_then(|r| self.net_map[r.0 as usize])
                     .map(|l| l.node);
 
+                // A flip-flop that powers up high keeps doing so through
+                // re-synthesis.
+                let init = (cell
+                    .parameters
+                    .get(crate::gate_netlist::FF_INIT_PARAM)
+                    .map(String::as_str)
+                    == Some("1"))
+                .then_some(true);
                 // Create latch with false_lit as placeholder - will be updated later
-                let latch_id = self.aig.add_latch(AigLit::false_lit(), None, clock, reset);
+                let latch_id = self.aig.add_latch(AigLit::false_lit(), init, clock, reset);
                 let latch_lit = AigLit::new(latch_id);
 
                 // Map all output nets to this latch

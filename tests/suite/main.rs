@@ -100,6 +100,7 @@ mod test_match_sub_mwe;
 mod test_mcu_flow_sanity;
 mod test_memory_equivalence;
 mod test_memory_inference;
+mod test_memory_init;
 mod test_method_call_poc;
 mod test_milestone4_complete;
 mod test_monomorphization;

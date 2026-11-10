@@ -434,6 +434,40 @@ impl SineRom {
 }
 ```
 
+### Initial Contents
+
+A memory can power up holding contents, given one of two ways:
+
+```skalp
+// From a hex file, read relative to the source file
+#[memory(depth = 1024, init = "boot.hex")]
+signal boot_rom: bit[32][1024]
+
+// From an array literal
+#[memory(depth = 4)]
+signal table: bit[8][4] = [0x11, 0x22, 0x44, 0x88]
+```
+
+The hex file uses the `$readmemh` format: hex words separated by whitespace,
+`//` and `/* */` comments, and `@addr` (hex) to move to a word address.
+Addresses the file or literal leaves out start at zero. Every word must fit
+the memory's width, there can be no more words than the depth, and words
+are limited to 64 bits. A memory given both a file and a literal is an error,
+as is `init` with `style = register`.
+
+The contents reach every implementation the compiler chooses:
+
+| Implementation | How the contents are loaded |
+|----------------|-----------------------------|
+| Nexus block RAM (EBR) | Written over the configuration bus after the configuration frames |
+| iCE40 block RAM | The `INIT_0`..`INIT_F` data of each `SB_RAM40_4K` |
+| Distributed (LUT) RAM | Each `DPR16X4` cell's `INITVAL` |
+| Registers | Each flip-flop's power-up value |
+| A ROM read combinationally | Constants, folded into the read logic |
+| SystemVerilog | An `initial` block assigning each word |
+
+Behavioural and gate-level simulation start from the same contents.
+
 ### Coefficient Storage
 
 ```skalp

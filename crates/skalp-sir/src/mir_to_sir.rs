@@ -235,6 +235,7 @@ impl<'a> MirToSirConverter<'a> {
                         width,
                         sir_type: Some(sir_type.clone()),
                         reset_value: None,
+                        initial_contents: None,
                         clock: String::new(),
                         reset: None,
                         span: port.span.clone(),
@@ -252,8 +253,11 @@ impl<'a> MirToSirConverter<'a> {
             let sir_type = self.convert_type(&signal.signal_type);
             let width = sir_type.width();
 
-            // Determine if this is a register by checking if it's assigned in sequential blocks
-            let is_register = self.is_signal_sequential(signal.id);
+            // Determine if this is a register by checking if it's assigned in sequential
+            // blocks. A memory with initial contents holds them as state even when
+            // nothing writes it (a ROM).
+            let initial_contents = memory_initial_contents(signal);
+            let is_register = self.is_signal_sequential(signal.id) || initial_contents.is_some();
 
             // Convert flattened MIR name to hierarchical path
             let hierarchical_path = flattened_to_hierarchical(&signal.name);
@@ -304,6 +308,7 @@ impl<'a> MirToSirConverter<'a> {
                         width,
                         sir_type: Some(sir_type.clone()),
                         reset_value: initial_u64,
+                        initial_contents,
                         clock: String::new(),
                         reset: None,
                         span: signal.span.clone(),
@@ -7240,7 +7245,9 @@ impl<'a> MirToSirConverter<'a> {
             // Check if this signal is a register in the child module
             // With the proper HIR→MIR fix, all array elements have their own assignments
             // so we can just check this specific signal
-            let is_register = self.is_signal_sequential_in_module(signal.id, child_module);
+            let initial_contents = memory_initial_contents(signal);
+            let is_register = self.is_signal_sequential_in_module(signal.id, child_module)
+                || initial_contents.is_some();
 
             // Use TypeFlattener to handle composite types (structs, arrays, etc.)
             let mut flattener = skalp_mir::type_flattening::TypeFlattener::default();
@@ -7303,6 +7310,7 @@ impl<'a> MirToSirConverter<'a> {
                             sir_type: Some(sir_type.clone()),
                             // A child's `signal x: T = v` starts at v, as at the top level.
                             reset_value: initial_u64,
+                            initial_contents: initial_contents.clone(),
                             clock: String::new(),
                             reset: None,
                             span: None,
@@ -8261,6 +8269,7 @@ impl<'a> MirToSirConverter<'a> {
                                         width,
                                         sir_type: Some(sir_type.clone()),
                                         reset_value: None,
+                                        initial_contents: None,
                                         clock: clock_signal.clone(),
                                         reset: None,
                                         span: None,
@@ -10973,4 +10982,12 @@ impl<'a> MirToSirConverter<'a> {
             _ => None,
         }
     }
+}
+
+/// A memory's initial contents, when the signal is a memory given them.
+fn memory_initial_contents(signal: &skalp_mir::mir::Signal) -> Option<Vec<u64>> {
+    if !matches!(signal.signal_type, DataType::Array(..)) {
+        return None;
+    }
+    signal.memory_config.as_ref()?.init.clone()
 }
