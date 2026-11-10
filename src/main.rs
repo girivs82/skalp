@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+mod memory_guard;
+
 /// ISO 26262 Safety build options
 #[derive(Debug, Clone)]
 pub struct SafetyBuildOptions {
@@ -62,6 +64,13 @@ struct Cli {
     /// Verbosity level
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Most memory skalp may use before it stops, so a large build cannot
+    /// exhaust the machine: a size such as 12G, or a share of physical
+    /// memory such as 60%. Defaults to half of physical memory, or
+    /// SKALP_MAX_MEMORY when set; 0 turns the limit off.
+    #[arg(long, global = true, value_name = "SIZE")]
+    max_memory: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -661,6 +670,12 @@ fn main() -> Result<()> {
         .with_env_filter(&log_level)
         .with_target(true) // Show module path in logs
         .init();
+
+    match memory_guard::start(cli.max_memory.as_deref()) {
+        Ok(Some(budget)) => info!("memory budget: {}", memory_guard::format_bytes(budget)),
+        Ok(None) => info!("memory budget: none"),
+        Err(e) => anyhow::bail!("--max-memory: {e}"),
+    }
 
     match cli.command {
         Commands::New { name } => {

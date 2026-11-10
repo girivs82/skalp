@@ -12,6 +12,8 @@ categories = ["development-tools", "hardware-support"]
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
+# Memory footprint and machine size for the memory guard
+libc = "0.2"
 thiserror = "1.0"
 tempfile = "3.8"
 
