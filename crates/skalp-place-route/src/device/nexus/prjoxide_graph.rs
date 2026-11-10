@@ -789,6 +789,45 @@ impl RoutingGraph {
     }
 }
 
+/// The tile type whose wiring a tile has.
+///
+/// IO tiles down a device edge alternate between `_ODD` and `_EVEN` slots,
+/// which differ only in the B pad's wiring: an odd slot drives the pad's
+/// output from `JCIBMUXOUTB4` and its tristate from `JCIBMUXOUTC0`, an even
+/// slot the other way round. A corner tile (`_C`) takes a slot in that
+/// sequence, but prjoxide has one `_C` type for both slots, with odd-slot
+/// wiring. A corner tile in an even slot gets the even type's wiring here, or
+/// its B pad's output would drive the tristate and the pad would never toggle.
+///
+/// The slot is the one the IO tile beside the corner's `_REM` tile does not
+/// take: slots alternate, and that tile is the corner's neighbour.
+fn routing_tiletype(tile: &PrjoxideTile, tiles: &[PrjoxideTile]) -> String {
+    let Some(base) = tile
+        .tiletype
+        .strip_suffix("_C")
+        .filter(|base| base.starts_with("SYSIO_B"))
+    else {
+        return tile.tiletype.clone();
+    };
+    let rem = format!("{base}_REM");
+    let Some(rem_tile) = tiles
+        .iter()
+        .find(|t| t.tiletype == rem && t.x.abs_diff(tile.x) + t.y.abs_diff(tile.y) == 1)
+    else {
+        return tile.tiletype.clone();
+    };
+    let (odd, even) = (format!("{base}_ODD"), format!("{base}_EVEN"));
+    let neighbour = tiles
+        .iter()
+        .filter(|t| (t.x, t.y) == (rem_tile.x, rem_tile.y))
+        .find_map(|t| match &t.tiletype {
+            name if *name == odd => Some(even.clone()),
+            name if *name == even => Some(odd.clone()),
+            _ => None,
+        });
+    neighbour.unwrap_or_else(|| tile.tiletype.clone())
+}
+
 /// Assemble the routing graph from `tiles`. If `bbox = Some((x0,y0,x1,y1))`, only
 /// tiles within that inclusive grid window contribute (cheap subset for tests/bring-up);
 /// `None` builds the full device. Tiletype `.ron`s are parsed once and cached.
@@ -821,11 +860,10 @@ pub fn build_routing_graph_with_clocks(
                 continue;
             }
         }
-        let db = cache.entry(tile.tiletype.clone()).or_insert_with(|| {
-            load_tiletype(db_root, family, &tile.tiletype)
-                .ok()
-                .flatten()
-        });
+        let routing_type = routing_tiletype(tile, tiles);
+        let db = cache
+            .entry(routing_type.clone())
+            .or_insert_with(|| load_tiletype(db_root, family, &routing_type).ok().flatten());
         let Some(db) = db.clone() else { continue };
 
         for edge in tile_edges_with_clocks(tile, &db, clocks) {
@@ -1092,6 +1130,104 @@ mod tests {
             cfg_with_bits,
             conns,
             g.pip_bits.iter().map(|b| b.len()).sum::<usize>(),
+        );
+    }
+
+    #[test]
+    fn corner_io_tiles_take_the_wiring_of_their_slot() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        for variant in [NexusVariant::Lfcpnx100, NexusVariant::Lifcl40] {
+            let tiles = load_tilegrid(&db, variant).expect("tilegrid");
+            let corners: Vec<&PrjoxideTile> = tiles
+                .iter()
+                .filter(|t| t.tiletype.starts_with("SYSIO_B") && t.tiletype.ends_with("_C"))
+                .collect();
+            assert!(!corners.is_empty(), "{variant:?} has corner IO tiles");
+            for corner in corners {
+                // Slots alternate down the edge, so the IO tiles on either
+                // side of a corner share a slot, and the corner takes the other.
+                let edge_io: Vec<&PrjoxideTile> = tiles
+                    .iter()
+                    .filter(|t| t.x == corner.x && t.tiletype.starts_with("SYSIO_B"))
+                    .filter(|t| t.tiletype.ends_with("_ODD") || t.tiletype.ends_with("_EVEN"))
+                    .collect();
+                let before = edge_io
+                    .iter()
+                    .filter(|t| t.y < corner.y)
+                    .max_by_key(|t| t.y);
+                let after = edge_io
+                    .iter()
+                    .filter(|t| t.y > corner.y)
+                    .min_by_key(|t| t.y);
+                let (Some(before), Some(after)) = (before, after) else {
+                    continue;
+                };
+                let parity = |t: &PrjoxideTile| t.tiletype.rsplit('_').next().unwrap().to_string();
+                assert_eq!(
+                    parity(before),
+                    parity(after),
+                    "{} sits between slots",
+                    corner.name
+                );
+                let expected = if parity(before) == "ODD" {
+                    "EVEN"
+                } else {
+                    "ODD"
+                };
+                let base = corner.tiletype.strip_suffix("_C").unwrap();
+                assert_eq!(
+                    routing_tiletype(corner, &tiles),
+                    format!("{base}_{expected}"),
+                    "{}",
+                    corner.name
+                );
+            }
+        }
+
+        // CertusPro-NX's pad PR28B sits in an even-slot corner: its output comes
+        // from the C0 CIB mux, not B4 (which is its tristate).
+        let variant = NexusVariant::Lfcpnx100;
+        let tiles = load_tilegrid(&db, variant).expect("tilegrid");
+        let g = build_routing_graph(
+            &db,
+            variant.prjoxide_family(),
+            &tiles,
+            Some((158, 27, 159, 29)),
+        )
+        .expect("build graph");
+        let wire = |name: &str| g.wire_names[name];
+        let drivers = |dst: &str| -> Vec<String> {
+            g.wire_to_pips[&wire(dst)]
+                .iter()
+                .map(|p| {
+                    g.wires[g.pips[p.0 as usize].src_wire.0 as usize]
+                        .name
+                        .clone()
+                })
+                .collect()
+        };
+        let output = drivers("R28C159_JPADDO_SEIO33_CORE_IOB");
+        assert!(
+            output.contains(&"R28C158_JCIBMUXOUTC0".to_string()),
+            "{output:?}"
+        );
+        assert!(
+            !output.contains(&"R28C158_JCIBMUXOUTB4".to_string()),
+            "{output:?}"
+        );
+        let tristate = drivers("R28C159_JPADDT_SEIO33_CORE_IOB");
+        assert!(
+            tristate.contains(&"R28C158_JCIBMUXOUTB4".to_string()),
+            "{tristate:?}"
+        );
+        // Pad A's wiring is the same in both slots.
+        let output_a = drivers("R28C159_JPADDO_SEIO33_CORE_IOA");
+        assert!(
+            output_a.contains(&"R28C158_JCIBMUXOUTA0".to_string()),
+            "{output_a:?}"
         );
     }
 }
