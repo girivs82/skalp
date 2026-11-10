@@ -156,3 +156,8 @@ members = [
     "crates/skalp-vhdl",
     "crates/skalp-hir-codegen",
 ]
+
+# Place and route a design on the real Nexus device data, timing each stage
+[[example]]
+name = "nexus_pnr_bench"
+required-features = ["nexus-real"]

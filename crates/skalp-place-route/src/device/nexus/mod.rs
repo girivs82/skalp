@@ -301,7 +301,13 @@ impl NexusDevice {
         let mut ordered: Vec<_> = primary.iter().collect();
         ordered.sort_unstable_by_key(|(&(x, y), _)| (y, x));
         for (&(x, y), t) in ordered {
-            let placeable = logic_rows.is_none_or(|(from, to)| y >= from && y <= to);
+            // A logic tile on a side of the window that is not the device's
+            // edge gets its clock (and some routing) through tiles outside the
+            // window, which the routing graph leaves out: placing a cell there
+            // would cut it off from the dedicated clock network.
+            let inside_columns = (x > x0 || x0 == 0) && (x < x1 || x1 + 1 >= width);
+            let placeable =
+                inside_columns && logic_rows.is_none_or(|(from, to)| y >= from && y <= to);
             let bels = if t.tiletype == "PLC" && !placeable {
                 Vec::new()
             } else if t.tiletype == "PLC" {
@@ -515,39 +521,43 @@ impl NexusDevice {
                 .get(pip.0 as usize)
                 .is_some_and(|p| !claimed.contains(&p.src_wire) && !claimed.contains(&p.dst_wire))
         };
-        let mut uphill = (*self.uphill_override).clone();
-        let mut downhill = (*self.downhill_override).clone();
+        // Each wire next to a claimed one is rebuilt once, however many
+        // claimed wires it touches: a clock spine wire next to thousands of
+        // claimed branch wires made rebuilding it per claimed wire take over
+        // a minute on a design with 12,800 flip-flops.
+        let mut uphill_touched: crate::collections::HashSet<WireId> = claimed.clone();
+        let mut downhill_touched: crate::collections::HashSet<WireId> = claimed.clone();
         for &wire in claimed {
-            let mut uphill_touched = vec![wire];
-            let mut downhill_touched = vec![wire];
             for pip in self.pips_driven_by(wire) {
                 if let Some(p) = self.pips.get(pip.0 as usize) {
-                    uphill_touched.push(p.dst_wire);
+                    uphill_touched.insert(p.dst_wire);
                 }
             }
             for pip in self.pips_driving(wire) {
                 if let Some(p) = self.pips.get(pip.0 as usize) {
-                    downhill_touched.push(p.src_wire);
+                    downhill_touched.insert(p.src_wire);
                 }
             }
-            for w in uphill_touched {
-                let kept = self
-                    .pips_driving(w)
-                    .iter()
-                    .copied()
-                    .filter(usable)
-                    .collect();
-                uphill.insert(w, kept);
-            }
-            for w in downhill_touched {
-                let kept = self
-                    .pips_driven_by(w)
-                    .iter()
-                    .copied()
-                    .filter(usable)
-                    .collect();
-                downhill.insert(w, kept);
-            }
+        }
+        let mut uphill = (*self.uphill_override).clone();
+        let mut downhill = (*self.downhill_override).clone();
+        for w in uphill_touched {
+            let kept = self
+                .pips_driving(w)
+                .iter()
+                .copied()
+                .filter(usable)
+                .collect();
+            uphill.insert(w, kept);
+        }
+        for w in downhill_touched {
+            let kept = self
+                .pips_driven_by(w)
+                .iter()
+                .copied()
+                .filter(usable)
+                .collect();
+            downhill.insert(w, kept);
         }
         let mut device = self.clone();
         device.uphill_override = Arc::new(uphill);
@@ -2360,12 +2370,13 @@ mod tests {
         let device =
             NexusDevice::from_prjoxide_bbox(variant, &db, (4, 4, 12, 12)).expect("build device");
 
-        // Locate a PLC (Logic) cell in the window.
+        // Locate a PLC (Logic) cell in the window. Those on the window's
+        // inner edges hold no BELs: their clock comes from outside it.
         let mut plc = None;
         for y in 4..=12 {
             for x in 4..=12 {
                 if let Some(t) = device.tile_at(x, y) {
-                    if t.tile_type() == TileType::Logic {
+                    if t.tile_type() == TileType::Logic && !t.bels().is_empty() {
                         plc = Some((x, y));
                     }
                 }

@@ -11,6 +11,7 @@ mod annealing;
 mod constraints;
 mod legalization;
 mod sites;
+mod spreading;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
@@ -315,16 +316,28 @@ impl<D: Device + Clone> Placer<D> {
             | PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical with carry chain column constraints
                 let analytical = AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                let t_stage = std::time::Instant::now();
                 let initial = if carry_chains.is_empty() {
                     analytical.place(netlist)?
                 } else {
                     analytical.place_with_carry_chains(netlist, carry_chains)?
                 };
+                log::info!(
+                    "placer: analytical placement took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                Self::log_placement_stats(&initial, netlist);
 
                 // Legalize with carry chain consecutive-row constraints
                 let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
+                let t_stage = std::time::Instant::now();
                 let legalized =
                     legalizer.legalize_with_carry_chains(initial, netlist, carry_chains)?;
+                log::info!(
+                    "placer: legalization took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                Self::log_placement_stats(&legalized, netlist);
 
                 // SA refinement with carry chain awareness
                 let timing_weight = if matches!(
@@ -359,7 +372,13 @@ impl<D: Device + Clone> Placer<D> {
                 .with_fill_limit(fill_limit)
                 .with_carry_chains(carry_chains.to_vec());
 
-                annealer.optimize(legalized, netlist)?
+                let t_stage = std::time::Instant::now();
+                let annealed = annealer.optimize(legalized, netlist)?;
+                log::info!(
+                    "placer: annealing took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                annealed
             }
             _ => {
                 // For other algorithms, fall back to regular placement
@@ -878,6 +897,48 @@ impl<D: Device + Clone> Placer<D> {
                 | (BelType::DffSrE, BelType::DffE)
                 | (BelType::DffSrE, BelType::DffSr)
         )
+    }
+
+    /// Log how spread out the placed nets are: total half-perimeter
+    /// wirelength, and the HPWL of the median, 99th-percentile and longest
+    /// net. Long nets make the router search large regions, so this is the
+    /// first thing to look at when routing is slow.
+    pub fn log_placement_stats(result: &PlacementResult, netlist: &GateNetlist) {
+        if !log::log_enabled!(log::Level::Info) {
+            return;
+        }
+        let mut lengths: Vec<u32> = netlist
+            .nets
+            .iter()
+            .filter_map(|net| {
+                let mut cells = net.driver.iter().chain(net.fanout.iter().map(|(c, _)| c));
+                let first = result.placements.get(cells.next()?)?;
+                let (mut x0, mut x1, mut y0, mut y1) =
+                    (first.tile_x, first.tile_x, first.tile_y, first.tile_y);
+                let mut pins = 1;
+                for loc in cells.filter_map(|c| result.placements.get(c)) {
+                    x0 = x0.min(loc.tile_x);
+                    x1 = x1.max(loc.tile_x);
+                    y0 = y0.min(loc.tile_y);
+                    y1 = y1.max(loc.tile_y);
+                    pins += 1;
+                }
+                (pins > 1).then_some(x1 - x0 + y1 - y0)
+            })
+            .collect();
+        if lengths.is_empty() {
+            return;
+        }
+        lengths.sort_unstable();
+        let at = |q: f64| lengths[((lengths.len() - 1) as f64 * q) as usize];
+        log::info!(
+            "placer: {} nets, HPWL total {}, median {}, p99 {}, max {}",
+            lengths.len(),
+            lengths.iter().map(|&l| l as u64).sum::<u64>(),
+            at(0.5),
+            at(0.99),
+            lengths[lengths.len() - 1]
+        );
     }
 
     /// Calculate total wirelength (HPWL)

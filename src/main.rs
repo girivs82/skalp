@@ -4458,7 +4458,7 @@ fn run_nexus_pnr_on_netlist(
     println!("Variant: {:?}", nexus);
     println!("Preset: {}", preset);
     println!();
-    println!("Running placement...");
+    println!("Running placement and routing...");
     let result = place_and_route_nexus_for_cli(gate_netlist, nexus, config)?;
 
     println!("Placement:");
@@ -4596,7 +4596,7 @@ fn run_pnr_on_netlist(
 
     // Run place and route
     println!();
-    println!("Running placement...");
+    println!("Running placement and routing...");
     let result = place_and_route(gate_netlist, ice40_variant, config)?;
 
     // Report results

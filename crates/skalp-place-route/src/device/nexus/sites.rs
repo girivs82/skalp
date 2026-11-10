@@ -168,9 +168,13 @@ pub fn design_region(
         let (x0, _, x1, _) = region.window;
         let (from, to) = region.logic_rows;
         let inside = |t: &&PrjoxideTile| t.x >= x0 && t.x <= x1 && t.y >= from && t.y <= to;
+        // Logic is kept off the window's inner edges (see
+        // `NexusDevice::from_prjoxide_region`)
+        let off_edge = |t: &&PrjoxideTile| (t.x > x0 || x0 == 0) && (t.x < x1 || x1 >= last_col);
         let capacity = tiles
             .iter()
             .filter(inside)
+            .filter(off_edge)
             .filter(|t| t.tiletype == "PLC")
             .count()
             * LUTS_PER_TILE;

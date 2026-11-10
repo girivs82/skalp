@@ -584,12 +584,15 @@ pub fn place_and_route_nexus_real(
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();
     let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let t_place = std::time::Instant::now();
     let mut placement = if packing.carry_chains.is_empty() {
         placer.place(&logic)?
     } else {
         placer.place_with_carry_chains(&logic, &packing.carry_chains)?
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
+    log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());
+    Placer::<NexusDevice>::log_placement_stats(&placement, netlist);
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
