@@ -12,8 +12,6 @@ categories = ["development-tools", "hardware-support"]
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
-# Memory footprint and machine size for the memory guard
-libc = "0.2"
 thiserror = "1.0"
 tempfile = "3.8"
 
@@ -92,6 +90,18 @@ test-utils = ["proptest"]
 bench = ["criterion"]
 
 # GPU simulation support (Metal on macOS)
+# Memory footprint and machine size for the memory guard (src/memory_guard.rs)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27"
 objc = "0.2"
