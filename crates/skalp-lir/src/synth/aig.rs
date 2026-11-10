@@ -646,6 +646,24 @@ impl Aig {
         }
     }
 
+    /// Fill in a latch's clock and reset where it was created without them
+    /// (their signals were not built yet), leaving ones it has alone
+    pub fn complete_latch_controls(
+        &mut self,
+        latch_id: AigNodeId,
+        new_clock: Option<AigNodeId>,
+        new_reset: Option<AigNodeId>,
+    ) {
+        if let Some(AigNode::Latch { clock, reset, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
+            if clock.is_none() {
+                *clock = new_clock;
+            }
+            if reset.is_none() {
+                *reset = new_reset;
+            }
+        }
+    }
+
     /// Update a barrier node's data and enable inputs after creation
     ///
     /// Used by optimization passes that need to pre-create barriers before

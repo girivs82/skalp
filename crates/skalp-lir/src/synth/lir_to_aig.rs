@@ -333,6 +333,13 @@ impl<'a> LirToSynthAig<'a> {
                     };
 
                     self.aig.update_latch_data(latch_id, next_lit);
+                    // A clock or reset computed by logic (such as a signal
+                    // that renames a child instance's output) did not exist
+                    // when the latch was pre-created
+                    let clock_node = self.find_clock_node(node);
+                    let reset_node = self.find_reset_node(node);
+                    self.aig
+                        .complete_latch_controls(latch_id, clock_node, reset_node);
                 }
             }
         }
