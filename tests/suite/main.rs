@@ -113,6 +113,7 @@ mod test_ncl_convergence_mwe;
 mod test_ncl_expansion_fix;
 mod test_ncl_std_cell_mode;
 mod test_nexus_real_flow;
+mod test_nexus_saved_netlist;
 mod test_parametric_types_parsing;
 mod test_partitionable_adder;
 mod test_phase10_backends;
