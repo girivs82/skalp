@@ -1,4 +1,4 @@
-// NCL Completion Detection — from Karythra CLE V2 async
+// NCL Completion Detection
 // XOR detects where dual-rail signals differ (one rail high, other low).
 // AND reduction checks all positions are valid.
 // Uses bulk XOR (not per-bit for-loop) for reliable synthesis.

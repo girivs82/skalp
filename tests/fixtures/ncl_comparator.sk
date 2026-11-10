@@ -1,4 +1,4 @@
-// NCL 8-bit comparator — from Karythra CLE function unit L0
+// NCL 8-bit comparator
 
 async entity NclCompare8 {
     in a: bit[8]

@@ -1,4 +1,4 @@
-// NCL Handshake Acknowledgment — from Karythra CLE V2 ack generation
+// NCL Handshake Acknowledgment
 // Generates acknowledge signals based on pipeline completion and mode.
 // Exercises: multi-input AND for pipeline_complete, mode-gated acks,
 // XOR-based response detection.

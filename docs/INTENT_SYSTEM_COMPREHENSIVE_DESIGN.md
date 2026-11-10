@@ -931,7 +931,7 @@ fn log_diagnostics(value: fp32) with intent::area_efficient {
 
 ```skalp
 // Define application-specific intent
-intent karythra_alu_decode {
+intent cpu_alu_decode {
     // Parallel mux for instruction decode
     mux_style: parallel,
     // Timing critical
@@ -945,7 +945,7 @@ entity InstructionDecoder {
     out alu_op: AluOp
 }
 
-impl InstructionDecoder with intent::karythra_alu_decode {
+impl InstructionDecoder with intent::cpu_alu_decode {
     // Match generates parallel mux (OR of ANDs)
     alu_op = match opcode {
         0x00 => AluOp::Add,

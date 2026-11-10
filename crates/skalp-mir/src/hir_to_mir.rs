@@ -596,10 +596,7 @@ impl<'hir> HirToMir<'hir> {
 
         // First pass: create modules for entities
         for entity in &hir.entities {
-            if entity.name.contains("FpAdd")
-                || entity.name == "KarythraCLEAsync"
-                || entity.name == "FpSub"
-            {
+            if entity.name.contains("FpAdd") || entity.name == "FpSub" {
                 trace!(
                     "[HIR_TO_MIR] First pass: entity '{}' with id {:?}",
                     entity.name,
@@ -616,10 +613,7 @@ impl<'hir> HirToMir<'hir> {
             self.entity_map.insert(entity.id, module_id);
             self.entity_name_to_module
                 .insert(entity.name.clone(), module_id);
-            if entity.name.contains("FpAdd")
-                || entity.name == "KarythraCLEAsync"
-                || entity.name == "FpSub"
-            {
+            if entity.name.contains("FpAdd") || entity.name == "FpSub" {
                 trace!(
                     "[HIR_TO_MIR] entity_map[{:?}] = {:?} for '{}'",
                     entity.id,
@@ -17949,7 +17943,7 @@ impl<'hir> HirToMir<'hir> {
                 // Dynamic variables are created during function inlining (e.g., in match arm blocks)
                 // and must be accessible for Index/Range operations.
                 //
-                // Example: In Karythra's exec_l0_l1, match arm 9 creates:
+                // Example: an inlined ALU function whose match arm creates:
                 //   let shift_amt = b[4:0];
                 //   if sign && shift_amt > 0 { ... }
                 // The condition references shift_amt, which is only in dynamic_variables.

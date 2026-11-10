@@ -1,4 +1,4 @@
-// NCL Priority Encoder — from Karythra CLE V2 multi-outstanding request tracker
+// NCL Priority Encoder
 // Finds the first zero in a 4-bit pending bitmap (first available request slot).
 // This is the next_tag logic that assigns tags to cache requests.
 

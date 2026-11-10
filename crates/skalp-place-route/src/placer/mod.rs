@@ -149,7 +149,7 @@ pub struct PlacerConfig {
 /// How full placement fills a tile's BELs of each type when the design
 /// leaves room. Packing every tile full left the busiest part of a design
 /// needing more signals in and out of each tile than the local routing
-/// carries (CLE-µ on the LFCPNX-100 never finished routing).
+/// carries (a 15K-cell processor core on the LFCPNX-100 never finished routing).
 pub const DEFAULT_TILE_FILL: f64 = 0.75;
 
 /// Room above the fill a design needs at the least, so the nearest-site

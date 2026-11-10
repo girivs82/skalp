@@ -726,7 +726,7 @@ $ skalp update      # Update dependencies
 
 ## 📊 Impact on Real Projects
 
-**Case Study: Karythra CLE (Content-addressed List Engine)**
+**Case Study: a 256-bit processor datapath**
 
 A complex 256-bit datapath with 49 function units across 5 hierarchy levels.
 

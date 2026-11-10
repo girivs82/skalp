@@ -1,5 +1,4 @@
-//! Second round of regressions found while bringing up the Karythra K4 CLE-µ
-//! (an RV64I core) in SKALP.
+//! Second round of regressions found while bringing up an RV64I core in SKALP.
 //!
 //! 4. A `let` in a child instance read 0 in behavioral simulation.
 //! 5. A `let` with the name of a port hid the port, and the only error was
@@ -39,8 +38,8 @@ fn squash(sv: &str) -> String {
 // 4 ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_k4_let_in_child_instance_simulates() {
-    let mut tb = Testbench::with_top_module(&fixture_path("k4_let_in_child.sk"), "K")
+async fn test_let_in_child_instance_simulates() {
+    let mut tb = Testbench::with_top_module(&fixture_path("let_in_child.sk"), "K")
         .await
         .unwrap();
     tb.set("x", 0x1234_566fu64);
@@ -55,7 +54,7 @@ async fn test_k4_let_in_child_instance_simulates() {
 // 5 ---------------------------------------------------------------------------
 
 #[test]
-fn test_k4_let_shadowing_port_is_reported() {
+fn test_let_shadowing_port_is_reported() {
     let source = r#"
 entity A {
     in x: bit[8]
@@ -78,7 +77,7 @@ impl A {
 // 6 ---------------------------------------------------------------------------
 
 #[test]
-fn test_k4_no_index_of_slice_in_sv() {
+fn test_no_index_of_slice_in_sv() {
     let source = r#"
 fn sra32(a: bit[32], sh: bit[5]) -> bit[32] {
     let sg: bit = a[31]
@@ -109,7 +108,7 @@ impl B6 {
 // 7 ---------------------------------------------------------------------------
 
 #[test]
-fn test_k4_replicated_bit_select_is_one_bit_in_sv() {
+fn test_replicated_bit_select_is_one_bit_in_sv() {
     let source = r#"
 fn load_b(word: bit[64], off: bit[3]) -> bit[64] {
     let w: bit[64] = word >> {off, 3'b000}
@@ -138,8 +137,8 @@ impl B7 {
 // 8 ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_k4_sim_truncates_to_declared_width() {
-    let mut tb = Testbench::with_top_module(&fixture_path("k4_alu_truncation.sk"), "Trunc")
+async fn test_sim_truncates_to_declared_width() {
+    let mut tb = Testbench::with_top_module(&fixture_path("alu_truncation.sk"), "Trunc")
         .await
         .unwrap();
     tb.set("a", 0xffff_fff0u64).set("b", 0x20u64).set("sh", 8u8);
@@ -179,8 +178,8 @@ async fn check_regfile(mut tb: Testbench, what: &str) {
 }
 
 #[tokio::test]
-async fn test_k4_regfile_two_reads_gate_level_asic() {
-    let path = fixture_path("k4_regfile_two_reads.sk");
+async fn test_regfile_two_reads_gate_level_asic() {
+    let path = fixture_path("regfile_two_reads.sk");
     let tb = Testbench::gate_level_with_top_and_library(&path, "Rf", "generic_asic")
         .await
         .unwrap();
@@ -188,8 +187,8 @@ async fn test_k4_regfile_two_reads_gate_level_asic() {
 }
 
 #[tokio::test]
-async fn test_k4_regfile_two_reads_gate_level_nexus() {
-    let path = fixture_path("k4_regfile_two_reads.sk");
+async fn test_regfile_two_reads_gate_level_nexus() {
+    let path = fixture_path("regfile_two_reads.sk");
     let tb = Testbench::gate_level_with_top_and_library(&path, "Rf", "nexus")
         .await
         .unwrap();
@@ -197,8 +196,8 @@ async fn test_k4_regfile_two_reads_gate_level_nexus() {
 }
 
 #[test]
-fn test_k4_async_read_memory_stays_out_of_block_ram() {
-    let path = std::path::PathBuf::from(fixture_path("k4_regfile_two_reads.sk"));
+fn test_async_read_memory_stays_out_of_block_ram() {
+    let path = std::path::PathBuf::from(fixture_path("regfile_two_reads.sk"));
     let ctx = skalp_frontend::parse_and_build_compilation_context(&path).unwrap();
     let mir = skalp_mir::MirCompiler::new()
         .with_optimization_level(skalp_mir::OptimizationLevel::None)

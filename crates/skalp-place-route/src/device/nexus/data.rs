@@ -77,7 +77,7 @@ pub const LIFCL_40: NexusDieData = NexusDieData {
     has_lpddr4: false,
 };
 
-/// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
+/// LFCPNX-100 (CertusPro-NX)
 pub const LFCPNX_100: NexusDieData = NexusDieData {
     grid: (160, 75), // prjoxide: max_col=159, max_row=74
     name: "LFCPNX-100",

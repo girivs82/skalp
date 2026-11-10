@@ -1,4 +1,4 @@
-// NCL Mode Controller — from Karythra CLE V2 mode selection
+// NCL Mode Controller
 // Dual-rail mode decode with completion detection, then mode-dependent
 // output generation. Exercises: completion detect, comparators, muxing.
 

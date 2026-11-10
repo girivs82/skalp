@@ -21,7 +21,7 @@ use skalp_lir::ncl_constraints::MatchedDelayGroup;
 /// first. A net that stays congested gets twice the margin each time it is
 /// rerouted, so it can detour further; a search that finds no path inside
 /// its region retries over the whole device. (Capping the margin at 12
-/// tiles left CLE-µ on the real LFCPNX-100 stuck at about 100 overused
+/// tiles left a 15K-cell core on the real LFCPNX-100 stuck at about 100 overused
 /// wires: the congestion sits at the edge of the placed region, and nets
 /// must detour well around it.)
 const SEARCH_MARGIN: u32 = 3;

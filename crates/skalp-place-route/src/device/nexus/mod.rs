@@ -10,7 +10,7 @@
 //! # Supported Variants
 //!
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
-//! - LFCPNX-100 — 79,872 LUT4, 160x75 grid, KarythraGPU target (LFCPNX-VERSA-EVN)
+//! - LFCPNX-100 — 79,872 LUT4, 160x75 grid (LFCPNX-VERSA-EVN board)
 
 pub mod data;
 pub mod dsp;
@@ -61,7 +61,7 @@ pub enum NexusVariant {
     /// 21 EBR (18Kb), 2 LRAM (32Kb), ~14 DSP blocks, 3 PLLs
     /// Packages: QFN72, csfBGA289, caBGA400
     Lifcl40,
-    /// LFCPNX-100 (CertusPro-NX) — KarythraGPU target
+    /// LFCPNX-100 (CertusPro-NX)
     /// 9,984 PLC tiles = 79,872 LUT4 + 79,872 FF
     /// 52 EBR (18Kb), 7 LRAM (32Kb), ~39 DSP blocks, 4 PLLs
     /// Hard PCIe (1x PCIE_LL), 8x PCS (SerDes)
