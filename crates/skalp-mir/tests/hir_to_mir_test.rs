@@ -34,6 +34,7 @@ fn create_simple_entity() -> Hir {
     // Create entity
     let entity = HirEntity {
         id: EntityId(1),
+        specialized_from: None,
         name: "counter".to_string(),
         comments: vec![],
         is_async: false,

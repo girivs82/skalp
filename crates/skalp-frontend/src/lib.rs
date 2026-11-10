@@ -82,8 +82,19 @@ fn find_project_root(start_path: &Path) -> Option<PathBuf> {
 /// Parse and build HIR from a file with full module resolution
 /// Returns a CompilationContext containing both the main HIR and all module HIRs
 pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<CompilationContext> {
+    let source = std::fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
+    parse_and_build_compilation_context_from_source(file_path, source)
+}
+
+/// Like [`parse_and_build_compilation_context`], for source text held in
+/// memory, such as a design with generated debug logic added. `file_path`
+/// still locates the modules it imports.
+pub fn parse_and_build_compilation_context_from_source(
+    file_path: &Path,
+    source: String,
+) -> Result<CompilationContext> {
     use module_resolver::ModuleResolver;
-    use std::fs;
 
     // Find the project root by looking for skalp.toml
     let root_dir = find_project_root(file_path).unwrap_or_else(|| {
@@ -95,10 +106,6 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
 
     // Create module resolver
     let mut resolver = ModuleResolver::new(root_dir);
-
-    // Load the main file
-    let source = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
 
     // Parse source to syntax tree
     let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
@@ -182,7 +189,7 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     // Previously, when cc_cv.sk was parsed, PiController wasn't available yet,
     // so `let voltage_loop = PiController { ... }` failed to build as an instance.
     // Now we rebuild instances for all modules after the merge.
-    hir = rebuild_instances_for_all_modules(&hir, file_path, &resolver)
+    hir = rebuild_instances_for_all_modules(&hir, file_path, &source, &resolver)
         .context("Failed to rebuild instances with imports")?;
 
     // All imports are merged and instances rebuilt: any instance whose entity is
@@ -228,18 +235,21 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
 
 /// Rebuild instances with imported entities now available
 fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
-    use std::fs;
-
-    // Read the source file again
-    let source = fs::read_to_string(file_path)
+    let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file for rebuild: {:?}", file_path))?;
+    rebuild_instances_from_source(hir, file_path, &source)
+}
 
+/// Rebuild instances of `source`, the text of `file_path`, with imported
+/// entities now available. The text is passed in rather than re-read, so a
+/// design built from edited source (such as `synth --debug`) keeps its edits.
+fn rebuild_instances_from_source(hir: &Hir, file_path: &Path, source: &str) -> Result<Hir> {
     // Parse to syntax tree
-    let (syntax_tree, _) = parse::parse_with_errors(&source);
+    let (syntax_tree, _) = parse::parse_with_errors(source);
 
     // Create a new builder with all entities pre-registered
     let mut builder =
-        hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
+        hir_builder::HirBuilderContext::with_source(source, Some(file_path.to_path_buf()));
 
     // Pre-register all entities in the symbol table
     for entity in &hir.entities {
@@ -482,12 +492,13 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
 fn rebuild_instances_for_all_modules(
     hir: &Hir,
     main_file_path: &Path,
+    main_source: &str,
     resolver: &ModuleResolver,
 ) -> Result<Hir> {
     use std::collections::HashSet;
 
-    // Start with the main file rebuild
-    let mut result_hir = rebuild_instances_with_imports(hir, main_file_path)
+    // Start with the main file rebuild, from the text that was parsed
+    let mut result_hir = rebuild_instances_from_source(hir, main_file_path, main_source)
         .context("Failed to rebuild main file instances")?;
 
     // Collect all loaded module paths (excluding stdlib and main file)

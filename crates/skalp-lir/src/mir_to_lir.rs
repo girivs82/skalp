@@ -1047,6 +1047,18 @@ impl MirToLirTransform {
         clock_signal: Option<LirSignalId>,
         reset_signal: Option<LirSignalId>,
     ) {
+        // Each memory written anywhere in the block gets one write port, with
+        // the full guard of every write site (if, match, or both).
+        let memories = self.memories_written(block);
+        if !memories.is_empty() {
+            for &memory in &memories {
+                self.lower_memory_writes_in_scope(memory, &block.statements, clock_signal);
+            }
+            let remaining = self.without_memory_writes(block);
+            self.transform_sequential_block(&remaining, clock_signal, reset_signal);
+            return;
+        }
+
         // A register assigned by more than one statement gets one driver: the
         // last assignment that applies, in source order.
         let repeated = self.targets_of_several_statements(block);
@@ -1068,6 +1080,57 @@ impl MirToLirTransform {
             return;
         }
         self.transform_sequential_statements(block, clock_signal, reset_signal);
+    }
+
+    /// Memories a block writes, in the order first written.
+    fn memories_written(&self, block: &Block) -> Vec<SignalId> {
+        let mut memories = Vec::new();
+        for (target, _) in Self::collect_all_assignments_recursive(block) {
+            if let LValue::BitSelect { base, .. } = &target {
+                if let Some(memory) = self.get_memory_signal_id(base) {
+                    if !memories.contains(&memory) {
+                        memories.push(memory);
+                    }
+                }
+            }
+        }
+        memories
+    }
+
+    /// A copy of a block without its memory writes, which are lowered separately.
+    fn without_memory_writes(&self, block: &Block) -> Block {
+        let prune = |inner: &Block| self.without_memory_writes(inner);
+        let mut statements = Vec::with_capacity(block.statements.len());
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let is_memory_write = matches!(
+                        &assign.lhs,
+                        LValue::BitSelect { base, .. } if self.get_memory_signal_id(base).is_some()
+                    );
+                    if !is_memory_write {
+                        statements.push(stmt.clone());
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    let mut pruned = if_stmt.clone();
+                    pruned.then_block = prune(&if_stmt.then_block);
+                    pruned.else_block = if_stmt.else_block.as_ref().map(prune);
+                    statements.push(Statement::If(pruned));
+                }
+                Statement::Case(case_stmt) => {
+                    let mut pruned = case_stmt.clone();
+                    for item in &mut pruned.items {
+                        item.block = prune(&item.block);
+                    }
+                    pruned.default = case_stmt.default.as_ref().map(prune);
+                    statements.push(Statement::Case(pruned));
+                }
+                Statement::Block(inner) => statements.push(Statement::Block(prune(inner))),
+                _ => statements.push(stmt.clone()),
+            }
+        }
+        Block { statements }
     }
 
     /// Targets assigned by more than one statement of a block, memories aside.
@@ -1153,26 +1216,7 @@ impl MirToLirTransform {
     ) {
         let target_signal = self.get_lvalue_signal(target);
         let target_width = self.get_lvalue_width(target);
-        let mut current_value = target_signal;
-        for (condition, expr) in paths {
-            let expr_signal = self.transform_expression(&expr, target_width);
-            let Some(cond) = condition else {
-                current_value = expr_signal;
-                continue;
-            };
-            let cond_signal = self.transform_expression(&cond, 1);
-            let mux_out = self.alloc_temp_signal(target_width);
-            let path = self.unique_node_path("mux");
-            self.lir.add_node(
-                LirOp::Mux2 {
-                    width: target_width,
-                },
-                vec![cond_signal, current_value, expr_signal],
-                mux_out,
-                path,
-            );
-            current_value = mux_out;
-        }
+        let current_value = self.select_last_applicable(paths, target_signal, target_width);
 
         let reg_op = LirOp::Reg {
             width: target_width,
@@ -1827,13 +1871,10 @@ impl MirToLirTransform {
             Vec::new()
         };
 
-        // BUG #237 FIX: Also include targets from sequential_defaults that might not
-        // appear in case arms but have a leading assignment
-        for (lv, _) in sequential_defaults.iter() {
-            if !all_targets.contains(lv) {
-                all_targets.push(lv.clone());
-            }
-        }
+        // A target assigned only before the match is not driven here: its own
+        // assignment gives it a register, and a second one would be a
+        // duplicate driver. Targets assigned both before and inside the match
+        // are merged earlier into one register (see `targets_of_several_statements`).
 
         // For each target signal, build a mux chain
         for target in &all_targets {
@@ -1853,6 +1894,14 @@ impl MirToLirTransform {
                     target_signal // Feedback: keep current value
                 };
 
+            // An arm that matches but does not assign the target leaves it at
+            // its value before the match, never at the default arm's value.
+            let hold = if let Some(expr) = Self::find_assignment_expr(sequential_defaults, target) {
+                self.transform_expression(expr, target_width)
+            } else {
+                target_signal
+            };
+
             // Build mux chain from last case to first (so first has priority)
             let mut current_result = default_signal;
 
@@ -1861,14 +1910,9 @@ impl MirToLirTransform {
                 // conditional assignments inside case arms (e.g., if-else in match arms)
                 let has_target = Self::block_assigns_to_target(arm_block, target);
                 let arm_signal = if has_target {
-                    self.synthesize_case_arm_for_target(
-                        arm_block,
-                        target,
-                        target_width,
-                        current_result,
-                    )
+                    self.synthesize_case_arm_for_target(arm_block, target, target_width, hold)
                 } else {
-                    current_result // Not assigned in this arm, use previous result
+                    hold
                 };
 
                 // Build condition: case_expr == value (for each value in values list)
@@ -2781,88 +2825,39 @@ impl MirToLirTransform {
         target_width: u32,
         feedback_signal: LirSignalId,
     ) -> LirSignalId {
-        // Check if block contains direct assignment or conditional assignment
-        for stmt in &block.statements {
-            match stmt {
-                Statement::Assignment(assign)
-                    if matches!(assign.kind, AssignmentKind::NonBlocking)
-                        && &assign.lhs == target =>
-                {
-                    // Direct assignment - transform and return
-                    return self.transform_expression(&assign.rhs, target_width);
-                }
-                Statement::If(if_stmt) => {
-                    // Check if this if statement assigns to our target
-                    let then_has_target =
-                        Self::block_assigns_to_target(&if_stmt.then_block, target);
-                    let else_has_target = if_stmt
-                        .else_block
-                        .as_ref()
-                        .map(|b| Self::block_assigns_to_target(b, target))
-                        .unwrap_or(false);
+        // The arm's value is the last of its assignments that applies, in
+        // source order, through any nesting of if, match, blocks and resolved
+        // if-else-if chains; with none applying, the target holds.
+        let paths = Self::collect_conditional_paths_for_target(block, target, None);
+        self.select_last_applicable(paths, feedback_signal, target_width)
+    }
 
-                    if then_has_target || else_has_target {
-                        // Synthesize the conditional assignment as a mux
-                        let cond_signal = self.transform_expression(&if_stmt.condition, 1);
-
-                        // Get then value (recursively handle nested conditionals)
-                        let then_signal = if then_has_target {
-                            self.synthesize_case_arm_for_target(
-                                &if_stmt.then_block,
-                                target,
-                                target_width,
-                                feedback_signal,
-                            )
-                        } else {
-                            feedback_signal
-                        };
-
-                        // Get else value
-                        let else_signal = if let Some(ref else_block) = if_stmt.else_block {
-                            if else_has_target {
-                                self.synthesize_case_arm_for_target(
-                                    else_block,
-                                    target,
-                                    target_width,
-                                    feedback_signal,
-                                )
-                            } else {
-                                feedback_signal
-                            }
-                        } else {
-                            feedback_signal
-                        };
-
-                        // Create mux: if cond then then_signal else else_signal
-                        let mux_out = self.alloc_temp_signal(target_width);
-                        let path = self.unique_node_path("arm_cond_mux");
-                        self.lir.add_node(
-                            LirOp::Mux2 {
-                                width: target_width,
-                            },
-                            vec![cond_signal, else_signal, then_signal],
-                            mux_out,
-                            path,
-                        );
-                        return mux_out;
-                    }
-                }
-                Statement::Block(inner_block)
-                    if Self::block_assigns_to_target(inner_block, target) =>
-                {
-                    // Recursively check inner block
-                    return self.synthesize_case_arm_for_target(
-                        inner_block,
-                        target,
-                        target_width,
-                        feedback_signal,
-                    );
-                }
-                _ => {}
-            }
+    /// The value of the last of `paths` whose condition holds, or `start`.
+    fn select_last_applicable(
+        &mut self,
+        paths: Vec<(Option<Expression>, Expression)>,
+        start: LirSignalId,
+        width: u32,
+    ) -> LirSignalId {
+        let mut current_value = start;
+        for (condition, expr) in paths {
+            let expr_signal = self.transform_expression(&expr, width);
+            let Some(cond) = condition else {
+                current_value = expr_signal;
+                continue;
+            };
+            let cond_signal = self.transform_expression(&cond, 1);
+            let mux_out = self.alloc_temp_signal(width);
+            let path = self.unique_node_path("mux");
+            self.lir.add_node(
+                LirOp::Mux2 { width },
+                vec![cond_signal, current_value, expr_signal],
+                mux_out,
+                path,
+            );
+            current_value = mux_out;
         }
-        // No assignment found - return feedback
-        feedback_signal
+        current_value
     }
 
     /// Check if a block assigns to a target (non-recursively in conditionals)
@@ -2889,6 +2884,19 @@ impl MirToLirTransform {
                     if Self::block_assigns_to_target(inner_block, target) =>
                 {
                     return true;
+                }
+                // An if-else-if chain already resolved to one target
+                Statement::ResolvedConditional(rc) if &rc.target == target => {
+                    return true;
+                }
+                Statement::Case(case_stmt) => {
+                    let arms = case_stmt.items.iter().map(|item| &item.block);
+                    if arms
+                        .chain(case_stmt.default.as_ref())
+                        .any(|arm| Self::block_assigns_to_target(arm, target))
+                    {
+                        return true;
+                    }
                 }
                 _ => {}
             }
@@ -6481,6 +6489,31 @@ fn create_blackbox_lir_placeholder(
     }
 }
 
+/// The design's top module, as every flow chooses it ([`Mir::top_module`]).
+fn select_top_module(mir: &Mir) -> &Module {
+    let Some(top) = mir.top_module() else {
+        panic!(
+            "Top module detection failed: the design has no modules. \
+             Ensure your source file defines a synthesizable entity."
+        );
+    };
+    let has_content = !top.instances.is_empty()
+        || !top.signals.is_empty()
+        || !top.processes.is_empty()
+        || !top.assignments.is_empty();
+    if !has_content && !top.parameters.is_empty() {
+        panic!(
+            "Top module detection failed: '{}' has no content. \
+             This usually happens when an entity has generic parameters (like clock domains) \
+             but is never instantiated. Either:\n\
+             1. Remove generic parameters from the top-level entity, or\n\
+             2. Create a wrapper entity that instantiates it with concrete types.",
+            top.name
+        );
+    }
+    top
+}
+
 /// Lower entire MIR hierarchy to per-instance LIR
 ///
 /// This function traverses the module hierarchy starting from the top module,
@@ -6492,147 +6525,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     let module_by_name: IndexMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
-    // DEBUG: Print module ID to name mapping
-    trace!(
-        "[HIER_LIR_DEBUG] Module ID mapping (first 10): {:?}",
-        mir.modules
-            .iter()
-            .take(10)
-            .map(|m| (m.id.0, &m.name))
-            .collect::<Vec<_>>()
-    );
-    // Find KarythraCLEAsync module ID
-    if let Some(kcle) = mir.modules.iter().find(|m| m.name == "KarythraCLEAsync") {
-        trace!(
-            "[HIER_LIR_DEBUG] KarythraCLEAsync has ModuleId({})",
-            kcle.id.0
-        );
-    }
-
-    // Find modules that are instantiated (have parents)
-    let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
-    let mut modules_with_instances: HashSet<ModuleId> = HashSet::new();
-
-    for module in &mir.modules {
-        if !module.instances.is_empty() {
-            modules_with_instances.insert(module.id);
-        }
-        for inst in &module.instances {
-            // Debug: track what's instantiating what
-            if module.name == "FpSub" && inst.name == "adder" {
-                trace!(
-                    "[HIER_LIR_DEBUG] FpSub's 'adder' instance has module=ModuleId({})",
-                    inst.module.0
-                );
-            }
-            if let Some(child_module) = mir.modules.iter().find(|m| m.id == inst.module) {
-                if child_module.name == "KarythraCLEAsync" {
-                    trace!(
-                        "[HIER_LIR_DEBUG] Module '{}' instantiates 'KarythraCLEAsync' via instance '{}'",
-                        module.name, inst.name
-                    );
-                }
-            }
-            instantiated_modules.insert(inst.module);
-        }
-    }
-
-    // Find top module: has instances but is not instantiated by others
-    // If no such module exists, fall back to first non-instantiated module
-    trace!(
-        "[HIER_LIR] Looking for top module among {} modules",
-        mir.modules.len()
-    );
-    trace!(
-        "[HIER_LIR] modules_with_instances: {:?}",
-        mir.modules
-            .iter()
-            .filter(|m| modules_with_instances.contains(&m.id))
-            .map(|m| &m.name)
-            .collect::<Vec<_>>()
-    );
-    trace!(
-        "[HIER_LIR] instantiated_modules (have parents): {:?}",
-        mir.modules
-            .iter()
-            .filter(|m| instantiated_modules.contains(&m.id))
-            .map(|m| &m.name)
-            .collect::<Vec<_>>()
-    );
-
-    // BUG FIX: Select the top module with the most UNIQUE instance types.
-    // The user's main module typically instantiates many different module types
-    // (func_exec_l2, func_exec_l3, etc.), while stdlib modules like FpSub only
-    // instantiate one or two types (e.g., just FpAdd).
-    let top_candidates: Vec<_> = mir
-        .modules
-        .iter()
-        .filter(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
-        .collect();
-
-    // Helper to check if a module name looks like a stdlib module
-    fn is_stdlib_name(name: &str) -> bool {
-        // Stdlib modules typically start with these prefixes
-        let stdlib_prefixes = [
-            "Fp",
-            "Cordic",
-            "Int",
-            "Shift",
-            "Vec",
-            "Matrix",
-            "Fifo",
-            "Memory",
-            "Clz",
-            "Popcount",
-            "Parity",
-            "Bitreverse",
-        ];
-        stdlib_prefixes
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-    }
-
-    let top_module = if !top_candidates.is_empty() {
-        // First try: prefer user modules (non-stdlib names)
-        let user_candidates: Vec<_> = top_candidates
-            .iter()
-            .filter(|m| !is_stdlib_name(&m.name))
-            .copied()
-            .collect();
-
-        if !user_candidates.is_empty() {
-            // Among user modules, pick the one with most unique instance types
-            user_candidates
-                .into_iter()
-                .max_by_key(|m| {
-                    let unique_types: std::collections::HashSet<_> =
-                        m.instances.iter().map(|i| i.module).collect();
-                    unique_types.len()
-                })
-                .unwrap()
-        } else {
-            // No user modules found, fall back to most unique instance types
-            top_candidates
-                .into_iter()
-                .max_by_key(|m| {
-                    let unique_types: std::collections::HashSet<_> =
-                        m.instances.iter().map(|i| i.module).collect();
-                    unique_types.len()
-                })
-                .unwrap()
-        }
-    } else {
-        // Fallback: find the module with most unique instance types among non-instantiated
-        mir.modules
-            .iter()
-            .filter(|m| !instantiated_modules.contains(&m.id))
-            .max_by_key(|m| {
-                let unique_types: std::collections::HashSet<_> =
-                    m.instances.iter().map(|i| i.module).collect();
-                unique_types.len()
-            })
-            .unwrap_or(&mir.modules[0])
-    };
+    let top_module = select_top_module(mir);
 
     trace!(
         "[HIER_LIR] Selected top module: '{}' (id={}, {} instances)",
@@ -6768,130 +6661,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     let module_by_name: IndexMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
-    // Find modules that are instantiated (have parents)
-    let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
-    let mut modules_with_instances: HashSet<ModuleId> = HashSet::new();
-
-    for module in &mir.modules {
-        if !module.instances.is_empty() {
-            modules_with_instances.insert(module.id);
-        }
-        for inst in &module.instances {
-            instantiated_modules.insert(inst.module);
-        }
-    }
-
-    // Helper to check if a module name looks like a stdlib module
-    fn is_stdlib_name_opt(name: &str) -> bool {
-        let stdlib_prefixes = [
-            "Fp",
-            "Cordic",
-            "Int",
-            "Shift",
-            "Vec",
-            "Matrix",
-            "Fifo",
-            "Memory",
-            "Clz",
-            "Popcount",
-            "Parity",
-            "Bitreverse",
-        ];
-        stdlib_prefixes
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-    }
-
-    // Find top module - a module that is NOT instantiated by any other module
-    // Priority:
-    // 1. User modules (non-stdlib) that are not instantiated
-    // 2. Among those, prefer modules with more instances (has children)
-    // 3. If no user modules found, fall back to any non-instantiated module
-
-    // All modules that are not instantiated by anyone (potential top modules)
-    let not_instantiated: Vec<_> = mir
-        .modules
-        .iter()
-        .filter(|m| !instantiated_modules.contains(&m.id))
-        .collect();
-
-    // First priority: user modules (non-stdlib names) that are not instantiated
-    let user_candidates: Vec<_> = not_instantiated
-        .iter()
-        .filter(|m| !is_stdlib_name_opt(&m.name))
-        .copied()
-        .collect();
-
-    // Helper to check if a module has actual content (not just a generic shell)
-    fn has_content(m: &Module) -> bool {
-        !m.instances.is_empty()
-            || !m.signals.is_empty()
-            || !m.processes.is_empty()
-            || !m.assignments.is_empty()
-    }
-
-    // Find valid top module: user module with content that's not instantiated
-    let user_with_content: Vec<_> = user_candidates
-        .iter()
-        .filter(|m| has_content(m))
-        .copied()
-        .collect();
-
-    let top_module = if !user_with_content.is_empty() {
-        // Pick user module with content, preferring more instances
-        user_with_content
-            .into_iter()
-            .max_by_key(|m| {
-                let unique_types: std::collections::HashSet<_> =
-                    m.instances.iter().map(|i| i.module).collect();
-                (unique_types.len(), m.id.0)
-            })
-            .unwrap()
-    } else {
-        // No valid user module found - fall back to stdlib-looking modules with content
-        // This handles user modules that happen to have stdlib-like prefixes (e.g., "BitreverseMWE")
-        let stdlib_with_content: Vec<_> = not_instantiated
-            .iter()
-            .filter(|m| is_stdlib_name_opt(&m.name) && has_content(m))
-            .copied()
-            .collect();
-
-        if !stdlib_with_content.is_empty() {
-            // Found a module with stdlib-like prefix that has content - use it
-            stdlib_with_content
-                .into_iter()
-                .max_by_key(|m| {
-                    let unique_types: std::collections::HashSet<_> =
-                        m.instances.iter().map(|i| i.module).collect();
-                    (unique_types.len(), m.id.0)
-                })
-                .unwrap()
-        } else {
-            // No valid user module found - check if there are user modules without content
-            let empty_user_modules: Vec<_> = user_candidates
-                .iter()
-                .filter(|m| !has_content(m))
-                .map(|m| m.name.as_str())
-                .collect();
-
-            if !empty_user_modules.is_empty() {
-                panic!(
-                    "Top module detection failed: Found user module(s) {:?} but they have no content. \
-                     This usually happens when an entity has generic parameters (like clock domains) \
-                     but is never instantiated. Either:\n\
-                     1. Remove generic parameters from the top-level entity, or\n\
-                     2. Create a wrapper entity that instantiates it with concrete types.",
-                    empty_user_modules
-                );
-            } else {
-                panic!(
-                    "Top module detection failed: No valid user module found. \
-                     Only stdlib modules are present in the design. \
-                     Ensure your source file defines a synthesizable entity."
-                );
-            }
-        }
-    };
+    let top_module = select_top_module(mir);
 
     trace!(
         "[TOP_DETECT] Selected '{}' as top module (has {} instances, is_async={})",
@@ -8244,6 +8014,7 @@ mod tests {
     fn make_simple_module() -> Module {
         Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "test_module".to_string(),
             parameters: Vec::new(),
@@ -8356,6 +8127,7 @@ mod tests {
     fn test_word_lir_comparison() {
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "cmp_module".to_string(),
             parameters: Vec::new(),
@@ -8456,6 +8228,7 @@ mod tests {
     fn test_word_lir_mux() {
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "mux_module".to_string(),
             parameters: Vec::new(),

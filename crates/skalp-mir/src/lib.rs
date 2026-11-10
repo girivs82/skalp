@@ -23,6 +23,7 @@ pub mod undriven;
 pub mod upf;
 
 // Shared utility modules for consistent transformations
+pub mod logic_analyzer;
 pub mod name_registry;
 pub mod signal_naming;
 pub mod type_flattening;

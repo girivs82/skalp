@@ -21,6 +21,8 @@ mod ftdi;
 mod ice40_spi;
 #[cfg(feature = "programmer")]
 pub mod nexus_jtag;
+#[cfg(feature = "programmer")]
+pub mod uart;
 
 #[cfg(feature = "programmer")]
 pub use ftdi::FtdiDevice;

@@ -131,6 +131,9 @@ pub struct Module {
     /// Used by top-module selection to prefer user-defined entities over library entities
     #[serde(default)]
     pub is_from_main_source: bool,
+    /// The generic entity this module specializes (`Core` for `Core_8`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialization_of: Option<String>,
     /// Whether this is an async (NCL) module
     /// NCL modules have no clocks and use dual-rail encoding
     #[serde(default)]
@@ -1322,6 +1325,66 @@ impl Mir {
     pub fn add_module(&mut self, module: Module) {
         self.modules.push(module);
     }
+
+    /// The design's top-level module.
+    ///
+    /// Every flow (simulation, synthesis, hierarchical lowering) must agree
+    /// on this, so it is decided here and nowhere else. The top is a module
+    /// no other module instantiates, excluding generic templates and unused
+    /// specializations of generic entities (library leftovers, such as a
+    /// stdlib core's default parameters). Modules from the main source file
+    /// win over imported ones; among those, the one with the most content.
+    pub fn top_module(&self) -> Option<&Module> {
+        if self.modules.len() <= 1 {
+            return self.modules.first();
+        }
+        let instantiated: std::collections::HashSet<ModuleId> = self
+            .modules
+            .iter()
+            .flat_map(|m| m.instances.iter().map(|inst| inst.module))
+            .collect();
+        let is_copy_of = |copy: &Module, template: &Module| {
+            copy.name
+                .strip_prefix(template.name.as_str())
+                .is_some_and(|rest| rest.starts_with('_'))
+        };
+        // A generic entity used only through its specialized copies.
+        let is_template = |m: &Module| {
+            !m.parameters.is_empty()
+                && self
+                    .modules
+                    .iter()
+                    .any(|other| instantiated.contains(&other.id) && is_copy_of(other, m))
+        };
+        // A specialization of a generic entity that nothing instantiates, such
+        // as the default-parameter copy of a library core.
+        let is_specialization = |m: &Module| {
+            m.specialization_of.is_some()
+                || self
+                    .modules
+                    .iter()
+                    .any(|template| !template.parameters.is_empty() && is_copy_of(m, template))
+        };
+        let candidates: Vec<&Module> = self
+            .modules
+            .iter()
+            .filter(|m| !instantiated.contains(&m.id) && !is_template(m) && !is_specialization(m))
+            .collect();
+        let size = |m: &&&Module| {
+            m.instances.len()
+                + m.processes.len()
+                + m.signals.len()
+                + m.assignments.len()
+                + m.ports.len()
+        };
+        candidates
+            .iter()
+            .filter(|m| m.is_from_main_source)
+            .max_by_key(size)
+            .or_else(|| candidates.iter().max_by_key(size))
+            .copied()
+            .or_else(|| self.modules.last())
+    }
 }
 
 impl Module {
@@ -1348,6 +1411,7 @@ impl Module {
             power_domain_config: None,
             safety_context: None,
             is_from_main_source: false,
+            specialization_of: None,
             is_async: false,
             barriers: Vec::new(),
             ncl_boundary_mode: None,

@@ -264,6 +264,11 @@ enum Commands {
         /// islands.
         #[arg(long)]
         power_stub: bool,
+
+        /// Add an on-chip logic analyzer for the top entity's #[trace] signals,
+        /// triggered by its #[breakpoint] signals, sending over the board's UART
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -310,6 +315,31 @@ enum Commands {
         /// after loading if a bitstream is given
         #[arg(long, value_name = "SECONDS")]
         watch: Option<u64>,
+    },
+
+    /// Read a logic analyzer capture from a board running a `synth --debug` build
+    Debug {
+        /// Build directory of the `synth --debug` run
+        dir: PathBuf,
+        /// Board to read from
+        #[arg(short, long, default_value = "certuspro-versa")]
+        board: String,
+        /// How long to wait for the trigger, in seconds
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+
+    /// Print what a board's UART sends to the host
+    Uart {
+        /// Board whose UART to read
+        #[arg(short, long, default_value = "certuspro-versa")]
+        board: String,
+        /// Baud rate
+        #[arg(long, default_value_t = 1_000_000)]
+        baud: u32,
+        /// How long to listen, in seconds
+        #[arg(long, default_value_t = 2)]
+        seconds: u64,
     },
 
     /// Format SKALP source files
@@ -817,6 +847,7 @@ fn main() -> Result<()> {
             pnr_preset,
             emit,
             power_stub,
+            debug,
         } => {
             synthesize_design(
                 &source,
@@ -827,6 +858,7 @@ fn main() -> Result<()> {
                 &pnr_preset,
                 emit.as_deref(),
                 power_stub,
+                debug,
             )?;
         }
 
@@ -840,6 +872,16 @@ fn main() -> Result<()> {
             run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
         }
 
+        Commands::Debug {
+            dir,
+            board,
+            timeout,
+        } => read_debug_capture(&dir, &board, timeout)?,
+        Commands::Uart {
+            board,
+            baud,
+            seconds,
+        } => read_board_uart(&board, baud, seconds)?,
         Commands::Program {
             bitstream,
             board,
@@ -2850,56 +2892,7 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
 /// When multiple uninstantiated modules exist (e.g., unmonomorphized templates alongside
 /// their specialized variants), pick the one with the most content (instances + processes + signals).
 fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::Module> {
-    if mir.modules.is_empty() {
-        return None;
-    }
-    if mir.modules.len() == 1 {
-        return mir.modules.first();
-    }
-    // Collect all module IDs that are instantiated by some other module
-    let instantiated: std::collections::HashSet<skalp_mir::mir::ModuleId> = mir
-        .modules
-        .iter()
-        .flat_map(|m| m.instances.iter().map(|inst| inst.module))
-        .collect();
-    // Find all uninstantiated modules, pick the one with most content
-    // This handles monomorphization: both `Foo` (empty template) and `Foo_42` (specialized)
-    // are uninstantiated, but only the specialized one has actual logic
-    // Include assignments and ports in the score so designs with function calls
-    // (no sub-entity instances) still rank above imported library entities
-    // Prefer modules from the main source file over imported/stdlib modules
-    let candidates: Vec<_> = mir
-        .modules
-        .iter()
-        .filter(|m| !instantiated.contains(&m.id))
-        .collect();
-
-    // First try: uninstantiated modules from main source, pick largest
-    candidates
-        .iter()
-        .filter(|m| m.is_from_main_source)
-        .max_by_key(|m| {
-            m.instances.len()
-                + m.processes.len()
-                + m.signals.len()
-                + m.assignments.len()
-                + m.ports.len()
-        })
-        .copied()
-        // Fallback: any uninstantiated module
-        .or_else(|| {
-            candidates
-                .iter()
-                .max_by_key(|m| {
-                    m.instances.len()
-                        + m.processes.len()
-                        + m.signals.len()
-                        + m.assignments.len()
-                        + m.ports.len()
-                })
-                .copied()
-        })
-        .or_else(|| mir.modules.last())
+    mir.top_module()
 }
 
 /// Equivalence checking between RTL (LIR) and gate-level netlist
@@ -4128,6 +4121,7 @@ fn synthesize_design(
     pnr_preset: &str,
     emit: Option<&str>,
     power_stub: bool,
+    debug: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
@@ -4168,6 +4162,11 @@ fn synthesize_design(
 
     // Parse and build HIR with full module resolution (stdlib, imports)
     let context = parse_and_build_compilation_context(source).context("Failed to parse source")?;
+    let context = if debug {
+        add_logic_analyzer(source, context, family, variant, output_dir)?
+    } else {
+        context
+    };
     let hir = context.main_hir;
     let module_hirs = context.module_hirs;
 
@@ -4810,6 +4809,186 @@ fn program_nexus_board(
 }
 
 /// Report the device's state and which pads change over the watch period.
+/// Rebuild a design with the on-chip logic analyzer added.
+fn add_logic_analyzer(
+    source: &Path,
+    context: skalp_frontend::CompilationContext,
+    family: &str,
+    variant: &str,
+    output_dir: &Path,
+) -> Result<skalp_frontend::CompilationContext> {
+    use skalp_frontend::hir::PinLocation;
+    if family != "nexus" {
+        anyhow::bail!("--debug needs a board with a known UART; only Nexus boards have one so far");
+    }
+    let board = skalp_place_route::boards::for_nexus_variant(nexus_variant(variant)?)
+        .ok_or_else(|| anyhow::anyhow!("No known board for {}", variant))?;
+    let (tx_pin, io_standard) = board
+        .debug_uart_tx
+        .ok_or_else(|| anyhow::anyhow!("The {} has no UART to the host", board.name))?;
+
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+    let top = find_top_level_module(&mir)
+        .ok_or_else(|| anyhow::anyhow!("No top-level module in the design"))?;
+    let clock_pin = top
+        .ports
+        .iter()
+        .find(|p| matches!(p.port_type, skalp_mir::mir::DataType::Clock { .. }))
+        .and_then(|p| p.physical_constraints.as_ref()?.pin_location.as_ref())
+        .and_then(|pin| match pin {
+            PinLocation::Single(pin) => Some(pin.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("The design's clock has no pin assignment"))?;
+    let clock_hz =
+        skalp_place_route::boards::clock_frequency(board, &clock_pin).ok_or_else(|| {
+            anyhow::anyhow!(
+                "The frequency of clock pin {} on the {} is unknown",
+                clock_pin,
+                board.name
+            )
+        })?;
+
+    let original = fs::read_to_string(source)?;
+    let link = skalp_mir::logic_analyzer::DebugLink {
+        tx_pin,
+        io_standard,
+        clock_hz,
+        depth_bits: skalp_mir::logic_analyzer::DEPTH_BITS,
+        baud: skalp_mir::logic_analyzer::BAUD,
+    };
+    let (edited, map) = skalp_mir::logic_analyzer::add_analyzer(&original, top, &link)?;
+    fs::create_dir_all(output_dir)?;
+    fs::write(output_dir.join("debug_source.sk"), &edited)?;
+    fs::write(
+        output_dir.join(skalp_mir::logic_analyzer::PROBE_MAP_FILE),
+        serde_json::to_string_pretty(&map)?,
+    )?;
+    println!(
+        "🔬 Logic analyzer: {} probe bits, {} samples, trigger {}, sent on pin {}",
+        map.probe_bytes * 8,
+        map.depth,
+        map.trigger,
+        tx_pin
+    );
+    skalp_frontend::parse_and_build_compilation_context_from_source(source, edited)
+        .context("Failed to build the design with the logic analyzer")
+}
+
+/// Read a logic analyzer capture from the board and save it as a waveform.
+fn read_debug_capture(dir: &Path, board: &str, timeout: u64) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::NexusBoard;
+    use skalp_place_route::programmer::uart::BoardUart;
+    let map = skalp_mir::logic_analyzer::read_probe_map(dir)?;
+    let board =
+        NexusBoard::by_name(board).ok_or_else(|| anyhow::anyhow!("Unknown board '{}'", board))?;
+    let (vid, pid, channel) = board.uart;
+    let mut uart =
+        BoardUart::open(vid, pid, channel, map.baud).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let capture_bytes = 4 + map.depth * map.probe_bytes;
+    println!(
+        "⏳ Waiting up to {} s for a capture from {}...",
+        timeout, map.design
+    );
+    // A capture may already be partly sent; reading two lets one arrive whole.
+    let stream = uart
+        .read_exact_within(2 * capture_bytes, std::time::Duration::from_secs(timeout))
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let samples = skalp_mir::logic_analyzer::parse_capture(&stream, &map)?;
+
+    let mut waveform = skalp_sim::waveform::Waveform::new();
+    for probe in &map.probes {
+        let radix = match probe.radix.as_deref() {
+            Some("hex") => skalp_frontend::hir::TraceRadix::Hex,
+            Some("unsigned") => skalp_frontend::hir::TraceRadix::Unsigned,
+            Some("signed") => skalp_frontend::hir::TraceRadix::Signed,
+            Some("ascii") => skalp_frontend::hir::TraceRadix::Ascii,
+            _ => skalp_frontend::hir::TraceRadix::Binary,
+        };
+        let config = skalp_frontend::hir::TraceConfig {
+            group: probe.group.clone(),
+            radix,
+            display_name: None,
+        };
+        waveform.add_traced_signal(probe.name.clone(), probe.width, config);
+    }
+    let mut previous: Vec<Option<Vec<u8>>> = vec![None; map.probes.len()];
+    for (cycle, sample) in samples.iter().enumerate() {
+        for (index, probe) in map.probes.iter().enumerate() {
+            let value = skalp_mir::logic_analyzer::probe_value(sample, probe);
+            if previous[index].as_ref() != Some(&value) {
+                waveform.add_value(&probe.name, cycle as u64, value.clone());
+                previous[index] = Some(value);
+            }
+        }
+    }
+    waveform.max_cycle = samples.len() as u64;
+    let path = dir.join("capture.skw.gz");
+    waveform.export_skw_compressed(&path, &map.design)?;
+
+    println!(
+        "✅ Captured {} samples around the trigger ({}), sample {}",
+        samples.len(),
+        map.trigger,
+        map.trigger_index
+    );
+    let around = map.trigger_index.saturating_sub(3)..(map.trigger_index + 4).min(samples.len());
+    for cycle in around {
+        let values: Vec<String> = map
+            .probes
+            .iter()
+            .map(|probe| {
+                let value = skalp_mir::logic_analyzer::probe_value(&samples[cycle], probe);
+                let number = value
+                    .iter()
+                    .rev()
+                    .fold(0u128, |n, byte| (n << 8) | u128::from(*byte));
+                format!("{}={}", probe.name, number)
+            })
+            .collect();
+        let marker = if cycle == map.trigger_index {
+            "▶"
+        } else {
+            " "
+        };
+        println!(
+            "   {marker} {:>5}: {}",
+            cycle as i64 - map.trigger_index as i64,
+            values.join("  ")
+        );
+    }
+    println!("   Waveform: {}", path.display());
+    Ok(())
+}
+
+/// Print what a board's UART sends, as hex.
+fn read_board_uart(board: &str, baud: u32, seconds: u64) -> Result<()> {
+    use skalp_place_route::programmer::nexus_jtag::NexusBoard;
+    use skalp_place_route::programmer::uart::BoardUart;
+    let board =
+        NexusBoard::by_name(board).ok_or_else(|| anyhow::anyhow!("Unknown board '{}'", board))?;
+    let (vid, pid, channel) = board.uart;
+    let mut uart =
+        BoardUart::open(vid, pid, channel, baud).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let data = uart
+        .read_for(std::time::Duration::from_secs(seconds))
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!(
+        "📨 {} bytes in {} s from the {} UART",
+        data.len(),
+        seconds,
+        board.name
+    );
+    for line in data.chunks(32).take(16) {
+        let hex: Vec<String> = line.iter().map(|b| format!("{b:02x}")).collect();
+        println!("   {}", hex.join(" "));
+    }
+    Ok(())
+}
+
 fn report_pad_watch(
     programmer: &mut skalp_place_route::programmer::nexus_jtag::NexusJtagProgrammer,
     board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,

@@ -46,6 +46,8 @@ pub struct NexusBoard {
     pub programn_button: &'static str,
     /// Package of the FPGA fitted to this board.
     pub package: &'static str,
+    /// FTDI `(vid, pid, channel)` wired to the FPGA as a UART.
+    pub uart: (u16, u16, u8),
     /// Boundary-scan bits confirmed on this board, with what they connect to.
     pub known_pads: &'static [(usize, &'static str)],
 }
@@ -59,6 +61,7 @@ pub const NEXUS_BOARDS: [NexusBoard; 1] = [NexusBoard {
     idcode: LFCPNX_100_IDCODE,
     programn_button: "SW2, labelled PROGRAMN, just below the Raspberry Pi connector",
     package: "LFG672",
+    uart: (0x0403, 0x6010, 1),
     known_pads: &[(533, "LED2 (pad PR31A)")],
 }];
 

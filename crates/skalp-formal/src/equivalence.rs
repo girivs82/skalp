@@ -12657,6 +12657,7 @@ mod tests {
         // Create a simple MIR module: out = a & b
         let module = Module {
             is_from_main_source: false,
+            specialization_of: None,
             id: ModuleId(0),
             name: "and_gate".to_string(),
             parameters: vec![],
@@ -12752,6 +12753,7 @@ mod tests {
         fn create_and_module() -> Module {
             Module {
                 is_from_main_source: false,
+                specialization_of: None,
                 id: ModuleId(0),
                 name: "and_gate".to_string(),
                 parameters: vec![],

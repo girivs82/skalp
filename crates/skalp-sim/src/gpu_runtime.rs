@@ -144,13 +144,8 @@ impl GpuRuntime {
                 .new_buffer(output_size.max(16), MTLResourceOptions::StorageModeShared),
         );
 
-        // Initialize registers to zero
-        if let Some(reg_buffer) = &self.register_buffer {
-            let ptr = reg_buffer.contents();
-            unsafe {
-                std::ptr::write_bytes(ptr, 0, register_size as usize);
-            }
-        }
+        // Registers start at their declared initial values, zero otherwise
+        self.load_initial_values(module);
 
         // Initialize inputs to zero to prevent undefined behavior
         if let Some(input_buffer) = &self.input_buffer {
@@ -178,6 +173,45 @@ impl GpuRuntime {
             offset += metal_size;
         }
         offset
+    }
+
+    /// Start every register at its declared initial value (`signal x: T = v`),
+    /// as the hardware does, and the rest at zero. Uses the register layout
+    /// of [`Self::calculate_register_size`], which matches the Metal struct.
+    fn load_initial_values(&self, module: &SirModule) {
+        let Some(reg_buffer) = &self.register_buffer else {
+            return;
+        };
+        let size = reg_buffer.length() as usize;
+        let ptr = reg_buffer.contents() as *mut u8;
+        // SAFETY: the buffer is `size` bytes of shared CPU-visible memory.
+        unsafe { std::ptr::write_bytes(ptr, 0, size) };
+
+        let mut sorted_states: Vec<_> = module.state_elements.values().collect();
+        sorted_states.sort_by_key(|state| &state.name);
+        let mut offset = 0usize;
+        for state in sorted_states {
+            let metal_size = self.get_metal_type_size(state.width);
+            let metal_align = self.get_metal_type_alignment(state.width);
+            let remainder = offset % metal_align;
+            if remainder != 0 {
+                offset += metal_align - remainder;
+            }
+            if let Some(value) = state.reset_value {
+                let bytes = value.to_le_bytes();
+                let len = metal_size.min(bytes.len()).min(size.saturating_sub(offset));
+                // SAFETY: `offset + len` stays within the buffer, as checked above.
+                unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset), len) };
+            }
+            offset += metal_size;
+        }
+        if let Some(shadow) = &self.shadow_register_buffer {
+            let len = size.min(shadow.length() as usize);
+            // SAFETY: both buffers hold at least `len` bytes and do not overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(ptr, shadow.contents() as *mut u8, len);
+            }
+        }
     }
 
     fn calculate_register_size(&self, module: &SirModule) -> u64 {
@@ -799,10 +833,9 @@ impl SimulationRuntime for GpuRuntime {
 
     async fn reset(&mut self) -> SimulationResult<()> {
         self.current_cycle = 0;
-
-        // Clear GPU buffers
-        // TODO: Implement proper reset logic
-
+        if let Some(module) = self.module.clone() {
+            self.load_initial_values(&module);
+        }
         Ok(())
     }
 

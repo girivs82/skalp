@@ -17,6 +17,10 @@ pub struct BoardPins {
     pub safe_outputs: &'static [(&'static str, &'static str)],
     /// Other pins worth naming in an error
     pub connected: &'static [(&'static str, &'static str)],
+    /// Pin and IO standard of the UART line the board routes to the host
+    pub debug_uart_tx: Option<(&'static str, &'static str)>,
+    /// Clock inputs and their frequencies in hertz
+    pub clock_pins: &'static [(&'static str, f64)],
 }
 
 /// CertusPro-NX Versa board, from its user guide (FPGA-EB-02053).
@@ -80,6 +84,8 @@ pub const CERTUSPRO_VERSA: BoardPins = BoardPins {
         ("P24", "the 125 MHz oscillator"),
         ("L8", "the FTDI chip's UART transmit line"),
     ],
+    debug_uart_tx: Some(("M9", "LVCMOS33")),
+    clock_pins: &[("P24", 125_000_000.0)],
 };
 
 /// The board a Nexus device is fitted to, where SKALP knows one.
@@ -88,6 +94,18 @@ pub fn for_nexus_variant(variant: NexusVariant) -> Option<&'static BoardPins> {
         NexusVariant::Lfcpnx100 => Some(&CERTUSPRO_VERSA),
         _ => None,
     }
+}
+
+/// Frequency of a design's clock pin, if the board or device fixes it.
+pub fn clock_frequency(board: &BoardPins, pin: &str) -> Option<f64> {
+    if pin == crate::device::nexus::sites::OSC_PIN {
+        return Some(crate::device::nexus::emit::OSC_FREQUENCY_MHZ * 1e6);
+    }
+    board
+        .clock_pins
+        .iter()
+        .find(|(name, _)| *name == pin)
+        .map(|(_, hz)| *hz)
 }
 
 /// Check every pad a design drives against what its board allows.

@@ -528,6 +528,8 @@ enum RamPin {
 }
 
 /// Set a named option in whichever of a site's tiles define it.
+///
+/// Block RAM, multiplier and IO sites all spread their settings over tiles.
 fn set_ram_enum(
     config: &mut ConfigDb<'_>,
     tiles: &[PrjoxideTile],
@@ -839,12 +841,6 @@ fn emit_pad(
         .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
         .cloned()
         .ok_or_else(|| emit_err(format!("Pad '{}' has no IO tile", cell.path)))?;
-    if tile.tiletype.ends_with("_C") {
-        return Err(emit_err(format!(
-            "Pad '{}' is on a {} site, whose settings are not known to work on this device yet",
-            cell.path, tile.tiletype
-        )));
-    }
     let bank = tile
         .tiletype
         .strip_prefix("SYSIO_B")
@@ -876,19 +872,32 @@ fn emit_pad(
     } else {
         (tile, format!("PIO{side}"))
     };
-    config.set_enum(
-        &settings_tile,
+    // A corner site (`_C`) keeps the rest of its settings in the tile below.
+    let mut settings_tiles = vec![settings_tile.clone()];
+    if settings_tile.tiletype.ends_with("_C") {
+        let rest = settings_tile.tiletype.replace("_C", "_REM");
+        let below = config
+            .device
+            .prjoxide_tile(x, y + 1, |t| t == rest)
+            .cloned()
+            .ok_or_else(|| emit_err(format!("Pad '{}' has no {rest} tile", cell.path)))?;
+        settings_tiles.push(below);
+    }
+    let tiles = settings_tiles.as_slice();
+    set_ram_enum(
+        config,
+        tiles,
         &format!("{prefix}.BASE_TYPE"),
         &format!("{direction}_{standard}"),
     )?;
-    config.set_enum(&settings_tile, &format!("{prefix}.PULLMODE"), "NONE")?;
+    set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
     if !high_performance {
-        config.set_enum(&settings_tile, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
+        set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
     }
     if is_output {
-        config.set_enum(&settings_tile, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
-        config.set_enum(&settings_tile, &format!("{prefix}.SLEWRATE"), "MED")?;
-        config.set_enum(&settings_tile, &format!("PIO{side}.TMUX"), "INV")?;
+        set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
+        set_ram_enum(config, tiles, &format!("{prefix}.SLEWRATE"), "MED")?;
+        set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), "INV")?;
     }
 
     // High-performance banks have no VCC setting to make.

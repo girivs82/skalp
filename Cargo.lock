@@ -3481,6 +3481,7 @@ dependencies = [
  "indexmap 2.11.4",
  "petgraph",
  "serde",
+ "serde_json",
  "skalp-frontend",
  "stacker",
  "thiserror 1.0.69",

@@ -630,6 +630,7 @@ impl<'hir> HirToMir<'hir> {
 
             let mut module = Module::new(module_id, entity.name.clone());
             module.is_from_main_source = true;
+            module.specialization_of = entity.specialized_from.clone();
 
             // Propagate pipeline configuration from HIR entity to MIR module
             if let Some(ref config) = entity.pipeline_config {

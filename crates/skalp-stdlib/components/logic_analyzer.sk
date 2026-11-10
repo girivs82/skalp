@@ -1,0 +1,145 @@
+// On-chip logic analyzer
+//
+// Records PROBE_BYTES * 8 probe bits into a DEPTH-sample circular buffer. Once
+// half the buffer holds history, a high `trigger` starts the post-trigger half;
+// when the buffer is full it is sent out on `tx` as an 8N1 UART stream at one
+// bit per DIVIDER clocks, then the analyzer re-arms.
+//
+// DEPTH must be 2^DEPTH_BITS.
+//
+// Stream: 0xA5, 0x5A, PROBE_BYTES, DEPTH_BITS, then DEPTH samples, oldest
+// first, each PROBE_BYTES bytes least significant first. The trigger sample is
+// number DEPTH / 2.
+
+entity logic_analyzer<const PROBE_BYTES: nat = 1, const DEPTH_BITS: nat = 9, const DEPTH: nat = 512, const DIVIDER: nat = 18> {
+    in clk: clock
+    in probes: bit[PROBE_BYTES * 8]
+    in trigger: bit
+    out tx: bit
+}
+
+impl logic_analyzer {
+    signal mem: [bit[PROBE_BYTES * 8]; DEPTH]
+    signal write_addr: bit[DEPTH_BITS] = 0
+    signal read_addr: bit[DEPTH_BITS] = 0
+    signal recorded: bit[DEPTH_BITS + 1] = 0
+    signal sent: bit[DEPTH_BITS + 1] = 0
+    signal state: nat[3] = 0
+    signal header: nat[3] = 0
+    signal byte_index: nat[8] = 0
+    signal read_data: bit[PROBE_BYTES * 8] = 0
+    signal word: bit[PROBE_BYTES * 8] = 0
+    signal shifted: bit[PROBE_BYTES * 8]
+    signal size_bytes: bit[8]
+    signal depth_bits: bit[8]
+
+    // UART transmitter
+    signal divider: nat[16] = 0
+    signal bits_left: nat[4] = 0
+    signal frame: bit[10] = 1023
+
+    shifted = word >> (byte_index * 8)
+    size_bytes = PROBE_BYTES
+    depth_bits = DEPTH_BITS
+    tx = frame[0]
+
+    on(clk.rise) {
+        read_data = mem[read_addr]
+
+        if bits_left != 0 {
+            if divider == DIVIDER - 1 {
+                divider = 0
+                frame = {1'b1, frame[9:1]}
+                bits_left = bits_left - 1
+            } else {
+                divider = divider + 1
+            }
+        }
+
+        match state {
+            // Filling the pre-trigger half of the buffer
+            0 => {
+                mem[write_addr] = probes
+                write_addr = write_addr + 1
+                recorded = recorded + 1
+                if recorded == DEPTH / 2 - 1 {
+                    state = 1
+                }
+            }
+            // Recording history, waiting for the trigger
+            1 => {
+                mem[write_addr] = probes
+                write_addr = write_addr + 1
+                if trigger == 1 {
+                    recorded = 0
+                    state = 2
+                }
+            }
+            // Recording the post-trigger half
+            2 => {
+                mem[write_addr] = probes
+                write_addr = write_addr + 1
+                recorded = recorded + 1
+                if recorded == DEPTH / 2 - 2 {
+                    header = 0
+                    state = 3
+                }
+            }
+            // Sending the header
+            3 => {
+                if bits_left == 0 {
+                    if header == 0 {
+                        frame = {1'b1, 8'hA5, 1'b0}
+                    } else if header == 1 {
+                        frame = {1'b1, 8'h5A, 1'b0}
+                    } else if header == 2 {
+                        frame = {1'b1, size_bytes, 1'b0}
+                    } else {
+                        frame = {1'b1, depth_bits, 1'b0}
+                    }
+                    bits_left = 10
+                    divider = 0
+                    header = header + 1
+                    if header == 3 {
+                        read_addr = write_addr
+                        sent = 0
+                        byte_index = 0
+                        state = 4
+                    }
+                }
+            }
+            // Reading the next sample from the buffer
+            4 => {
+                state = 5
+            }
+            5 => {
+                word = read_data
+                state = 6
+            }
+            // Sending the sample's bytes
+            6 => {
+                if bits_left == 0 {
+                    frame = {1'b1, shifted[7:0], 1'b0}
+                    bits_left = 10
+                    divider = 0
+                    if byte_index == PROBE_BYTES - 1 {
+                        byte_index = 0
+                        if sent == DEPTH - 1 {
+                            recorded = 0
+                            state = 0
+                        } else {
+                            sent = sent + 1
+                            read_addr = read_addr + 1
+                            state = 4
+                        }
+                    } else {
+                        byte_index = byte_index + 1
+                    }
+                }
+            }
+            _ => {
+                state = 0
+            }
+        }
+    }
+}

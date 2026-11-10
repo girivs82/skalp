@@ -539,6 +539,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             safety_mechanism_config: entity.safety_mechanism_config.clone(), // Preserve safety config
             seooc_config: entity.seooc_config.clone(), // Preserve SEooC config
             compiled_ip_config: entity.compiled_ip_config.clone(), // Preserve compiled IP config
+            specialized_from: Some(entity.name.clone()),
         };
 
         (specialized_entity, port_id_map)

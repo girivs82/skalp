@@ -1700,6 +1700,7 @@ impl HirBuilderContext {
             seooc_config,
             compiled_ip_config,
             comments: Self::collect_leading_comments(node),
+            specialized_from: None,
         })
     }
 

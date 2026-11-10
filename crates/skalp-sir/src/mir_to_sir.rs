@@ -5,8 +5,8 @@ use skalp_mir::mir::PortDirection as MirPortDirection;
 use skalp_mir::mir::PriorityMux;
 use skalp_mir::signal_naming::flattened_to_hierarchical;
 use skalp_mir::{
-    BinaryOp, Block, DataType, EdgeType, Expression, ExpressionKind, IfStatement, LValue, Mir,
-    Module, NameKind, ProcessKind, SensitivityList, SignalId, Statement, Value,
+    AssignmentKind, BinaryOp, Block, DataType, EdgeType, Expression, ExpressionKind, IfStatement,
+    LValue, Mir, Module, NameKind, ProcessKind, SensitivityList, SignalId, Statement, Value,
 };
 use std::collections::HashMap;
 
@@ -745,6 +745,156 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_sequential_block(&mut self, statements: &[Statement], clock: &str, edge: ClockEdge) {
+        // A register assigned by more than one statement of the block gets one
+        // driver: the last assignment that applies, in source order, through
+        // any nesting of if, match and resolved chains. Lowering each
+        // statement on its own would give it one flip-flop per statement, and
+        // only the last would drive it.
+        let repeated = self.registers_of_several_statements(statements);
+        if !repeated.is_empty() {
+            for target in &repeated {
+                let hold = self.get_or_create_signal_driver(target);
+                let value = self.build_value_from_statements_for_target(statements, target, hold);
+                let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
+                self.connect_node_to_signal(ff_node, target);
+            }
+            let remaining = self.without_assignments_to(statements, &repeated);
+            self.convert_sequential_statements(&remaining, clock, edge);
+            return;
+        }
+        self.convert_sequential_statements(statements, clock, edge);
+    }
+
+    /// Registers (whole signals, not memories) that more than one statement of
+    /// `statements` assigns.
+    fn registers_of_several_statements(&self, statements: &[Statement]) -> Vec<String> {
+        fn collect(stmts: &[Statement], out: &mut Vec<LValue>) {
+            for stmt in stmts {
+                match stmt {
+                    Statement::Assignment(assign)
+                        if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                    {
+                        out.push(assign.lhs.clone())
+                    }
+                    Statement::ResolvedConditional(rc)
+                        if matches!(rc.kind, AssignmentKind::NonBlocking) =>
+                    {
+                        out.push(rc.target.clone())
+                    }
+                    Statement::If(if_stmt) => {
+                        collect(&if_stmt.then_block.statements, out);
+                        if let Some(else_block) = &if_stmt.else_block {
+                            collect(&else_block.statements, out);
+                        }
+                    }
+                    Statement::Case(case_stmt) => {
+                        for item in &case_stmt.items {
+                            collect(&item.block.statements, out);
+                        }
+                        if let Some(default_block) = &case_stmt.default {
+                            collect(&default_block.statements, out);
+                        }
+                    }
+                    Statement::Block(block) => collect(&block.statements, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let mut repeated: Vec<String> = Vec::new();
+        for stmt in statements {
+            let mut lvalues = Vec::new();
+            collect(std::slice::from_ref(stmt), &mut lvalues);
+            let mut targets: Vec<String> = Vec::new();
+            for lvalue in lvalues {
+                if !matches!(lvalue, LValue::Signal(_) | LValue::Port(_)) {
+                    continue;
+                }
+                if self.is_lvalue_typed_array(&lvalue) {
+                    continue;
+                }
+                let target = self.lvalue_to_string(&lvalue);
+                let internal = self.translate_to_internal_name(&target);
+                if !self.sir.state_elements.contains_key(&internal) {
+                    continue;
+                }
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            for target in targets {
+                if seen.contains(&target) {
+                    if !repeated.contains(&target) {
+                        repeated.push(target);
+                    }
+                } else {
+                    seen.push(target);
+                }
+            }
+        }
+        repeated
+    }
+
+    /// A copy of `statements` without the assignments to `targets`, which
+    /// have been lowered already.
+    fn without_assignments_to(
+        &self,
+        statements: &[Statement],
+        targets: &[String],
+    ) -> Vec<Statement> {
+        let assigns_target = |lvalue: &LValue| {
+            matches!(lvalue, LValue::Signal(_) | LValue::Port(_))
+                && targets.contains(&self.lvalue_to_string(lvalue))
+        };
+        let mut kept = Vec::with_capacity(statements.len());
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking)
+                        && assigns_target(&assign.lhs) => {}
+                Statement::ResolvedConditional(rc)
+                    if matches!(rc.kind, AssignmentKind::NonBlocking)
+                        && assigns_target(&rc.target) => {}
+                Statement::If(if_stmt) => {
+                    let mut pruned = if_stmt.clone();
+                    pruned.then_block.statements =
+                        self.without_assignments_to(&if_stmt.then_block.statements, targets);
+                    if let Some(else_block) = &mut pruned.else_block {
+                        else_block.statements =
+                            self.without_assignments_to(&else_block.statements, targets);
+                    }
+                    kept.push(Statement::If(pruned));
+                }
+                Statement::Case(case_stmt) => {
+                    let mut pruned = case_stmt.clone();
+                    for item in &mut pruned.items {
+                        item.block.statements =
+                            self.without_assignments_to(&item.block.statements, targets);
+                    }
+                    if let Some(default_block) = &mut pruned.default {
+                        default_block.statements =
+                            self.without_assignments_to(&default_block.statements, targets);
+                    }
+                    kept.push(Statement::Case(pruned));
+                }
+                Statement::Block(block) => {
+                    let mut pruned = block.clone();
+                    pruned.statements = self.without_assignments_to(&block.statements, targets);
+                    kept.push(Statement::Block(pruned));
+                }
+                _ => kept.push(stmt.clone()),
+            }
+        }
+        kept
+    }
+
+    /// Lower a sequential block's statements, each target assigned by one of them.
+    fn convert_sequential_statements(
+        &mut self,
+        statements: &[Statement],
+        clock: &str,
+        edge: ClockEdge,
+    ) {
         // BUG #226 FIX: Clear any previous defaults from earlier sequential blocks
         // These will be populated with unconditional assignments that precede conditionals.
         self.sequential_defaults.clear();
@@ -1527,82 +1677,57 @@ impl<'a> MirToSirConverter<'a> {
 
         // Step 2: For each target, build a mux tree that handles all case arms and nested conditions
         for target in &all_targets {
-            // BUG #226 FIX: Start with the default from an unconditional assignment if present,
-            // otherwise use the current signal value (state holding when no assignment matches)
-            let mut current_value = if let Some(&default_val) = self.sequential_defaults.get(target)
-            {
+            // BUG #226 FIX: The value before the match is the default from an
+            // unconditional assignment if present, otherwise the register itself.
+            // An arm that matches but does not assign the target leaves it there.
+            let hold = if let Some(&default_val) = self.sequential_defaults.get(target) {
                 default_val
             } else {
                 self.get_or_create_signal_driver(target)
             };
 
-            // Build mux from last case to first (priority order)
-            // For each case arm, build the value expression considering nested if statements
+            // The default arm applies when no listed arm matches, so it is the
+            // innermost value; listed arms are muxed over it from last to first.
+            let mut current_value = match &case_stmt.default {
+                Some(default_block) => self.build_value_from_statements_for_target(
+                    &default_block.statements,
+                    target,
+                    hold,
+                ),
+                None => hold,
+            };
+
             for item in case_stmt.items.iter().rev() {
-                // Create case guard: case_expr == value
-                let case_guard = if item.values.is_empty() {
-                    continue;
-                } else if item.values.len() == 1 {
-                    let val_node = self.create_expression_node(&item.values[0]);
-                    self.create_binary_op_node(
+                // Create case guard: case_expr == value (any of the arm's values)
+                let mut guard = None;
+                for value in &item.values {
+                    let val_node = self.create_expression_node(value);
+                    let eq_node = self.create_binary_op_node(
                         &skalp_mir::BinaryOp::Equal,
                         case_expr_node,
                         val_node,
-                    )
-                } else {
-                    let mut or_node = {
-                        let val_node = self.create_expression_node(&item.values[0]);
-                        self.create_binary_op_node(
-                            &skalp_mir::BinaryOp::Equal,
-                            case_expr_node,
-                            val_node,
-                        )
-                    };
-                    for value in &item.values[1..] {
-                        let val_node = self.create_expression_node(value);
-                        let eq_node = self.create_binary_op_node(
-                            &skalp_mir::BinaryOp::Equal,
-                            case_expr_node,
-                            val_node,
-                        );
-                        or_node =
-                            self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
-                    }
-                    or_node
+                    );
+                    guard = Some(match guard {
+                        None => eq_node,
+                        Some(previous) => {
+                            self.create_binary_op_node(&skalp_mir::BinaryOp::Or, previous, eq_node)
+                        }
+                    });
+                }
+                let Some(case_guard) = guard else {
+                    continue;
                 };
 
-                // Build the value for this target within this case arm
-                // This handles nested if statements by creating nested muxes
+                // This arm's value for the target, through any nested
+                // conditionals; the target holds where the arm does not assign it.
                 let arm_value = self.build_value_from_statements_for_target(
                     &item.block.statements,
                     target,
-                    current_value, // fallthrough value if not assigned in this arm
+                    hold,
                 );
 
-                // MUX: case_guard ? arm_value : current_value
+                // MUX: case_guard ? arm_value : (later arms, then the default)
                 current_value = self.create_mux_node(case_guard, arm_value, current_value);
-            }
-
-            // Handle default case
-            if let Some(default_block) = &case_stmt.default {
-                // The default should apply when none of the explicit cases match
-                // Since we're building from last to first with priority, the default
-                // is already represented by the initial current_value for cases that
-                // don't match. But if there are explicit assignments in default, we
-                // need to handle them.
-                let default_value = self.build_value_from_statements_for_target(
-                    &default_block.statements,
-                    target,
-                    current_value,
-                );
-
-                // Only update if default has a different value (i.e., there was an assignment)
-                if default_value != current_value {
-                    // Create condition: none of the explicit cases matched
-                    // This is complex, so for now we assume default is the fallthrough
-                    // The current implementation already handles this via the initial value
-                    current_value = default_value;
-                }
             }
 
             // Create flip-flop with the final mux tree
@@ -7176,7 +7301,8 @@ impl<'a> MirToSirConverter<'a> {
                             name: internal_name,
                             width,
                             sir_type: Some(sir_type.clone()),
-                            reset_value: None,
+                            // A child's `signal x: T = v` starts at v, as at the top level.
+                            reset_value: initial_u64,
                             clock: String::new(),
                             reset: None,
                             span: None,
@@ -8897,6 +9023,24 @@ impl<'a> MirToSirConverter<'a> {
                         result = Some(val);
                     }
                 }
+                // An if-else-if chain resolved to one target: its original
+                // form gives the same value, guarded the same way.
+                Statement::ResolvedConditional(resolved) => {
+                    if let Some(chain_result) = self
+                        .synthesize_conditional_for_instance_with_default(
+                            &resolved.original,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            target,
+                            parent_module_for_signals,
+                            parent_prefix,
+                            result,
+                        )
+                    {
+                        result = Some(chain_result);
+                    }
+                }
                 _ => {}
             }
         }
@@ -8998,11 +9142,24 @@ impl<'a> MirToSirConverter<'a> {
             }
         };
 
+        // An arm that matches but does not assign the target leaves it at its
+        // value before the match, never at the default arm's value.
+        let before_match = match default_result {
+            Some(value) => value,
+            None => self.create_signal_ref_for_instance(
+                target,
+                inst_prefix,
+                port_mapping,
+                parent_module_for_signals,
+                parent_prefix,
+            ),
+        };
+
         // Build mux chain from last case to first (so first has priority)
         for (values, arm_value) in case_arms.iter().rev() {
             let value_node = match arm_value {
                 Some(val) => *val,
-                None => current_mux,
+                None => before_match,
             };
 
             if values.is_empty() {

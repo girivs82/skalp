@@ -832,6 +832,7 @@ impl VhdlHirBuilder {
             safety_mechanism_config: None,
             seooc_config: None,
             compiled_ip_config: None,
+            specialized_from: None,
         })
     }
 
