@@ -135,6 +135,13 @@ opt-level = 0
 # builds previously consumed tens of GB of target/ space (see tests/suite).
 debug = "line-tables-only"
 
+# Tests run the compiler on real designs (synthesis, simulation, place and
+# route); unoptimised builds made the integration suite ~4.5x slower
+# (462 s -> 101 s at opt-level 1) for ~2 min more compile time. `cargo build`
+# and `cargo run` keep the fast-compiling dev profile.
+[profile.test]
+opt-level = 1
+
 [workspace]
 members = [
     "crates/skalp-frontend",

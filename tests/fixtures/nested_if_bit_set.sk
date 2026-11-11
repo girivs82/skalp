@@ -1,0 +1,19 @@
+// A single-bit write inside nested ifs: the bit must stay set at gate level.
+entity Bits {
+    in clk: clock
+    in x: bit
+    out q: bit[8]
+}
+impl Bits {
+    signal go: bit = 0
+    signal flags: bit[8] = 0
+    on(clk.rise) {
+        go = 1
+        if (go == 1) {
+            if (x == 1) {
+                flags[5] = 1
+            }
+        }
+    }
+    q = flags
+}

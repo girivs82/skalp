@@ -819,6 +819,11 @@ pub trait Device: Send + Sync {
         Some(input)
     }
 
+    /// Router output pin a block RAM output comes from.
+    fn ram_output_pin(&self, _ports: &skalp_lir::gate_netlist::RamPorts, output: usize) -> usize {
+        output
+    }
+
     /// Whether a block RAM input tied low must be driven by a real signal
     /// because configuration alone cannot hold it low.
     fn ram_input_needs_low_driver(

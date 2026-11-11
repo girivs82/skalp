@@ -12,26 +12,23 @@ env:
 
 jobs:
   test:
-    name: Test Suite
+    name: Linux stable
+    uses: ./.github/workflows/test-suite.yml
+
+  # Beta and macOS are only linted on every change; their full test runs
+  # happen before a release (see full-test-matrix.yml).
+  toolchains:
+    name: Clippy (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust:
-          - stable
-          - beta
+        include:
+          - os: ubuntu-latest
+            rust: beta
+          - os: macos-latest
+            rust: stable
     steps:
-      - name: Free disk space (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
-            /usr/local/graalvm /usr/local/share/powershell
-          sudo docker image prune --all --force || true
-          sudo apt-get clean
-          df -h /
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -39,116 +36,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
+          components: clippy
 
-      - name: Cache cargo registry
-        uses: actions/cache@v3
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
-
-      - name: Cache cargo build
-        uses: actions/cache@v3
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-target-
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+          key: clippy-${{ matrix.rust }}
 
       - name: Run Clippy
         run: cargo clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
-
-      - name: Build
-        run: cargo build --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --verbose --all-features
-
-      - name: Run parser regression tests
-        run: cargo test -p skalp-frontend --test parser_regression --verbose
-
-      - name: Run HIR builder regression tests
-        run: cargo test -p skalp-frontend --test hir_builder_regression --verbose
-
-      - name: Run golden file tests
-        run: cargo test --test suite golden_file_tests --verbose
-
-      - name: Run frontend integration tests
-        run: cargo test -p skalp-frontend --test integration_tests --verbose
-
-      - name: Run all unit tests
-        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --lib --all-features --verbose
-
-      - name: Run MIR tests
-        run: cargo test -p skalp-mir --verbose
-
-      - name: Run SIR tests
-        run: cargo test -p skalp-sir --verbose
-
-      - name: Run simulation tests
-        run: cargo test -p skalp-sim --verbose
-
-      - name: Run verification tests
-        if: runner.os == 'macOS'  # z3 only available on macOS
-        run: cargo test -p skalp-verify --verbose || echo "Skipping verification tests (z3 not installed)"
-
-      - name: Run CLI integration tests
-        run: cargo test --test suite cli_integration --verbose
-
-      - name: Run E2E example tests
-        run: cargo test --test suite e2e_examples_test --verbose
-
-      - name: Run all other integration tests
-        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --tests --verbose
-
-      - name: Run doc tests
-        run: cargo test --doc --workspace --all-features --verbose --exclude skalp --exclude skalp-verify --exclude skalp-formal
-
-      - name: Run all tests (comprehensive)
-        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --verbose
-
-      - name: Test Summary
-        if: always()
-        run: |
-          echo "Test run completed on ${{ matrix.os }} with Rust ${{ matrix.rust }}"
-          echo "All workspace tests executed including:"
-          echo "  - Parser and HIR tests"
-          echo "  - MIR and SIR tests"
-          echo "  - Simulation tests (GPU tests on macOS only)"
-          echo "  - Integration and E2E tests"
-          echo "  - Golden file tests"
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Generate coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --exclude skalp-verify --exclude skalp-formal --timeout 120 --out xml --ignore-tests || true
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: ./cobertura.xml
-          fail_ci_if_error: false
 
   lint:
     name: Lint

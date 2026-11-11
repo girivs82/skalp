@@ -693,9 +693,16 @@ impl SynthEngine {
             let before_and = before.and_count;
 
             for pass_name in &passes {
+                let started = std::time::Instant::now();
+                let ands = aig.and_count();
                 if let Some(result) = self.run_pass(aig, pass_name) {
                     self.pass_results.push(result);
                 }
+                tracing::debug!(
+                    "synth pass {pass_name}: {ands} -> {} ANDs in {:.2?}",
+                    aig.and_count(),
+                    started.elapsed()
+                );
             }
 
             let after = aig.compute_stats();

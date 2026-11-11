@@ -2042,6 +2042,7 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
     for &idx in indices.iter().rev() {
         netlist.cells.remove(idx);
     }
+    netlist.rebuild_net_connectivity();
 
     removed
 }
@@ -2260,6 +2261,7 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
     for &idx in inv_to_remove.iter().rev() {
         netlist.cells.remove(idx);
     }
+    netlist.rebuild_net_connectivity();
 
     total_removed
 }
@@ -2490,6 +2492,7 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
         for &idx in indices.iter().rev() {
             netlist.cells.remove(idx);
         }
+        netlist.rebuild_net_connectivity();
 
         total_merged += merges.len();
     }

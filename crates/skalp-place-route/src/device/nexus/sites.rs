@@ -205,6 +205,27 @@ pub fn design_region(
 }
 
 /// Name of the pad a boundary-scan bit reads, with its ball on `package`.
+/// The boundary-scan bit of each package ball that has one.
+pub fn boundary_bits_by_ball(package: &str) -> HashMap<String, usize> {
+    let Ok(io) = serde_json::from_str::<IoDatabase>(LFCPNX_100_IODB) else {
+        return HashMap::new();
+    };
+    let Some(index) = io.packages.iter().position(|p| p == package) else {
+        return HashMap::new();
+    };
+    io.boundary
+        .iter()
+        .filter_map(|cell| {
+            let pad = io
+                .pads
+                .iter()
+                .find(|p| p.name.as_deref() == Some(cell.pad.as_str()))?;
+            let ball = pad.pins.get(index).filter(|pin| pin.as_str() != "-")?;
+            Some((ball.clone(), cell.bit))
+        })
+        .collect()
+}
+
 pub fn boundary_pad_names(package: &str) -> HashMap<usize, String> {
     let Ok(io) = serde_json::from_str::<IoDatabase>(LFCPNX_100_IODB) else {
         return HashMap::new();

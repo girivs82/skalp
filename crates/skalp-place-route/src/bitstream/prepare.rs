@@ -85,6 +85,44 @@ fn constant_nets(netlist: &GateNetlist) -> HashMap<GateNetId, bool> {
         .collect()
 }
 
+/// Put block RAM connections on the device's RAM pins, for a flow that routes
+/// the netlist as it is (without [`prepare_for_routing`]).
+///
+/// A RAM cell lists its inputs and outputs in [`RamPorts`] order; the device
+/// says which pin each lands on ([`Device::ram_input_pin`],
+/// [`Device::ram_output_pin`]). Inputs with no pin, and inputs tied low that
+/// configuration holds low, are left unconnected.
+///
+/// [`RamPorts`]: skalp_lir::gate_netlist::RamPorts
+pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
+    let constants = constant_nets(netlist);
+    let mut mapped = netlist.clone();
+    for cell in &netlist.cells {
+        let Some(ports) = cell.ram_ports() else {
+            continue;
+        };
+        for (index, &net) in cell.inputs.iter().enumerate() {
+            let pin = device.ram_input_pin(&ports, index).filter(|_| {
+                constants.get(&net) != Some(&false)
+                    || device.ram_input_needs_low_driver(&ports, index)
+            });
+            let fanout = &mut mapped.nets[net.0 as usize].fanout;
+            if let Some(entry) = fanout.iter().position(|&(c, i)| c == cell.id && i == index) {
+                match pin {
+                    Some(pin) => fanout[entry].1 = pin,
+                    None => {
+                        fanout.remove(entry);
+                    }
+                }
+            }
+        }
+        for (index, &net) in cell.outputs.iter().enumerate() {
+            mapped.nets[net.0 as usize].driver_pin = Some(device.ram_output_pin(&ports, index));
+        }
+    }
+    mapped
+}
+
 /// Give block RAM and multiplier inputs tied low a real driver where the device
 /// needs one.
 ///
@@ -320,6 +358,10 @@ pub fn prepare_for_routing(
                 } else if let Some(pin) = device.ram_input_pin(&ports, index) {
                     connect(&mut prepared.nets, net, cell.id, pin);
                 }
+            }
+            for (index, &net) in cell.outputs.iter().enumerate() {
+                prepared.nets[net.0 as usize].driver_pin =
+                    Some(device.ram_output_pin(&ports, index));
             }
             continue;
         }

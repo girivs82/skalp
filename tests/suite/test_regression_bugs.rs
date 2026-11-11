@@ -2448,3 +2448,40 @@ impl LedBlinker {
         "Triage #22: `slew: fast` must still be captured contextually"
     );
 }
+
+// A concatenation element made of an operator chain over indexed bits,
+// `{a[14:0], a[15] ^ a[13] ^ a[12] ^ a[10]}` (an LFSR step), was split into
+// extra elements: the parser emits `[i]` and `^ x` as siblings of their
+// base, and the concat builder built each sibling on its own, giving
+// `{a[14:0], fb, fb ^ a[12] ^ a[10], ...}`. Each element between commas is
+// now built as one chain.
+#[test]
+fn test_concat_element_with_operator_chain_stays_one_element() {
+    let source = r#"
+entity Lfsr {
+    in clk: clock
+    out q: bit[16]
+    out y: bit[24]
+}
+
+impl Lfsr {
+    signal a: bit[16] = 16'hACE1
+    on(clk.rise) {
+        a = {a[14:0], a[15] ^ a[13] ^ a[12] ^ a[10]}
+    }
+    q = a
+    y = a[7:0] ++ a[15:8] & 8'h0f ++ 8'h00
+}
+"#;
+    let sv = compile_to_sv(source).expect("must compile");
+    assert!(
+        sv.contains("a <= {a[14:0], (((a[15] ^ a[13]) ^ a[12]) ^ a[10])};"),
+        "the feedback must be one element of the concat, got:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("{a[7:0], (a[15:8] & 8'b00001111), 8'b00000000}"),
+        "`++` elements must each be one chain, got:\n{}",
+        sv
+    );
+}

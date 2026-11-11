@@ -1138,22 +1138,11 @@ impl<'a> IceStormAscii<'a> {
             }
 
             if let Some(cell) = netlist.cells.iter().find(|c| c.id.0 == cell_id.0) {
-                let read_mode = cell
-                    .parameters
-                    .get("READ_MODE")
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .unwrap_or(0);
-                let write_mode = cell
-                    .parameters
-                    .get("WRITE_MODE")
-                    .and_then(|v| v.parse::<u8>().ok())
-                    .unwrap_or(0);
-
-                // The configuration bits take the low two bits of READ_MODE.
-                let mode = read_mode & 3;
+                let (read_mode, write_mode) = crate::device::ice40::ram::cell_modes(cell);
+                // The contents are laid out as the block reads them.
                 let init_data = Self::parse_ram_init_data(&cell.parameters).or_else(|| {
                     cell.memory_init()
-                        .map(|words| Self::ram_data_from_words(&words, mode))
+                        .map(|words| Self::ram_data_from_words(&words, read_mode))
                 });
 
                 ram_configs.insert(
@@ -1480,34 +1469,19 @@ impl<'a> IceStormAscii<'a> {
         // Create a 16x42 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 42]; 16];
 
-        // RamConfig.PowerUp — always set on all ramb tiles (data-driven from chipdb)
-        let powerup_pos = self
-            .lookup_config_bit(TileType::RamBottom, "RamConfig.PowerUp")
-            .unwrap_or((1, 7));
-        bits[powerup_pos.0][powerup_pos.1] = true;
+        // A block's cell sits on its top tile, the one above this.
+        let config = ram_configs
+            .get(&(x, y + 1))
+            .or_else(|| ram_configs.get(&(x, y)));
 
-        // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
-        if let Some(config) = ram_configs.get(&(x, y)) {
-            if let Some(ref chipdb) = self.chipdb {
-                if let Some(tile_bits) = chipdb.tile_bits.get(&TileType::RamBottom) {
-                    for cb in tile_bits {
-                        let value = match cb.name.as_str() {
-                            "RamConfig.CBIT_0" => config.read_mode & 1 != 0,
-                            "RamConfig.CBIT_1" => (config.read_mode >> 1) & 1 != 0,
-                            "RamConfig.CBIT_2" => config.write_mode & 1 != 0,
-                            "RamConfig.CBIT_3" => (config.write_mode >> 1) & 1 != 0,
-                            _ => false,
-                        };
-                        if value {
-                            let row = cb.row as usize;
-                            let col = cb.col as usize;
-                            if row < num_rows && col < num_cols {
-                                bits[row][col] = true;
-                            }
-                        }
-                    }
-                }
-            }
+        // RamConfig.PowerUp: on the 1K devices the bit is set on unused blocks,
+        // on the others on used ones (nextpnr ice40/bitstream.cc).
+        let is_1k = matches!(self.device.variant, Ice40Variant::Hx1k | Ice40Variant::Lp1k);
+        if config.is_some() != is_1k {
+            let powerup_pos = self
+                .lookup_config_bit(TileType::RamBottom, "RamConfig.PowerUp")
+                .unwrap_or((1, 7));
+            bits[powerup_pos.0][powerup_pos.1] = true;
         }
 
         // Set ColBufCtrl bits for global networks at column buffer rows (data-driven from chipdb)
@@ -1543,7 +1517,7 @@ impl<'a> IceStormAscii<'a> {
         }
 
         // Always emit .ram_data section (icepack expects it for all RAMB tiles)
-        let init_data = ram_configs.get(&(x, y)).and_then(|c| c.init_data.as_ref());
+        let init_data = config.and_then(|c| c.init_data.as_ref());
         asc.push_str(&format!(".ram_data {} {}\n", x, y));
         // 16 lines (INIT_0..INIT_F), each 64 hex chars (256 bits)
         for line in 0..16 {
@@ -1585,22 +1559,22 @@ impl<'a> IceStormAscii<'a> {
         // Create a 16x42 bit array (static max; output bounded by tile_dimensions)
         let mut bits = [[false; 42]; 16];
 
-        // RAMT config mirrors the corresponding RAMB tile (at y-1)
-        let ramb_y = y.saturating_sub(1);
+        // A block's cell sits on this, its top tile.
         let config = ram_configs
-            .get(&(x, ramb_y))
-            .or_else(|| ram_configs.get(&(x, y)));
+            .get(&(x, y))
+            .or_else(|| ram_configs.get(&(x, y.saturating_sub(1))));
 
-        // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
+        // The mode bits: CBIT_0/1 the write mode, CBIT_2/3 the read mode
+        // (nextpnr ice40/bitstream.cc).
         if let Some(config) = config {
             if let Some(ref chipdb) = self.chipdb {
                 if let Some(tile_bits) = chipdb.tile_bits.get(&TileType::RamTop) {
                     for cb in tile_bits {
                         let value = match cb.name.as_str() {
-                            "RamConfig.CBIT_0" => config.read_mode & 1 != 0,
-                            "RamConfig.CBIT_1" => (config.read_mode >> 1) & 1 != 0,
-                            "RamConfig.CBIT_2" => config.write_mode & 1 != 0,
-                            "RamConfig.CBIT_3" => (config.write_mode >> 1) & 1 != 0,
+                            "RamConfig.CBIT_0" => config.write_mode & 1 != 0,
+                            "RamConfig.CBIT_1" => (config.write_mode >> 1) & 1 != 0,
+                            "RamConfig.CBIT_2" => config.read_mode & 1 != 0,
+                            "RamConfig.CBIT_3" => (config.read_mode >> 1) & 1 != 0,
                             _ => false,
                         };
                         if value {

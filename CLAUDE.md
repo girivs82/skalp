@@ -29,13 +29,14 @@ Optionally, if you have z3 installed and want to test code coverage:
 
 The project uses GitHub Actions with multiple jobs:
 
-1. **Test Suite** (stable & beta Rust)
+1. **Test Suite** (Linux, stable Rust; `.github/workflows/test-suite.yml`)
    - Formatting check
    - Clippy with `-D warnings`
-   - Build
-   - All test suites
+   - All test targets, built and run once
+   - Beta and macOS get clippy only on each change; their full test runs
+     (`full-test-matrix.yml`) happen before every release and on demand
 
-2. **Code Coverage**
+2. **Code Coverage** (informational; runs with the full matrix before releases)
    - Uses `cargo tarpaulin`
    - May expose different compilation issues than regular clippy
 

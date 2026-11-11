@@ -1741,6 +1741,8 @@ fn build_design(
             let verilog_path = output_dir.join("design_gates.v");
             fs::write(&verilog_path, &verilog)?;
 
+            check_no_floating_inputs(&optimized_netlist)?;
+
             // Save gate netlist as JSON
             let netlist_json = serde_json::to_string_pretty(&optimized_netlist)?;
             fs::write(output_dir.join("design_gates.json"), &netlist_json)?;
@@ -4280,6 +4282,8 @@ fn synthesize_design(
     // Create output directory
     fs::create_dir_all(output_dir)?;
 
+    check_no_floating_inputs(&gate_netlist)?;
+
     // Save gate-level netlist as JSON
     let netlist_path = output_dir.join("design_gates.json");
     let netlist_json = serde_json::to_string_pretty(&gate_netlist)?;
@@ -5039,6 +5043,15 @@ fn report_pad_watch(
         result.samples,
         result.seconds
     );
+    if let Some(board) = board {
+        let pads = board.labelled_pads();
+        if !pads.is_empty() {
+            println!("   Board pins:");
+            for (bit, label) in pads {
+                println!("   {label}: {}", result.describe(bit));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -7852,4 +7865,42 @@ fn run_signal_trace(
     }
 
     Ok(())
+}
+
+/// Refuse a gate netlist with a net that feeds cells but has no driver.
+///
+/// On silicon such an input floats (Nexus LUT and carry inputs read it as 1),
+/// while gate-level simulation gives it a fixed value, so the board and the
+/// simulator disagree with nothing pointing at the cause. It always means a
+/// synthesis pass lost the net's driver, so fail rather than build it.
+fn check_no_floating_inputs(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+    let undriven = netlist.undriven_nets_with_fanout();
+    if undriven.is_empty() {
+        return Ok(());
+    }
+    let mut lines = Vec::new();
+    for net_id in undriven.iter().take(20) {
+        let net = &netlist.nets[net_id.0 as usize];
+        let loads: Vec<String> = netlist
+            .cells
+            .iter()
+            .filter(|cell| {
+                cell.inputs.contains(net_id)
+                    || cell.clock == Some(*net_id)
+                    || cell.reset == Some(*net_id)
+            })
+            .take(3)
+            .map(|cell| format!("{} ({})", cell.path, cell.cell_type))
+            .collect();
+        lines.push(format!("{} -> {}", net.name, loads.join(", ")));
+    }
+    if undriven.len() > lines.len() {
+        lines.push(format!("... and {} more", undriven.len() - lines.len()));
+    }
+    anyhow::bail!(
+        "gate netlist has {} net(s) that feed cells but have no driver (a synthesis bug; \
+         they would float on the device):\n  {}",
+        undriven.len(),
+        lines.join("\n  ")
+    )
 }
