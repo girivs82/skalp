@@ -1741,7 +1741,7 @@ fn build_design(
             let verilog_path = output_dir.join("design_gates.v");
             fs::write(&verilog_path, &verilog)?;
 
-            check_no_floating_inputs(&optimized_netlist)?;
+            check_net_drivers(&optimized_netlist)?;
 
             // Save gate netlist as JSON
             let netlist_json = serde_json::to_string_pretty(&optimized_netlist)?;
@@ -4298,7 +4298,7 @@ fn synthesize_design(
     // Create output directory
     fs::create_dir_all(output_dir)?;
 
-    check_no_floating_inputs(&gate_netlist)?;
+    check_net_drivers(&gate_netlist)?;
 
     // Save gate-level netlist as JSON
     let netlist_path = output_dir.join("design_gates.json");
@@ -7883,13 +7883,48 @@ fn run_signal_trace(
     Ok(())
 }
 
-/// Refuse a gate netlist with a net that feeds cells but has no driver.
+/// Refuse a gate netlist with a net that feeds cells but has no driver, or
+/// a net that two cells drive.
+///
+/// Two drivers on one net short them together on silicon, and a simulator
+/// takes one of them; it always means a pass wrote a cell twice or merged
+/// two nets that were not the same signal.
 ///
 /// On silicon such an input floats (Nexus LUT and carry inputs read it as 1),
 /// while gate-level simulation gives it a fixed value, so the board and the
 /// simulator disagree with nothing pointing at the cause. It always means a
 /// synthesis pass lost the net's driver, so fail rather than build it.
-fn check_no_floating_inputs(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+    let shorted = netlist.multiply_driven_nets();
+    if !shorted.is_empty() {
+        let lines: Vec<String> = shorted
+            .iter()
+            .take(20)
+            .map(|net_id| {
+                let drivers: Vec<String> = netlist
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.outputs.contains(net_id))
+                    .map(|cell| format!("{} ({})", cell.path, cell.cell_type))
+                    .collect();
+                format!(
+                    "{} <- {}",
+                    netlist.nets[net_id.0 as usize].name,
+                    drivers.join(", ")
+                )
+            })
+            .collect();
+        anyhow::bail!(
+            "gate netlist has {} net(s) with more than one driver (a synthesis bug):\n  {}{}",
+            shorted.len(),
+            lines.join("\n  "),
+            if shorted.len() > lines.len() {
+                "\n  ..."
+            } else {
+                ""
+            }
+        );
+    }
     let undriven = netlist.undriven_nets_with_fanout();
     if undriven.is_empty() {
         return Ok(());

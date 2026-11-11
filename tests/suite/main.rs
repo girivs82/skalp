@@ -115,6 +115,7 @@ mod test_ncl_cle_patterns;
 mod test_ncl_convergence_mwe;
 mod test_ncl_expansion_fix;
 mod test_ncl_std_cell_mode;
+mod test_netlist_writer;
 mod test_nexus_real_flow;
 mod test_nexus_saved_netlist;
 mod test_parametric_types_parsing;

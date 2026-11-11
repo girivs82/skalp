@@ -1002,6 +1002,24 @@ impl GateNetlist {
     /// silently disagree. It always means a pass lost the net's driver.
     /// Connectivity is recomputed from the cells, so stale `driver`/`fanout`
     /// fields cannot hide one.
+    /// Nets that more than one cell drives
+    pub fn multiply_driven_nets(&self) -> Vec<GateNetId> {
+        let mut drivers = vec![0u32; self.nets.len()];
+        for cell in &self.cells {
+            for net in &cell.outputs {
+                if let Some(count) = drivers.get_mut(net.0 as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        drivers
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 1)
+            .map(|(index, _)| GateNetId(index as u32))
+            .collect()
+    }
+
     pub fn undriven_nets_with_fanout(&self) -> Vec<GateNetId> {
         let mut driven = vec![false; self.nets.len()];
         let mut loaded = vec![false; self.nets.len()];
@@ -2661,6 +2679,23 @@ mod tests {
         let driver = netlist.nets[nets[3].0 as usize].driver.unwrap();
         assert_eq!(netlist.cells[driver.0 as usize].path, "top.inv2");
         assert!(netlist.undriven_nets_with_fanout().is_empty());
+    }
+
+    #[test]
+    fn test_net_with_two_drivers_is_reported() {
+        let (mut netlist, nets) = inverter_chain();
+        assert!(netlist.multiply_driven_nets().is_empty());
+        // A second cell on n2, which inv1 already drives
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "BUF_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.buf".to_string(),
+            vec![nets[0]],
+            vec![nets[2]],
+        ));
+        assert_eq!(netlist.multiply_driven_nets(), vec![nets[2]]);
     }
 
     #[test]

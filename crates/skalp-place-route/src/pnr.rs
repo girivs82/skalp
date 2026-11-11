@@ -751,6 +751,38 @@ fn check_routes_disjoint<D: crate::device::Device>(
     let mut nets: Vec<_> = routing.routes.iter().collect();
     nets.sort_by_key(|(id, _)| id.0);
     for (&net, route) in nets {
+        // Within a net, one pip drives each wire: a second would drive it
+        // from another source (on silicon, two drivers on one wire) and
+        // close a loop in the route tree
+        let mut driven: std::collections::HashMap<crate::device::WireId, crate::device::PipId> =
+            std::collections::HashMap::new();
+        for &pip in &route.pips {
+            let Some(info) = device.pip(pip) else {
+                continue;
+            };
+            if let Some(&first) = driven.get(&info.dst_wire) {
+                if first != pip {
+                    let wire_name = |w| device.wire(w).map_or("?".to_string(), |w| w.name.clone());
+                    let src = |p| {
+                        device
+                            .pip(p)
+                            .map_or("?".to_string(), |i| wire_name(i.src_wire))
+                    };
+                    return Err(crate::PlaceRouteError::RoutingFailed(format!(
+                        "Net '{}' drives wire {} from both {} and {}",
+                        netlist
+                            .nets
+                            .get(net.0 as usize)
+                            .map_or("?", |n| n.name.as_str()),
+                        wire_name(info.dst_wire),
+                        src(first),
+                        src(pip)
+                    )));
+                }
+            } else {
+                driven.insert(info.dst_wire, pip);
+            }
+        }
         for &wire in &route.wires {
             match owner.insert(wire, net) {
                 Some(other) if other != net => {

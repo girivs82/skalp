@@ -625,7 +625,7 @@ impl Testbench {
             synth_result.netlist
         };
         if !netlist.is_ncl {
-            refuse_floating_inputs(&netlist)?;
+            refuse_bad_drivers(&netlist)?;
         }
 
         // Convert to SIR
@@ -839,7 +839,7 @@ impl Testbench {
         };
 
         if !(has_async || netlist.is_ncl) {
-            refuse_floating_inputs(&netlist)?;
+            refuse_bad_drivers(&netlist)?;
         }
 
         // Convert to SIR and load
@@ -2365,13 +2365,27 @@ fn bytes_to_u64(bytes: &[u8]) -> u64 {
 )]
 pub type GateLevelTestbench = Testbench;
 
-/// Refuse a synchronous gate netlist in which a net feeds cells but has no
-/// driver. Simulation gives such a net a fixed value while hardware reads it
-/// as either level, so a passing gate-level test would say nothing about the
-/// device. It always means a pass lost the driver (an instance input that
+/// Refuse a synchronous gate netlist in which a net has two drivers, or
+/// feeds cells but has no driver. Simulation takes one of two drivers, and
+/// gives an undriven net a fixed value, while hardware shorts the drivers or
+/// reads the undriven net as either level, so a passing gate-level test would
+/// say nothing about the device. It always means a pass lost the driver (an instance input that
 /// stitched to a net that does not exist, for one), so fail loudly — the CLI
 /// build refuses the same netlist.
-fn refuse_floating_inputs(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+fn refuse_bad_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+    let shorted = netlist.multiply_driven_nets();
+    if !shorted.is_empty() {
+        let names: Vec<&str> = shorted
+            .iter()
+            .take(20)
+            .map(|id| netlist.nets[id.0 as usize].name.as_str())
+            .collect();
+        return Err(anyhow::anyhow!(
+            "gate netlist has {} net(s) with more than one driver: {}",
+            shorted.len(),
+            names.join(", ")
+        ));
+    }
     let undriven = netlist.undriven_nets_with_fanout();
     if undriven.is_empty() {
         return Ok(());
