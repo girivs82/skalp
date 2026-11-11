@@ -26,8 +26,11 @@ use skalp_lir::ncl_constraints::MatchedDelayGroup;
 /// must detour well around it.)
 const SEARCH_MARGIN: u32 = 3;
 
-/// Most nets routed side by side in one wave
-const MAX_WAVE: usize = 256;
+/// Most nets routed side by side in one batch ([`PathFinder::route_in_batches`])
+const MAX_BATCH: usize = 256;
+
+/// Least nets in a batch, however often its routes clash
+const MIN_BATCH: usize = 8;
 
 /// How many times a net is rerouted keeping its uncongested branches before
 /// it is rerouted whole
@@ -172,18 +175,6 @@ impl CongestionTracker {
         }
     }
 
-    /// Cost multiplier for one more net using `wire` (PathFinder):
-    /// `(1 + history_factor * history) * (1 + present_factor * overuse)`,
-    /// where `overuse` is how far over capacity (1) the wire would be with
-    /// this net added. An unused wire with no history costs 1.
-    fn cost_factor(&self, wire: WireId, present_factor: f64, history_factor: f64) -> f64 {
-        let i = wire.0 as usize;
-        let usage = self.usage.get(i).copied().unwrap_or(0);
-        let history = self.history.get(i).copied().unwrap_or(0.0);
-        let overuse = usage as f64; // (usage + 1) - capacity
-        (1.0 + history_factor * history) * (1.0 + present_factor * overuse)
-    }
-
     /// Update history costs for congested wires
     fn update_history(&mut self) {
         for &w in &self.touched {
@@ -223,6 +214,36 @@ impl CongestionTracker {
             .copied()
             .filter(|w| self.usage[w.0 as usize] > 1)
             .collect()
+    }
+}
+
+/// The congestion one net is routed against: every net's current route
+/// but its own (`own`, the wires of its route still counted in `tracker`)
+#[derive(Clone, Copy)]
+struct NetView<'a> {
+    tracker: &'a CongestionTracker,
+    own: Option<&'a HashSet<WireId>>,
+}
+
+impl NetView<'_> {
+    /// Nets other than this one using `wire`
+    fn usage(&self, wire: WireId) -> u32 {
+        self.tracker.usage(wire) - self.own_use(wire)
+    }
+
+    fn own_use(&self, wire: WireId) -> u32 {
+        u32::from(self.own.is_some_and(|own| own.contains(&wire)))
+    }
+
+    /// Cost multiplier for this net using `wire` (PathFinder):
+    /// `(1 + history_factor * history) * (1 + present_factor * overuse)`,
+    /// where `overuse` is how far over capacity (1) the wire would be with
+    /// this net added. An unused wire with no history costs 1.
+    fn cost_factor(&self, wire: WireId, present_factor: f64, history_factor: f64) -> f64 {
+        let i = wire.0 as usize;
+        let usage = self.usage(wire);
+        let history = self.tracker.history.get(i).copied().unwrap_or(0.0);
+        (1.0 + history_factor * history) * (1.0 + present_factor * usage as f64)
     }
 }
 
@@ -389,14 +410,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 net_id,
                 margin: SEARCH_MARGIN,
                 keep: false,
-                bounds: self.search_bounds(
-                    &netlist.nets[net_id.0 as usize],
-                    placement,
-                    SEARCH_MARGIN,
-                ),
             })
             .collect();
-        self.route_in_waves(
+        self.route_in_batches(
             initial,
             netlist,
             placement,
@@ -425,15 +441,32 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 congestion.total_overuse()
             );
             if log::log_enabled!(log::Level::Debug) {
-                let mut by_type: HashMap<String, usize> = HashMap::new();
+                // By wire class (the same wire in every tile), most first
+                let mut by_class: HashMap<String, usize> = HashMap::new();
                 for w in congestion.overused_wires() {
-                    let kind = self.device.wire(w).map_or("?".to_string(), |w| {
-                        let t = format!("{:?}", w.wire_type);
-                        t.split('(').next().unwrap_or("").to_string()
-                    });
-                    *by_type.entry(kind).or_default() += 1;
+                    let class = self
+                        .device
+                        .wire(w)
+                        .map_or("?".to_string(), |w| super::lookahead::class_key(&w.name));
+                    *by_class.entry(class).or_default() += 1;
                 }
-                log::debug!("pathfinder: overused wires by type: {by_type:?}");
+                let mut by_class: Vec<(String, usize)> = by_class.into_iter().collect();
+                by_class.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                by_class.truncate(30);
+                log::debug!("pathfinder: overused wires by class: {by_class:?}");
+                // Where they are: by 8x8-tile block, most first
+                let mut by_block: HashMap<(u32, u32), usize> = HashMap::new();
+                for w in congestion.overused_wires() {
+                    if let Some(wire) = self.device.wire(w) {
+                        *by_block
+                            .entry((wire.tile_x / 8 * 8, wire.tile_y / 8 * 8))
+                            .or_default() += 1;
+                    }
+                }
+                let mut by_block: Vec<((u32, u32), usize)> = by_block.into_iter().collect();
+                by_block.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                by_block.truncate(20);
+                log::debug!("pathfinder: overused wires by 8x8 block (x, y): {by_block:?}");
                 let sample: Vec<String> = congestion
                     .overused_wires()
                     .into_iter()
@@ -491,10 +524,9 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 .collect();
             log::info!("pathfinder: rerouting {} nets", reroute_list.len());
 
-            // Rip up and reroute in waves of nets whose search regions don't
-            // overlap, so each net is routed against the current routes of
-            // all the others outside its wave, and those inside it cannot
-            // reach the same wires. (Ripping up every congested net first
+            // Rip up and reroute each net against the current routes of all
+            // the others, as if one after another ([`Self::route_in_batches`]).
+            // (Ripping up every congested net first
             // let the early ones spread into wires the rest still needed,
             // and congestion barely fell.)
             let jobs: Vec<NetJob> = reroute_list
@@ -512,15 +544,10 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                         net_id,
                         margin,
                         keep: *reroutes <= PARTIAL_REROUTES,
-                        bounds: self.search_bounds(
-                            &netlist.nets[net_id.0 as usize],
-                            placement,
-                            margin,
-                        ),
                     }
                 })
                 .collect();
-            self.route_in_waves(
+            self.route_in_batches(
                 jobs,
                 netlist,
                 placement,
@@ -575,14 +602,25 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         Ok(result)
     }
 
-    /// Route `jobs` (in routing order), ripping up each net's current route
-    /// first. Nets go in waves of ones whose search regions don't overlap
-    /// ([`next_wave`]): a wave's old routes are ripped up, its nets routed
-    /// in parallel against the congestion as it stands, and the new routes
-    /// recorded in order. The waves depend only on the jobs, never on the
-    /// number of threads, so the result is the same on any machine.
+    /// Reroute `jobs` (in routing order), replacing each net's current
+    /// route, much as if they were routed one after another.
+    ///
+    /// Nets go in batches that are routed in parallel, each against the
+    /// routes as they stand less its own, then recorded in order. A net
+    /// whose new route takes a wire that a net before it in the batch has
+    /// just taken was routed without seeing that net's route, so it is not
+    /// recorded: it keeps its old route and goes to the front of the next
+    /// batch ([`settle_batch`]). Every other route is the one a search after
+    /// the earlier nets would have found, give or take wires their old
+    /// routes freed. (Ripping up a whole batch first let its early nets
+    /// spread into the wires the later ones were using, and the late passes
+    /// stopped converging; batching only nets whose search regions don't
+    /// overlap left those passes routing one net at a time.) A batch
+    /// shrinks while its nets keep clashing and grows back when they stop.
+    /// The batches depend only on the routes, never on the number of
+    /// threads, so the result is the same on any machine.
     #[allow(clippy::too_many_arguments)]
-    fn route_in_waves(
+    fn route_in_batches(
         &self,
         jobs: Vec<NetJob>,
         netlist: &GateNetlist,
@@ -594,76 +632,117 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         (present_factor, history_factor): (f64, f64),
         result: &mut RoutingResult,
     ) -> Result<()> {
-        let mut pending = jobs;
-        let total = pending.len();
-        let (mut waves, mut largest) = (0usize, 0usize);
-        let mut serial_time = std::time::Duration::ZERO;
+        let total = jobs.len();
+        let mut pending: std::collections::VecDeque<NetJob> = jobs.into();
+        let mut size = MAX_BATCH;
+        let (mut batches, mut deferred) = (0usize, 0usize);
         let t_start = std::time::Instant::now();
+        // Search time of whole-net and partial reroutes, and the slowest nets
+        let mut net_time = [0.0f64; 2];
+        let mut slow: Vec<(f64, String, usize, u32, bool)> = Vec::new();
         while !pending.is_empty() {
-            let wave = next_wave(&mut pending, MAX_WAVE);
-            let t_wave = std::time::Instant::now();
-            waves += 1;
-            largest = largest.max(wave.len());
-            let previous: Vec<Option<Route>> = wave
+            let take = size.min(pending.len());
+            let batch: Vec<NetJob> = pending.drain(..take).collect();
+            batches += 1;
+            // Each net's current route stays in place while the batch is
+            // routed, and each search discounts only its own
+            let old: Vec<HashSet<WireId>> = batch
                 .iter()
                 .map(|job| {
-                    let previous = result.routes.remove(&job.net_id);
-                    if let Some(route) = &previous {
-                        for wire in Self::shared_wires(route) {
-                            congestion.remove_usage(wire);
-                        }
-                    }
-                    previous
+                    result
+                        .routes
+                        .get(&job.net_id)
+                        .map(|r| Self::shared_wires(r).into_iter().collect())
+                        .unwrap_or_default()
                 })
                 .collect();
             let frozen: &CongestionTracker = congestion;
-            let routes: Vec<Result<Route>> = wave
+            let routes: Vec<(Result<Route>, f64)> = batch
                 .par_iter()
-                .zip(previous.par_iter())
-                .map(|(job, previous)| {
-                    self.route_net_with_costs_internal(
+                .zip(old.par_iter())
+                .map(|(job, own)| {
+                    let t_net = std::time::Instant::now();
+                    let route = self.route_net_with_costs_internal(
                         job.net_id,
                         netlist,
                         placement,
-                        frozen,
+                        NetView {
+                            tracker: frozen,
+                            own: Some(own),
+                        },
                         astar,
                         criticality_map.get(&job.net_id).copied().unwrap_or(0.0),
                         present_factor,
                         history_factor,
                         matched_delay_lookup.contains_key(&job.net_id),
                         job.margin,
-                        previous.as_ref().filter(|_| job.keep),
-                    )
+                        result.routes.get(&job.net_id).filter(|_| job.keep),
+                    );
+                    (route, t_net.elapsed().as_secs_f64())
                 })
                 .collect();
-            for (job, route) in wave.iter().zip(routes) {
-                let route = route?;
-                for wire in Self::shared_wires(&route) {
-                    congestion.add_usage(wire);
-                }
-                result.routes.insert(job.net_id, route);
-            }
-            if wave.len() == 1 {
-                let elapsed = t_wave.elapsed();
-                serial_time += elapsed;
-                if elapsed.as_secs_f64() > 1.0 {
-                    let net = &netlist.nets[wave[0].net_id.0 as usize];
-                    log::debug!(
-                        "pathfinder: net {} ({} sinks, region {:?}) took {:.1} s",
-                        net.name,
+            let mut new = Vec::with_capacity(routes.len());
+            for (job, (route, secs)) in batch.iter().zip(routes) {
+                net_time[usize::from(job.keep)] += secs;
+                if secs > 1.0 {
+                    let net = &netlist.nets[job.net_id.0 as usize];
+                    slow.push((
+                        secs,
+                        net.name.clone(),
                         net.fanout.len(),
-                        wave[0].bounds,
-                        elapsed.as_secs_f64()
-                    );
+                        job.margin,
+                        job.keep,
+                    ));
                 }
+                new.push(route?);
+            }
+            let shared: Vec<Vec<WireId>> = new.iter().map(Self::shared_wires).collect();
+            let commit = settle_batch(&shared, &old);
+            let mut retry = Vec::new();
+            for ((job, route), ((wires, own), commit)) in batch
+                .into_iter()
+                .zip(new)
+                .zip(shared.into_iter().zip(old).zip(commit))
+            {
+                if commit {
+                    for &wire in &own {
+                        congestion.remove_usage(wire);
+                    }
+                    for wire in wires {
+                        congestion.add_usage(wire);
+                    }
+                    result.routes.insert(job.net_id, route);
+                } else {
+                    retry.push(job);
+                }
+            }
+            deferred += retry.len();
+            // Halve the batch while more than a quarter of it clashes;
+            // double it while none does
+            if retry.len() * 4 > take {
+                size = (size / 2).max(MIN_BATCH);
+            } else if retry.is_empty() {
+                size = (size * 2).min(MAX_BATCH);
+            }
+            for job in retry.into_iter().rev() {
+                pending.push_front(job);
             }
         }
         log::debug!(
-            "pathfinder: routed {total} nets in {waves} waves (largest {largest}) in {:.1} s, \
-             {:.1} s of it in waves of one net",
+            "pathfinder: routed {total} nets in {batches} batches in {:.1} s, \
+             {deferred} routes clashed and were redone; searches took {:.1} s whole, \
+             {:.1} s keeping branches",
             t_start.elapsed().as_secs_f64(),
-            serial_time.as_secs_f64()
+            net_time[0],
+            net_time[1],
         );
+        slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+        slow.truncate(15);
+        for (secs, name, sinks, margin, keep) in slow {
+            log::debug!(
+                "pathfinder: net {name} ({sinks} sinks, margin {margin}, keep {keep}) took {secs:.1} s"
+            );
+        }
         Ok(())
     }
 
@@ -838,7 +917,10 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             net_id,
             netlist,
             placement,
-            congestion,
+            NetView {
+                tracker: congestion,
+                own: None,
+            },
             astar,
             net_criticality,
             self.present_factor,
@@ -860,7 +942,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         net_id: GateNetId,
         netlist: &GateNetlist,
         placement: &PlacementResult,
-        congestion: &CongestionTracker,
+        congestion: NetView<'_>,
         astar: &AStarRouter<D>,
         net_criticality: f64,
         present_factor: f64,
@@ -1840,36 +1922,26 @@ struct NetJob {
     margin: u32,
     /// Keep the uncongested part of the net's current route
     keep: bool,
-    /// The region its searches stay in (`None`: the whole device)
-    bounds: Option<SearchBounds>,
 }
 
-/// Take from `pending` the next wave of nets to route side by side: in
-/// order, every net whose search region overlaps none already in the wave,
-/// up to `max` of them. A net whose search covers the whole device goes in
-/// a wave of its own. The nets left behind keep their order.
-fn next_wave(pending: &mut Vec<NetJob>, max: usize) -> Vec<NetJob> {
-    let mut wave: Vec<NetJob> = Vec::new();
-    let mut rest = Vec::with_capacity(pending.len());
-    let mut closed = false;
-    for job in pending.drain(..) {
-        let fits = !closed
-            && wave.len() < max
-            && match job.bounds {
-                None => wave.is_empty(),
-                Some(b) => wave
-                    .iter()
-                    .all(|w| w.bounds.is_some_and(|wb| !wb.overlaps(&b))),
-            };
-        if fits {
-            closed = job.bounds.is_none();
-            wave.push(job);
-        } else {
-            rest.push(job);
-        }
-    }
-    *pending = rest;
-    wave
+/// Which routes of a batch, in order, to record. Each was found against
+/// the routes as they stood before the batch, less its own old route
+/// (`old`); it is recorded if it takes no wire that a route recorded before
+/// it in the batch newly took, so it is still the route it would have been
+/// had it been routed after them. (The first is always recorded, so every
+/// batch makes progress.)
+fn settle_batch(new: &[Vec<WireId>], old: &[HashSet<WireId>]) -> Vec<bool> {
+    let mut taken: HashSet<WireId> = HashSet::new();
+    new.iter()
+        .zip(old)
+        .map(|(wires, old)| {
+            let clear = wires.iter().all(|w| !taken.contains(w));
+            if clear {
+                taken.extend(wires.iter().copied().filter(|w| !old.contains(w)));
+            }
+            clear
+        })
+        .collect()
 }
 
 /// Whether the best of the last `window` values of `history` is less than
@@ -1932,39 +2004,23 @@ mod tests {
     }
 
     #[test]
-    fn waves_hold_nets_whose_regions_do_not_overlap() {
-        let job = |id: u32, b: Option<(u32, u32, u32, u32)>| NetJob {
-            net_id: GateNetId(id),
-            margin: SEARCH_MARGIN,
-            keep: false,
-            bounds: b.map(|(min_x, min_y, max_x, max_y)| SearchBounds {
-                min_x,
-                min_y,
-                max_x,
-                max_y,
-            }),
-        };
-        let mut pending = vec![
-            job(0, Some((0, 0, 5, 5))),
-            job(1, Some((4, 4, 9, 9))),   // overlaps 0
-            job(2, Some((10, 0, 15, 5))), // clear of 0
-            job(3, None),                 // whole device
-            job(4, Some((0, 10, 5, 15))), // clear of 0 and 2
+    fn a_batch_records_routes_that_take_no_wire_an_earlier_one_took() {
+        let w = |ids: &[u32]| ids.iter().map(|&i| WireId(i)).collect::<Vec<_>>();
+        let set = |ids: &[u32]| ids.iter().map(|&i| WireId(i)).collect::<HashSet<_>>();
+        let new = [
+            w(&[1, 2, 3]),
+            w(&[3, 4]), // takes 3 from the first
+            w(&[4, 5]), // 4 belongs to a route that was not recorded: clear
+            w(&[5]),    // takes 5 from the third
+            w(&[2, 6]), // 2 the first already held before the batch: clear
+            w(&[]),
         ];
-        let ids = |w: &[NetJob]| w.iter().map(|j| j.net_id.0).collect::<Vec<_>>();
-        let wave = next_wave(&mut pending, MAX_WAVE);
-        assert_eq!(ids(&wave), [0, 2, 4]);
-        assert_eq!(ids(&pending), [1, 3]);
-        // 1 fits an empty wave; the whole-device net then waits for its own
-        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [1]);
-        assert_eq!(ids(&next_wave(&mut pending, MAX_WAVE)), [3]);
-        assert!(pending.is_empty());
-        // The size cap holds
-        let mut many: Vec<NetJob> = (0..10)
-            .map(|i| job(i, Some((i * 10, 0, i * 10 + 5, 5))))
-            .collect();
-        assert_eq!(next_wave(&mut many, 4).len(), 4);
-        assert_eq!(many.len(), 6);
+        let old = [set(&[2]), set(&[]), set(&[]), set(&[]), set(&[]), set(&[])];
+        assert_eq!(
+            settle_batch(&new, &old),
+            [true, false, true, false, true, true]
+        );
+        assert_eq!(settle_batch(&[], &[]), Vec::<bool>::new());
     }
 
     #[test]

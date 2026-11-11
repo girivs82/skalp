@@ -12,6 +12,9 @@
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::{Device, PipId, WireId, WireType};
 use crate::timing::DelayModel;
+use std::sync::OnceLock;
+
+use super::lookahead::{self, Lookahead};
 
 /// One PIP as the search sees it
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +53,11 @@ pub struct RoutingGraph {
     /// PIP driving wire `w`, with that PIP's base cost
     rev_offsets: Vec<u32>,
     rev_edges: Vec<(WireId, f32)>,
+    /// Class of each wire ([`lookahead::class_key`]) and the number of classes
+    class: Vec<u32>,
+    class_count: usize,
+    /// Measured costs by wire class, built on first use
+    lookahead: OnceLock<Lookahead>,
 }
 
 /// What a path must still spend inside its sink's tile, for
@@ -93,6 +101,8 @@ impl RoutingGraph {
         let mut tile = Vec::with_capacity(n);
         let mut delay = Vec::with_capacity(n);
         let mut global = Vec::with_capacity(n);
+        let mut class = Vec::with_capacity(n);
+        let mut class_ids: HashMap<String, u32> = HashMap::new();
         offsets.push(0);
         for i in 0..n {
             let id = WireId(i as u32);
@@ -100,6 +110,9 @@ impl RoutingGraph {
             tile.push(wire.map_or((0, 0), |w| (w.tile_x, w.tile_y)));
             delay.push(wire.map_or(0, |w| w.delay));
             global.push(wire.is_some_and(|w| matches!(w.wire_type, WireType::Global(_))));
+            let key = wire.map_or_else(String::new, |w| lookahead::class_key(&w.name));
+            let next = class_ids.len() as u32;
+            class.push(*class_ids.entry(key).or_insert(next));
             for &pip_id in device.wire_src_pips(id) {
                 let Some(pip) = device.pip(pip_id) else {
                     continue;
@@ -126,6 +139,8 @@ impl RoutingGraph {
             tile,
             delay,
             global,
+            class,
+            class_count: class_ids.len(),
             ..Self::default()
         };
         graph.compute_reverse_edges();
@@ -333,6 +348,41 @@ impl RoutingGraph {
         self.cost_lower_bound(dx, dy) + approach.remaining(wire, (x, y))
     }
 
+    /// The router's estimate of the cost from `wire` to the sink
+    /// `approach` describes: the cost measured from a wire of the same class
+    /// to a tile at the same displacement ([`Lookahead`]), plus what the
+    /// path must spend inside the sink's tile, and never less than
+    /// [`Self::cost_to_sink`]. Sinks out of the measured radius take the
+    /// measured cost to the nearest tile within it plus the bound for the
+    /// rest of the way.
+    pub fn estimate_to_sink(&self, wire: WireId, approach: &SinkApproach) -> f64 {
+        let bound = self.cost_to_sink(wire, approach);
+        let Some((x, y)) = self.tile(wire) else {
+            return bound;
+        };
+        if (x, y) == approach.tile || approach.far_entry {
+            return bound;
+        }
+        let Some(&class) = self.class.get(wire.0 as usize) else {
+            return bound;
+        };
+        let radius = lookahead::RADIUS;
+        let dx = approach.tile.0 as i32 - x as i32;
+        let dy = approach.tile.1 as i32 - y as i32;
+        let (near_dx, near_dy) = (dx.clamp(-radius, radius), dy.clamp(-radius, radius));
+        let Some(measured) = self.lookahead().cost(class, near_dx, near_dy) else {
+            return bound;
+        };
+        let beyond = self.cost_lower_bound(dx.abs_diff(near_dx), dy.abs_diff(near_dy));
+        bound.max(measured + beyond + approach.entry)
+    }
+
+    /// The lookahead, measured on first use
+    pub fn lookahead(&self) -> &Lookahead {
+        self.lookahead
+            .get_or_init(|| Lookahead::build(self, &self.class, self.class_count))
+    }
+
     /// A lower bound on the cost of a path from a wire to one `dx` and `dy`
     /// tiles away (A*'s heuristic). Never more than any real path's cost,
     /// since every wire entered costs at least its PIP's base cost.
@@ -366,7 +416,7 @@ impl RoutingGraph {
     }
 
     /// Whether `wire` belongs to a global distribution network
-    fn is_global(&self, wire: WireId) -> bool {
+    pub(super) fn is_global(&self, wire: WireId) -> bool {
         self.global.get(wire.0 as usize).copied().unwrap_or(false)
     }
 
@@ -478,6 +528,14 @@ mod tests {
                 "bound {to_sink} above path cost {cost}"
             );
             assert!(to_sink >= bound);
+            // The measured lookahead tightens it further, and on this
+            // regular fabric still never passes the real cost
+            let estimate = graph.estimate_to_sink(src, &approach);
+            assert!(estimate >= to_sink);
+            assert!(
+                estimate <= cost + 1e-6,
+                "estimate {estimate} above path cost {cost}"
+            );
             checked += 1;
         }
         assert!(checked > 0);

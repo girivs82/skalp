@@ -9,6 +9,7 @@ mod astar;
 mod carry_chain;
 mod global_nets;
 mod graph;
+mod lookahead;
 mod lut_permutation;
 mod pathfinder;
 
