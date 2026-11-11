@@ -277,7 +277,9 @@ impl CutMapper {
 
         // Phase 2: Area recovery with delay bound
         if self.config.area_recovery && self.config.recovery_iterations > 0 {
-            let delay_bound = initial_delay * 1.05; // Allow 5% slack
+            // Area is recovered at the delay-optimal depth: a slower
+            // mapping is a lower Fmax, which area cannot buy back.
+            let delay_bound = initial_delay + 1e-6;
 
             for _ in 0..self.config.recovery_iterations {
                 params.priority = CutPriority::AreaWithDelayBound;
@@ -932,6 +934,11 @@ impl CutMapper {
 
     /// Topological sort of AIG nodes
     fn topological_sort(&self, aig: &Aig) -> Vec<AigNodeId> {
+        // A node's chosen cut may read its alternatives' nodes, which are
+        // newer than it: order by choices too
+        if self.config.use_choices && aig.choice_node_count() > 0 {
+            return aig.choice_topological_order();
+        }
         let mut order = Vec::new();
         let mut visited = HashSet::new();
 
@@ -946,10 +953,13 @@ impl CutMapper {
             }
             visited.insert(node);
 
-            if let Some(n) = aig.get_node(node) {
-                for fanin in n.fanins() {
-                    visit(aig, fanin.node, visited, order);
-                }
+            // Only AND edges are combinational. A latch's (or barrier's) data
+            // is read at the next clock edge: following it would let a
+            // sequential loop put a node ahead of one of its fanins, which
+            // the forward pass would then take to arrive at time 0.
+            if let Some(AigNode::And { left, right }) = aig.get_node(node) {
+                visit(aig, left.node, visited, order);
+                visit(aig, right.node, visited, order);
             }
 
             order.push(node);
@@ -1027,6 +1037,41 @@ mod tests {
                 .map(|n| n.cell_type.as_str())
                 .collect();
             assert_eq!(cells, ["OXIDE_LUT5"], "{cells:?}");
+        }
+    }
+
+    /// A sequential loop through two latches must not put a node ahead of
+    /// its fanins in the mapper's order. Latch `l` is visited first and its
+    /// data `x` reads latch `m`, whose data `z` reads `x`: following latch
+    /// data edges would order `z` before `x`, and the forward pass would
+    /// then see `x` arrive at time 0 when it picks `z`'s cut.
+    #[test]
+    fn sequential_loop_keeps_combinational_order() {
+        let mut aig = Aig::new("loop".to_string());
+        let l = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let m = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let a = AigLit::new(aig.add_input("a".to_string(), None));
+        let b = AigLit::new(aig.add_input("b".to_string(), None));
+        let ab = aig.add_and(a, b);
+        let x = aig.add_and(AigLit::new(m), ab);
+        let e = AigLit::new(aig.add_input("e".to_string(), None));
+        let z = aig.add_and(x, e);
+        aig.update_latch_data(l, x);
+        aig.update_latch_data(m, z);
+
+        let order = CutMapper::new().topological_sort(&aig);
+        assert_eq!(order.len(), aig.node_count());
+        let position: IndexMap<AigNodeId, usize> =
+            order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        for (id, node) in aig.iter_nodes() {
+            if let AigNode::And { left, right } = node {
+                for fanin in [left.node, right.node] {
+                    assert!(
+                        position[&fanin] < position[&id],
+                        "{fanin:?} must come before {id:?}: {order:?}"
+                    );
+                }
+            }
         }
     }
 

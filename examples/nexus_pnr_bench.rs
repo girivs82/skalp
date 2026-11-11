@@ -44,16 +44,24 @@ fn synthesize(path: &std::path::Path, top_name: &str) -> GateNetlist {
     let library = skalp_lir::get_stdlib_library("nexus").unwrap();
     // FLAT=1: synthesize the flattened design in one piece instead of one
     // module at a time (logic can then be optimized across module boundaries).
-    let mut netlist = if std::env::var("FLAT").is_ok_and(|v| v == "1") {
+    let mut netlist = if !flat.is_empty() {
         skalp_lir::synthesize(&hier.flatten(), &library, preset).netlist
     } else {
         skalp_lir::synthesize_hierarchical(&hier, &library, preset).flatten_for_library(&library)
     };
     let top = mir.modules.iter().find(|m| m.name == top_name).unwrap();
+    // Hierarchical synthesis names the top's nets `top.<port>`; flat
+    // synthesis keeps the port names.
+    let prefix = if flat.is_empty() { "top." } else { "" };
     let constraints: indexmap::IndexMap<_, _> = top
         .ports
         .iter()
-        .filter_map(|p| Some((format!("top.{}", p.name), p.physical_constraints.clone()?)))
+        .filter_map(|p| {
+            Some((
+                format!("{prefix}{}", p.name),
+                p.physical_constraints.clone()?,
+            ))
+        })
         .collect();
     // Like the CLI, drop ports hierarchical synthesis promoted for child instances
     let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();

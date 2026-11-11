@@ -857,6 +857,235 @@ impl Aig {
         self.choices.clear();
     }
 
+    /// Every node after its fanins and, for a node with choices, after its
+    /// alternatives too, so the cuts of a node's alternatives are known when
+    /// its own are enumerated. Latches, barriers and inputs start timing
+    /// paths and come first only as their readers need them.
+    ///
+    /// Assumes the choices are acyclic ([`Aig::prune_cyclic_choices`]).
+    pub fn choice_topological_order(&self) -> Vec<AigNodeId> {
+        self.choice_dfs().0
+    }
+
+    /// Make every reader of a node that has a representative (a node it is a
+    /// choice of) read the representative instead, as ABC's choice AIG
+    /// does: the alternatives of a class then share the classes below them,
+    /// so the mapper can mix them. Each node computes the same function as
+    /// before. A representative is always older than its alternatives, so
+    /// AND edges still go to older nodes and the AIG stays acyclic. Returns
+    /// the number of fanins redirected.
+    pub fn redirect_to_representatives(&mut self) -> usize {
+        let mut repr_of: std::collections::HashMap<AigNodeId, AigLit> =
+            std::collections::HashMap::new();
+        for (&repr, alternatives) in &self.choices {
+            for alt in alternatives {
+                if repr.0 < alt.node.0 {
+                    // alt.node == repr ^ alt.inverted
+                    repr_of.insert(
+                        alt.node,
+                        AigLit {
+                            node: repr,
+                            inverted: alt.inverted,
+                        },
+                    );
+                }
+            }
+        }
+        let redirect = |lit: AigLit| match repr_of.get(&lit.node) {
+            Some(r) => AigLit {
+                node: r.node,
+                inverted: r.inverted != lit.inverted,
+            },
+            None => lit,
+        };
+        let mut redirected = 0;
+        for node in &mut self.nodes {
+            match node {
+                AigNode::And { left, right } => {
+                    let (l, r) = (redirect(*left), redirect(*right));
+                    // A pair that degenerates (x & x, x & !x) keeps its
+                    // original fanins
+                    if l.node == r.node || (l == *left && r == *right) {
+                        continue;
+                    }
+                    redirected += (l != *left) as usize + (r != *right) as usize;
+                    *left = l;
+                    *right = r;
+                }
+                AigNode::Latch { data, .. } => *data = redirect(*data),
+                AigNode::Barrier { data, enable, .. } => {
+                    *data = redirect(*data);
+                    if let Some(en) = enable {
+                        *en = redirect(*en);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (_, lit) in &mut self.outputs {
+            *lit = redirect(*lit);
+        }
+        // Structural hashing over the new fanins (the first node of each
+        // pair wins; later duplicates stay as choices of their class)
+        self.strash_map.clear();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if let AigNode::And { left, right } = node {
+                let key = if left.node.0 > right.node.0 {
+                    (*right, *left)
+                } else {
+                    (*left, *right)
+                };
+                self.strash_map.entry(key).or_insert(AigNodeId(i as u32));
+            }
+        }
+        redirected
+    }
+
+    /// Drop every choice that would make the AIG cyclic when the mapper
+    /// replaces a node by an alternative: an alternative that reads its
+    /// representative, directly or through other choices. Returns how many
+    /// were dropped.
+    pub fn prune_cyclic_choices(&mut self) -> usize {
+        let mut dropped = 0;
+        // An alternative reading its own representative through its fanins
+        // (the common case) is found by a search bounded by the
+        // representative's id: AND fanins are always older nodes.
+        let reprs: Vec<AigNodeId> = self.choices.keys().copied().collect();
+        for repr in reprs {
+            let alternatives = self.choices[&repr].clone();
+            let kept: Vec<AigLit> = alternatives
+                .iter()
+                .copied()
+                .filter(|alt| !self.reads(alt.node, repr))
+                .collect();
+            dropped += alternatives.len() - kept.len();
+            self.choices.insert(repr, kept);
+        }
+        // Cycles through several choice classes: drop the choice edge that
+        // closes each one until none is left
+        while let (_, Some((repr, alt))) = self.choice_dfs() {
+            let Some(list) = self.choices.get_mut(&repr) else {
+                break;
+            };
+            let before = list.len();
+            list.retain(|lit| lit.node != alt);
+            if list.len() == before {
+                // Not a choice edge: AND edges alone are acyclic, so this
+                // cannot happen; stop rather than loop
+                tracing::warn!("[DCH] cycle without a choice edge at {:?}", repr);
+                break;
+            }
+            dropped += 1;
+        }
+        self.choices.retain(|_, list| !list.is_empty());
+        dropped
+    }
+
+    /// Whether `target` is in the transitive fanin of `node` (AND edges).
+    fn reads(&self, node: AigNodeId, target: AigNodeId) -> bool {
+        let mut stack = vec![node];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == target {
+                return true;
+            }
+            if n.0 < target.0 || !seen.insert(n) {
+                continue;
+            }
+            if let Some(AigNode::And { left, right }) = self.get_node(n) {
+                stack.push(left.node);
+                stack.push(right.node);
+            }
+        }
+        false
+    }
+
+    /// Depth-first post-order over AND fanins and choice edges. Also returns
+    /// a choice edge (representative, alternative) that closes a cycle, if
+    /// any; the order is then incomplete.
+    fn choice_dfs(&self) -> (Vec<AigNodeId>, Option<(AigNodeId, AigNodeId)>) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mark {
+            New,
+            Open,
+            Done,
+        }
+        let n = self.nodes.len();
+        let mut mark = vec![Mark::New; n];
+        let mut order = Vec::with_capacity(n);
+        // An open node of the DFS: its edges (the fanins, then the
+        // choices, each flagged when it is a choice), the next one to take,
+        // and the representative whose choice edge it was entered through.
+        struct Frame {
+            node: AigNodeId,
+            edges: Vec<(AigNodeId, bool)>,
+            next: usize,
+            via: Option<AigNodeId>,
+        }
+        let edges = |id: AigNodeId| -> Vec<(AigNodeId, bool)> {
+            let mut out = Vec::new();
+            if let Some(AigNode::And { left, right }) = self.nodes.get(id.0 as usize) {
+                out.push((left.node, false));
+                out.push((right.node, false));
+            }
+            for alt in self.get_choices(id) {
+                out.push((alt.node, true));
+            }
+            out
+        };
+        for root in 0..n {
+            if mark[root] != Mark::New {
+                continue;
+            }
+            let root = AigNodeId(root as u32);
+            let mut stack = vec![Frame {
+                node: root,
+                edges: edges(root),
+                next: 0,
+                via: None,
+            }];
+            mark[root.0 as usize] = Mark::Open;
+            while let Some(top) = stack.last_mut() {
+                let node = top.node;
+                let step = top.edges.get(top.next).copied();
+                top.next += 1;
+                let Some((child, is_choice)) = step else {
+                    mark[node.0 as usize] = Mark::Done;
+                    order.push(node);
+                    stack.pop();
+                    continue;
+                };
+                match mark[child.0 as usize] {
+                    Mark::Done => {}
+                    Mark::Open => {
+                        // A cycle: blame the newest choice edge on it
+                        let cut = if is_choice {
+                            Some((node, child))
+                        } else {
+                            stack
+                                .iter()
+                                .rev()
+                                .take_while(|frame| frame.node != child)
+                                .find_map(|frame| frame.via.map(|repr| (repr, frame.node)))
+                        };
+                        return (order, cut.or(Some((node, child))));
+                    }
+                    Mark::New => {
+                        mark[child.0 as usize] = Mark::Open;
+                        let via = is_choice.then_some(node);
+                        stack.push(Frame {
+                            node: child,
+                            edges: edges(child),
+                            next: 0,
+                            via,
+                        });
+                    }
+                }
+            }
+        }
+        (order, None)
+    }
+
     /// Get the representative node for a choice class
     ///
     /// Given any node in a choice class, returns the representative node.

@@ -1,34 +1,37 @@
-//! Choice-Based Synthesis (DCHOICE) Pass
+//! Structural choices (ABC's `dch`).
 //!
-//! This pass builds an AIG with choice nodes - equivalent implementations
-//! of the same function that can be selected by the technology mapper.
+//! A cut-based mapper only sees the cuts of the one AIG structure it is
+//! given, so the depth it reaches depends on how the logic happens to be
+//! written. This pass gives it several structures of the same logic at once:
 //!
-//! # Algorithm
+//! 1. Copies of the AIG are optimized by different scripts (balancing for
+//!    depth, rewriting and refactoring for area).
+//! 2. The copies are added into the original AIG on its own inputs and
+//!    latches; structural hashing shares whatever they have in common.
+//! 3. FRAIG (simulation and SAT) proves which nodes compute the same
+//!    function. Instead of merging them, each proven node becomes a *choice*
+//!    of its class's first node, the representative.
+//! 4. Every reader of a class member reads the representative instead, so
+//!    the alternatives of one class are built on the classes below them and
+//!    the mapper can mix structures (ABC's choice AIG).
 //!
-//! 1. Run multiple synthesis flows (balance, rewrite, refactor, etc.)
-//! 2. Record equivalent nodes found during synthesis
-//! 3. Create choice links between equivalent implementations
-//! 4. Technology mapper can choose the best implementation
+//! The mapper then takes, at a node with choices, the cuts of every
+//! alternative as well (see `CutEnumeration::enumerate_with_choices`).
+//! A choice is dropped when using it would make the AIG cyclic: an
+//! alternative that reads its own representative, directly or through other
+//! choices, cannot replace it.
 //!
-//! # References
-//!
-//! - Mishchenko, A., Chatterjee, S., & Brayton, R. (2006).
-//!   DAG-aware AIG rewriting: a fresh look at combinational logic synthesis.
+//! Reference: Chatterjee, Mishchenko, Brayton, Wang, Kam, "Reducing
+//! structural bias in technology mapping", ICCAD 2005.
 
-use super::{Pass, PassResult};
+use super::{Balance, Fraig, FraigConfig, Pass, PassResult, Refactor, Rewrite};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use indexmap::IndexMap;
-use std::collections::HashSet;
-
-/// Maximum choices per node
-const MAX_CHOICES: usize = 4;
+use std::collections::HashMap;
 
 /// Choice-Based Synthesis Pass
 pub struct Dchoice {
     /// Number of choices recorded
     choices_recorded: usize,
-    /// Verbose logging
-    verbose: bool,
 }
 
 impl Default for Dchoice {
@@ -42,208 +45,74 @@ impl Dchoice {
     pub fn new() -> Self {
         Self {
             choices_recorded: 0,
-            verbose: false,
         }
     }
 
-    /// Create with verbose logging
-    pub fn verbose() -> Self {
-        Self {
-            choices_recorded: 0,
-            verbose: true,
-        }
+    /// Choices recorded by the last run
+    pub fn choices_recorded(&self) -> usize {
+        self.choices_recorded
     }
 
-    /// Run a synthesis flow and record choices
-    fn run_synthesis_flow(
-        &self,
-        aig: &mut Aig,
-        passes: &[&str],
-    ) -> IndexMap<AigNodeId, Vec<AigNodeId>> {
-        let mut choices: IndexMap<AigNodeId, Vec<AigNodeId>> = IndexMap::new();
+    /// The copies of `aig` whose structures become choices: one balanced
+    /// for depth, one rewritten and refactored for area, then balanced.
+    fn snapshots(aig: &Aig) -> Vec<Aig> {
+        let mut balanced = aig.clone();
+        Balance::new().run(&mut balanced);
 
-        // Record original nodes before synthesis
-        let original_nodes: Vec<AigNodeId> = aig
-            .iter_nodes()
-            .filter_map(|(id, node)| {
-                if matches!(node, AigNode::And { .. }) {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut restructured = aig.clone();
+        Rewrite::new().run(&mut restructured);
+        Refactor::new().run(&mut restructured);
+        Balance::new().run(&mut restructured);
+        Rewrite::new().run(&mut restructured);
 
-        // Run synthesis passes
-        for pass_name in passes {
-            match *pass_name {
-                "balance" => {
-                    let mut pass = super::Balance::new();
-                    pass.run(aig);
-                }
-                "rewrite" => {
-                    let mut pass = super::Rewrite::new();
-                    pass.run(aig);
-                }
-                "rewrite_z" => {
-                    let mut pass = super::Rewrite::zero_cost();
-                    pass.run(aig);
-                }
-                "refactor" => {
-                    let mut pass = super::Refactor::new();
-                    pass.run(aig);
-                }
-                "refactor_z" => {
-                    let mut pass = super::Refactor::zero_cost();
-                    pass.run(aig);
-                }
-                "strash" => {
-                    let mut pass = super::Strash::new();
-                    pass.run(aig);
-                }
-                "dce" => {
-                    let mut pass = super::Dce::new();
-                    pass.run(aig);
-                }
-                _ => {}
-            }
-        }
-
-        // Find equivalent nodes by comparing truth tables
-        let new_nodes: Vec<AigNodeId> = aig
-            .iter_nodes()
-            .filter_map(|(id, node)| {
-                if matches!(node, AigNode::And { .. }) {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Build equivalence map using truth tables
-        for &orig in &original_nodes {
-            let orig_leaves = self.collect_leaves(aig, orig, 6);
-            let orig_tt = self.compute_tt(aig, orig, &orig_leaves);
-
-            if let Some(ott) = orig_tt {
-                for &new_node in &new_nodes {
-                    if new_node == orig {
-                        continue;
-                    }
-
-                    let new_leaves = self.collect_leaves(aig, new_node, 6);
-
-                    // Only compare if leaves are the same
-                    if new_leaves != orig_leaves || new_leaves.len() > 6 {
-                        continue;
-                    }
-
-                    if let Some(ntt) = self.compute_tt(aig, new_node, &new_leaves) {
-                        let mask = if new_leaves.len() < 6 {
-                            (1u64 << (1 << new_leaves.len())) - 1
-                        } else {
-                            u64::MAX
-                        };
-
-                        if (ott & mask) == (ntt & mask) {
-                            choices.entry(orig).or_default().push(new_node);
-                        }
-                    }
-                }
-            }
-        }
-
-        choices
+        vec![balanced, restructured]
     }
 
-    /// Collect leaves for a node
-    fn collect_leaves(&self, aig: &Aig, node: AigNodeId, max: usize) -> Vec<AigNodeId> {
-        let mut leaves = Vec::new();
-        let mut visited = HashSet::new();
-        let mut stack = vec![node];
-
-        while let Some(n) = stack.pop() {
-            if visited.contains(&n) || leaves.len() >= max {
-                continue;
-            }
-            visited.insert(n);
-
-            match aig.get_node(n) {
-                Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
-                    leaves.push(n);
-                }
-                Some(AigNode::And { left, right, .. }) => {
-                    stack.push(left.node);
-                    stack.push(right.node);
-                }
-                _ => {}
-            }
-        }
-
-        leaves.sort();
-        leaves
-    }
-
-    /// Compute truth table
-    fn compute_tt(&self, aig: &Aig, node: AigNodeId, leaves: &[AigNodeId]) -> Option<u64> {
-        if leaves.len() > 6 {
-            return None;
-        }
-
-        let leaf_map: IndexMap<AigNodeId, usize> =
-            leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-
-        let num_rows = 1usize << leaves.len();
-        let mut tt = 0u64;
-
-        for row in 0..num_rows {
-            if self.evaluate(aig, node, row, &leaf_map) {
-                tt |= 1u64 << row;
-            }
-        }
-
-        Some(tt)
-    }
-
-    fn evaluate(
-        &self,
-        aig: &Aig,
-        node: AigNodeId,
-        assignment: usize,
-        leaf_map: &IndexMap<AigNodeId, usize>,
-    ) -> bool {
-        match aig.get_node(node) {
-            Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
-                if let Some(&idx) = leaf_map.get(&node) {
-                    (assignment >> idx) & 1 == 1
-                } else {
-                    false
+    /// Add the AND nodes of `snapshot` to `aig`, reading `aig`'s own inputs,
+    /// latches and barriers. Passes rebuild an AIG keeping its inputs in
+    /// order, and its latches and barriers in order, so the k-th of each
+    /// kind corresponds. Returns false (adding nothing) when the snapshot's
+    /// sources do not line up with `aig`'s.
+    fn import(aig: &mut Aig, snapshot: &Aig) -> bool {
+        let sources = |a: &Aig| {
+            let mut inputs = Vec::new();
+            let mut state = Vec::new();
+            for (id, node) in a.iter_nodes() {
+                match node {
+                    AigNode::Input { .. } => inputs.push(id),
+                    AigNode::Latch { .. } | AigNode::Barrier { .. } => state.push(id),
+                    _ => {}
                 }
             }
-            Some(AigNode::And { left, right, .. }) => {
-                let l = self.evaluate_lit(aig, *left, assignment, leaf_map);
-                let r = self.evaluate_lit(aig, *right, assignment, leaf_map);
-                l && r
+            (inputs, state)
+        };
+        let (own_inputs, own_state) = sources(aig);
+        let (snap_inputs, snap_state) = sources(snapshot);
+        if own_inputs.len() != snap_inputs.len() || own_state.len() != snap_state.len() {
+            return false;
+        }
+        let mut map: HashMap<AigNodeId, AigLit> = HashMap::new();
+        map.insert(AigNodeId::FALSE, AigLit::false_lit());
+        for (s, o) in snap_inputs
+            .iter()
+            .zip(&own_inputs)
+            .chain(snap_state.iter().zip(&own_state))
+        {
+            map.insert(*s, AigLit::new(*o));
+        }
+        for (id, node) in snapshot.iter_nodes() {
+            if let AigNode::And { left, right } = node {
+                let (Some(&l), Some(&r)) = (map.get(&left.node), map.get(&right.node)) else {
+                    // An AND reading a later node: not a rebuilt AIG
+                    return false;
+                };
+                let l = if left.inverted { l.invert() } else { l };
+                let r = if right.inverted { r.invert() } else { r };
+                let lit = aig.add_and(l, r);
+                map.insert(id, lit);
             }
-            Some(AigNode::Const) => false,
-            _ => false,
         }
-    }
-
-    fn evaluate_lit(
-        &self,
-        aig: &Aig,
-        lit: AigLit,
-        assignment: usize,
-        leaf_map: &IndexMap<AigNodeId, usize>,
-    ) -> bool {
-        let val = self.evaluate(aig, lit.node, assignment, leaf_map);
-        if lit.inverted {
-            !val
-        } else {
-            val
-        }
+        true
     }
 }
 
@@ -255,58 +124,30 @@ impl Pass for Dchoice {
     fn run(&mut self, aig: &mut Aig) -> PassResult {
         let mut result = PassResult::new(self.name());
         result.record_before(aig);
-
         self.choices_recorded = 0;
 
-        // Run multiple synthesis flows to find choices
-        let flows = [
-            // Flow 1: Balance-focused
-            vec!["balance", "rewrite", "balance"],
-            // Flow 2: Rewrite-focused
-            vec!["rewrite", "rewrite_z", "balance"],
-            // Flow 3: Refactor-focused
-            vec!["refactor", "balance", "rewrite"],
-        ];
-
-        let mut all_choices: IndexMap<AigNodeId, Vec<AigNodeId>> = IndexMap::new();
-
-        // Run each flow and collect choices
-        for flow in &flows {
-            // We need a fresh copy for each flow, but since we're modifying in place,
-            // we'll just run the passes. In a full implementation, we'd maintain
-            // separate AIGs and merge.
-            let choices = self.run_synthesis_flow(aig, flow);
-
-            for (node, equiv_nodes) in choices {
-                let entry = all_choices.entry(node).or_default();
-                for equiv in equiv_nodes {
-                    if !entry.contains(&equiv) && entry.len() < MAX_CHOICES {
-                        entry.push(equiv);
-                        self.choices_recorded += 1;
-                    }
-                }
+        // Choices recorded by an earlier run refer to nodes of this AIG and
+        // stay valid; the new ones are added to them.
+        for snapshot in Self::snapshots(aig) {
+            if !Self::import(aig, &snapshot) {
+                tracing::debug!("[DCH] a snapshot's inputs do not line up; skipped");
             }
         }
 
-        // Record choices in the AIG
-        // Note: Full implementation would use aig.add_choice() if available
-        // For now, we just track the equivalences
-        for (node, equiv_nodes) in &all_choices {
-            if !equiv_nodes.is_empty() {
-                // Record the choice relationship
-                // The technology mapper can use this information
-                for &equiv in equiv_nodes {
-                    aig.add_choice(*node, AigLit::new(equiv));
-                }
-            }
-        }
-
-        // Final cleanup
-        let mut dce = super::Dce::new();
-        dce.run(aig);
+        let mut fraig = Fraig::with_config(FraigConfig {
+            record_choices: true,
+            max_sat_calls: 200_000,
+            ..FraigConfig::default()
+        });
+        fraig.run(aig);
+        let redirected = aig.redirect_to_representatives();
+        let dropped = aig.prune_cyclic_choices();
+        self.choices_recorded = aig.total_choice_count();
 
         result.record_after(aig);
         result.add_extra("choices_recorded", &self.choices_recorded.to_string());
+        result.add_extra("fanins_redirected", &redirected.to_string());
+        result.add_extra("cyclic_choices_dropped", &dropped.to_string());
         result
     }
 }
@@ -321,53 +162,44 @@ mod tests {
         assert_eq!(pass.name(), "dchoice");
     }
 
+    /// A chain `((((a & b) & c) & d) & ...)` balances to a tree: the chain's
+    /// last node gets the tree as a choice, and every choice is acyclic.
+    /// `Balance` rebuilds AND cones rooted at nodes read more than once, so
+    /// the chain is read by two outputs.
     #[test]
-    fn test_dchoice_simple() {
+    fn test_chain_gets_its_balanced_tree_as_a_choice() {
         let mut aig = Aig::new("test".to_string());
-        let a = aig.add_input("a".to_string(), None);
-        let b = aig.add_input("b".to_string(), None);
-        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
-        aig.add_output("y".to_string(), ab);
+        let inputs: Vec<AigLit> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+            .iter()
+            .map(|n| AigLit::new(aig.add_input(n.to_string(), None)))
+            .collect();
+        let mut chain = inputs[0];
+        for &x in &inputs[1..] {
+            chain = aig.add_and(chain, x);
+        }
+        aig.add_output("y".to_string(), chain);
+        aig.add_output("z".to_string(), chain);
+        let nodes_before = aig.iter_nodes().count();
 
         let mut pass = Dchoice::new();
-        let result = pass.run(&mut aig);
+        pass.run(&mut aig);
 
-        // Should complete without error
-        assert!(result.ands_after >= 1);
+        assert!(aig.iter_nodes().count() > nodes_before, "snapshots added");
+        assert!(aig.has_choices(chain.node), "the output node has choices");
+        assert_eq!(aig.outputs()[0].1, chain, "outputs are unchanged");
+        assert_eq!(aig.prune_cyclic_choices(), 0);
     }
 
     #[test]
-    fn test_collect_leaves() {
-        let mut aig = Aig::new("test".to_string());
-        let a = aig.add_input("a".to_string(), None);
-        let b = aig.add_input("b".to_string(), None);
-        let c = aig.add_input("c".to_string(), None);
-
-        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
-        let abc = aig.add_and(ab, AigLit::new(c));
-        aig.add_output("y".to_string(), abc);
-
-        let dchoice = Dchoice::new();
-        let leaves = dchoice.collect_leaves(&aig, abc.node, 6);
-
-        // Should include a, b, c
-        assert_eq!(leaves.len(), 3);
-    }
-
-    #[test]
-    fn test_compute_tt() {
-        let mut aig = Aig::new("test".to_string());
-        let a = aig.add_input("a".to_string(), None);
-        let b = aig.add_input("b".to_string(), None);
-        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
-        aig.add_output("y".to_string(), ab);
-
-        let dchoice = Dchoice::new();
-        let leaves = dchoice.collect_leaves(&aig, ab.node, 6);
-        let tt = dchoice.compute_tt(&aig, ab.node, &leaves);
-
-        // AND truth table for 2 inputs: 1000 = 0x8
-        assert!(tt.is_some());
-        // The exact value depends on variable ordering
+    fn test_snapshot_with_other_inputs_is_not_imported() {
+        let mut aig = Aig::new("a".to_string());
+        let a = AigLit::new(aig.add_input("a".to_string(), None));
+        let b = AigLit::new(aig.add_input("b".to_string(), None));
+        let y = aig.add_and(a, b);
+        aig.add_output("y".to_string(), y);
+        let mut other = Aig::new("b".to_string());
+        let c = AigLit::new(other.add_input("c".to_string(), None));
+        other.add_output("y".to_string(), c);
+        assert!(!Dchoice::import(&mut aig, &other));
     }
 }
