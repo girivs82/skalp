@@ -84,6 +84,10 @@ fn test_imported_entity_signal_types_stay_in_their_module() {
     let top = mir.modules.iter().find(|m| m.name == TOP).unwrap();
     let cnt = top.signals.iter().find(|s| s.name == "cnt").unwrap().id;
 
+    // `cnt + 1` is lowered through the stdlib adder (`impl Add for bit<N>`),
+    // so `cnt` is read as the adder instance's `a` input; a primitive lowering
+    // reads it as the left operand of a Binary. Either way the read must carry
+    // cnt's own type.
     fn find_increment(stmts: &[Statement], cnt: skalp_mir::SignalId) -> Option<Type> {
         for stmt in stmts {
             match stmt {
@@ -103,10 +107,18 @@ fn test_imported_entity_signal_types_stay_in_their_module() {
         None
     }
 
-    let ty = top
-        .processes
-        .iter()
-        .find_map(|p| find_increment(&p.body.statements, cnt))
+    let adder_input = top.instances.iter().find_map(|inst| {
+        inst.connections.get("a").and_then(|expr| {
+            matches!(expr.kind, ExpressionKind::Ref(LValue::Signal(id)) if id == cnt)
+                .then(|| expr.ty.clone())
+        })
+    });
+    let ty = adder_input
+        .or_else(|| {
+            top.processes
+                .iter()
+                .find_map(|p| find_increment(&p.body.statements, cnt))
+        })
         .expect("cnt = cnt + 1 not found");
     assert!(
         matches!(ty, Type::Bit(Width::Fixed(8))),

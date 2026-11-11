@@ -420,3 +420,122 @@ fn test_instance_port_expressions_unoptimised_gate_build() {
         );
     }
 }
+
+// Operators routed through stdlib entities -------------------------------------
+//
+// `impl Sub for bit<N>` ends in `subtractor.sum`, naming its `inst subtractor`.
+// The instance name did not resolve inside the function body, so inlining
+// failed and the operator was lowered as a primitive while the instance it had
+// already created stayed behind, unconnected and unused.
+
+#[test]
+fn test_operators_use_their_stdlib_instance() {
+    // The stdlib's operator impls are preloaded from SKALP_STDLIB_PATH; set it
+    // on a child process only, since it changes compilation process-wide.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .env(
+            "SKALP_STDLIB_PATH",
+            format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR")),
+        )
+        .args([
+            "build",
+            "-s",
+            &fixture_path("operator_through_stdlib.sk"),
+            "--emit",
+            "mir",
+        ])
+        .output()
+        .expect("failed to run skalp");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mir: skalp_mir::Mir = serde_json::from_slice(&output.stdout).expect("MIR dump parses");
+    let top = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "OpThroughStdlib")
+        .unwrap();
+    assert_eq!(top.instances.len(), 2, "one adder per operator");
+    for inst in &top.instances {
+        let driven = top.assignments.iter().any(|a| {
+            matches!(&a.rhs.kind, skalp_mir::ExpressionKind::Ref(skalp_mir::LValue::Signal(id))
+                if top.signals.iter().any(|s| s.id == *id && s.name.starts_with(inst.name.as_str())))
+        });
+        assert!(driven, "output of {} is not used", inst.name);
+    }
+    for a in &top.assignments {
+        assert!(
+            !matches!(a.rhs.kind, skalp_mir::ExpressionKind::Binary { .. }),
+            "operator lowered inline as well: {:?}",
+            a.rhs.kind
+        );
+    }
+}
+
+async fn check_operators(mut tb: Testbench, what: &str) {
+    for (a, b) in [
+        (100u64, 50u64),
+        (0, 0),
+        (50, 100),
+        (255, 1),
+        (1, 255),
+        (128, 128),
+    ] {
+        tb.set("a", a).set("b", b);
+        tb.step().await;
+        assert_eq!(tb.get_u64("s").await, (a + b) & 0xFF, "{what}: {a}+{b}");
+        assert_eq!(
+            tb.get_u64("d").await,
+            a.wrapping_sub(b) & 0xFF,
+            "{what}: {a}-{b}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_operators_through_stdlib_behavioral() {
+    let tb = Testbench::new(&fixture_path("operator_through_stdlib.sk"))
+        .await
+        .unwrap();
+    check_operators(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_operators_through_stdlib_gate_level_nexus() {
+    let path = fixture_path("operator_through_stdlib.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "OpThroughStdlib", "nexus")
+        .await
+        .unwrap();
+    check_operators(tb, "nexus").await;
+}
+
+// `skalp synth --emit` ---------------------------------------------------------
+//
+// `--emit lir` looked the top up by module name in a hierarchy keyed by
+// instance path and always failed; every dump was also preceded by banner text
+// on stdout, so none of them parsed as JSON.
+
+#[test]
+fn test_synth_emit_dumps_are_plain_json() {
+    let source = fixture_path("instance_port_expression.sk");
+    for stage in ["hir", "mir", "lir"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+            .args(["synth", &source, "-d", "nexus-lfcpnx100", "--emit", stage])
+            .output()
+            .expect("failed to run skalp");
+        assert!(
+            output.status.success(),
+            "--emit {stage} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let dump: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("--emit {stage} is not JSON: {e}"));
+        if stage == "lir" {
+            assert_eq!(dump["top"]["module"], "PortExpr");
+            assert_eq!(dump["top.u"]["module"], "PassThrough");
+            assert!(dump["top"]["lir"]["nodes"].is_array());
+        }
+    }
+}

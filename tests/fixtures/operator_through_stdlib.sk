@@ -1,0 +1,13 @@
+// `+` and `-` on bit vectors route through the stdlib adder entity.
+
+entity OpThroughStdlib {
+    in a: bit[8]
+    in b: bit[8]
+    out s: bit[8]
+    out d: bit[8]
+}
+
+impl OpThroughStdlib {
+    s = a + b
+    d = a - b
+}

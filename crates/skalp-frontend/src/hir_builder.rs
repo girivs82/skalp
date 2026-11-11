@@ -3381,6 +3381,17 @@ impl HirBuilderContext {
             .insert(result_name.clone(), result_var_id);
         self.symbols
             .add_to_scope(&result_name, SymbolId::Variable(result_var_id));
+        // The instance's own name refers to the same binding, so a later
+        // `instance.port` in the body (e.g. the `subtractor.sum` that ends
+        // `impl Sub for bit<N>`) resolves to that instance's output. Without
+        // this the name fell through to an unknown generic parameter, the
+        // body had no result, and the operator was lowered inline while the
+        // already-created instance stayed behind as dead logic.
+        self.symbols
+            .variables
+            .insert(instance_name.clone(), result_var_id);
+        self.symbols
+            .add_to_scope(&instance_name, SymbolId::Variable(result_var_id));
 
         let inst_stmt = HirStatement::Let(HirLetStatement {
             is_placeholder: false,
