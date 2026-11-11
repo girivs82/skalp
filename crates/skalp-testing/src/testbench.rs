@@ -624,6 +624,9 @@ impl Testbench {
             );
             synth_result.netlist
         };
+        if !netlist.is_ncl {
+            refuse_floating_inputs(&netlist)?;
+        }
 
         // Convert to SIR
         let mut sir_result = convert_gate_netlist_to_sir(&netlist);
@@ -766,20 +769,22 @@ impl Testbench {
         library_name: &str,
         top_module_name: Option<&str>,
     ) -> Result<Self> {
-        use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
             get_stdlib_library, lower_mir_module_to_lir, synthesize, synthesize_hierarchical,
         };
 
         let path = Path::new(source_path);
 
-        // Parse HIR
-        let hir = parse_and_build_hir_from_file(path)?;
+        // Parse with the loaded modules (the preloaded standard library among
+        // them), as the behavioral testbench and the CLI do: a design that
+        // uses `fp32` arithmetic or `sqrt` without importing the fp module
+        // gets those impls from there.
+        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
 
         // Compile to MIR
         let compiler = MirCompiler::new();
         let mir = compiler
-            .compile_to_mir(&hir)
+            .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
         // Load technology library
@@ -832,6 +837,10 @@ impl Testbench {
             );
             synth_result.netlist
         };
+
+        if !(has_async || netlist.is_ncl) {
+            refuse_floating_inputs(&netlist)?;
+        }
 
         // Convert to SIR and load
         let mut sir_result = convert_gate_netlist_to_sir(&netlist);
@@ -2355,3 +2364,31 @@ fn bytes_to_u64(bytes: &[u8]) -> u64 {
     note = "Use Testbench::gate_level() or Testbench::ncl() instead"
 )]
 pub type GateLevelTestbench = Testbench;
+
+/// Refuse a synchronous gate netlist in which a net feeds cells but has no
+/// driver. Simulation gives such a net a fixed value while hardware reads it
+/// as either level, so a passing gate-level test would say nothing about the
+/// device. It always means a pass lost the driver (an instance input that
+/// stitched to a net that does not exist, for one), so fail loudly — the CLI
+/// build refuses the same netlist.
+fn refuse_floating_inputs(netlist: &skalp_lir::GateNetlist) -> Result<()> {
+    let undriven = netlist.undriven_nets_with_fanout();
+    if undriven.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = undriven
+        .iter()
+        .take(20)
+        .map(|id| netlist.nets[id.0 as usize].name.as_str())
+        .collect();
+    Err(anyhow::anyhow!(
+        "gate netlist has {} net(s) that feed cells but have no driver: {}{}",
+        undriven.len(),
+        names.join(", "),
+        if undriven.len() > names.len() {
+            ", ..."
+        } else {
+            ""
+        }
+    ))
+}

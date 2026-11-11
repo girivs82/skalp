@@ -153,6 +153,63 @@ impl MirCompiler {
             }
         }
 
+        // An instance of a generic module whose arguments never resolved: a
+        // trait body that names a constant the evaluator could not see
+        // (`FpSqrt<IEEE754_32>` from a design that never imported the fp
+        // module) fell back to the bare template, which has parameters and no
+        // body. The build succeeded and the instance's outputs floated.
+        {
+            use crate::mir::GenericParameterType;
+            let modules_by_id: std::collections::HashMap<_, _> =
+                mir.modules.iter().map(|m| (m.id, m)).collect();
+            let mut template_errors: Vec<String> = Vec::new();
+            for module in mir
+                .modules
+                .iter()
+                .filter(|m| reachable_names.contains(&m.name))
+            {
+                for instance in &module.instances {
+                    let Some(target) = modules_by_id.get(&instance.module) else {
+                        continue;
+                    };
+                    let unresolved: Vec<&str> = target
+                        .parameters
+                        .iter()
+                        .filter(|p| {
+                            matches!(
+                                p.param_type,
+                                GenericParameterType::Const(_)
+                                    | GenericParameterType::Width
+                                    | GenericParameterType::Type
+                            ) && p.default.is_none()
+                                && !instance.parameters.contains_key(&p.name)
+                        })
+                        .map(|p| p.name.as_str())
+                        .collect();
+                    if !unresolved.is_empty() {
+                        template_errors.push(format!(
+                            "in `{}`: instance `{}` of `{}` has no value for generic parameter(s) {} — its generic arguments could not be resolved, so it would be the unspecialized template",
+                            module.name,
+                            instance.name,
+                            target.name,
+                            unresolved
+                                .iter()
+                                .map(|n| format!("`{n}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+            if !template_errors.is_empty() {
+                return Err(format!(
+                    "MIR conversion failed with {} error(s):\n  {}",
+                    template_errors.len(),
+                    template_errors.join("\n  ")
+                ));
+            }
+        }
+
         // TRIAGE #11 + legacy-let removal (reachability-scoped): every
         // reachable instance must use `inst`, and every input port of the
         // instantiated entity must be connected — the docs promise
@@ -436,10 +493,39 @@ impl MirCompiler {
                 .iter()
                 .map(|m| (m.id, !m.parameters.is_empty()))
                 .collect();
+            // Entities preloaded from module HIRs (the stdlib) are library code,
+            // not the user's hardware: they are monomorphized wholesale whether
+            // or not anything uses them. Such a module is never a root; it is
+            // kept only when the user's hardware instantiates it. Without this
+            // every design built with a stdlib path emitted ~20 unused stdlib
+            // modules into its netlist.
+            let matches_entity = |name: &str, entity: &str| {
+                name == entity
+                    || (name.len() > entity.len()
+                        && name.starts_with(entity)
+                        && name.as_bytes()[entity.len()] == b'_')
+            };
+            let main_declared = |m: &crate::mir::Module| {
+                hir.main_entity_names
+                    .iter()
+                    .any(|n| n == &m.name || m.specialization_of.as_deref() == Some(n.as_str()))
+            };
+            let is_library: std::collections::HashMap<crate::mir::ModuleId, bool> = mir
+                .modules
+                .iter()
+                .map(|m| {
+                    let library = !main_declared(m)
+                        && external_entity_names.iter().any(|e| {
+                            matches_entity(&m.name, e)
+                                || m.specialization_of.as_deref() == Some(e.as_str())
+                        });
+                    (m.id, library)
+                })
+                .collect();
             let mut reachable: std::collections::HashSet<crate::mir::ModuleId> = mir
                 .modules
                 .iter()
-                .filter(|m| m.parameters.is_empty())
+                .filter(|m| m.parameters.is_empty() && !is_library[&m.id])
                 .map(|m| m.id)
                 .collect();
             let mut queue: std::collections::VecDeque<crate::mir::ModuleId> =
@@ -463,6 +549,13 @@ impl MirCompiler {
                 .collect();
             let first = mir.modules.first().map(|m| m.id);
             mir.modules.retain(|m| {
+                let library = is_library.get(&m.id).copied().unwrap_or(false);
+                if library {
+                    if !reachable.contains(&m.id) {
+                        trace!("dropping unused library module '{}'", m.name);
+                    }
+                    return reachable.contains(&m.id);
+                }
                 if !is_template.get(&m.id).copied().unwrap_or(false) {
                     return true;
                 }

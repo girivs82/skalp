@@ -464,6 +464,15 @@ fn test_operators_use_their_stdlib_instance() {
                 if top.signals.iter().any(|s| s.id == *id && s.name.starts_with(inst.name.as_str())))
         });
         assert!(driven, "output of {} is not used", inst.name);
+        // The impl body never binds `sum` in the instantiation (it reads
+        // `adder.sum` afterwards); the instance must still drive its signal,
+        // or the netlist leaves the port open.
+        assert!(
+            inst.connections.contains_key("sum"),
+            "instance {} leaves its `sum` output unconnected: {:?}",
+            inst.name,
+            inst.connections.keys().collect::<Vec<_>>()
+        );
     }
     for a in &top.assignments {
         assert!(
@@ -537,5 +546,569 @@ fn test_synth_emit_dumps_are_plain_json() {
             assert_eq!(dump["top.u"]["module"], "PassThrough");
             assert!(dump["top"]["lir"]["nodes"].is_array());
         }
+    }
+}
+
+// Bit-manipulation builtins on signals -------------------------------------------
+//
+// `clz(x)` and friends fold in the frontend when the argument is constant. On
+// a signal they reached the function inliner, found no definition, and the
+// whole initializer was dropped: `signal msb: nat = 15 - clz(v)` had no
+// driver (the floating-input check caught it inside the stdlib's FpDiv). A
+// signal initializer that cannot be lowered is now an error.
+
+fn builtin_expected(v: u64, w: u64) -> [u64; 7] {
+    let lz = if v == 0 {
+        12
+    } else {
+        (v as u16).leading_zeros() as u64 - 4
+    };
+    let tz = if v == 0 {
+        12
+    } else {
+        v.trailing_zeros() as u64
+    };
+    let norm = if v == 0 { 0 } else { (v << lz) & 0xFFF };
+    [
+        lz,
+        tz,
+        v.count_ones() as u64,
+        (v != 0 && v & (v - 1) == 0) as u64,
+        v.min(w),
+        v.max(w),
+        norm,
+    ]
+}
+
+async fn check_builtins(mut tb: Testbench, what: &str) {
+    let names = ["lz", "tz", "ones", "pow2", "lo", "hi", "norm"];
+    for (v, w) in [
+        (0u64, 5u64),
+        (1, 0),
+        (0x800, 0x7FF),
+        (0x400, 0x400),
+        (0x0F0, 0x100),
+        (0xFFF, 0x001),
+        (0x028, 0x3A5),
+        (0x001, 0xFFF),
+    ] {
+        tb.set("v", v).set("w", w);
+        tb.step().await;
+        for (name, expected) in names.iter().zip(builtin_expected(v, w)) {
+            assert_eq!(
+                tb.get_u64(name).await,
+                expected,
+                "{what}: {name} for v={v:#x} w={w:#x}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_runtime_builtins_behavioral() {
+    let tb = Testbench::new(&fixture_path("runtime_builtins.sk"))
+        .await
+        .unwrap();
+    check_builtins(tb, "behavioral").await;
+}
+
+/// With the standard library loaded, `11 - clz(v)` goes through `impl Sub`
+/// (`std_adder<32> { a, b: ~b, carry_in: 1 }`). The 4-bit `clz(v)` has to be
+/// widened to 32 bits before the `~`: inverted first, `11 - 11` came out 16
+/// in the behavioral simulator and `norm` read 0.
+#[tokio::test]
+async fn test_runtime_builtins_through_stdlib_operators() {
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR")),
+    );
+    let tb = Testbench::new(&fixture_path("runtime_builtins.sk"))
+        .await
+        .unwrap();
+    check_builtins(tb, "behavioral, stdlib operators").await;
+}
+
+#[tokio::test]
+async fn test_runtime_builtins_gate_level_nexus() {
+    let path = fixture_path("runtime_builtins.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "RuntimeBuiltins", "nexus")
+        .await
+        .unwrap();
+    check_builtins(tb, "nexus").await;
+}
+
+#[test]
+fn test_signal_initializer_that_cannot_lower_is_an_error() {
+    let source = r#"
+entity U {
+    in v: bit[8]
+    out y: bit[8]
+}
+impl U {
+    signal t: bit[8] = no_such_function(v)
+    y = t
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("skalp_init_err_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("u.sk");
+    std::fs::write(&path, source).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args(["build", "-s"])
+        .arg(&path)
+        .args(["--emit", "mir"])
+        .output()
+        .expect("failed to run skalp");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "build must fail");
+    assert!(
+        stderr.contains("initializer of signal `t` could not be lowered"),
+        "unexpected error: {stderr}"
+    );
+}
+
+// Floating-point trait methods called by name ------------------------------------
+//
+// `x.add(y)` in a signal initializer was parsed as the field access `x.add`
+// (call and argument dropped), and `sqrt(x)` went through the plain function
+// inliner, which reads the impl body's `let sqrt_op = FpSqrt<..> { .. }` as a
+// struct literal: dropped when inlined into an entity, and "unknown type
+// `FpSqrt`" once the caller had enough calls to be synthesized as a module.
+
+const FP_ONE_POINT_FIVE: u64 = 0x3FC0_0000;
+const FP_TWO_POINT_TWO_FIVE: u64 = 0x4010_0000;
+const FP_THREE_POINT_SEVEN_FIVE: u64 = 0x4070_0000;
+const FP_THREE_POINT_THREE_SEVEN_FIVE: u64 = 0x4058_0000;
+const FP_FOUR: u64 = 0x4080_0000;
+const FP_TWO: u64 = 0x4000_0000;
+const FP_FOUR_POINT_EIGHT_SEVEN_FIVE: u64 = 0x409C_0000;
+const FP_FOUR_POINT_FIVE: u64 = 0x4090_0000;
+const FP_TWO_THIRDS: u64 = 0x3F2A_AAAB;
+
+#[tokio::test]
+async fn test_fp_trait_methods_called_by_name() {
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR")),
+    );
+    let mut tb = Testbench::new(&fixture_path("fp_trait_method_calls.sk"))
+        .await
+        .unwrap();
+
+    // 1.5 + 2.25, 1.5 * 2.25 through `x.add(y)` / `x.mul(y)`.
+    tb.set("op", 0u64)
+        .set("a", FP_ONE_POINT_FIVE)
+        .set("b", FP_TWO_POINT_TWO_FIVE);
+    tb.step().await;
+    assert_eq!(
+        tb.get_u64("sum").await,
+        FP_THREE_POINT_SEVEN_FIVE,
+        "x.add(y)"
+    );
+    assert_eq!(
+        tb.get_u64("prod").await,
+        FP_THREE_POINT_THREE_SEVEN_FIVE,
+        "x.mul(y)"
+    );
+    assert_eq!(
+        tb.get_u64("unit").await,
+        FP_THREE_POINT_SEVEN_FIVE,
+        "exec add"
+    );
+
+    // The module-synthesized function, each arm.
+    for (op, expected, what) in [
+        (1u64, FP_THREE_POINT_THREE_SEVEN_FIVE, "exec mul"),
+        (2, FP_FOUR_POINT_EIGHT_SEVEN_FIVE, "exec mul-add"),
+        (4, FP_TWO_THIRDS, "exec divide"),
+        (5, FP_FOUR_POINT_FIVE, "exec b + b"),
+    ] {
+        tb.set("op", op);
+        tb.step().await;
+        assert_eq!(tb.get_u64("unit").await, expected, "{what}");
+    }
+
+    // sqrt(4.0) in an initializer and in the module-synthesized function.
+    tb.set("op", 3u64).set("a", FP_FOUR);
+    tb.step().await;
+    assert_eq!(tb.get_u64("root").await, FP_TWO, "sqrt(x) initializer");
+    assert_eq!(tb.get_u64("unit").await, FP_TWO, "exec sqrt");
+}
+
+/// Without `use skalp::numeric::fp::*`, the impl bodies' `FpAdd<IEEE754_32>`
+/// named a constant the evaluator could not see from the design, so the
+/// instance fell back to the bare generic `FpAdd` — a template with no body —
+/// and the outputs floated (`sqrt` also lost its intent default). Every FP
+/// instance must be a real specialization with logic in it.
+#[test]
+fn test_fp_ops_without_import_instantiate_specializations() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .env(
+            "SKALP_STDLIB_PATH",
+            format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR")),
+        )
+        .args([
+            "build",
+            "-s",
+            &fixture_path("fp_trait_method_calls.sk"),
+            "--emit",
+            "mir",
+        ])
+        .output()
+        .expect("failed to run skalp");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mir: skalp_mir::Mir = serde_json::from_slice(&output.stdout).expect("MIR dump parses");
+    let mut seen = 0;
+    for owner in ["FpMethodCalls", "func_exec"] {
+        let module = mir.modules.iter().find(|m| m.name == owner).unwrap();
+        for inst in &module.instances {
+            let target = mir.modules.iter().find(|m| m.id == inst.module).unwrap();
+            if target.name == "func_exec" {
+                continue;
+            }
+            seen += 1;
+            assert!(
+                target.name.ends_with("_fp32") && !target.signals.is_empty(),
+                "`{}` in `{owner}` instantiates `{}`, not a populated fp32 specialization",
+                inst.name,
+                target.name
+            );
+        }
+    }
+    assert!(seen >= 8, "expected the FP instances, saw {seen}");
+}
+
+// ============================================================================
+// Compiled behavioral sim with 65..128-bit values
+// ============================================================================
+//
+// 65..128-bit signals are `unsigned __int128` scalars in the compiled C++ sim
+// and wider ones are u32 limb arrays. Constants of that width were emitted as
+// invalid C++, a widening 96x96 multiply wrote an array into the scalar,
+// truncating an array to a scalar kept only its first limb, wide registers
+// had no local copy in the batched kernel, and unaligned 33..128-bit slices of
+// limb arrays dropped limbs.
+
+#[tokio::test]
+async fn test_compiled_sim_wide_arith_65_to_128_bits() {
+    let mut tb = Testbench::new(&fixture_path("wide_arith_128.sk"))
+        .await
+        .expect("wide_arith_128.sk should build in the compiled behavioral sim");
+    let mask48: u128 = (1 << 48) - 1;
+    let mask96: u128 = (1 << 96) - 1;
+    let bias: u128 = (1u128 << 64) | 3;
+    for (a, b) in [
+        (3u64, 5u64),
+        (0xFFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF),
+        (0x1234_5678_9ABC, 0xFEDC_BA98_7654),
+        (0x8000_0000_0001, 0x0000_0001_0000),
+    ] {
+        tb.set("a", a).set("b", b);
+        tb.clock(2).await;
+        let prod = (a as u128) * (b as u128);
+        let sum = (prod + bias) & mask96;
+        let diff = prod.wrapping_sub(bias) & mask96;
+        // wide = {prod, 64'h0123456789ABCDEF}; m = wide[119:48]; mid = m[71:24]
+        let wide_low = 0x0123_4567_89AB_CDEFu128;
+        let m = ((prod << 64 | wide_low) >> 48) & ((1u128 << 72) - 1);
+        let expect = [
+            ("prod_lo", prod & mask48),
+            ("prod_hi", prod >> 48),
+            ("sum_hi", sum >> 48),
+            ("diff_lo", diff & mask48),
+            ("mid", (m >> 24) & mask48),
+        ];
+        for (port, want) in expect {
+            let got = tb.get_u64(port).await;
+            assert_eq!(
+                got as u128, want,
+                "{port} for a={a:#x} b={b:#x}: got {got:#x}, want {want:#x}"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// SystemVerilog with the stdlib preloaded
+// ============================================================================
+//
+// With SKALP_STDLIB_PATH set, every stdlib entity is monomorphized whether or
+// not the design uses it, and all of them were emitted into design.sv. Inside
+// CordicSqrt the inlined FP operator methods' `result` locals were declared
+// next to the `result` output port, so Icarus rejected the file.
+
+fn build_sv_with_stdlib(fixture: &str) -> String {
+    let out = tempfile::tempdir().expect("temp dir");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .env(
+            "SKALP_STDLIB_PATH",
+            format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR")),
+        )
+        .args(["build", "-s", &fixture_path(fixture), "-o"])
+        .arg(out.path())
+        .output()
+        .expect("failed to run skalp");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(out.path().join("design.sv")).expect("design.sv written")
+}
+
+fn sv_module_names(sv: &str) -> Vec<String> {
+    sv.lines()
+        .filter_map(|l| l.strip_prefix("module "))
+        .map(|rest| {
+            rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Every name declared in a module (ports, nets, variables, instances) must
+/// be declared once: SystemVerilog has a single namespace per module.
+fn assert_unique_declarations(sv: &str) {
+    let mut module = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in sv.lines() {
+        if let Some(rest) = line.strip_prefix("module ") {
+            module = rest.split([' ', '(', '#']).next().unwrap_or("").to_string();
+            seen.clear();
+            continue;
+        }
+        let t = line.trim().trim_end_matches([';', ',']);
+        let decl = ["input ", "output ", "inout ", "wire ", "logic ", "reg "]
+            .iter()
+            .find_map(|k| t.strip_prefix(k));
+        let Some(decl) = decl else { continue };
+        let decl = decl.split('=').next().unwrap_or("").trim();
+        // The name is the last identifier before any unpacked dimension.
+        let mut decl = decl;
+        while decl.ends_with(']') {
+            decl = decl[..decl.rfind('[').unwrap_or(0)].trim_end();
+        }
+        let name = decl
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .rfind(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            seen.insert(name.clone()),
+            "`{name}` declared twice in module {module}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "`result` declared twice in module M")]
+fn test_unique_declaration_check_catches_a_repeat() {
+    assert_unique_declarations(
+        "module M (\n    input [31:0] value,\n    output [31:0] result\n);\n    logic [31:0] result;\nendmodule\n",
+    );
+}
+
+#[test]
+fn test_unused_stdlib_entities_stay_out_of_the_netlist() {
+    let sv = build_sv_with_stdlib("stdlib_unused.sk");
+    assert_eq!(sv_module_names(&sv), vec!["NoStdlib".to_string()], "{sv}");
+}
+
+#[test]
+fn test_stdlib_entity_netlist_has_only_its_dependencies_and_unique_names() {
+    let sv = build_sv_with_stdlib("stdlib_cordic_sqrt_user.sk");
+    let modules = sv_module_names(&sv);
+    for needed in ["SqrtUser", "CordicSqrt", "CordicHyperbolicIteration"] {
+        assert!(
+            modules.iter().any(|m| m == needed),
+            "{needed} missing: {modules:?}"
+        );
+    }
+    for unused in ["CordicRotate16", "CordicVector16", "CordicRotateIteration"] {
+        assert!(
+            !modules.iter().any(|m| m == unused),
+            "{unused} emitted: {modules:?}"
+        );
+    }
+    assert_unique_declarations(&sv);
+}
+
+// ============================================================================
+// Instance input bound to a `let` mux, at gate level
+// ============================================================================
+
+async fn check_let_mux_instance_input(mut tb: Testbench, what: &str) {
+    let mut s: u64 = 12345;
+    for i in 0..50 {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let a = (s >> 20) as u32;
+        let b = (s >> 40) as u32 ^ (s as u32);
+        let sel = (i % 3 == 0) as u8;
+        tb.set("a", a).set("b", b).set("sel", sel);
+        tb.clock(1).await;
+        let bb = if sel == 1 { 0x3F80_0000 } else { b };
+        let ma = (a as u64 & 0x7F_FFFF) | 0x80_0000;
+        let mb = (bb as u64 & 0x7F_FFFF) | 0x80_0000;
+        assert_eq!(
+            (tb.get_u64("p").await, tb.get_u64("q").await),
+            (ma * mb, ma ^ mb),
+            "{what}: a={a:#x} b={b:#x} sel={sel}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_let_mux_instance_input_behavioral() {
+    let tb = Testbench::with_top_module(
+        &fixture_path("let_mux_instance_input.sk"),
+        "LetMuxInstInput",
+    )
+    .await
+    .unwrap();
+    check_let_mux_instance_input(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_let_mux_instance_input_gate_level_nexus() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("let_mux_instance_input.sk"),
+        "LetMuxInstInput",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_let_mux_instance_input(tb, "nexus").await;
+}
+
+#[tokio::test]
+async fn test_let_mux_instance_input_gate_level_asic() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("let_mux_instance_input.sk"),
+        "LetMuxInstInput",
+        "generic_asic",
+    )
+    .await
+    .unwrap();
+    check_let_mux_instance_input(tb, "generic_asic").await;
+}
+
+// ============================================================================
+// Concatenation parts keep their declared width in the compiled sim
+// ============================================================================
+//
+// The C++ sim keeps an add/subtract's carry bit in the node's storage. A
+// concatenation sized its parts by that stored width, so a 32-bit difference
+// took 33 bits and pushed every later part up by one; with a borrow the extra
+// bit also landed in the next part.
+
+#[tokio::test]
+async fn test_concat_parts_keep_declared_width_in_compiled_sim() {
+    let mut tb = Testbench::new(&fixture_path("concat_carry_parts.sk"))
+        .await
+        .unwrap();
+    for (x, y) in [(10u32, 3u32), (3, 10), (0xFFFF_FFFF, 1), (0, 0xFFFF_FFFF)] {
+        tb.set("x", x).set("y", y);
+        tb.clock(1).await;
+        let sum = x.wrapping_add(y) as u64;
+        let diff = x.wrapping_sub(y) as u64;
+        assert_eq!(
+            tb.get_u64("lo").await,
+            (sum << 32) | diff,
+            "x={x:#x} y={y:#x}"
+        );
+        assert_eq!(tb.get_u64("hi").await, diff, "x={x:#x} y={y:#x}");
+        assert_eq!(
+            tb.get_u64("small").await,
+            (diff & 0xFFFF) << 16 | (sum & 0xFFFF),
+            "x={x:#x} y={y:#x}"
+        );
+    }
+}
+
+/// 160-bit value as three u64 words, least significant first (top word holds 32 bits).
+fn wide160(hi: u64, mid: u64, lo32: u32) -> [u64; 3] {
+    // {hi(64), mid(64), lo32(32)}: bits 0..32 lo32, 32..96 mid, 96..160 hi
+    [
+        (lo32 as u64) | (mid << 32),
+        (mid >> 32) | (hi << 32),
+        hi >> 32,
+    ]
+}
+
+fn wide160_bit(v: &[u64; 3], i: i64) -> u64 {
+    if !(0..160).contains(&i) {
+        0
+    } else {
+        (v[(i / 64) as usize] >> (i % 64)) & 1
+    }
+}
+
+/// Bits [low, low + 64) of `v` shifted by `shift` (positive = left), with
+/// `fill` for bits shifted in from above the top.
+fn wide160_window(v: &[u64; 3], low: i64, shift: i64, fill: u64) -> u64 {
+    (0..64).fold(0u64, |acc, j| {
+        let src = low + j - shift;
+        let bit = if src >= 160 {
+            fill
+        } else {
+            wide160_bit(v, src)
+        };
+        acc | (bit << j)
+    })
+}
+
+#[tokio::test]
+async fn test_compiled_sim_wide_shift_compare_bitwise() {
+    let mut tb = Testbench::new(&fixture_path("wide_shift_compare.sk"))
+        .await
+        .expect("wide_shift_compare.sk should build in the compiled behavioral sim");
+    for (a, b, k) in [
+        (0x0123_4567_89AB_CDEFu64, 0xFEDC_BA98_7654_3210u64, 0u8),
+        (0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 1),
+        (0x8000_0000_0000_0001, 0x0000_0000_FFFF_FFFF, 37),
+        (0xFFFF_0000_FFFF_0000, 0x1234_5678_9ABC_DEF0, 64),
+        (0x8123_4567_89AB_CDEF, 0x0F0F_0F0F_0F0F_0F0F, 100),
+        (0x0000_0000_0000_0005, 0x0000_0000_0000_0005, 200),
+    ] {
+        tb.set("a", a).set("b", b).set("k", k);
+        tb.clock(1).await;
+        let s = wide160(a, b, 0x89AB_CDEF);
+        let t = wide160(b, a, 0x0123_4567);
+        let k = k as i64;
+        let sign = s[2] >> 31 & 1;
+        let x = [s[0] ^ t[0], s[1] ^ t[1], s[2] ^ t[2]];
+        let s_lt_t = (s[2], s[1], s[0]) < (t[2], t[1], t[0]);
+        let what = format!("a={a:#x} b={b:#x} k={k}");
+        assert_eq!(
+            tb.get_u64("shl_mid").await,
+            wide160_window(&s, 48, k, 0),
+            "<< {what}"
+        );
+        assert_eq!(
+            tb.get_u64("shr_mid").await,
+            wide160_window(&s, 48, -k, 0),
+            ">> {what}"
+        );
+        assert_eq!(
+            tb.get_u64("sar_top").await,
+            wide160_window(&s, 96, -k, sign),
+            "sar {what}"
+        );
+        assert_eq!(
+            tb.get_u64("xor_mid").await,
+            wide160_window(&x, 48, 0, 0),
+            "^ {what}"
+        );
+        assert_eq!(tb.get_u64("lt").await, s_lt_t as u64, "< {what}");
+        assert_eq!(tb.get_u64("eq").await, (s == t) as u64, "== {what}");
     }
 }

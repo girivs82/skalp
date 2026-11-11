@@ -511,11 +511,67 @@ fn scan_statements_for_variable_widths(
 }
 
 /// Generate a single SystemVerilog module
+/// Give every MIR variable a name that is unique in the module's SystemVerilog
+/// scope. Variables come from `let` bindings and inlined function bodies, so
+/// their names freely repeat each other and the module's ports, signals and
+/// instances (an inlined FP method's `result` local inside an entity whose
+/// output port is `result`). SystemVerilog has one namespace per module, so a
+/// repeat is either a redeclaration error or, worse, a reference that silently
+/// resolves to the wrong net.
+///
+/// The one legitimate repeat is a variable that mirrors a same-named,
+/// same-typed signal with no initializer: function-module synthesis creates
+/// both for each `let`, and the variable is an alias of the signal.
+///
+/// Returns `None` when every name is already unique.
+fn with_unique_variable_names(module: &Module) -> Option<Module> {
+    let is_alias = |v: &skalp_mir::Variable| {
+        v.initial.is_none()
+            && module
+                .signals
+                .iter()
+                .any(|s| s.name == v.name && s.signal_type == v.var_type)
+    };
+    let mut taken: HashSet<String> = module
+        .ports
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(module.signals.iter().map(|s| s.name.clone()))
+        .chain(module.instances.iter().map(|i| i.name.clone()))
+        .collect();
+    let mut renames: Vec<(usize, String)> = Vec::new();
+    for (idx, variable) in module.variables.iter().enumerate() {
+        if is_alias(variable) {
+            continue;
+        }
+        if taken.insert(variable.name.clone()) {
+            continue;
+        }
+        let mut candidate = format!("{}_{}", variable.name, variable.id.0);
+        while !taken.insert(candidate.clone()) {
+            candidate.push('_');
+        }
+        renames.push((idx, candidate));
+    }
+    if renames.is_empty() {
+        return None;
+    }
+    let mut renamed = module.clone();
+    for (idx, name) in renames {
+        renamed.variables[idx].name = name;
+    }
+    Some(renamed)
+}
+
 fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     // Check if this is a vendor IP wrapper - generate special output
     if let Some(ref vendor_config) = mir_module.vendor_ip_config {
         return generate_vendor_ip_wrapper(mir_module, vendor_config);
     }
+
+    // From here on every non-alias variable name is unique in the module.
+    let uniquely_named = with_unique_variable_names(mir_module);
+    let mir_module = uniquely_named.as_ref().unwrap_or(mir_module);
 
     let mut sv = String::new();
 
@@ -789,10 +845,9 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
         sv.push('\n');
     }
 
-    // Generate internal variable declarations with collision detection
-    // Track which names have been declared to detect collisions
-    let mut declared_variable_names: HashMap<String, skalp_mir::VariableId> = HashMap::new();
-    let mut variable_unique_names: HashMap<skalp_mir::VariableId, String> = HashMap::new();
+    // Generate internal variable declarations. Names are already unique in
+    // the module (`with_unique_variable_names`).
+    let mut declared_any_variable = false;
 
     for variable in &mir_module.variables {
         // BUG FIX #8: Check if we have an inferred width override for this variable
@@ -822,30 +877,14 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                 .iter()
                 .any(|s| s.name == variable.name && s.signal_type == variable.var_type)
         {
-            variable_unique_names.insert(variable.id, variable.name.clone());
             continue;
         }
 
-        // Check if this variable name has already been declared, as a variable
-        // or as a signal of a different type
-        let unique_name = if declared_variable_names.contains_key(&variable.name)
-            || declared_signal_names.contains(&variable.name)
-        {
-            // Collision detected - use unique name with variable ID suffix
-            format!("{}_{}", variable.name, variable.id.0)
-        } else {
-            // First occurrence - use original name and track it
-            declared_variable_names.insert(variable.name.clone(), variable.id);
-            variable.name.clone()
-        };
-
-        // Store the unique name mapping for use in variable references
-        variable_unique_names.insert(variable.id, unique_name.clone());
-
         // Variables are always logic (combinational variables in processes)
+        declared_any_variable = true;
         sv.push_str(&format!(
             "    logic {}{}{}",
-            element_width, unique_name, array_dim
+            element_width, variable.name, array_dim
         ));
 
         // Add initial value if present
@@ -856,7 +895,7 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
         sv.push_str(";\n");
     }
 
-    if !declared_variable_names.is_empty() {
+    if declared_any_variable {
         sv.push('\n');
     }
 
@@ -1419,42 +1458,15 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
                 .unwrap_or_else(|| format!("signal_{}", id.0))
         }
         skalp_mir::LValue::Variable(id) => {
-            // Find the variable by ID
-            let variable = module.variables.iter().find(|v| v.id == *id);
-
-            if let Some(var) = variable {
-                // Check if this variable is the first one with this name
-                // The first occurrence keeps the original name, subsequent ones get suffixed
-                let first_with_name = module.variables.iter().find(|v| v.name == var.name);
-
-                if let Some(first_var) = first_with_name {
-                    if first_var.id == *id {
-                        // This is the first variable with this name - use original name
-                        var.name.clone()
-                    } else {
-                        // This is not the first - check if there are multiple with same name
-                        let same_name_count = module
-                            .variables
-                            .iter()
-                            .filter(|v| v.name == var.name)
-                            .count();
-
-                        if same_name_count > 1 {
-                            // Name collision exists - use unique name with ID suffix
-                            format!("{}_{}", var.name, id.0)
-                        } else {
-                            // No collision (shouldn't happen, but handle it)
-                            var.name.clone()
-                        }
-                    }
-                } else {
-                    // Shouldn't happen, but fallback to original name
-                    var.name.clone()
-                }
-            } else {
-                // Variable not found - use fallback
-                format!("var_{}", id.0)
-            }
+            // Variable names are unique in the module (see
+            // `with_unique_variable_names`), except aliases of a same-named
+            // signal, which must resolve to that signal's name anyway.
+            module
+                .variables
+                .iter()
+                .find(|v| v.id == *id)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("var_{}", id.0))
         }
         skalp_mir::LValue::Port(id) => {
             // Find the port name by ID
@@ -1643,9 +1655,13 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
             // to a shift and mask must keep its width: `(x >> 7) & 1'b1` is as wide as x,
             // which matters inside a concatenation or replication.
             let inner = format_expression_with_context(expr, module);
+            // A literal cast to a width is a sized literal (`(W)'b0`); left
+            // unsized it is a 32-bit integer, which is illegal inside a
+            // concatenation and the wrong width anywhere else.
             match (&expr.kind, target_type) {
                 (
-                    skalp_mir::ExpressionKind::Binary { .. },
+                    skalp_mir::ExpressionKind::Binary { .. }
+                    | skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(_)),
                     DataType::Bit(w) | DataType::Logic(w),
                 ) if *w > 0 => format!("{}'({})", w, inner),
                 _ => inner,
@@ -1756,9 +1772,13 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             // to a shift and mask must keep its width: `(x >> 7) & 1'b1` is as wide as x,
             // which matters inside a concatenation or replication.
             let inner = format_expression(expr);
+            // A literal cast to a width is a sized literal (`(W)'b0`); left
+            // unsized it is a 32-bit integer, which is illegal inside a
+            // concatenation and the wrong width anywhere else.
             match (&expr.kind, target_type) {
                 (
-                    skalp_mir::ExpressionKind::Binary { .. },
+                    skalp_mir::ExpressionKind::Binary { .. }
+                    | skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(_)),
                     DataType::Bit(w) | DataType::Logic(w),
                 ) if *w > 0 => format!("{}'({})", w, inner),
                 _ => inner,

@@ -1,0 +1,14 @@
+// Uses one stdlib entity (CordicSqrt) so that its dependencies, and nothing
+// else from the stdlib, belong in the netlist. CordicSqrt's output port is
+// `result`, the same name the inlined FP operator methods use for their locals.
+use skalp::numeric::cordic::CordicSqrt;
+
+entity SqrtUser {
+    in v: fp32
+    out r: fp32
+}
+
+impl SqrtUser {
+    inst s = CordicSqrt { value: v }
+    r = s.result
+}

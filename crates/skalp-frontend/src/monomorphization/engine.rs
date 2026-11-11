@@ -1994,8 +1994,63 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 })
             }
 
+            // A cast's target width may name a parameter: `(WIDTH)'b0` is
+            // `Cast(0, bit<WIDTH>)`. Without these arms the cast fell to the
+            // catch-all, so the specialized module kept an unresolved
+            // `bit<WIDTH>` and the sized zero lost its width.
+            HirExpression::Cast(cast) => HirExpression::Cast(crate::hir::HirCastExpr {
+                expr: Box::new(self.substitute_expr(&cast.expr, const_args)),
+                target_type: self.substitute_width_type(&cast.target_type, const_args),
+            }),
+            HirExpression::Unary(unary) => HirExpression::Unary(crate::hir::HirUnaryExpr {
+                op: unary.op.clone(),
+                operand: Box::new(self.substitute_expr(&unary.operand, const_args)),
+            }),
+            HirExpression::Call(call) => {
+                let mut new_call = call.clone();
+                new_call.args = call
+                    .args
+                    .iter()
+                    .map(|a| self.substitute_expr(a, const_args))
+                    .collect();
+                HirExpression::Call(new_call)
+            }
+
             // Other expressions pass through
             _ => expr.clone(),
+        }
+    }
+
+    /// Resolve a width-expression type (`bit<W * 2>`, `nat<N>`, ...) whose
+    /// expression names const parameters, given just the const arguments.
+    fn substitute_width_type(
+        &self,
+        ty: &HirType,
+        const_args: &IndexMap<String, ConstValue>,
+    ) -> HirType {
+        let expr = match ty {
+            HirType::BitExpr(e)
+            | HirType::LogicExpr(e)
+            | HirType::IntExpr(e)
+            | HirType::NatExpr(e) => e,
+            _ => return ty.clone(),
+        };
+        let subst_expr = self.substitute_expr(expr, const_args);
+        let mut eval = self.create_evaluator_with_constants();
+        eval.bind_all(const_args.clone());
+        match eval.eval(&subst_expr).ok().and_then(|v| v.as_nat()) {
+            Some(width) => match ty {
+                HirType::BitExpr(_) => HirType::Bit(width as u32),
+                HirType::LogicExpr(_) => HirType::Logic(width as u32),
+                HirType::IntExpr(_) => HirType::Int(width as u32),
+                _ => HirType::Nat(width as u32),
+            },
+            None => match ty {
+                HirType::BitExpr(_) => HirType::BitExpr(Box::new(subst_expr)),
+                HirType::LogicExpr(_) => HirType::LogicExpr(Box::new(subst_expr)),
+                HirType::IntExpr(_) => HirType::IntExpr(Box::new(subst_expr)),
+                _ => HirType::NatExpr(Box::new(subst_expr)),
+            },
         }
     }
 

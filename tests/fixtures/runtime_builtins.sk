@@ -1,0 +1,24 @@
+// Bit-manipulation builtins applied to signals.
+
+entity RuntimeBuiltins {
+    in v: bit[12]
+    in w: bit[12]
+    out lz: bit[4]
+    out tz: bit[4]
+    out ones: bit[4]
+    out pow2: bit
+    out lo: bit[12]
+    out hi: bit[12]
+    out norm: bit[12]
+}
+
+impl RuntimeBuiltins {
+    signal msb: nat = 11 - clz(v)
+    lz = clz(v)
+    tz = ctz(v)
+    ones = popcount(v)
+    pow2 = is_power_of_2(v)
+    lo = min(v, w)
+    hi = max(v, w)
+    norm = v << (11 - msb)
+}

@@ -27,6 +27,10 @@ pub struct SharedCodegen<'a> {
     /// Pre-computed signal widths (including intermediate node outputs)
     /// This is the authoritative source for all signal widths - never guess or default to 32
     signal_width_cache: HashMap<String, usize>,
+    /// Widths the SIR declares for its signals. A node's computed width can be
+    /// wider (an add keeps its carry bit until assigned); a concatenation must
+    /// place each part at its declared width, or every later part shifts.
+    declared_signal_widths: HashMap<String, usize>,
     /// Field names collected during struct generation (sanitized, in order)
     /// Used to emit offsetof() tables in the export section.
     pub input_field_names: Vec<String>,
@@ -45,6 +49,7 @@ impl<'a> SharedCodegen<'a> {
             concat_recursion_depth: 0,
             in_batched_mode: false,
             signal_width_cache: HashMap::new(),
+            declared_signal_widths: HashMap::new(),
             input_field_names: Vec::new(),
             register_field_names: Vec::new(),
             signal_field_names: Vec::new(),
@@ -59,6 +64,8 @@ impl<'a> SharedCodegen<'a> {
         // 1. Add widths from declared signals
         for signal in &self.module.signals {
             self.signal_width_cache
+                .insert(signal.name.clone(), signal.width);
+            self.declared_signal_widths
                 .insert(signal.name.clone(), signal.width);
         }
 
@@ -196,8 +203,9 @@ impl<'a> SharedCodegen<'a> {
                 .inputs
                 .iter()
                 .map(|input| {
-                    self.signal_width_cache
+                    self.declared_signal_widths
                         .get(&input.signal_id)
+                        .or_else(|| self.signal_width_cache.get(&input.signal_id))
                         .copied()
                         .unwrap_or_else(|| {
                             self.type_mapper
@@ -1044,6 +1052,62 @@ impl<'a> SharedCodegen<'a> {
         // Determine operator string
         let op_str = self.get_binary_op_str(op, left_width, right_width);
 
+        // C++: multiplies wider than 64 bits, and add/subtract wider than the
+        // native 128-bit scalar, work limb by limb. The element-wise fallback
+        // below multiplies limb i by limb i (no cross products, no carries) and
+        // indexes 65..128-bit operands, which are `unsigned __int128` scalars,
+        // as arrays — the generated C++ did not compile.
+        if !matches!(self.type_mapper.target, BackendTarget::Metal) {
+            let max_input_width = std::cmp::max(left_width, right_width);
+            if matches!(op, BinaryOperation::Mul) && (output_width > 64 || max_input_width > 64) {
+                self.generate_cpp_limb_multiply(node, left_width, right_width, output_width);
+                return;
+            }
+            let wide = output_width > 128 || max_input_width > 128;
+            if wide
+                && matches!(
+                    op,
+                    BinaryOperation::Shl | BinaryOperation::Shr | BinaryOperation::Sar
+                )
+            {
+                self.generate_cpp_limb_shift(node, op, left_width, right_width, output_width);
+                return;
+            }
+            if wide
+                && matches!(
+                    op,
+                    BinaryOperation::Eq
+                        | BinaryOperation::Neq
+                        | BinaryOperation::Lt
+                        | BinaryOperation::Lte
+                        | BinaryOperation::Gt
+                        | BinaryOperation::Gte
+                )
+            {
+                self.generate_cpp_limb_compare(node, op, left_width, right_width);
+                return;
+            }
+            if wide
+                && matches!(
+                    op,
+                    BinaryOperation::And | BinaryOperation::Or | BinaryOperation::Xor
+                )
+            {
+                self.generate_cpp_limb_bitwise(node, op_str, left_width, right_width, output_width);
+                return;
+            }
+            if matches!(op, BinaryOperation::Add | BinaryOperation::Sub) && output_width > 128 {
+                self.generate_cpp_limb_add_sub(
+                    node,
+                    matches!(op, BinaryOperation::Sub),
+                    left_width,
+                    right_width,
+                    output_width,
+                );
+                return;
+            }
+        }
+
         // Check for wide bit operations that need element-wise handling
         if output_width > 128 {
             self.generate_wide_binary_op(node, op, op_str);
@@ -1778,6 +1842,470 @@ impl<'a> SharedCodegen<'a> {
         self.write_indented("}\n");
     }
 
+    /// C++: 32-bit limb `i` of a signal, whatever its storage (u32/u64 or
+    /// `unsigned __int128` scalar up to 128 bits, `uint32_t[N]` beyond).
+    /// Expression for bits `[low, low + width)` of a 32-bit limb array
+    /// (`array_len` limbs), in the storage type for `width`: C++ `uint32_t`,
+    /// `uint64_t` or `unsigned __int128`, or a Metal `uint`/`uint2`/`uint4`.
+    /// Limbs past the end of the array read as zero.
+    fn cpp_array_bits_to_scalar(
+        &self,
+        base: &str,
+        array_len: usize,
+        low: usize,
+        width: usize,
+    ) -> String {
+        let (scalar_type, _) = self.type_mapper.get_type_for_width(width);
+        if self.type_mapper.target == BackendTarget::Metal && width > 32 {
+            // Metal stores 33..128 bits as uint2/uint4 vectors: build one
+            // 32-bit component at a time.
+            let components = width.div_ceil(32);
+            let lanes = if components <= 2 { 2 } else { 4 };
+            let parts: Vec<String> = (0..lanes)
+                .map(|i| {
+                    if i < components {
+                        let lane_width = (width - 32 * i).min(32);
+                        self.cpp_array_bits_to_scalar(base, array_len, low + 32 * i, lane_width)
+                    } else {
+                        "0u".to_string()
+                    }
+                })
+                .collect();
+            return format!("{}({})", scalar_type, parts.join(", "));
+        }
+        let type_bits = if width <= 32 {
+            32
+        } else if width <= 64 {
+            64
+        } else {
+            128
+        };
+        let first = low / 32;
+        let last = ((low + width.max(1) - 1) / 32).min(array_len.saturating_sub(1));
+        let parts: Vec<String> = (first..=last)
+            .filter(|&k| k < array_len)
+            .map(|k| {
+                let limb_pos = 32 * k;
+                if limb_pos < low {
+                    format!("(({}){}[{}] >> {})", scalar_type, base, k, low - limb_pos)
+                } else if limb_pos == low {
+                    format!("(({}){}[{}])", scalar_type, base, k)
+                } else {
+                    format!("(({}){}[{}] << {})", scalar_type, base, k, limb_pos - low)
+                }
+            })
+            .collect();
+        let value = if parts.is_empty() {
+            "0".to_string()
+        } else {
+            parts.join(" | ")
+        };
+        if width >= type_bits {
+            format!("({})({})", scalar_type, value)
+        } else {
+            format!(
+                "(({})({}) & ((({})1 << {}) - 1))",
+                scalar_type, value, scalar_type, width
+            )
+        }
+    }
+
+    fn cpp_limb_read(&self, name: &str, width: usize, i: usize) -> String {
+        if 32 * i >= width.max(1) {
+            return "0u".to_string();
+        }
+        if self.uses_array_storage(width) {
+            format!("signals->{}[{}]", name, i)
+        } else if i == 0 {
+            format!("(uint32_t)signals->{}", name)
+        } else {
+            format!("(uint32_t)(signals->{} >> {})", name, 32 * i)
+        }
+    }
+
+    /// C++: store the 32-bit limbs in the local array `limbs` into a signal of
+    /// `width` bits, masking the top limb.
+    fn cpp_limbs_write(&mut self, name: &str, width: usize, limbs: &str) {
+        let count = width.div_ceil(32).max(1);
+        let top_bits = width - 32 * (count - 1);
+        let top_mask = if top_bits >= 32 {
+            String::new()
+        } else {
+            format!(" & 0x{:X}u", (1u64 << top_bits) - 1)
+        };
+        if self.uses_array_storage(width) {
+            for i in 0..count {
+                let mask = if i + 1 == count {
+                    top_mask.as_str()
+                } else {
+                    ""
+                };
+                self.write_indented(&format!(
+                    "signals->{}[{}] = {}[{}]{};\n",
+                    name, i, limbs, i, mask
+                ));
+            }
+        } else {
+            let (base_type, _) = self.type_mapper.get_type_for_width(width);
+            let parts: Vec<String> = (0..count)
+                .map(|i| {
+                    let mask = if i + 1 == count {
+                        top_mask.as_str()
+                    } else {
+                        ""
+                    };
+                    if i == 0 {
+                        format!("(({})({}[0]{}))", base_type, limbs, mask)
+                    } else {
+                        format!("(({})({}[{}]{}) << {})", base_type, limbs, i, mask, 32 * i)
+                    }
+                })
+                .collect();
+            self.write_indented(&format!("signals->{} = {};\n", name, parts.join(" | ")));
+        }
+    }
+
+    /// C++: schoolbook multiply on 32-bit limbs, keeping the low
+    /// `output_width` bits of the product.
+    fn generate_cpp_limb_multiply(
+        &mut self,
+        node: &SirNode,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = self.sanitize_name(&node.inputs[0].signal_id);
+        let right = self.sanitize_name(&node.inputs[1].signal_id);
+        let output = self.sanitize_name(&node.outputs[0].signal_id);
+        let out_limbs = output_width.div_ceil(32).max(1);
+        let left_limbs = left_width.div_ceil(32).max(1).min(out_limbs);
+        let right_limbs = right_width.div_ceil(32).max(1).min(out_limbs);
+
+        self.write_indented(&format!(
+            "// Multiply {}x{} -> {} on 32-bit limbs\n",
+            left_width, right_width, output_width
+        ));
+        self.write_indented("{\n");
+        self.indent();
+        let a: Vec<String> = (0..left_limbs)
+            .map(|i| self.cpp_limb_read(&left, left_width, i))
+            .collect();
+        let b: Vec<String> = (0..right_limbs)
+            .map(|i| self.cpp_limb_read(&right, right_width, i))
+            .collect();
+        self.write_indented(&format!(
+            "const uint32_t _a[{}] = {{{}}};\n",
+            left_limbs,
+            a.join(", ")
+        ));
+        self.write_indented(&format!(
+            "const uint32_t _b[{}] = {{{}}};\n",
+            right_limbs,
+            b.join(", ")
+        ));
+        self.write_indented(&format!("uint32_t _p[{}] = {{0}};\n", out_limbs));
+        self.write_indented(&format!(
+            "for (uint32_t i = 0; i < {}; i++) {{\n",
+            left_limbs
+        ));
+        self.indent();
+        self.write_indented("uint64_t _carry = 0;\n");
+        self.write_indented(&format!(
+            "for (uint32_t j = 0; j < {} && i + j < {}; j++) {{\n",
+            right_limbs, out_limbs
+        ));
+        self.indent();
+        self.write_indented("uint64_t _t = (uint64_t)_a[i] * _b[j] + _p[i + j] + _carry;\n");
+        self.write_indented("_p[i + j] = (uint32_t)_t;\n");
+        self.write_indented("_carry = _t >> 32;\n");
+        self.dedent();
+        self.write_indented("}\n");
+        self.write_indented(&format!(
+            "for (uint32_t k = i + {}; _carry != 0 && k < {}; k++) {{\n",
+            right_limbs, out_limbs
+        ));
+        self.indent();
+        self.write_indented("uint64_t _t = (uint64_t)_p[k] + _carry;\n");
+        self.write_indented("_p[k] = (uint32_t)_t;\n");
+        self.write_indented("_carry = _t >> 32;\n");
+        self.dedent();
+        self.write_indented("}\n");
+        self.dedent();
+        self.write_indented("}\n");
+        self.cpp_limbs_write(&output, output_width, "_p");
+        self.dedent();
+        self.write_indented("}\n");
+    }
+
+    /// C++: add or subtract on 32-bit limbs with carry/borrow, for widths
+    /// beyond the native 128-bit scalar.
+    /// C++ expression for a shift amount: the low 64 bits of `name`,
+    /// saturated to `u64::MAX` when any higher bit is set.
+    fn cpp_shift_amount(&self, name: &str, width: usize) -> String {
+        let limbs = width.div_ceil(32).max(1);
+        let low = if limbs == 1 {
+            format!("(uint64_t){}", self.cpp_limb_read(name, width, 0))
+        } else {
+            format!(
+                "((uint64_t){} | ((uint64_t){} << 32))",
+                self.cpp_limb_read(name, width, 0),
+                self.cpp_limb_read(name, width, 1)
+            )
+        };
+        if limbs <= 2 {
+            return low;
+        }
+        let high: Vec<String> = (2..limbs)
+            .map(|i| self.cpp_limb_read(name, width, i))
+            .collect();
+        format!("(({}) != 0 ? ~(uint64_t)0 : {})", high.join(" | "), low)
+    }
+
+    /// Shift (`<<`, `>>`, arithmetic `>>`) on 32-bit limbs, for operands or
+    /// results wider than the 128-bit native scalar. The element-wise fallback
+    /// shifted each limb on its own, so bits never crossed a limb boundary.
+    fn generate_cpp_limb_shift(
+        &mut self,
+        node: &SirNode,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = self.sanitize_name(&node.inputs[0].signal_id);
+        let right = self.sanitize_name(&node.inputs[1].signal_id);
+        let output = self.sanitize_name(&node.outputs[0].signal_id);
+        let in_limbs = left_width.div_ceil(32).max(1);
+        let out_limbs = output_width.div_ceil(32).max(1);
+        let amount = self.cpp_shift_amount(&right, right_width);
+
+        self.write_indented(&format!(
+            "// {:?} {}-bit -> {}-bit on 32-bit limbs\n",
+            op, left_width, output_width
+        ));
+        self.write_indented("{\n");
+        self.indent();
+        let a: Vec<String> = (0..in_limbs)
+            .map(|i| self.cpp_limb_read(&left, left_width, i))
+            .collect();
+        self.write_indented(&format!(
+            "uint32_t _a[{}] = {{{}}};\n",
+            in_limbs,
+            a.join(", ")
+        ));
+        // Limbs beyond the operand: zero, or the sign for an arithmetic shift.
+        let fill = if matches!(op, BinaryOperation::Sar) {
+            let top_bits = left_width - 32 * (in_limbs - 1);
+            let sign_bit = top_bits - 1;
+            if top_bits < 32 {
+                // Sign-extend the top limb inside its own 32 bits first.
+                self.write_indented(&format!(
+                    "if ((_a[{top}] >> {sign_bit}) & 1u) _a[{top}] |= 0x{mask:X}u;\n",
+                    top = in_limbs - 1,
+                    sign_bit = sign_bit,
+                    mask = !((1u64 << top_bits) - 1) & 0xFFFF_FFFF
+                ));
+            }
+            self.write_indented(&format!(
+                "const uint32_t _fill = ((_a[{}] >> 31) & 1u) ? 0xFFFFFFFFu : 0u;\n",
+                in_limbs - 1
+            ));
+            "_fill"
+        } else {
+            "0u"
+        };
+        self.write_indented(&format!("const uint64_t _sh = {};\n", amount));
+        self.write_indented(&format!("uint32_t _r[{}];\n", out_limbs));
+        // Source limb k of the operand, with out-of-range limbs reading as fill.
+        let src = |k: &str| -> String {
+            format!(
+                "((int64_t)({k}) >= 0 && (int64_t)({k}) < {in_limbs} ? _a[(int64_t)({k})] : {fill})"
+            )
+        };
+        // A shift past every limb leaves only fill: clamp the limb offset so
+        // the arithmetic below cannot overflow.
+        let limit_limbs = (in_limbs + out_limbs + 1) as u64;
+        self.write_indented(&format!(
+            "const bool _all = _sh >= {}ull;\n",
+            limit_limbs * 32
+        ));
+        self.write_indented(&format!(
+            "const int64_t _w = _all ? {} : (int64_t)(_sh / 32);\n",
+            limit_limbs
+        ));
+        self.write_indented("const uint32_t _b = _all ? 0u : (uint32_t)(_sh % 32);\n");
+        self.write_indented(&format!("for (int64_t i = 0; i < {}; i++) {{\n", out_limbs));
+        self.indent();
+        if matches!(op, BinaryOperation::Shl) {
+            // result limb i takes source limb i - w, plus the bits carried up
+            // from limb i - w - 1.
+            self.write_indented(&format!("const uint32_t _hi = {};\n", src("i - _w")));
+            self.write_indented(&format!("const uint32_t _lo = {};\n", src("i - _w - 1")));
+            self.write_indented(
+                "_r[i] = _b == 0 ? _hi : (uint32_t)((_hi << _b) | (_lo >> (32 - _b)));\n",
+            );
+        } else {
+            self.write_indented(&format!("const uint32_t _lo = {};\n", src("i + _w")));
+            self.write_indented(&format!("const uint32_t _hi = {};\n", src("i + _w + 1")));
+            self.write_indented(
+                "_r[i] = _b == 0 ? _lo : (uint32_t)((_lo >> _b) | (_hi << (32 - _b)));\n",
+            );
+        }
+        self.dedent();
+        self.write_indented("}\n");
+        self.cpp_limbs_write(&output, output_width, "_r");
+        self.dedent();
+        self.write_indented("}\n");
+    }
+
+    /// Unsigned comparison on 32-bit limbs, most significant limb first.
+    fn generate_cpp_limb_compare(
+        &mut self,
+        node: &SirNode,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+    ) {
+        let left = self.sanitize_name(&node.inputs[0].signal_id);
+        let right = self.sanitize_name(&node.inputs[1].signal_id);
+        let output = self.sanitize_name(&node.outputs[0].signal_id);
+        let limbs = left_width.max(right_width).div_ceil(32).max(1);
+        self.write_indented(&format!("// {:?} on {} 32-bit limbs\n", op, limbs));
+        self.write_indented("{\n");
+        self.indent();
+        let a: Vec<String> = (0..limbs)
+            .map(|i| self.cpp_limb_read(&left, left_width, i))
+            .collect();
+        let b: Vec<String> = (0..limbs)
+            .map(|i| self.cpp_limb_read(&right, right_width, i))
+            .collect();
+        self.write_indented(&format!(
+            "const uint32_t _a[{}] = {{{}}};\n",
+            limbs,
+            a.join(", ")
+        ));
+        self.write_indented(&format!(
+            "const uint32_t _b[{}] = {{{}}};\n",
+            limbs,
+            b.join(", ")
+        ));
+        // _cmp: -1, 0 or 1 for a <, ==, > b.
+        self.write_indented("int _cmp = 0;\n");
+        self.write_indented(&format!(
+            "for (int i = {}; i >= 0 && _cmp == 0; i--) _cmp = _a[i] < _b[i] ? -1 : (_a[i] > _b[i] ? 1 : 0);\n",
+            limbs - 1
+        ));
+        let cond = match op {
+            BinaryOperation::Eq => "_cmp == 0",
+            BinaryOperation::Neq => "_cmp != 0",
+            BinaryOperation::Lt => "_cmp < 0",
+            BinaryOperation::Lte => "_cmp <= 0",
+            BinaryOperation::Gt => "_cmp > 0",
+            _ => "_cmp >= 0",
+        };
+        self.write_indented(&format!("signals->{} = ({}) ? 1u : 0u;\n", output, cond));
+        self.dedent();
+        self.write_indented("}\n");
+    }
+
+    /// Bitwise and/or/xor on 32-bit limbs. Unlike the element-wise fallback,
+    /// either operand may be a scalar (up to `unsigned __int128`) or narrower
+    /// than the result.
+    fn generate_cpp_limb_bitwise(
+        &mut self,
+        node: &SirNode,
+        op_str: &str,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = self.sanitize_name(&node.inputs[0].signal_id);
+        let right = self.sanitize_name(&node.inputs[1].signal_id);
+        let output = self.sanitize_name(&node.outputs[0].signal_id);
+        let limbs = output_width.div_ceil(32).max(1);
+        let parts: Vec<String> = (0..limbs)
+            .map(|i| {
+                format!(
+                    "({} {} {})",
+                    self.cpp_limb_read(&left, left_width, i),
+                    op_str,
+                    self.cpp_limb_read(&right, right_width, i)
+                )
+            })
+            .collect();
+        self.write_indented("{\n");
+        self.indent();
+        self.write_indented(&format!(
+            "const uint32_t _r[{}] = {{{}}};\n",
+            limbs,
+            parts.join(", ")
+        ));
+        self.cpp_limbs_write(&output, output_width, "_r");
+        self.dedent();
+        self.write_indented("}\n");
+    }
+
+    fn generate_cpp_limb_add_sub(
+        &mut self,
+        node: &SirNode,
+        subtract: bool,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = self.sanitize_name(&node.inputs[0].signal_id);
+        let right = self.sanitize_name(&node.inputs[1].signal_id);
+        let output = self.sanitize_name(&node.outputs[0].signal_id);
+        let limbs = output_width.div_ceil(32).max(1);
+
+        self.write_indented(&format!(
+            "// {} {}-bit on 32-bit limbs\n",
+            if subtract { "Subtract" } else { "Add" },
+            output_width
+        ));
+        self.write_indented("{\n");
+        self.indent();
+        let a: Vec<String> = (0..limbs)
+            .map(|i| self.cpp_limb_read(&left, left_width, i))
+            .collect();
+        let b: Vec<String> = (0..limbs)
+            .map(|i| self.cpp_limb_read(&right, right_width, i))
+            .collect();
+        self.write_indented(&format!(
+            "const uint32_t _a[{}] = {{{}}};\n",
+            limbs,
+            a.join(", ")
+        ));
+        self.write_indented(&format!(
+            "const uint32_t _b[{}] = {{{}}};\n",
+            limbs,
+            b.join(", ")
+        ));
+        self.write_indented(&format!("uint32_t _r[{}];\n", limbs));
+        // a - b = a + ~b + 1
+        self.write_indented(&format!(
+            "uint64_t _carry = {};\n",
+            if subtract { 1 } else { 0 }
+        ));
+        self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", limbs));
+        self.indent();
+        self.write_indented(&format!(
+            "uint64_t _t = (uint64_t)_a[i] + (uint64_t)({}) + _carry;\n",
+            if subtract {
+                "(uint32_t)~_b[i]"
+            } else {
+                "_b[i]"
+            }
+        ));
+        self.write_indented("_r[i] = (uint32_t)_t;\n");
+        self.write_indented("_carry = _t >> 32;\n");
+        self.dedent();
+        self.write_indented("}\n");
+        self.cpp_limbs_write(&output, output_width, "_r");
+        self.dedent();
+        self.write_indented("}\n");
+    }
+
     /// Generate widening multiplication where output is wider than inputs
     /// This handles cases like 32*32->64, 64*64->128, etc.
     fn generate_widening_multiply(
@@ -1901,6 +2429,17 @@ impl<'a> SharedCodegen<'a> {
                     "signals->{} = uint4((uint)_result_lo, (uint)(_result_lo >> 32), (uint)_result_hi, (uint)(_result_hi >> 32));\n",
                     output_sanitized
                 ));
+            } else if !is_metal && !self.uses_array_storage(output_width) {
+                // C++: 65-128 bits are an unsigned __int128 scalar
+                let mask = if output_width >= 128 {
+                    String::new()
+                } else {
+                    format!(" & (((unsigned __int128)1 << {}) - 1)", output_width)
+                };
+                self.write_indented(&format!(
+                    "signals->{} = (((unsigned __int128)_result_hi << 64) | (unsigned __int128)_result_lo){};\n",
+                    output_sanitized, mask
+                ));
             } else {
                 // C++: output is uint32_t[N] array - only write elements that exist
                 self.write_indented(&format!(
@@ -1949,6 +2488,9 @@ impl<'a> SharedCodegen<'a> {
         } else if width <= 64 {
             // C++: uint64_t scalar
             format!("signals->{}", name)
+        } else if !self.uses_array_storage(width) {
+            // C++: 65-128 bits are an unsigned __int128 scalar - low 64 bits
+            format!("(uint64_t)signals->{}", name)
         } else {
             // C++: uint32_t array - take first 64 bits
             format!(
@@ -1968,8 +2510,8 @@ impl<'a> SharedCodegen<'a> {
                 format!("signals->{}.x", name),
                 format!("signals->{}.y", name),
             )
-        } else if width <= 64 {
-            // C++: uint64_t scalar
+        } else if width <= 64 || !self.uses_array_storage(width) {
+            // C++: uint64_t, or (65-128 bits) unsigned __int128, scalar
             (
                 format!("(uint32_t)signals->{}", name),
                 format!("(uint32_t)(signals->{} >> 32)", name),
@@ -2012,8 +2554,11 @@ impl<'a> SharedCodegen<'a> {
         } else if left_width <= 64 {
             // C++: 33-64 bits stored as uint64_t scalar
             format!("signals->{}", self.sanitize_name(left))
+        } else if !self.uses_array_storage(left_width) {
+            // C++: 65-128 bits stored as unsigned __int128 - low 64 bits
+            format!("(uint64_t)signals->{}", self.sanitize_name(left))
         } else {
-            // C++: > 64 bits stored as uint32_t[N] array
+            // C++: > 128 bits stored as uint32_t[N] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(left),
@@ -2033,8 +2578,11 @@ impl<'a> SharedCodegen<'a> {
         } else if right_width <= 64 {
             // C++: 33-64 bits stored as uint64_t scalar
             format!("signals->{}", self.sanitize_name(right))
+        } else if !self.uses_array_storage(right_width) {
+            // C++: 65-128 bits stored as unsigned __int128 - low 64 bits
+            format!("(uint64_t)signals->{}", self.sanitize_name(right))
         } else {
-            // C++: > 64 bits stored as uint32_t[N] array
+            // C++: > 128 bits stored as uint32_t[N] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(right),
@@ -2059,8 +2607,17 @@ impl<'a> SharedCodegen<'a> {
                 op_str,
                 right_expr
             ));
+        } else if !self.uses_array_storage(output_width) {
+            // C++: 65-128 bits stored as unsigned __int128
+            self.write_indented(&format!(
+                "signals->{} = (unsigned __int128)({} {} {});\n",
+                self.sanitize_name(output),
+                left_expr,
+                op_str,
+                right_expr
+            ));
         } else {
-            // C++: > 64 bits stored as uint32_t[N] array
+            // C++: > 128 bits stored as uint32_t[N] array
             self.write_indented(&format!(
                 "{{ uint64_t _tmp = {} {} {}; signals->{}[0] = (uint32_t)_tmp; signals->{}[1] = (uint32_t)(_tmp >> 32); }}\n",
                 left_expr, op_str, right_expr,
@@ -2236,8 +2793,10 @@ impl<'a> SharedCodegen<'a> {
                 ));
             }
         } else {
+            // `(T)(v)`, not `T(v)`: a functional cast needs a one-word type,
+            // and the 65..128-bit type is `unsigned __int128`.
             self.write_indented(&format!(
-                "signals->{} = {}({});\n",
+                "signals->{} = ({})({});\n",
                 self.sanitize_name(output),
                 base_type,
                 value
@@ -2547,25 +3106,19 @@ impl<'a> SharedCodegen<'a> {
                         second_mask,
                         bits_from_first
                     ));
-                    } else if width <= 64 {
-                        // 33-64 bit slice from array - combine two elements
-                        self.write_indented(&format!(
-                            "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
-                            self.sanitize_name(output),
-                            input_base,
-                            element_idx,
-                            bit_in_element,
-                            input_base,
-                            element_idx + 1,
-                            32 - bit_in_element
-                        ));
                     } else {
-                        // Wide slice to scalar (shouldn't happen often)
+                        // 33-128 bit slice from a limb array: gather every limb
+                        // the slice touches into the scalar output.
+                        let expr = self.cpp_array_bits_to_scalar(
+                            &input_base,
+                            self.get_array_size(input_width),
+                            low,
+                            width,
+                        );
                         self.write_indented(&format!(
-                            "signals->{} = {}[{}];\n",
+                            "signals->{} = {};\n",
                             self.sanitize_name(output),
-                            input_base,
-                            element_idx
+                            expr
                         ));
                     }
                 } // end !is_element_array
@@ -2658,6 +3211,26 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Generate concatenation operation
+    /// One part of a C++ scalar concatenation, cast to the result's storage
+    /// type. A part whose stored value can be wider than its declared width
+    /// (an add or subtract keeps its carry/borrow bit) is masked to that
+    /// width, so the extra bit cannot spill into the next part.
+    fn cpp_concat_part(&self, input_name: &str, width: usize, cast: &str) -> String {
+        let name = self.sanitize_name(input_name);
+        let cast_bits = match cast {
+            "uint32_t" => 32,
+            "uint64_t" => 64,
+            _ => 128,
+        };
+        // At `width == cast_bits` the cast itself truncates (and a shift by
+        // the full width would be undefined).
+        if self.get_signal_width(input_name) > width && width < cast_bits {
+            format!("((({cast})signals->{name}) & ((({cast})1 << {width}) - 1))")
+        } else {
+            format!("({cast})signals->{name}")
+        }
+    }
+
     pub fn generate_concat(&mut self, node: &SirNode) {
         self.concat_recursion_depth += 1;
         if self.concat_recursion_depth > 100 {
@@ -2672,15 +3245,81 @@ impl<'a> SharedCodegen<'a> {
         let output = &node.outputs[0].signal_id;
         let output_width = self.get_signal_width(output);
 
-        // Collect input widths
+        // Collect input widths: each part occupies its declared width
         let mut input_widths = Vec::new();
         for input in &node.inputs {
-            let width = self.get_signal_width(&input.signal_id);
+            let width = self
+                .declared_signal_widths
+                .get(&input.signal_id)
+                .copied()
+                .unwrap_or_else(|| self.get_signal_width(&input.signal_id));
             input_widths.push((input.signal_id.clone(), width));
         }
 
-        if output_width > 128 {
-            // Wide concat - use array
+        if output_width > 128 && self.type_mapper.target == BackendTarget::Cpp {
+            // Wide C++ concat into a u32 limb array. Every input (uint32_t,
+            // uint64_t, unsigned __int128 or limb array) is read 32 bits at a
+            // time and OR-ed in at its bit offset, which may be unaligned.
+            let out = self.sanitize_name(output);
+            let array_size = output_width.div_ceil(32);
+            self.write_indented(&format!(
+                "// Concat: {} inputs -> {}-bit output\n",
+                node.inputs.len(),
+                output_width
+            ));
+            for i in 0..array_size {
+                self.write_indented(&format!("signals->{}[{}] = 0;\n", out, i));
+            }
+            let mut bit_offset = 0;
+            for (input_name, width) in input_widths.iter().rev() {
+                let input = self.sanitize_name(input_name);
+                let limbs = width.div_ceil(32);
+                for j in 0..limbs {
+                    let dest_bit = bit_offset + 32 * j;
+                    if dest_bit >= output_width {
+                        break;
+                    }
+                    let limb_bits = (width - 32 * j).min(32);
+                    let mut limb = self.cpp_limb_read(&input, *width, j);
+                    if limb_bits < 32 {
+                        limb = format!("({} & 0x{:X}u)", limb, (1u64 << limb_bits) - 1);
+                    }
+                    let elem = dest_bit / 32;
+                    let shift = dest_bit % 32;
+                    if shift == 0 {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] |= (uint32_t){};\n",
+                            out, elem, limb
+                        ));
+                    } else {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] |= (uint32_t)((uint32_t){} << {});\n",
+                            out, elem, limb, shift
+                        ));
+                        if shift + limb_bits > 32 && elem + 1 < array_size {
+                            self.write_indented(&format!(
+                                "signals->{}[{}] |= (uint32_t)((uint32_t){} >> {});\n",
+                                out,
+                                elem + 1,
+                                limb,
+                                32 - shift
+                            ));
+                        }
+                    }
+                }
+                bit_offset += width;
+            }
+            let top_bits = output_width - 32 * (array_size - 1);
+            if top_bits < 32 {
+                self.write_indented(&format!(
+                    "signals->{}[{}] &= 0x{:X}u;\n",
+                    out,
+                    array_size - 1,
+                    (1u64 << top_bits) - 1
+                ));
+            }
+        } else if output_width > 128 {
+            // Wide Metal concat - use array
             let array_size = output_width.div_ceil(32);
             self.write_indented(&format!(
                 "// Concat: {} inputs -> {}-bit output\n",
@@ -2792,10 +3431,7 @@ impl<'a> SharedCodegen<'a> {
                     if shift >= output_width {
                         break;
                     }
-                    let input_ref = format!(
-                        "(unsigned __int128)signals->{}",
-                        self.sanitize_name(input_name)
-                    );
+                    let input_ref = self.cpp_concat_part(input_name, *width, "unsigned __int128");
                     if !concat_expr.is_empty() {
                         concat_expr.push_str(" | ");
                     }
@@ -2878,8 +3514,7 @@ impl<'a> SharedCodegen<'a> {
                         break;
                     }
 
-                    let input_ref =
-                        format!("(uint64_t)signals->{}", self.sanitize_name(input_name));
+                    let input_ref = self.cpp_concat_part(input_name, *width, "uint64_t");
 
                     if !concat_expr.is_empty() {
                         concat_expr.push_str(" | ");
@@ -2973,7 +3608,11 @@ impl<'a> SharedCodegen<'a> {
                     break;
                 }
 
-                let input_ref = format!("signals->{}", self.sanitize_name(input_name));
+                let input_ref = if self.type_mapper.target == BackendTarget::Cpp {
+                    self.cpp_concat_part(input_name, *width, "uint32_t")
+                } else {
+                    format!("signals->{}", self.sanitize_name(input_name))
+                };
 
                 if !concat_expr.is_empty() {
                     concat_expr.push_str(" | ");
@@ -3136,11 +3775,18 @@ impl<'a> SharedCodegen<'a> {
                 ));
             }
         } else if source_uses_array {
-            // Source is array but output is scalar - copy first element
+            // Source is a limb array but output is scalar: keep the low
+            // `output_width` bits (truncation), gathering as many limbs as needed.
+            let expr = self.cpp_array_bits_to_scalar(
+                &source_location,
+                self.get_array_size(source_width),
+                0,
+                output_width,
+            );
             self.write_indented(&format!(
-                "signals->{} = {}[0];\n",
+                "signals->{} = {};\n",
                 self.sanitize_name(output),
-                source_location
+                expr
             ));
         } else if output_is_array_source && !source_uses_array {
             // Output is forced to be array (ArrayRead source) but source is scalar
@@ -3775,7 +4421,14 @@ impl<'a> SharedCodegen<'a> {
             }
         } else {
             // Scalar type
-            let target = if self.in_batched_mode && output_width <= 64 {
+            // Batched mode keeps a local copy of every scalar-stored register
+            // (see `get_register_accessor`), whatever its width.
+            let scalar_storage = self
+                .type_mapper
+                .get_type_for_width(output_width)
+                .1
+                .is_none();
+            let target = if self.in_batched_mode && scalar_storage {
                 format!("local_{}", sanitized_output)
             } else {
                 format!("{}->{}", next_reg, sanitized_output)

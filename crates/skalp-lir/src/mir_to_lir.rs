@@ -326,6 +326,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.tie_off_unwritten_memory_ports();
         self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
@@ -408,6 +409,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.tie_off_unwritten_memory_ports();
         self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
@@ -553,6 +555,7 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
         self.mark_async_memory_reads(module);
+        self.tie_off_unwritten_memory_ports();
         self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
@@ -683,6 +686,35 @@ impl MirToLirTransform {
                 signal.name
             );
             self.lir.mark_as_detection(signal_id);
+        }
+    }
+
+    /// Drive the write port of a memory nothing writes (a ROM declared without
+    /// `rom`) with constant zero: write enable low, address and data zero.
+    /// Left undriven, those nets float into the block RAM cell, which the
+    /// device reads as either level and the simulator as a fixed one.
+    fn tie_off_unwritten_memory_ports(&mut self) {
+        let mut memories: Vec<MemoryInfo> = self
+            .memory_signals
+            .values()
+            .filter(|m| !m.read_only)
+            .cloned()
+            .collect();
+        memories.sort_by_key(|m| m.node_id.0);
+        for mem in memories {
+            for (signal, width, what) in [
+                (mem.we_signal, 1, "mem_we_tie"),
+                (mem.waddr_signal, mem.addr_width, "mem_waddr_tie"),
+                (mem.wdata_signal, mem.element_width, "mem_wdata_tie"),
+            ] {
+                if self.lir.signals[signal.0 as usize].driver.is_some() {
+                    continue;
+                }
+                let zero = self.create_constant_value(0, width);
+                let path = self.unique_node_path(what);
+                self.lir
+                    .add_node(LirOp::Buf { width }, vec![zero], signal, path);
+            }
         }
     }
 
@@ -7888,6 +7920,21 @@ fn extract_connection_info(
     // This handles cases where the parent_module is monomorphized but the lvalue IDs
     // reference the original generic module
     let lvalue_to_name_with_fallback = |lvalue: &LValue| -> String {
+        // A variable (`let` binding) is the LIR net `_v_<name>` (see
+        // `create_variable_signal`), and every read of the variable resolves
+        // to that net. Naming the connection after the bare variable named a
+        // net that does not exist, the stitch found nothing to merge, and the
+        // instance input was left floating.
+        if let LValue::Variable(var_id) = lvalue {
+            if let Some(variable) = parent_module
+                .variables
+                .iter()
+                .chain(fallback_module.iter().flat_map(|m| m.variables.iter()))
+                .find(|v| v.id == *var_id)
+            {
+                return format!("_v_{}", variable.name);
+            }
+        }
         let name = lvalue_to_name_with_module(lvalue, parent_module);
         // If we got a fallback name like "port_X" or "signal_X", try the fallback module
         if let Some(fb_module) =
