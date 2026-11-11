@@ -3,6 +3,7 @@
 //! This module converts the high-level HIR representation
 //! to the mid-level MIR suitable for code generation
 
+use crate::memory_ports;
 use crate::mir::*;
 use crate::signal_naming::FIELD_SEPARATOR;
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
@@ -12,6 +13,7 @@ use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, DetectionConfig, Hir};
 use skalp_frontend::span::SourceSpan;
 use skalp_frontend::types::Width;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::trace;
 
@@ -760,6 +762,18 @@ impl<'hir> HirToMir<'hir> {
             // Set current entity for generic parameter resolution
             self.current_entity_id = Some(entity.id);
 
+            // Arrays a clocked block can write at two entries in one cycle
+            let entity_concurrently_written = {
+                let blocks: Vec<&hir::HirEventBlock> = hir
+                    .implementations
+                    .iter()
+                    .filter(|imp| imp.entity == entity.id)
+                    .flat_map(|imp| imp.event_blocks.iter())
+                    .collect();
+                let arrays: HashSet<hir::SignalId> = entity.signals.iter().map(|s| s.id).collect();
+                memory_ports::arrays_written_concurrently(&blocks, &arrays)
+            };
+
             // Convert entity body signals - flatten structs/vectors into individual signals
             for hir_signal in &entity.signals {
                 let signal_type = self.convert_type(&hir_signal.signal_type);
@@ -804,6 +818,12 @@ impl<'hir> HirToMir<'hir> {
                     hir_signal.memory_config.clone().or(auto_memory_config);
                 let init_from_literal =
                     self.attach_memory_init(hir_signal, &signal_type, &mut effective_memory_config);
+                let is_memory = is_memory
+                    && self.settle_memory_write_port(
+                        hir_signal,
+                        &mut effective_memory_config,
+                        &entity_concurrently_written,
+                    );
 
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
@@ -1353,6 +1373,23 @@ impl<'hir> HirToMir<'hir> {
                     // assignments, after the instances, with the impl's own.
                     let mut deferred_initializers: Vec<hir::HirAssignment> = Vec::new();
 
+                    // Arrays a clocked block can write at two entries in one
+                    // cycle: a memory's single write port cannot take them
+                    let concurrently_written = {
+                        let blocks: Vec<&hir::HirEventBlock> = impl_block
+                            .event_blocks
+                            .iter()
+                            .chain(gen_event_blocks.iter())
+                            .collect();
+                        let arrays: HashSet<hir::SignalId> = impl_block
+                            .signals
+                            .iter()
+                            .chain(gen_signals.iter())
+                            .map(|s| s.id)
+                            .collect();
+                        memory_ports::arrays_written_concurrently(&blocks, &arrays)
+                    };
+
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
                         let pre_id = self.next_signal_id;
@@ -1400,6 +1437,12 @@ impl<'hir> HirToMir<'hir> {
                             &signal_type,
                             &mut effective_memory_config,
                         );
+                        let is_memory = is_memory
+                            && self.settle_memory_write_port(
+                                hir_signal,
+                                &mut effective_memory_config,
+                                &concurrently_written,
+                            );
 
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
@@ -2529,6 +2572,9 @@ impl<'hir> HirToMir<'hir> {
     fn convert_statement(&mut self, stmt: &hir::HirStatement) -> Option<Statement> {
         match stmt {
             hir::HirStatement::Assignment(assign) => {
+                if let Some(statement) = self.try_expand_array_index_write_statement(assign) {
+                    return Some(statement);
+                }
                 let assigns = self.convert_assignment_expanded(assign);
                 match assigns.len() {
                     // An assignment that lowers to NOTHING is a lost
@@ -4510,20 +4556,13 @@ impl<'hir> HirToMir<'hir> {
         None // Field path not found in flattened signals
     }
 
-    /// Try to expand an array index assignment into multiple conditional assignments
-    ///
-    /// This handles assignments like: `mem[index] <= data` where `mem` is a flattened array
-    ///
-    /// For each flattened element, generates:
-    /// ```text
-    /// mem_N_field <= (index == N) ? data_field : mem_N_field
-    /// ```
+    /// Split an assignment to an element of a flattened array,
+    /// `mem[index] = data`, into the writes to each element it can reach:
+    /// unguarded when the index is a constant, otherwise guarded by
+    /// `index == N` for each element N.
     ///
     /// This is the ROOT CAUSE FIX for Bug #8: Properly expanding array assignments at HIR→MIR level
-    fn try_expand_array_index_assignment(
-        &mut self,
-        assign: &hir::HirAssignment,
-    ) -> Option<Vec<Assignment>> {
+    fn array_index_writes(&mut self, assign: &hir::HirAssignment) -> Option<ArrayIndexWrites> {
         // Get assignment kind
         let kind = match assign.assignment_type {
             hir::HirAssignmentType::NonBlocking => AssignmentKind::NonBlocking,
@@ -4606,7 +4645,10 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Generate assignments for each flattened element
-        let mut assignments = Vec::new();
+        let mut writes = ArrayIndexWrites {
+            direct: Vec::new(),
+            guarded: Vec::new(),
+        };
 
         // A compile-time index names exactly ONE element, so it should be
         // written directly. Every unrolled `generate for` produces this shape.
@@ -4636,7 +4678,7 @@ impl<'hir> HirToMir<'hir> {
                         LValue::Port(PortId(field_info.id))
                     };
                     let rhs_for_field = self.adapt_rhs_for_array_element(&mir_rhs, field_info);
-                    assignments.push(Assignment {
+                    writes.direct.push(Assignment {
                         lhs: lhs_lval,
                         rhs: rhs_for_field,
                         kind,
@@ -4657,6 +4699,7 @@ impl<'hir> HirToMir<'hir> {
             });
 
             // For each field at this index (e.g., x, y, z for a struct element)
+            let mut element_writes = Vec::new();
             for field_info in &fields_at_index {
                 // Build LHS: mem_N_field
                 let lhs_lval = if is_signal {
@@ -4668,28 +4711,87 @@ impl<'hir> HirToMir<'hir> {
                 // Build RHS for this specific field
                 // Need to adapt mir_rhs to reference the correct field
                 let rhs_for_field = self.adapt_rhs_for_array_element(&mir_rhs, field_info);
-
-                // Create self-reference for "keep" value: mem_N_field
-                let keep_value =
-                    Expression::with_unknown_type(ExpressionKind::Ref(lhs_lval.clone()));
-
-                // Build conditional: (index == N) ? data_field : mem_N_field
-                let conditional_rhs = Expression::with_unknown_type(ExpressionKind::Conditional {
-                    cond: Box::new(condition.clone()),
-                    then_expr: Box::new(rhs_for_field),
-                    else_expr: Box::new(keep_value),
-                });
-
-                assignments.push(Assignment {
+                element_writes.push(Assignment {
                     lhs: lhs_lval,
-                    rhs: conditional_rhs,
+                    rhs: rhs_for_field,
                     kind,
                     span: None,
                 });
             }
+            writes.guarded.push((condition, element_writes));
         }
 
+        Some(writes)
+    }
+
+    /// Expand an assignment to an element of a flattened array into plain
+    /// assignments, one per element field:
+    /// ```text
+    /// mem_N_field = (index == N) ? data_field : mem_N_field
+    /// ```
+    /// Right for continuous and blocking assignments, where the element read
+    /// back is the value so far. A non-blocking write is lowered by
+    /// [`Self::try_expand_array_index_write_statement`] instead: there the
+    /// read gives the value before the clock edge, which would undo an
+    /// earlier write to the same element in the block.
+    fn try_expand_array_index_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<Assignment>> {
+        let writes = self.array_index_writes(assign)?;
+        let mut assignments = writes.direct;
+        for (condition, element_writes) in writes.guarded {
+            for write in element_writes {
+                // Create self-reference for "keep" value: mem_N_field
+                let keep_value =
+                    Expression::with_unknown_type(ExpressionKind::Ref(write.lhs.clone()));
+                // Build conditional: (index == N) ? data_field : mem_N_field
+                let conditional_rhs = Expression::with_unknown_type(ExpressionKind::Conditional {
+                    cond: Box::new(condition.clone()),
+                    then_expr: Box::new(write.rhs),
+                    else_expr: Box::new(keep_value),
+                });
+                assignments.push(Assignment {
+                    rhs: conditional_rhs,
+                    ..write
+                });
+            }
+        }
         Some(assignments)
+    }
+
+    /// Lower a non-blocking write to an element of a flattened array,
+    /// `mem[index] <= data`, as `if index == N { mem_N <= data }` for each
+    /// element N. Only the element addressed is assigned, so another write
+    /// in the same clocked block to a different element (or an earlier
+    /// write to this one, when this write's index does not match) stands.
+    fn try_expand_array_index_write_statement(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Statement> {
+        if !matches!(assign.assignment_type, hir::HirAssignmentType::NonBlocking) {
+            return None;
+        }
+        let writes = self.array_index_writes(assign)?;
+        let mut statements: Vec<Statement> = writes
+            .direct
+            .into_iter()
+            .map(Statement::Assignment)
+            .collect();
+        for (condition, element_writes) in writes.guarded {
+            statements.push(Statement::If(IfStatement {
+                condition,
+                then_block: Block {
+                    statements: element_writes
+                        .into_iter()
+                        .map(Statement::Assignment)
+                        .collect(),
+                },
+                else_block: None,
+                span: None,
+            }));
+        }
+        Some(Statement::Block(Block { statements }))
     }
 
     /// Expand array index read expressions for flattened arrays (Bug #9 - RHS counterpart to Bug #8)
@@ -11858,6 +11960,47 @@ impl<'hir> HirToMir<'hir> {
             }
             _ => None,
         }
+    }
+
+    /// Settle whether an array that memory inference picked stays one
+    /// memory. A memory has a single write port, so an array that a clocked
+    /// block can write at two different entries in one cycle cannot be one:
+    /// it is kept as separate registers when its style allows registers
+    /// (auto without initial contents, or `registers`), and is an error when
+    /// the style or initial contents ask for a memory. Returns whether the
+    /// array stays a memory; when it does not, `config` is cleared.
+    fn settle_memory_write_port(
+        &mut self,
+        hir_signal: &hir::HirSignal,
+        config: &mut Option<skalp_frontend::hir::MemoryConfig>,
+        concurrently_written: &HashSet<hir::SignalId>,
+    ) -> bool {
+        use skalp_frontend::hir::MemoryStyle;
+        let Some(memory) = config.as_ref() else {
+            return false;
+        };
+        if !concurrently_written.contains(&hir_signal.id) {
+            return true;
+        }
+        let registers_allowed = match memory.style {
+            MemoryStyle::Auto => memory.init.is_none(),
+            MemoryStyle::Register => true,
+            _ => false,
+        };
+        if registers_allowed {
+            *config = None;
+            return false;
+        }
+        self.conversion_errors.push((
+            self.current_entity_name(),
+            format!(
+                "memory `{}` is written at two different entries in one clock cycle, \
+                 but a memory has one write port; make the writes exclusive \
+                 (if/else or match) or use `style = registers`",
+                hir_signal.name
+            ),
+        ));
+        true
     }
 
     /// Give a memory its initial contents: from an array literal on the
@@ -26504,6 +26647,16 @@ impl<'hir> HirToMir<'hir> {
 
         (signals, fields)
     }
+}
+
+/// The element writes of an assignment to an element of a flattened array
+/// (see `HirToMir::array_index_writes`)
+struct ArrayIndexWrites {
+    /// Writes for a constant index: the one element it names
+    direct: Vec<Assignment>,
+    /// Writes for a dynamic index: per element, `index == N` and the
+    /// assignments to that element's fields
+    guarded: Vec<(Expression, Vec<Assignment>)>,
 }
 
 impl Default for HirToMir<'_> {

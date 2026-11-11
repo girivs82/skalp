@@ -1112,3 +1112,52 @@ async fn test_compiled_sim_wide_shift_compare_bitwise() {
         assert_eq!(tb.get_u64("eq").await, (s == t) as u64, "== {what}");
     }
 }
+
+/// Writes to one array from several conditional blocks of a clocked block:
+/// a write whose condition holds lands even when a later block's condition
+/// does not (the behavioural simulator kept only the last block's write).
+async fn check_array_conditional_writers(mut tb: Testbench, level: &str) {
+    tb.set("rst", 1u8).set("we0", 0u8).set("we1", 0u8);
+    tb.clock(10).await;
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+    tb.set("we0", 1u8).set("a0", 1u8).set("d0", 0x1234u64);
+    tb.clock(1).await;
+    tb.set("we0", 0u8);
+    tb.set("we1", 1u8).set("a1", 3u8).set("d1", 0x55u64);
+    tb.clock(1).await;
+    tb.set("we1", 0u8);
+    // Both ports in the same cycle, to different entries
+    tb.set("we0", 1u8).set("a0", 5u8).set("d0", 0xA5u64);
+    tb.set("we1", 1u8).set("a1", 6u8).set("d1", 0x5Au64);
+    tb.clock(1).await;
+    tb.set("we0", 0u8).set("we1", 0u8);
+    for (index, expected) in [(0u8, 0u64), (1, 0x1234), (3, 0x55), (5, 0xA5), (6, 0x5A)] {
+        tb.set("ra", index);
+        tb.clock(1).await;
+        assert_eq!(tb.get_u64("q").await, expected, "{level}: entry {index}");
+    }
+}
+
+#[tokio::test]
+async fn test_array_conditional_writers_behavioral() {
+    let tb = Testbench::with_top_module(
+        &fixture_path("array_conditional_writers.sk"),
+        "ArrayConditionalWriters",
+    )
+    .await
+    .unwrap();
+    check_array_conditional_writers(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_array_conditional_writers_gate_level() {
+    let tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("array_conditional_writers.sk"),
+        "ArrayConditionalWriters",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    check_array_conditional_writers(tb, "gate level").await;
+}
