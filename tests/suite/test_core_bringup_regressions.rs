@@ -221,3 +221,108 @@ fn test_async_read_memory_stays_out_of_block_ram() {
         "a combinationally read memory must not use block RAM"
     );
 }
+
+async fn check_nested_if_bit_set(mut tb: Testbench, what: &str) {
+    tb.set("x", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("q").await, 0, "{what}: no bit before x is set");
+    tb.set("x", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 1 << 5, "{what}: flags[5] set");
+    tb.set("x", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("q").await, 1 << 5, "{what}: flags[5] stays set");
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_behavioral() {
+    let tb = Testbench::new(&fixture_path("nested_if_bit_set.sk"))
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_gate_level_asic() {
+    let path = fixture_path("nested_if_bit_set.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Bits", "generic_asic")
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "generic_asic").await;
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_gate_level_nexus() {
+    let path = fixture_path("nested_if_bit_set.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Bits", "nexus")
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "nexus").await;
+}
+
+async fn check_register_part_writes(mut tb: Testbench, what: &str) {
+    // Power-up value, before any write.
+    tb.set("rst", 0u8)
+        .set("op", 1u8)
+        .set("v", 0xAu8)
+        .set("idx", 0u8);
+    assert_eq!(tb.get_u64("r").await, 0xA5, "{what}: power-up value");
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0xA5, "{what}: r[7:4] <= v");
+    tb.set("rst", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0, "{what}: reset");
+    assert_eq!(tb.get_u64("p").await, 0x0F, "{what}: p reset");
+    tb.set("rst", 0u8).set("op", 0u8).set("v", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0x42, "{what}: two bits in one cycle");
+    tb.set("op", 1u8).set("v", 0x9u8);
+    tb.clock(1).await;
+    assert_eq!(
+        tb.get_u64("r").await,
+        0x92,
+        "{what}: range write keeps low bits"
+    );
+    tb.set("op", 2u8).set("idx", 3u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0x9A, "{what}: run-time index");
+    assert_eq!(
+        tb.get_u64("p").await,
+        0x07,
+        "{what}: port bit at run-time index"
+    );
+    tb.set("op", 3u8).set("v", 0xCu8);
+    tb.clock(1).await;
+    assert_eq!(
+        tb.get_u64("r").await,
+        0xA9,
+        "{what}: whole write after parts"
+    );
+    assert_eq!(tb.get_u64("p").await, 0x0C, "{what}: port range write");
+}
+
+#[tokio::test]
+async fn test_register_part_writes_behavioral() {
+    let tb = Testbench::new(&fixture_path("register_part_writes.sk"))
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_register_part_writes_gate_level_asic() {
+    let path = fixture_path("register_part_writes.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Parts", "generic_asic")
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "generic_asic").await;
+}
+
+#[tokio::test]
+async fn test_register_part_writes_gate_level_nexus() {
+    let path = fixture_path("register_part_writes.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Parts", "nexus")
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "nexus").await;
+}

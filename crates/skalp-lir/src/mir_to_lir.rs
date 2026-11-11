@@ -167,6 +167,29 @@ pub struct MirToLirTransform {
     /// Expression memoization cache for CSE: (expression, expected_width) -> LirSignalId
     /// Shared conditions across registers (e.g., FSM state comparisons) are computed once
     expression_cache: HashMap<(Expression, u32), LirSignalId>,
+    /// Registers written in parts (`flags[5] <= x`), each lowered as one
+    /// register per segment; the whole signal is the concatenation.
+    register_segments: Vec<RegisterSegment>,
+}
+
+/// One segment of a register that a sequential process writes in parts.
+#[derive(Debug, Clone)]
+struct RegisterSegment {
+    /// The written signal or port (`LValue::Signal` or `LValue::Port`)
+    base: LValue,
+    high: u32,
+    low: u32,
+    /// LIR signal holding this segment's register
+    signal: LirSignalId,
+}
+
+/// How a sequential process writes parts of one register.
+#[derive(Debug, Default)]
+struct PartialWrites {
+    /// Bit positions where a written part starts or ends
+    boundaries: std::collections::BTreeSet<u32>,
+    /// Some write has an index only known at run time
+    dynamic: bool,
 }
 
 impl MirToLirTransform {
@@ -196,6 +219,7 @@ impl MirToLirTransform {
             memory_signals: IndexMap::new(),
             target_has_bram: false,
             expression_cache: HashMap::new(),
+            register_segments: Vec::new(),
         }
     }
 
@@ -879,7 +903,8 @@ impl MirToLirTransform {
 
                 // Transform sequential statements (create registers)
                 self.sequential_clock = clock_signal;
-                self.transform_sequential_block(&process.body, clock_signal, reset_signal);
+                let body = self.split_partially_written_registers(&process.body);
+                self.transform_sequential_block(&body, clock_signal, reset_signal);
 
                 // Reset for next process
                 self.sequential_clock = None;
@@ -902,6 +927,398 @@ impl MirToLirTransform {
                     self.transform_combinational_block(&process.body);
                 }
             }
+        }
+    }
+
+    /// Rewrite a sequential process so every register it writes in parts is
+    /// written one segment at a time.
+    ///
+    /// A non-blocking write to part of a register (`flags[5] <= x`,
+    /// `r[7:4] <= y`, `bits[i] <= z`) keeps the other bits, so it cannot be
+    /// a register on the whole signal driven from that one statement. The
+    /// register is cut at every boundary any write uses; each write (full,
+    /// part, or run-time index) becomes writes to the segments it covers,
+    /// and each segment is lowered like any other register. The signal is
+    /// then the concatenation of its segments.
+    fn split_partially_written_registers(&mut self, block: &Block) -> Block {
+        let mut writes: Vec<(LValue, PartialWrites)> = Vec::new();
+        self.collect_partial_writes(block, &mut writes);
+        if writes.is_empty() {
+            return block.clone();
+        }
+
+        for (base, partial) in &writes {
+            let width = self.get_lvalue_width(base);
+            let mut boundaries: Vec<u32> = if partial.dynamic {
+                (0..=width).collect()
+            } else {
+                partial
+                    .boundaries
+                    .iter()
+                    .copied()
+                    .filter(|&b| b <= width)
+                    .chain([0, width])
+                    .collect()
+            };
+            boundaries.sort_unstable();
+            boundaries.dedup();
+
+            let base_signal = self.get_lvalue_signal(base);
+            let base_name = self.get_signal_name(base_signal);
+            let mut segments = Vec::new();
+            for pair in boundaries.windows(2) {
+                let (low, high) = (pair[0], pair[1] - 1);
+                let signal = self.lir.add_signal(
+                    format!("{}__seg_{}_{}", base_name, high, low),
+                    high - low + 1,
+                );
+                segments.push(RegisterSegment {
+                    base: base.clone(),
+                    high,
+                    low,
+                    signal,
+                });
+            }
+
+            // The whole signal, most significant segment first.
+            let widths = segments.iter().rev().map(|s| s.high - s.low + 1).collect();
+            let inputs = segments.iter().rev().map(|s| s.signal).collect();
+            let path = self.unique_node_path(&format!("{}_segments", base_name));
+            self.lir
+                .add_node(LirOp::Concat { widths }, inputs, base_signal, path);
+            self.register_segments.extend(segments);
+        }
+
+        let bases: Vec<LValue> = writes.into_iter().map(|(base, _)| base).collect();
+        self.rewrite_block_for_segments(block, &bases)
+    }
+
+    /// The signal or port a register write targets, if it is a part write
+    /// to a plain register (not a memory).
+    fn partial_write_base(&self, lhs: &LValue) -> Option<LValue> {
+        let base = match lhs {
+            LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => base.as_ref(),
+            _ => return None,
+        };
+        match base {
+            LValue::Signal(id) if !self.memory_signals.contains_key(id) => Some(base.clone()),
+            LValue::Port(_) => Some(base.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the part writes in a block, by register.
+    fn collect_partial_writes(&mut self, block: &Block, writes: &mut Vec<(LValue, PartialWrites)>) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                {
+                    self.note_partial_write(&assign.lhs, writes);
+                }
+                Statement::ResolvedConditional(resolved)
+                    if matches!(resolved.kind, AssignmentKind::NonBlocking) =>
+                {
+                    self.note_partial_write(&resolved.target, writes);
+                }
+                Statement::If(if_stmt) => {
+                    self.collect_partial_writes(&if_stmt.then_block, writes);
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.collect_partial_writes(else_block, writes);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.collect_partial_writes(&item.block, writes);
+                    }
+                    if let Some(default) = &case_stmt.default {
+                        self.collect_partial_writes(default, writes);
+                    }
+                }
+                Statement::Block(inner) => self.collect_partial_writes(inner, writes),
+                Statement::Loop(LoopStatement::For { body, .. })
+                | Statement::Loop(LoopStatement::While { body, .. }) => {
+                    self.collect_partial_writes(body, writes)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn note_partial_write(&mut self, lhs: &LValue, writes: &mut Vec<(LValue, PartialWrites)>) {
+        let Some(base) = self.partial_write_base(lhs) else {
+            return;
+        };
+        let index = match writes.iter().position(|(b, _)| *b == base) {
+            Some(index) => index,
+            None => {
+                writes.push((base, PartialWrites::default()));
+                writes.len() - 1
+            }
+        };
+        let partial = &mut writes[index].1;
+        match lhs {
+            LValue::BitSelect { index, .. } => match extract_const_index(index) {
+                Some(bit) => {
+                    partial.boundaries.insert(bit as u32);
+                    partial.boundaries.insert(bit as u32 + 1);
+                }
+                None => partial.dynamic = true,
+            },
+            LValue::RangeSelect { high, low, .. } => {
+                match (extract_const_index(high), extract_const_index(low)) {
+                    (Some(high), Some(low)) => {
+                        partial.boundaries.insert(low as u32);
+                        partial.boundaries.insert(high as u32 + 1);
+                    }
+                    _ => {
+                        self.warnings.push(format!(
+                            "Range write with a run-time bound is not supported: {:?}",
+                            lhs
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The segments of a split register, low bit first.
+    fn segments_of(&self, base: &LValue) -> Vec<RegisterSegment> {
+        let mut segments: Vec<RegisterSegment> = self
+            .register_segments
+            .iter()
+            .filter(|s| s.base == *base)
+            .cloned()
+            .collect();
+        segments.sort_by_key(|s| s.low);
+        segments
+    }
+
+    /// The LIR signal of a segment written as `base[high:low]`, if any.
+    fn segment_signal(&self, base: &LValue, high: u32, low: u32) -> Option<LirSignalId> {
+        self.register_segments
+            .iter()
+            .find(|s| s.base == *base && s.high == high && s.low == low)
+            .map(|s| s.signal)
+    }
+
+    fn rewrite_block_for_segments(&self, block: &Block, bases: &[LValue]) -> Block {
+        let mut statements = Vec::with_capacity(block.statements.len());
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                {
+                    match self.segment_writes(&assign.lhs, bases) {
+                        Some(parts) => {
+                            for (lhs, part) in parts {
+                                statements.push(self.segment_statement(
+                                    lhs,
+                                    part,
+                                    &assign.rhs,
+                                    assign.span.clone(),
+                                ));
+                            }
+                        }
+                        None => statements.push(stmt.clone()),
+                    }
+                }
+                Statement::ResolvedConditional(resolved)
+                    if matches!(resolved.kind, AssignmentKind::NonBlocking) =>
+                {
+                    match self.segment_writes(&resolved.target, bases) {
+                        Some(parts) => {
+                            for (lhs, part) in parts {
+                                statements.push(self.segment_resolved(lhs, part, resolved));
+                            }
+                        }
+                        None => statements.push(stmt.clone()),
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    let mut rewritten = if_stmt.clone();
+                    rewritten.then_block =
+                        self.rewrite_block_for_segments(&if_stmt.then_block, bases);
+                    rewritten.else_block = if_stmt
+                        .else_block
+                        .as_ref()
+                        .map(|b| self.rewrite_block_for_segments(b, bases));
+                    statements.push(Statement::If(rewritten));
+                }
+                Statement::Case(case_stmt) => {
+                    let mut rewritten = case_stmt.clone();
+                    for item in &mut rewritten.items {
+                        item.block = self.rewrite_block_for_segments(&item.block, bases);
+                    }
+                    rewritten.default = case_stmt
+                        .default
+                        .as_ref()
+                        .map(|b| self.rewrite_block_for_segments(b, bases));
+                    statements.push(Statement::Case(rewritten));
+                }
+                Statement::Block(inner) => statements.push(Statement::Block(
+                    self.rewrite_block_for_segments(inner, bases),
+                )),
+                Statement::Loop(LoopStatement::For {
+                    init,
+                    condition,
+                    update,
+                    body,
+                }) => statements.push(Statement::Loop(LoopStatement::For {
+                    init: init.clone(),
+                    condition: condition.clone(),
+                    update: update.clone(),
+                    body: self.rewrite_block_for_segments(body, bases),
+                })),
+                Statement::Loop(LoopStatement::While { condition, body }) => {
+                    statements.push(Statement::Loop(LoopStatement::While {
+                        condition: condition.clone(),
+                        body: self.rewrite_block_for_segments(body, bases),
+                    }))
+                }
+                _ => statements.push(stmt.clone()),
+            }
+        }
+        Block { statements }
+    }
+
+    /// The segment writes one write to a split register turns into: each
+    /// segment's lvalue with the part of the right-hand side it takes.
+    /// `None` when the target is not a split register.
+    fn segment_writes(&self, lhs: &LValue, bases: &[LValue]) -> Option<Vec<(LValue, SegmentPart)>> {
+        let (base, written) = match lhs {
+            LValue::Signal(_) | LValue::Port(_) if bases.contains(lhs) => {
+                let width = self.get_lvalue_width(lhs);
+                (lhs.clone(), WrittenBits::Range(width - 1, 0))
+            }
+            LValue::BitSelect { base, index } if bases.contains(base) => {
+                let written = match extract_const_index(index) {
+                    Some(bit) => WrittenBits::Range(bit as u32, bit as u32),
+                    None => WrittenBits::Dynamic(index.clone()),
+                };
+                ((**base).clone(), written)
+            }
+            LValue::RangeSelect { base, high, low } if bases.contains(base) => {
+                match (extract_const_index(high), extract_const_index(low)) {
+                    (Some(high), Some(low)) => (
+                        (**base).clone(),
+                        WrittenBits::Range(high as u32, low as u32),
+                    ),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+
+        let mut parts = Vec::new();
+        for segment in self.segments_of(&base) {
+            let lhs = segment_lvalue(&base, segment.high, segment.low);
+            match &written {
+                WrittenBits::Range(high, low) => {
+                    if segment.low >= *low && segment.high <= *high {
+                        parts.push((
+                            lhs,
+                            SegmentPart {
+                                low: segment.low - low,
+                                width: segment.high - segment.low + 1,
+                                source_width: high - low + 1,
+                                when_index: None,
+                            },
+                        ));
+                    }
+                }
+                WrittenBits::Dynamic(index) => parts.push((
+                    lhs,
+                    SegmentPart {
+                        low: 0,
+                        width: 1,
+                        source_width: 1,
+                        when_index: Some(((**index).clone(), segment.low)),
+                    },
+                )),
+            }
+        }
+        Some(parts)
+    }
+
+    fn segment_statement(
+        &self,
+        lhs: LValue,
+        part: SegmentPart,
+        rhs: &Expression,
+        span: Option<skalp_frontend::SourceSpan>,
+    ) -> Statement {
+        let assignment = Statement::Assignment(skalp_mir::mir::Assignment {
+            lhs,
+            rhs: slice_expression(rhs, part.low, part.width, part.source_width),
+            kind: AssignmentKind::NonBlocking,
+            span: span.clone(),
+        });
+        match part.when_index {
+            None => assignment,
+            Some((index, bit)) => Statement::If(IfStatement {
+                condition: Expression {
+                    kind: ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(index),
+                        right: Box::new(int_literal(bit as i64)),
+                    },
+                    ty: skalp_frontend::types::Type::Bool,
+                    span: None,
+                },
+                then_block: Block {
+                    statements: vec![assignment],
+                },
+                else_block: None,
+                span,
+            }),
+        }
+    }
+
+    fn segment_resolved(
+        &self,
+        lhs: LValue,
+        part: SegmentPart,
+        resolved: &skalp_mir::mir::ResolvedConditional,
+    ) -> Statement {
+        let slice = |e: &Expression| slice_expression(e, part.low, part.width, part.source_width);
+        let mux = skalp_mir::mir::PriorityMux {
+            cases: resolved
+                .resolved
+                .cases
+                .iter()
+                .map(|case| skalp_mir::mir::ConditionalCase {
+                    condition: case.condition.clone(),
+                    value: slice(&case.value),
+                })
+                .collect(),
+            default: slice(&resolved.resolved.default),
+        };
+        let statement = Statement::ResolvedConditional(skalp_mir::mir::ResolvedConditional {
+            target: lhs,
+            kind: resolved.kind,
+            original: resolved.original.clone(),
+            resolved: mux,
+        });
+        match part.when_index {
+            None => statement,
+            Some((index, bit)) => Statement::If(IfStatement {
+                condition: Expression {
+                    kind: ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(index),
+                        right: Box::new(int_literal(bit as i64)),
+                    },
+                    ty: skalp_frontend::types::Type::Bool,
+                    span: None,
+                },
+                then_block: Block {
+                    statements: vec![statement],
+                },
+                else_block: None,
+                span: None,
+            }),
         }
     }
 
@@ -4549,6 +4966,11 @@ impl MirToLirTransform {
                 }
             }
             LValue::RangeSelect { base, high, low } => {
+                if let (Some(h), Some(l)) = (extract_const_index(high), extract_const_index(low)) {
+                    if let Some(segment) = self.segment_signal(base, h as u32, l as u32) {
+                        return segment;
+                    }
+                }
                 let base_signal = self.get_lvalue_signal(base);
                 let base_width = self.get_lvalue_width(base);
 
@@ -4747,6 +5169,20 @@ impl MirToLirTransform {
             };
             if let Some(&lir_signal) = self.signal_to_lir_signal.get(&signal.id) {
                 self.lir.signals[lir_signal.0 as usize].initial = Some(value);
+            }
+            // A register written in parts powers up segment by segment.
+            for segment in &self.register_segments {
+                if segment.base != LValue::Signal(signal.id) {
+                    continue;
+                }
+                let width = segment.high - segment.low + 1;
+                let bits = value.checked_shr(segment.low).unwrap_or(0);
+                let bits = if width >= 64 {
+                    bits
+                } else {
+                    bits & ((1u64 << width) - 1)
+                };
+                self.lir.signals[segment.signal.0 as usize].initial = Some(bits);
             }
         }
     }
@@ -7650,6 +8086,133 @@ fn compute_magic_number(divisor: u64, width: u32) -> (u64, u32) {
 }
 
 /// Extract a constant index value from an expression
+/// Which bits of a split register one write covers.
+enum WrittenBits {
+    /// Constant `[high:low]` (a whole-signal write is its full range)
+    Range(u32, u32),
+    /// One bit at a run-time index
+    Dynamic(Box<Expression>),
+}
+
+/// The part of a write's right-hand side that one segment takes.
+struct SegmentPart {
+    /// First bit of the right-hand side the segment takes
+    low: u32,
+    width: u32,
+    /// Width of the written range (the right-hand side's width)
+    source_width: u32,
+    /// For a run-time index: the index and the segment's bit; the write
+    /// applies only when they are equal
+    when_index: Option<(Expression, u32)>,
+}
+
+fn int_literal(value: i64) -> Expression {
+    Expression {
+        kind: ExpressionKind::Literal(Value::Integer(value)),
+        ty: skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(64)),
+        span: None,
+    }
+}
+
+fn bit_type(width: u32) -> skalp_frontend::types::Type {
+    skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(width))
+}
+
+/// `base[high:low]` with constant bounds.
+fn segment_lvalue(base: &LValue, high: u32, low: u32) -> LValue {
+    LValue::RangeSelect {
+        base: Box::new(base.clone()),
+        high: Box::new(int_literal(high as i64)),
+        low: Box::new(int_literal(low as i64)),
+    }
+}
+
+/// Bits `[low + width - 1 : low]` of `expr`, taken as a `source_width`-bit
+/// value (truncated or extended exactly as an assignment of that width).
+fn slice_expression(expr: &Expression, low: u32, width: u32, source_width: u32) -> Expression {
+    if low == 0 && width == source_width {
+        return expr.clone();
+    }
+    let mask = |v: u64| {
+        if width >= 64 {
+            v
+        } else {
+            v & ((1u64 << width) - 1)
+        }
+    };
+    match &expr.kind {
+        ExpressionKind::Literal(Value::Integer(v)) if low + width <= 64 => {
+            let bits = mask((*v as u64) >> low);
+            {
+                return Expression {
+                    kind: ExpressionKind::Literal(Value::BitVector {
+                        width: width as usize,
+                        value: bits,
+                    }),
+                    ty: bit_type(width),
+                    span: expr.span.clone(),
+                };
+            }
+        }
+        ExpressionKind::Literal(Value::BitVector { value, .. }) if low + width <= 64 => {
+            return Expression {
+                kind: ExpressionKind::Literal(Value::BitVector {
+                    width: width as usize,
+                    value: mask(value >> low),
+                }),
+                ty: bit_type(width),
+                span: expr.span.clone(),
+            };
+        }
+        ExpressionKind::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            return Expression {
+                kind: ExpressionKind::Conditional {
+                    cond: cond.clone(),
+                    then_expr: Box::new(slice_expression(then_expr, low, width, source_width)),
+                    else_expr: Box::new(slice_expression(else_expr, low, width, source_width)),
+                },
+                ty: bit_type(width),
+                span: expr.span.clone(),
+            };
+        }
+        _ => {}
+    }
+    // General case: the value at the written width, shifted down, truncated.
+    let at_width = Expression {
+        kind: ExpressionKind::Cast {
+            expr: Box::new(expr.clone()),
+            target_type: DataType::Bit(source_width as usize),
+        },
+        ty: bit_type(source_width),
+        span: expr.span.clone(),
+    };
+    let shifted = if low == 0 {
+        at_width
+    } else {
+        Expression {
+            kind: ExpressionKind::Binary {
+                op: BinaryOp::RightShift,
+                left: Box::new(at_width),
+                right: Box::new(int_literal(low as i64)),
+            },
+            ty: bit_type(source_width),
+            span: expr.span.clone(),
+        }
+    };
+    Expression {
+        kind: ExpressionKind::Cast {
+            expr: Box::new(shifted),
+            target_type: DataType::Bit(width as usize),
+        },
+        ty: bit_type(width),
+        span: expr.span.clone(),
+    }
+}
+
 fn extract_const_index(expr: &Expression) -> Option<usize> {
     match &expr.kind {
         ExpressionKind::Literal(Value::Integer(v)) => Some(*v as usize),
