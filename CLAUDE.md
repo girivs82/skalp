@@ -36,7 +36,7 @@ The project uses GitHub Actions with multiple jobs:
    - Beta and macOS get clippy only on each change; their full test runs
      (`full-test-matrix.yml`) happen before every release and on demand
 
-2. **Code Coverage** (pushes to master only; informational)
+2. **Code Coverage** (informational; runs with the full matrix before releases)
    - Uses `cargo tarpaulin`
    - May expose different compilation issues than regular clippy
 
