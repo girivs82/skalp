@@ -184,6 +184,8 @@ pub fn synthesize(
 
     let absorbed = absorb_block_ram_read_registers(lir, library);
     let lir = absorbed.as_ref().unwrap_or(lir);
+    let banked = split_distram_banks(lir, library);
+    let lir = banked.as_ref().unwrap_or(lir);
 
     // Step 1: Convert LIR directly to AIG (bypasses intermediate GateNetlist).
     // Physical ops (NCL, BRAM, DSP) become pseudo-inputs in the AIG so that
@@ -1703,12 +1705,7 @@ fn map_memblock_standalone(
     // A memory read combinationally goes into distributed RAM when the target
     // has it and that is cheaper than registers (it nearly always is beyond a
     // couple of words).
-    if ram_lookup.is_none()
-        && async_read
-        && has_write
-        && library.find_best_cell(&CellFunction::DistRam16x4).is_some()
-        && distram_is_cheaper(data_width, depth)
-    {
+    if ram_lookup.is_none() && goes_to_distram(library, data_width, depth, has_write, async_read) {
         map_memblock_to_distram(
             netlist, library, data_width, addr_width, depth, inputs, outputs, path, clk, init,
         );
@@ -2113,6 +2110,243 @@ fn map_memblock_standalone(
             }
         }
     }
+}
+
+/// Whether a memory is built from 16×4 distributed RAM cells: it is read
+/// combinationally (so it cannot be a block RAM), written, the target has
+/// distributed RAM, and that is cheaper than registers.
+fn goes_to_distram(
+    library: &TechLibrary,
+    data_width: u32,
+    depth: u32,
+    has_write: bool,
+    async_read: bool,
+) -> bool {
+    async_read
+        && has_write
+        && library.find_best_cell(&CellFunction::DistRam16x4).is_some()
+        && distram_is_cheaper(data_width, depth)
+}
+
+/// Words in one distributed RAM cell, and its address bits.
+const DISTRAM_WORDS: u32 = 16;
+const DISTRAM_ADDR_BITS: u32 = 4;
+
+/// Split each distributed-RAM memory deeper than one cell into memories of
+/// one cell's depth (banks), with the bank write enables and the read mux
+/// over the banks as ordinary logic. That logic then goes through the AIG
+/// with the rest of the design, so the mapper can pack the read mux into the
+/// LUTs that use the data, instead of leaving two or more mux levels in
+/// front of them. Returns `None` when there is nothing to split.
+fn split_distram_banks(lir: &Lir, library: &TechLibrary) -> Option<Lir> {
+    let candidates: Vec<usize> = lir
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| match &node.op {
+            LirOp::MemBlock {
+                data_width,
+                addr_width,
+                depth,
+                has_write,
+                async_read,
+                registered_read: false,
+                read_enable: false,
+                ..
+            } => {
+                *depth > DISTRAM_WORDS
+                    && *addr_width > DISTRAM_ADDR_BITS
+                    && node.inputs.len() == 4
+                    && goes_to_distram(library, *data_width, *depth, *has_write, *async_read)
+            }
+            _ => false,
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut result = lir.clone();
+    for memory in candidates {
+        let node = lir.nodes[memory].clone();
+        let LirOp::MemBlock {
+            data_width: dw,
+            addr_width: aw,
+            depth,
+            init,
+            ..
+        } = node.op
+        else {
+            unreachable!()
+        };
+        let (raddr, waddr, wdata, we) = (
+            node.inputs[0],
+            node.inputs[1],
+            node.inputs[2],
+            node.inputs[3],
+        );
+        let path = node.path.clone();
+        let rdata_name = lir.signals[node.output.0 as usize].name.clone();
+        let upper = aw - DISTRAM_ADDR_BITS;
+        let banks = depth.div_ceil(DISTRAM_WORDS);
+
+        let select =
+            |result: &mut Lir, from: LirSignalId, width: u32, high: u32, low: u32, name: String| {
+                let out = result.add_signal(name.clone(), high - low + 1);
+                result.add_node(
+                    LirOp::RangeSelect { width, high, low },
+                    vec![from],
+                    out,
+                    name,
+                );
+                out
+            };
+        let raddr_low = select(
+            &mut result,
+            raddr,
+            aw,
+            DISTRAM_ADDR_BITS - 1,
+            0,
+            format!("{path}.raddr_low"),
+        );
+        let waddr_low = select(
+            &mut result,
+            waddr,
+            aw,
+            DISTRAM_ADDR_BITS - 1,
+            0,
+            format!("{path}.waddr_low"),
+        );
+        let waddr_high = select(
+            &mut result,
+            waddr,
+            aw,
+            aw - 1,
+            DISTRAM_ADDR_BITS,
+            format!("{path}.waddr_high"),
+        );
+
+        // Bank b: written when we & waddr[high] == b; its read data is rdata_b
+        let mut bank_data = Vec::with_capacity(banks as usize);
+        for b in 0..banks {
+            let index = result.add_signal(format!("{path}.bank{b}_index"), upper);
+            result.add_node(
+                LirOp::Constant {
+                    width: upper,
+                    value: b as u64,
+                },
+                vec![],
+                index,
+                format!("{path}.bank{b}_index"),
+            );
+            let hit = result.add_signal(format!("{path}.bank{b}_hit"), 1);
+            result.add_node(
+                LirOp::Eq { width: upper },
+                vec![waddr_high, index],
+                hit,
+                format!("{path}.bank{b}_hit"),
+            );
+            let bank_we = result.add_signal(format!("{path}.bank{b}_we"), 1);
+            result.add_node(
+                LirOp::And { width: 1 },
+                vec![we, hit],
+                bank_we,
+                format!("{path}.bank{b}_we"),
+            );
+            let words = (depth - b * DISTRAM_WORDS).min(DISTRAM_WORDS);
+            let bank_init = init.as_ref().map(|words_init| {
+                words_init
+                    .iter()
+                    .skip((b * DISTRAM_WORDS) as usize)
+                    .take(words as usize)
+                    .copied()
+                    .collect::<Vec<u64>>()
+            });
+            let out = result.add_signal(format!("{rdata_name}_bank{b}"), dw);
+            let bank_path = format!("{path}.bank{b}");
+            let op = LirOp::MemBlock {
+                data_width: dw,
+                addr_width: DISTRAM_ADDR_BITS,
+                depth: words,
+                has_write: true,
+                read_only: false,
+                async_read: true,
+                registered_read: false,
+                read_enable: false,
+                init: bank_init,
+            };
+            let inputs = vec![raddr_low, waddr_low, wdata, bank_we];
+            match node.clock {
+                Some(clock) => {
+                    result.add_seq_node(op, inputs, out, bank_path, clock, node.reset);
+                }
+                None => {
+                    result.add_node(op, inputs, out, bank_path);
+                }
+            }
+            bank_data.push(out);
+        }
+
+        // Read mux tree: level u halves the banks using raddr[4 + u]. A
+        // missing partner (past the memory's depth) reads as 0.
+        let zero = result.add_signal(format!("{path}.bank_none"), dw);
+        result.add_node(
+            LirOp::Constant {
+                width: dw,
+                value: 0,
+            },
+            vec![],
+            zero,
+            format!("{path}.bank_none"),
+        );
+        let mut level = bank_data;
+        let mut u = 0;
+        while level.len() > 1 {
+            let sel = select(
+                &mut result,
+                raddr,
+                aw,
+                DISTRAM_ADDR_BITS + u,
+                DISTRAM_ADDR_BITS + u,
+                format!("{path}.raddr{}", DISTRAM_ADDR_BITS + u),
+            );
+            let last = level.len() <= 2;
+            let pairs: Vec<(LirSignalId, LirSignalId)> = level
+                .chunks(2)
+                .map(|pair| (pair[0], pair.get(1).copied().unwrap_or(zero)))
+                .collect();
+            level = pairs
+                .into_iter()
+                .enumerate()
+                .map(|(k, (d0, d1))| {
+                    let mux_path = format!("{path}.rmux{u}_{k}");
+                    if last {
+                        // The memory's own node becomes the last mux, so its
+                        // output signal keeps its one driver
+                        let root = &mut result.nodes[memory];
+                        root.op = LirOp::Mux2 { width: dw };
+                        root.inputs = vec![sel, d0, d1];
+                        root.path = mux_path;
+                        root.clock = None;
+                        root.reset = None;
+                        node.output
+                    } else {
+                        let out = result.add_signal(mux_path.clone(), dw);
+                        result.add_node(
+                            LirOp::Mux2 { width: dw },
+                            vec![sel, d0, d1],
+                            out,
+                            mux_path,
+                        );
+                        out
+                    }
+                })
+                .collect();
+            u += 1;
+        }
+    }
+    Some(result)
 }
 
 /// LUT-equivalent cost of a `DistRam16x4` cell: four RAM LUTs plus the write
@@ -4194,6 +4428,88 @@ fn create_blackbox_netlist(
 mod tests {
     use super::*;
     use crate::lir::Lir;
+
+    /// A 40-word combinational-read memory on a target with 16-word
+    /// distributed RAM becomes three one-cell memories (the last 8 words
+    /// deep) with the read mux over them as logic, keeping its output
+    /// signal, and is mapped to distributed RAM cells with no mux cells of
+    /// its own.
+    #[test]
+    fn deep_distributed_ram_is_split_into_banks() {
+        let lib = crate::tech_library::get_stdlib_library("nexus").unwrap();
+        let mut lir = Lir::new("ram".to_string());
+        let clk = lir.add_input("clk".to_string(), 1);
+        lir.clocks.push(clk);
+        let raddr = lir.add_input("ra".to_string(), 6);
+        let waddr = lir.add_input("wa".to_string(), 6);
+        let wdata = lir.add_input("wd".to_string(), 8);
+        let we = lir.add_input("we".to_string(), 1);
+        let rdata = lir.add_output("rd".to_string(), 8);
+        let init: Vec<u64> = (0..40).collect();
+        lir.add_seq_node(
+            LirOp::MemBlock {
+                data_width: 8,
+                addr_width: 6,
+                depth: 40,
+                has_write: true,
+                read_only: false,
+                async_read: true,
+                registered_read: false,
+                read_enable: false,
+                init: Some(init),
+            },
+            vec![raddr, waddr, wdata, we],
+            rdata,
+            "ram.m".to_string(),
+            clk,
+            None,
+        );
+
+        let split = split_distram_banks(&lir, &lib).expect("the memory is split");
+        let banks: Vec<(u32, u32, Vec<u64>)> = split
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.op {
+                LirOp::MemBlock {
+                    addr_width,
+                    depth,
+                    init,
+                    ..
+                } => {
+                    assert_eq!(node.clock, Some(clk));
+                    Some((*addr_width, *depth, init.clone().unwrap()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(banks.len(), 3);
+        assert_eq!((banks[0].0, banks[0].1), (4, 16));
+        assert_eq!(banks[1].2, (16..32).collect::<Vec<u64>>());
+        assert_eq!((banks[2].1, banks[2].2.len()), (8, 8));
+        let driver = split.signals[rdata.0 as usize].driver.unwrap();
+        assert!(matches!(
+            split.nodes[driver.0 as usize].op,
+            LirOp::Mux2 { width: 8 }
+        ));
+        // Nothing to split once each memory is one cell deep
+        assert!(split_distram_banks(&split, &lib).is_none());
+
+        let netlist = synthesize(&lir, &lib, crate::synth::SynthPreset::Full).netlist;
+        let rams = netlist
+            .cells
+            .iter()
+            .filter(|c| c.function == Some(CellFunction::DistRam16x4))
+            .count();
+        assert_eq!(rams, 3 * 2, "two 4-bit slices per bank");
+        assert!(
+            netlist
+                .cells
+                .iter()
+                .all(|c| c.source_op.as_deref() != Some("MemBlock_DistRam")
+                    || c.function == Some(CellFunction::DistRam16x4)),
+            "the bank logic is mapped with the rest of the design"
+        );
+    }
 
     #[test]
     fn test_synthesize_and_gate() {
