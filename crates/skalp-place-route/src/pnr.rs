@@ -735,6 +735,7 @@ pub fn place_and_route_nexus_real(
 /// Refuse routes in which two nets share a wire: the clock router and the
 /// general router each keep their own nets apart, and this holds them
 /// apart from each other too.
+#[cfg(feature = "nexus-bitstream")]
 fn check_routes_disjoint<D: crate::device::Device>(
     netlist: &GateNetlist,
     device: &D,
