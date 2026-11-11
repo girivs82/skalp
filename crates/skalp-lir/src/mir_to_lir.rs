@@ -2331,6 +2331,46 @@ impl MirToLirTransform {
                 target_signal
             };
 
+            // Every arm on constants: a table lookup rather than a priority
+            // chain one level per arm.
+            let all_constant = case_arms_data
+                .iter()
+                .all(|(values, _)| values.iter().all(|v| constant_of(v).is_some()));
+            if all_constant
+                && case_arms_data.len() >= MIN_SELECT_ARMS
+                && (1..=64).contains(&case_expr_width)
+            {
+                let mut keys = Vec::new();
+                let mut values = Vec::with_capacity(case_arms_data.len() + 1);
+                for (case_values, arm_block) in &case_arms_data {
+                    let arm_signal = if Self::block_assigns_to_target(arm_block, target) {
+                        self.synthesize_case_arm_for_target(arm_block, target, target_width, hold)
+                    } else {
+                        hold
+                    };
+                    for value in case_values {
+                        keys.push((constant_of(value).expect("checked"), values.len()));
+                    }
+                    values.push(arm_signal);
+                }
+                values.push(default_signal);
+                let selected = self.constant_select(
+                    case_expr_signal,
+                    case_expr_width,
+                    &keys,
+                    &values,
+                    target_width,
+                );
+                self.add_case_register(
+                    target_signal,
+                    target_width,
+                    selected,
+                    clock_signal,
+                    reset_signal,
+                );
+                continue;
+            }
+
             // Build mux chain from last case to first (so first has priority)
             let mut current_result = default_signal;
 
@@ -2419,32 +2459,49 @@ impl MirToLirTransform {
                 current_result = mux_out;
             }
 
-            // Create register for the final mux result
-            let reg_op = LirOp::Reg {
-                width: target_width,
-                has_enable: false,
-                has_reset: reset_signal.is_some(),
-                async_reset: self.async_reset,
-                reset_value: Some(0),
-            };
+            self.add_case_register(
+                target_signal,
+                target_width,
+                current_result,
+                clock_signal,
+                reset_signal,
+            );
+        }
+    }
 
-            // BUG FIX: Include target signal name in path to avoid naming collisions
-            let target_name = self.get_signal_name(target_signal);
-            let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+    /// The register a sequential `match` drives for one target.
+    fn add_case_register(
+        &mut self,
+        target_signal: LirSignalId,
+        target_width: u32,
+        next: LirSignalId,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+    ) {
+        let reg_op = LirOp::Reg {
+            width: target_width,
+            has_enable: false,
+            has_reset: reset_signal.is_some(),
+            async_reset: self.async_reset,
+            reset_value: Some(0),
+        };
 
-            if let Some(clk) = clock_signal {
-                self.lir.add_seq_node(
-                    reg_op,
-                    vec![current_result],
-                    target_signal,
-                    reg_path,
-                    clk,
-                    reset_signal,
-                );
-            } else {
-                self.lir
-                    .add_node(reg_op, vec![current_result], target_signal, reg_path);
-            }
+        // BUG FIX: Include target signal name in path to avoid naming collisions
+        let target_name = self.get_signal_name(target_signal);
+        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
+        if let Some(clk) = clock_signal {
+            self.lir.add_seq_node(
+                reg_op,
+                vec![next],
+                target_signal,
+                reg_path,
+                clk,
+                reset_signal,
+            );
+        } else {
+            self.lir
+                .add_node(reg_op, vec![next], target_signal, reg_path);
         }
     }
 
@@ -3413,6 +3470,9 @@ impl MirToLirTransform {
                 then_expr,
                 else_expr,
             } => {
+                if let Some(out) = self.transform_select_chain(expr, expected_width) {
+                    return out;
+                }
                 let cond_signal = self.transform_expression(cond, 1);
                 let then_signal = self.transform_expression(then_expr, expected_width);
                 let else_signal = self.transform_expression(else_expr, expected_width);
@@ -5800,6 +5860,184 @@ impl MirToLirTransform {
 
     /// Allocate a temporary signal
     /// Create a constant value signal
+    /// Lower a chain `if s == k0 { v0 } else if s == k1 { v1 } ... else { d }`
+    /// (what a `match` on constants becomes) without its priority order: the
+    /// constants are distinct, so at most one arm applies and the chain is a
+    /// table lookup (see [`Self::constant_select`]). `None` when `expr` is not
+    /// such a chain or is too short to gain anything.
+    fn transform_select_chain(
+        &mut self,
+        expr: &Expression,
+        expected_width: u32,
+    ) -> Option<LirSignalId> {
+        /// `s == k` or `k == s`: the selector and the constant.
+        fn compare(cond: &Expression) -> Option<(&Expression, u64)> {
+            let ExpressionKind::Binary {
+                op: BinaryOp::Equal,
+                left,
+                right,
+            } = &cond.kind
+            else {
+                return None;
+            };
+            match (constant_of(left), constant_of(right)) {
+                (None, Some(k)) => Some((left, k)),
+                (Some(k), None) => Some((right, k)),
+                _ => None,
+            }
+        }
+
+        let ExpressionKind::Conditional { cond, .. } = &expr.kind else {
+            return None;
+        };
+        let (selector, _) = compare(cond)?;
+        let mut keys: Vec<(u64, usize)> = Vec::new();
+        let mut arms: Vec<&Expression> = Vec::new();
+        let mut cursor = expr;
+        while let ExpressionKind::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } = &cursor.kind
+        {
+            match compare(cond) {
+                Some((s, k)) if s.kind == selector.kind => {
+                    keys.push((k, arms.len()));
+                    arms.push(then_expr);
+                    cursor = else_expr;
+                }
+                _ => break,
+            }
+        }
+        if arms.len() < MIN_SELECT_ARMS {
+            return None;
+        }
+        let select_width = self.infer_expression_width(selector);
+        if select_width == 0 || select_width > 64 {
+            return None;
+        }
+        let select = self.transform_expression(selector, select_width);
+        let mut values: Vec<LirSignalId> = arms
+            .iter()
+            .map(|arm| self.transform_expression(arm, expected_width))
+            .collect();
+        values.push(self.transform_expression(cursor, expected_width));
+        Some(self.constant_select(select, select_width, &keys, &values, expected_width))
+    }
+
+    /// The value a selector picks: `values[i]` where `(k, i)` is the first
+    /// entry of `keys` with `k` equal to the selector, or the last of `values`
+    /// (the default) when there is none. Unlike a chain of compares, one level
+    /// per key, this is about log2 of the number of keys deep: a mux tree on
+    /// the selector's bits for a narrow selector, otherwise an OR of the
+    /// values each masked by its compare.
+    fn constant_select(
+        &mut self,
+        select: LirSignalId,
+        select_width: u32,
+        keys: &[(u64, usize)],
+        values: &[LirSignalId],
+        width: u32,
+    ) -> LirSignalId {
+        /// Selectors up to this wide become a mux tree on the selector's bits.
+        const MAX_TREE_SELECT_WIDTH: u32 = 10;
+        let default = values.len() - 1;
+        let fits = |k: u64| select_width >= 64 || k >> select_width == 0;
+
+        if select_width <= MAX_TREE_SELECT_WIDTH {
+            let mut table = vec![default; 1usize << select_width];
+            for &(k, value) in keys.iter().rev() {
+                if fits(k) {
+                    table[k as usize] = value;
+                }
+            }
+            let mut tree = SelectTree {
+                values,
+                width,
+                select,
+                select_width,
+                bits: vec![None; select_width as usize],
+                built: HashMap::new(),
+            };
+            return tree.build(self, &table);
+        }
+
+        // Wide selector: each value masked by whether some key of it matches,
+        // ORed together, and the default when nothing matched.
+        let mut hits_by_value: Vec<Vec<LirSignalId>> = vec![Vec::new(); default];
+        let mut seen = std::collections::HashSet::new();
+        for &(k, value) in keys {
+            if value == default || !fits(k) || !seen.insert(k) {
+                continue;
+            }
+            let k = self.create_constant_value(k, select_width);
+            let hit = self.alloc_temp_signal(1);
+            let path = self.unique_node_path("select_eq");
+            self.lir.add_node(
+                LirOp::Eq {
+                    width: select_width,
+                },
+                vec![select, k],
+                hit,
+                path,
+            );
+            hits_by_value[value].push(hit);
+        }
+        let zero = self.create_constant_value(0, width);
+        let mut matches = Vec::new();
+        let mut masked = Vec::new();
+        for (value, hits) in hits_by_value.into_iter().enumerate() {
+            if hits.is_empty() {
+                continue;
+            }
+            let hit = self.or_tree(hits, 1);
+            let out = self.alloc_temp_signal(width);
+            let path = self.unique_node_path("select_mask");
+            self.lir.add_node(
+                LirOp::Mux2 { width },
+                vec![hit, zero, values[value]],
+                out,
+                path,
+            );
+            matches.push(hit);
+            masked.push(out);
+        }
+        if matches.is_empty() {
+            return values[default];
+        }
+        let any = self.or_tree(matches, 1);
+        let picked = self.or_tree(masked, width);
+        let out = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("select");
+        self.lir.add_node(
+            LirOp::Mux2 { width },
+            vec![any, values[default], picked],
+            out,
+            path,
+        );
+        out
+    }
+
+    /// OR of `signals` as a balanced tree of two-input ORs.
+    fn or_tree(&mut self, mut signals: Vec<LirSignalId>, width: u32) -> LirSignalId {
+        while signals.len() > 1 {
+            let mut next = Vec::with_capacity(signals.len().div_ceil(2));
+            for pair in signals.chunks(2) {
+                if let [a, b] = pair {
+                    let out = self.alloc_temp_signal(width);
+                    let path = self.unique_node_path("select_or");
+                    self.lir
+                        .add_node(LirOp::Or { width }, vec![*a, *b], out, path);
+                    next.push(out);
+                } else {
+                    next.push(pair[0]);
+                }
+            }
+            signals = next;
+        }
+        signals[0]
+    }
+
     fn create_constant_value(&mut self, value: u64, width: u32) -> LirSignalId {
         let out = self.alloc_temp_signal(width);
         let path = self.unique_node_path(&format!("const_{}", value));
@@ -5820,6 +6058,79 @@ impl MirToLirTransform {
         let id = self.node_counter;
         self.node_counter += 1;
         format!("{}.{}_{}", self.hierarchy_path, name, id)
+    }
+}
+
+/// Selects shorter than this stay a chain of compares: a tree gains nothing.
+const MIN_SELECT_ARMS: usize = 4;
+
+/// A non-negative integer literal's value.
+fn constant_of(expr: &Expression) -> Option<u64> {
+    match &expr.kind {
+        ExpressionKind::Literal(Value::BitVector { value, .. }) => Some(*value),
+        ExpressionKind::Literal(Value::Integer(i)) if *i >= 0 => Some(*i as u64),
+        _ => None,
+    }
+}
+
+/// Builds the mux tree of [`MirToLirTransform::constant_select`].
+struct SelectTree<'a> {
+    values: &'a [LirSignalId],
+    width: u32,
+    select: LirSignalId,
+    select_width: u32,
+    /// Single selector bits
+    bits: Vec<Option<LirSignalId>>,
+    /// Subtrees already built, by the values they select between
+    built: HashMap<Vec<usize>, LirSignalId>,
+}
+
+impl SelectTree<'_> {
+    /// The value selected among `table` (value indices for consecutive
+    /// selector values, a power of two of them), splitting on the selector's
+    /// bits from the top.
+    fn build(&mut self, lower: &mut MirToLirTransform, table: &[usize]) -> LirSignalId {
+        if table.iter().all(|&value| value == table[0]) {
+            return self.values[table[0]];
+        }
+        if let Some(&out) = self.built.get(table) {
+            return out;
+        }
+        let half = table.len() / 2;
+        let bit = half.trailing_zeros();
+        let low = self.build(lower, &table[..half]);
+        let high = self.build(lower, &table[half..]);
+        let select_bit = self.bit(lower, bit);
+        let out = lower.alloc_temp_signal(self.width);
+        let path = lower.unique_node_path("select_mux");
+        lower.lir.add_node(
+            LirOp::Mux2 { width: self.width },
+            vec![select_bit, low, high],
+            out,
+            path,
+        );
+        self.built.insert(table.to_vec(), out);
+        out
+    }
+
+    fn bit(&mut self, lower: &mut MirToLirTransform, bit: u32) -> LirSignalId {
+        if let Some(out) = self.bits[bit as usize] {
+            return out;
+        }
+        let out = lower.alloc_temp_signal(1);
+        let path = lower.unique_node_path("select_bit");
+        lower.lir.add_node(
+            LirOp::RangeSelect {
+                width: self.select_width,
+                high: bit,
+                low: bit,
+            },
+            vec![self.select],
+            out,
+            path,
+        );
+        self.bits[bit as usize] = Some(out);
+        out
     }
 }
 

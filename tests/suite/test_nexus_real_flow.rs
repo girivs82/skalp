@@ -283,3 +283,30 @@ fn pll_builds_a_bitstream_for_the_real_device() {
         .collect();
     assert!(!pll_bytes.is_empty(), "the PLL registers are written");
 }
+
+#[test]
+fn wide_lut_builds_a_bitstream_for_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_wide_lut.sk", "WideLutBlink");
+    assert!(
+        netlist
+            .cells
+            .iter()
+            .any(|c| c.function == Some(skalp_lir::CellFunction::Lut5)),
+        "the five-input XOR should map to a 5-input LUT"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the wide LUT design should place and route");
+    assert!(result.routing.success);
+    assert_eq!(result.routing.unrouted_connections, 0);
+    let timing = result.timing.expect("the real flow reports timing");
+    assert!(timing.meets_timing);
+}

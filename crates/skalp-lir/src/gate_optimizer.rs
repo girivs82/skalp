@@ -883,7 +883,7 @@ impl GateOptimizer {
             // These are created by the AIG writer when forwarding inputs to outputs.
             // INIT patterns for identity: 0xAAAA (I0), 0xCCCC (I1), 0xF0F0 (I2), 0xFF00 (I3)
             // With input padding (unused inputs tied to I0): 0xAAAA maps to any single-input pass-through
-            let identity_input = if !is_buffer {
+            let identity_input = if !is_buffer && cell.inputs.len() <= 4 {
                 if let Some(init) = cell.lut_init {
                     match init {
                         0xAAAA => cell.inputs.first().copied(),

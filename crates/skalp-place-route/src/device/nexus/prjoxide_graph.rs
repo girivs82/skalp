@@ -487,6 +487,15 @@ fn is_usable_pip(dst: &str, src: &str) -> bool {
     if matches_index("JDL", "_DRMUX", dst) {
         return matches_index("JD", "_DRMUX", src);
     }
+    // A tile's clock lines take clocks from the clock network's branches
+    // only. The database also lists arcs from nearby general wires, but a
+    // clock routed that way never arrives on silicon (a pad clock routed
+    // to slice clocks on general wires left its counter stopped, and one
+    // routed to a PLL's reference input left the PLL unlocked); one that
+    // enters the clock network through a centre clock buffer works.
+    if dst == "JCLK0" || dst == "JCLK1" {
+        return src.starts_with("BRANCH:");
+    }
     true
 }
 
@@ -880,6 +889,16 @@ pub fn build_routing_graph_with_clocks(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tile_clock_lines_take_clock_network_branches_only() {
+        assert!(is_usable_pip("JCLK0", "BRANCH:HPBX0000"));
+        assert!(is_usable_pip("JCLK1", "BRANCH:HPBX0700"));
+        assert!(!is_usable_pip("JCLK0", "V00T0000"));
+        assert!(!is_usable_pip("JCLK1", "N1:V01S0000"));
+        assert!(!is_usable_pip("JCLK0", "G:VCC"));
+        assert!(is_usable_pip("JCLK_SLICEA", "JCLK0"));
+    }
     use super::*;
 
     fn local(x: u32, y: u32, n: &str) -> NodeKey {

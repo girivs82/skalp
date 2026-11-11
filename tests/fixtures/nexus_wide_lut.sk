@@ -1,0 +1,18 @@
+// Drives an LED from a five-input function of a counter, so synthesis maps it
+// to one 5-input LUT (a slice's two LUT4s and the mux between them).
+entity WideLutBlink {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl WideLutBlink {
+    signal counter: nat[25] = 0
+    signal shown: bit = 0
+
+    on(clk.rise) {
+        counter = counter + 1
+        shown = counter[24] ^ counter[23] ^ counter[22] ^ counter[21] ^ counter[20]
+    }
+
+    led = shown
+}

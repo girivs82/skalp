@@ -1443,7 +1443,7 @@ impl Device for Ecp5Device {
 
     fn ff_control_group(&self, x: u32, y: u32, bel_index: usize) -> Option<usize> {
         // A slice's two flip-flops share its CLK, CE and LSR
-        super::ff_slice_group(self, x, y, bel_index)
+        super::ff_slice_group(self, x, y, bel_index, 2)
     }
 
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {

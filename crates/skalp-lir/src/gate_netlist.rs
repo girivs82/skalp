@@ -152,6 +152,13 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// Number of variables of this cell's truth table, if it is a LUT whose
+    /// table can be rewritten (at most 6 inputs). LUT4-sized cells with fewer
+    /// inputs keep a 4-variable table, with the unused inputs as don't-cares.
+    pub fn lut_variables(&self) -> Option<usize> {
+        (self.lut_init.is_some() && self.inputs.len() <= 6).then(|| self.inputs.len().max(4))
+    }
+
     /// The input layout of a hard multiplier cell, or `None` for any other cell.
     pub fn dsp_ports(&self) -> Option<DspPorts> {
         let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
@@ -1408,7 +1415,13 @@ impl GateNetlist {
 
             // Add parameters for LUT4 cells
             if needs_init {
-                if let Some(init) = self.compute_lut4_init(&cell.cell_type) {
+                // The cell's own truth table wins: passes that fold inverters
+                // or merge LUTs rewrite it without renaming the cell.
+                let init = cell
+                    .lut_init
+                    .map(|t| (t & 0xFFFF) as u16)
+                    .or_else(|| self.compute_lut4_init(&cell.cell_type));
+                if let Some(init) = init {
                     output.push_str(&format!("#(.LUT_INIT(16'h{:04X})) ", init));
                 }
             }
@@ -2574,6 +2587,15 @@ fn generate_ncl_reg_module() -> String {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// The bits of a truth table over `variables` inputs (at most 6).
+pub fn truth_table_mask(variables: usize) -> u64 {
+    if variables >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << variables)) - 1
+    }
+}
 
 #[cfg(test)]
 mod tests {

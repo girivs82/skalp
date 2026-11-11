@@ -631,8 +631,10 @@ pub fn place_and_route_nexus_real(
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         if !clock_routes.general.contains(&net.id) {
-            net.fanout
-                .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+            net.fanout.retain(|&(cell, pin)| {
+                !crate::device::is_clock_pin(pin)
+                    && !clock_routes.dedicated_inputs.contains(&(cell, pin))
+            });
         }
     }
     let router_device = device.without_wires(&clock_routes.claimed);
@@ -656,6 +658,7 @@ pub fn place_and_route_nexus_real(
             }
         }
     }
+    check_routes_disjoint(netlist, &device, &routing)?;
     if !routing.success {
         let mut unrouted: Vec<&str> = routing
             .routes
@@ -732,6 +735,44 @@ pub fn place_and_route_nexus_real(
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
     })
+}
+
+/// Refuse routes in which two nets share a wire: the clock router and the
+/// general router each keep their own nets apart, and this holds them
+/// apart from each other too.
+#[cfg(feature = "nexus-bitstream")]
+fn check_routes_disjoint<D: crate::device::Device>(
+    netlist: &GateNetlist,
+    device: &D,
+    routing: &RoutingResult,
+) -> Result<()> {
+    let mut owner: std::collections::HashMap<crate::device::WireId, GateNetId> =
+        std::collections::HashMap::new();
+    let mut nets: Vec<_> = routing.routes.iter().collect();
+    nets.sort_by_key(|(id, _)| id.0);
+    for (&net, route) in nets {
+        for &wire in &route.wires {
+            match owner.insert(wire, net) {
+                Some(other) if other != net => {
+                    let name = |id: GateNetId| {
+                        netlist
+                            .nets
+                            .get(id.0 as usize)
+                            .map_or("?", |n| n.name.as_str())
+                            .to_string()
+                    };
+                    return Err(crate::PlaceRouteError::RoutingFailed(format!(
+                        "Nets '{}' and '{}' were both routed through wire {}",
+                        name(other),
+                        name(net),
+                        device.wire(wire).map_or("?", |w| w.name.as_str())
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Place and route targeting Lattice ECP5 devices.

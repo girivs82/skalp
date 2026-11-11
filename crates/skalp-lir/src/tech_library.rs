@@ -845,6 +845,11 @@ pub enum CellFunction {
     // Lookup tables (FPGA)
     /// 4-input lookup table — implements ANY Boolean function of up to 4 inputs
     Lut4,
+    /// 5-input lookup table — ANY Boolean function of up to 5 inputs. On
+    /// devices whose logic slice pairs two 4-input LUTs with a mux (Lattice
+    /// PFUMX, Nexus WIDEFN9), it is that pair: one LUT per value of the
+    /// fifth input.
+    Lut5,
     /// 6-input lookup table — implements ANY Boolean function of up to 6 inputs
     Lut6,
 
@@ -1068,7 +1073,7 @@ impl CellFunction {
             | CellFunction::FpGe32 => false,
 
             // LUT cells — FPGA output primitives, not decomposable into AIG
-            CellFunction::Lut4 | CellFunction::Lut6 => false,
+            CellFunction::Lut4 | CellFunction::Lut5 | CellFunction::Lut6 => false,
 
             // Arithmetic primitives — preserve carry chain structure, optimize via datapath pass
             CellFunction::FullAdder
@@ -1126,6 +1131,16 @@ impl CellFunction {
             ),
             CellFunction::Lut4 => (
                 vec!["I0".into(), "I1".into(), "I2".into(), "I3".into()],
+                vec!["O".into()],
+            ),
+            CellFunction::Lut5 => (
+                vec![
+                    "I0".into(),
+                    "I1".into(),
+                    "I2".into(),
+                    "I3".into(),
+                    "I4".into(),
+                ],
                 vec!["O".into()],
             ),
             CellFunction::Lut6 => (
@@ -1794,6 +1809,24 @@ impl TechLibrary {
     /// Get the LUT size for FPGA libraries, or default (4) for unknown
     pub fn get_lut_size(&self) -> usize {
         self.lut_size.map(|s| s as usize).unwrap_or(4)
+    }
+
+    /// Most inputs one logic cell of an FPGA library takes: the LUT size, or
+    /// more where the library has a wider LUT cell (a [`CellFunction::Lut5`]
+    /// built from two LUT4s and a mux). The mapper cuts the logic this wide.
+    pub fn max_lut_inputs(&self) -> usize {
+        let widest = self
+            .cells
+            .values()
+            .filter_map(|c| match c.function {
+                CellFunction::Lut4 => Some(4),
+                CellFunction::Lut5 => Some(5),
+                CellFunction::Lut6 => Some(6),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        self.get_lut_size().max(widest)
     }
 
     /// Add a cell to the library
@@ -3329,6 +3362,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "oai21" => Ok(CellFunction::Oai21),
         "oai22" => Ok(CellFunction::Oai22),
         "lut4" | "sb_lut4" => Ok(CellFunction::Lut4),
+        "lut5" => Ok(CellFunction::Lut5),
         "lut6" | "lut6_2" => Ok(CellFunction::Lut6),
         "mux2" => Ok(CellFunction::Mux2),
         "mux4" => Ok(CellFunction::Mux4),
@@ -3424,6 +3458,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::Oai21 => "oai21".to_string(),
         CellFunction::Oai22 => "oai22".to_string(),
         CellFunction::Lut4 => "lut4".to_string(),
+        CellFunction::Lut5 => "lut5".to_string(),
         CellFunction::Lut6 => "lut6".to_string(),
         CellFunction::Mux2 => "mux2".to_string(),
         CellFunction::Mux4 => "mux4".to_string(),

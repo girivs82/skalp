@@ -1567,7 +1567,7 @@ fn build_design(
                     hier_netlist.instance_count()
                 );
 
-                hier_netlist.flatten()
+                hier_netlist.flatten_for_library(&library)
             } else {
                 // Flat synthesis for single-module designs
                 let top_module = mir
@@ -4270,7 +4270,7 @@ fn synthesize_design(
 
     // Hierarchical synthesis: each module independently, then flatten
     let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
-    let mut gate_netlist = hier_netlist.flatten();
+    let mut gate_netlist = hier_netlist.flatten_for_library(&library);
     if family == "nexus" {
         // Pads go in before the netlist is saved, so `skalp pnr` on the saved
         // netlist gets the same pins (and the on-chip clock) as the full flow.

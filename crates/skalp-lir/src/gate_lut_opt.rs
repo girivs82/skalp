@@ -111,8 +111,8 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
 
     for cell in &netlist.cells {
         let init = match cell.lut_init {
-            Some(init) => init & 0xFFFF, // mask to 16 bits for LUT4
-            None => continue,
+            Some(init) if cell.inputs.len() <= 4 => init & 0xFFFF, // LUT4
+            _ => continue,
         };
 
         // Check identity patterns
@@ -204,8 +204,8 @@ fn project_constant_inputs(netlist: &mut GateNetlist) -> LutOptStats {
     // Process each LUT cell
     for cell in &mut netlist.cells {
         let init = match cell.lut_init {
-            Some(init) => init & 0xFFFF,
-            None => continue,
+            Some(init) if cell.inputs.len() <= 4 => init & 0xFFFF,
+            _ => continue,
         };
 
         // Find which inputs are constant
@@ -328,7 +328,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
     let mut already_merged: HashSet<CellId> = HashSet::new();
 
     for cell_a in &netlist.cells {
-        if cell_a.lut_init.is_none() || cell_a.outputs.is_empty() {
+        if cell_a.lut_init.is_none() || cell_a.outputs.is_empty() || cell_a.inputs.len() > 4 {
             continue;
         }
         if already_merged.contains(&cell_a.id) {
@@ -359,7 +359,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
         };
         let cell_b = &netlist.cells[cell_b_idx];
 
-        if cell_b.lut_init.is_none() {
+        if cell_b.lut_init.is_none() || cell_b.inputs.len() > 4 {
             continue;
         }
 
@@ -432,8 +432,10 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
             }
         }
 
-        if combined_inputs.len() > 4 {
-            continue; // safety check
+        if combined_inputs.len() > 4 || combined_inputs.is_empty() {
+            // Over four inputs does not fit; none means A is a constant
+            // feeding B alone, which constant projection handles instead.
+            continue;
         }
 
         // Compose truth tables
@@ -499,6 +501,169 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
     netlist.rebuild_net_connectivity();
 
     stats
+}
+
+// ============================================================================
+// Flattened-design cleanup
+// ============================================================================
+
+/// LUT clean-up on a flattened FPGA netlist, across the module boundaries
+/// that per-module synthesis could not see through.
+///
+/// Each module is mapped on its own, so a signal crossing a boundary can
+/// pick up a buffer (a child output forwarded to another child) or an
+/// inverter (a complemented module output), and two LUTs on either side of
+/// a boundary are never merged. Each of those is a LUT level and a routing
+/// hop on the path. This pass removes the buffers, folds inverters into the
+/// LUTs they feed, and merges single-fanout LUT pairs that fit one LUT.
+///
+/// Nets that are outputs of the design keep their drivers. NCL netlists are
+/// left alone: their dual-rail encoding relies on the cells as written.
+pub fn optimize_flattened_luts(netlist: &mut GateNetlist) -> LutOptStats {
+    let mut stats = LutOptStats::default();
+    if netlist.is_ncl {
+        return stats;
+    }
+    stats.buffers_eliminated += remove_flat_buffers(netlist);
+    stats.luts_eliminated += absorb_flat_inverters(netlist);
+    netlist.rebuild_net_connectivity();
+    for _ in 0..10 {
+        let iter_stats = combine_lut_pairs(netlist);
+        if iter_stats.luts_combined == 0 {
+            break;
+        }
+        stats += iter_stats;
+        netlist.rebuild_net_connectivity();
+    }
+    // Cell ids index the cell list everywhere downstream; close the gaps.
+    for (index, cell) in netlist.cells.iter_mut().enumerate() {
+        cell.id = CellId(index as u32);
+    }
+    netlist.rebuild_net_connectivity();
+    netlist.update_stats();
+    stats
+}
+
+fn is_single_io(cell: &crate::gate_netlist::Cell) -> bool {
+    cell.inputs.len() == 1 && cell.outputs.len() == 1 && cell.clock.is_none()
+}
+
+fn is_buffer_cell(cell: &crate::gate_netlist::Cell) -> bool {
+    use crate::tech_library::CellFunction;
+    is_single_io(cell)
+        && (cell.function == Some(CellFunction::Buf)
+            || (cell.function.is_none() && cell.lut_init.map(|t| t & 0x3) == Some(0x2)))
+}
+
+fn is_inverter_cell(cell: &crate::gate_netlist::Cell) -> bool {
+    use crate::tech_library::CellFunction;
+    is_single_io(cell)
+        && (cell.function == Some(CellFunction::Inv)
+            || (cell.function.is_none() && cell.lut_init.map(|t| t & 0x3) == Some(0x1)))
+}
+
+/// Whether `cell` is a single-output LUT whose truth table can take a
+/// rewritten input.
+fn is_rewritable_lut(cell: &crate::gate_netlist::Cell) -> bool {
+    cell.lut_variables().is_some() && cell.outputs.len() == 1 && cell.clock.is_none()
+}
+
+/// Remove buffer cells that do not drive a design output, wiring their
+/// consumers (data, clock and reset pins) to the buffer's input. The removed
+/// net becomes an alias of the input so lookups by name still resolve.
+fn remove_flat_buffers(netlist: &mut GateNetlist) -> usize {
+    let outputs: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    let mut replace: HashMap<GateNetId, GateNetId> = HashMap::new();
+    let mut removed: HashSet<CellId> = HashSet::new();
+    for cell in &netlist.cells {
+        if !is_buffer_cell(cell) {
+            continue;
+        }
+        let (input, output) = (cell.inputs[0], cell.outputs[0]);
+        if outputs.contains(&output) || input == output {
+            continue;
+        }
+        replace.insert(output, input);
+        removed.insert(cell.id);
+    }
+    if removed.is_empty() {
+        return 0;
+    }
+    let resolve = |mut net: GateNetId| {
+        let mut steps = 0;
+        while let Some(&next) = replace.get(&net) {
+            if next == net || steps > replace.len() {
+                break;
+            }
+            net = next;
+            steps += 1;
+        }
+        net
+    };
+    netlist.cells.retain(|c| !removed.contains(&c.id));
+    for cell in &mut netlist.cells {
+        for input in &mut cell.inputs {
+            *input = resolve(*input);
+        }
+        cell.clock = cell.clock.map(resolve);
+        cell.reset = cell.reset.map(resolve);
+    }
+    for &old in replace.keys() {
+        let target = resolve(old);
+        if let Some(net) = netlist.nets.get_mut(old.0 as usize) {
+            net.alias_of = Some(target);
+        }
+    }
+    removed.len()
+}
+
+/// Fold each inverter into the LUTs it feeds by complementing the matching
+/// truth-table input. An inverter left with no consumers is removed; one
+/// that still feeds a register, RAM or other non-LUT input stays for those.
+fn absorb_flat_inverters(netlist: &mut GateNetlist) -> usize {
+    let outputs: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    let inverters: HashMap<GateNetId, (CellId, GateNetId)> = netlist
+        .cells
+        .iter()
+        .filter(|c| is_inverter_cell(c))
+        .map(|c| (c.outputs[0], (c.id, c.inputs[0])))
+        .collect();
+    if inverters.is_empty() {
+        return 0;
+    }
+    for cell in &mut netlist.cells {
+        if !is_rewritable_lut(cell) || inverters.contains_key(&cell.outputs[0]) {
+            continue;
+        }
+        for pin in 0..cell.inputs.len() {
+            if let Some(&(_, source)) = inverters.get(&cell.inputs[pin]) {
+                let init = cell.lut_init.unwrap_or(0);
+                let vars = cell.lut_variables().unwrap_or(4);
+                cell.lut_init = Some(complement_input(init, pin, vars));
+                cell.inputs[pin] = source;
+            }
+        }
+    }
+    let mut used: HashSet<GateNetId> = outputs;
+    for cell in &netlist.cells {
+        used.extend(cell.inputs.iter().copied());
+        used.extend(cell.clock);
+        used.extend(cell.reset);
+    }
+    let dead: HashSet<CellId> = inverters
+        .iter()
+        .filter(|(out, _)| !used.contains(out))
+        .map(|(_, &(id, _))| id)
+        .collect();
+    netlist.cells.retain(|c| !dead.contains(&c.id));
+    dead.len()
+}
+
+/// `tt`, a truth table over `vars` inputs, with input `pin` complemented.
+fn complement_input(tt: u64, pin: usize, vars: usize) -> u64 {
+    (0..1usize << vars)
+        .filter(|&i| (tt >> (i ^ (1 << pin))) & 1 == 1)
+        .fold(0u64, |acc, i| acc | (1 << i))
 }
 
 #[cfg(test)]
@@ -754,5 +919,185 @@ mod tests {
         assert_eq!(netlist.outputs, vec![n]);
         assert_eq!(netlist.nets[n.0 as usize].name, "y");
         assert_eq!(netlist.nets[a.0 as usize].name, "a");
+    }
+
+    fn ff(netlist: &mut GateNetlist, clk: GateNetId, d: GateNetId, q: GateNetId) {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            "FF".to_string(),
+            "fpga".to_string(),
+            0.1,
+            "ff".to_string(),
+            vec![d],
+            vec![q],
+        );
+        cell.clock = Some(clk);
+        netlist.add_cell(cell);
+    }
+
+    fn gate(netlist: &mut GateNetlist, function: CellFunction, a: GateNetId, y: GateNetId) {
+        netlist.add_cell(
+            Cell::new_comb(
+                CellId(0),
+                format!("{:?}", function),
+                "fpga".to_string(),
+                0.1,
+                "gate".to_string(),
+                vec![a],
+                vec![y],
+            )
+            .with_function(function),
+        );
+    }
+
+    fn eval(netlist: &GateNetlist, values: &HashMap<GateNetId, bool>, net: GateNetId) -> bool {
+        if let Some(&v) = values.get(&net) {
+            return v;
+        }
+        let cell = netlist
+            .cells
+            .iter()
+            .find(|c| c.outputs.contains(&net))
+            .expect("driven net");
+        let bits: Vec<bool> = cell
+            .inputs
+            .iter()
+            .map(|&i| eval(netlist, values, i))
+            .collect();
+        match (cell.lut_init, cell.function.as_ref()) {
+            (Some(init), _) => {
+                let index = bits
+                    .iter()
+                    .enumerate()
+                    .fold(0, |acc, (i, &b)| acc | ((b as usize) << i));
+                (init >> index) & 1 == 1
+            }
+            (None, Some(CellFunction::Inv)) => !bits[0],
+            (None, Some(CellFunction::Buf)) => bits[0],
+            _ => panic!("cannot evaluate {}", cell.cell_type),
+        }
+    }
+
+    /// q0 -> buf -> (module boundary) -> inv -> lut(and with q1) -> y, and
+    /// the inverter also feeds a register.
+    #[test]
+    fn flattened_buffers_go_and_inverters_fold_into_luts() {
+        let mut netlist = make_test_netlist();
+        let clk = netlist.add_input("clk".to_string());
+        let q0 = netlist.add_net(GateNet::new(GateNetId(0), "q0".to_string()));
+        let q1 = netlist.add_net(GateNet::new(GateNetId(0), "q1".to_string()));
+        let fwd = netlist.add_net(GateNet::new(GateNetId(0), "fwd".to_string()));
+        let inv = netlist.add_net(GateNet::new(GateNetId(0), "inv".to_string()));
+        let r = netlist.add_net(GateNet::new(GateNetId(0), "r".to_string()));
+        let y = netlist.add_output("y".to_string());
+        let d0 = netlist.add_input("d0".to_string());
+        let d1 = netlist.add_input("d1".to_string());
+        ff(&mut netlist, clk, d0, q0);
+        ff(&mut netlist, clk, d1, q1);
+        gate(&mut netlist, CellFunction::Buf, q0, fwd);
+        gate(&mut netlist, CellFunction::Inv, fwd, inv);
+        ff(&mut netlist, clk, inv, r);
+        netlist.add_cell(Cell::new_lut(
+            CellId(0),
+            "LUT4".to_string(),
+            "fpga".to_string(),
+            0.1,
+            "and".to_string(),
+            vec![inv, q1, inv, inv],
+            vec![y],
+            0x8888, // I0 & I1, padded with I0
+        ));
+        let before = netlist.clone();
+
+        let stats = optimize_flattened_luts(&mut netlist);
+        assert_eq!(stats.buffers_eliminated, 1);
+        assert_eq!(
+            stats.luts_eliminated, 0,
+            "the register still needs the inverter"
+        );
+        let lut = netlist.cells.iter().find(|c| c.path == "and").unwrap();
+        assert_eq!(lut.inputs, vec![q0, q1, q0, q0]);
+        assert_eq!(netlist.nets[fwd.0 as usize].alias_of, Some(q0));
+        let inverter = netlist
+            .cells
+            .iter()
+            .find(|c| c.function == Some(CellFunction::Inv))
+            .expect("inverter kept for the register");
+        assert_eq!(inverter.inputs, vec![q0]);
+        assert!(
+            netlist
+                .cells
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.id.0 as usize == i),
+            "cell ids index the cell list"
+        );
+
+        for bits in 0..4u8 {
+            let values: HashMap<GateNetId, bool> =
+                HashMap::from_iter([(q0, bits & 1 == 1), (q1, bits & 2 == 2)]);
+            for net in [y, inv] {
+                assert_eq!(
+                    eval(&netlist, &values, net),
+                    eval(&before, &values, net),
+                    "net {:?} with q0={} q1={}",
+                    net,
+                    bits & 1,
+                    bits >> 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flattened_inverter_feeding_only_luts_is_removed() {
+        let mut netlist = make_test_netlist();
+        let a = netlist.add_input("a".to_string());
+        let b = netlist.add_input("b".to_string());
+        let na = netlist.add_net(GateNet::new(GateNetId(0), "na".to_string()));
+        let y = netlist.add_output("y".to_string());
+        let z = netlist.add_output("z".to_string());
+        gate(&mut netlist, CellFunction::Inv, a, na);
+        for (name, out, init) in [("xor", y, 0x6666u64), ("or", z, 0xEEEE)] {
+            netlist.add_cell(Cell::new_lut(
+                CellId(0),
+                "LUT4".to_string(),
+                "fpga".to_string(),
+                0.1,
+                name.to_string(),
+                vec![na, b, na, na],
+                vec![out],
+                init,
+            ));
+        }
+        let before = netlist.clone();
+
+        let stats = optimize_flattened_luts(&mut netlist);
+        assert_eq!(stats.luts_eliminated, 1);
+        assert!(netlist
+            .cells
+            .iter()
+            .all(|c| c.function != Some(CellFunction::Inv)));
+        for bits in 0..4u8 {
+            let values = HashMap::from_iter([(a, bits & 1 == 1), (b, bits & 2 == 2)]);
+            for net in [y, z] {
+                assert_eq!(eval(&netlist, &values, net), eval(&before, &values, net));
+            }
+        }
+    }
+
+    #[test]
+    fn flattened_buffer_driving_a_design_output_stays() {
+        let mut netlist = make_test_netlist();
+        let clk = netlist.add_input("clk".to_string());
+        let d = netlist.add_input("d".to_string());
+        let q = netlist.add_net(GateNet::new(GateNetId(0), "q".to_string()));
+        let y = netlist.add_output("y".to_string());
+        ff(&mut netlist, clk, d, q);
+        gate(&mut netlist, CellFunction::Buf, q, y);
+
+        let stats = optimize_flattened_luts(&mut netlist);
+        assert_eq!(stats.buffers_eliminated, 0);
+        assert_eq!(netlist.cells.len(), 2);
     }
 }

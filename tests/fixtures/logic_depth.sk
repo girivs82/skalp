@@ -1,0 +1,85 @@
+// Selects and compares that synthesis must not turn into long chains: a
+// `match` on constants is a table lookup, not a priority chain of compares,
+// and wide equality compares and reductions are balanced trees.
+fn table(s: bit[6], x: bit[16]) -> bit[16] {
+    return match s {
+        2 => 16'h3c4f,
+        3 => 16'h9df1,
+        4 => 16'h5c88,
+        5 => 16'h34c3,
+        6 => 16'h6030,
+        7 => x ^ 16'h5A5A,
+        9 => 16'h31e2,
+        13 => 16'h2025,
+        14 => 16'h1e84,
+        15 => 16'h6973,
+        17 => 16'hfe2a,
+        23 => 16'hdaed,
+        25 => 16'ha0d7,
+        26 => 16'hee63,
+        27 => 16'he807,
+        28 => 16'hb921,
+        30 => 16'h997b,
+        32 => 16'h7f31,
+        34 => 16'h5c0a,
+        35 => 16'h7cfa,
+        36 => 16'h29e8,
+        37 => 16'h99ba,
+        38 => 16'hfd7f,
+        39 => 16'hafdc,
+        40 => 16'he5cd,
+        41 => 16'h936c,
+        44 => 16'h257a,
+        46 => 16'h3c73,
+        47 => 16'hd614,
+        48 => 16'h5475,
+        49 => 16'haf21,
+        51 => 16'h4dd0,
+        52 => 16'hfa59,
+        57 => 16'hd7e8,
+        58 => 16'h1412,
+        59 => 16'h27bd,
+        60 => 16'ha0a3,
+        61 => 16'hae24,
+        62 => 16'hb34a,
+        63 => 16'hfe4c,
+        _ => x
+    }
+}
+
+fn decode(c: bit[16]) -> bit[8] {
+    return match c {
+        4660 => 8'h11,
+        48879 => 8'h22,
+        7 => 8'h33,
+        32768 => 8'h44,
+        65535 => 8'h55,
+        16962 => 8'h66,
+        _ => 8'h00
+    }
+}
+
+entity LogicDepth {
+    in s: bit[6]
+    in x: bit[16]
+    in c: bit[16]
+    in a: bit[64]
+    in b: bit[64]
+    out lut: bit[16]
+    out dec: bit[8]
+    out eq: bit
+    out ne: bit
+    out all: bit
+    out any: bit
+    out parity: bit
+}
+
+impl LogicDepth {
+    lut = table(s, x)
+    dec = decode(c)
+    eq = if a == b { 1 } else { 0 }
+    ne = if a != b { 1 } else { 0 }
+    all = &a
+    any = |a
+    parity = ^a
+}
