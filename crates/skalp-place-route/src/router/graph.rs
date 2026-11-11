@@ -45,6 +45,13 @@ pub struct RoutingGraph {
     hop_cost_y: Vec<f64>,
     hop_slope_x: f64,
     hop_slope_y: f64,
+    /// The same for the PIPs' timing terms: a bound on the delay of moving
+    /// `d` tiles, which a timing-driven search adds (scaled by the net's
+    /// timing weight) to the cost bound
+    hop_timing_x: Vec<f64>,
+    hop_timing_y: Vec<f64>,
+    hop_timing_slope_x: f64,
+    hop_timing_slope_y: f64,
     /// Whether some PIP moves along both axes at once
     diagonal: bool,
     /// Wires of a global distribution network (clock spines and branches)
@@ -76,6 +83,11 @@ pub struct SinkApproach {
 }
 
 impl SinkApproach {
+    /// Whether distance gives no bound on reaching the sink (see `far_entry`)
+    pub fn far_entry(&self) -> bool {
+        self.far_entry
+    }
+
     /// A lower bound on the cost from `wire`, in tile `tile`, to the sink:
     /// a path staying in the sink's tile spends at least the in-tile
     /// distance, and one that leaves it re-enters on an entry wire
@@ -91,9 +103,10 @@ impl SinkApproach {
 }
 
 impl RoutingGraph {
-    /// Build the graph of `device`'s wires `0..device.wire_count()`. With a
-    /// delay model, an edge's timing term is the model's typed PIP delay
-    /// (in 50 ps units); otherwise the PIP's own delay.
+    /// Build the graph of `device`'s wires `0..device.wire_count()`. An
+    /// edge's timing term (in 50 ps units) is the PIP's own delay where the
+    /// device data gives one, so the search sees the delays the timing
+    /// analysis will report; otherwise the delay model's typed PIP delay.
     pub fn build<D: Device + ?Sized>(device: &D, delay_model: Option<&DelayModel>) -> Self {
         let n = device.wire_count();
         let mut offsets = Vec::with_capacity(n + 1);
@@ -118,6 +131,7 @@ impl RoutingGraph {
                     continue;
                 };
                 let timing = match (delay_model, wire, device.wire(pip.dst_wire)) {
+                    _ if pip.delay > 0 => pip.delay as f64 / 50.0,
                     (Some(model), Some(src), Some(dst)) => {
                         model.pip_delay_typed(&src.wire_type, &dst.wire_type) / 0.05
                     }
@@ -256,6 +270,8 @@ impl RoutingGraph {
         // Cheapest PIP per displacement length, per axis
         let mut best_x: Vec<f64> = Vec::new();
         let mut best_y: Vec<f64> = Vec::new();
+        let mut timing_x: Vec<f64> = Vec::new();
+        let mut timing_y: Vec<f64> = Vec::new();
         let note = |best: &mut Vec<f64>, d: u32, cost: f64| {
             let d = d as usize;
             if best.len() <= d {
@@ -286,16 +302,22 @@ impl RoutingGraph {
                 }
                 if dx > 0 {
                     note(&mut best_x, dx, e.cost as f64);
+                    note(&mut timing_x, dx, e.timing as f64);
                 }
                 if dy > 0 {
                     note(&mut best_y, dy, e.cost as f64);
+                    note(&mut timing_y, dy, e.timing as f64);
                 }
             }
         }
         log::debug!("routing graph: least PIP cost by x displacement {best_x:?}");
         log::debug!("routing graph: least PIP cost by y displacement {best_y:?}");
+        log::debug!("routing graph: least PIP timing by x displacement {timing_x:?}");
+        log::debug!("routing graph: least PIP timing by y displacement {timing_y:?}");
         (self.hop_cost_x, self.hop_slope_x) = Self::covering_costs(&best_x);
         (self.hop_cost_y, self.hop_slope_y) = Self::covering_costs(&best_y);
+        (self.hop_timing_x, self.hop_timing_slope_x) = Self::covering_costs(&timing_x);
+        (self.hop_timing_y, self.hop_timing_slope_y) = Self::covering_costs(&timing_y);
     }
 
     /// From the cheapest PIP per displacement (`best[k]` for `k` tiles), the
@@ -394,6 +416,23 @@ impl RoutingGraph {
         let y = Self::axis_cost(&self.hop_cost_y, self.hop_slope_y, dy);
         if self.diagonal {
             // One PIP may serve both axes: only the larger part is certain
+            x.max(y)
+        } else {
+            x + y
+        }
+    }
+
+    /// A lower bound on the summed timing terms of a path from a wire to
+    /// one `dx` and `dy` tiles away, as [`Self::cost_lower_bound`] is for
+    /// base costs. A timing-driven search's cost is base cost plus timing
+    /// weight times timing, and each part is bounded on its own.
+    pub fn timing_lower_bound(&self, dx: u32, dy: u32) -> f64 {
+        if self.hop_timing_x.is_empty() {
+            return 0.0;
+        }
+        let x = Self::axis_cost(&self.hop_timing_x, self.hop_timing_slope_x, dx);
+        let y = Self::axis_cost(&self.hop_timing_y, self.hop_timing_slope_y, dy);
+        if self.diagonal {
             x.max(y)
         } else {
             x + y
@@ -511,7 +550,8 @@ mod tests {
             let (Some(src), Some(dst)) = (pin(x0, y0), sink(x1, y1)) else {
                 continue;
             };
-            let Ok((_, _, cost)) = astar.find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, None)
+            let Ok((_, _, cost)) =
+                astar.find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, |_| 0.0, None)
             else {
                 continue;
             };
@@ -536,6 +576,59 @@ mod tests {
                 estimate <= cost + 1e-6,
                 "estimate {estimate} above path cost {cost}"
             );
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
+
+    /// An edge's timing term is its PIP's own delay (in 50 ps units) where
+    /// the device gives one, and the timing bound never exceeds a path's
+    /// summed timing terms: a timing-driven search's cost (base cost plus
+    /// timing weight times timing) is bounded by the two bounds together
+    #[test]
+    fn timing_terms_follow_pip_delays_and_are_bounded() {
+        use crate::router::AStarRouter;
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let model = DelayModel::ice40_default();
+        let graph = RoutingGraph::build(&device, Some(&model));
+        let mut with_delay = 0;
+        for i in 0..device.wire_count() {
+            for e in graph.edges(WireId(i as u32)) {
+                let pip = device.pip(e.pip).unwrap();
+                if pip.delay > 0 {
+                    assert_eq!(e.timing, (pip.delay as f64 / 50.0) as f32);
+                    with_delay += 1;
+                }
+            }
+        }
+        assert!(with_delay > 0);
+
+        let astar = AStarRouter::with_delay_model(&device, model);
+        let timing_weight = 2.0;
+        let (w, h) = device.grid_size();
+        let pin = |x, y| {
+            Device::bel_pin_wire(&device, x, y, 0, crate::device::CellPin::Output(0))
+                .or_else(|| Device::lut_output_wire(&device, x, y, 0))
+        };
+        let sink = |x, y| Device::lut_input_wire(&device, x, y, 0, 0);
+        let mut checked = 0;
+        for (x0, y0, x1, y1) in [(2, 2, w - 3, h - 3), (3, 5, 9, 5), (6, 2, 6, 12)] {
+            let (Some(src), Some(dst)) = (pin(x0, y0), sink(x1, y1)) else {
+                continue;
+            };
+            let Ok((wires, _, cost)) =
+                astar.find_path_bounded(&[src], dst, &[], |_| 1.0, timing_weight, |_| 0.0, None)
+            else {
+                continue;
+            };
+            let (sx, sy) = graph.tile(src).unwrap();
+            let (tx, ty) = graph.tile(dst).unwrap();
+            let (dx, dy) = (sx.abs_diff(tx), sy.abs_diff(ty));
+            assert!(graph.timing_lower_bound(dx, dy) > 0.0);
+            let bound =
+                graph.cost_lower_bound(dx, dy) + timing_weight * graph.timing_lower_bound(dx, dy);
+            assert!(bound <= cost + 1e-6, "bound {bound} above path cost {cost}");
+            assert!(wires.len() > 1);
             checked += 1;
         }
         assert!(checked > 0);

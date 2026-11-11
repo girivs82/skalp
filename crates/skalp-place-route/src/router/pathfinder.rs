@@ -328,8 +328,10 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     ) -> Result<RoutingResult> {
         let mut result = RoutingResult::new();
         let mut congestion = CongestionTracker::new(self.device.wire_count());
-        let astar =
-            AStarRouter::with_delay_model(self.device, crate::timing::DelayModel::ice40_default());
+        let astar = AStarRouter::with_delay_model(
+            self.device,
+            crate::timing::DelayModel::for_family(self.device.family()),
+        );
 
         // Build matched-delay lookup from NCL constraints (empty for non-NCL designs)
         let matched_delay_lookup: HashMap<GateNetId, &MatchedDelayGroup> = netlist
@@ -980,24 +982,21 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
         // Build wire cost map from congestion, with timing awareness for critical nets
         let timing_factor = net_criticality * self.timing_weight;
-        let adjusted_present_factor = present_factor * (1.0 - timing_factor * 0.5);
-        let adjusted_history_factor = history_factor * (1.0 - timing_factor * 0.3);
+        // Critical nets weigh congestion less, but never ignore it, or a
+        // heavily weighted net could hold a shared wire forever
+        let relief = timing_factor.min(1.0);
+        let adjusted_present_factor = present_factor * (1.0 - relief * 0.5);
+        let adjusted_history_factor = history_factor * (1.0 - relief * 0.3);
 
         // Cost multiplier for entering a wire: 1.0 for a wire no net has
-        // used, the PathFinder congestion cost (plus a delay term for
-        // critical nets) otherwise. Computed on demand for the wires the
-        // search reaches; building it as a map of every used wire for every
-        // net made routing quadratic in design size.
+        // used, the PathFinder congestion cost otherwise. Computed on demand
+        // for the wires the search reaches; building it as a map of every
+        // used wire for every net made routing quadratic in design size. A
+        // critical net's delay is charged by the search itself, through each
+        // PIP's timing term.
         let graph = astar.graph();
         let wire_cost = |wire: WireId| -> f64 {
-            let congestion_cost =
-                congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor);
-            let delay_cost = if timing_factor > 0.0 {
-                timing_factor * (graph.wire_delay(wire) as f64 / 100.0)
-            } else {
-                0.0
-            };
-            congestion_cost + delay_cost
+            congestion.cost_factor(wire, adjusted_present_factor, adjusted_history_factor)
         };
         // Wires already in the route (route.wires keeps first-use order)
         let mut route_wire_set: HashSet<WireId> = HashSet::new();
@@ -1099,9 +1098,21 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             let local = (tree.len() > LOCAL_SEED_MIN_TREE)
                 .then(|| tree_index.seeds_near(sink_loc.tile_x, sink_loc.tile_y))
                 .flatten();
+            // A critical sink pays for the delay already spent reaching the
+            // tree wire it branches from (edge timing terms are in 50 ps)
+            let start_cost =
+                |w: WireId| timing_weight * arrival.get(&w).copied().unwrap_or(0) as f64 / 50.0;
             let search = |seeds: &[WireId]| {
                 astar
-                    .find_path_bounded(seeds, sink_wire, &[], wire_cost, timing_weight, bounds)
+                    .find_path_bounded(
+                        seeds,
+                        sink_wire,
+                        &[],
+                        wire_cost,
+                        timing_weight,
+                        start_cost,
+                        bounds,
+                    )
                     .or_else(|e| match bounds {
                         Some(_) => astar.find_path_bounded(
                             seeds,
@@ -1109,6 +1120,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                             &[],
                             wire_cost,
                             timing_weight,
+                            start_cost,
                             None,
                         ),
                         None => Err(e),
@@ -1831,48 +1843,28 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
     ) -> Vec<NetCriticality> {
         let mut criticalities = Vec::new();
 
-        // Use real STA when timing-driven
+        // Timing-driven: the same slack estimate the placer uses, on the
+        // placed cells with this device family's delays
         if self.timing_weight > 0.0 {
-            let timing_config = crate::timing::TimingConfig::default();
-            let analyzer = crate::timing::TimingAnalyzer::with_delay_model(
-                timing_config,
-                self.device.clone(),
-                crate::timing::DelayModel::ice40_default(),
-            );
-            let net_slacks = analyzer.pre_routing_sta(netlist, placement);
-
-            for ns in &net_slacks {
-                if let Some(net) = netlist.nets.get(ns.net_id.0 as usize) {
-                    if net.driver.is_none() || net.fanout.is_empty() {
-                        continue;
-                    }
-                    let bbox = self.calculate_net_bbox(net, placement);
-                    criticalities.push(NetCriticality {
-                        net_id: ns.net_id,
-                        criticality: ns.criticality,
-                        slack: ns.slack,
-                        bbox,
-                    });
-                }
-            }
-
-            // Add nets not covered by STA (e.g., no register paths)
-            let sta_nets: HashSet<GateNetId> = net_slacks.iter().map(|ns| ns.net_id).collect();
+            let model = crate::timing::DelayModel::for_family(self.device.family());
+            let critical =
+                crate::placer::timing_estimate::net_criticalities(netlist, &model, |id| {
+                    placement
+                        .get(id)
+                        .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
+                });
             for net in &netlist.nets {
                 if net.driver.is_none() || net.fanout.is_empty() {
                     continue;
                 }
-                if !sta_nets.contains(&net.id) {
-                    let bbox = self.calculate_net_bbox(net, placement);
-                    criticalities.push(NetCriticality {
-                        net_id: net.id,
-                        criticality: 0.0,
-                        slack: f64::MAX,
-                        bbox,
-                    });
-                }
+                let criticality = critical.get(net.id.0 as usize).copied().unwrap_or(0.0);
+                criticalities.push(NetCriticality {
+                    net_id: net.id,
+                    criticality,
+                    slack: 1.0 - criticality,
+                    bbox: self.calculate_net_bbox(net, placement),
+                });
             }
-
             return criticalities;
         }
 
