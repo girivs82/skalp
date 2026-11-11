@@ -13,11 +13,9 @@ cargo +stable clippy --workspace --exclude skalp-verify --exclude skalp-formal -
 echo -e "\n=== Running clippy on beta ==="
 cargo +beta clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
-echo -e "\n=== Running build ==="
-cargo build --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --verbose --all-features
-
 echo -e "\n=== Running tests ==="
-cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-features
+# Builds every target once (no separate build step needed).
+cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --no-fail-fast
 
 # Optional: Run tarpaulin coverage check (requires cargo-tarpaulin and z3)
 # Note: This will fail if you don't have z3 installed (required for skalp-verify formal feature)
