@@ -326,8 +326,16 @@ fn fill_lfcpnx_gaps(
     let Some(mut own) = own else { return lifcl };
     let Some(lifcl) = lifcl else { return Some(own) };
 
+    // A hard block tile fuzzed for its settings only (block RAM: the
+    // CertusPro-NX settings differ in places, so they are fuzzed on that
+    // device) has no routing of its own. Its wiring to the fabric is
+    // CrossLink-NX's: the tile is the same block in the same fabric. A CIB
+    // tile takes the CrossLink-NX arcs it lacks.
     let is_cib = matches!(tiletype, "CIB" | "CIB_LR" | "CIB_LR_A" | "CIB_T");
-    if is_cib {
+    if own.pips.is_empty() && own.conns.is_empty() {
+        own.pips = lifcl.pips;
+        own.conns = lifcl.conns;
+    } else if is_cib {
         for (dst, arcs) in lifcl.pips {
             let existing = own.pips.entry(dst).or_default();
             for arc in arcs {
@@ -907,6 +915,27 @@ mod tests {
             y,
             name: n.to_string(),
         }
+    }
+
+    /// A CertusPro-NX block RAM tile fuzzed for its settings only keeps
+    /// them, and takes CrossLink-NX's wiring to the fabric
+    #[test]
+    fn settings_only_tile_takes_crosslink_routing() {
+        let own: TileBitsDb = ron::from_str(
+            r#"(enums: {"EBR0.MODE": (options: {"PDP16K": [(frame:1,bit:2,invert:false,),]},)})"#,
+        )
+        .unwrap();
+        let lifcl: TileBitsDb = ron::from_str(
+            r#"(
+                enums: {"EBR0.MODE": (options: {"PDP16K": [(frame:9,bit:9,invert:false,),]},)},
+                conns: {"N1:JF0": [(from_wire: "N1W1:JDOA4_EBR_CORE",)]},
+            )"#,
+        )
+        .unwrap();
+        let merged = fill_lfcpnx_gaps(Some(own), Some(lifcl), "EBR_1").unwrap();
+        assert_eq!(merged.conns.len(), 1, "CrossLink-NX wiring");
+        let mode = &merged.enums["EBR0.MODE"].options["PDP16K"];
+        assert_eq!((mode[0].frame, mode[0].bit), (1, 2), "own settings");
     }
 
     #[test]
