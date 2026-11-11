@@ -449,6 +449,19 @@ impl AigWriterState<'_> {
                     }
                 }
             }
+            // A latch's clock and reset (which may be computed by logic)
+            // get their nets before the latch's cell is written
+            match node {
+                AigNode::Latch { clock, reset, .. } | AigNode::Barrier { clock, reset, .. } => {
+                    if let Some(c) = clock {
+                        visit(*c, &mut visited, &mut result);
+                    }
+                    if let Some(r) = reset {
+                        visit(r.node, &mut visited, &mut result);
+                    }
+                }
+                _ => {}
+            }
             visit(id, &mut visited, &mut result);
         }
 
@@ -692,7 +705,7 @@ impl AigWriterState<'_> {
         aig: &Aig,
         id: AigNodeId,
         init: Option<bool>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
     ) {
         if init != Some(true) || (reset.is_some() && !aig.is_latch_sync_reset(id)) {
             return;
@@ -722,7 +735,7 @@ impl AigWriterState<'_> {
         data: AigLit,
         _init: Option<bool>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
     ) {
         // Get pre-created output net (created in pre_create_latch_nets phase)
         let output_net = self.node_to_net.get(&id).copied().unwrap_or_else(|| {
@@ -733,7 +746,10 @@ impl AigWriterState<'_> {
 
         // Get clock and reset nets
         let clock_net = clock.and_then(|c| self.node_to_net.get(&c).copied());
-        let reset_net = reset.and_then(|r| self.node_to_net.get(&r).copied());
+        // The reset pin takes the literal with its polarity: an active-low
+        // reset reaches it through an inverter (or the inverting cell the
+        // mapper chose)
+        let reset_net = reset.map(|r| self.get_or_create_lit_net(aig, r));
 
         // Get safety info
         let safety = aig
@@ -1495,7 +1511,7 @@ impl AigWriterState<'_> {
         data: AigLit,
         enable: Option<AigLit>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
         _init: Option<bool>,
     ) {
         // Get input nets
@@ -1617,7 +1633,7 @@ impl AigWriterState<'_> {
         // Create the cell
         let cell = if is_seq {
             let clock_net = clock.and_then(|c| self.node_to_net.get(&c).copied());
-            let reset_net = reset.and_then(|r| self.node_to_net.get(&r).copied());
+            let reset_net = reset.map(|r| self.get_or_create_lit_net(aig, r));
 
             Cell::new_seq(
                 CellId(self.next_cell_id),
@@ -1998,12 +2014,19 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
                 .or_default()
                 .push((cell_idx, pin_idx));
         }
-        // Also check clock nets — these should NOT absorb inversions
+        // Clock and reset pins cannot absorb an inversion: an inverter
+        // that drives one stays
         if let Some(clk_net) = cell.clock {
             consumers
                 .entry(clk_net)
                 .or_default()
-                .push((cell_idx, usize::MAX)); // sentinel: non-absorbable
+                .push((cell_idx, CLOCK_PIN));
+        }
+        if let Some(rst_net) = cell.reset {
+            consumers
+                .entry(rst_net)
+                .or_default()
+                .push((cell_idx, RESET_PIN));
         }
     }
 
@@ -2044,7 +2067,7 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
         // ALL consumers must be LUT cells (have lut_init)
         let all_consumers_are_luts = consumer_list
             .iter()
-            .all(|&(ci, pin)| pin != usize::MAX && netlist.cells[ci].lut_variables().is_some());
+            .all(|&(ci, pin)| pin < RESET_PIN && netlist.cells[ci].lut_variables().is_some());
 
         if all_consumers_are_luts {
             inv_removals.push((cell_idx, inv_input, inv_output));
@@ -2059,9 +2082,6 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
     for &(_cell_idx, inv_input, inv_output) in &inv_removals {
         if let Some(consumer_list) = consumers.get(&inv_output) {
             for &(ci, pin_idx) in consumer_list {
-                if pin_idx == usize::MAX {
-                    continue;
-                }
                 // Complement the truth table at this input position
                 if let (Some(init), Some(vars)) = (
                     netlist.cells[ci].lut_init,

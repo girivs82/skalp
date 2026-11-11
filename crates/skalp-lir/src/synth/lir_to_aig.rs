@@ -488,9 +488,11 @@ impl<'a> LirToSynthAig<'a> {
     }
 
     /// Find the AIG reset node for a register
-    fn find_reset_node(&self, node: &LirNode) -> Option<AigNodeId> {
+    /// The literal that is 1 while the register is in reset. It keeps its
+    /// inversion: an active-low reset arrives as an inverted literal.
+    fn find_reset_node(&self, node: &LirNode) -> Option<AigLit> {
         node.reset
-            .and_then(|rst_id| self.signal_map.get(&(rst_id.0, 0)).map(|lit| lit.node))
+            .and_then(|rst_id| self.signal_map.get(&(rst_id.0, 0)).copied())
     }
 
     /// Combine `lits` pairwise, level by level, so a reduction over `n` bits

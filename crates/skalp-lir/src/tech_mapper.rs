@@ -4511,6 +4511,59 @@ mod tests {
         );
     }
 
+    /// A register reset by a signal computed in the same module (a
+    /// power-on reset from a counter) keeps its reset: the flip-flop gets
+    /// the reset net on its reset pin.
+    #[test]
+    fn register_reset_by_logic_keeps_its_reset() {
+        let lib = crate::tech_library::get_stdlib_library("nexus").unwrap();
+        let mut lir = Lir::new("por".to_string());
+        let clk = lir.add_input("clk".to_string(), 1);
+        lir.clocks.push(clk);
+        let a = lir.add_input("a".to_string(), 2);
+        let d = lir.add_input("d".to_string(), 8);
+        let q = lir.add_output("q".to_string(), 8);
+        let three = lir.add_signal("three".to_string(), 2);
+        lir.add_node(
+            LirOp::Constant { width: 2, value: 3 },
+            vec![],
+            three,
+            "por.three".to_string(),
+        );
+        let rst = lir.add_signal("rst".to_string(), 1);
+        lir.add_node(
+            LirOp::Ne { width: 2 },
+            vec![a, three],
+            rst,
+            "por.rst".to_string(),
+        );
+        lir.add_seq_node(
+            LirOp::Reg {
+                width: 8,
+                has_enable: false,
+                has_reset: true,
+                async_reset: true,
+                reset_value: Some(0),
+            },
+            vec![d],
+            q,
+            "por.q".to_string(),
+            clk,
+            Some(rst),
+        );
+
+        let netlist = synthesize(&lir, &lib, crate::synth::SynthPreset::Full).netlist;
+        let ffs: Vec<_> = netlist.cells.iter().filter(|c| c.is_sequential()).collect();
+        assert_eq!(ffs.len(), 8);
+        for ff in ffs {
+            assert!(ff.reset.is_some(), "{} lost its reset", ff.path);
+        }
+        assert!(
+            netlist.undriven_nets_with_fanout().is_empty(),
+            "the reset logic must drive the reset pins"
+        );
+    }
+
     #[test]
     fn test_synthesize_and_gate() {
         let lib = crate::tech_library::get_stdlib_library("generic_asic")

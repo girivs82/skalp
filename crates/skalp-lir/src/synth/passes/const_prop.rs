@@ -137,7 +137,7 @@ impl Pass for ConstProp {
                 } => {
                     let resolved_data = self.resolve(*data);
                     let resolved_clock = clock.map(|c| self.resolve(AigLit::new(c)).node);
-                    let resolved_reset = reset.map(|r| self.resolve(AigLit::new(r)).node);
+                    let resolved_reset = reset.map(|r| self.resolve(r));
 
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_latch_with_safety(
@@ -164,7 +164,7 @@ impl Pass for ConstProp {
                     let resolved_data = self.resolve(*data);
                     let resolved_enable = enable.map(|e| self.resolve(e));
                     let resolved_clock = clock.map(|c| self.resolve(AigLit::new(c)).node);
-                    let resolved_reset = reset.map(|r| self.resolve(AigLit::new(r)).node);
+                    let resolved_reset = reset.map(|r| self.resolve(r));
 
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(

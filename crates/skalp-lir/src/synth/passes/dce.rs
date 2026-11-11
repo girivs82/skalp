@@ -91,14 +91,14 @@ impl Pass for Dce {
                     for fanin in node.fanins() {
                         mark_live(aig, fanin.node, &mut live);
                     }
-                    // Clock and reset are not AigLit, they're AigNodeId, so mark them directly
+                    // The clock is a node and the reset a literal; mark both cones
                     if let Some(clk) = clock {
                         live.insert(*clk);
                         mark_live(aig, *clk, &mut live);
                     }
                     if let Some(rst) = reset {
-                        live.insert(*rst);
-                        mark_live(aig, *rst, &mut live);
+                        live.insert(rst.node);
+                        mark_live(aig, rst.node, &mut live);
                     }
                 }
                 AigNode::Barrier { clock, reset, .. } => {
@@ -111,8 +111,8 @@ impl Pass for Dce {
                         mark_live(aig, *clk, &mut live);
                     }
                     if let Some(rst) = reset {
-                        live.insert(*rst);
-                        mark_live(aig, *rst, &mut live);
+                        live.insert(rst.node);
+                        mark_live(aig, rst.node, &mut live);
                     }
                 }
                 _ => {}
@@ -151,7 +151,7 @@ impl Pass for Dce {
             AigLit,
             Option<bool>,
             Option<AigNodeId>,
-            Option<AigNodeId>,
+            Option<AigLit>,
         )> = Vec::new();
         let mut barrier_ids: Vec<(
             AigNodeId,
@@ -159,7 +159,7 @@ impl Pass for Dce {
             AigLit,
             Option<AigLit>,
             Option<AigNodeId>,
-            Option<AigNodeId>,
+            Option<AigLit>,
             Option<bool>,
         )> = Vec::new();
 
@@ -196,7 +196,8 @@ impl Pass for Dce {
                 } => {
                     // Pre-create latch with placeholder data
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
-                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let new_reset = reset
+                        .and_then(|r| node_map.get(&r.node).map(|lit| lit.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_latch_with_safety(
                         AigLit::false_lit(),
@@ -221,7 +222,8 @@ impl Pass for Dce {
                 } => {
                     // Pre-create barrier with placeholder data
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
-                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let new_reset = reset
+                        .and_then(|r| node_map.get(&r.node).map(|lit| lit.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
                         barrier_type.clone(),
@@ -266,17 +268,25 @@ impl Pass for Dce {
         }
 
         // Phase 2: Update latch/barrier data with resolved values
-        for (id, data, _init, _clock, _reset) in latch_ids {
+        for (id, data, _init, clock, reset) in latch_ids {
             let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
             let new_data = resolve_lit(&node_map, data);
             new_aig.update_latch_data(new_node_id, new_data);
+            let new_clock = clock.and_then(|c| node_map.get(&c).map(|l| l.node));
+            let new_reset =
+                reset.and_then(|r| node_map.get(&r.node).map(|l| l.invert_if(r.inverted)));
+            new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
         }
 
-        for (id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+        for (id, _barrier_type, data, enable, clock, reset, _init) in barrier_ids {
             let new_node_id = node_map.get(&id).map(|lit| lit.node).unwrap();
             let new_data = resolve_lit(&node_map, data);
             let new_enable = enable.map(|e| resolve_lit(&node_map, e));
             new_aig.update_barrier_data(new_node_id, new_data, new_enable);
+            let new_clock = clock.and_then(|c| node_map.get(&c).map(|l| l.node));
+            let new_reset =
+                reset.and_then(|r| node_map.get(&r.node).map(|l| l.invert_if(r.inverted)));
+            new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
         }
 
         // Copy outputs with resolved literals

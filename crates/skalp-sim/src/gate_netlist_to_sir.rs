@@ -16,9 +16,9 @@
 //! - Cell-to-primitive mapping for fault injection targeting
 
 use crate::sir::{
-    CombBlockId, CombinationalBlock, EdgeType, ResetSpec, SeqBlockId, SequentialBlock, Sir,
-    SirDetectionMode, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
-    SirSignalType, StructuralBlockInfo,
+    CombBlockId, CombinationalBlock, EdgeType, SeqBlockId, SequentialBlock, Sir, SirDetectionMode,
+    SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId, SirSignalType,
+    StructuralBlockInfo,
 };
 use indexmap::IndexMap;
 use skalp_frontend::hir::DetectionMode;
@@ -267,6 +267,14 @@ impl GateNetlistToSirConverter {
                 // Fallback to cell type name parsing
                 self.cell_type_to_primitive(&cell.cell_type)
             };
+            // A flip-flop with a reset pin resets through it, whatever its
+            // name says
+            let ptype = match ptype {
+                PrimitiveType::DffP if cell.reset.is_some() && cell.clock.is_some() => {
+                    PrimitiveType::DffSR
+                }
+                other => other,
+            };
 
             // Convert input/output net IDs to signal IDs
             // BUG FIX: Resolve net aliases before looking up signals.
@@ -299,10 +307,8 @@ impl GateNetlistToSirConverter {
             }
             // A flip-flop's own reset follows its D (and enable) inputs: see
             // `own_reset_input`
-            if matches!(
-                cell.function,
-                Some(CellFunction::DffR) | Some(CellFunction::DffRE)
-            ) && inputs.len() == expected_inputs
+            if own_reset_input(&ptype).is_some_and(|index| index == expected_inputs)
+                && inputs.len() == expected_inputs
             {
                 if let Some(&reset) = cell
                     .reset
@@ -1059,14 +1065,12 @@ impl GateNetlistToSirConverter {
                 .and_then(|clk_net| self.net_to_signal.get(clk_net).copied())
                 .unwrap_or(SirSignalId(0));
 
-            // Find reset signal if present
-            let reset = netlist.resets.first().and_then(|rst_net| {
-                self.net_to_signal.get(rst_net).map(|&signal| ResetSpec {
-                    signal,
-                    active_high: true, // Assume active-high reset
-                    edge: None,        // Synchronous reset
-                })
-            });
+            // No block-wide reset: each flip-flop resets through its own
+            // reset pin (see `own_reset_input`), with the polarity and the
+            // reset net synthesis gave it. Resetting every flip-flop on the
+            // design's first reset port would also reset registers whose
+            // code never does, and assumed that port was active high.
+            let reset = None;
 
             // Collect registers (output signals of sequential cells)
             let mut registers = Vec::new();
@@ -1329,7 +1333,13 @@ mod tests {
 
         let seq_block = &result.sir.top_module.seq_blocks[0];
         assert_eq!(seq_block.operations.len(), 1);
-        assert!(seq_block.reset.is_some());
+        // The flip-flop resets through its own reset pin
+        assert!(seq_block.reset.is_none());
+        let SirOperation::Primitive { ptype, inputs, .. } = &seq_block.operations[0] else {
+            panic!("expected a flip-flop primitive");
+        };
+        assert!(matches!(ptype, PrimitiveType::DffSR));
+        assert_eq!(inputs.len(), 2, "D and the reset");
     }
 
     #[test]

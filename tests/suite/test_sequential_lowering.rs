@@ -239,3 +239,196 @@ async fn repeated_target_and_default_arm_in_a_child_instance() {
     ];
     assert_eq!(trace, expected);
 }
+
+/// Hold `rst_n` low, release it, then assert it again, reading `q` after
+/// each step.
+async fn active_low_reset_trace(path: &str, top: &str, library: Option<&str>) -> Vec<u64> {
+    let mut tb = match library {
+        Some(library) => Testbench::gate_level_with_top_and_library(path, top, library)
+            .await
+            .unwrap(),
+        None => Testbench::with_top_module(path, top).await.unwrap(),
+    };
+    let mut trace = Vec::new();
+    tb.set("d", 0x11u64);
+    for (rst_n, cycles) in [(0u64, 2), (1, 2), (0, 1)] {
+        tb.set("rst_n", rst_n);
+        tb.clock(cycles).await;
+        trace.push(tb.get_u64("q").await);
+    }
+    trace
+}
+
+const ACTIVE_LOW_RESET: &str = r#"
+entity LowResetReg {
+    in clk: clock
+    in rst_n: reset(active_low)
+    in d: bit[8]
+    out q: bit[8]
+}
+impl LowResetReg {
+    signal r: bit[8] = 0
+    on(clk.rise | rst_n.active) {
+        if (!rst_n) {
+            r = 8'h5a
+        } else {
+            r = d
+        }
+    }
+    q = r
+}
+"#;
+
+/// An asynchronous reset that is active low resets the register while it is
+/// low, in gates as in behavior. The gate netlist used to connect the
+/// reset pin to `rst_n` itself, so the register was held in reset while
+/// `rst_n` was high.
+#[tokio::test]
+async fn active_low_async_reset_has_its_polarity_in_gates() {
+    let path = design("active_low_reset", ACTIVE_LOW_RESET);
+    let expected = vec![0x5a, 0x11, 0x5a];
+    assert_eq!(
+        active_low_reset_trace(&path, "LowResetReg", None).await,
+        expected
+    );
+    for library in ["nexus", "generic_asic"] {
+        assert_eq!(
+            active_low_reset_trace(&path, "LowResetReg", Some(library)).await,
+            expected,
+            "gate level on {library}"
+        );
+    }
+}
+
+/// The same register inside a child instance: the child's reset is the
+/// parent's port, renamed.
+#[tokio::test]
+async fn active_low_async_reset_in_a_child_instance() {
+    let source = format!(
+        "{ACTIVE_LOW_RESET}
+entity LowResetTop {{
+    in clk: clock
+    in rst_n: reset(active_low)
+    in d: bit[8]
+    out q: bit[8]
+}}
+impl LowResetTop {{
+    inst reg = LowResetReg {{ clk: clk, rst_n: rst_n, d: d }}
+    q = reg.q
+}}
+"
+    );
+    let path = design("active_low_reset_child", &source);
+    let expected = vec![0x5a, 0x11, 0x5a];
+    assert_eq!(
+        active_low_reset_trace(&path, "LowResetTop", None).await,
+        expected
+    );
+    for library in ["nexus", "generic_asic"] {
+        assert_eq!(
+            active_low_reset_trace(&path, "LowResetTop", Some(library)).await,
+            expected,
+            "gate level on {library}"
+        );
+    }
+}
+
+/// A reset computed by logic: the parent holds the child in reset while
+/// `rst_n` is low or `hold` is high. In gates the reset pin is driven by
+/// that logic, with its polarity.
+#[tokio::test]
+async fn async_reset_computed_by_logic() {
+    let source = format!(
+        "{ACTIVE_LOW_RESET}
+entity HeldResetTop {{
+    in clk: clock
+    in rst_n: reset(active_low)
+    in hold: bit
+    in d: bit[8]
+    out q: bit[8]
+}}
+impl HeldResetTop {{
+    inst reg = LowResetReg {{ clk: clk, rst_n: rst_n & !hold, d: d }}
+    q = reg.q
+}}
+"
+    );
+    let path = design("computed_reset", &source);
+    let run = |library: Option<&'static str>| {
+        let path = path.clone();
+        async move {
+            let mut tb = match library {
+                Some(library) => {
+                    Testbench::gate_level_with_top_and_library(&path, "HeldResetTop", library)
+                        .await
+                        .unwrap()
+                }
+                None => Testbench::with_top_module(&path, "HeldResetTop")
+                    .await
+                    .unwrap(),
+            };
+            let mut trace = Vec::new();
+            tb.set("d", 0x11u64);
+            for (rst_n, hold, cycles) in [(0u64, 0u64, 2), (1, 0, 2), (1, 1, 1), (1, 0, 2)] {
+                tb.set("rst_n", rst_n);
+                tb.set("hold", hold);
+                tb.clock(cycles).await;
+                trace.push(tb.get_u64("q").await);
+            }
+            trace
+        }
+    };
+    let expected = vec![0x5a, 0x11, 0x5a, 0x11];
+    assert_eq!(run(None).await, expected);
+    for library in ["nexus", "generic_asic"] {
+        assert_eq!(
+            run(Some(library)).await,
+            expected,
+            "gate level on {library}"
+        );
+    }
+}
+
+/// A register whose code never tests the module's reset port is not reset
+/// by it. Gates used to reset every register of a module with a reset port
+/// to 0, and gate-level simulation reset every flip-flop while the first
+/// reset port was high.
+#[tokio::test]
+async fn register_not_reset_by_its_code_ignores_the_reset_port() {
+    let source = r#"
+entity UnresetReg {
+    in clk: clock
+    in rst: reset
+    in d: bit[8]
+    out q: bit[8]
+}
+impl UnresetReg {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        r = d
+    }
+    q = r
+}
+"#;
+    let path = design("unreset", source);
+    for library in [None, Some("nexus"), Some("generic_asic")] {
+        let mut tb = match library {
+            Some(library) => {
+                Testbench::gate_level_with_top_and_library(&path, "UnresetReg", library)
+                    .await
+                    .unwrap()
+            }
+            None => Testbench::with_top_module(&path, "UnresetReg")
+                .await
+                .unwrap(),
+        };
+        let mut trace = Vec::new();
+        tb.set("d", 0x11u64);
+        for rst in [1u64, 0, 1] {
+            tb.set("rst", rst);
+            tb.clock(2).await;
+            trace.push(tb.get_u64("q").await);
+        }
+        assert_eq!(trace, vec![0x11, 0x11, 0x11], "{library:?}");
+    }
+}

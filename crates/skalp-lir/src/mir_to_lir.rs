@@ -152,12 +152,19 @@ pub struct MirToLirTransform {
     clock_signals: Vec<LirSignalId>,
     /// Reset signal IDs
     reset_signals: Vec<LirSignalId>,
+    /// Whether each reset port is asserted when high (`reset(active_low)`
+    /// is asserted when low)
+    reset_active_high: HashMap<LirSignalId, bool>,
+    /// The inverse of each reset that a register is reset by while low
+    reset_inverses: HashMap<LirSignalId, LirSignalId>,
     /// Counter for generating unique signal names
     temp_counter: u32,
     /// Counter for generating unique node names
     node_counter: u32,
-    /// Whether the current process uses async reset (Active/Inactive edge in sensitivity list)
-    async_reset: bool,
+    /// Asynchronous reset of the process being lowered (an `Active` or
+    /// `Inactive` reset edge in its sensitivity list): the reset signal and
+    /// whether the process is reset while that signal is high
+    async_reset: Option<(LirSignalId, bool)>,
     /// Clock of the sequential process being lowered, if any
     sequential_clock: Option<LirSignalId>,
     /// Memory signals: maps MIR SignalId to MemBlock port info
@@ -212,9 +219,11 @@ impl MirToLirTransform {
             warnings: Vec::new(),
             clock_signals: Vec::new(),
             reset_signals: Vec::new(),
+            reset_active_high: HashMap::new(),
+            reset_inverses: HashMap::new(),
             temp_counter: 0,
             node_counter: 0,
-            async_reset: false,
+            async_reset: None,
             sequential_clock: None,
             memory_signals: IndexMap::new(),
             target_has_bram: false,
@@ -610,8 +619,9 @@ impl MirToLirTransform {
                 if matches!(port.port_type, DataType::Clock { .. }) {
                     self.clock_signals.push(id);
                 }
-                if matches!(port.port_type, DataType::Reset { .. }) {
+                if let DataType::Reset { active_high, .. } = port.port_type {
                     self.reset_signals.push(id);
+                    self.reset_active_high.insert(id, active_high);
                 }
                 id
             }
@@ -890,20 +900,21 @@ impl MirToLirTransform {
             ProcessKind::Sequential => {
                 // Extract clock from sensitivity list
                 let clock_signal = self.get_clock_from_sensitivity(&process.sensitivity);
-                let reset_signal = self.get_reset_from_sensitivity(&process.sensitivity);
-
-                // Detect async reset from sensitivity list (Active/Inactive edge types)
-                self.async_reset = matches!(&process.sensitivity, SensitivityList::Edge(edges)
-                    if edges.iter().any(|e| matches!(e.edge, EdgeType::Active | EdgeType::Inactive)));
+                // A reset edge in the sensitivity list makes the process's
+                // reset asynchronous. Registers get a reset only from what
+                // the body says (see the reset pattern in
+                // transform_sequential_statement); the others hold their
+                // reset behavior, if any, in their data logic.
+                self.async_reset = self.get_async_reset_from_sensitivity(&process.sensitivity);
 
                 // Transform sequential statements (create registers)
                 self.sequential_clock = clock_signal;
                 let body = self.split_partially_written_registers(&process.body);
-                self.transform_sequential_block(&body, clock_signal, reset_signal);
+                self.transform_sequential_block(&body, clock_signal);
 
                 // Reset for next process
                 self.sequential_clock = None;
-                self.async_reset = false;
+                self.async_reset = None;
             }
             ProcessKind::Combinational | ProcessKind::General => {
                 // Transform combinational statements
@@ -1465,12 +1476,7 @@ impl MirToLirTransform {
     }
 
     /// Transform a sequential block
-    fn transform_sequential_block(
-        &mut self,
-        block: &Block,
-        clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
-    ) {
+    fn transform_sequential_block(&mut self, block: &Block, clock_signal: Option<LirSignalId>) {
         // Each memory written anywhere in the block gets one write port, with
         // the full guard of every write site (if, match, or both).
         let memories = self.memories_written(block);
@@ -1479,7 +1485,7 @@ impl MirToLirTransform {
                 self.lower_memory_writes_in_scope(memory, &block.statements, clock_signal);
             }
             let remaining = self.without_memory_writes(block);
-            self.transform_sequential_block(&remaining, clock_signal, reset_signal);
+            self.transform_sequential_block(&remaining, clock_signal);
             return;
         }
 
@@ -1497,13 +1503,13 @@ impl MirToLirTransform {
             }
             for target in &repeated {
                 let paths = Self::collect_conditional_paths_for_target(block, target, None);
-                self.add_register_from_paths(target, paths, clock_signal, reset_signal);
+                self.add_register_from_paths(target, paths, clock_signal);
             }
             let remaining = Self::without_handled_assignments(block, &repeated, true);
-            self.transform_sequential_statements(&remaining, clock_signal, reset_signal);
+            self.transform_sequential_statements(&remaining, clock_signal);
             return;
         }
-        self.transform_sequential_statements(block, clock_signal, reset_signal);
+        self.transform_sequential_statements(block, clock_signal);
     }
 
     /// Memories a block writes, in the order first written.
@@ -1636,7 +1642,6 @@ impl MirToLirTransform {
         target: &LValue,
         paths: Vec<(Option<Expression>, Expression)>,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
     ) {
         let target_signal = self.get_lvalue_signal(target);
         let target_width = self.get_lvalue_width(target);
@@ -1645,8 +1650,8 @@ impl MirToLirTransform {
         let reg_op = LirOp::Reg {
             width: target_width,
             has_enable: false,
-            has_reset: reset_signal.is_some(),
-            async_reset: self.async_reset,
+            has_reset: false,
+            async_reset: false,
             reset_value: Some(0),
         };
         let target_name = self.get_signal_name(target_signal);
@@ -1658,7 +1663,7 @@ impl MirToLirTransform {
                 target_signal,
                 reg_path,
                 clk,
-                reset_signal,
+                None,
             );
         } else {
             self.lir
@@ -1671,7 +1676,6 @@ impl MirToLirTransform {
         &mut self,
         block: &Block,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
     ) {
         // BUG #237 FIX: Collect leading assignments (before any if/case) as defaults
         // These serve as implicit defaults for conditionals that don't assign to a target
@@ -1702,7 +1706,6 @@ impl MirToLirTransform {
             self.transform_sequential_statement_with_defaults(
                 stmt,
                 clock_signal,
-                reset_signal,
                 &sequential_defaults,
             );
         }
@@ -1713,7 +1716,6 @@ impl MirToLirTransform {
         &mut self,
         stmt: &Statement,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
         sequential_defaults: &[(LValue, Expression)],
     ) {
         match stmt {
@@ -1722,13 +1724,12 @@ impl MirToLirTransform {
                 self.transform_sequential_case_with_defaults(
                     case_stmt,
                     clock_signal,
-                    reset_signal,
                     sequential_defaults,
                 );
             }
             _ => {
                 // Other statements use the original handler
-                self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+                self.transform_sequential_statement(stmt, clock_signal);
             }
         }
     }
@@ -1738,7 +1739,6 @@ impl MirToLirTransform {
         &mut self,
         stmt: &Statement,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
     ) {
         match stmt {
             Statement::Assignment(assign) => {
@@ -1751,7 +1751,6 @@ impl MirToLirTransform {
                                 index,
                                 &assign.rhs,
                                 clock_signal,
-                                reset_signal,
                             );
                             return;
                         }
@@ -1774,8 +1773,8 @@ impl MirToLirTransform {
                     let reg_op = LirOp::Reg {
                         width: target_width,
                         has_enable: false,
-                        has_reset: reset_signal.is_some(),
-                        async_reset: self.async_reset,
+                        has_reset: false,
+                        async_reset: false,
                         reset_value: Some(0), // Default reset value
                     };
 
@@ -1790,7 +1789,7 @@ impl MirToLirTransform {
                             target_signal,
                             reg_path,
                             clk,
-                            reset_signal,
+                            None,
                         );
                     } else {
                         self.lir
@@ -1804,7 +1803,8 @@ impl MirToLirTransform {
             Statement::If(if_stmt) => {
                 // Check for SDFF pattern: if (reset) { reg = const } else { reg = value }
                 // When detected, skip the mux and use integrated synchronous reset
-                let is_reset_condition = self.is_reset_signal_reference(&if_stmt.condition);
+                let reset_condition = self.reset_condition(&if_stmt.condition);
+                let is_reset_condition = reset_condition.is_some();
 
                 // Collect assignments from each branch (direct only, not nested)
                 let then_assigns = Self::collect_assignments(&if_stmt.then_block);
@@ -1947,7 +1947,7 @@ impl MirToLirTransform {
                             paths.extend(else_paths);
                         }
 
-                        self.add_register_from_paths(target, paths, clock_signal, reset_signal);
+                        self.add_register_from_paths(target, paths, clock_signal);
                         continue;
                     }
 
@@ -2045,12 +2045,17 @@ impl MirToLirTransform {
                             target_signal // Feedback: keep current value
                         };
 
-                        // Create register with reset
+                        // Create register with reset: the reset pin takes
+                        // the condition (1 while asserted), and is
+                        // asynchronous when it is the process's reset edge
+                        let (reset_base, asserted_high) =
+                            reset_condition.expect("the reset pattern has a reset condition");
+                        let reset_pin = self.reset_asserted_signal(reset_base, asserted_high);
                         let reg_op = LirOp::Reg {
                             width: target_width,
                             has_enable: false,
                             has_reset: true,
-                            async_reset: self.async_reset,
+                            async_reset: self.async_reset == Some((reset_base, asserted_high)),
                             reset_value: Some(reset_value),
                         };
 
@@ -2065,7 +2070,7 @@ impl MirToLirTransform {
                                 target_signal,
                                 reg_path,
                                 clk,
-                                reset_signal,
+                                Some(reset_pin),
                             );
                         } else {
                             self.lir
@@ -2168,8 +2173,8 @@ impl MirToLirTransform {
                         let reg_op = LirOp::Reg {
                             width: target_width,
                             has_enable: false,
-                            has_reset: reset_signal.is_some(),
-                            async_reset: self.async_reset,
+                            has_reset: false,
+                            async_reset: false,
                             reset_value: Some(0),
                         };
 
@@ -2184,7 +2189,7 @@ impl MirToLirTransform {
                                 target_signal,
                                 reg_path,
                                 clk,
-                                reset_signal,
+                                None,
                             );
                         } else {
                             self.lir
@@ -2201,7 +2206,6 @@ impl MirToLirTransform {
                         self.transform_sequential_if_excluding_targets(
                             nested_if,
                             clock_signal,
-                            reset_signal,
                             &handled_targets,
                         );
                     }
@@ -2212,7 +2216,6 @@ impl MirToLirTransform {
                             self.transform_sequential_if_excluding_targets(
                                 nested_if,
                                 clock_signal,
-                                reset_signal,
                                 &handled_targets,
                             );
                         }
@@ -2220,19 +2223,14 @@ impl MirToLirTransform {
                 }
             }
             Statement::Block(block) => {
-                self.transform_sequential_block(block, clock_signal, reset_signal);
+                self.transform_sequential_block(block, clock_signal);
             }
             Statement::Case(case_stmt) => {
                 // BUG #237 FIX: Handle Case/Match statements in LIR lowering
                 // Convert case statement to chain of muxes for state machine synthesis
                 // Note: When called from transform_sequential_statement_with_defaults,
                 // that version handles defaults. This is a fallback for direct calls.
-                self.transform_sequential_case_with_defaults(
-                    case_stmt,
-                    clock_signal,
-                    reset_signal,
-                    &[],
-                );
+                self.transform_sequential_case_with_defaults(case_stmt, clock_signal, &[]);
             }
             Statement::ResolvedConditional(resolved) => {
                 // ResolvedConditional wraps an if-else-if chain into a PriorityMux.
@@ -2242,7 +2240,6 @@ impl MirToLirTransform {
                     self.transform_sequential_statement(
                         &Statement::If(*resolved.original.clone()),
                         clock_signal,
-                        reset_signal,
                     );
                 } else {
                     // Blocking: treat as combinational
@@ -2261,7 +2258,6 @@ impl MirToLirTransform {
         &mut self,
         case_stmt: &CaseStatement,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
         sequential_defaults: &[(LValue, Expression)],
     ) {
         // Transform the case expression (e.g., state_reg)
@@ -2356,13 +2352,7 @@ impl MirToLirTransform {
                     &values,
                     target_width,
                 );
-                self.add_case_register(
-                    target_signal,
-                    target_width,
-                    selected,
-                    clock_signal,
-                    reset_signal,
-                );
+                self.add_case_register(target_signal, target_width, selected, clock_signal);
                 continue;
             }
 
@@ -2454,13 +2444,7 @@ impl MirToLirTransform {
                 current_result = mux_out;
             }
 
-            self.add_case_register(
-                target_signal,
-                target_width,
-                current_result,
-                clock_signal,
-                reset_signal,
-            );
+            self.add_case_register(target_signal, target_width, current_result, clock_signal);
         }
     }
 
@@ -2471,13 +2455,12 @@ impl MirToLirTransform {
         target_width: u32,
         next: LirSignalId,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
     ) {
         let reg_op = LirOp::Reg {
             width: target_width,
             has_enable: false,
-            has_reset: reset_signal.is_some(),
-            async_reset: self.async_reset,
+            has_reset: false,
+            async_reset: false,
             reset_value: Some(0),
         };
 
@@ -2486,14 +2469,8 @@ impl MirToLirTransform {
         let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
 
         if let Some(clk) = clock_signal {
-            self.lir.add_seq_node(
-                reg_op,
-                vec![next],
-                target_signal,
-                reg_path,
-                clk,
-                reset_signal,
-            );
+            self.lir
+                .add_seq_node(reg_op, vec![next], target_signal, reg_path, clk, None);
         } else {
             self.lir
                 .add_node(reg_op, vec![next], target_signal, reg_path);
@@ -3119,7 +3096,6 @@ impl MirToLirTransform {
         &mut self,
         if_stmt: &IfStatement,
         clock_signal: Option<LirSignalId>,
-        reset_signal: Option<LirSignalId>,
         excluded_targets: &[LValue],
     ) {
         // BUG FIX: Transform blocking assignments (let bindings) in both branches
@@ -3203,8 +3179,8 @@ impl MirToLirTransform {
             let reg_op = LirOp::Reg {
                 width: target_width,
                 has_enable: false,
-                has_reset: reset_signal.is_some(),
-                async_reset: self.async_reset,
+                has_reset: false,
+                async_reset: false,
                 reset_value: Some(0),
             };
 
@@ -3213,14 +3189,8 @@ impl MirToLirTransform {
             let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
 
             if let Some(clk) = clock_signal {
-                self.lir.add_seq_node(
-                    reg_op,
-                    vec![mux_out],
-                    target_signal,
-                    reg_path,
-                    clk,
-                    reset_signal,
-                );
+                self.lir
+                    .add_seq_node(reg_op, vec![mux_out], target_signal, reg_path, clk, None);
             } else {
                 self.lir
                     .add_node(reg_op, vec![mux_out], target_signal, reg_path);
@@ -3237,7 +3207,6 @@ impl MirToLirTransform {
                 self.transform_sequential_if_excluding_targets(
                     nested_if,
                     clock_signal,
-                    reset_signal,
                     &combined_excluded,
                 );
             }
@@ -3248,7 +3217,6 @@ impl MirToLirTransform {
                     self.transform_sequential_if_excluding_targets(
                         nested_if,
                         clock_signal,
-                        reset_signal,
                         &combined_excluded,
                     );
                 }
@@ -5558,7 +5526,6 @@ impl MirToLirTransform {
         index: &Expression,
         rhs: &Expression,
         clock_signal: Option<LirSignalId>,
-        _reset_signal: Option<LirSignalId>,
     ) {
         // Set the MemBlock node's clock (deferred from create_memory_signal)
         if let Some(clk) = clock_signal {
@@ -5759,15 +5726,24 @@ impl MirToLirTransform {
     }
 
     /// Get reset signal from sensitivity list
-    fn get_reset_from_sensitivity(&self, sens: &SensitivityList) -> Option<LirSignalId> {
-        if let SensitivityList::Edge(edges) = sens {
-            for edge in edges {
-                if matches!(edge.edge, EdgeType::Active | EdgeType::Inactive) {
-                    return self.get_lvalue_signal_readonly(&edge.signal);
-                }
-            }
-        }
-        self.reset_signals.first().copied()
+    fn get_async_reset_from_sensitivity(
+        &self,
+        sens: &SensitivityList,
+    ) -> Option<(LirSignalId, bool)> {
+        let SensitivityList::Edge(edges) = sens else {
+            return None;
+        };
+        edges.iter().find_map(|edge| {
+            let active = match edge.edge {
+                EdgeType::Active => true,
+                EdgeType::Inactive => false,
+                _ => return None,
+            };
+            let signal = self.get_lvalue_signal_readonly(&edge.signal)?;
+            let active_high = self.reset_active_high.get(&signal).copied().unwrap_or(true);
+            // `rst.inactive` triggers on the opposite level
+            Some((signal, active_high == active))
+        })
     }
 
     /// Get LValue signal without modifying state
@@ -5781,29 +5757,41 @@ impl MirToLirTransform {
         }
     }
 
-    /// Check if an expression is a reference to the reset signal
-    /// Returns true if the expression directly references a tracked reset signal
-    fn is_reset_signal_reference(&self, expr: &Expression) -> bool {
+    /// A condition that tests a reset port: `rst` gives the port and
+    /// `true` (the condition holds while it is high), `!rst_n` gives the
+    /// port and `false`.
+    fn reset_condition(&self, expr: &Expression) -> Option<(LirSignalId, bool)> {
         match &expr.kind {
-            ExpressionKind::Ref(lvalue) => match lvalue {
-                LValue::Port(port_id) => {
-                    if let Some(&sig_id) = self.port_to_signal.get(port_id) {
-                        self.reset_signals.contains(&sig_id)
-                    } else {
-                        false
-                    }
-                }
-                LValue::Signal(signal_id) => {
-                    if let Some(&sig_id) = self.signal_to_lir_signal.get(signal_id) {
-                        self.reset_signals.contains(&sig_id)
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            },
-            _ => false,
+            ExpressionKind::Ref(lvalue @ (LValue::Port(_) | LValue::Signal(_))) => self
+                .get_lvalue_signal_readonly(lvalue)
+                .filter(|signal| self.reset_signals.contains(signal))
+                .map(|signal| (signal, true)),
+            ExpressionKind::Unary {
+                op: UnaryOp::Not | UnaryOp::BitwiseNot,
+                operand,
+            } => self
+                .reset_condition(operand)
+                .map(|(signal, high)| (signal, !high)),
+            _ => None,
         }
+    }
+
+    /// The signal that is 1 while `reset` reads `asserted_high`: the reset
+    /// itself, or its inverse (built once).
+    fn reset_asserted_signal(&mut self, reset: LirSignalId, asserted_high: bool) -> LirSignalId {
+        if asserted_high {
+            return reset;
+        }
+        if let Some(&existing) = self.reset_inverses.get(&reset) {
+            return existing;
+        }
+        let name = format!("{}_asserted", self.get_signal_name(reset));
+        let inverted = self.lir.add_signal(name, 1);
+        let path = self.unique_node_path("reset_not");
+        self.lir
+            .add_node(LirOp::Not { width: 1 }, vec![reset], inverted, path);
+        self.reset_inverses.insert(reset, inverted);
+        inverted
     }
 
     /// Try to extract a constant integer value from an expression
