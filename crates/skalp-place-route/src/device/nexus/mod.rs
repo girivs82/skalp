@@ -495,8 +495,10 @@ impl NexusDevice {
                     resolve_wire(x, y, &pll::site_wire(step, pin))
                         .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
                 };
-                // The pins sit one tile into the fabric from the PLL's tile
-                let step = ["E1", "W1", "S1", "N1"]
+                // The pins sit one tile into the fabric from the PLL's tile,
+                // beside it or diagonally (CertusPro-NX's lower left PLL sits
+                // one row below its tile)
+                let step = ["E1", "W1", "S1", "N1", "S1E1", "N1E1", "S1W1", "N1W1"]
                     .into_iter()
                     .find(|step| wire_of(step, "REFCK").is_some());
                 if let Some(step) = step {
