@@ -61,6 +61,10 @@ pub struct SinkApproach {
     tile: (u32, u32),
     within_tile: HashMap<WireId, f64>,
     entry: f64,
+    /// The sink is reached from another tile by a PIP cheaper than the
+    /// displacement bound allows (one into a hard block pin from a pad far
+    /// away, left out of that bound): distance gives no bound then.
+    far_entry: bool,
 }
 
 impl SinkApproach {
@@ -178,6 +182,7 @@ impl RoutingGraph {
         within_tile.insert(sink, 0.0);
         heap.push(std::cmp::Reverse((OrderedCost(0.0), sink.0)));
         let mut entry = f64::INFINITY;
+        let mut far_entry = false;
         while let Some(std::cmp::Reverse((OrderedCost(d), w))) = heap.pop() {
             let w = WireId(w);
             if within_tile.get(&w).is_some_and(|&best| d > best) {
@@ -187,6 +192,12 @@ impl RoutingGraph {
                 if self.tile(src) != Some(tile) {
                     // A path can enter the tile on `w`
                     entry = entry.min(d);
+                    // (Global networks are left out of the bound on purpose;
+                    // their PIPs, such as a constant's, say nothing here.)
+                    if let Some((x, y)) = self.tile(src).filter(|_| !self.is_global(src)) {
+                        let bound = self.cost_lower_bound(x.abs_diff(tile.0), y.abs_diff(tile.1));
+                        far_entry |= (cost as f64) < bound;
+                    }
                     continue;
                 }
                 let nd = d + cost as f64;
@@ -200,6 +211,7 @@ impl RoutingGraph {
             tile,
             within_tile,
             entry: if entry.is_finite() { entry } else { 0.0 },
+            far_entry,
         }
     }
 
@@ -208,6 +220,14 @@ impl RoutingGraph {
     /// to the wire they drive) and costs. A path that moves `d` tiles along
     /// an axis uses PIPs whose displacements along it add up to at least
     /// `d`, so the cheapest such multiset of PIPs bounds its cost.
+    ///
+    /// PIPs into a wire that drives nothing (a hard block's input pin) are
+    /// left out too: such a PIP can only end a path, at that pin, and a
+    /// path into a sink reached this way is bounded by [`Self::sink_approach`]
+    /// instead. The CertusPro-NX ADC takes inputs straight from pads up to 82
+    /// columns away, at the cost of one PIP; counting those made the bound
+    /// one PIP for 82 tiles, so a search to a sink 40 tiles away expanded up
+    /// to a million wires.
     ///
     /// PIPs into or out of a global distribution network are left out. A
     /// clock branch reaches across the device for the cost of one PIP, so
@@ -234,7 +254,15 @@ impl RoutingGraph {
                 let Some(&(tx, ty)) = self.tile.get(e.dst.0 as usize) else {
                     continue;
                 };
-                if self.global[w] || self.global[e.dst.0 as usize] {
+                let d = e.dst.0 as usize;
+                if self.global[w] || self.global[d] {
+                    continue;
+                }
+                let drives_nothing = self
+                    .offsets
+                    .get(d + 1)
+                    .is_none_or(|&end| end == self.offsets[d]);
+                if drives_nothing {
                     continue;
                 }
                 let (dx, dy) = (sx.abs_diff(tx), sy.abs_diff(ty));
@@ -298,6 +326,9 @@ impl RoutingGraph {
         let Some((x, y)) = self.tile(wire) else {
             return 0.0;
         };
+        if approach.far_entry {
+            return approach.remaining(wire, (x, y));
+        }
         let (dx, dy) = (x.abs_diff(approach.tile.0), y.abs_diff(approach.tile.1));
         self.cost_lower_bound(dx, dy) + approach.remaining(wire, (x, y))
     }
@@ -332,6 +363,11 @@ impl RoutingGraph {
             (Some(&a), Some(&b)) => &self.edges[a as usize..b as usize],
             _ => &[],
         }
+    }
+
+    /// Whether `wire` belongs to a global distribution network
+    fn is_global(&self, wire: WireId) -> bool {
+        self.global.get(wire.0 as usize).copied().unwrap_or(false)
     }
 
     /// Tile of `wire`
@@ -443,6 +479,42 @@ mod tests {
             );
             assert!(to_sink >= bound);
             checked += 1;
+        }
+        assert!(checked > 0);
+    }
+
+    /// On real device data: the estimate from a wire one PIP outside a
+    /// sink's tile never exceeds what that PIP and the rest of the way to the
+    /// sink cost. Hard block pins taken straight from far pads (the
+    /// CertusPro-NX ADC's) are where it used to break.
+    #[test]
+    fn cost_to_sink_never_exceeds_a_last_hop_on_real_device() {
+        use crate::device::nexus::{prjoxide_load, NexusDevice, NexusVariant};
+        let Some(db) = prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let device = NexusDevice::from_prjoxide_bbox(NexusVariant::Lfcpnx100, &db, (0, 0, 158, 73))
+            .expect("build device");
+        let graph = RoutingGraph::build(&device, None);
+        let mut checked = 0usize;
+        for i in (0..graph.wire_count()).step_by(53) {
+            let sink = WireId(i as u32);
+            let approach = graph.sink_approach(sink);
+            for (&w, &inside) in &approach.within_tile {
+                for &(src, cost) in graph.drivers(w) {
+                    if graph.tile(src) == Some(approach.tile) || graph.is_global(src) {
+                        continue;
+                    }
+                    let estimate = graph.cost_to_sink(src, &approach);
+                    let actual = cost as f64 + inside;
+                    assert!(
+                        estimate <= actual + 1e-9,
+                        "estimate {estimate} above {actual} from {src:?} to {sink:?}"
+                    );
+                    checked += 1;
+                }
+            }
         }
         assert!(checked > 0);
     }

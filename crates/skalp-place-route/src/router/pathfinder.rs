@@ -36,6 +36,84 @@ const PARTIAL_REROUTES: u32 = 2;
 /// Factor by which the present-congestion cost grows each rip-up iteration
 const PRESENT_FACTOR_GROWTH: f64 = 1.3;
 
+/// A net whose route has more wires than this starts each sink's search
+/// only from the route wires near the sink ([`TreeIndex::seeds_near`]).
+/// Starting from the whole route made a net's routing time grow with the
+/// square of its fanout: a 7,300-sink reset took 25 s per routing pass.
+const LOCAL_SEED_MIN_TREE: usize = 256;
+
+/// Route wires a sink's search starts from, at the least, before the
+/// region around the sink stops growing
+const LOCAL_SEEDS: usize = 32;
+
+/// A net's route wires by tile, to find the part of the route near a sink.
+struct TreeIndex {
+    by_tile: HashMap<(u32, u32), Vec<WireId>>,
+    /// Bounding box of the tiles: (min x, max x, min y, max y)
+    bbox: (u32, u32, u32, u32),
+}
+
+impl TreeIndex {
+    fn new() -> Self {
+        Self {
+            by_tile: HashMap::new(),
+            bbox: (u32::MAX, 0, u32::MAX, 0),
+        }
+    }
+
+    fn insert(&mut self, tile: Option<(u32, u32)>, wire: WireId) {
+        if let Some((x, y)) = tile {
+            self.by_tile.entry((x, y)).or_default().push(wire);
+            let b = &mut self.bbox;
+            *b = (b.0.min(x), b.1.max(x), b.2.min(y), b.3.max(y));
+        }
+    }
+
+    /// Route wires in the smallest square around `(x, y)` (side doubling
+    /// from 3 tiles) holding at least [`LOCAL_SEEDS`] of them, or `None` once
+    /// that square would hold the whole route anyway. A branch to the sink
+    /// leaves the route close to it, so a search seeded there finds the same
+    /// branches as one seeded with every wire, at a cost independent of the
+    /// net's size.
+    fn seeds_near(&self, x: u32, y: u32) -> Option<Vec<WireId>> {
+        let (min_x, max_x, min_y, max_y) = self.bbox;
+        let mut radius = 1u32;
+        loop {
+            let covers_all = x.saturating_sub(radius) <= min_x
+                && x + radius >= max_x
+                && y.saturating_sub(radius) <= min_y
+                && y + radius >= max_y;
+            if covers_all {
+                return None;
+            }
+            let near = |tx: u32, ty: u32| tx.abs_diff(x) <= radius && ty.abs_diff(y) <= radius;
+            let side = 2 * radius as usize + 1;
+            let mut seeds = Vec::new();
+            if side * side < self.by_tile.len() {
+                for tx in x.saturating_sub(radius)..=x + radius {
+                    for ty in y.saturating_sub(radius)..=y + radius {
+                        if let Some(wires) = self.by_tile.get(&(tx, ty)) {
+                            seeds.extend_from_slice(wires);
+                        }
+                    }
+                }
+            } else {
+                for (&(tx, ty), wires) in &self.by_tile {
+                    if near(tx, ty) {
+                        seeds.extend_from_slice(wires);
+                    }
+                }
+            }
+            if seeds.len() >= LOCAL_SEEDS {
+                // Same seeds in the same order on every run
+                seeds.sort_unstable_by_key(|w| w.0);
+                return Some(seeds);
+            }
+            radius *= 2;
+        }
+    }
+}
+
 /// Wire usage and PathFinder history cost, indexed by wire. Every routing
 /// wire has capacity 1. Dense, because the router's search asks for the
 /// cost of every wire it reaches; `touched` lists the wires ever used, so
@@ -849,7 +927,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         let bounds = self.search_bounds(net, placement, margin);
 
         // Each sink's pin wire (None: placed, but no pin wire)
-        let sinks: Vec<(CellId, &PlacementLoc, Option<WireId>)> = net
+        let mut sinks: Vec<(CellId, &PlacementLoc, Option<WireId>)> = net
             .fanout
             .iter()
             .filter_map(|&(sink_id, pin_idx)| {
@@ -861,6 +939,12 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 ))
             })
             .collect();
+        // Nearest sinks first, so the route grows outward from the source and
+        // each later sink finds route wires close by
+        sinks.sort_by_key(|(_, loc, _)| {
+            loc.tile_x.abs_diff(source_loc.tile_x) + loc.tile_y.abs_diff(source_loc.tile_y)
+        });
+        let mut tree_index = TreeIndex::new();
 
         // Rerouting a net: keep the part of its previous route that shares
         // no wire with another net, and route only the sinks it no longer
@@ -877,6 +961,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             ) {
                 for &w in &wires {
                     route_wire_set.insert(w);
+                    tree_index.insert(graph.tile(w), w);
                 }
                 route.wires = wires;
                 // In tree order, so each PIP's source already has its time
@@ -927,20 +1012,31 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             } else {
                 &route.wires[..]
             };
-            let path_result = astar
-                .find_path_bounded(tree, sink_wire, &[], wire_cost, timing_weight, bounds)
-                .or_else(|e| match bounds {
-                    Some(_) => astar.find_path_bounded(
-                        tree,
-                        sink_wire,
-                        &[],
-                        wire_cost,
-                        timing_weight,
-                        None,
-                    ),
-                    None => Err(e),
-                })
-                .map(|(wires, pips, _)| (wires, pips));
+            // A large route: start from its wires near the sink, and from
+            // the whole route only if no path leaves those
+            let local = (tree.len() > LOCAL_SEED_MIN_TREE)
+                .then(|| tree_index.seeds_near(sink_loc.tile_x, sink_loc.tile_y))
+                .flatten();
+            let search = |seeds: &[WireId]| {
+                astar
+                    .find_path_bounded(seeds, sink_wire, &[], wire_cost, timing_weight, bounds)
+                    .or_else(|e| match bounds {
+                        Some(_) => astar.find_path_bounded(
+                            seeds,
+                            sink_wire,
+                            &[],
+                            wire_cost,
+                            timing_weight,
+                            None,
+                        ),
+                        None => Err(e),
+                    })
+            };
+            let path_result = match &local {
+                Some(seeds) => search(seeds).or_else(|_| search(tree)),
+                None => search(tree),
+            }
+            .map(|(wires, pips, _)| (wires, pips));
 
             match path_result {
                 Ok((wires, pips)) => {
@@ -952,6 +1048,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     for wire in &wires {
                         if route_wire_set.insert(*wire) {
                             route.wires.push(*wire);
+                            tree_index.insert(graph.tile(*wire), *wire);
                         }
                     }
                     route.pips.extend(&pips);
@@ -994,6 +1091,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                             for wire in &alt_wires {
                                 if route_wire_set.insert(*wire) {
                                     route.wires.push(*wire);
+                                    tree_index.insert(graph.tile(*wire), *wire);
                                 }
                             }
                             route.pips.extend(&alt_pips);
@@ -1884,6 +1982,34 @@ mod tests {
         assert!(stalled(&flat, 8, 0.02));
         // Too short to judge
         assert!(!stalled(&[5.0, 5.0], 8, 0.02));
+    }
+
+    /// A large route's search for a sink starts from the route wires near
+    /// the sink: the smallest square holding enough of them.
+    #[test]
+    fn tree_seeds_come_from_the_route_near_the_sink() {
+        let mut tree = TreeIndex::new();
+        let mut next = 0u32;
+        let mut wire = || {
+            next += 1;
+            WireId(next)
+        };
+        // A route along row 10 from column 0 to 100, 4 wires per tile
+        for x in 0..=100 {
+            for _ in 0..4 {
+                tree.insert(Some((x, 10)), wire());
+            }
+        }
+        // A sink beside column 50: 3 x 3 tiles hold 12 wires, too few;
+        // 5 x 5 hold 20, still too few; 9 x 9 hold 36
+        let seeds = tree.seeds_near(50, 12).expect("a local part");
+        assert_eq!(seeds.len(), 36);
+        // A route no wider than the square: no local part, the whole route
+        let mut small = TreeIndex::new();
+        for x in 0..3 {
+            small.insert(Some((x, 0)), WireId(x));
+        }
+        assert!(small.seeds_near(1, 1).is_none());
     }
 
     #[test]
