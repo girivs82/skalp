@@ -83,8 +83,11 @@ fn test_triage27_memory_port_nets_driven() {
             || net.name.starts_with("mem_raddr");
         if is_mem_port {
             checked += 1;
+            // A port net may be an alias of a primary input once the buffer
+            // that renamed it is gone
+            let root = netlist.resolve_alias(net.id);
             assert!(
-                net.is_input || driven.contains(&netlist.resolve_alias(net.id).0),
+                net.is_input || netlist.nets[root.0 as usize].is_input || driven.contains(&root.0),
                 "Triage #27: memory port net `{}` has no driver — the logic cone \
                  feeding the memory was swept during synthesis",
                 net.name

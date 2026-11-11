@@ -402,6 +402,14 @@ pub fn synthesize(
             nets.get(id.0 as usize)
                 .is_none_or(|n| !internal.contains(n.name.as_str()))
         });
+        // The writer gave an export that shares its literal with an output
+        // (or another export) its own net through a buffer. With the export
+        // no longer an output, that buffer is only a LUT level and a routing
+        // hop between a register and its loads.
+        if !result.netlist.is_ncl {
+            crate::gate_lut_opt::remove_flat_buffers(&mut result.netlist);
+            result.netlist.rebuild_net_connectivity();
+        }
     }
 
     // Sync is_output flags with netlist.outputs — post-processing passes may
@@ -4562,6 +4570,85 @@ mod tests {
             netlist.undriven_nets_with_fanout().is_empty(),
             "the reset logic must drive the reset pins"
         );
+    }
+
+    /// A register read by a carry chain under two names (an output and a
+    /// renamed copy) is exported twice from the AIG, and the writer gives
+    /// the second name its own net through a buffer. Once the exports are
+    /// plain internal nets again the buffer goes: it was only a LUT level
+    /// and a routing hop between the register and the adder.
+    #[test]
+    fn exported_carry_chain_operand_needs_no_buffer() {
+        let lib = crate::tech_library::get_stdlib_library("nexus").unwrap();
+        let mut lir = Lir::new("acc".to_string());
+        let clk = lir.add_input("clk".to_string(), 1);
+        lir.clocks.push(clk);
+        let d = lir.add_input("d".to_string(), 8);
+        let b = lir.add_input("b".to_string(), 8);
+        let q = lir.add_output("q".to_string(), 8);
+        let s_out = lir.add_output("s".to_string(), 8);
+        let r = lir.add_signal("r".to_string(), 8);
+        lir.add_seq_node(
+            LirOp::Reg {
+                width: 8,
+                has_enable: false,
+                has_reset: false,
+                async_reset: false,
+                reset_value: None,
+            },
+            vec![d],
+            r,
+            "acc.r".to_string(),
+            clk,
+            None,
+        );
+        let a = lir.add_signal("a".to_string(), 8);
+        lir.add_node(LirOp::Buffer { width: 8 }, vec![r], a, "acc.a".to_string());
+        let a2 = lir.add_signal("a2".to_string(), 8);
+        lir.add_node(
+            LirOp::Buffer { width: 8 },
+            vec![r],
+            a2,
+            "acc.a2".to_string(),
+        );
+        lir.add_node(LirOp::Buffer { width: 8 }, vec![r], q, "acc.q".to_string());
+        let sum = lir.add_signal("sum".to_string(), 8);
+        lir.add_node(
+            LirOp::Add {
+                width: 8,
+                has_carry: false,
+                const_b: None,
+            },
+            vec![a, b],
+            sum,
+            "acc.add".to_string(),
+        );
+        lir.add_node(
+            LirOp::Add {
+                width: 8,
+                has_carry: false,
+                const_b: None,
+            },
+            vec![a2, sum],
+            s_out,
+            "acc.add2".to_string(),
+        );
+
+        let netlist = synthesize(&lir, &lib, crate::synth::SynthPreset::Full).netlist;
+        assert!(
+            netlist.cells.iter().any(|c| c.cell_type == "CCU2"),
+            "the adders go on the carry chain"
+        );
+        let buffers: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(|c| {
+                c.function == Some(CellFunction::Buf) && !netlist.outputs.contains(&c.outputs[0])
+            })
+            .map(|c| c.path.clone())
+            .collect();
+        assert!(buffers.is_empty(), "internal buffers left: {buffers:?}");
+        assert!(netlist.undriven_nets_with_fanout().is_empty());
     }
 
     #[test]

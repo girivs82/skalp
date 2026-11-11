@@ -571,7 +571,7 @@ fn is_rewritable_lut(cell: &crate::gate_netlist::Cell) -> bool {
 /// Remove buffer cells that do not drive a design output, wiring their
 /// consumers (data, clock and reset pins) to the buffer's input. The removed
 /// net becomes an alias of the input so lookups by name still resolve.
-fn remove_flat_buffers(netlist: &mut GateNetlist) -> usize {
+pub(crate) fn remove_flat_buffers(netlist: &mut GateNetlist) -> usize {
     let outputs: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
     let mut replace: HashMap<GateNetId, GateNetId> = HashMap::new();
     let mut removed: HashSet<CellId> = HashSet::new();
