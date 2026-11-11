@@ -428,7 +428,7 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         }
         // Derived from the routing graph itself, for any device: a lower
         // bound on paths through the general fabric
-        graph.cost_to_sink(wire, approach)
+        graph.estimate_to_sink(wire, approach)
     }
 
     /// Reconstruct the path ending at `sink` from the search scratch

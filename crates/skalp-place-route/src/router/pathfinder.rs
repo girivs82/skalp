@@ -425,15 +425,32 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                 congestion.total_overuse()
             );
             if log::log_enabled!(log::Level::Debug) {
-                let mut by_type: HashMap<String, usize> = HashMap::new();
+                // By wire class (the same wire in every tile), most first
+                let mut by_class: HashMap<String, usize> = HashMap::new();
                 for w in congestion.overused_wires() {
-                    let kind = self.device.wire(w).map_or("?".to_string(), |w| {
-                        let t = format!("{:?}", w.wire_type);
-                        t.split('(').next().unwrap_or("").to_string()
-                    });
-                    *by_type.entry(kind).or_default() += 1;
+                    let class = self
+                        .device
+                        .wire(w)
+                        .map_or("?".to_string(), |w| super::lookahead::class_key(&w.name));
+                    *by_class.entry(class).or_default() += 1;
                 }
-                log::debug!("pathfinder: overused wires by type: {by_type:?}");
+                let mut by_class: Vec<(String, usize)> = by_class.into_iter().collect();
+                by_class.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                by_class.truncate(30);
+                log::debug!("pathfinder: overused wires by class: {by_class:?}");
+                // Where they are: by 8x8-tile block, most first
+                let mut by_block: HashMap<(u32, u32), usize> = HashMap::new();
+                for w in congestion.overused_wires() {
+                    if let Some(wire) = self.device.wire(w) {
+                        *by_block
+                            .entry((wire.tile_x / 8 * 8, wire.tile_y / 8 * 8))
+                            .or_default() += 1;
+                    }
+                }
+                let mut by_block: Vec<((u32, u32), usize)> = by_block.into_iter().collect();
+                by_block.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                by_block.truncate(20);
+                log::debug!("pathfinder: overused wires by 8x8 block (x, y): {by_block:?}");
                 let sample: Vec<String> = congestion
                     .overused_wires()
                     .into_iter()
