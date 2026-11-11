@@ -46,9 +46,13 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
 
+  # Coverage is informational (never fails the run) and slow, so it runs on
+  # pushes to the main branches only, not on every pull request.
   coverage:
     name: Code Coverage
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -60,7 +64,7 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --exclude skalp-verify --exclude skalp-formal --timeout 120 --out xml --ignore-tests || true
+        run: cargo tarpaulin --all-features --workspace --exclude skalp-verify --exclude skalp-formal --timeout 120 --out xml --ignore-tests || true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
