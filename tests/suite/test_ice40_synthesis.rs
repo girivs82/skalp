@@ -1346,21 +1346,35 @@ fn test_ecp5_dsp_wide_multiply() {
 }
 
 #[test]
-fn test_ecp5_dsp_too_wide_fallback() {
+fn test_ecp5_dsp_multiply_64x64_tiled() {
     let lir = build_multiply_lir(64, 128, false);
     let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
     let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
 
     let dsp_count = count_dsp_cells_in(&result.netlist);
     assert_eq!(
+        dsp_count, 16,
+        "64x64 multiply should tile onto 4 x 4 MULT18X18D blocks"
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_too_wide_fallback() {
+    // 80 bits needs 5 x 5 = 25 blocks, more than one multiply may take.
+    let lir = build_multiply_lir(80, 160, false);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+
+    let dsp_count = count_dsp_cells_in(&result.netlist);
+    assert_eq!(
         dsp_count, 0,
-        "64x64 multiply should fall back to gate-level (too wide for DSP tiling)"
+        "80x80 multiply should fall back to gate-level (too wide for DSP tiling)"
     );
 
     // Gate-level multiply should produce cells (LUTs for the multiplier logic)
     assert!(
         !result.netlist.cells.is_empty(),
-        "Should produce gate-level cells for 64x64 multiply"
+        "Should produce gate-level cells for 80x80 multiply"
     );
 }
 

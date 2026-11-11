@@ -34,6 +34,7 @@ pub mod gate_lut_opt;
 pub mod gate_netlist;
 pub mod gate_optimizer;
 pub mod hierarchical_netlist;
+pub mod known_bits;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_constraints;

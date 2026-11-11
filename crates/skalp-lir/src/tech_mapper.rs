@@ -767,15 +767,64 @@ fn apply_io_constraints_standalone(
     }
 }
 
+/// Most DSP blocks one multiply may be tiled over. A wider multiply stays
+/// gate logic.
+pub const MAX_DSP_TILES: u32 = 16;
+
+/// The operand widths a DSP mapping of a LIR multiply must cover: the
+/// significant widths of an unsigned multiply's operands (their known-zero
+/// top bits need no DSP inputs), or the full width of a signed one.
+pub fn mul_operand_widths(
+    leading_zeros: &crate::known_bits::LeadingZeros,
+    node: &crate::lir::LirNode,
+) -> Option<(u32, u32)> {
+    let LirOp::Mul { width, signed, .. } = node.op else {
+        return None;
+    };
+    if signed {
+        return Some((width, width));
+    }
+    let significant = |i: usize| {
+        node.inputs
+            .get(i)
+            .map(|&sig| leading_zeros.significant_width(sig).min(width))
+            .unwrap_or(0)
+    };
+    Some((significant(0), significant(1)))
+}
+
+/// DSP blocks of `block_width` x `block_width` needed to tile an
+/// `a_bits` x `b_bits` multiply.
+pub fn dsp_tile_count(a_bits: u32, b_bits: u32, block_width: u32) -> u32 {
+    if block_width == 0 {
+        return u32::MAX;
+    }
+    a_bits.div_ceil(block_width) * b_bits.div_ceil(block_width)
+}
+
+/// One slice of a multiply operand fed to a DSP block.
+struct DspChunk {
+    /// Weight of the chunk's bit 0 in the operand
+    lo: usize,
+    nets: Vec<GateNetId>,
+    /// Two's complement (the top chunk of a signed operand)
+    signed: bool,
+}
+
 /// Map a LIR Mul node to DSP hard multiplier blocks (standalone version).
 ///
-/// Queries `DspCellInfo` from the library. Handles single-block multiply
-/// (operands ≤ DSP width) and tiled wide multiply (operands ≤ 2× DSP width).
-/// Falls through silently if no DSP cell is available (AIG gate-level fallback).
+/// `operand_bits` are the operand widths to multiply ([`mul_operand_widths`]):
+/// bits of an unsigned operand above its width are known to be zero. An
+/// operand wider than the DSP block is split into block-wide chunks (the low
+/// chunks unsigned, the top chunk of a signed operand signed); every pair of
+/// chunks is one DSP block, and the partial products are summed at their
+/// weights. Does nothing if the library has no DSP cell (the multiply is then
+/// gate logic, decided in `LirToSynthAig`).
 #[allow(clippy::too_many_arguments)]
 fn map_dsp_standalone(
     netlist: &mut GateNetlist,
     library: &TechLibrary,
+    operand_bits: (u32, u32),
     width: u32,
     result_width: u32,
     signed: bool,
@@ -817,283 +866,249 @@ fn map_dsp_standalone(
         }
     };
     let tie_high = get_or_create_tie_high(netlist, library);
+    let p_width = dsp_info.p_width as usize;
 
-    let signed_net = if signed { tie_high } else { tie_low };
-
-    // Determine sign extension bits
-    let a_sign = if signed {
-        inputs[0]
-            .get(width as usize - 1)
-            .copied()
-            .unwrap_or(tie_low)
-    } else {
-        tie_low
-    };
-    let b_sign = if signed {
-        inputs[1]
-            .get(width as usize - 1)
-            .copied()
-            .unwrap_or(tie_low)
-    } else {
-        tie_low
-    };
-
-    // Helper: instantiate a single DSP block
-    let instantiate_dsp = |netlist: &mut GateNetlist,
-                           a_nets: &[GateNetId],
-                           b_nets: &[GateNetId],
-                           a_w: u32,
-                           b_w: u32,
-                           rw: u32,
-                           out: &[GateNetId],
-                           a_ext: GateNetId,
-                           b_ext: GateNetId,
-                           a_signed: GateNetId,
-                           b_signed: GateNetId,
-                           suffix: &str| {
-        let mut cell_inputs = Vec::new();
-
-        // A input — pad/extend to DSP a_width
-        for bit in 0..dsp_info.a_width as usize {
-            if bit < a_w as usize {
-                cell_inputs.push(a_nets.get(bit).copied().unwrap_or(tie_low));
-            } else {
-                cell_inputs.push(a_ext);
+    // Instantiate one DSP block computing `a_nets * b_nets`. Operands are
+    // extended to the block width (by their top bit when signed), so all
+    // `p_width` product bits are valid. Product bits go to `out`.
+    let instantiate_dsp =
+        |netlist: &mut GateNetlist, a: &DspChunk, b: &DspChunk, out: &[GateNetId], suffix: &str| {
+            let extension = |chunk: &DspChunk| {
+                if chunk.signed {
+                    chunk.nets.last().copied().unwrap_or(tie_low)
+                } else {
+                    tie_low
+                }
+            };
+            let mut cell_inputs = Vec::new();
+            for (chunk, block_width) in [(a, dsp_info.a_width), (b, dsp_info.b_width)] {
+                let ext = extension(chunk);
+                for bit in 0..block_width as usize {
+                    cell_inputs.push(chunk.nets.get(bit).copied().unwrap_or(ext));
+                }
             }
-        }
-        // B input
-        for bit in 0..dsp_info.b_width as usize {
-            if bit < b_w as usize {
-                cell_inputs.push(b_nets.get(bit).copied().unwrap_or(tie_low));
-            } else {
-                cell_inputs.push(b_ext);
+            // C input — tie low
+            for _ in 0..DSP_C_BITS {
+                cell_inputs.push(tie_low);
             }
-        }
-        // C input — tie low
-        for _ in 0..DSP_C_BITS {
+            // SIGNEDA, SIGNEDB
+            for chunk in [a, b] {
+                cell_inputs.push(if chunk.signed { tie_high } else { tie_low });
+            }
+            // SOURCEA, SOURCEB — direct input
             cell_inputs.push(tie_low);
-        }
-        // SIGNEDA, SIGNEDB
-        cell_inputs.push(a_signed);
-        cell_inputs.push(b_signed);
-        // SOURCEA, SOURCEB — direct input
-        cell_inputs.push(tie_low);
-        cell_inputs.push(tie_low);
-        // CLK[0..3], CE[0..3], RST[0..3] — combinational mode
-        for _ in 0..12 {
             cell_inputs.push(tie_low);
-        }
-        // SRIA[0..17], SRIB[0..17] — unused
-        for _ in 0..36 {
-            cell_inputs.push(tie_low);
-        }
+            // CLK[0..3], CE[0..3], RST[0..3] — combinational mode
+            for _ in 0..12 {
+                cell_inputs.push(tie_low);
+            }
+            // SRIA[0..17], SRIB[0..17] — unused
+            for _ in 0..36 {
+                cell_inputs.push(tie_low);
+            }
 
-        // Outputs: P[0..p_width], SIGNEDP, cascade/shift outputs
-        let mut cell_outputs = Vec::new();
-        for bit in 0..dsp_info.p_width as usize {
-            if bit < rw as usize && bit < out.len() {
-                cell_outputs.push(out[bit]);
+            // Outputs: P[0..p_width], SIGNEDP, cascade/shift outputs
+            let mut cell_outputs = Vec::new();
+            for bit in 0..p_width {
+                if let Some(&net) = out.get(bit) {
+                    cell_outputs.push(net);
+                } else {
+                    let unused = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}{}.dsp_unused_p{}", path, suffix, bit),
+                    ));
+                    cell_outputs.push(unused);
+                }
+            }
+            // SIGNEDP
+            let signedp = netlist.add_net(GateNet::new(
+                GateNetId(0),
+                format!("{}{}.dsp_unused_signedp", path, suffix),
+            ));
+            cell_outputs.push(signedp);
+            // Cascade outputs: sroa/srob/roa/rob/roc × 18
+            for prefix in &["sroa", "srob", "roa", "rob", "roc"] {
+                for bit in 0..18 {
+                    let unused = netlist.add_net(GateNet::new(
+                        GateNetId(0),
+                        format!("{}{}.dsp_unused_{}_{}", path, suffix, prefix, bit),
+                    ));
+                    cell_outputs.push(unused);
+                }
+            }
+
+            let cell_path = if suffix.is_empty() {
+                path.to_string()
             } else {
-                let unused = netlist.add_net(GateNet::new(
-                    GateNetId(0),
-                    format!("{}{}.dsp_unused_p{}", path, suffix, bit),
-                ));
-                cell_outputs.push(unused);
-            }
-        }
-        // SIGNEDP
-        let signedp = netlist.add_net(GateNet::new(
-            GateNetId(0),
-            format!("{}{}.dsp_unused_signedp", path, suffix),
-        ));
-        cell_outputs.push(signedp);
-        // Cascade outputs: sroa/srob/roa/rob/roc × 18
-        for prefix in &["sroa", "srob", "roa", "rob", "roc"] {
-            for bit in 0..18 {
-                let unused = netlist.add_net(GateNet::new(
-                    GateNetId(0),
-                    format!("{}{}.dsp_unused_{}_{}", path, suffix, prefix, bit),
-                ));
-                cell_outputs.push(unused);
-            }
-        }
-
-        let cell_path = if suffix.is_empty() {
-            path.to_string()
-        } else {
-            format!("{}{}", path, suffix)
+                format!("{}{}", path, suffix)
+            };
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                dsp_cell_name.clone(),
+                library.name.clone(),
+                dsp_cell_fit,
+                cell_path,
+                cell_inputs,
+                cell_outputs,
+            );
+            cell.source_op = Some("DspMultiply".to_string());
+            cell.parameters
+                .insert(DSP_A_BITS_PARAM.to_string(), dsp_info.a_width.to_string());
+            cell.parameters
+                .insert(DSP_B_BITS_PARAM.to_string(), dsp_info.b_width.to_string());
+            cell.parameters
+                .insert(DSP_P_BITS_PARAM.to_string(), dsp_info.p_width.to_string());
+            cell.parameters
+                .insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
+            cell.parameters
+                .insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
+            cell.parameters
+                .insert("REG_INPUTC_CLK".to_string(), "NONE".to_string());
+            cell.parameters
+                .insert("REG_PIPELINE_CLK".to_string(), "NONE".to_string());
+            cell.parameters
+                .insert("REG_OUTPUT_CLK".to_string(), "NONE".to_string());
+            cell.parameters
+                .insert("SOURCEB_MODE".to_string(), "B_INPUT".to_string());
+            cell.parameters
+                .insert("MULT_BYPASS".to_string(), "DISABLED".to_string());
+            cell.parameters
+                .insert("RESETMODE".to_string(), "SYNC".to_string());
+            cell.parameters.insert(
+                "SIGNED_MODE".to_string(),
+                if a.signed || b.signed {
+                    "SIGNED"
+                } else {
+                    "UNSIGNED"
+                }
+                .to_string(),
+            );
+            dsp_cell_info.apply_to_cell(&mut cell);
+            netlist.add_cell(cell);
         };
+
+    let (a_bits, b_bits) = operand_bits;
+    let total = (result_width as usize).min(outputs.len());
+    // Product bits that can be non-zero: an unsigned a x b product has at
+    // most a + b bits; a signed one is sign-extended to the full result.
+    let live = if signed {
+        total
+    } else {
+        total.min((a_bits + b_bits) as usize)
+    };
+
+    // Split an operand into DSP-block-wide chunks, low chunk first.
+    let chunks = |operand: usize, bits: u32, block: u32| -> Vec<DspChunk> {
+        let nets = &inputs[operand];
+        let sign = if signed {
+            nets.get(width as usize - 1).copied().unwrap_or(tie_low)
+        } else {
+            tie_low
+        };
+        let count = bits.div_ceil(block) as usize;
+        (0..count)
+            .map(|i| {
+                let lo = i * block as usize;
+                let hi = (lo + block as usize).min(bits as usize);
+                DspChunk {
+                    lo,
+                    nets: (lo..hi)
+                        .map(|bit| nets.get(bit).copied().unwrap_or(sign))
+                        .collect(),
+                    signed: signed && i + 1 == count,
+                }
+            })
+            .collect()
+    };
+    let a_chunks = chunks(0, a_bits, dsp_info.a_width);
+    let b_chunks = chunks(1, b_bits, dsp_info.b_width);
+
+    let buffer = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
+    let drive = |netlist: &mut GateNetlist, from: GateNetId, to: GateNetId, bit: usize| {
         let mut cell = Cell::new_comb(
             CellId(0),
-            dsp_cell_name.clone(),
+            buffer.name.clone(),
             library.name.clone(),
-            dsp_cell_fit,
-            cell_path,
-            cell_inputs,
-            cell_outputs,
+            buffer.fit,
+            format!("{path}.product_buf{bit}"),
+            vec![from],
+            vec![to],
         );
-        cell.source_op = Some("DspMultiply".to_string());
-        cell.parameters
-            .insert(DSP_A_BITS_PARAM.to_string(), dsp_info.a_width.to_string());
-        cell.parameters
-            .insert(DSP_B_BITS_PARAM.to_string(), dsp_info.b_width.to_string());
-        cell.parameters
-            .insert(DSP_P_BITS_PARAM.to_string(), dsp_info.p_width.to_string());
-        cell.parameters
-            .insert("REG_INPUTA_CLK".to_string(), "NONE".to_string());
-        cell.parameters
-            .insert("REG_INPUTB_CLK".to_string(), "NONE".to_string());
-        cell.parameters
-            .insert("REG_INPUTC_CLK".to_string(), "NONE".to_string());
-        cell.parameters
-            .insert("REG_PIPELINE_CLK".to_string(), "NONE".to_string());
-        cell.parameters
-            .insert("REG_OUTPUT_CLK".to_string(), "NONE".to_string());
-        cell.parameters
-            .insert("SOURCEB_MODE".to_string(), "B_INPUT".to_string());
-        cell.parameters
-            .insert("MULT_BYPASS".to_string(), "DISABLED".to_string());
-        cell.parameters
-            .insert("RESETMODE".to_string(), "SYNC".to_string());
-        cell.parameters.insert(
-            "SIGNED_MODE".to_string(),
-            if signed { "SIGNED" } else { "UNSIGNED" }.to_string(),
-        );
-        dsp_cell_info.apply_to_cell(&mut cell);
+        buffer.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
     };
 
-    if width <= dsp_info.a_width && width <= dsp_info.b_width {
-        // Single DSP block
-        instantiate_dsp(
-            netlist,
-            &inputs[0],
-            &inputs[1],
-            width,
-            width,
-            result_width,
-            outputs,
-            a_sign,
-            b_sign,
-            signed_net,
-            signed_net,
-            "",
-        );
-    } else if width <= dsp_info.a_width * 2 && width <= dsp_info.b_width * 2 {
-        // Tiled: split operands into hi/lo halves, 4 DSP blocks
-        let half = dsp_info.a_width;
-        let a_lo: Vec<GateNetId> = (0..half as usize)
-            .map(|i| inputs[0].get(i).copied().unwrap_or(tie_low))
-            .collect();
-        let a_hi: Vec<GateNetId> = (half as usize..width as usize)
-            .map(|i| inputs[0].get(i).copied().unwrap_or(a_sign))
-            .collect();
-        let b_lo: Vec<GateNetId> = (0..half as usize)
-            .map(|i| inputs[1].get(i).copied().unwrap_or(tie_low))
-            .collect();
-        let b_hi: Vec<GateNetId> = (half as usize..width as usize)
-            .map(|i| inputs[1].get(i).copied().unwrap_or(b_sign))
-            .collect();
-
-        let a_hi_w = width - half;
-        let b_hi_w = width - half;
-
-        let product_nets = |netlist: &mut GateNetlist, width: u32, tag: &str| -> Vec<GateNetId> {
-            (0..width as usize)
-                .map(|i| netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{tag}_p{i}"))))
-                .collect()
+    if let ([a], [b]) = (a_chunks.as_slice(), b_chunks.as_slice()) {
+        // One block: its product drives the outputs directly; result bits
+        // above the block's product width extend it.
+        let direct = live.min(p_width);
+        instantiate_dsp(netlist, a, b, &outputs[..direct], "");
+        let extension = if signed && direct > 0 {
+            outputs[direct - 1]
+        } else {
+            tie_low
         };
+        for bit in direct..total {
+            let from = if bit < live { extension } else { tie_low };
+            drive(netlist, from, outputs[bit], bit);
+        }
+        return;
+    }
 
-        // The low halves are unsigned; a signed multiply has signed high halves.
-        let ll_width = (2 * half).min(dsp_info.p_width);
-        let ll_out = product_nets(netlist, ll_width, "ll");
-        instantiate_dsp(
-            netlist, &a_lo, &b_lo, half, half, ll_width, &ll_out, tie_low, tie_low, tie_low,
-            tie_low, "_ll",
-        );
-        let lh_width = (half + b_hi_w).min(dsp_info.p_width);
-        let lh_out = product_nets(netlist, lh_width, "lh");
-        instantiate_dsp(
-            netlist, &a_lo, &b_hi, half, b_hi_w, lh_width, &lh_out, tie_low, b_sign, tie_low,
-            signed_net, "_lh",
-        );
-        let hl_width = (a_hi_w + half).min(dsp_info.p_width);
-        let hl_out = product_nets(netlist, hl_width, "hl");
-        instantiate_dsp(
-            netlist, &a_hi, &b_lo, a_hi_w, half, hl_width, &hl_out, a_sign, tie_low, signed_net,
-            tie_low, "_hl",
-        );
-        let hh_width = (a_hi_w + b_hi_w).min(dsp_info.p_width);
-        let hh_out = product_nets(netlist, hh_width, "hh");
-        instantiate_dsp(
-            netlist, &a_hi, &b_hi, a_hi_w, b_hi_w, hh_width, &hh_out, a_sign, b_sign, signed_net,
-            signed_net, "_hh",
-        );
-
-        // Line each partial product up at its weight, extended to the full result.
-        let total = result_width as usize;
-        let shifted = |product: &[GateNetId], shift: usize, sign: GateNetId| -> Vec<GateNetId> {
-            (0..total)
-                .map(|bit| {
-                    if bit < shift {
-                        tie_low
-                    } else {
-                        product.get(bit - shift).copied().unwrap_or(sign)
-                    }
+    // One block per pair of chunks; its partial product weighs 2^(a.lo + b.lo).
+    // Each partial is extended to the live result width (by its top bit when
+    // signed).
+    let mut partials: Vec<(usize, Vec<GateNetId>)> = Vec::new();
+    for a in &a_chunks {
+        for b in &b_chunks {
+            let shift = a.lo + b.lo;
+            if shift >= live {
+                continue;
+            }
+            let bits = (live - shift).min(p_width);
+            let suffix = format!("_a{}b{}", a.lo, b.lo);
+            let product: Vec<GateNetId> = (0..bits)
+                .map(|i| {
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{path}{suffix}_p{i}")))
                 })
-                .collect()
-        };
-        let top_bit = |product: &[GateNetId]| {
-            if signed {
-                product.last().copied().unwrap_or(tie_low)
+                .collect();
+            instantiate_dsp(netlist, a, b, &product, &suffix);
+            let extension = if a.signed || b.signed {
+                *product.last().expect("live partial has bits")
             } else {
                 tie_low
-            }
-        };
-        let h = half as usize;
-        let ll = shifted(&ll_out, 0, tie_low);
-        let lh = shifted(&lh_out, h, top_bit(&lh_out));
-        let hl = shifted(&hl_out, h, top_bit(&hl_out));
-        let hh = shifted(&hh_out, 2 * h, top_bit(&hh_out));
-
-        let sum = add_nets(netlist, library, &ll, &lh, tie_low, &format!("{path}.sum0"));
-        let sum = add_nets(
-            netlist,
-            library,
-            &sum,
-            &hl,
-            tie_low,
-            &format!("{path}.sum1"),
-        );
-        let sum = add_nets(
-            netlist,
-            library,
-            &sum,
-            &hh,
-            tie_low,
-            &format!("{path}.sum2"),
-        );
-        let buffer = lookup_cell(library, CellFunction::Buf, "BUF", 0.1);
-        for (bit, &output) in outputs.iter().enumerate().take(total) {
-            let mut cell = Cell::new_comb(
-                CellId(0),
-                buffer.name.clone(),
-                library.name.clone(),
-                buffer.fit,
-                format!("{path}.product_buf{bit}"),
-                vec![sum[bit]],
-                vec![output],
-            );
-            buffer.apply_to_cell(&mut cell);
-            netlist.add_cell(cell);
+            };
+            let extended = (0..live - shift)
+                .map(|i| product.get(i).copied().unwrap_or(extension))
+                .collect();
+            partials.push((shift, extended));
         }
-    } else {
-        // Too wide for DSP — should not happen since the AIG path would handle it,
-        // but just in case, warn
-        eprintln!(
-            "warning: Mul too wide for DSP at {} (width={}), falling through",
-            path, width
+    }
+    partials.sort_by_key(|(shift, _)| *shift);
+
+    // Sum the partials. A partial at weight `shift` leaves the sum's bits
+    // below `shift` unchanged, so each adder only spans [shift, live).
+    let mut sum = vec![tie_low; live];
+    let mut first = true;
+    for (index, (shift, product)) in partials.into_iter().enumerate() {
+        if first {
+            sum[shift..].copy_from_slice(&product);
+            first = false;
+            continue;
+        }
+        let upper = add_nets(
+            netlist,
+            library,
+            &sum[shift..],
+            &product,
+            tie_low,
+            &format!("{path}.sum{index}"),
         );
+        sum[shift..].copy_from_slice(&upper);
+    }
+    for (bit, &output) in outputs.iter().enumerate().take(total) {
+        let from = sum.get(bit).copied().unwrap_or(tie_low);
+        drive(netlist, from, output, bit);
     }
 }
 
@@ -3128,6 +3143,7 @@ fn merge_physical_nodes_into_netlist(
         };
 
     // Process each physical node
+    let leading_zeros = crate::known_bits::LeadingZeros::new(lir);
     for &idx in physical_indices {
         let node = &lir.nodes[idx];
         let path = &node.path;
@@ -4002,9 +4018,12 @@ fn merge_physical_nodes_into_netlist(
                 result_width,
                 signed,
             } => {
+                let operand_bits =
+                    mul_operand_widths(&leading_zeros, node).unwrap_or((*width, *width));
                 map_dsp_standalone(
                     netlist,
                     library,
+                    operand_bits,
                     *width,
                     *result_width,
                     *signed,
