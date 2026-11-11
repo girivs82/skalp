@@ -2,6 +2,7 @@
 //!
 //! Snaps analytical placement to valid BEL sites while minimizing displacement.
 
+use super::control_sets::control_sets;
 use super::sites::{bel_types_compatible, SiteMap};
 use super::{BelType, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -46,7 +47,7 @@ impl<'a, D: Device> Legalizer<'a, D> {
     pub fn legalize_with_carry_chains(
         &self,
         placement: PlacementResult,
-        _netlist: &GateNetlist,
+        netlist: &GateNetlist,
         carry_chains: &[CarryChain],
     ) -> Result<PlacementResult> {
         let mut result = PlacementResult::new();
@@ -73,17 +74,22 @@ impl<'a, D: Device> Legalizer<'a, D> {
             .filter(|(id, _)| !chain_cells.contains(id))
             .collect();
         // Distributed RAM first: its site needs six free LUTs of one tile,
-        // which ordinary logic placed earlier would scatter
+        // which ordinary logic placed earlier would scatter. Wide LUTs next,
+        // for the same reason: each needs both LUTs of one slice.
         cells.sort_by_key(|(_, loc)| {
-            (
-                loc.bel_type != BelType::DistRam,
-                loc.tile_y * 1000 + loc.tile_x,
-            )
+            let rank = match loc.bel_type {
+                BelType::DistRam => 0,
+                BelType::WideLut => 1,
+                _ => 2,
+            };
+            (rank, loc.tile_y * 1000 + loc.tile_x)
         });
 
+        // Flip-flops share a control group only with the same control set
+        let sets = control_sets(netlist);
         let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
-        for &(x, y, bel) in used_bels.keys() {
-            sites.take(x, y, bel);
+        for (&(x, y, bel), cell) in &used_bels {
+            sites.take(x, y, bel, sets.get(cell).copied());
         }
         for (cell_id, loc) in cells {
             let bel_type = loc.bel_type;
@@ -92,6 +98,7 @@ impl<'a, D: Device> Legalizer<'a, D> {
                     loc.tile_x as f64,
                     loc.tile_y as f64,
                     bel_type,
+                    sets.get(&cell_id).copied(),
                     bel_types_compatible,
                 )
                 .ok_or_else(|| {
@@ -320,11 +327,12 @@ impl<'a, D: Device> Legalizer<'a, D> {
         used: &HashMap<(u32, u32, usize), CellId>,
     ) -> Result<PlacementLoc> {
         let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
+        // Only carry cells come here: no flip-flop control sets involved
         for &(ux, uy, ubel) in used.keys() {
-            sites.take(ux, uy, ubel);
+            sites.take(ux, uy, ubel, None);
         }
         let (tx, ty, idx) = sites
-            .find_nearest(x as f64, y as f64, bel_type, &bel_types_compatible)
+            .find_nearest(x as f64, y as f64, bel_type, None, &bel_types_compatible)
             .ok_or_else(|| {
                 PlaceRouteError::PlacementFailed(format!(
                     "No legal location found for BEL type {:?} near ({}, {})",

@@ -288,6 +288,24 @@ impl CompiledCpuRuntime {
     /// as the hardware does, instead of zero.
     fn load_initial_values(&mut self) {
         for (name, elem) in &self.module.state_elements {
+            if let Some(words) = &elem.initial_contents {
+                // A memory: an array of equal-size elements, each holding one
+                // word low byte first.
+                let field = self.register_fields.get(&name.replace('.', "_"));
+                if let (Some(field), Some(SirType::Array(_, depth))) = (field, &elem.sir_type) {
+                    if *depth > 0 && field.size % depth == 0 {
+                        let stride = field.size / depth;
+                        for (address, word) in words.iter().take(*depth).enumerate() {
+                            let mut element = vec![0u8; stride];
+                            let len = stride.min(8);
+                            element[..len].copy_from_slice(&word.to_le_bytes()[..len]);
+                            self.registers
+                                .write(field.offset + address * stride, &element);
+                        }
+                    }
+                }
+                continue;
+            }
             let Some(value) = elem.reset_value else {
                 continue;
             };

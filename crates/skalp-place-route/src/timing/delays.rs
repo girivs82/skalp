@@ -67,6 +67,18 @@ impl Default for DelayModel {
 }
 
 impl DelayModel {
+    /// The delay model for a device family (the fastest speed grade; generic
+    /// iCE40 numbers for families without their own)
+    pub fn for_family(family: crate::device::DeviceFamily) -> Self {
+        use crate::device::DeviceFamily;
+        match family {
+            DeviceFamily::Nexus => Self::nexus(),
+            DeviceFamily::Ecp5 => Self::ecp5(),
+            DeviceFamily::Xc7 => Self::xc7(),
+            _ => Self::ice40_default(),
+        }
+    }
+
     /// Default delay model for iCE40 FPGAs
     pub fn ice40_default() -> Self {
         Self::from_ice40_timing(&ice40_data::TIMING_DEFAULT)

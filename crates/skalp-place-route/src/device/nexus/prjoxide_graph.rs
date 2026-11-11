@@ -183,6 +183,18 @@ impl TileBitsDb {
         self.enums.get(name)?.options.get(option).map(Vec::as_slice)
     }
 
+    /// Names of every word setting.
+    pub fn word_names(&self) -> impl Iterator<Item = &str> {
+        self.words.keys().map(String::as_str)
+    }
+
+    /// Every enum setting, with the bits of each of its options.
+    pub fn enums(&self) -> impl Iterator<Item = (&str, &BTreeMap<String, Vec<ConfigBit>>)> {
+        self.enums
+            .iter()
+            .map(|(name, e)| (name.as_str(), &e.options))
+    }
+
     /// Bits that enable the pip from `src` to `dst`.
     pub fn pip(&self, dst: &str, src: &str) -> Option<&[ConfigBit]> {
         self.pips
@@ -235,7 +247,42 @@ pub fn load_tiletype(
     if lifcl.is_none() && tiletype.starts_with("BANKREF") {
         lifcl = load_bank_reference_variant(db_root, tiletype)?;
     }
+    // CrossLink-NX has no upper right PLL; the lower right one sits on the
+    // same (right) edge, so its tile, flipped top to bottom, stands in
+    if lifcl.is_none() && tiletype == "GPLL_URC" {
+        lifcl = parse_tiletype(db_root, "LIFCL", "GPLL_LRC")?.map(mirror_lower_right_pll);
+    }
     Ok(fill_lfcpnx_gaps(own, lifcl, tiletype))
+}
+
+/// Load the bit database of a hard block's configuration registers
+/// (`iptypes/<TYPE>.ron`, such as `EBR_INIT`), whose bit `frame`s are byte
+/// offsets from the block's bus address. CertusPro-NX has none fuzzed; it
+/// takes CrossLink-NX's, as for its tiles.
+pub fn load_iptype(
+    db_root: &Path,
+    family: &str,
+    iptype: &str,
+) -> Result<Option<TileBitsDb>, String> {
+    let load = |family: &str| -> Result<Option<TileBitsDb>, String> {
+        let path = db_root
+            .join(family)
+            .join("iptypes")
+            .join(format!("{iptype}.ron"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {}", path.display(), e))?;
+        ron::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("parsing {}: {}", path.display(), e))
+    };
+    match load(family)? {
+        Some(db) => Ok(Some(db)),
+        None if family == "LFCPNX" => load("LIFCL"),
+        None => Ok(None),
+    }
 }
 
 /// CrossLink-NX bank reference tiles carry a suffix (such as `BANKREF7_RBB_2`)
@@ -273,6 +320,9 @@ fn fill_lfcpnx_gaps(
     lifcl: Option<TileBitsDb>,
     tiletype: &str,
 ) -> Option<TileBitsDb> {
+    if tiletype.starts_with("GPLL_") {
+        return pll_tile(own, lifcl);
+    }
     let Some(mut own) = own else { return lifcl };
     let Some(lifcl) = lifcl else { return Some(own) };
 
@@ -296,6 +346,112 @@ fn fill_lfcpnx_gaps(
         own.words = lifcl.words;
     }
     Some(own)
+}
+
+/// A CertusPro-NX PLL tile: its own settings (fuzzed separately, and they
+/// differ: it has no mode bit), with CrossLink-NX's routing. Only the routing
+/// that stays within a tile of the PLL carries over: the connections from
+/// pads further away follow CrossLink-NX's floorplan, not this device's.
+fn pll_tile(own: Option<TileBitsDb>, lifcl: Option<TileBitsDb>) -> Option<TileBitsDb> {
+    let Some(lifcl) = lifcl else { return own };
+    let mut own = own.unwrap_or_default();
+    // The PLL's own pins reach the fabric a few tiles away (its reset comes
+    // from the LSR of a slice two rows from the corner); the reference
+    // clock inputs from pads come from tens of tiles away
+    let is_near = |wire: &str| match wire.split_once(':') {
+        None => true,
+        Some(("G", _)) => true,
+        Some((step, _)) => step
+            .split(|c: char| c.is_ascii_alphabetic())
+            .filter(|n| !n.is_empty())
+            .all(|n| n.parse::<u32>().is_ok_and(|n| n <= PLL_FABRIC_REACH)),
+    };
+    if own.pips.is_empty() {
+        own.pips = lifcl.pips;
+    }
+    if own.conns.is_empty() {
+        own.conns = lifcl
+            .conns
+            .into_iter()
+            .filter(|(dst, _)| is_near(dst))
+            .map(|(dst, conns)| {
+                let near = conns
+                    .into_iter()
+                    .filter(|c| is_near(&c.from_wire))
+                    .collect();
+                (dst, near)
+            })
+            .filter(|(_, conns): &(String, Vec<ConnData>)| !conns.is_empty())
+            .collect();
+    }
+    Some(own)
+}
+
+/// How many tiles from its corner tile a PLL's pins reach into the fabric
+/// (CrossLink-NX's reach at most three)
+const PLL_FABRIC_REACH: u32 = 4;
+
+/// The lower right PLL tile turned into the upper right one: the fabric it
+/// connects to flips from above it to below it, and its outputs feed the
+/// top and right clock muxes instead of the bottom and right ones. The
+/// edge clock banks are on the bottom edge only, so those connections go.
+fn mirror_lower_right_pll(mut db: TileBitsDb) -> TileBitsDb {
+    fn mirror_wire(wire: &str) -> Option<String> {
+        match wire.split_once(':') {
+            None => Some(wire.to_string()),
+            Some(("G", name)) => {
+                if name.contains("ECLK") {
+                    return None;
+                }
+                let name = name
+                    .replacen("JLRCLKO", "JURCLKO", 1)
+                    .replace("BMID", "TMID");
+                Some(format!("G:{name}"))
+            }
+            Some((step, name)) => {
+                let step: String = step
+                    .chars()
+                    .map(|c| match c {
+                        'N' => 'S',
+                        'S' => 'N',
+                        c => c,
+                    })
+                    .collect();
+                Some(format!("{step}:{name}"))
+            }
+        }
+    }
+    db.conns = db
+        .conns
+        .into_iter()
+        .filter_map(|(dst, conns)| {
+            let dst = mirror_wire(&dst)?;
+            let conns: Vec<ConnData> = conns
+                .into_iter()
+                .filter_map(|mut c| {
+                    c.from_wire = mirror_wire(&c.from_wire)?;
+                    Some(c)
+                })
+                .collect();
+            (!conns.is_empty()).then_some((dst, conns))
+        })
+        .collect();
+    db.pips = db
+        .pips
+        .into_iter()
+        .filter_map(|(dst, arcs)| {
+            let dst = mirror_wire(&dst)?;
+            let arcs: Vec<_> = arcs
+                .into_iter()
+                .filter_map(|mut a| {
+                    a.from_wire = mirror_wire(&a.from_wire)?;
+                    Some(a)
+                })
+                .collect();
+            (!arcs.is_empty()).then_some((dst, arcs))
+        })
+        .collect();
+    db
 }
 
 fn parse_tiletype(
@@ -330,6 +486,15 @@ fn is_usable_pip(dst: &str, src: &str) -> bool {
     }
     if matches_index("JDL", "_DRMUX", dst) {
         return matches_index("JD", "_DRMUX", src);
+    }
+    // A tile's clock lines take clocks from the clock network's branches
+    // only. The database also lists arcs from nearby general wires, but a
+    // clock routed that way never arrives on silicon (a pad clock routed
+    // to slice clocks on general wires left its counter stopped, and one
+    // routed to a PLL's reference input left the PLL unlocked); one that
+    // enters the clock network through a centre clock buffer works.
+    if dst == "JCLK0" || dst == "JCLK1" {
+        return src.starts_with("BRANCH:");
     }
     true
 }
@@ -624,6 +789,45 @@ impl RoutingGraph {
     }
 }
 
+/// The tile type whose wiring a tile has.
+///
+/// IO tiles down a device edge alternate between `_ODD` and `_EVEN` slots,
+/// which differ only in the B pad's wiring: an odd slot drives the pad's
+/// output from `JCIBMUXOUTB4` and its tristate from `JCIBMUXOUTC0`, an even
+/// slot the other way round. A corner tile (`_C`) takes a slot in that
+/// sequence, but prjoxide has one `_C` type for both slots, with odd-slot
+/// wiring. A corner tile in an even slot gets the even type's wiring here, or
+/// its B pad's output would drive the tristate and the pad would never toggle.
+///
+/// The slot is the one the IO tile beside the corner's `_REM` tile does not
+/// take: slots alternate, and that tile is the corner's neighbour.
+fn routing_tiletype(tile: &PrjoxideTile, tiles: &[PrjoxideTile]) -> String {
+    let Some(base) = tile
+        .tiletype
+        .strip_suffix("_C")
+        .filter(|base| base.starts_with("SYSIO_B"))
+    else {
+        return tile.tiletype.clone();
+    };
+    let rem = format!("{base}_REM");
+    let Some(rem_tile) = tiles
+        .iter()
+        .find(|t| t.tiletype == rem && t.x.abs_diff(tile.x) + t.y.abs_diff(tile.y) == 1)
+    else {
+        return tile.tiletype.clone();
+    };
+    let (odd, even) = (format!("{base}_ODD"), format!("{base}_EVEN"));
+    let neighbour = tiles
+        .iter()
+        .filter(|t| (t.x, t.y) == (rem_tile.x, rem_tile.y))
+        .find_map(|t| match &t.tiletype {
+            name if *name == odd => Some(even.clone()),
+            name if *name == even => Some(odd.clone()),
+            _ => None,
+        });
+    neighbour.unwrap_or_else(|| tile.tiletype.clone())
+}
+
 /// Assemble the routing graph from `tiles`. If `bbox = Some((x0,y0,x1,y1))`, only
 /// tiles within that inclusive grid window contribute (cheap subset for tests/bring-up);
 /// `None` builds the full device. Tiletype `.ron`s are parsed once and cached.
@@ -656,11 +860,10 @@ pub fn build_routing_graph_with_clocks(
                 continue;
             }
         }
-        let db = cache.entry(tile.tiletype.clone()).or_insert_with(|| {
-            load_tiletype(db_root, family, &tile.tiletype)
-                .ok()
-                .flatten()
-        });
+        let routing_type = routing_tiletype(tile, tiles);
+        let db = cache
+            .entry(routing_type.clone())
+            .or_insert_with(|| load_tiletype(db_root, family, &routing_type).ok().flatten());
         let Some(db) = db.clone() else { continue };
 
         for edge in tile_edges_with_clocks(tile, &db, clocks) {
@@ -686,6 +889,16 @@ pub fn build_routing_graph_with_clocks(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tile_clock_lines_take_clock_network_branches_only() {
+        assert!(is_usable_pip("JCLK0", "BRANCH:HPBX0000"));
+        assert!(is_usable_pip("JCLK1", "BRANCH:HPBX0700"));
+        assert!(!is_usable_pip("JCLK0", "V00T0000"));
+        assert!(!is_usable_pip("JCLK1", "N1:V01S0000"));
+        assert!(!is_usable_pip("JCLK0", "G:VCC"));
+        assert!(is_usable_pip("JCLK_SLICEA", "JCLK0"));
+    }
     use super::*;
 
     fn local(x: u32, y: u32, n: &str) -> NodeKey {
@@ -917,6 +1130,104 @@ mod tests {
             cfg_with_bits,
             conns,
             g.pip_bits.iter().map(|b| b.len()).sum::<usize>(),
+        );
+    }
+
+    #[test]
+    fn corner_io_tiles_take_the_wiring_of_their_slot() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        for variant in [NexusVariant::Lfcpnx100, NexusVariant::Lifcl40] {
+            let tiles = load_tilegrid(&db, variant).expect("tilegrid");
+            let corners: Vec<&PrjoxideTile> = tiles
+                .iter()
+                .filter(|t| t.tiletype.starts_with("SYSIO_B") && t.tiletype.ends_with("_C"))
+                .collect();
+            assert!(!corners.is_empty(), "{variant:?} has corner IO tiles");
+            for corner in corners {
+                // Slots alternate down the edge, so the IO tiles on either
+                // side of a corner share a slot, and the corner takes the other.
+                let edge_io: Vec<&PrjoxideTile> = tiles
+                    .iter()
+                    .filter(|t| t.x == corner.x && t.tiletype.starts_with("SYSIO_B"))
+                    .filter(|t| t.tiletype.ends_with("_ODD") || t.tiletype.ends_with("_EVEN"))
+                    .collect();
+                let before = edge_io
+                    .iter()
+                    .filter(|t| t.y < corner.y)
+                    .max_by_key(|t| t.y);
+                let after = edge_io
+                    .iter()
+                    .filter(|t| t.y > corner.y)
+                    .min_by_key(|t| t.y);
+                let (Some(before), Some(after)) = (before, after) else {
+                    continue;
+                };
+                let parity = |t: &PrjoxideTile| t.tiletype.rsplit('_').next().unwrap().to_string();
+                assert_eq!(
+                    parity(before),
+                    parity(after),
+                    "{} sits between slots",
+                    corner.name
+                );
+                let expected = if parity(before) == "ODD" {
+                    "EVEN"
+                } else {
+                    "ODD"
+                };
+                let base = corner.tiletype.strip_suffix("_C").unwrap();
+                assert_eq!(
+                    routing_tiletype(corner, &tiles),
+                    format!("{base}_{expected}"),
+                    "{}",
+                    corner.name
+                );
+            }
+        }
+
+        // CertusPro-NX's pad PR28B sits in an even-slot corner: its output comes
+        // from the C0 CIB mux, not B4 (which is its tristate).
+        let variant = NexusVariant::Lfcpnx100;
+        let tiles = load_tilegrid(&db, variant).expect("tilegrid");
+        let g = build_routing_graph(
+            &db,
+            variant.prjoxide_family(),
+            &tiles,
+            Some((158, 27, 159, 29)),
+        )
+        .expect("build graph");
+        let wire = |name: &str| g.wire_names[name];
+        let drivers = |dst: &str| -> Vec<String> {
+            g.wire_to_pips[&wire(dst)]
+                .iter()
+                .map(|p| {
+                    g.wires[g.pips[p.0 as usize].src_wire.0 as usize]
+                        .name
+                        .clone()
+                })
+                .collect()
+        };
+        let output = drivers("R28C159_JPADDO_SEIO33_CORE_IOB");
+        assert!(
+            output.contains(&"R28C158_JCIBMUXOUTC0".to_string()),
+            "{output:?}"
+        );
+        assert!(
+            !output.contains(&"R28C158_JCIBMUXOUTB4".to_string()),
+            "{output:?}"
+        );
+        let tristate = drivers("R28C159_JPADDT_SEIO33_CORE_IOB");
+        assert!(
+            tristate.contains(&"R28C158_JCIBMUXOUTB4".to_string()),
+            "{tristate:?}"
+        );
+        // Pad A's wiring is the same in both slots.
+        let output_a = drivers("R28C159_JPADDO_SEIO33_CORE_IOA");
+        assert!(
+            output_a.contains(&"R28C158_JCIBMUXOUTA0".to_string()),
+            "{output_a:?}"
         );
     }
 }

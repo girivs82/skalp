@@ -100,6 +100,77 @@ arcs = [
     { arc = "A->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 210, rise_slope_ps_per_ff = 0.48, fall_base_ps = 210, fall_slope_ps_per_ff = 0.48 },
 ]
 # =============================================================================
+# OXIDE_LUT5 - 5-input Look-Up Table: a slice's two OXIDE_COMBs and the
+# MUX2 between them (Lattice WIDEFN9 with both LUTs on the same four
+# inputs). Input E selects: F = E ? LUT1(A,B,C,D) : LUT0(A,B,C,D).
+# INIT is the 32-entry truth table, E the most significant address bit, so
+# its low half is LUT0 and its high half LUT1. Place and route expands it
+# into the slice pair.
+# =============================================================================
+
+[[cells]]
+name = "OXIDE_LUT5"
+function = "lut5"
+fit = 0.20
+inputs = ["A", "B", "C", "D", "E"]
+outputs = ["F"]
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+timing_margin_voltage_mv = 855
+voltage_delay_coefficient = 0.14
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.024
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.024
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.030
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "routing_open"
+fit = 0.010
+fault_type = "open"
+mechanism = "interconnect_failure"
+
+[[cells.failure_modes]]
+name = "routing_bridge"
+fit = 0.008
+fault_type = "bridge"
+mechanism = "interconnect_bridge"
+
+[cells.timing]
+arcs = [
+    { arc = "A->F", rise_base_ps = 455, rise_slope_ps_per_ff = 0.8, fall_base_ps = 455, fall_slope_ps_per_ff = 0.8 }, { arc = "B->F", rise_base_ps = 455, rise_slope_ps_per_ff = 0.8, fall_base_ps = 455, fall_slope_ps_per_ff = 0.8 }, { arc = "C->F", rise_base_ps = 455, rise_slope_ps_per_ff = 0.8, fall_base_ps = 455, fall_slope_ps_per_ff = 0.8 }, { arc = "D->F", rise_base_ps = 455, rise_slope_ps_per_ff = 0.8, fall_base_ps = 455, fall_slope_ps_per_ff = 0.8 }, { arc = "E->F", rise_base_ps = 455, rise_slope_ps_per_ff = 0.8, fall_base_ps = 455, fall_slope_ps_per_ff = 0.8 },
+]
+
+[cells.timing.corners.SS]
+arcs = [
+    { arc = "A->F", rise_base_ps = 680, rise_slope_ps_per_ff = 1.2, fall_base_ps = 680, fall_slope_ps_per_ff = 1.2 }, { arc = "B->F", rise_base_ps = 680, rise_slope_ps_per_ff = 1.2, fall_base_ps = 680, fall_slope_ps_per_ff = 1.2 }, { arc = "C->F", rise_base_ps = 680, rise_slope_ps_per_ff = 1.2, fall_base_ps = 680, fall_slope_ps_per_ff = 1.2 }, { arc = "D->F", rise_base_ps = 680, rise_slope_ps_per_ff = 1.2, fall_base_ps = 680, fall_slope_ps_per_ff = 1.2 }, { arc = "E->F", rise_base_ps = 680, rise_slope_ps_per_ff = 1.2, fall_base_ps = 680, fall_slope_ps_per_ff = 1.2 },
+]
+
+[cells.timing.corners.FF]
+arcs = [
+    { arc = "A->F", rise_base_ps = 275, rise_slope_ps_per_ff = 0.48, fall_base_ps = 275, fall_slope_ps_per_ff = 0.48 }, { arc = "B->F", rise_base_ps = 275, rise_slope_ps_per_ff = 0.48, fall_base_ps = 275, fall_slope_ps_per_ff = 0.48 }, { arc = "C->F", rise_base_ps = 275, rise_slope_ps_per_ff = 0.48, fall_base_ps = 275, fall_slope_ps_per_ff = 0.48 }, { arc = "D->F", rise_base_ps = 275, rise_slope_ps_per_ff = 0.48, fall_base_ps = 275, fall_slope_ps_per_ff = 0.48 }, { arc = "E->F", rise_base_ps = 275, rise_slope_ps_per_ff = 0.48, fall_base_ps = 275, fall_slope_ps_per_ff = 0.48 },
+]
+# =============================================================================
 # CCU2 - Dual Carry Chain Cell (Nexus carry primitive)
 # Two halves, each a LUT4 P = INITi(Ai,Bi,Ci,Di) (propagate) plus a LUT2
 # G = INITi[3:0](Ai,Bi) (generate), with INJECT = "NO":

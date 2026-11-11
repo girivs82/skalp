@@ -7,15 +7,16 @@
 //! The settings mirror what nextpnr writes for the same cells.
 
 use super::prjoxide_graph::{
-    load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
+    load_iptype, load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
 };
-use super::{dsp, ebr};
+use super::{dsp, ebr, pll};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
-use crate::bitstream::config::{ConfigGenerator, DesignBit, PlacedDesign};
+use crate::bitstream::config::{ConfigGenerator, ConfigSpace, DesignBit, PlacedDesign};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::{PlaceRouteError, Result};
+use crate::placer::control_sets::ControlSet;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::{Cell, CellId};
 use skalp_lir::tech_library::CellFunction;
@@ -40,10 +41,14 @@ fn emit_err(message: String) -> PlaceRouteError {
 /// Tiletype settings, loaded once per type.
 struct ConfigDb<'a> {
     device: &'a NexusDevice,
+    variant: NexusVariant,
     db_root: &'a Path,
     family: &'static str,
     cache: HashMap<String, Option<TileBitsDb>>,
     bits: Vec<GlobalBit>,
+    /// Hard-block register bits on the configuration bus: (byte address,
+    /// bit, value)
+    bus_bits: Vec<(u32, u32, bool)>,
 }
 
 impl ConfigDb<'_> {
@@ -144,6 +149,24 @@ fn float_high(
             .map_or("?", |w| w.name.as_str())
             .to_string()
     };
+    // A pin wired straight from a tile's set/reset line needs nothing: an
+    // unconnected set/reset line reads high, as slices rely on
+    let lsr = device.wire_pips(pin).into_iter().find_map(|p| {
+        let src = device.pip(p)?.src_wire;
+        let wire = device.wire(src)?;
+        let line = wire.name.rsplit('_').next()?;
+        let index = line.strip_prefix("JLSR")?;
+        (!index.is_empty() && index.chars().all(|c| c.is_ascii_digit())).then_some(src)
+    });
+    if let Some(lsr) = lsr {
+        if used_wires.contains(&lsr) {
+            return Err(emit_err(format!(
+                "The set/reset line feeding {} is used by a routed net, so the pin cannot float",
+                name()
+            )));
+        }
+        return Ok(());
+    }
     let mux = find_cib_mux(device, pin)
         .ok_or_else(|| emit_err(format!("No CIB mux feeds {}", name())))?;
     if used_wires.contains(&mux) {
@@ -301,14 +324,19 @@ impl ConfigGenerator for NexusConfig<'_> {
             design.tied,
             self.db_root,
         )?;
-        Ok(bits
-            .into_iter()
-            .map(|b| DesignBit {
-                frame: b.frame,
-                bit: b.bit,
-                value: !b.invert,
-            })
-            .collect())
+        let frames = bits.frames.into_iter().map(|b| DesignBit {
+            frame: b.frame,
+            bit: b.bit,
+            value: !b.invert,
+            space: ConfigSpace::Frames,
+        });
+        let bus = bits.bus.into_iter().map(|(frame, bit, value)| DesignBit {
+            frame,
+            bit,
+            value,
+            space: ConfigSpace::Bus,
+        });
+        Ok(frames.chain(bus).collect())
     }
 }
 
@@ -321,13 +349,15 @@ fn emit_bits(
     routing: &RoutingResult,
     tied: &crate::bitstream::prepare::TiedInputs,
     db_root: &Path,
-) -> Result<Vec<GlobalBit>> {
+) -> Result<EmittedBits> {
     let mut config = ConfigDb {
         device,
+        variant,
         db_root,
         family: variant.prjoxide_family(),
         cache: HashMap::new(),
         bits: Vec::new(),
+        bus_bits: Vec::new(),
     };
 
     set_always_on_bits(&mut config)?;
@@ -352,7 +382,12 @@ fn emit_bits(
             .filter(|&i| tied.value(cell, first + i) == Some(false))
             .collect()
     };
-    let mut slices_with_ff: HashSet<(u32, u32, char, bool)> = HashSet::new();
+    // Each slice's control set, and a flip-flop holding it
+    let control_sets = crate::placer::control_sets::control_sets(netlist);
+    let mut slices_with_ff: HashMap<(u32, u32, char), (ControlSet, &str)> = HashMap::new();
+    let mut pairs_with_ff: HashMap<(u32, u32, &str), (ControlSet, &str)> = HashMap::new();
+    // Tiles whose slice C is a distributed RAM's write port
+    let mut ram_write_tiles: HashSet<(u32, u32)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
     let mut used_multipliers: HashSet<(u32, u32, usize)> = HashSet::new();
 
@@ -379,6 +414,10 @@ fn emit_bits(
                     dsp::slot_of_tile(&tile.tiletype).unwrap_or(0),
                 ));
             }
+            continue;
+        }
+        if loc.bel_type == BelType::Pll {
+            emit_pll(&mut config, cell, x, y, &used_wires)?;
             continue;
         }
         if loc.bel_type == BelType::RamSlice {
@@ -441,8 +480,30 @@ fn emit_bits(
                 config.set_enum(&tile, &format!("{prefix}.LSRMODE"), "LSR")?;
                 config.set_enum(&tile, &format!("{prefix}.SEL"), "DF")?;
                 config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), "CLK")?;
-                let uses_reset = cell.reset.is_some() || cell.cell_type.contains("RST");
-                slices_with_ff.insert((x, y, slice, uses_reset));
+                let set = control_sets
+                    .get(&cell.id)
+                    .copied()
+                    .ok_or_else(|| emit_err(format!("Flip-flop '{}' has no clock", cell.path)))?;
+                // Slices A and B share one clock, enable and set/reset
+                // line of the tile, and C and D the other
+                let pair = if slice <= 'B' { "A and B" } else { "C and D" };
+                match pairs_with_ff.get(&(x, y, pair)) {
+                    Some((held, other)) if *held != set => {
+                        return Err(emit_err(format!(
+                            "Flip-flops '{other}' and '{}' share the control lines of \
+                             slices {pair} of tile ({x}, {y}) but not their clock, reset \
+                             and enable",
+                            cell.path
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        pairs_with_ff.insert((x, y, pair), (set, cell.path.as_str()));
+                    }
+                }
+                slices_with_ff
+                    .entry((x, y, slice))
+                    .or_insert((set, cell.path.as_str()));
             }
             BelType::DistRam => {
                 if (0..cell.inputs.len()).any(|i| tied.value(cell.id, i).is_some()) {
@@ -452,6 +513,7 @@ fn emit_bits(
                     )));
                 }
                 emit_dist_ram(&mut config, &tile, cell)?;
+                ram_write_tiles.insert((x, y));
             }
             BelType::Lut4 => {
                 let slice = slice_of(number);
@@ -462,6 +524,25 @@ fn emit_bits(
                 low.extend(cell.inputs.len()..4);
                 let init = fold_tied_low(lut_init(cell)?, &low);
                 config.set_word(&tile, &format!("SLICE{slice}.K{lut}.INIT"), init)?;
+            }
+            BelType::WideLut => {
+                // Both LUTs of the slice see inputs 0..3; the slice's wide
+                // mux picks LUT1 (the table's upper half) when input 4 is high.
+                let slice = SLICES[number];
+                let init = lut_init(cell)?;
+                let mut halves = [init & 0xFFFF, (init >> 16) & 0xFFFF];
+                match tied.value(cell.id, 4) {
+                    Some(true) => halves[0] = halves[1],
+                    Some(false) => halves[1] = halves[0],
+                    None if cell.inputs.len() <= 4 => halves[1] = halves[0],
+                    None => {}
+                }
+                let mut low = tied_low(cell.id, 0, 4);
+                low.extend(cell.inputs.len().min(4)..4);
+                for (lut, half) in halves.into_iter().enumerate() {
+                    let folded = fold_tied_low(half, &low);
+                    config.set_word(&tile, &format!("SLICE{slice}.K{lut}.INIT"), folded)?;
+                }
             }
             other => {
                 return Err(emit_err(format!(
@@ -474,15 +555,33 @@ fn emit_bits(
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
 
-    for &(x, y, slice, uses_reset) in &slices_with_ff {
-        if !uses_reset {
+    for (&(x, y, slice), &(set, path)) in &slices_with_ff {
+        if matches!(slice, 'C' | 'D') && ram_write_tiles.contains(&(x, y)) {
+            // The RAM's write clock and write enable drive slice C's clock
+            // and set/reset inputs, which slice D shares
+            return Err(emit_err(format!(
+                "Flip-flop '{path}' is in slice {slice} of tile ({x}, {y}), which shares \
+                 the write port of a distributed RAM"
+            )));
+        }
+        if set.reset.is_none() {
             // An unconnected set/reset input reads high; this holds it inactive.
             let tile = config.tile(x, y, "PLC")?;
             config.set_enum(&tile, &format!("SLICE{slice}.LSRMUX"), "INV")?;
         }
     }
 
-    Ok(config.bits)
+    Ok(EmittedBits {
+        frames: config.bits,
+        bus: config.bus_bits,
+    })
+}
+
+/// A design's configuration: frame bits, and hard-block register bits on
+/// the configuration bus as (byte address, bit, value).
+struct EmittedBits {
+    frames: Vec<GlobalBit>,
+    bus: Vec<(u32, u32, bool)>,
 }
 
 /// Configure a logic tile's slices A and B as RAM storage and C as its write port.
@@ -508,6 +607,205 @@ fn emit_dist_ram(config: &mut ConfigDb<'_>, tile: &PrjoxideTile, cell: &Cell) ->
     config.set_enum(tile, "SLICEC.MODE", "RAMW")?;
     config.set_enum(tile, "SLICEC.CLKMUX", "CLK")?;
     config.set_enum(tile, "SLICEC.LSRMUX", "LSR")
+}
+
+/// Settings of the `PLL_CORE` primitive that are not registers of the
+/// block (simulation and generator bookkeeping), ignored when given.
+const PLL_PRIMITIVE_ONLY: &[&str] = &[
+    "SIM_FLOAT_PRECISION",
+    "PMU_WAITFORLOCK",
+    "REF_OSC_CTRL",
+    "EXTERNAL_DIVIDE_FACTOR",
+    "INTFBKDEL_SEL",
+    "PHASE_SEL_DEL",
+    "PHASE_SEL_DEL_P1",
+    "SEL_FBK",
+    "LOC",
+];
+
+/// Configure a PLL: its tile's feedback and LMMI muxes, the device-wide bits
+/// a PLL needs, and its registers on the configuration bus.
+fn emit_pll(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    x: u32,
+    y: u32,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let device = config.device;
+    let tile = device
+        .prjoxide_tile(x, y, |t| pll::corner_of_tile(t).is_some())
+        .cloned()
+        .ok_or_else(|| emit_err(format!("PLL '{}' is not on a PLL site", cell.path)))?;
+    let corner = pll::corner_of_tile(&tile.tiletype)
+        .unwrap_or_default()
+        .to_string();
+    let value = |name: &str| {
+        pll::setting(cell, name)
+            .ok_or_else(|| emit_err(format!("PLL '{}' has no setting {name}", cell.path)))
+    };
+
+    // The tile: feedback source and LMMI clock/reset inversion, and (on
+    // CrossLink-NX) the mode bit
+    let db = config.db(&tile.tiletype)?.clone();
+    for &(name, default) in pll::TILE_SETTINGS {
+        let option = value(name)?;
+        let full = format!("PLL_{corner}.{name}");
+        if db.enum_option(&full, option).is_some() {
+            config.set_enum(&tile, &full, option)?;
+        } else if option != default {
+            return Err(emit_err(format!(
+                "PLL '{}': {name}={option} is not available in tile {}",
+                cell.path, tile.tiletype
+            )));
+        }
+    }
+    let mode = format!("PLL_{corner}.MODE");
+    if db.enum_option(&mode, "PLL_CORE").is_some() {
+        config.set_enum(&tile, &mode, "PLL_CORE")?;
+    }
+    for &(tiletype, frame, bit) in pll::device_enable_bits(config.variant) {
+        let owner = device
+            .prjoxide_tiles()
+            .iter()
+            .find(|t| t.tiletype == tiletype)
+            .cloned()
+            .ok_or_else(|| emit_err(format!("No {tiletype} tile for the PLL enable bits")))?;
+        config.bits.push(GlobalBit {
+            frame: owner.start_frame + frame,
+            bit: owner.start_bit + bit,
+            invert: false,
+        });
+    }
+
+    // The registers: every bit of every setting, so none keeps a reset value
+    let region = format!("PLL_{corner}");
+    let base =
+        super::prjoxide_load::hard_block_base_address(config.db_root, config.variant, &region)
+            .ok_or_else(|| {
+                emit_err(format!(
+                    "The device database has no {region} address in {}/baseaddr.json",
+                    config.variant.prjoxide_device()
+                ))
+            })?;
+    let registers = load_iptype(config.db_root, config.family, pll::IPTYPE)
+        .map_err(emit_err)?
+        .ok_or_else(|| emit_err("No PLL register data in the device database".to_string()))?;
+    let mut known: HashSet<String> = HashSet::new();
+    let reserved =
+        |name: &str| pll::RESERVED_SETTINGS.contains(&name) && !cell.parameters.contains_key(name);
+    for name in registers.word_names() {
+        known.insert(name.to_string());
+        if reserved(name) {
+            for bit in registers.word(name).unwrap_or_default().iter().flatten() {
+                config
+                    .bus_bits
+                    .push((base + bit.frame as u32, bit.bit as u32, bit.invert));
+            }
+            continue;
+        }
+        let number = pll::parse_number(value(name)?).ok_or_else(|| {
+            emit_err(format!(
+                "PLL '{}': {name}={} is not a number",
+                cell.path,
+                value(name).unwrap_or_default()
+            ))
+        })?;
+        let groups = registers.word(name).unwrap_or_default();
+        if groups.len() < 64 && number >> groups.len() != 0 {
+            return Err(emit_err(format!(
+                "PLL '{}': {name}={number} does not fit in {} bits",
+                cell.path,
+                groups.len()
+            )));
+        }
+        for (index, group) in groups.iter().enumerate() {
+            let on = (number >> index) & 1 == 1;
+            for bit in group {
+                config
+                    .bus_bits
+                    .push((base + bit.frame as u32, bit.bit as u32, on ^ bit.invert));
+            }
+        }
+    }
+    for (name, options) in registers.enums() {
+        known.insert(name.to_string());
+        if reserved(name) {
+            let bits: HashSet<(usize, usize)> = options
+                .values()
+                .flatten()
+                .map(|bit| (bit.frame, bit.bit))
+                .collect();
+            for (frame, bit) in bits {
+                config
+                    .bus_bits
+                    .push((base + frame as u32, bit as u32, false));
+            }
+            continue;
+        }
+        let option = value(name)?;
+        let chosen = options.get(option).ok_or_else(|| {
+            emit_err(format!(
+                "PLL '{}': {name}={option} is not one of {}",
+                cell.path,
+                options.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        let mut written: HashSet<(usize, usize)> = HashSet::new();
+        for bit in chosen {
+            written.insert((bit.frame, bit.bit));
+            config
+                .bus_bits
+                .push((base + bit.frame as u32, bit.bit as u32, !bit.invert));
+        }
+        // A bit only other options use takes the value they do not set
+        for bit in options.values().flatten() {
+            if written.insert((bit.frame, bit.bit)) {
+                config
+                    .bus_bits
+                    .push((base + bit.frame as u32, bit.bit as u32, bit.invert));
+            }
+        }
+    }
+    // prjoxide sets the first register bit of every PLL it configures
+    config.bus_bits.push((base, 0, true));
+
+    for name in cell.parameters.keys() {
+        let tile_setting = pll::TILE_SETTINGS.iter().any(|(n, _)| n == name);
+        let pins = name == skalp_lir::gate_netlist::BLACKBOX_INPUTS_PARAM
+            || name == skalp_lir::gate_netlist::BLACKBOX_OUTPUTS_PARAM;
+        if !known.contains(name)
+            && !tile_setting
+            && !pins
+            && !PLL_PRIMITIVE_ONLY.contains(&name.as_str())
+        {
+            return Err(emit_err(format!(
+                "PLL '{}' has a setting {name} that this device's PLL does not have",
+                cell.path
+            )));
+        }
+    }
+
+    // Unconnected inputs: the enables and power-down read high; a reset left
+    // unconnected would read high too, and hold the PLL in reset
+    let connected =
+        |pin: &str| (0..cell.inputs.len()).any(|i| pll::input_pin_name(cell, i) == Some(pin));
+    if value("PLLRESET_ENA")? == "ENABLED" && !connected("PLLRESET") {
+        return Err(emit_err(format!(
+            "PLL '{}' has PLLRESET_ENA=ENABLED but no RST input; connect RST (0 to run)",
+            cell.path
+        )));
+    }
+    for pin in pll::FLOAT_HIGH_PINS {
+        if connected(pin) {
+            continue;
+        }
+        let wire = device.bel_pin_wire_by_name(x, y, &format!("PLL_{pin}"));
+        if let Some(wire) = wire {
+            float_high(config, wire, used_wires)?;
+        }
+    }
+    Ok(())
 }
 
 /// A block RAM cell and the site it was placed on.
@@ -549,7 +847,7 @@ fn set_ram_enum(
     }
     found
         .then_some(())
-        .ok_or_else(|| emit_err(format!("No block RAM setting {name}.{option}")))
+        .ok_or_else(|| emit_err(format!("No site setting {name}.{option}")))
 }
 
 /// Set a word in whichever of a site's tiles defines it.
@@ -568,7 +866,55 @@ fn set_ram_word(
     }
     found
         .then_some(())
-        .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))
+        .ok_or_else(|| emit_err(format!("No site setting {name}")))
+}
+
+/// Write a block RAM's initial contents to its window on the configuration
+/// bus (chosen by its `WID`, see [`super::prjoxide_load::block_ram_init_address`]).
+fn write_block_ram_init(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    wid: u64,
+    width: usize,
+    words: &[u64],
+) -> Result<()> {
+    let image = ebr::init_image(width, words).ok_or_else(|| {
+        emit_err(format!(
+            "Block RAM '{}' has {} initial words, more than its {width}-bit mode holds",
+            cell.path,
+            words.len()
+        ))
+    })?;
+    let (base, unconfirmed) =
+        super::prjoxide_load::block_ram_init_address(config.db_root, config.variant, wid as u32)
+            .map_err(emit_err)?;
+    if unconfirmed {
+        log::warn!(
+            "{}: block RAM contents placed where other Nexus devices keep them; \
+             neither prjoxide nor a silicon check has located them on this device",
+            config.variant.prjoxide_device()
+        );
+    }
+    let db = load_iptype(config.db_root, config.family, ebr::INIT_IPTYPE)
+        .map_err(emit_err)?
+        .ok_or_else(|| {
+            emit_err("No block RAM initialisation data in the device database".to_string())
+        })?;
+    for (index, row) in image.iter().enumerate() {
+        let name = ebr::init_word_name(index);
+        let bits = db
+            .word(&name)
+            .ok_or_else(|| emit_err(format!("No block RAM setting {name}")))?;
+        for (i, group) in bits.iter().enumerate() {
+            let on = row.get(i).copied().unwrap_or(false);
+            for bit in group {
+                config
+                    .bus_bits
+                    .push((base + bit.frame as u32, bit.bit as u32, on ^ bit.invert));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Configure a block RAM site and everything its unrouted pins must read.
@@ -611,6 +957,9 @@ fn emit_block_ram(
     set_ram_enum(config, &tiles, &format!("{prefix}.INIT_DATA"), "STATIC")?;
     set_ram_enum(config, &tiles, &format!("{prefix}.GSR"), "DISABLED")?;
     set_ram_word(config, &tiles, &format!("{prefix}.WID"), id)?;
+    if let Some(words) = cell.memory_init() {
+        write_block_ram_init(config, cell, id, width, &words)?;
+    }
     let in_mode = format!("{prefix}.{mode}");
     set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_W"), 0)?;
     set_ram_word(config, &tiles, &format!("{in_mode}.CSDECODE_R"), 0)?;
@@ -889,7 +1238,19 @@ fn emit_pad(
         tiles,
         &format!("{prefix}.BASE_TYPE"),
         &format!("{direction}_{standard}"),
-    )?;
+    )
+    .map_err(|_| {
+        let bank = if high_performance {
+            "a high-performance (1.8 V at most) I/O"
+        } else {
+            "a wide-range I/O"
+        };
+        emit_err(format!(
+            "Pad '{}' is on {bank}, which has no {} {standard}",
+            cell.path,
+            direction.to_lowercase()
+        ))
+    })?;
     set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
     if !high_performance {
         set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;

@@ -4,6 +4,7 @@
 //! Supports timing-driven placement by incorporating estimated path delays.
 //! Includes parallel move evaluation for improved performance on multi-core systems.
 
+use super::control_sets::{control_sets, fits_control_group, ControlSet};
 use super::{PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
@@ -448,6 +449,15 @@ struct MoveContext {
     /// BELs no move may target: the LUTs under fixed two-bit carry cells
     /// and under distributed-RAM cells
     reserved: HashSet<(u32, u32, usize)>,
+    /// Control set of every flip-flop: flip-flops of one control group
+    /// ([`Device::ff_control_group`]) must all have the same one
+    control_sets: HashMap<CellId, ControlSet>,
+}
+
+/// Whether cells of `bel_type` use up other BELs of their tile and so stay
+/// where the legalizer put them.
+fn has_footprint(bel_type: BelType) -> bool {
+    matches!(bel_type, BelType::DistRam | BelType::WideLut)
 }
 
 impl MoveContext {
@@ -456,9 +466,9 @@ impl MoveContext {
     /// those chains stay fixed (they are not moved and are not move targets)
     /// and the LUTs under them are reserved.
     ///
-    /// Distributed-RAM cells stay fixed too: a RAM BEL uses up LUTs of its
-    /// tile (`footprint`, [`Device::bel_footprint`]), which the legalizer
-    /// kept free and which no move may then fill.
+    /// Distributed-RAM and wide-LUT cells stay fixed too: their BELs use up
+    /// LUTs of their tile (`footprint`, [`Device::bel_footprint`]), which the
+    /// legalizer kept free and which no move may then fill.
     fn build(
         placement: &PlacementResult,
         netlist: &GateNetlist,
@@ -469,7 +479,7 @@ impl MoveContext {
     ) -> Self {
         let mut reserved = HashSet::new();
         for loc in placement.placements.values() {
-            if loc.bel_type == BelType::DistRam {
+            if has_footprint(loc.bel_type) {
                 reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
                 for lut in footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
                     reserved.insert((loc.tile_x, loc.tile_y, lut));
@@ -491,7 +501,7 @@ impl MoveContext {
             .placements
             .iter()
             .filter(|(c, loc)| {
-                loc.bel_type != BelType::DistRam
+                !has_footprint(loc.bel_type)
                     && (carry_layout.is_none() || !chain_membership.contains_key(c))
             })
             .map(|(&c, _)| c)
@@ -518,6 +528,7 @@ impl MoveContext {
             cells,
             critical: critical[..top_n].iter().map(|&(c, _)| c).collect(),
             reserved,
+            control_sets: control_sets(netlist),
         }
     }
 }
@@ -655,6 +666,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let move_op = self.generate_move(&cal_placement, ctx, &cal_loc_map, rlim, &mut rng);
             let affected = self.moved_cells_with_displaced(&move_op, &cal_placement, &cal_loc_map);
             let undo = self.apply_move_in_place(&mut cal_placement, &mut cal_loc_map, &move_op);
+            if !self.control_sets_hold(ctx, &affected, &cal_placement, &cal_loc_map) {
+                Self::undo_move(&mut cal_placement, &mut cal_loc_map, undo);
+                continue;
+            }
             let affected_nets = cost_cache.affected_nets(&affected);
             let (delta, _, _) = cost_cache.compute_delta(
                 &affected_nets,
@@ -815,6 +830,10 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
                 // Apply move in-place (no clone), get undo record
                 let undo = self.apply_move_in_place(&mut current, &mut location_to_cell, &move_op);
+                if !self.control_sets_hold(&move_ctx, &affected, &current, &location_to_cell) {
+                    Self::undo_move(&mut current, &mut location_to_cell, undo);
+                    continue;
+                }
 
                 // Incremental cost delta: only recompute nets connected to moved cells
                 let affected_nets = cost_cache.affected_nets(&affected);
@@ -1004,6 +1023,22 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             self.apply_move(&current, &location_to_cell, &move_op);
                         let affected =
                             self.moved_cells_with_displaced(&move_op, &current, &location_to_cell);
+                        if !self.control_sets_hold(
+                            &move_ctx,
+                            &affected,
+                            &new_placement,
+                            &new_loc_map,
+                        ) {
+                            // An illegal move: never accepted
+                            return (
+                                move_op,
+                                new_placement,
+                                new_loc_map,
+                                f64::INFINITY,
+                                Vec::new(),
+                                Vec::new(),
+                            );
+                        }
                         let affected_nets = cost_cache.affected_nets(&affected);
                         let (delta, net_updates, prox_updates) = cost_cache.compute_delta(
                             &affected_nets,
@@ -1169,6 +1204,24 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                         continue;
                     }
                 }
+                // Flip-flops share a control group only with their own
+                // control set: the cell at its new BEL, and any occupant
+                // swapped back to the cell's old one
+                let lookup = |x: u32, y: u32, b: usize| loc_map.get(&(x, y, b)).copied();
+                let target = PlacementLoc::new(x, y, bel_idx, loc.bel_type);
+                let leaving: Vec<CellId> = occupant.copied().into_iter().collect();
+                if !fits_control_group(
+                    self.device,
+                    &ctx.control_sets,
+                    cell_id,
+                    &target,
+                    &leaving,
+                    lookup,
+                ) || occupant.is_some_and(|&o| {
+                    !fits_control_group(self.device, &ctx.control_sets, o, &loc, &[cell_id], lookup)
+                }) {
+                    continue;
+                }
                 seen += 1;
                 if rng.gen_range(0..seen) == 0 {
                     chosen = Some(bel_idx);
@@ -1180,6 +1233,25 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         Move::Relocate(cell_id, loc)
+    }
+
+    /// Whether every flip-flop a move touched (`affected`) shares its control
+    /// group, after the move (`placement`, `loc_map`), only with flip-flops
+    /// of its own control set.
+    fn control_sets_hold(
+        &self,
+        ctx: &MoveContext,
+        affected: &[CellId],
+        placement: &PlacementResult,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+    ) -> bool {
+        affected.iter().all(|&cell| {
+            placement.placements.get(&cell).is_none_or(|loc| {
+                fits_control_group(self.device, &ctx.control_sets, cell, loc, &[], |x, y, b| {
+                    loc_map.get(&(x, y, b)).copied()
+                })
+            })
+        })
     }
 
     /// Whether tile (x, y) already holds as many cells on BELs of the
@@ -1527,95 +1599,19 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         netlist: &GateNetlist,
         placement: &PlacementResult,
     ) -> HashMap<GateNetId, f64> {
-        let mut criticalities: HashMap<GateNetId, f64> = HashMap::new();
-        let mut path_delays: HashMap<GateNetId, f64> = HashMap::new();
-
-        // Forward pass: compute arrival times (estimated delays to each net)
-        for net in &netlist.nets {
-            let delay = self.estimate_arrival_time(
-                net.id,
-                netlist,
-                placement,
-                &path_delays,
-                &mut HashSet::new(),
-            );
-            path_delays.insert(net.id, delay);
-        }
-
-        // Find maximum delay (worst slack point)
-        let max_delay = path_delays.values().copied().fold(0.0f64, f64::max);
-
-        // Compute criticalities: 1.0 for critical path, 0.0 for slack
-        if max_delay > 0.0 {
-            for (net_id, delay) in &path_delays {
-                let criticality = delay / max_delay;
-                criticalities.insert(*net_id, criticality);
-            }
-        }
-
-        criticalities
-    }
-
-    /// Estimate arrival time for a net (forward propagation)
-    fn estimate_arrival_time(
-        &self,
-        net_id: GateNetId,
-        netlist: &GateNetlist,
-        placement: &PlacementResult,
-        memo: &HashMap<GateNetId, f64>,
-        visited: &mut HashSet<GateNetId>,
-    ) -> f64 {
-        // Check memo
-        if let Some(&delay) = memo.get(&net_id) {
-            return delay;
-        }
-
-        // Prevent cycles
-        if visited.contains(&net_id) {
-            return 0.0;
-        }
-        visited.insert(net_id);
-
-        let net = match netlist.nets.get(net_id.0 as usize) {
-            Some(n) => n,
-            None => return 0.0,
-        };
-
-        // If this is a primary input or clock, arrival time is 0
-        if net.is_input || net.is_clock {
-            return 0.0;
-        }
-
-        // Get the driver cell
-        let driver_id = match net.driver {
-            Some(id) => id,
-            None => return 0.0,
-        };
-
-        let driver = match netlist.get_cell(driver_id) {
-            Some(c) => c,
-            None => return 0.0,
-        };
-
-        // If driver is sequential, this starts a new timing path
-        if driver.clock.is_some() {
-            return self.delay_model.dff_clk_to_q;
-        }
-
-        // Driver is combinational - get max input arrival + cell delay
-        let cell_delay = self.delay_model.cell_delay(&driver.cell_type);
-        let mut max_input_arrival = 0.0f64;
-
-        for &input_net in &driver.inputs {
-            let input_arrival =
-                self.estimate_arrival_time(input_net, netlist, placement, memo, visited);
-            max_input_arrival = max_input_arrival.max(input_arrival);
-        }
-
-        // Add routing delay estimate based on placement
-        let routing_delay = self.estimate_net_delay(net_id, placement, netlist);
-
-        max_input_arrival + cell_delay + routing_delay * 0.5 // Partial routing delay
+        let critical =
+            super::timing_estimate::net_criticalities(netlist, &self.delay_model, |id| {
+                placement
+                    .placements
+                    .get(&id)
+                    .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
+            });
+        netlist
+            .nets
+            .iter()
+            .zip(critical)
+            .map(|(net, c)| (net.id, c))
+            .collect()
     }
 
     /// Generate a move biased toward cells on critical paths

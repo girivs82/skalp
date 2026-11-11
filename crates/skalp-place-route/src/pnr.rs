@@ -551,6 +551,12 @@ pub fn place_and_route_nexus_real(
         })
         .map(|&(x, y, _)| (x, y))
         .collect();
+    // Each PLL goes to the corner its LOC names, or the corner nearest the
+    // design's pins; the region loaded must reach it
+    let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
+        .map_err(PlaceRouteError::PlacementFailed)?;
+    let mut pad_sites = pad_sites;
+    pad_sites.extend(pll_sites.values().copied());
     let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
         db_root,
         variant.prjoxide_family(),
@@ -580,23 +586,52 @@ pub fn place_and_route_nexus_real(
             .map_err(PlaceRouteError::BitstreamFailed)?;
 
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
-    let logic = prepare::logic_only_netlist(netlist);
+    let mut logic = prepare::logic_only_netlist(netlist);
+    for cell in &mut logic.cells {
+        if pll_sites.contains_key(&cell.id) {
+            cell.cell_type = "TIE_PLL".to_string();
+            cell.function = None;
+            cell.parameters.clear();
+        }
+    }
     let mut packer = CellPacker::new(&logic);
     let packing = packer.pack();
     let mut placer = Placer::new(config.placer.clone(), device.clone());
+    let t_place = std::time::Instant::now();
     let mut placement = if packing.carry_chains.is_empty() {
         placer.place(&logic)?
     } else {
         placer.place_with_carry_chains(&logic, &packing.carry_chains)?
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
+    for (&cell, &(x, y)) in &pll_sites {
+        let bel = crate::device::Device::tile_at(&device, x, y)
+            .and_then(|t| {
+                t.bels()
+                    .iter()
+                    .position(|b| b.bel_type == crate::device::BelType::Pll)
+            })
+            .ok_or_else(|| {
+                PlaceRouteError::PlacementFailed(format!(
+                    "The PLL site at ({x}, {y}) has no routing data in the device database"
+                ))
+            })?;
+        placement.placements.insert(
+            cell,
+            crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::Pll),
+        );
+    }
+    log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());
+    Placer::<NexusDevice>::log_placement_stats(&placement, netlist);
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         if !clock_routes.general.contains(&net.id) {
-            net.fanout
-                .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+            net.fanout.retain(|&(cell, pin)| {
+                !crate::device::is_clock_pin(pin)
+                    && !clock_routes.dedicated_inputs.contains(&(cell, pin))
+            });
         }
     }
     let router_device = device.without_wires(&clock_routes.claimed);
@@ -620,10 +655,30 @@ pub fn place_and_route_nexus_real(
             }
         }
     }
+    check_routes_disjoint(netlist, &device, &routing)?;
     if !routing.success {
-        return Err(PlaceRouteError::RoutingFailed(
-            "Some nets could not be routed on the real device".to_string(),
-        ));
+        let mut unrouted: Vec<&str> = routing
+            .routes
+            .iter()
+            .filter(|(_, r)| r.unrouted_sinks > 0)
+            .filter_map(|(id, _)| netlist.nets.get(id.0 as usize).map(|n| n.name.as_str()))
+            .collect();
+        unrouted.sort_unstable();
+        unrouted.truncate(10);
+        return Err(PlaceRouteError::RoutingFailed(format!(
+            "Some nets could not be routed on the real device: {} connections unrouted{}{}",
+            routing.unrouted_connections,
+            if unrouted.is_empty() {
+                String::new()
+            } else {
+                format!(" (nets {})", unrouted.join(", "))
+            },
+            if routing.congestion > 1.0 {
+                format!(", wires overused (congestion {:.2})", routing.congestion)
+            } else {
+                String::new()
+            }
+        )));
     }
 
     let uses_oscillator = netlist
@@ -677,6 +732,44 @@ pub fn place_and_route_nexus_real(
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
     })
+}
+
+/// Refuse routes in which two nets share a wire: the clock router and the
+/// general router each keep their own nets apart, and this holds them
+/// apart from each other too.
+#[cfg(feature = "nexus-bitstream")]
+fn check_routes_disjoint<D: crate::device::Device>(
+    netlist: &GateNetlist,
+    device: &D,
+    routing: &RoutingResult,
+) -> Result<()> {
+    let mut owner: std::collections::HashMap<crate::device::WireId, GateNetId> =
+        std::collections::HashMap::new();
+    let mut nets: Vec<_> = routing.routes.iter().collect();
+    nets.sort_by_key(|(id, _)| id.0);
+    for (&net, route) in nets {
+        for &wire in &route.wires {
+            match owner.insert(wire, net) {
+                Some(other) if other != net => {
+                    let name = |id: GateNetId| {
+                        netlist
+                            .nets
+                            .get(id.0 as usize)
+                            .map_or("?", |n| n.name.as_str())
+                            .to_string()
+                    };
+                    return Err(crate::PlaceRouteError::RoutingFailed(format!(
+                        "Nets '{}' and '{}' were both routed through wire {}",
+                        name(other),
+                        name(net),
+                        device.wire(wire).map_or("?", |w| w.name.as_str())
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Place and route targeting Lattice ECP5 devices.

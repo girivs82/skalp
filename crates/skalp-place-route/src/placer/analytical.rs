@@ -7,19 +7,123 @@
 //! 3. Produces continuous cell positions
 
 use super::sites::{bel_types_compatible, SiteMap};
+use super::spreading::{spread, CapacityMap, SpreadCell};
+use super::timing_estimate;
 use super::{is_constant_cell, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
+use crate::timing::DelayModel;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 
 /// Nets with more pins than this use a star model instead of a clique.
 const CLIQUE_MAX_PINS: usize = 8;
 
+/// Most rounds of spreading and re-solving
+const MAX_SPREAD_ROUNDS: usize = 30;
+
+/// Spreading is done once the solved wirelength is this close to the
+/// spread wirelength: further rounds would move little
+const SPREAD_CONVERGED: f64 = 0.9;
+
+/// Pull towards the spread positions added per round, relative to a
+/// two-pin net (weight 1/2)
+const ANCHOR_WEIGHT: f64 = 0.02;
+
+/// Share of the (fill-limited) capacity of the region a design is spread
+/// over that it may fill
+const SPREAD_DENSITY: f64 = 0.9;
+
+/// Residual, relative to the right-hand side, at which a solve stops
+const CG_RELATIVE_TOLERANCE: f64 = 1e-5;
+
+/// Carry cells per tile when the device has no chain layout (iCE40: one
+/// per logic cell)
+const CARRY_CELLS_PER_TILE: usize = 8;
+
+/// The quadratic wirelength system `A x = b` for each axis: `A` as its
+/// off-diagonal entries per row plus its diagonal.
+struct QuadraticSystem {
+    off_diag: Vec<Vec<(usize, f64)>>,
+    diag: Vec<f64>,
+    bx: Vec<f64>,
+    by: Vec<f64>,
+}
+
+/// A carry chain's cells (position indices, chain order) and how chains
+/// run on the device.
+struct ChainShape {
+    cells: Vec<usize>,
+    step: (i32, i32),
+    per_tile: usize,
+}
+
+impl ChainShape {
+    /// Lay the chain out straight along the chain direction, centred where
+    /// its cells are, as the legalizer will have to place it.
+    fn straighten(&self, x: &mut [f64], y: &mut [f64]) {
+        let n = self.cells.len() as f64;
+        let cx = self.cells.iter().map(|&i| x[i]).sum::<f64>() / n;
+        let cy = self.cells.iter().map(|&i| y[i]).sum::<f64>() / n;
+        let span = self.cells.len().div_ceil(self.per_tile) as f64;
+        for (k, &i) in self.cells.iter().enumerate() {
+            let along = (k / self.per_tile) as f64 + 0.5 - span / 2.0;
+            x[i] = cx + self.step.0 as f64 * along;
+            y[i] = cy + self.step.1 as f64 * along;
+        }
+    }
+}
+
+/// Whether a cell is an I/O pad, held at its pin rather than spread.
+fn is_io_cell(cell: &skalp_lir::gate_netlist::Cell) -> bool {
+    cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO")
+}
+
+/// Position indices of each net's placed cells, for nets of two or more.
+fn net_pins(netlist: &GateNetlist, cell_indices: &HashMap<CellId, usize>) -> Vec<Vec<usize>> {
+    netlist
+        .nets
+        .iter()
+        .map(|net| {
+            net.driver
+                .iter()
+                .chain(net.fanout.iter().map(|(c, _)| c))
+                .filter_map(|c| cell_indices.get(c).copied())
+                .collect::<Vec<usize>>()
+        })
+        .filter(|pins| pins.len() >= 2)
+        .collect()
+}
+
+/// Half-perimeter wirelength of `pins` at positions `x`, `y`.
+fn hpwl(pins: &[Vec<usize>], x: &[f64], y: &[f64]) -> f64 {
+    pins.iter()
+        .map(|net| {
+            let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for &i in net {
+                x0 = x0.min(x[i]);
+                x1 = x1.max(x[i]);
+                y0 = y0.min(y[i]);
+                y1 = y1.max(y[i]);
+            }
+            (x1 - x0) + (y1 - y0)
+        })
+        .sum()
+}
+
+/// Extra weight of a net on the worst path in timing-driven placement (a net
+/// with slack to spare keeps weight 1).
+const TIMING_NET_WEIGHT: f64 = 8.0;
+/// How sharply the extra weight falls off with slack: criticality is raised
+/// to this power, so only nets near the worst path gain much.
+const TIMING_CRITICALITY_EXPONENT: i32 = 4;
+
 /// Analytical placer using quadratic wirelength minimization
 pub struct AnalyticalPlacer<'a, D: Device> {
     device: &'a D,
+    /// Delays for timing-driven net weights; `None` places for wirelength only
+    delay_model: Option<DelayModel>,
     /// Resolved I/O constraints: signal_name → (tile_x, tile_y, bel_idx)
     resolved_io_constraints: HashMap<String, (u32, u32, usize)>,
     /// Share of each tile's BELs of a type cells may take
@@ -32,9 +136,16 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     pub fn new(device: &'a D) -> Self {
         Self {
             device,
+            delay_model: None,
             resolved_io_constraints: HashMap::new(),
             fill_limit: 1.0,
         }
+    }
+
+    /// Weight nets by timing criticality, estimated with these delays
+    pub fn with_timing(mut self, delay_model: DelayModel) -> Self {
+        self.delay_model = Some(delay_model);
+        self
     }
 
     /// Fill each tile's BELs of a type at most this far (0..=1)
@@ -62,13 +173,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             return Ok(PlacementResult::new());
         }
 
-        // Solve for continuous positions (same as place())
-        let (mut x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
-
-        // Anchor carry chains: force all cells in a chain to same x-coordinate
-        self.anchor_carry_chains(&mut x_positions, carry_chains, &cell_indices);
-
-        // Convert to discrete placements
+        let (x_positions, y_positions) = self.global_place(netlist, &cell_indices, carry_chains)?;
         self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
     }
 
@@ -87,7 +192,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             return Ok(PlacementResult::new());
         }
 
-        let (x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
+        let (x_positions, y_positions) = self.global_place(netlist, &cell_indices, &[])?;
         self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
     }
 
@@ -101,12 +206,14 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         self
     }
 
-    /// Solve for continuous x, y positions via Laplacian + conjugate gradient
-    fn solve_positions(
+    /// Build the quadratic wirelength system: the net Laplacian, with I/O
+    /// cells tied to their pins and every other cell weakly to the centre.
+    fn build_system(
         &self,
         netlist: &GateNetlist,
         cell_indices: &HashMap<CellId, usize>,
-    ) -> Result<(Vec<f64>, Vec<f64>)> {
+        net_weights: Option<&[f64]>,
+    ) -> QuadraticSystem {
         let n = cell_indices.len();
 
         // Build sparse connectivity matrix (Laplacian) — O(nnz) storage & multiply
@@ -118,7 +225,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let mut by = vec![0.0f64; n];
 
         // Process each net to build connectivity
-        for net in &netlist.nets {
+        for (net_index, net) in netlist.nets.iter().enumerate() {
+            let net_weight = net_weights.map_or(1.0, |w| w[net_index]);
             let mut connected_cells: Vec<CellId> = Vec::new();
 
             if let Some(driver) = net.driver {
@@ -146,7 +254,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             };
             if k <= CLIQUE_MAX_PINS {
                 // Clique model: every pin pair, weight 1/k
-                let weight = 1.0 / k as f64;
+                let weight = net_weight / k as f64;
                 for i in 0..k {
                     for j in (i + 1)..k {
                         connect(
@@ -163,7 +271,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 // ~2M matrix entries. Weight 1/2 per edge keeps the net's total
                 // weight equal to the clique's (k(k-1)/2 pairs × 1/k).
                 let hub = cell_indices[&connected_cells[0]];
-                let weight = 0.5;
+                let weight = 0.5 * net_weight;
                 for cell in &connected_cells[1..] {
                     connect(hub, cell_indices[cell], weight);
                 }
@@ -179,7 +287,7 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
                 None => continue, // constant cell, not placed
             };
 
-            if cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO") {
+            if is_io_cell(cell) {
                 let anchor_weight = 100.0;
                 diag[idx] += anchor_weight;
 
@@ -229,10 +337,12 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             *row = merged;
         }
 
-        let x_positions = Self::conjugate_gradient_sparse(&laplacian, &diag, &bx, n)?;
-        let y_positions = Self::conjugate_gradient_sparse(&laplacian, &diag, &by, n)?;
-
-        Ok((x_positions, y_positions))
+        QuadraticSystem {
+            off_diag: laplacian,
+            diag,
+            bx,
+            by,
+        }
     }
 
     /// Convert continuous positions to discrete BEL placements
@@ -246,6 +356,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let (width, height) = self.device.grid_size();
         let mut result = PlacementResult::new();
         let mut sites = SiteMap::new(self.device).with_fill_limit(self.fill_limit);
+        // Flip-flops share a control group only with the same control set
+        let sets = super::control_sets::control_sets(netlist);
 
         for cell in &netlist.cells {
             let idx = match cell_indices.get(&cell.id) {
@@ -258,7 +370,13 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             let y = y_positions[idx].clamp(0.0, (height - 1) as f64);
 
             let (tile_x, tile_y, bel_index) = sites
-                .take_nearest(x, y, bel_type, bel_types_compatible)
+                .take_nearest(
+                    x,
+                    y,
+                    bel_type,
+                    sets.get(&cell.id).copied(),
+                    bel_types_compatible,
+                )
                 .ok_or_else(|| {
                     PlaceRouteError::PlacementFailed(format!(
                         "No valid location for BEL type {:?}",
@@ -275,115 +393,198 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         Ok(result)
     }
 
-    /// Anchor carry chain cells to the same x-coordinate (column constraint)
-    fn anchor_carry_chains(
+    /// Continuous positions for every cell: a quadratic wirelength solve,
+    /// then rounds of spreading the cells over the device and solving again
+    /// with each cell pulled towards its spread position (SimPL), until the
+    /// solve no longer undoes the spreading. Returns the last spread
+    /// positions, which the device can hold.
+    fn global_place(
         &self,
-        x_positions: &mut [f64],
-        carry_chains: &[CarryChain],
+        netlist: &GateNetlist,
         cell_indices: &HashMap<CellId, usize>,
-    ) {
-        for chain in carry_chains {
-            if chain.cells.is_empty() {
+        carry_chains: &[CarryChain],
+    ) -> Result<(Vec<f64>, Vec<f64>)> {
+        let n = cell_indices.len();
+        let mut system = self.build_system(netlist, cell_indices, None);
+        let (width, height) = self.device.grid_size();
+        let centre = || vec![width as f64 / 2.0; n];
+        let mut x =
+            Self::conjugate_gradient_sparse(&system.off_diag, &system.diag, &system.bx, centre());
+        let mut y = Self::conjugate_gradient_sparse(
+            &system.off_diag,
+            &system.diag,
+            &system.by,
+            vec![height as f64 / 2.0; n],
+        );
+
+        // Cells to spread: everything but I/O, which stays tied to its pins
+        let capacity = CapacityMap::new(self.device, self.fill_limit);
+        let mut movable: Vec<SpreadCell> = Vec::new();
+        for cell in &netlist.cells {
+            let Some(&index) = cell_indices.get(&cell.id) else {
+                continue;
+            };
+            if is_io_cell(cell) {
                 continue;
             }
-
-            // Compute centroid x of all chain cells
-            let mut sum_x = 0.0;
-            let mut count = 0;
-            for &cell_id in &chain.cells {
-                if let Some(&idx) = cell_indices.get(&cell_id) {
-                    sum_x += x_positions[idx];
-                    count += 1;
-                }
-            }
-
-            if count == 0 {
-                continue;
-            }
-
-            let centroid_x = sum_x / count as f64;
-
-            // Force all chain cells to the centroid x
-            for &cell_id in &chain.cells {
-                if let Some(&idx) = cell_indices.get(&cell_id) {
-                    x_positions[idx] = centroid_x;
-                }
-            }
-
-            // Also anchor associated LUTs and DFFs to same column
-            for lut_id in chain.associated_luts.iter().flatten() {
-                if let Some(&idx) = cell_indices.get(lut_id) {
-                    x_positions[idx] = centroid_x;
-                }
-            }
-            for dff_id in chain.associated_dffs.iter().flatten() {
-                if let Some(&idx) = cell_indices.get(dff_id) {
-                    x_positions[idx] = centroid_x;
-                }
-            }
+            movable.push(SpreadCell {
+                index,
+                demand: capacity.demand(super::cell_bel_type(cell)),
+            });
         }
+        if movable.is_empty() {
+            return Ok((x, y));
+        }
+        let chains = self.chain_shapes(carry_chains, cell_indices);
+        let pins = net_pins(netlist, cell_indices);
+
+        let mut targets: Vec<(f64, f64)> = Vec::new();
+        for round in 0..MAX_SPREAD_ROUNDS {
+            targets = spread(&capacity, &movable, &x, &y, SPREAD_DENSITY);
+            let mut tx = x.clone();
+            let mut ty = y.clone();
+            for (cell, &(px, py)) in movable.iter().zip(&targets) {
+                tx[cell.index] = px;
+                ty[cell.index] = py;
+            }
+            for chain in &chains {
+                chain.straighten(&mut tx, &mut ty);
+            }
+            let spread_wl = hpwl(&pins, &tx, &ty);
+            let solved_wl = hpwl(&pins, &x, &y);
+            log::debug!(
+                "analytical: round {round}: solved HPWL {solved_wl:.0}, spread HPWL {spread_wl:.0}"
+            );
+            targets = movable.iter().map(|c| (tx[c.index], ty[c.index])).collect();
+            if solved_wl >= SPREAD_CONVERGED * spread_wl {
+                break;
+            }
+
+            // Timing-driven: weight each net by how critical it is with the
+            // cells where spreading put them.
+            if let Some(model) = &self.delay_model {
+                let critical = timing_estimate::net_criticalities(netlist, model, |id| {
+                    cell_indices.get(&id).map(|&i| (tx[i], ty[i]))
+                });
+                let weights: Vec<f64> = critical
+                    .iter()
+                    .map(|c| 1.0 + TIMING_NET_WEIGHT * c.powi(TIMING_CRITICALITY_EXPONENT))
+                    .collect();
+                system = self.build_system(netlist, cell_indices, Some(&weights));
+            }
+
+            // Pull every movable cell towards its spread position, harder
+            // each round, and solve again from where the cells are
+            let weight = ANCHOR_WEIGHT * (round + 1) as f64;
+            let mut diag = system.diag.clone();
+            let mut bx = system.bx.clone();
+            let mut by = system.by.clone();
+            for cell in &movable {
+                let i = cell.index;
+                diag[i] += weight;
+                bx[i] += weight * tx[i];
+                by[i] += weight * ty[i];
+            }
+            x = Self::conjugate_gradient_sparse(&system.off_diag, &diag, &bx, x);
+            y = Self::conjugate_gradient_sparse(&system.off_diag, &diag, &by, y);
+        }
+
+        for (cell, &(px, py)) in movable.iter().zip(&targets) {
+            x[cell.index] = px;
+            y[cell.index] = py;
+        }
+        Ok((x, y))
     }
 
-    /// Sparse conjugate gradient solver for Ax = b.
+    /// Each carry chain's cells in chain order, with the device's chain
+    /// direction and positions per tile.
+    fn chain_shapes(
+        &self,
+        carry_chains: &[CarryChain],
+        cell_indices: &HashMap<CellId, usize>,
+    ) -> Vec<ChainShape> {
+        // Without a layout, chains run up a column of logic cells (iCE40)
+        let (step, per_tile) = match self.device.carry_chain_layout() {
+            Some(layout) => (layout.step, layout.slots.len().max(1)),
+            None => ((0, 1), CARRY_CELLS_PER_TILE),
+        };
+        carry_chains
+            .iter()
+            .map(|chain| ChainShape {
+                cells: chain
+                    .cells
+                    .iter()
+                    .filter_map(|c| cell_indices.get(c).copied())
+                    .collect(),
+                step,
+                per_tile,
+            })
+            .filter(|c| !c.cells.is_empty())
+            .collect()
+    }
+
+    /// Sparse conjugate gradient solver for Ax = b, with a Jacobi (diagonal)
+    /// preconditioner, starting from `x0`.
     ///
     /// Uses sparse Laplacian (off-diagonal entries) + separate diagonal vector.
-    /// Matrix-vector multiply is O(nnz) instead of O(n²).
-    /// Temp vectors are allocated once and reused across iterations.
+    /// Matrix-vector multiply is O(nnz) instead of O(n²). It stops once the
+    /// residual is a small fraction of `b`: positions are in tiles, so a
+    /// far tighter solve changes nothing a placement can show.
     fn conjugate_gradient_sparse(
         off_diag: &[Vec<(usize, f64)>],
         diag: &[f64],
         b: &[f64],
-        n: usize,
-    ) -> Result<Vec<f64>> {
-        let mut x = vec![0.0; n];
-        let mut r = b.to_vec();
-        let mut p = r.clone();
-        // Pre-allocate temp vectors (reused every iteration)
+        x0: Vec<f64>,
+    ) -> Vec<f64> {
+        let n = b.len();
+        let mut x = x0;
+        let multiply = |v: &[f64], out: &mut [f64]| {
+            for i in 0..n {
+                let mut sum = diag[i] * v[i];
+                for &(j, val) in &off_diag[i] {
+                    sum += val * v[j];
+                }
+                out[i] = sum;
+            }
+        };
         let mut ap = vec![0.0; n];
+        multiply(&x, &mut ap);
+        let mut r: Vec<f64> = b.iter().zip(&ap).map(|(bi, ai)| bi - ai).collect();
+        let inv_diag: Vec<f64> = diag
+            .iter()
+            .map(|&d| if d.abs() > 1e-12 { 1.0 / d } else { 1.0 })
+            .collect();
+        let mut z: Vec<f64> = r.iter().zip(&inv_diag).map(|(ri, m)| ri * m).collect();
+        let mut p = z.clone();
+        let mut r_dot_z: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
 
-        let max_iterations = n * 2;
-        let tolerance = 1e-6;
+        let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let tolerance = (CG_RELATIVE_TOLERANCE * b_norm).max(1e-9);
+        let max_iterations = (n * 2).max(10);
 
         for _ in 0..max_iterations {
-            let r_dot_r: f64 = r.iter().map(|&ri| ri * ri).sum();
-
-            if r_dot_r.sqrt() < tolerance {
+            if r.iter().map(|v| v * v).sum::<f64>().sqrt() < tolerance {
                 break;
             }
-
-            // Sparse matrix-vector multiply: ap = A * p
-            for i in 0..n {
-                ap[i] = diag[i] * p[i]; // Diagonal contribution
-                for &(j, val) in &off_diag[i] {
-                    ap[i] += val * p[j]; // Off-diagonal contributions
-                }
-            }
-
-            let p_dot_ap: f64 = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum();
-
+            multiply(&p, &mut ap);
+            let p_dot_ap: f64 = p.iter().zip(&ap).map(|(a, b)| a * b).sum();
             if p_dot_ap.abs() < 1e-12 {
                 break;
             }
-
-            let alpha = r_dot_r / p_dot_ap;
-
-            // x += alpha * p; r -= alpha * ap (fused to avoid extra loop)
-            let mut r_new_dot = 0.0;
+            let alpha = r_dot_z / p_dot_ap;
             for i in 0..n {
                 x[i] += alpha * p[i];
                 r[i] -= alpha * ap[i];
-                r_new_dot += r[i] * r[i];
+                z[i] = r[i] * inv_diag[i];
             }
-
-            let beta = r_new_dot / r_dot_r;
-
-            // p = r + beta * p
+            let r_dot_z_new: f64 = r.iter().zip(&z).map(|(a, b)| a * b).sum();
+            let beta = r_dot_z_new / r_dot_z;
+            r_dot_z = r_dot_z_new;
             for i in 0..n {
-                p[i] = r[i] + beta * p[i];
+                p[i] = z[i] + beta * p[i];
             }
         }
-
-        Ok(x)
+        x
     }
 
     /// Get I/O anchor position based on connectivity to internal cells.

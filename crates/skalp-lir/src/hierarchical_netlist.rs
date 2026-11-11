@@ -39,6 +39,11 @@ pub struct InstanceNetlist {
     pub constant_inputs: IndexMap<String, u64>,
     /// Child instances within this instance
     pub children: Vec<String>,
+    /// Signals the synthesizer was told to keep as outputs only because a
+    /// child instance reads them. They are not ports of the module, so the
+    /// top instance's copies are not outputs of the flattened design.
+    #[serde(default)]
+    pub internal_outputs: HashSet<String>,
 }
 
 /// A connection to a port
@@ -97,6 +102,23 @@ impl HierarchicalNetlist {
 
     /// Flatten the hierarchical netlist into a single GateNetlist
     /// with proper port connections between modules
+    /// Flatten for implementation on `library`. On an FPGA library this also
+    /// cleans up the LUTs across module boundaries (see
+    /// [`crate::gate_lut_opt::optimize_flattened_luts`]).
+    pub fn flatten_for_library(&self, library: &crate::tech_library::TechLibrary) -> GateNetlist {
+        let mut netlist = self.flatten();
+        if library.is_fpga() {
+            let stats = crate::gate_lut_opt::optimize_flattened_luts(&mut netlist);
+            trace!(
+                "[FLATTEN] Cross-boundary LUT cleanup: {} buffers, {} inverters, {} LUT pairs",
+                stats.buffers_eliminated,
+                stats.luts_eliminated,
+                stats.luts_combined
+            );
+        }
+        netlist
+    }
+
     pub fn flatten(&self) -> GateNetlist {
         let mut result = GateNetlist::new(self.top_module.clone(), self.library.clone());
 
@@ -298,9 +320,14 @@ impl HierarchicalNetlist {
                     }
                 }
             }
-            // Mark top-level outputs
+            // Mark top-level outputs: the top module's ports, not the
+            // signals kept as outputs only to feed its children.
             for &output_net in &top_inst.netlist.outputs {
                 if let Some(net) = top_inst.netlist.nets.get(output_net.0 as usize) {
+                    let base = net.name.split('[').next().unwrap_or(&net.name);
+                    if top_inst.internal_outputs.contains(base) {
+                        continue;
+                    }
                     let full_name = format!("top.{}", net.name);
                     if let Some(final_net_id) = result.get_net_id(&full_name) {
                         if let Some(final_net) = result.nets.get_mut(final_net_id.0 as usize) {
@@ -897,6 +924,7 @@ impl InstanceNetlist {
             unused_outputs: HashSet::new(),
             constant_inputs: IndexMap::new(),
             children: Vec::new(),
+            internal_outputs: HashSet::new(),
         }
     }
 

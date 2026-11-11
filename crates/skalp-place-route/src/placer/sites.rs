@@ -13,7 +13,9 @@
 //! packing every tile full: a full tile needs more signals in and out than
 //! its local routing can carry once its neighbours are full too.
 
+use super::control_sets::ControlSet;
 use super::BelType;
+use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 
 /// Whether a BEL of type `available` can implement a cell needing `required`.
@@ -46,6 +48,9 @@ struct TileSites {
     footprint: Vec<Vec<usize>>,
     /// Per BEL type in the tile: (type, BELs of it, BELs of it taken)
     kinds: Vec<(BelType, usize, usize)>,
+    /// Per BEL index, its flip-flop control group
+    /// ([`Device::ff_control_group`]); empty when the tile has none
+    groups: Vec<Option<usize>>,
 }
 
 impl TileSites {
@@ -78,6 +83,9 @@ pub struct SiteMap {
     tiles: Vec<TileSites>,
     /// Share of each tile's BELs of a type that may be taken (1.0: all)
     fill_limit: f64,
+    /// Control set of the flip-flops in each (tile index, control group)
+    /// holding any
+    group_sets: HashMap<(usize, usize), ControlSet>,
 }
 
 impl SiteMap {
@@ -107,11 +115,20 @@ impl SiteMap {
                         None => kinds.push((t, 1, 0)),
                     }
                 }
+                let groups: Vec<Option<usize>> = (0..bels.len())
+                    .map(|i| device.ff_control_group(x, y, i))
+                    .collect();
+                let groups = if groups.iter().all(Option::is_none) {
+                    Vec::new()
+                } else {
+                    groups
+                };
                 tiles.push(TileSites {
                     bels,
                     free,
                     footprint,
                     kinds,
+                    groups,
                 });
             }
         }
@@ -120,6 +137,7 @@ impl SiteMap {
             height,
             tiles,
             fill_limit: 1.0,
+            group_sets: HashMap::new(),
         }
     }
 
@@ -135,13 +153,15 @@ impl SiteMap {
     }
 
     /// Mark a BEL taken, along with the BELs in its footprint (which no
-    /// other cell may then use). Returns false if it was already taken or
-    /// does not exist.
-    pub fn take(&mut self, x: u32, y: u32, bel_index: usize) -> bool {
+    /// other cell may then use). A flip-flop's control set (`set`) claims its
+    /// control group for flip-flops with the same one. Returns false if it was
+    /// already taken or does not exist.
+    pub fn take(&mut self, x: u32, y: u32, bel_index: usize, set: Option<ControlSet>) -> bool {
         if x >= self.width || y >= self.height {
             return false;
         }
         let idx = self.tile_index(x, y);
+        let group = self.tiles[idx].groups.get(bel_index).copied().flatten();
         let tile = &mut self.tiles[idx];
         match tile.bels.get_mut(bel_index) {
             Some((t, taken)) if !*taken => {
@@ -163,6 +183,9 @@ impl SiteMap {
                     }
                 }
             }
+        }
+        if let (Some(set), Some(group)) = (set, group) {
+            self.group_sets.entry((idx, group)).or_insert(set);
         }
         true
     }
@@ -186,34 +209,50 @@ impl SiteMap {
         x: u32,
         y: u32,
         required: BelType,
+        set: Option<&ControlSet>,
         compatible: &impl Fn(BelType, BelType) -> bool,
     ) -> Option<usize> {
-        let tile = &self.tiles[self.tile_index(x, y)];
+        let idx = self.tile_index(x, y);
+        let tile = &self.tiles[idx];
         if tile.free == 0 {
             return None;
         }
-        let open = |t: BelType, taken: bool| !taken && tile.below_limit(t, self.fill_limit);
+        // A flip-flop fits a control group holding none or its own control set
+        let group_fits = |bel: usize| match (set, tile.groups.get(bel)) {
+            (Some(set), Some(&Some(group))) => self
+                .group_sets
+                .get(&(idx, group))
+                .is_none_or(|held| held == set),
+            _ => true,
+        };
+        let open = |bel: usize, t: BelType, taken: bool| {
+            !taken && tile.below_limit(t, self.fill_limit) && group_fits(bel)
+        };
         tile.bels
             .iter()
-            .position(|&(t, taken)| t == required && open(t, taken))
+            .enumerate()
+            .position(|(i, &(t, taken))| t == required && open(i, t, taken))
             .or_else(|| {
                 tile.bels
                     .iter()
-                    .position(|&(t, taken)| compatible(t, required) && open(t, taken))
+                    .enumerate()
+                    .position(|(i, &(t, taken))| compatible(t, required) && open(i, t, taken))
             })
     }
 
     /// Take the free BEL nearest to (x, y) (Chebyshev rings, nearest tile first
     /// within a ring) that can hold `required`. Returns (tile_x, tile_y, bel_index).
+    /// `set`: the cell's control set, when it is a flip-flop.
     pub fn take_nearest(
         &mut self,
         x: f64,
         y: f64,
         required: BelType,
+        set: Option<ControlSet>,
         compatible: impl Fn(BelType, BelType) -> bool,
     ) -> Option<(u32, u32, usize)> {
-        let found = self.find_nearest(x, y, required, &compatible)?;
-        self.take(found.0, found.1, found.2);
+        let found = self.find_nearest(x, y, required, set.as_ref(), &compatible)?;
+        self.take(found.0, found.1, found.2, set);
         Some(found)
     }
 
@@ -223,6 +262,7 @@ impl SiteMap {
         x: f64,
         y: f64,
         required: BelType,
+        set: Option<&ControlSet>,
         compatible: &impl Fn(BelType, BelType) -> bool,
     ) -> Option<(u32, u32, usize)> {
         if self.width == 0 || self.height == 0 {
@@ -245,7 +285,8 @@ impl SiteMap {
                 if best.is_some_and(|b| b.0 <= d2) {
                     return;
                 }
-                if let Some(bel) = self.free_bel_in_tile(tx as u32, ty as u32, required, compatible)
+                if let Some(bel) =
+                    self.free_bel_in_tile(tx as u32, ty as u32, required, set, compatible)
                 {
                     *best = Some((d2, tx as u32, ty as u32, bel));
                 }
@@ -301,6 +342,7 @@ mod tests {
                 w as f64 / 2.0,
                 h as f64 / 2.0,
                 BelType::Lut4,
+                None,
                 bel_types_compatible,
             )
             .expect("a free LUT");
@@ -312,6 +354,7 @@ mod tests {
                 w as f64 / 2.0,
                 h as f64 / 2.0,
                 BelType::Lut4,
+                None,
                 bel_types_compatible,
             )
             .is_some()
@@ -334,6 +377,7 @@ mod tests {
                         w as f64 / 2.0,
                         h as f64 / 2.0,
                         BelType::Lut4,
+                        None,
                         bel_types_compatible,
                     )
                     .expect("a free LUT");

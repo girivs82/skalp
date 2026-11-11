@@ -1877,7 +1877,8 @@ pub fn write_aig_to_gates(aig: &Aig, library: &TechLibrary) -> GateNetlist {
 ///
 /// For K<4 inputs, the K-bit pattern is replicated to fill 16 bits.
 /// This ensures that unused higher-order inputs don't affect the output.
-/// Example: 2-input AND (tt=0x8, K=2) → 0x8888 (replicated 4×)
+/// Example: 2-input AND (tt=0x8, K=2) → 0x8888 (replicated 4×).
+/// A wider table (K>4, a LUT5 cell) is kept whole.
 fn expand_truth_table_to_lut4(tt: u64, num_inputs: usize) -> u64 {
     let k_bits = 1usize << num_inputs; // number of entries in the K-input truth table
     let k_mask = (1u64 << k_bits) - 1;
@@ -1917,8 +1918,8 @@ fn expand_truth_table_to_lut4(tt: u64, num_inputs: usize) -> u64 {
             base & 0xFFFF
         }
         _ => {
-            // For >4 inputs, truncate (shouldn't happen for LUT4)
-            base & 0xFFFF
+            // A wider LUT (LUT5 and up) holds its whole table.
+            base
         }
     }
 }
@@ -2003,7 +2004,7 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
         // ALL consumers must be LUT cells (have lut_init)
         let all_consumers_are_luts = consumer_list
             .iter()
-            .all(|&(ci, pin)| pin != usize::MAX && netlist.cells[ci].lut_init.is_some());
+            .all(|&(ci, pin)| pin != usize::MAX && netlist.cells[ci].lut_variables().is_some());
 
         if all_consumers_are_luts {
             inv_removals.push((cell_idx, inv_input, inv_output));
@@ -2022,8 +2023,11 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
                     continue;
                 }
                 // Complement the truth table at this input position
-                if let Some(init) = netlist.cells[ci].lut_init {
-                    let new_init = complement_tt_input(init, pin_idx, 4);
+                if let (Some(init), Some(vars)) = (
+                    netlist.cells[ci].lut_init,
+                    netlist.cells[ci].lut_variables(),
+                ) {
+                    let new_init = complement_tt_input(init, pin_idx, vars);
                     netlist.cells[ci].lut_init = Some(new_init);
                 }
                 // Rewire: connect the LUT input directly to the INV's source
@@ -2041,6 +2045,10 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
 
     removed
 }
+
+/// Consumer-map pin numbers for a cell's clock and reset inputs.
+const CLOCK_PIN: usize = usize::MAX;
+const RESET_PIN: usize = usize::MAX - 1;
 
 /// Post-processing pass: push INV cells backward into producing LUT truth tables.
 ///
@@ -2069,13 +2077,13 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             net_consumers
                 .entry(clk)
                 .or_default()
-                .push((cell_idx, usize::MAX));
+                .push((cell_idx, CLOCK_PIN));
         }
         if let Some(rst) = cell.reset {
             net_consumers
                 .entry(rst)
                 .or_default()
-                .push((cell_idx, usize::MAX));
+                .push((cell_idx, RESET_PIN));
         }
     }
 
@@ -2109,8 +2117,8 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             continue;
         };
 
-        // Producer must be a LUT4
-        if netlist.cells[producer_idx].lut_init.is_none() {
+        // Producer must be a LUT whose table can be complemented
+        if netlist.cells[producer_idx].lut_variables().is_none() {
             continue;
         }
 
@@ -2122,7 +2130,7 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
         // Classify consumers of the producer's output:
         // - INV cells: will be removed if we flip
         // - LUT cells: can absorb polarity change via truth table complement (free)
-        // - Other cells (DFF, output): would need a new INV cell
+        // - Other cells (DFF, output): need the true value, so no flip
         let Some(consumers) = net_consumers.get(&inv_input_net) else {
             continue;
         };
@@ -2141,7 +2149,7 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
 
             if is_inv {
                 inv_consumers.push(ci);
-            } else if pin != usize::MAX && c.lut_init.is_some() {
+            } else if pin < RESET_PIN && c.lut_variables().is_some() {
                 lut_consumers.push((ci, pin));
             } else {
                 other_count += 1;
@@ -2153,9 +2161,22 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             other_count += 1;
         }
 
-        // Flip if: removing INV cells saves more than adding INVs for 'other' consumers
-        // When other_count == 0, all non-INV consumers are LUTs that absorb for free
-        if !inv_consumers.is_empty() && inv_consumers.len() > other_count {
+        // Flip only when every consumer can take the inverted value: the
+        // inverters go away and the LUT consumers complement their input. A
+        // register, RAM, clock or port reading the true value would see it
+        // inverted, and nothing here adds an inverter back for it.
+        // The flipped LUT's net takes the name of a port an inverter drove;
+        // it can carry only one.
+        let port_inverters = inv_consumers
+            .iter()
+            .filter(|&&ci| {
+                netlist.cells[ci]
+                    .outputs
+                    .first()
+                    .is_some_and(|o| output_nets.contains(o))
+            })
+            .count();
+        if !inv_consumers.is_empty() && other_count == 0 && port_inverters <= 1 {
             luts_to_flip.entry(producer_idx).or_default().push((
                 cell_idx,
                 inv_output_net,
@@ -2169,8 +2190,9 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
     for (producer_idx, flip_info) in &luts_to_flip {
         let producer_output = netlist.cells[*producer_idx].outputs[0];
         // Flip the LUT's INIT
-        if let Some(init) = netlist.cells[*producer_idx].lut_init {
-            netlist.cells[*producer_idx].lut_init = Some(!init & 0xFFFF);
+        let producer = &mut netlist.cells[*producer_idx];
+        if let (Some(init), Some(vars)) = (producer.lut_init, producer.lut_variables()) {
+            producer.lut_init = Some(!init & crate::gate_netlist::truth_table_mask(vars));
         }
 
         // Complement non-INV LUT consumers' truth tables at the affected input
@@ -2179,50 +2201,54 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
         for (_, _, lut_consumers) in flip_info {
             for &(ci, pin_idx) in lut_consumers {
                 if complemented_luts.insert((ci, pin_idx)) {
-                    if let Some(init) = netlist.cells[ci].lut_init {
-                        netlist.cells[ci].lut_init = Some(complement_tt_input(init, pin_idx, 4));
+                    let consumer = &mut netlist.cells[ci];
+                    if let (Some(init), Some(vars)) = (consumer.lut_init, consumer.lut_variables())
+                    {
+                        consumer.lut_init = Some(complement_tt_input(init, pin_idx, vars));
                     }
                 }
             }
         }
 
-        // Rewire: each INV cell's output consumers now connect to the (flipped) LUT output
+        // The flipped LUT drives the port an inverter drove, if any, so the
+        // port keeps its net and name; otherwise it keeps its own net.
+        let target = flip_info
+            .iter()
+            .map(|&(_, out, _)| out)
+            .find(|out| output_nets.contains(out))
+            .unwrap_or(producer_output);
+        let rewire = |netlist: &mut GateNetlist, consumers: &[(usize, usize)]| {
+            for &(ci, pin_idx) in consumers {
+                let cell = &mut netlist.cells[ci];
+                match pin_idx {
+                    CLOCK_PIN => cell.clock = Some(target),
+                    RESET_PIN => cell.reset = Some(target),
+                    _ if pin_idx < cell.inputs.len() => cell.inputs[pin_idx] = target,
+                    _ => {}
+                }
+            }
+        };
+        if target != producer_output {
+            netlist.cells[*producer_idx].outputs[0] = target;
+            if let Some(consumers) = net_consumers.get(&producer_output) {
+                rewire(netlist, consumers);
+            }
+            if let Some(net) = netlist.nets.get_mut(producer_output.0 as usize) {
+                net.driver = None;
+            }
+            let producer_id = netlist.cells[*producer_idx].id;
+            if let Some(net) = netlist.nets.get_mut(target.0 as usize) {
+                net.driver = Some(producer_id);
+            }
+        }
+
+        // Each inverter's readers now read the flipped LUT
         for &(inv_idx, inv_output_net, _) in flip_info {
-            if let Some(consumers) = net_consumers.get(&inv_output_net) {
-                for &(ci, pin_idx) in consumers {
-                    if pin_idx == usize::MAX {
-                        netlist.cells[ci].clock = Some(producer_output);
-                    } else if pin_idx < netlist.cells[ci].inputs.len() {
-                        netlist.cells[ci].inputs[pin_idx] = producer_output;
-                    }
+            if inv_output_net != target {
+                if let Some(consumers) = net_consumers.get(&inv_output_net) {
+                    rewire(netlist, consumers);
                 }
             }
-
-            // Also rewire output ports, transferring is_output flag and name
-            let mut was_output = false;
-            for out in &mut netlist.outputs {
-                if *out == inv_output_net {
-                    *out = producer_output;
-                    was_output = true;
-                }
-            }
-            if was_output {
-                let output_name = netlist
-                    .nets
-                    .get(inv_output_net.0 as usize)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default();
-                if let Some(old_net) = netlist.nets.get_mut(inv_output_net.0 as usize) {
-                    old_net.is_output = false;
-                }
-                if let Some(new_net) = netlist.nets.get_mut(producer_output.0 as usize) {
-                    new_net.is_output = true;
-                    if !output_name.is_empty() {
-                        new_net.name = output_name;
-                    }
-                }
-            }
-
             inv_to_remove.push(inv_idx);
             total_removed += 1;
         }
@@ -2283,8 +2309,8 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
         let mut consumed_consumers: HashSet<usize> = HashSet::new();
 
         for (prod_idx, cell) in netlist.cells.iter().enumerate() {
-            // Must be a LUT cell
-            if cell.lut_init.is_none() || cell.outputs.is_empty() {
+            // Must be a LUT4 cell (a wider LUT's table does not compose here)
+            if cell.lut_init.is_none() || cell.outputs.is_empty() || cell.inputs.len() > 4 {
                 continue;
             }
 
@@ -2310,8 +2336,8 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
             }
 
             let consumer = &netlist.cells[cons_idx];
-            if consumer.lut_init.is_none() {
-                continue; // Consumer must also be a LUT
+            if consumer.lut_init.is_none() || consumer.inputs.len() > 4 {
+                continue; // Consumer must also be a LUT4
             }
 
             // Count unique combined inputs
@@ -2509,6 +2535,122 @@ mod tests {
         netlist.add_cell(buf_cell);
 
         netlist
+    }
+
+    /// A LUT over `inputs` driving `out`, an inverter on `out`, and a register
+    /// on the inverter's output; with `direct`, a second register reads `out`.
+    fn lut_inverter_register(inputs: usize, init: u64, direct: bool) -> GateNetlist {
+        let mut n = GateNetlist::new("t".to_string(), "nexus".to_string());
+        let clk = n.add_input("clk".to_string());
+        let ins: Vec<GateNetId> = (0..inputs).map(|i| n.add_input(format!("i{i}"))).collect();
+        let out = n.add_net(GateNet::new(GateNetId(0), "out".to_string()));
+        let inv = n.add_net(GateNet::new(GateNetId(0), "inv".to_string()));
+        let q = n.add_output("q".to_string());
+        let mut lut = Cell::new_lut(
+            CellId(0),
+            "LUT".to_string(),
+            "nexus".to_string(),
+            0.0,
+            "lut".to_string(),
+            ins,
+            vec![out],
+            init,
+        );
+        lut.function = Some(if inputs > 4 {
+            CellFunction::Lut5
+        } else {
+            CellFunction::Lut4
+        });
+        n.add_cell(lut);
+        let mut not = Cell::new_comb(
+            CellId(0),
+            "OXIDE_COMB_INV".to_string(),
+            "nexus".to_string(),
+            0.0,
+            "inv".to_string(),
+            vec![out],
+            vec![inv],
+        );
+        not.function = Some(CellFunction::Inv);
+        n.add_cell(not);
+        let register = |n: &mut GateNetlist, d: GateNetId, q: GateNetId, name: &str| {
+            let mut ff = Cell::new_comb(
+                CellId(0),
+                "OXIDE_FF".to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                vec![d],
+                vec![q],
+            );
+            ff.clock = Some(clk);
+            n.add_cell(ff);
+        };
+        register(&mut n, inv, q, "ff");
+        if direct {
+            let q2 = n.add_output("q2".to_string());
+            register(&mut n, out, q2, "ff_direct");
+        }
+        n
+    }
+
+    #[test]
+    fn inverter_folds_into_the_wide_lut_that_drives_it() {
+        let mut n = lut_inverter_register(5, 0x6996_9669, false);
+        assert_eq!(push_inverters_into_producing_luts(&mut n), 1);
+        assert!(n
+            .cells
+            .iter()
+            .all(|c| c.function != Some(CellFunction::Inv)));
+        let lut = n.cells.iter().find(|c| c.path == "lut").unwrap();
+        assert_eq!(lut.lut_init, Some(0x9669_6996));
+        let ff = n.cells.iter().find(|c| c.path == "ff").unwrap();
+        assert_eq!(ff.inputs[0], lut.outputs[0]);
+    }
+
+    #[test]
+    fn folded_inverter_leaves_the_port_on_its_own_net() {
+        let mut n = GateNetlist::new("t".to_string(), "ice40".to_string());
+        let a = n.add_input("a".to_string());
+        let b = n.add_input("b".to_string());
+        let out = n.add_net(GateNet::new(GateNetId(0), "out".to_string()));
+        let y = n.add_output("y".to_string());
+        n.add_cell(Cell::new_lut(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "lut".to_string(),
+            vec![a, b],
+            vec![out],
+            0x8888,
+        ));
+        let mut not = Cell::new_comb(
+            CellId(0),
+            "SB_LUT4_INV".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "inv".to_string(),
+            vec![out],
+            vec![y],
+        );
+        not.function = Some(CellFunction::Inv);
+        n.add_cell(not);
+
+        assert_eq!(push_inverters_into_producing_luts(&mut n), 1);
+        assert_eq!(n.cells.len(), 1);
+        assert_eq!(n.cells[0].outputs, vec![y]);
+        assert_eq!(n.cells[0].lut_init, Some(0x7777));
+        assert_eq!(n.outputs, vec![y]);
+        assert_eq!(n.nets[y.0 as usize].name, "y");
+    }
+
+    #[test]
+    fn inverter_stays_when_a_register_reads_the_true_value() {
+        let mut n = lut_inverter_register(4, 0x8000, true);
+        assert_eq!(push_inverters_into_producing_luts(&mut n), 0);
+        let lut = n.cells.iter().find(|c| c.path == "lut").unwrap();
+        assert_eq!(lut.lut_init, Some(0x8000));
     }
 
     #[test]

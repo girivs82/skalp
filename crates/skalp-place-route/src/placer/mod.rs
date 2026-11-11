@@ -9,8 +9,11 @@
 mod analytical;
 mod annealing;
 mod constraints;
+pub mod control_sets;
 mod legalization;
 mod sites;
+mod spreading;
+mod timing_estimate;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
@@ -52,6 +55,8 @@ pub(crate) fn cell_bel_type(cell: &skalp_lir::gate_netlist::Cell) -> BelType {
     let t = cell.cell_type.as_str();
     if cell.function == Some(CellFunction::DistRam16x4) {
         BelType::DistRam
+    } else if cell.function == Some(CellFunction::Lut5) {
+        BelType::WideLut
     } else if t.contains("LUT") {
         BelType::Lut4
     } else if t.contains("DFFE") || t.starts_with("SB_SDFFE") {
@@ -273,6 +278,11 @@ impl<D: Device + Clone> Placer<D> {
         Self { config, device }
     }
 
+    /// Delays for timing-driven placement on this device
+    fn delay_model(&self) -> crate::timing::DelayModel {
+        crate::timing::DelayModel::for_family(self.device.family())
+    }
+
     /// Place a design with carry chain constraints
     pub fn place_with_carry_chains(
         &mut self,
@@ -314,17 +324,36 @@ impl<D: Device + Clone> Placer<D> {
             PlacementAlgorithm::AnalyticalWithRefinement
             | PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical with carry chain column constraints
-                let analytical = AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                let mut analytical =
+                    AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                if matches!(
+                    self.config.algorithm,
+                    PlacementAlgorithm::AnalyticalTimingDriven
+                ) {
+                    analytical = analytical.with_timing(self.delay_model());
+                }
+                let t_stage = std::time::Instant::now();
                 let initial = if carry_chains.is_empty() {
                     analytical.place(netlist)?
                 } else {
                     analytical.place_with_carry_chains(netlist, carry_chains)?
                 };
+                log::info!(
+                    "placer: analytical placement took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                Self::log_placement_stats(&initial, netlist);
 
                 // Legalize with carry chain consecutive-row constraints
                 let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
+                let t_stage = std::time::Instant::now();
                 let legalized =
                     legalizer.legalize_with_carry_chains(initial, netlist, carry_chains)?;
+                log::info!(
+                    "placer: legalization took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                Self::log_placement_stats(&legalized, netlist);
 
                 // SA refinement with carry chain awareness
                 let timing_weight = if matches!(
@@ -357,9 +386,16 @@ impl<D: Device + Clone> Placer<D> {
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
                 .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model())
                 .with_carry_chains(carry_chains.to_vec());
 
-                annealer.optimize(legalized, netlist)?
+                let t_stage = std::time::Instant::now();
+                let annealed = annealer.optimize(legalized, netlist)?;
+                log::info!(
+                    "placer: annealing took {:.1} s",
+                    t_stage.elapsed().as_secs_f64()
+                );
+                annealed
             }
             _ => {
                 // For other algorithms, fall back to regular placement
@@ -371,6 +407,7 @@ impl<D: Device + Clone> Placer<D> {
         if !resolved_constraints.is_empty() {
             self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
         }
+        Self::check_control_sets(&self.device, &result, netlist)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
@@ -378,6 +415,35 @@ impl<D: Device + Clone> Placer<D> {
         result.cost = self.calculate_cost(&result, netlist);
 
         Ok(result)
+    }
+
+    /// Refuse a placement that puts flip-flops with different clock, reset
+    /// or enable in one control group. Every algorithm keeps them apart; a
+    /// placement that does not would build hardware that misbehaves (a
+    /// flip-flop reset by its neighbour's reset, or held in reset).
+    fn check_control_sets(
+        device: &D,
+        result: &PlacementResult,
+        netlist: &GateNetlist,
+    ) -> Result<()> {
+        let sets = control_sets::control_sets(netlist);
+        match control_sets::control_set_conflicts(device, result, &sets)
+            .into_iter()
+            .next()
+        {
+            None => Ok(()),
+            Some((x, y, group, cells)) => {
+                let names: Vec<&str> = cells
+                    .iter()
+                    .filter_map(|&c| netlist.get_cell(c).map(|c| c.path.as_str()))
+                    .collect();
+                Err(PlaceRouteError::PlacementFailed(format!(
+                    "flip-flops with different clock, reset or enable share control group \
+                     {group} of tile ({x}, {y}): {}",
+                    names.join(", ")
+                )))
+            }
+        }
     }
 
     /// Place a design
@@ -488,6 +554,7 @@ impl<D: Device + Clone> Placer<D> {
                 // Analytical + legalization + timing-driven SA refinement
                 let analytical = AnalyticalPlacer::new(&self.device)
                     .with_fill_limit(fill_limit)
+                    .with_timing(self.delay_model())
                     .with_resolved_constraints(resolved_constraints.clone());
                 let initial = analytical.place(netlist)?;
 
@@ -507,7 +574,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
-                .with_fill_limit(fill_limit);
+                .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model());
                 annealer.optimize(legalized, netlist)?
             }
         };
@@ -516,6 +584,8 @@ impl<D: Device + Clone> Placer<D> {
         if !resolved_constraints.is_empty() {
             self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
         }
+
+        Self::check_control_sets(&self.device, &result, netlist)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
@@ -584,15 +654,27 @@ impl<D: Device + Clone> Placer<D> {
         let (width, height) = self.device.grid_size();
         let mut available: HashMap<BelType, usize> = HashMap::new();
         let mut ram_footprint = 0usize;
+        let mut wide_footprint = 0usize;
         for y in 0..height {
             for x in 0..width {
                 let Some(tile) = self.device.tile_at(x, y) else {
                     continue;
                 };
-                for (i, bel) in tile.bels().iter().enumerate() {
+                let bels = tile.bels();
+                let luts_under = |i: usize| {
+                    self.device
+                        .bel_footprint(x, y, i)
+                        .iter()
+                        .filter(|&&b| bels.get(b).is_some_and(|b| b.bel_type.is_lut()))
+                        .count()
+                };
+                for (i, bel) in bels.iter().enumerate() {
                     *available.entry(bel.bel_type).or_default() += 1;
                     if bel.bel_type == BelType::DistRam && ram_footprint == 0 {
-                        ram_footprint = self.device.bel_footprint(x, y, i).len();
+                        ram_footprint = luts_under(i);
+                    }
+                    if bel.bel_type == BelType::WideLut && wide_footprint == 0 {
+                        wide_footprint = luts_under(i);
                     }
                 }
             }
@@ -613,6 +695,7 @@ impl<D: Device + Clone> Placer<D> {
             let blocked_luts = match required {
                 BelType::Carry => luts_per_carry,
                 BelType::DistRam => ram_footprint,
+                BelType::WideLut => wide_footprint,
                 _ => 0,
             };
             *demand.entry(BelType::Lut4).or_default() += blocked_luts;
@@ -781,6 +864,8 @@ impl<D: Device + Clone> Placer<D> {
 
         // Track used BELs
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
+        // Flip-flops share a control group only with the same control set
+        let sets = control_sets::control_sets(netlist);
 
         for cell in &netlist.cells {
             // Skip constant cells (TIE_HIGH/TIE_LOW/GND/VCC) — on iCE40 these
@@ -813,6 +898,14 @@ impl<D: Device + Clone> Placer<D> {
                         for (bel_idx, bel) in tile.bels().iter().enumerate() {
                             if Self::bel_types_compatible(bel.bel_type, bel_type)
                                 && !used_bels.contains_key(&(x, y, bel_idx))
+                                && control_sets::fits_control_group(
+                                    &self.device,
+                                    &sets,
+                                    cell_id,
+                                    &PlacementLoc::new(x, y, bel_idx, bel_type),
+                                    &[],
+                                    |x, y, b| used_bels.get(&(x, y, b)).copied(),
+                                )
                             {
                                 used_bels.insert((x, y, bel_idx), cell_id);
                                 result
@@ -850,6 +943,7 @@ impl<D: Device + Clone> Placer<D> {
             | BelType::DffSr
             | BelType::DffSrE
             | BelType::Carry
+            | BelType::WideLut
             | BelType::DistRam => TileType::Logic,
             BelType::IoCell => TileType::IoTop, // Will be refined during placement
             BelType::RamSlice => TileType::RamTop,
@@ -878,6 +972,48 @@ impl<D: Device + Clone> Placer<D> {
                 | (BelType::DffSrE, BelType::DffE)
                 | (BelType::DffSrE, BelType::DffSr)
         )
+    }
+
+    /// Log how spread out the placed nets are: total half-perimeter
+    /// wirelength, and the HPWL of the median, 99th-percentile and longest
+    /// net. Long nets make the router search large regions, so this is the
+    /// first thing to look at when routing is slow.
+    pub fn log_placement_stats(result: &PlacementResult, netlist: &GateNetlist) {
+        if !log::log_enabled!(log::Level::Info) {
+            return;
+        }
+        let mut lengths: Vec<u32> = netlist
+            .nets
+            .iter()
+            .filter_map(|net| {
+                let mut cells = net.driver.iter().chain(net.fanout.iter().map(|(c, _)| c));
+                let first = result.placements.get(cells.next()?)?;
+                let (mut x0, mut x1, mut y0, mut y1) =
+                    (first.tile_x, first.tile_x, first.tile_y, first.tile_y);
+                let mut pins = 1;
+                for loc in cells.filter_map(|c| result.placements.get(c)) {
+                    x0 = x0.min(loc.tile_x);
+                    x1 = x1.max(loc.tile_x);
+                    y0 = y0.min(loc.tile_y);
+                    y1 = y1.max(loc.tile_y);
+                    pins += 1;
+                }
+                (pins > 1).then_some(x1 - x0 + y1 - y0)
+            })
+            .collect();
+        if lengths.is_empty() {
+            return;
+        }
+        lengths.sort_unstable();
+        let at = |q: f64| lengths[((lengths.len() - 1) as f64 * q) as usize];
+        log::info!(
+            "placer: {} nets, HPWL total {}, median {}, p99 {}, max {}",
+            lengths.len(),
+            lengths.iter().map(|&l| l as u64).sum::<u64>(),
+            at(0.5),
+            at(0.99),
+            lengths[lengths.len() - 1]
+        );
     }
 
     /// Calculate total wirelength (HPWL)

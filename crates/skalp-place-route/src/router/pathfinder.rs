@@ -474,9 +474,18 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
 
         result.unrouted_connections = result.routes.values().map(|r| r.unrouted_sinks).sum();
         if result.unrouted_connections > 0 {
+            let mut nets: Vec<&str> = result
+                .routes
+                .iter()
+                .filter(|(_, r)| r.unrouted_sinks > 0)
+                .filter_map(|(id, _)| netlist.nets.get(id.0 as usize).map(|n| n.name.as_str()))
+                .collect();
+            nets.sort_unstable();
+            nets.truncate(10);
             log::warn!(
-                "routing: {} sink connections have no path",
-                result.unrouted_connections
+                "routing: {} sink connections have no path (nets {})",
+                result.unrouted_connections,
+                nets.join(", ")
             );
         }
 
@@ -890,6 +899,12 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             let sink_wire = match sink_wire {
                 Some(w) => w,
                 None => {
+                    log::debug!(
+                        "pathfinder: net {} sink {:?} pin at {:?} has no pin wire",
+                        net.name,
+                        sink_id,
+                        sink_loc
+                    );
                     route.unrouted_sinks += 1;
                     continue;
                 }
@@ -997,6 +1012,13 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                         }
                     }
                     if !reached {
+                        let name = |w: WireId| self.device.wire(w).map(|wire| wire.name.clone());
+                        log::debug!(
+                            "pathfinder: net {} has no path from {:?} to {:?}",
+                            net.name,
+                            name(source_wire),
+                            name(sink_wire)
+                        );
                         route.unrouted_sinks += 1;
                     }
                 }

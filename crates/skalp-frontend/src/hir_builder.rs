@@ -11592,6 +11592,7 @@ impl HirBuilderContext {
         let mut read_latency: Option<u32> = None;
         let mut read_only = false;
         let mut unknown_style: Option<String> = None;
+        let mut init_file: Option<String> = None;
 
         let mut current_key: Option<&str> = None;
 
@@ -11599,7 +11600,7 @@ impl HirBuilderContext {
             if token.kind() == SyntaxKind::Ident {
                 let text = token.text();
                 match text {
-                    "depth" | "width" | "ports" | "style" | "read_latency" => {
+                    "depth" | "width" | "ports" | "style" | "read_latency" | "init" => {
                         current_key = Some(text);
                     }
                     "read_only" | "rom" => {
@@ -11648,6 +11649,9 @@ impl HirBuilderContext {
                     }
                     _ => {}
                 }
+            } else if token.kind() == SyntaxKind::StringLiteral && current_key == Some("init") {
+                init_file = Some(token.text().trim_matches('"').to_string());
+                current_key = None;
             } else if token.kind() == SyntaxKind::IntLiteral {
                 // Remove underscores from integer literals like "1_024"
                 let text = token.text().replace('_', "");
@@ -11682,6 +11686,38 @@ impl HirBuilderContext {
         // depth is required
         let depth = depth?;
 
+        let init = init_file.and_then(|name| {
+            let loaded = crate::memory_init::load_hex_file(&name, self.source_file.as_deref())
+                .and_then(|words| {
+                    if words.len() > depth as usize {
+                        Err(format!(
+                            "`{name}` holds {} words but the memory has {depth}",
+                            words.len()
+                        ))
+                    } else {
+                        Ok(words)
+                    }
+                });
+            match loaded {
+                Ok(words) => Some(words),
+                Err(message) => {
+                    self.errors.push(HirError {
+                        message: format!("#[memory]: init: {message}"),
+                        span: self.make_span(intent_value),
+                    });
+                    None
+                }
+            }
+        });
+        if init.is_some() && style == Some(MemoryStyle::Register) {
+            self.errors.push(HirError {
+                message: "#[memory]: init is not supported with style=registers; \
+                          use auto, block or distributed"
+                    .to_string(),
+                span: self.make_span(intent_value),
+            });
+        }
+
         Some(MemoryConfig {
             depth,
             width,
@@ -11689,6 +11725,7 @@ impl HirBuilderContext {
             style: style.unwrap_or_default(),
             read_latency: read_latency.unwrap_or(1),
             read_only,
+            init,
         })
     }
 

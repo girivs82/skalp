@@ -99,8 +99,16 @@ impl<'a> AigBuilder<'a> {
                     .and_then(|r| self.net_map[r.0 as usize])
                     .map(|l| l.node);
 
+                // A flip-flop that powers up high keeps doing so through
+                // re-synthesis.
+                let init = (cell
+                    .parameters
+                    .get(crate::gate_netlist::FF_INIT_PARAM)
+                    .map(String::as_str)
+                    == Some("1"))
+                .then_some(true);
                 // Create latch with false_lit as placeholder - will be updated later
-                let latch_id = self.aig.add_latch(AigLit::false_lit(), None, clock, reset);
+                let latch_id = self.aig.add_latch(AigLit::false_lit(), init, clock, reset);
                 let latch_lit = AigLit::new(latch_id);
 
                 // Map all output nets to this latch
@@ -827,7 +835,7 @@ impl<'a> AigBuilder<'a> {
             }
 
             // LUT cells — FPGA primitives, should be partitioned out before AIG optimization
-            CellFunction::Lut4 | CellFunction::Lut6 => {
+            CellFunction::Lut4 | CellFunction::Lut5 | CellFunction::Lut6 => {
                 panic!(
                     "Cannot convert LUT cell to AIG — LUT cells should be partitioned out. \
                      LUT4/LUT6 are FPGA output primitives, not AIG input cells."

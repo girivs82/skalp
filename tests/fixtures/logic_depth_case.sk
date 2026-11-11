@@ -1,0 +1,78 @@
+// A `match` statement in a clocked block (a state machine's shape): one
+// register per target, fed by a table lookup rather than a priority chain.
+entity CaseDepth {
+    in clk: clock
+    in s: bit[5]
+    in x: bit[8]
+    out q: bit[8]
+    out r: bit[8]
+}
+
+impl CaseDepth {
+    signal qr: bit[8] = 0
+    signal rr: bit[8] = 0
+
+    on(clk.rise) {
+        rr = x
+        match s {
+            0 => {
+                qr = x
+            }
+            1 => {
+                qr = ~x
+            }
+            2 => {
+                qr = x ^ 8'h0f
+                rr = 8'h55
+            }
+            3 => {
+                rr = 8'haa
+            }
+            6 => {
+                qr = 8'he7
+            }
+            8 => {
+                qr = 8'hee
+            }
+            10 => {
+                qr = 8'he7
+            }
+            12 => {
+                qr = 8'h61
+            }
+            14 => {
+                qr = 8'h5e
+            }
+            16 => {
+                qr = 8'hf3
+            }
+            18 => {
+                qr = 8'h5f
+            }
+            20 => {
+                qr = 8'h30
+            }
+            22 => {
+                qr = 8'he4
+            }
+            24 => {
+                qr = 8'h9b
+            }
+            26 => {
+                qr = 8'h48
+            }
+            28 => {
+                qr = 8'h2e
+            }
+            30 => {
+                qr = 8'h15
+            }
+            _ => {
+                qr = 8'h00
+            }
+        }
+    }
+
+    q = qr
+    r = rr
+}

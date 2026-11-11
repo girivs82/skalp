@@ -1,0 +1,32 @@
+// Memories that power up holding contents: a block RAM ROM loaded from a
+// hex file, a RAM preloaded by an array literal and written later, and a small
+// read-only table.
+entity MemInit {
+    in clk: clock
+    in addr: bit[8]
+    in we: bit
+    in wa: bit[4]
+    in wd: bit[12]
+    in ta: bit[2]
+    out rom_q: bit[16]
+    out ram_q: bit[12]
+    out table_q: bit[8]
+}
+impl MemInit {
+    #[memory(depth = 256, init = "memory_init_rom.hex")]
+    signal rom: bit[16][256]
+    #[memory(depth = 16)]
+    signal ram: bit[12][16] = [0xa5, 0x1b6, 0x2c7, 0x3d8, 0x4e9, 0x5fa, 0x70b, 0x81c, 0x92d, 0xa3e, 0xb4f, 0xc60, 0xd71, 0xe82, 0xf93, 0xa4]
+    #[memory(depth = 4, rom)]
+    signal tbl: bit[8][4] = [0x11, 0x22, 0x44, 0x88]
+    signal rom_r: bit[16] = 0
+    on(clk.rise) {
+        rom_r = rom[addr]
+        if we == 1 {
+            ram[wa] = wd
+        }
+    }
+    rom_q = rom_r
+    ram_q = ram[wa]
+    table_q = tbl[ta]
+}

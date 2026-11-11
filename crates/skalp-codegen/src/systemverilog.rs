@@ -691,6 +691,29 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
                 signal.name,
                 mem_config.depth - 1
             ));
+
+            // Initial contents; words past the given ones start at zero
+            if let Some(words) = &mem_config.init {
+                sv.push_str("    initial begin\n");
+                if words.len() < mem_config.depth as usize {
+                    sv.push_str(&format!(
+                        "        for (int i = {}; i < {}; i++) {}[i] = '0;\n",
+                        words.len(),
+                        mem_config.depth,
+                        signal.name
+                    ));
+                }
+                for (address, word) in words.iter().enumerate() {
+                    sv.push_str(&format!(
+                        "        {}[{}] = {}'h{:x};\n",
+                        signal.name,
+                        address,
+                        data_width.max(1),
+                        word
+                    ));
+                }
+                sv.push_str("    end\n");
+            }
         } else {
             // TRIAGE #5: `#[cdc]` is a VERIFICATION annotation over the user's
             // hand-written synchronizer (the published tutorial semantics) —

@@ -151,6 +151,75 @@ pub fn floats_through_cib(pin: &str) -> bool {
     !matches!(pin, "CEA" | "CEB" | "WEA" | "WEB" | "RSTA" | "RSTB") && !pin.starts_with("CS")
 }
 
+/// prjoxide's register map of a block RAM's contents.
+pub const INIT_IPTYPE: &str = "EBR_INIT";
+/// Rows of a block RAM's contents (`INITVAL_00` .. `INITVAL_3F`).
+const INIT_ROWS: usize = 64;
+/// Nine-bit bytes per row; each takes ten bits of the row, the tenth unused.
+const BYTES_PER_ROW: usize = 32;
+/// Bits a row of contents spans.
+const ROW_BITS: usize = BYTES_PER_ROW * 10;
+
+/// Name of row `index` of a block RAM's contents.
+pub fn init_word_name(index: usize) -> String {
+    format!("INITVAL_{index:02X}")
+}
+
+/// A block RAM's contents as its 64 rows of 320 bits, from `words` (one per
+/// address, from 0) in `width`-bit mode; `None` if they don't fit.
+///
+/// The RAM holds 2,048 nine-bit bytes, 32 to a row with each byte in ten bits
+/// (Lattice's `INITVAL` layout, as Yosys writes it). Modes 9 bits and wider
+/// take whole bytes per word, low byte first. Narrower modes address the eight
+/// data bits of each byte and leave the ninth (parity) bit unused, as the
+/// address pins do: in 1-, 2- and 4-bit modes the address counts data bits
+/// in units of the width.
+pub fn init_image(width: usize, words: &[u64]) -> Option<Vec<Vec<bool>>> {
+    let mut bytes = vec![0u16; INIT_ROWS * BYTES_PER_ROW];
+    let fits = |count: usize| words.len() <= count;
+    match width {
+        9 | 18 | 36 => {
+            let per_word = width / 9;
+            if !fits(bytes.len() / per_word) {
+                return None;
+            }
+            for (address, &word) in words.iter().enumerate() {
+                for k in 0..per_word {
+                    bytes[address * per_word + k] = ((word >> (9 * k)) & 0x1FF) as u16;
+                }
+            }
+        }
+        1 | 2 | 4 => {
+            if !fits(bytes.len() * 8 / width) {
+                return None;
+            }
+            for (address, &word) in words.iter().enumerate() {
+                for j in 0..width {
+                    let bit = address * width + j;
+                    if (word >> j) & 1 == 1 {
+                        bytes[bit / 8] |= 1 << (bit % 8);
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(
+        bytes
+            .chunks(BYTES_PER_ROW)
+            .map(|row| {
+                let mut bits = vec![false; ROW_BITS];
+                for (i, &byte) in row.iter().enumerate() {
+                    for b in 0..9 {
+                        bits[i * 10 + b] = (byte >> b) & 1 == 1;
+                    }
+                }
+                bits
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +287,43 @@ mod tests {
         assert!(!has_inverter("ADA4"));
         assert!(has_inverter("ADB1"));
         assert!(!has_inverter("ADB2"));
+    }
+
+    #[test]
+    fn contents_fill_nine_bit_bytes_ten_bits_apart() {
+        // 18-bit mode: word 0 takes bytes 0 and 1; word 17 starts row 1
+        let mut words = vec![0u64; 18];
+        words[0] = 0x3_FE01; // low byte 0x001, high byte 0x1FF
+        words[17] = 0x1FF;
+        let image = init_image(18, &words).unwrap();
+        assert_eq!(image.len(), 64);
+        assert!(image.iter().all(|row| row.len() == 320));
+        assert!(image[0][0] && !image[0][1]);
+        assert!((10..19).all(|b| image[0][b]));
+        assert!(!image[0][9] && !image[0][19]);
+        // byte 34 = row 1, byte 2
+        assert!((20..29).all(|b| image[1][b]));
+    }
+
+    #[test]
+    fn narrow_modes_skip_the_parity_bit() {
+        // 1-bit mode: address 8 is the first data bit of byte 1
+        let mut words = vec![0u64; 9];
+        words[8] = 1;
+        let image = init_image(1, &words).unwrap();
+        assert!(image[0][10]);
+        assert_eq!(image[0].iter().filter(|&&b| b).count(), 1);
+        // 4-bit mode: address 3 is the high nibble of byte 1
+        let image = init_image(4, &[0, 0, 0, 0xA]).unwrap();
+        assert!(image[0][15] && image[0][17] && !image[0][14] && !image[0][16]);
+    }
+
+    #[test]
+    fn contents_must_fit_the_mode() {
+        assert!(init_image(9, &vec![0; 2048]).is_some());
+        assert!(init_image(9, &vec![0; 2049]).is_none());
+        assert!(init_image(36, &vec![0; 513]).is_none());
+        assert!(init_image(1, &vec![0; 16384]).is_some());
+        assert!(init_image(7, &[0]).is_none());
     }
 }

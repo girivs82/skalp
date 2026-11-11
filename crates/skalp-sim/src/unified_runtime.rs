@@ -552,11 +552,18 @@ impl UnifiedSimulator {
         // Store name registry for path resolution
         self.name_registry = module.name_registry.clone();
 
-        let use_gpu = match self.config.hw_accel {
-            HwAccel::Cpu => false,
-            HwAccel::Gpu => true,
-            HwAccel::Auto => cfg!(target_os = "macos"),
-        };
+        // The GPU runtime does not load memories' initial contents, so a design
+        // with preloaded memories runs on the CPU, which does.
+        let has_memory_contents = module
+            .state_elements
+            .values()
+            .any(|state| state.initial_contents.is_some());
+        let use_gpu = !has_memory_contents
+            && match self.config.hw_accel {
+                HwAccel::Cpu => false,
+                HwAccel::Gpu => true,
+                HwAccel::Auto => cfg!(target_os = "macos"),
+            };
 
         if use_gpu {
             #[cfg(target_os = "macos")]

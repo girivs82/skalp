@@ -136,3 +136,177 @@ fn multiplier_builds_a_bitstream_for_the_real_device() {
     .unwrap();
     assert!(result.routing.success);
 }
+
+#[test]
+fn bus_port_pads_land_on_their_own_pins() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_bus_pins.sk", "Bus");
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the LED counter should place and route");
+    assert!(result.routing.success);
+
+    // Each of the eight LED pads sits on a different I/O site
+    let sites: std::collections::HashSet<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.path.starts_with("top.led[") && c.path.ends_with("_obuf"))
+        .map(|c| {
+            let loc = result.placement.placements[&c.id];
+            (loc.tile_x, loc.tile_y, loc.bel_index)
+        })
+        .collect();
+    assert_eq!(sites.len(), 8);
+}
+
+/// A ROM preloaded from a hex file reaches the bitstream: the configuration
+/// bus writes the block RAM's contents, one set bit per one-bit of the words.
+#[test]
+fn preloaded_block_ram_contents_reach_the_bitstream() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_rom_leds.sk", "NexusRomLeds");
+    let rams: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.ram_ports().is_some())
+        .collect();
+    assert_eq!(rams.len(), 1, "the 1024 x 8 ROM takes one block RAM");
+    let words = rams[0].memory_init().expect("the block RAM has contents");
+    let expected: Vec<u64> = (0..1024u64).map(|a| (a ^ 0xA5) & 0xFF).collect();
+    assert_eq!(words, expected);
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .unwrap();
+    assert!(result.routing.success);
+
+    let bus = skalp_place_route::device::nexus::prjoxide_pack::read_bus_config(
+        &db,
+        &result.bitstream.data,
+    )
+    .expect("the bitstream parses");
+    let written: u32 = bus.iter().map(|&(_, byte)| byte.count_ones()).sum();
+    let ones: u32 = expected.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(written, ones, "every one-bit of the contents is written");
+}
+
+/// Registers with and without a reset never share a slice: its two
+/// flip-flops share one clock, enable and set/reset input, and the bitstream
+/// holds a slice without a reset user's set/reset off by inverting it.
+#[test]
+fn registers_with_and_without_reset_get_their_own_slices() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_mixed_resets.sk", "MixedResets");
+    let sets = skalp_place_route::placer::control_sets::control_sets(&netlist);
+    let resets = sets.values().filter(|s| s.reset.is_some()).count();
+    assert!(resets > 0, "the counter has a reset");
+    assert!(resets < sets.len(), "the shift register has none");
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("mixed reset registers should place, route and emit");
+    // The placer refuses a slice of mixed control sets, and so does emit
+    assert!(result.routing.success);
+}
+
+/// A PLL instance: the blackbox `PLL_CORE` cell goes to a corner PLL site,
+/// its clock output drives a counter on the clock network, and its
+/// registers are written over the configuration bus at the corner's base.
+#[test]
+fn pll_builds_a_bitstream_for_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let mut netlist = netlist_with_pads("nexus_pll.sk", "NexusPll");
+    // The CLI drops ports hierarchical synthesis promotes for child instances
+    let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+    let real_port = |net: &skalp_lir::GateNetId| {
+        let name = &names[net.0 as usize];
+        name.starts_with("top.clk") || name.starts_with("top.led")
+    };
+    netlist.inputs.retain(real_port);
+    netlist.outputs.retain(real_port);
+    netlist.cells.retain(|c| {
+        !(c.cell_type.ends_with("_OB") || c.cell_type.ends_with("_IB"))
+            || c.parameters.contains_key("LOC")
+    });
+    let pll = netlist
+        .cells
+        .iter()
+        .find(|c| c.cell_type == "BLACKBOX_PLL_CORE")
+        .expect("the PLL instance is a blackbox cell");
+    assert_eq!(pll.parameters.get("DIVA").map(String::as_str), Some("15"));
+    let clkop = pll.outputs[0];
+    assert!(
+        netlist.cells.iter().any(|c| c.clock == Some(clkop)),
+        "the counter is clocked by the PLL output"
+    );
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the PLL design should place, route and emit");
+    assert!(result.routing.success);
+    let bus = skalp_place_route::device::nexus::prjoxide_pack::read_bus_config(
+        &db,
+        &result.bitstream.data,
+    )
+    .expect("the bitstream parses");
+    let pll_bytes: Vec<_> = bus
+        .iter()
+        .filter(|&&(address, _)| (0x0e00_0000..0x0e08_0000).contains(&address))
+        .collect();
+    assert!(!pll_bytes.is_empty(), "the PLL registers are written");
+}
+
+#[test]
+fn wide_lut_builds_a_bitstream_for_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_wide_lut.sk", "WideLutBlink");
+    assert!(
+        netlist
+            .cells
+            .iter()
+            .any(|c| c.function == Some(skalp_lir::CellFunction::Lut5)),
+        "the five-input XOR should map to a 5-input LUT"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the wide LUT design should place and route");
+    assert!(result.routing.success);
+    assert_eq!(result.routing.unrouted_connections, 0);
+    let timing = result.timing.expect("the real flow reports timing");
+    assert!(timing.meets_timing);
+}

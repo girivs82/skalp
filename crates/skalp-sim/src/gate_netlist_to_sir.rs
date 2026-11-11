@@ -43,6 +43,8 @@ pub struct GateNetlistToSirConverter {
     next_primitive_id: u32,
     /// Accumulated FIT for structural info
     total_fit: f64,
+    /// Initial contents of RAM primitives (see [`SirModule::memory_init`])
+    memory_init: IndexMap<u32, Vec<u64>>,
 }
 
 impl GateNetlistToSirConverter {
@@ -54,6 +56,7 @@ impl GateNetlistToSirConverter {
             next_signal_id: 0,
             next_primitive_id: 0,
             total_fit: 0.0,
+            memory_init: IndexMap::new(),
         }
     }
 
@@ -81,6 +84,7 @@ impl GateNetlistToSirConverter {
 
         // Phase 3: Build combinational and sequential blocks
         self.build_blocks(&mut sir.top_module, comb_ops, seq_ops, netlist);
+        sir.top_module.memory_init = std::mem::take(&mut self.memory_init);
 
         // Create result with conversion stats
         let has_comb = netlist.cells.iter().any(|c| !c.is_sequential());
@@ -233,6 +237,9 @@ impl GateNetlistToSirConverter {
                 } else {
                     addr_width_without_mask as u8
                 };
+                if let Some(words) = cell.memory_init() {
+                    self.memory_init.insert(primitive_id.0, words);
+                }
                 PrimitiveType::RamBlock {
                     addr_width,
                     data_width,
@@ -333,6 +340,18 @@ impl GateNetlistToSirConverter {
                     DW
                 );
                 let ram = primitive_id.0;
+                // INITVAL bit 4 * word + i is bit i of `word`
+                if let Some(initval) = cell
+                    .parameters
+                    .get("INITVAL")
+                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .filter(|&v| v != 0)
+                {
+                    let words = (0..1usize << AW)
+                        .map(|word| (initval >> (DW * word)) & ((1 << DW) - 1))
+                        .collect();
+                    self.memory_init.insert(ram, words);
+                }
                 seq_ops.push(SirOperation::Primitive {
                     id: primitive_id,
                     ptype: PrimitiveType::DistRamWrite {

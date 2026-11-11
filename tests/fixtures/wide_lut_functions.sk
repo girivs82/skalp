@@ -1,0 +1,13 @@
+// Five-input functions: each fits one 5-input LUT on a library that has them.
+entity WideFunctions {
+    in a: bit[5]
+    out parity: bit
+    out select: bit
+    out vote: bit
+}
+
+impl WideFunctions {
+    parity = a[0] ^ a[1] ^ a[2] ^ a[3] ^ a[4]
+    select = if a[4] { a[0] & a[1] } else { a[2] | a[3] }
+    vote = (a[0] & a[1] & a[2]) | (a[3] & a[4])
+}

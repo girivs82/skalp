@@ -177,15 +177,21 @@ pub struct CutMatch {
 }
 
 /// Library cell matcher
+/// Delay of a LUT5 made of two LUT4s and a mux, relative to one LUT4. A
+/// mapping level stands for a LUT and the route into it: on Nexus 276 ps
+/// against 213 ps through the cell, plus ~700 ps of routing either way.
+const WIDE_LUT_DELAY_FACTOR: f64 = 1.1;
+
 #[derive(Debug)]
 pub struct CellMatcher {
     /// Cell library
     cells: IndexMap<String, CellTiming>,
     /// Truth table to cell mapping
     tt_to_cell: IndexMap<u64, Vec<CellMatch>>,
-    /// Universal LUT cell for FPGA targets: (cell_name, area, delay, max_inputs)
-    /// When set, ANY truth table with ≤max_inputs is implementable in one cell.
-    universal_lut: Option<(String, f64, f64, usize)>,
+    /// Universal LUT cells for FPGA targets: (cell_name, area, delay,
+    /// max_inputs), narrowest first. ANY truth table with ≤max_inputs is
+    /// implementable in one such cell.
+    universal_luts: Vec<(String, f64, f64, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +213,7 @@ impl CellMatcher {
         let mut matcher = Self {
             cells: IndexMap::new(),
             tt_to_cell: IndexMap::new(),
-            universal_lut: None,
+            universal_luts: Vec::new(),
         };
         matcher.init_basic_cells();
         matcher
@@ -223,31 +229,27 @@ impl CellMatcher {
         let mut matcher = Self {
             cells: IndexMap::new(),
             tt_to_cell: IndexMap::new(),
-            universal_lut: None,
+            universal_luts: Vec::new(),
         };
 
         // Add cells from the library based on their function
         for (name, cell) in library.iter_cells() {
-            // Detect universal LUT cells for FPGA targets
-            match &cell.function {
-                CellFunction::Lut4 => {
-                    let area = 1.0 + cell.fit * 15.0;
-                    let delay = 15.0 + cell.fit * 50.0;
-                    matcher.universal_lut = Some((name.to_string(), area, delay, 4));
+            // Universal LUT cells for FPGA targets. A LUT5 built from two
+            // LUT4s and a mux takes the area of two LUT4s.
+            let lut_inputs = match &cell.function {
+                CellFunction::Lut4 => Some(4),
+                CellFunction::Lut5 => Some(5),
+                CellFunction::Lut6 => Some(6),
+                _ => None,
+            };
+            if let Some(k) = lut_inputs {
+                let area = 1.0 + cell.fit * 15.0;
+                let delay = 15.0 + cell.fit * 50.0;
+                if !matcher.universal_luts.iter().any(|l| l.3 == k) {
+                    matcher
+                        .universal_luts
+                        .push((name.to_string(), area, delay, k));
                 }
-                CellFunction::Lut6 => {
-                    let area = 1.0 + cell.fit * 15.0;
-                    let delay = 15.0 + cell.fit * 50.0;
-                    // Only upgrade if we don't already have a LUT (prefer larger)
-                    if matcher
-                        .universal_lut
-                        .as_ref()
-                        .is_none_or(|(_, _, _, k)| *k < 6)
-                    {
-                        matcher.universal_lut = Some((name.to_string(), area, delay, 6));
-                    }
-                }
-                _ => {}
             }
 
             if let Some(tt_pin_pairs) = Self::function_to_truth_tables(&cell.function) {
@@ -263,7 +265,25 @@ impl CellMatcher {
             }
         }
 
+        matcher.universal_luts.sort_by_key(|l| l.3);
+        // A LUT5 next to LUT4s is two of them and a mux (see
+        // CellFunction::Lut5): twice the area, and a little slower than one
+        // LUT4 (the mux), far less than two LUT4 levels and the route
+        // between them.
+        if let Some(&(_, lut4_area, lut4_delay, _)) =
+            matcher.universal_luts.iter().find(|l| l.3 == 4)
+        {
+            for lut in matcher.universal_luts.iter_mut().filter(|l| l.3 == 5) {
+                lut.1 = 2.0 * lut4_area;
+                lut.2 = lut4_delay * WIDE_LUT_DELAY_FACTOR;
+            }
+        }
         matcher
+    }
+
+    /// The narrowest universal LUT cell that takes `num_inputs` inputs.
+    fn universal_lut_for(&self, num_inputs: usize) -> Option<&(String, f64, f64, usize)> {
+        self.universal_luts.iter().find(|l| l.3 >= num_inputs)
     }
 
     /// Map a CellFunction to its truth table(s) and pin names
@@ -501,10 +521,15 @@ impl CellMatcher {
             }
         }
 
+        // A LUT that holds the cut computes any function of its inputs, so
+        // on a LUT target a gate plus an output inverter is never better than
+        // one LUT: the inverter is another cell and another level.
+        let lut_covers = self.universal_lut_for(num_inputs).is_some();
+
         // Inverted match — fallback when no direct match exists, or when the
         // inverted cell has strictly better area/delay.
         let inverted_tt = !tt & mask;
-        if let Some(cells) = self.tt_to_cell.get(&inverted_tt) {
+        if let Some(cells) = self.tt_to_cell.get(&inverted_tt).filter(|_| !lut_covers) {
             for cell in cells {
                 if cell.input_pins.len() == num_inputs {
                     matches.push(CutMatch {
@@ -531,8 +556,9 @@ impl CellMatcher {
         // can be implemented in a single LUT cell. This avoids the AND2_X1 fallback
         // which wastes 2–3 of the LUT's 4 inputs.
         if matches.is_empty() {
-            if let Some((ref lut_name, area, delay, max_inputs)) = self.universal_lut {
-                if num_inputs <= max_inputs {
+            if let Some((lut_name, area, delay, _)) = self.universal_lut_for(num_inputs) {
+                let (area, delay) = (*area, *delay);
+                {
                     let pin_names: Vec<String> =
                         (0..num_inputs).map(|i| format!("I{}", i)).collect();
                     matches.push(CutMatch {

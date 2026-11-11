@@ -554,8 +554,8 @@ pub fn insert_io_buffers(
         let has_pin = netlist
             .nets
             .get(input_net_id.0 as usize)
-            .and_then(|n| port_constraints.get(&n.name))
-            .is_some_and(|c| c.pin_location.is_some());
+            .and_then(|n| port_constraint(port_constraints, &n.name))
+            .is_some_and(|(c, _)| c.pin_location.is_some());
         if clock_nets.contains(&input_net_id) && !has_pin {
             continue;
         }
@@ -685,26 +685,47 @@ fn rewire_consumers(netlist: &mut GateNetlist, old_net: GateNetId, new_net: Gate
     }
 }
 
+/// The constraints of the port a pad's net belongs to, with the net's bit
+/// index when it is one bit of a multi-bit port: the netlist has a net per
+/// bit (`top.led[2]`), while constraints are written per port (`top.led`).
+fn port_constraint<'a>(
+    port_constraints: &'a IndexMap<String, PhysicalConstraints>,
+    net_name: &str,
+) -> Option<(&'a PhysicalConstraints, Option<usize>)> {
+    if let Some(c) = port_constraints.get(net_name) {
+        return Some((c, None));
+    }
+    let (port, rest) = net_name.rsplit_once('[')?;
+    let bit = rest.strip_suffix(']')?.parse().ok()?;
+    port_constraints.get(port).map(|c| (c, Some(bit)))
+}
+
 /// Apply physical constraints to an IO cell.
 fn apply_io_constraints_standalone(
     cell: &mut Cell,
     port_name: &str,
     port_constraints: &IndexMap<String, PhysicalConstraints>,
 ) {
-    let constraints = match port_constraints.get(port_name) {
-        Some(c) => c,
-        None => return,
+    let Some((constraints, bit)) = port_constraint(port_constraints, port_name) else {
+        return;
     };
 
     if let Some(ref pin_loc) = constraints.pin_location {
         use skalp_frontend::hir::PinLocation;
-        match pin_loc {
-            PinLocation::Single(pin) => {
+        match (pin_loc, bit) {
+            (PinLocation::Single(pin), None | Some(0)) => {
                 cell.parameters.insert("LOC".into(), pin.clone());
             }
-            PinLocation::Differential { positive, negative } => {
+            (PinLocation::Differential { positive, negative }, None | Some(0)) => {
                 cell.parameters.insert("LOC".into(), positive.clone());
                 cell.parameters.insert("LOC_N".into(), negative.clone());
+            }
+            // `pins: [...]` lists one pin per bit, bit 0 first; a one-bit
+            // port's net carries no index
+            (PinLocation::Multiple(pins), bit) => {
+                if let Some(pin) = pins.get(bit.unwrap_or(0)) {
+                    cell.parameters.insert("LOC".into(), pin.clone());
+                }
             }
             _ => {}
         }
@@ -1661,6 +1682,7 @@ fn map_memblock_standalone(
     outputs: &[GateNetId],
     path: &str,
     clk: GateNetId,
+    init: Option<&[u64]>,
 ) {
     // AUDIT-2 #7: small memories must NOT burn a block-RAM tile — the
     // documented Auto policy keeps memories under 256 bits in registers
@@ -1688,7 +1710,7 @@ fn map_memblock_standalone(
         && distram_is_cheaper(data_width, depth)
     {
         map_memblock_to_distram(
-            netlist, library, data_width, addr_width, depth, inputs, outputs, path, clk,
+            netlist, library, data_width, addr_width, depth, inputs, outputs, path, clk, init,
         );
         return;
     }
@@ -1702,7 +1724,7 @@ fn map_memblock_standalone(
             // equivalence AIG both understand plain DFF/MUX cells.
             decompose_memblock_to_dffs(
                 netlist, library, data_width, addr_width, depth, has_write, inputs, outputs, path,
-                clk,
+                clk, init,
             );
             return;
         }
@@ -1775,7 +1797,8 @@ fn map_memblock_standalone(
                               out: &[GateNetId],
                               dw: u32,
                               aw: u32,
-                              suffix: &str| {
+                              suffix: &str,
+                              contents: Option<Vec<u64>>| {
         let mut cell_inputs = Vec::new();
 
         // Read address — pad to block_addr_width
@@ -1856,15 +1879,47 @@ fn map_memblock_standalone(
         );
         cell.parameters
             .insert(RAM_DATA_BITS_PARAM.to_string(), block_width.to_string());
+        if let Some(words) = contents {
+            cell.set_memory_init(&words);
+        }
         ram_cell_info.apply_to_cell(&mut cell);
         netlist.add_cell(cell);
+    };
+    // The words of the block holding addresses from `depth_block` *
+    // block_depth, bits from `bit_lo`, `width` bits wide.
+    let block_contents = |depth_block: u32, bit_lo: u32, width: u32| -> Option<Vec<u64>> {
+        let words = init?;
+        let start = (depth_block * block_depth) as usize;
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let mut slice: Vec<u64> = words
+            .iter()
+            .skip(start)
+            .take(block_depth as usize)
+            .map(|&w| (w >> bit_lo) & mask)
+            .collect();
+        while slice.last() == Some(&0) {
+            slice.pop();
+        }
+        Some(slice)
     };
 
     if depth_blocks == 1 && width_blocks == 1 {
         // Single block
         instantiate_single(
-            netlist, raddr_nets, waddr_nets, wdata_nets, we_net, outputs, data_width, addr_width,
+            netlist,
+            raddr_nets,
+            waddr_nets,
+            wdata_nets,
+            we_net,
+            outputs,
+            data_width,
+            addr_width,
             "",
+            block_contents(0, 0, data_width),
         );
     } else if depth_blocks == 1 {
         // Width tiling: split data across multiple blocks
@@ -1890,6 +1945,7 @@ fn map_memblock_standalone(
                 slice_width,
                 addr_width,
                 &format!("_w{}", wb),
+                block_contents(0, bit_lo as u32, slice_width),
             );
         }
     } else {
@@ -1986,6 +2042,7 @@ fn map_memblock_standalone(
                     slice_width,
                     addr_width,
                     &format!("_d{}_w{}", db, wb),
+                    block_contents(db, bit_lo as u32, slice_width),
                 );
 
                 // MUX read data: if bank_sel, use this block's output, else keep previous
@@ -2096,6 +2153,7 @@ fn map_memblock_to_distram(
     outputs: &[GateNetId],
     path: &str,
     clk: GateNetId,
+    init: Option<&[u64]>,
 ) {
     const WORDS: usize = 16;
     const BITS: usize = 4;
@@ -2224,8 +2282,21 @@ fn map_memblock_to_distram(
                 None,
             );
             cell.source_op = Some("MemBlock_DistRam".to_string());
+            // INITVAL bit 4 * entry + i is bit i of the cell's word `entry`.
+            let initval = (0..WORDS).fold(0u64, |acc, entry| {
+                let word = init
+                    .and_then(|w| w.get(b * WORDS + entry))
+                    .copied()
+                    .unwrap_or(0);
+                let nibble = if s * BITS < 64 {
+                    (word >> (s * BITS)) & 0xF
+                } else {
+                    0
+                };
+                acc | (nibble << (BITS * entry))
+            });
             cell.parameters
-                .insert("INITVAL".to_string(), "0x0000000000000000".to_string());
+                .insert("INITVAL".to_string(), format!("0x{initval:016X}"));
             ram_ci.apply_to_cell(&mut cell);
             netlist.add_cell(cell);
         }
@@ -2301,6 +2372,7 @@ fn decompose_memblock_to_dffs(
     outputs: &[GateNetId],
     path: &str,
     clk: GateNetId,
+    init: Option<&[u64]>,
 ) {
     let inv_ci = lookup_cell(library, CellFunction::Inv, "INV", 0.1);
     let and_ci = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
@@ -2468,6 +2540,19 @@ fn decompose_memblock_to_dffs(
         };
         let mut word_q = Vec::with_capacity(dw);
         for b in 0..dw {
+            let starts_high = init
+                .and_then(|words| words.get(word))
+                .is_some_and(|&w| b < 64 && (w >> b) & 1 == 1);
+            // A memory that is never written holds its initial contents: they
+            // are constants, which synthesis folds into the read logic.
+            if !has_write && init.is_some() {
+                word_q.push(if starts_high {
+                    get_or_create_tie_high(netlist, library)
+                } else {
+                    tie_low
+                });
+                continue;
+            }
             let q = netlist.add_net(GateNet::new(
                 GateNetId(0),
                 format!("{}_w{}_q{}", path, word, b),
@@ -2502,6 +2587,12 @@ fn decompose_memblock_to_dffs(
                 None,
             );
             dff.source_op = Some("MemBlock_DffFallback".to_string());
+            if starts_high {
+                dff.parameters.insert(
+                    crate::gate_netlist::FF_INIT_PARAM.to_string(),
+                    "1".to_string(),
+                );
+            }
             dff_ci.apply_to_cell(&mut dff);
             netlist.add_cell(dff);
             word_q.push(q);
@@ -3593,6 +3684,7 @@ fn merge_physical_nodes_into_netlist(
                 has_write,
                 async_read,
                 read_enable,
+                init,
                 ..
             } => {
                 // TRIAGE #35: the clock input net may not EXIST yet — when
@@ -3634,6 +3726,7 @@ fn merge_physical_nodes_into_netlist(
                     &output_nets,
                     path,
                     clk_net,
+                    init.as_deref(),
                 );
             }
             LirOp::MemRead { .. } | LirOp::MemWrite { .. } => {
@@ -3808,6 +3901,7 @@ pub fn synthesize_hierarchical(
 
         // Check if this instance has internal signals referenced by children
         let needs_promotion = signals_needed_by_children.get(path.as_str());
+        let mut internal_outputs = std::collections::HashSet::new();
 
         let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
@@ -3839,6 +3933,7 @@ pub fn synthesize_hierarchical(
                                 path
                             );
                             lir.outputs.push(sid);
+                            internal_outputs.insert(sig_name.clone());
                         }
                     } else {
                         // Signal has no driver in parent → it's driven by a child instance.
@@ -3851,10 +3946,6 @@ pub fn synthesize_hierarchical(
                             );
                             lir.inputs.push(sid);
                         }
-                        // Also promote to output if it feeds other logic (e.g., y = core_y)
-                        if !lir.outputs.contains(&sid) {
-                            lir.outputs.push(sid);
-                        }
                     }
                 }
             }
@@ -3864,6 +3955,7 @@ pub fn synthesize_hierarchical(
         };
 
         let mut inst_netlist = InstanceNetlist::new(inst_lir.module_name.clone(), netlist);
+        inst_netlist.internal_outputs = internal_outputs;
 
         let mut sorted_port_names: Vec<_> = inst_lir.port_connections.keys().collect();
         sorted_port_names.sort();
@@ -3899,6 +3991,44 @@ pub fn synthesize_hierarchical(
     }
 
     result
+}
+
+/// A blackbox cell's parameters: the instance's own, unquoted, and the
+/// names of its input and output pins in cell pin order
+/// ([`crate::gate_netlist::BLACKBOX_INPUTS_PARAM`]).
+fn blackbox_parameters(info: &crate::mir_to_lir::BlackboxInfo) -> IndexMap<String, String> {
+    let pins = |ports: &[String]| -> String {
+        ports
+            .iter()
+            .flat_map(|port| {
+                let width = info.port_widths.get(port).copied().unwrap_or(1);
+                (0..width).map(move |bit| {
+                    if width == 1 {
+                        port.clone()
+                    } else {
+                        format!("{port}[{bit}]")
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut parameters: IndexMap<String, String> = info
+        .parameters
+        .iter()
+        .map(|(k, v)| (k.clone(), v.trim_matches('"').to_string()))
+        .collect();
+    let inputs: Vec<String> = info.inputs.iter().chain(&info.inouts).cloned().collect();
+    let outputs: Vec<String> = info.outputs.iter().chain(&info.inouts).cloned().collect();
+    parameters.insert(
+        crate::gate_netlist::BLACKBOX_INPUTS_PARAM.to_string(),
+        pins(&inputs),
+    );
+    parameters.insert(
+        crate::gate_netlist::BLACKBOX_OUTPUTS_PARAM.to_string(),
+        pins(&outputs),
+    );
+    parameters
 }
 
 /// Create a GateNetlist containing a single blackbox cell
@@ -4037,7 +4167,7 @@ fn create_blackbox_netlist(
         source_op: Some(format!("blackbox:{}", blackbox_info.cell_name)),
         safety_classification: CellSafetyClassification::Functional,
         lut_init: None,
-        parameters: IndexMap::new(),
+        parameters: blackbox_parameters(blackbox_info),
     };
     netlist.cells.push(blackbox_cell);
 

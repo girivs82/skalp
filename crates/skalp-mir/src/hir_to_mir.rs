@@ -785,6 +785,7 @@ impl<'hir> HirToMir<'hir> {
                                     style: skalp_frontend::hir::MemoryStyle::Auto,
                                     read_latency: 1,
                                     read_only: false,
+                                    init: None,
                                 })
                             } else {
                                 None
@@ -799,8 +800,10 @@ impl<'hir> HirToMir<'hir> {
                     None
                 };
                 let is_memory = hir_signal.memory_config.is_some() || auto_memory_config.is_some();
-                let effective_memory_config =
+                let mut effective_memory_config =
                     hir_signal.memory_config.clone().or(auto_memory_config);
+                let init_from_literal =
+                    self.attach_memory_init(hir_signal, &signal_type, &mut effective_memory_config);
 
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
@@ -869,7 +872,7 @@ impl<'hir> HirToMir<'hir> {
                     // compile-time constant. Constants (literals, enum variants)
                     // were already stored as the signal's initial value above —
                     // emitting a continuous assign too would multi-drive the net.
-                    if self.convert_literal_expr(&init_expr).is_none() {
+                    if self.convert_literal_expr(&init_expr).is_none() && !init_from_literal {
                         let init_expr = &init_expr;
                         trace!(
                             "[HIR→MIR] Signal '{}' has non-literal initial_value, generating continuous assign",
@@ -1359,6 +1362,7 @@ impl<'hir> HirToMir<'hir> {
                                             style: skalp_frontend::hir::MemoryStyle::Auto,
                                             read_latency: 1,
                                             read_only: false,
+                                            init: None,
                                         })
                                     } else {
                                         None
@@ -1374,8 +1378,13 @@ impl<'hir> HirToMir<'hir> {
                         };
                         let is_memory =
                             hir_signal.memory_config.is_some() || auto_memory_config.is_some();
-                        let effective_memory_config =
+                        let mut effective_memory_config =
                             hir_signal.memory_config.clone().or(auto_memory_config);
+                        let init_from_literal = self.attach_memory_init(
+                            hir_signal,
+                            &signal_type,
+                            &mut effective_memory_config,
+                        );
 
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
@@ -1503,7 +1512,7 @@ impl<'hir> HirToMir<'hir> {
                                         module.name, hir_signal.name, is_literal, !is_literal
                                     );
                             }
-                            if !is_literal {
+                            if !is_literal && !init_from_literal {
                                 if is_fp_module {
                                     trace!(
                                             "[BUG #207 CONVERT] Module '{}' Signal '{}' about to call convert_expression",
@@ -11718,6 +11727,80 @@ impl<'hir> HirToMir<'hir> {
             }
             _ => None,
         }
+    }
+
+    /// Give a memory its initial contents: from an array literal on the
+    /// signal, or the init file already in its `#[memory]` config. Checks the
+    /// contents fit the memory. Returns whether the array literal became the
+    /// contents, in which case it must not also drive the signal.
+    fn attach_memory_init(
+        &mut self,
+        hir_signal: &hir::HirSignal,
+        signal_type: &DataType,
+        config: &mut Option<skalp_frontend::hir::MemoryConfig>,
+    ) -> bool {
+        let Some(config) = config.as_mut() else {
+            return false;
+        };
+        let mut consumed = false;
+        if let Some(hir::HirExpression::ArrayLiteral(elements)) = &hir_signal.initial_value {
+            let values: Option<Vec<u64>> = elements
+                .iter()
+                .map(|e| match self.convert_literal_expr(e)? {
+                    Value::Integer(v) => Some(v as u64),
+                    Value::BitVector { value, .. } => Some(value),
+                    _ => None,
+                })
+                .collect();
+            if let Some(values) = values {
+                consumed = true;
+                if config.init.is_some() {
+                    self.conversion_errors.push((
+                        self.current_entity_name(),
+                        format!(
+                            "memory `{}` has both an init file and an array literal; give one",
+                            hir_signal.name
+                        ),
+                    ));
+                }
+                config.init = Some(values);
+            }
+        }
+        let Some(words) = &config.init else {
+            return consumed;
+        };
+        let width = match signal_type {
+            DataType::Array(element, _) => TypeFlattener::get_scalar_width(element),
+            _ => None,
+        }
+        .or(config.width);
+        let problem = if words.len() > config.depth as usize {
+            Some(format!(
+                "{} initial words for a memory of {} words",
+                words.len(),
+                config.depth
+            ))
+        } else if let Some(width) = width {
+            if width > 64 {
+                Some(format!(
+                    "initial contents are supported for words of at most 64 bits, not {width}"
+                ))
+            } else {
+                words
+                    .iter()
+                    .position(|&w| width < 64 && w >> width != 0)
+                    .map(|i| format!("word {i} ({:#x}) does not fit in {width} bits", words[i]))
+            }
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            self.conversion_errors.push((
+                self.current_entity_name(),
+                format!("memory `{}`: {problem}", hir_signal.name),
+            ));
+        }
+        consumed
     }
 
     /// Convert HIR literal to MIR value

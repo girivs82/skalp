@@ -1,0 +1,29 @@
+// Registers with a reset beside registers without one, on shared data, so
+// placement is drawn to pack them into the same slices. On the CertusPro-NX
+// Versa board: DIP switch 1 resets the counter on the low four LEDs.
+entity MixedResets {
+    in clk: clock @ { pin: "OSC" }
+    in rst: reset(active_high) @ { pin: "AA23", io_standard: "LVCMOS18H" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+
+impl MixedResets {
+    signal tick: nat[24] = 0
+    signal count: nat[4] = 0
+    signal shift: bit[4] = 0
+
+    on(clk.rise) {
+        tick = tick + 1
+        shift = (shift << 1) | tick[20]
+    }
+
+    on(clk.rise | rst.active) {
+        if rst {
+            count = 0
+        } else {
+            count = count + tick[20]
+        }
+    }
+
+    led = {shift, count}
+}

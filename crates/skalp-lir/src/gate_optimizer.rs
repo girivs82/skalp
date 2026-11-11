@@ -883,7 +883,7 @@ impl GateOptimizer {
             // These are created by the AIG writer when forwarding inputs to outputs.
             // INIT patterns for identity: 0xAAAA (I0), 0xCCCC (I1), 0xF0F0 (I2), 0xFF00 (I3)
             // With input padding (unused inputs tied to I0): 0xAAAA maps to any single-input pass-through
-            let identity_input = if !is_buffer {
+            let identity_input = if !is_buffer && cell.inputs.len() <= 4 {
                 if let Some(init) = cell.lut_init {
                     match init {
                         0xAAAA => cell.inputs.first().copied(),
@@ -937,6 +937,16 @@ impl GateOptimizer {
             if is_pass_through {
                 let input = pass_input;
                 let output = pass_output;
+
+                // A buffer from a net to itself (flattening merges a
+                // physical net with its same-named output copy) is a
+                // combinational loop that carries nothing: the net keeps
+                // its real driver, so drop the buffer whatever drives it
+                if input == output {
+                    self.cells_to_remove.insert(cell.id);
+                    removed += 1;
+                    continue;
+                }
 
                 // Do NOT remove buffers that drive output ports!
                 // Output port net IDs are fixed (part of module interface).
@@ -1422,5 +1432,40 @@ mod tests {
 
         // TIE_LO and MUX2 should be removed
         assert_eq!(stats.cells_removed, 2);
+    }
+
+    #[test]
+    fn test_self_loop_buffer_on_output_is_removed() {
+        // Flattening can merge a blackbox output net with its same-named
+        // output copy, leaving BUF(net) -> net beside the real driver
+        let mut netlist = GateNetlist::new("test".into(), "test_lib".into());
+        let a = netlist.add_input("a".into());
+        let out = netlist.add_output("out".into());
+        netlist.cells.push(Cell::new_comb(
+            CellId(0),
+            "INV".into(),
+            "test_lib".into(),
+            0.1,
+            "driver".into(),
+            vec![a],
+            vec![out],
+        ));
+        netlist.cells.push(Cell::new_comb(
+            CellId(1),
+            "BUF".into(),
+            "test_lib".into(),
+            0.1,
+            "loop".into(),
+            vec![out],
+            vec![out],
+        ));
+
+        let mut optimizer = GateOptimizer::new();
+        optimizer.set_enable_dce(false);
+        optimizer.optimize(&mut netlist);
+
+        assert_eq!(netlist.cells.len(), 1);
+        assert_eq!(netlist.cells[0].path, "driver");
+        assert_eq!(netlist.cells[0].outputs, vec![out]);
     }
 }

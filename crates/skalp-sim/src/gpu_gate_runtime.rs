@@ -156,11 +156,14 @@ impl GpuGateRuntime {
 
         // The shader evaluates primitives with at most 4 inputs and 2 outputs;
         // a design with a wider cell (a CCU2 carry cell has 9 inputs and 3
-        // outputs) runs on the CPU path, which evaluates every primitive.
-        let gpu_capable = runtime
-            .primitives
-            .iter()
-            .all(|p| !matches!(p.ptype, PrimitiveType::Ccu2 { .. }));
+        // outputs, a LUT5 5 inputs) runs on the CPU path, which evaluates
+        // every primitive.
+        let gpu_capable = runtime.primitives.iter().all(|p| {
+            !matches!(
+                p.ptype,
+                PrimitiveType::Ccu2 { .. } | PrimitiveType::Lut6 { .. }
+            )
+        });
         if !gpu_capable {
             runtime.use_gpu = false;
         }

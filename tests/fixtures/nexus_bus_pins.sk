@@ -1,0 +1,16 @@
+// Counts on the CertusPro-NX Versa board's eight LEDs: a bus port gets one
+// pin per bit from `pins: [...]`, bit 0 first.
+entity Bus {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+
+impl Bus {
+    signal counter: nat[26] = 0
+
+    on(clk.rise) {
+        counter = counter + 1
+    }
+
+    led = counter[25:18]
+}

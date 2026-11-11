@@ -640,6 +640,7 @@ Configures memory inference and implementation hints for array signals.
 #[memory(depth = N, ports = P)]
 #[memory(depth = N, read_latency = L)]
 #[memory(depth = N, read_only = true)]
+#[memory(depth = N, init = "contents.hex")]
 ```
 
 **Parameters:**
@@ -651,6 +652,11 @@ Configures memory inference and implementation hints for array signals.
 | `ports` | u32 | 1 | Number of ports |
 | `read_latency` | u32 | 1 | Read latency in cycles |
 | `read_only` | bool | false | Whether memory is ROM |
+| `init` | string | none | Hex file holding the memory's contents at power-up |
+
+**Initial contents:** a memory starts with the words of its `init` file, or
+with an array literal on the signal (`signal t: bit[8][4] = [1, 2, 4, 8]`);
+give one or the other. See the [memory synthesis guide](../guides/memory-synthesis.md#initial-contents).
 
 **Memory Styles:**
 | Style | Description | Use Case |

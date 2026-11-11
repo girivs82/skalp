@@ -74,8 +74,21 @@ pub struct Cell {
 /// Parameter on an output pad: why it may drive a pin the board does not list as safe.
 pub const DRIVE_OVERRIDE_PARAM: &str = "DRIVE_OVERRIDE";
 
+/// Cell parameter holding a memory cell's initial contents: one hexadecimal
+/// word per address, in address order, separated by spaces. Addresses past
+/// the last word start as zero.
+pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
+
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
+
+/// Parameter naming a blackbox cell's input pins, comma-separated in
+/// `inputs` order (a bus bit as `NAME[i]`).
+pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
+
+/// Parameter naming a blackbox cell's output pins, as
+/// [`BLACKBOX_INPUTS_PARAM`] does its inputs.
+pub const BLACKBOX_OUTPUTS_PARAM: &str = "BLACKBOX_OUTPUTS";
 
 /// Parameter holding a block RAM cell's address width in bits.
 pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
@@ -139,6 +152,13 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// Number of variables of this cell's truth table, if it is a LUT whose
+    /// table can be rewritten (at most 6 inputs). LUT4-sized cells with fewer
+    /// inputs keep a 4-variable table, with the unused inputs as don't-cares.
+    pub fn lut_variables(&self) -> Option<usize> {
+        (self.lut_init.is_some() && self.inputs.len() <= 6).then(|| self.inputs.len().max(4))
+    }
+
     /// The input layout of a hard multiplier cell, or `None` for any other cell.
     pub fn dsp_ports(&self) -> Option<DspPorts> {
         let bits = |name: &str| self.parameters.get(name)?.parse::<usize>().ok();
@@ -154,6 +174,38 @@ impl Cell {
             signed_b: signed_a + 1,
             product_width: bits(DSP_P_BITS_PARAM)?,
         })
+    }
+
+    /// The name of a blackbox cell's `index`-th input or output pin
+    /// ([`BLACKBOX_INPUTS_PARAM`]).
+    pub fn blackbox_pin(&self, output: bool, index: usize) -> Option<&str> {
+        let param = if output {
+            BLACKBOX_OUTPUTS_PARAM
+        } else {
+            BLACKBOX_INPUTS_PARAM
+        };
+        self.parameters
+            .get(param)?
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .nth(index)
+    }
+
+    /// A memory cell's initial contents, one word per address from address 0
+    /// ([`MEMORY_INIT_PARAM`]); `None` if it has none, or they don't parse.
+    pub fn memory_init(&self) -> Option<Vec<u64>> {
+        self.parameters
+            .get(MEMORY_INIT_PARAM)?
+            .split_whitespace()
+            .map(|word| u64::from_str_radix(word, 16).ok())
+            .collect()
+    }
+
+    /// Set a memory cell's initial contents ([`Self::memory_init`]).
+    pub fn set_memory_init(&mut self, words: &[u64]) {
+        let text: Vec<String> = words.iter().map(|w| format!("{w:x}")).collect();
+        self.parameters
+            .insert(MEMORY_INIT_PARAM.to_string(), text.join(" "));
     }
 
     /// The input layout of a block RAM cell, or `None` for any other cell.
@@ -1311,7 +1363,13 @@ impl GateNetlist {
 
             // Add parameters for LUT4 cells
             if needs_init {
-                if let Some(init) = self.compute_lut4_init(&cell.cell_type) {
+                // The cell's own truth table wins: passes that fold inverters
+                // or merge LUTs rewrite it without renaming the cell.
+                let init = cell
+                    .lut_init
+                    .map(|t| (t & 0xFFFF) as u16)
+                    .or_else(|| self.compute_lut4_init(&cell.cell_type));
+                if let Some(init) = init {
                     output.push_str(&format!("#(.LUT_INIT(16'h{:04X})) ", init));
                 }
             }
@@ -2477,6 +2535,15 @@ fn generate_ncl_reg_module() -> String {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// The bits of a truth table over `variables` inputs (at most 6).
+pub fn truth_table_mask(variables: usize) -> u64 {
+    if variables >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << variables)) - 1
+    }
+}
 
 #[cfg(test)]
 mod tests {

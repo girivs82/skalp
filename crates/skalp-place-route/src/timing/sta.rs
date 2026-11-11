@@ -7,7 +7,7 @@
 //! Scope: one clock at a time, without clock skew. Paths from and to the IO
 //! pads are not timed.
 
-use super::{ClockSummary, CriticalPath, TimingReport};
+use super::{ClockSummary, CriticalPath, PathStep, TimingReport};
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId};
@@ -55,14 +55,26 @@ pub trait TimingModel {
     }
 }
 
+/// Worst arrival at a net's driver output.
+#[derive(Debug, Clone, Copy)]
+struct Arrival {
+    time: i64,
+    /// The net on the driver's input that sets the arrival
+    from: Option<GateNetId>,
+    /// Routing delay into the driver on that input
+    route_ps: i64,
+    /// Delay through the driver from that input, or its launch delay
+    cell_ps: i64,
+}
+
 struct Engine<'a, D: Device + ?Sized> {
     device: &'a D,
     model: &'a dyn TimingModel,
     design: &'a PlacedDesign<'a>,
     /// Per-net map from a routed wire to the pip that drives it
     drivers: HashMap<GateNetId, HashMap<WireId, PipId>>,
-    /// Worst arrival time at each net and the net it came through
-    arrivals: HashMap<GateNetId, (i64, Option<GateNetId>)>,
+    /// Worst arrival time at each net, and the input that set it
+    arrivals: HashMap<GateNetId, Arrival>,
     visiting: HashSet<GateNetId>,
 }
 
@@ -104,8 +116,8 @@ impl<D: Device + ?Sized> Engine<'_, D> {
     }
 
     fn net_arrival(&mut self, net: GateNetId) -> i64 {
-        if let Some(&(time, _)) = self.arrivals.get(&net) {
-            return time;
+        if let Some(arrival) = self.arrivals.get(&net) {
+            return arrival.time;
         }
         if !self.visiting.insert(net) {
             return 0;
@@ -114,24 +126,30 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         let info = &netlist.nets[net.0 as usize];
         let driver = info.driver.and_then(|id| netlist.get_cell(id));
         let output = info.driver_pin.unwrap_or(0);
-        let (time, from) = match driver {
+        let arrival = match driver {
             Some(cell) => self.output_time(cell, output),
-            None => (0, None),
+            None => Arrival {
+                time: 0,
+                from: None,
+                route_ps: 0,
+                cell_ps: 0,
+            },
         };
         self.visiting.remove(&net);
-        self.arrivals.insert(net, (time, from));
-        time
+        self.arrivals.insert(net, arrival);
+        arrival.time
     }
 
-    /// Latest arrival of an input at the cell, or `None` if it is not timed.
-    fn input_time(&mut self, cell: &Cell, input: usize) -> Option<(i64, GateNetId)> {
+    /// Latest arrival of an input at the cell and the routing delay part of
+    /// it, or `None` if it is not timed.
+    fn input_time(&mut self, cell: &Cell, input: usize) -> Option<(i64, GateNetId, i64)> {
         let net = *cell.inputs.get(input)?;
         if self.design.tied.value(cell.id, input).is_some() {
             return None;
         }
         let arrival = self.net_arrival(net);
         if self.model.is_dedicated(cell, input) {
-            return Some((arrival, net));
+            return Some((arrival, net, 0));
         }
         let routing = self
             .model
@@ -140,40 +158,81 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             .map(|pin| self.route_delay(net, cell.id, pin))
             .max()
             .unwrap_or(0);
-        Some((arrival + routing, net))
+        Some((arrival + routing, net, routing))
     }
 
-    fn output_time(&mut self, cell: &Cell, output: usize) -> (i64, Option<GateNetId>) {
+    fn output_time(&mut self, cell: &Cell, output: usize) -> Arrival {
         if let Some(launch) = self.model.launch_ps(cell, output) {
-            return (launch, None);
+            return Arrival {
+                time: launch,
+                from: None,
+                route_ps: 0,
+                cell_ps: launch,
+            };
         }
-        let mut worst = (0, None);
+        let mut worst = Arrival {
+            time: 0,
+            from: None,
+            route_ps: 0,
+            cell_ps: 0,
+        };
         for input in 0..cell.inputs.len() {
             let Some(delay) = self.model.arc_ps(cell, input, output) else {
                 continue;
             };
-            if let Some((time, net)) = self.input_time(cell, input) {
-                if time + delay > worst.0 {
-                    worst = (time + delay, Some(net));
+            if let Some((time, net, route_ps)) = self.input_time(cell, input) {
+                if time + delay > worst.time {
+                    worst = Arrival {
+                        time: time + delay,
+                        from: Some(net),
+                        route_ps,
+                        cell_ps: delay,
+                    };
                 }
             }
         }
         worst
     }
 
-    fn path_through(&self, mut net: GateNetId) -> Vec<String> {
-        let netlist = self.design.netlist;
-        let mut path = vec![netlist.nets[net.0 as usize].name.clone()];
+    /// The nets on the worst path into `net`, from its start.
+    fn nets_through(&self, mut net: GateNetId) -> Vec<GateNetId> {
+        let mut nets = vec![net];
         let mut seen = HashSet::from_iter([net]);
-        while let Some(&(_, Some(previous))) = self.arrivals.get(&net) {
+        while let Some(Arrival {
+            from: Some(previous),
+            ..
+        }) = self.arrivals.get(&net).copied()
+        {
             if !seen.insert(previous) {
                 break;
             }
-            path.push(netlist.nets[previous.0 as usize].name.clone());
+            nets.push(previous);
             net = previous;
         }
-        path.reverse();
-        path
+        nets.reverse();
+        nets
+    }
+
+    fn path_steps(&self, nets: &[GateNetId]) -> Vec<PathStep> {
+        let netlist = self.design.netlist;
+        nets.iter()
+            .map(|&net| {
+                let info = &netlist.nets[net.0 as usize];
+                let driver = info.driver.and_then(|id| netlist.get_cell(id));
+                let arrival = self.arrivals.get(&net).copied();
+                PathStep {
+                    net: info.name.clone(),
+                    cell: driver.map(|c| c.path.clone()).unwrap_or_default(),
+                    cell_type: driver.map(|c| c.cell_type.clone()).unwrap_or_default(),
+                    tile: driver
+                        .and_then(|c| self.design.placement.placements.get(&c.id))
+                        .map(|loc| (loc.tile_x, loc.tile_y)),
+                    arrival: arrival.map_or(0.0, |a| a.time as f64 / PS_PER_NS),
+                    route_in: arrival.map_or(0.0, |a| a.route_ps as f64 / PS_PER_NS),
+                    cell_delay: arrival.map_or(0.0, |a| a.cell_ps as f64 / PS_PER_NS),
+                }
+            })
+            .collect()
     }
 }
 
@@ -210,22 +269,37 @@ pub fn analyze<D: Device + ?Sized>(
             let delay_ns = (time + endpoint.setup_ps) as f64 / PS_PER_NS;
             let worst = per_clock.get_mut(&clock.0).expect("present");
             worst.1 = worst.1.max(delay_ns);
-            let path = engine.path_through(net);
-            paths.push(CriticalPath {
-                delay: delay_ns,
-                required: target_ns,
-                slack: target_ns - delay_ns,
-                source: path.first().cloned().unwrap_or_default(),
-                destination: cell.path.clone(),
-                path,
-            });
+            let nets = engine.nets_through(net);
+            let path = nets
+                .iter()
+                .map(|n| netlist.nets[n.0 as usize].name.clone())
+                .collect::<Vec<_>>();
+            paths.push((
+                CriticalPath {
+                    delay: delay_ns,
+                    required: target_ns,
+                    slack: target_ns - delay_ns,
+                    source: path.first().cloned().unwrap_or_default(),
+                    destination: cell.path.clone(),
+                    path,
+                    steps: Vec::new(),
+                },
+                nets,
+            ));
         }
     }
 
-    paths.sort_by(|a, b| b.delay.total_cmp(&a.delay));
-    let failing_paths = paths.iter().filter(|p| p.slack < 0.0).count();
-    let worst_delay = paths.first().map_or(0.0, |p| p.delay);
+    paths.sort_by(|a, b| b.0.delay.total_cmp(&a.0.delay));
+    let failing_paths = paths.iter().filter(|p| p.0.slack < 0.0).count();
+    let worst_delay = paths.first().map_or(0.0, |p| p.0.delay);
     paths.truncate(10);
+    let paths: Vec<CriticalPath> = paths
+        .into_iter()
+        .map(|(mut path, nets)| {
+            path.steps = engine.path_steps(&nets);
+            path
+        })
+        .collect();
 
     let clock_summaries = per_clock
         .iter()

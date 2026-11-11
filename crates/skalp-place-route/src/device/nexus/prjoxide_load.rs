@@ -195,6 +195,106 @@ pub fn load_tilegrid(db_root: &Path, variant: NexusVariant) -> Result<Vec<Prjoxi
     Ok(tiles)
 }
 
+/// One hard-block register region of `baseaddr.json`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct BaseAddrRegion {
+    addr: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaseAddrFile {
+    #[serde(default)]
+    regions: HashMap<String, BaseAddrRegion>,
+}
+
+fn load_base_addresses(
+    db_root: &Path,
+    family: &str,
+    device: &str,
+) -> Option<HashMap<String, BaseAddrRegion>> {
+    let path = db_root.join(family).join(device).join("baseaddr.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let file: BaseAddrFile = serde_json::from_str(&text).ok()?;
+    Some(file.regions)
+}
+
+/// Configuration-bus address of a hard block's registers: the region of
+/// that name (such as `PLL_LLC`) in the device's `baseaddr.json`.
+pub fn hard_block_base_address(db_root: &Path, variant: NexusVariant, region: &str) -> Option<u32> {
+    load_base_addresses(
+        db_root,
+        variant.prjoxide_family(),
+        variant.prjoxide_device(),
+    )?
+    .get(region)
+    .map(|r| r.addr)
+}
+
+/// Configuration-bus address of the initial contents of the block RAM whose
+/// `WID` setting is `wid`.
+///
+/// Each block RAM's contents sit in their own window of the configuration
+/// bus, chosen by the `WID` number the RAM is configured with: window `n`
+/// starts at `EBR_WID0 + n × (EBR_WID1 − EBR_WID0)` (prjoxide's rule). A
+/// device whose `baseaddr.json` lacks these regions borrows them from another
+/// device of the Nexus database that has them: every device prjoxide has
+/// fuzzed (LIFCL-17, LIFCL-40, LFD2NX-40) places them identically. Returns
+/// the address and whether it is unconfirmed: borrowed for a device not in
+/// [`BLOCK_RAM_WINDOWS_CONFIRMED`].
+pub fn block_ram_init_address(
+    db_root: &Path,
+    variant: NexusVariant,
+    wid: u32,
+) -> Result<(u32, bool), String> {
+    let window = |regions: &HashMap<String, BaseAddrRegion>| {
+        let first = regions.get("EBR_WID0")?.addr;
+        let second = regions.get("EBR_WID1")?.addr;
+        Some(first + wid * (second - first))
+    };
+    let family = variant.prjoxide_family();
+    if let Some(addr) = load_base_addresses(db_root, family, variant.prjoxide_device())
+        .as_ref()
+        .and_then(window)
+    {
+        return Ok((addr, false));
+    }
+    // Any other device's, own family first, in a fixed order
+    let mut candidates: Vec<(bool, String, String)> = Vec::new();
+    for entry in std::fs::read_dir(db_root)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        let fam = entry.file_name().to_string_lossy().to_string();
+        let Ok(devices) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for device in devices.flatten() {
+            let dev = device.file_name().to_string_lossy().to_string();
+            if device.path().join("baseaddr.json").is_file() {
+                candidates.push((fam != family, fam.clone(), dev));
+            }
+        }
+    }
+    candidates.sort();
+    candidates
+        .iter()
+        .find_map(|(_, fam, dev)| {
+            load_base_addresses(db_root, fam, dev)
+                .as_ref()
+                .and_then(window)
+        })
+        .map(|addr| {
+            let confirmed = BLOCK_RAM_WINDOWS_CONFIRMED.contains(&variant.prjoxide_device());
+            (addr, !confirmed)
+        })
+        .ok_or_else(|| "no device in the prjoxide database locates block RAM contents".to_string())
+}
+
+/// Devices whose `baseaddr.json` lacks the block RAM windows, but where the
+/// borrowed windows were checked on silicon: a ROM preloaded this way read
+/// back its contents (LFCPNX-100 on a CertusPro-NX Versa board, 2026-11-10).
+pub const BLOCK_RAM_WINDOWS_CONFIRMED: &[&str] = &["LFCPNX-100"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +368,23 @@ mod tests {
         );
         assert_eq!(tiletype_to_skalp("PCIE_X1", 5, 5, 160, 75), TileType::IpCon);
         assert_eq!(tiletype_to_skalp("CIB", 5, 5, 160, 75), TileType::Empty);
+    }
+
+    #[test]
+    fn block_ram_contents_follow_the_wid_window() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        // CrossLink-NX has the windows fuzzed
+        assert_eq!(
+            block_ram_init_address(&db, NexusVariant::Lifcl40, 2).unwrap(),
+            (0x2004_0000, false)
+        );
+        // CertusPro-NX borrows them, checked on silicon
+        assert_eq!(
+            block_ram_init_address(&db, NexusVariant::Lfcpnx100, 3).unwrap(),
+            (0x2006_0000, false)
+        );
     }
 }
