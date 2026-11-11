@@ -133,6 +133,13 @@ pub struct ConstEvaluator {
     recursion_depth: usize,
 }
 
+/// Constant tables saved by [`ConstEvaluator::save_constants`].
+#[derive(Debug, Clone)]
+pub struct SavedConstants {
+    constants: IndexMap<ConstantId, HirExpression>,
+    named_constants: IndexMap<String, HirExpression>,
+}
+
 /// Evaluation error
 #[derive(Debug, Clone)]
 pub enum EvalError {
@@ -270,6 +277,22 @@ impl ConstEvaluator {
             self.named_constants
                 .insert(const_decl.name.clone(), const_decl.value.clone());
         }
+    }
+
+    /// Save the constant tables, to put back with [`Self::restore_constants`]
+    /// after registering another HIR's constants over a region (constant ids
+    /// are only meaningful in the HIR that minted them).
+    pub fn save_constants(&self) -> SavedConstants {
+        SavedConstants {
+            constants: self.constants.clone(),
+            named_constants: self.named_constants.clone(),
+        }
+    }
+
+    /// Put back constant tables saved with [`Self::save_constants`].
+    pub fn restore_constants(&mut self, saved: SavedConstants) {
+        self.constants = saved.constants;
+        self.named_constants = saved.named_constants;
     }
 
     /// Register an enum definition for variant lookups

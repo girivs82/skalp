@@ -1,0 +1,29 @@
+// Shifts, comparisons and bitwise operations on values wider than 128 bits,
+// which the compiled sim stores as 32-bit limb arrays.
+entity WideShiftCompare {
+    in a: bit[64]
+    in b: bit[64]
+    in k: bit[8]
+    out shl_mid: bit[64]
+    out shr_mid: bit[64]
+    out sar_top: bit[64]
+    out xor_mid: bit[64]
+    out lt: bit
+    out eq: bit
+}
+
+impl WideShiftCompare {
+    signal s: bit[160] = {a, b, 32'h89ABCDEF}
+    signal t: bit[160] = {b, a, 32'h01234567}
+    signal l: bit[160] = s << k
+    signal r: bit[160] = s >> k
+    signal si: int[160] = s as int[160]
+    signal sa: int[160] = si >> k
+    signal x: bit[160] = s ^ t
+    shl_mid = l[111:48]
+    shr_mid = r[111:48]
+    sar_top = sa[159:96] as bit[64]
+    xor_mid = x[111:48]
+    lt = s < t
+    eq = s == t
+}

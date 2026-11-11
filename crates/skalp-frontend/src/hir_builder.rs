@@ -3381,6 +3381,17 @@ impl HirBuilderContext {
             .insert(result_name.clone(), result_var_id);
         self.symbols
             .add_to_scope(&result_name, SymbolId::Variable(result_var_id));
+        // The instance's own name refers to the same binding, so a later
+        // `instance.port` in the body (e.g. the `subtractor.sum` that ends
+        // `impl Sub for bit<N>`) resolves to that instance's output. Without
+        // this the name fell through to an unknown generic parameter, the
+        // body had no result, and the operator was lowered inline while the
+        // already-created instance stayed behind as dead logic.
+        self.symbols
+            .variables
+            .insert(instance_name.clone(), result_var_id);
+        self.symbols
+            .add_to_scope(&instance_name, SymbolId::Variable(result_var_id));
 
         let inst_stmt = HirStatement::Let(HirLetStatement {
             is_placeholder: false,
@@ -7017,12 +7028,16 @@ impl HirBuilderContext {
         })
     }
 
-    /// Build match statement
-    fn build_match_statement(&mut self, node: &SyntaxNode) -> Option<HirMatchStatement> {
-        // Get expression being matched
-        let expr = node
+    /// The expression a `match` (statement or expression) examines: every
+    /// expression node before the arm list. The parser emits postfix
+    /// operations as siblings, so `match f3[1:0]` is IdentExpr(f3) followed by
+    /// IndexExpr([1:0]); building only the first node matched against the
+    /// whole of `f3`.
+    fn build_match_scrutinee(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        let nodes: Vec<SyntaxNode> = node
             .children()
-            .find(|n| {
+            .take_while(|n| n.kind() != SyntaxKind::MatchArmList)
+            .filter(|n| {
                 matches!(
                     n.kind(),
                     SyntaxKind::LiteralExpr
@@ -7034,11 +7049,27 @@ impl HirBuilderContext {
                         | SyntaxKind::IndexExpr
                         | SyntaxKind::PathExpr
                         | SyntaxKind::ParenExpr
-                        // Tuple scrutinee: match (wr_en, rd_en) { (true, false) => ... }
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::CastExpr
+                        // Tuple scrutinee: match (a == b, b == c) { (true, true) => ... }
+                        // Omitting this silently dropped the entire enclosing
+                        // assignment (the match built to None).
                         | SyntaxKind::TupleExpr
                 )
             })
-            .and_then(|n| self.build_expression(&n))?;
+            .collect();
+        match nodes.as_slice() {
+            [] => None,
+            [single] => self.build_expression(single),
+            several => self.build_chained_rhs_expression(several),
+        }
+    }
+
+    /// Build match statement
+    fn build_match_statement(&mut self, node: &SyntaxNode) -> Option<HirMatchStatement> {
+        let expr = self.build_match_scrutinee(node)?;
 
         // Build match arms from MATCH_ARM_LIST
         let mut arms = Vec::new();
@@ -7554,9 +7585,24 @@ impl HirBuilderContext {
                 if let Some(token) = literal_token.as_token() {
                     let literal = match token.kind() {
                         SyntaxKind::IntLiteral => {
-                            let text = token.text();
-                            let value = text.parse::<u64>().ok()?;
-                            HirLiteral::Integer(value)
+                            // Plain (`3`, `1_000`) or sized (`12'h001`): the
+                            // lexer gives both this kind. A sized pattern used
+                            // to fail to parse here, and the arm was dropped
+                            // without a word.
+                            match parse_int_literal_text(token.text()) {
+                                Some(literal) => literal,
+                                None => {
+                                    self.errors.push(HirError {
+                                        message: format!(
+                                            "cannot read match pattern literal `{}`",
+                                            token.text()
+                                        ),
+                                        span: self.make_span(node),
+                                    });
+                                    self.recursion_depth -= 1;
+                                    return None;
+                                }
+                            }
                         }
                         SyntaxKind::BinLiteral => {
                             let text = token.text();
@@ -7989,68 +8035,9 @@ impl HirBuilderContext {
             match token.kind() {
                 SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
-                    // BUG #172 FIX: Handle Verilog-style width-prefixed literals like 224'b0, 8'hFF
-                    // These are tokenized as IntLiteral but contain width prefix
-                    if text.contains("'b") || text.contains("'B") {
-                        // Binary width-prefixed: e.g., "224'b0" means 224 bits of binary 0
-                        if let Some(idx) = text.find("'b").or_else(|| text.find("'B")) {
-                            let width_str = &text[..idx];
-                            let width: u32 = width_str.parse().ok()?;
-                            let binary_str = &text[idx + 2..];
-                            // Parse the binary digits, pad/truncate to width
-                            let digits = binary_str.replace('_', "");
-                            let mut bits = Vec::with_capacity(width as usize);
-                            // Parse binary digits (LSB first)
-                            for ch in digits.chars().rev() {
-                                if bits.len() >= width as usize {
-                                    break;
-                                }
-                                bits.push(ch == '1');
-                            }
-                            // Pad with zeros if necessary
-                            while bits.len() < width as usize {
-                                bits.push(false);
-                            }
-                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
-                        }
-                        None
-                    } else if text.contains("'h") || text.contains("'H") {
-                        // Hex width-prefixed: e.g., "8'hFF" means 8 bits of hex FF
-                        if let Some(idx) = text.find("'h").or_else(|| text.find("'H")) {
-                            let width_str = &text[..idx];
-                            let width: u32 = width_str.parse().ok()?;
-                            let hex_str = &text[idx + 2..];
-                            // Parse hex value
-                            let value = u64::from_str_radix(&hex_str.replace('_', ""), 16).ok()?;
-                            // Convert to bits
-                            let mut bits = Vec::with_capacity(width as usize);
-                            for i in 0..width {
-                                bits.push((value >> i) & 1 == 1);
-                            }
-                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
-                        }
-                        None
-                    } else if text.contains("'d") || text.contains("'D") {
-                        // Decimal width-prefixed: e.g., "8'd255" means 8 bits of decimal 255
-                        if let Some(idx) = text.find("'d").or_else(|| text.find("'D")) {
-                            let width_str = &text[..idx];
-                            let width: u32 = width_str.parse().ok()?;
-                            let dec_str = &text[idx + 2..];
-                            let value: u64 = dec_str.replace('_', "").parse().ok()?;
-                            // Convert to bits
-                            let mut bits = Vec::with_capacity(width as usize);
-                            for i in 0..width {
-                                bits.push((value >> i) & 1 == 1);
-                            }
-                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
-                        }
-                        None
-                    } else {
-                        // Regular integer literal
-                        // BUG #214 FIX: Remove underscores before parsing (100_000_000 -> 100000000)
-                        let value = text.replace('_', "").parse::<u64>().ok()?;
-                        Some(HirExpression::Literal(HirLiteral::Integer(value)))
-                    }
+                    // BUG #172 FIX: Verilog-style width-prefixed literals
+                    // (224'b0, 8'hFF) are tokenized as IntLiteral too.
+                    parse_int_literal_text(text).map(HirExpression::Literal)
                 }
                 SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
@@ -9460,7 +9447,34 @@ impl HirBuilderContext {
         // instead of a child. If we only have 1 child, look for the left operand in the parent.
         // BUG FIX #66: Also check for NEXT siblings which represent chained operations!
         if let Some(parent) = node.parent() {
-            let siblings: Vec<_> = parent.children().collect();
+            // Only the sibling nodes of THIS element: a separator token (the
+            // `,` between concatenation elements, call arguments or tuple
+            // fields) ends it. Scanning past one chained the next element's
+            // `| u3 | u4` continuations onto this one: `{t1|t2|t3|t4,
+            // u1|u2|u3|u4}` built its first element as t1|t2|t3|t4|u3|u4.
+            let mut siblings: Vec<SyntaxNode> = Vec::new();
+            let mut own_start = 0;
+            let mut seen_self = false;
+            for elem in parent.children_with_tokens() {
+                match elem {
+                    rowan::NodeOrToken::Token(t)
+                        if !t.kind().is_trivia() && !t.kind().is_operator() =>
+                    {
+                        if seen_self {
+                            break;
+                        }
+                        own_start = siblings.len();
+                    }
+                    rowan::NodeOrToken::Token(_) => {}
+                    rowan::NodeOrToken::Node(n) => {
+                        if &n == node {
+                            seen_self = true;
+                        }
+                        siblings.push(n);
+                    }
+                }
+            }
+            let siblings: Vec<SyntaxNode> = siblings.split_off(own_start);
 
             // Find our position in siblings
             if let Some(pos) = siblings.iter().position(|n| n == node) {
@@ -10559,31 +10573,7 @@ impl HirBuilderContext {
     fn build_match_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Parse structure: match <expr> { <arms> }
 
-        // First child should be the expression being matched
-        let expr = node
-            .children()
-            .find(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::IfExpr
-                        | SyntaxKind::MatchExpr
-                        | SyntaxKind::ConcatExpr
-                        // Tuple scrutinee: match (a == b, b == c) { (true, true) => ... }
-                        // Omitting this silently dropped the entire enclosing
-                        // assignment (the match built to None).
-                        | SyntaxKind::TupleExpr
-                )
-            })
-            .and_then(|n| self.build_expression(&n))?;
+        let expr = self.build_match_scrutinee(node)?;
 
         // Build match arms from MATCH_ARM_LIST
         let mut arms = Vec::new();
@@ -15080,10 +15070,17 @@ impl HirBuilderContext {
             return self.build_expression(&expr_nodes[0]);
         }
 
-        // Multiple nodes - check for IdentExpr + FieldExpr pattern (field access)
+        // Multiple nodes - check for a pure field-access chain: IdentExpr
+        // followed only by FieldExprs (`F.total_bits`). Anything else after the
+        // fields — `a.add(b)` is IdentExpr, FieldExpr, CallExpr — is a method
+        // call or a longer chain; reading it as a field chain dropped the call
+        // and its arguments (`signal s = a.add(b)` became `a.add`), so those go
+        // to the general chained-expression builder, as assignments do.
         if expr_nodes.len() >= 2
             && expr_nodes[0].kind() == SyntaxKind::IdentExpr
-            && expr_nodes[1].kind() == SyntaxKind::FieldExpr
+            && expr_nodes[1..]
+                .iter()
+                .all(|n| n.kind() == SyntaxKind::FieldExpr)
         {
             // Build chained field access
             let base = self.build_expression(&expr_nodes[0])?;
@@ -15114,8 +15111,10 @@ impl HirBuilderContext {
             return Some(result);
         }
 
-        // BUG #188 FIX: Handle IdentExpr + CallExpr pattern (function calls like clz(x))
-        if expr_nodes.len() >= 2
+        // BUG #188 FIX: Handle IdentExpr + CallExpr pattern (function calls like clz(x)).
+        // Exactly those two nodes: a longer chain (`f(x).field`, `f(x).g(y)`)
+        // goes to the general builder below instead of losing its tail.
+        if expr_nodes.len() == 2
             && expr_nodes[0].kind() == SyntaxKind::IdentExpr
             && expr_nodes[1].kind() == SyntaxKind::CallExpr
         {
@@ -15916,14 +15915,14 @@ impl HirBuilderContext {
                 .find(|t| t.kind() == SyntaxKind::Ident)
                 .map(|t| t.text().to_string())?;
 
-            // Extract default value if present (e.g., intent I: Intent = Intent::default())
-            let default_value = node.children().nth(1).and_then(|child| {
-                if child.kind() == SyntaxKind::LiteralExpr {
-                    self.build_expression(&child)
-                } else {
-                    None
-                }
-            });
+            // Extract default value if present (`intent I: Intent = DEFAULT_INTENT`,
+            // `= Intent::default()`). Not only literals: the stdlib's defaults are
+            // named constants, and dropping them made `FpSqrt<IEEE754_32>` look
+            // like it was missing an argument.
+            let default_value = node
+                .children()
+                .nth(1)
+                .and_then(|child| self.build_expression(&child));
 
             Some(HirGeneric {
                 name,
@@ -16719,6 +16718,47 @@ impl Default for HirBuilderContext {
 pub fn build_hir(root: &SyntaxNode) -> Result<Hir, Vec<HirError>> {
     let mut builder = HirBuilderContext::new();
     builder.build(root)
+}
+
+/// Read an integer literal token's text: plain decimal (`42`, `100_000`) or
+/// Verilog-style sized (`8'hFF`, `224'b0`, `4'd15`), the latter as a bit
+/// vector of exactly its declared width.
+fn parse_int_literal_text(text: &str) -> Option<HirLiteral> {
+    let Some(apostrophe) = text.find('\'') else {
+        return text
+            .replace('_', "")
+            .parse::<u64>()
+            .ok()
+            .map(HirLiteral::Integer);
+    };
+    let width: usize = text[..apostrophe].trim().parse().ok()?;
+    let rest = text[apostrophe + 1..].trim_start();
+    let mut chars = rest.chars();
+    let base = chars.next()?;
+    let digits = chars.as_str().replace('_', "");
+    let bits: Vec<bool> = match base {
+        'b' | 'B' => {
+            if !digits.chars().all(|c| c == '0' || c == '1') {
+                return None;
+            }
+            // LSB first, truncated or zero-padded to the declared width.
+            let mut bits: Vec<bool> = digits.chars().rev().map(|c| c == '1').take(width).collect();
+            bits.resize(width, false);
+            bits
+        }
+        'h' | 'H' | 'd' | 'D' => {
+            let value = if matches!(base, 'h' | 'H') {
+                u64::from_str_radix(&digits, 16).ok()?
+            } else {
+                digits.parse::<u64>().ok()?
+            };
+            (0..width)
+                .map(|i| i < 64 && (value >> i) & 1 == 1)
+                .collect()
+        }
+        _ => return None,
+    };
+    Some(HirLiteral::BitVector(bits))
 }
 
 #[cfg(test)]

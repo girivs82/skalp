@@ -1,0 +1,10 @@
+// Uses nothing from the stdlib.
+entity NoStdlib {
+    in p: bit[4]
+    in q: bit[4]
+    out y: bit[4]
+}
+
+impl NoStdlib {
+    y = p & q
+}

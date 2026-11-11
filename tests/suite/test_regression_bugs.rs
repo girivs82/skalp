@@ -2485,3 +2485,157 @@ impl Lfsr {
         sv
     );
 }
+
+// An operator chain in a LATER concatenation element leaked into an earlier
+// one: in `{t1 | t2 | t3 | t4, u1 | u2 | u3 | u4}` the binary builder, looking
+// for its chain continuations among its parent's nodes, walked past the comma
+// and took `| u3 | u4` too, building the first element as
+// `t1|t2|t3|t4|u3|u4`. Silent wrong logic (it broke an arbiter's grant
+// vector). The continuations of an element stop at the separator.
+#[test]
+fn test_concat_operator_chains_stay_in_their_own_element() {
+    let source = r#"
+entity Cc {
+    in p: bit[4]
+    in q: bit[4]
+    out y: bit[2]
+    out z: bit[3]
+}
+impl Cc {
+    y = {
+        (p[1] & q[1]) | (p[0] & q[0]) | (p[2] & q[2]) | (p[3] & q[3]),
+        (p[0] & q[1]) | (p[1] & q[0]) | (p[3] & q[2]) | (p[2] & q[3])
+    }
+    z = {p[0] ^ q[0], p[1] ^ q[1] ^ p[2] ^ q[2], p[3] & q[3] & p[0]}
+}
+"#;
+    let sv = compile_to_sv(source).expect("must compile");
+    assert!(
+        sv.contains(
+            "assign y = {((((p[1] & q[1]) | (p[0] & q[0])) | (p[2] & q[2])) | (p[3] & q[3])), ((((p[0] & q[1]) | (p[1] & q[0])) | (p[3] & q[2])) | (p[2] & q[3]))};"
+        ),
+        "each element keeps exactly its own terms, got:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains(
+            "assign z = {(p[0] ^ q[0]), (((p[1] ^ q[1]) ^ p[2]) ^ q[2]), ((p[3] & q[3]) & p[0])};"
+        ),
+        "each element keeps exactly its own terms, got:\n{}",
+        sv
+    );
+}
+
+/// `(W)'b0` in a generic entity is a zero of width W. The cast's width named a
+/// const parameter that specialization never substituted, and SV emission
+/// dropped the width of literal casts, so the concatenation got an unsized
+/// `0` (illegal in a concatenation, and 32 bits wide anywhere else).
+#[test]
+fn test_sized_cast_literal_keeps_its_parameter_width() {
+    let source = r#"
+entity SizedPad<const WIDTH: usize> {
+    in a: bit<WIDTH>
+    out y: bit<WIDTH * 2>
+    out z: bit<WIDTH * 2>
+}
+impl SizedPad {
+    const W2: usize = WIDTH * 2;
+    y = {(W2)'b0, a} << 1
+    z = {(WIDTH)'b0, a}
+}
+entity PadTop {
+    in a: bit[8]
+    out y: bit[16]
+    out z: bit[16]
+}
+impl PadTop {
+    inst p = SizedPad<8> { a: a }
+    y = p.y
+    z = p.z
+}
+"#;
+    let sv = compile_to_sv(source).expect("must compile");
+    assert!(sv.contains("assign y = ({16'(0), a} << 1);"), "{}", sv);
+    assert!(sv.contains("assign z = {8'(0), a};"), "{}", sv);
+}
+
+/// Sized literal patterns (`12'h001 =>`) failed to parse and their arms were
+/// dropped silently, leaving only the wildcard: `assign y = 0;`.
+#[test]
+fn test_match_on_sized_literal_patterns_keeps_every_arm() {
+    let source = r#"
+entity MatchSized {
+    in sel: bit[12]
+    in a: bit[8]
+    in b: bit[8]
+    out y: bit[8]
+}
+impl MatchSized {
+    y = match sel {
+        12'h001 => a,
+        12'h002 => b,
+        12'hC00 => a ^ b,
+        12'b0000_0000_0100 => a | b,
+        12'd9 => a & b,
+        _ => 0
+    }
+}
+"#;
+    let sv = compile_to_sv(source).expect("must compile");
+    for pattern in [
+        "sel == 12'b000000000001",
+        "sel == 12'b000000000010",
+        "sel == 12'b110000000000",
+        "sel == 12'b000000000100",
+        "sel == 12'b000000001001",
+    ] {
+        assert!(sv.contains(pattern), "missing `{}` in:\n{}", pattern, sv);
+    }
+}
+
+/// `match f3[1:0]` (and the statement form) matched against all of `f3`: the
+/// slice is a postfix sibling node of the scrutinee and was ignored.
+#[test]
+fn test_match_on_slice_examines_the_slice() {
+    let source = r#"
+entity MatchSliced {
+    in clk: clock
+    in f3: bit[3]
+    in a: bit[8]
+    in b: bit[8]
+    out y: bit[8]
+    out r: bit[8]
+}
+impl MatchSliced {
+    signal acc: bit[8] = 0
+    on(clk.rise) {
+        match f3[2:1] {
+            1 => { acc = a }
+            _ => { acc = b }
+        }
+    }
+    y = match f3[1:0] {
+        1 => a,
+        2 => a | b,
+        _ => a & b
+    }
+    r = acc
+}
+"#;
+    let sv = compile_to_sv(source).expect("must compile");
+    assert!(
+        sv.contains("f3[1:0] =="),
+        "expression match ignores the slice:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("f3[2:1]"),
+        "statement match ignores the slice:\n{}",
+        sv
+    );
+    assert!(
+        !sv.contains("(f3 =="),
+        "a match compares the whole of f3:\n{}",
+        sv
+    );
+}

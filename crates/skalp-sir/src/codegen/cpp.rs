@@ -271,19 +271,17 @@ extern "C" void batched_simulation(
                 continue; // Arrays don't get local copies
             }
 
-            // Only create local copies for scalar registers (≤64 bits for C++)
-            if signal_width <= 64 {
-                let sanitized = self.shared.sanitize_name(name);
-                let (base_type, array_size) =
-                    self.shared.type_mapper.get_type_for_width(signal_width);
+            // Every scalar-stored register (C++: up to 128 bits) gets a local copy;
+            // `get_register_accessor` reads `local_X` for exactly these.
+            let sanitized = self.shared.sanitize_name(name);
+            let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
 
-                if array_size.is_none() {
-                    output.push_str(&format!(
-                        "    {} local_{} = registers->{};\n",
-                        base_type, sanitized, sanitized
-                    ));
-                    declared_locals.insert(sanitized);
-                }
+            if array_size.is_none() {
+                output.push_str(&format!(
+                    "    {} local_{} = registers->{};\n",
+                    base_type, sanitized, sanitized
+                ));
+                declared_locals.insert(sanitized);
             }
         }
 
@@ -303,16 +301,14 @@ extern "C" void batched_simulation(
                             continue;
                         }
                         let width = self.shared.get_signal_width(&ff_output.signal_id);
-                        if width <= 64 {
-                            let (base_type, array_size) =
-                                self.shared.type_mapper.get_type_for_width(width);
-                            if array_size.is_none() {
-                                output.push_str(&format!(
-                                    "    {} local_{} = registers->{};\n",
-                                    base_type, sanitized, sanitized
-                                ));
-                                declared_locals.insert(sanitized);
-                            }
+                        let (base_type, array_size) =
+                            self.shared.type_mapper.get_type_for_width(width);
+                        if array_size.is_none() {
+                            output.push_str(&format!(
+                                "    {} local_{} = registers->{};\n",
+                                base_type, sanitized, sanitized
+                            ));
+                            declared_locals.insert(sanitized);
                         }
                     }
                 }
@@ -345,17 +341,15 @@ extern "C" void batched_simulation(
                 continue; // Arrays are written directly, not via local copies
             }
 
-            if elem.width <= 64 {
-                let sanitized = self.shared.sanitize_name(name);
-                let (_, array_size) = self.shared.type_mapper.get_type_for_width(elem.width);
+            let sanitized = self.shared.sanitize_name(name);
+            let (_, array_size) = self.shared.type_mapper.get_type_for_width(elem.width);
 
-                if array_size.is_none() {
-                    output.push_str(&format!(
-                        "    registers->{} = local_{};\n",
-                        sanitized, sanitized
-                    ));
-                    written_back.insert(sanitized);
-                }
+            if array_size.is_none() {
+                output.push_str(&format!(
+                    "    registers->{} = local_{};\n",
+                    sanitized, sanitized
+                ));
+                written_back.insert(sanitized);
             }
         }
 
@@ -374,15 +368,13 @@ extern "C" void batched_simulation(
                             continue;
                         }
                         let width = self.shared.get_signal_width(&ff_output.signal_id);
-                        if width <= 64 {
-                            let (_, array_size) = self.shared.type_mapper.get_type_for_width(width);
-                            if array_size.is_none() {
-                                output.push_str(&format!(
-                                    "    registers->{} = local_{};\n",
-                                    sanitized, sanitized
-                                ));
-                                written_back.insert(sanitized);
-                            }
+                        let (_, array_size) = self.shared.type_mapper.get_type_for_width(width);
+                        if array_size.is_none() {
+                            output.push_str(&format!(
+                                "    registers->{} = local_{};\n",
+                                sanitized, sanitized
+                            ));
+                            written_back.insert(sanitized);
                         }
                     }
                 }

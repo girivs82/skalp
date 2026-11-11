@@ -4128,9 +4128,13 @@ fn synthesize_design(
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
 
-    println!("🔧 Synthesizing design for device: {}", device);
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Source: {:?}", source);
+    // An --emit dump goes to stdout on its own, so it can be piped.
+    let banner = emit.is_none();
+    if banner {
+        println!("🔧 Synthesizing design for device: {}", device);
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("Source: {:?}", source);
+    }
 
     // Parse device string (e.g., "ice40-hx8k" -> ("ice40", "hx8k"))
     let (family, variant) = device.split_once('-').ok_or_else(|| {
@@ -4160,7 +4164,9 @@ fn synthesize_design(
     // Load technology library
     let library = get_stdlib_library(library_name)
         .context(format!("Failed to load {} library", library_name))?;
-    println!("Library: {}", library_name);
+    if banner {
+        println!("Library: {}", library_name);
+    }
 
     // Parse and build HIR with full module resolution (stdlib, imports)
     let context = parse_and_build_compilation_context(source).context("Failed to parse source")?;
@@ -4207,12 +4213,14 @@ fn synthesize_design(
     // Get top module
     let top_module =
         find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
-    println!("Module: {}", top_module.name);
+    if banner {
+        println!("Module: {}", top_module.name);
+    }
 
     // Hierarchical LIR lowering with NCL expansion for async modules
     let (hier_lir, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
 
-    if has_async {
+    if has_async && banner {
         println!("NCL: async modules detected, applying boundary NCL");
     }
 
@@ -4230,16 +4238,24 @@ fn synthesize_design(
         hier_lir
     };
 
-    // --emit lir: dump top-level LIR and exit
+    // --emit lir: dump the LIR of every instance synthesis will see, keyed by
+    // instance path (`top`, `top.u`, ...). The hierarchy is keyed by path, not
+    // by module name, so the top is `top`.
     if emit == Some("lir") {
-        if let Some(top) = hier_lir.instances.get(&hier_lir.top_module) {
-            println!("{}", serde_json::to_string_pretty(&top.lir_result.lir)?);
-        } else {
-            anyhow::bail!(
-                "Top module '{}' not found in hierarchical LIR",
-                hier_lir.top_module
+        let mut dump = serde_json::Map::new();
+        for (path, inst) in &hier_lir.instances {
+            dump.insert(
+                path.clone(),
+                serde_json::json!({
+                    "module": inst.module_name,
+                    "lir": inst.lir_result.lir,
+                }),
             );
         }
+        if dump.is_empty() {
+            anyhow::bail!("No modules found in design");
+        }
+        println!("{}", serde_json::to_string_pretty(&dump)?);
         return Ok(());
     }
 

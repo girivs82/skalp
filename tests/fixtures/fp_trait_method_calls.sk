@@ -1,0 +1,61 @@
+// Floating-point trait methods called by name: `x.add(y)`, `x.mul(y)` and
+// `sqrt(x)`, in signal initializers and in a function that is big enough to
+// be synthesized as its own module. Nothing is imported: `fp32` and its
+// operator impls come with the standard library, and the entities those impls
+// instantiate (`FpSqrt`, ...) must resolve without being in the caller's scope.
+
+pub fn f_add(a: bit[32], b: bit[32]) -> bit[32] {
+    return ((a as fp32) + (b as fp32)) as bit[32]
+}
+
+pub fn f_mul(a: bit[32], b: bit[32]) -> bit[32] {
+    return ((a as fp32) * (b as fp32)) as bit[32]
+}
+
+pub fn f_div(a: bit[32], b: bit[32]) -> bit[32] {
+    return ((a as fp32) / (b as fp32)) as bit[32]
+}
+
+pub fn f_sqrt(a: bit[32]) -> bit[32] {
+    let x = a as fp32;
+    let r = sqrt(x);
+    return r as bit[32]
+}
+
+// More calls than the inliner takes, so this becomes a module of its own.
+pub fn exec(op: bit[3], a: bit[32], b: bit[32]) -> bit[32] {
+    let r: bit[32] = match op {
+        0 => f_add(a, b),
+        1 => f_mul(a, b),
+        2 => {
+            let p = f_mul(a, b);
+            f_add(p, a)
+        },
+        3 => f_sqrt(a),
+        4 => f_div(a, b),
+        _ => f_add(b, b)
+    };
+    return r
+}
+
+entity FpMethodCalls {
+    in op: bit[3]
+    in a: bit[32]
+    in b: bit[32]
+    out sum: bit[32]
+    out prod: bit[32]
+    out root: bit[32]
+    out unit: bit[32]
+}
+
+impl FpMethodCalls {
+    signal x: fp32 = a as fp32
+    signal y: fp32 = b as fp32
+    signal s: fp32 = x.add(y)
+    signal p: fp32 = x.mul(y)
+    signal r: fp32 = sqrt(x)
+    sum = s as bit[32]
+    prod = p as bit[32]
+    root = r as bit[32]
+    unit = exec(op, a, b)
+}

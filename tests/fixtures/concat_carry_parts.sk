@@ -1,0 +1,16 @@
+// Concatenations whose parts are add/subtract results.
+entity ConcatCarryParts {
+    in clk: clock
+    in x: bit[32]
+    in y: bit[32]
+    out lo: bit[64]
+    out hi: bit[32]
+    out small: bit[32]
+}
+
+impl ConcatCarryParts {
+    signal wide: bit[96] = {x - y, x + y, x - y}
+    lo = wide[63:0]
+    hi = wide[95:64]
+    small = {x[15:0] - y[15:0], x[15:0] + y[15:0]}
+}

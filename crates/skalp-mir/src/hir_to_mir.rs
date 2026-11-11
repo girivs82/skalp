@@ -893,6 +893,15 @@ impl<'hir> HirToMir<'hir> {
                                     hir_signal.name, mir_signal_id
                                 );
                             }
+                        } else {
+                            let entity = self.current_entity_name();
+                            self.conversion_errors.push((
+                                entity,
+                                format!(
+                                    "initializer of signal `{}` could not be lowered — the signal would have no driver",
+                                    hir_signal.name
+                                ),
+                            ));
                         }
                     }
                 }
@@ -1338,6 +1347,12 @@ impl<'hir> HirToMir<'hir> {
                     let (gen_signals, gen_event_blocks, gen_assignments) =
                         self.elaborate_generate_blocks_in_impl(impl_block);
 
+                    // Initializers that cannot be lowered while the signals are being
+                    // declared — they read an instance output (`signal r = inst.out`)
+                    // or a signal declared later — are retried as continuous
+                    // assignments, after the instances, with the impl's own.
+                    let mut deferred_initializers: Vec<hir::HirAssignment> = Vec::new();
+
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
                         let pre_id = self.next_signal_id;
@@ -1519,7 +1534,10 @@ impl<'hir> HirToMir<'hir> {
                                             module.name, hir_signal.name
                                         );
                                 }
-                                // Convert the expression
+                                // Convert the expression. A failure here is retried
+                                // later (see deferred_initializers), so errors this
+                                // attempt records are dropped with it.
+                                let errors_before = self.conversion_errors.len();
                                 let convert_result = self.convert_expression(init_expr, 0);
                                 if is_fp_module {
                                     trace!(
@@ -1573,15 +1591,15 @@ impl<'hir> HirToMir<'hir> {
                                         }
                                     }
                                 } else {
-                                    // BUG #207: Signal initializer conversion FAILED
-                                    // Print more details based on expression type
-                                    match init_expr {
-                                        hir::HirExpression::Index(base, idx) => {}
-                                        hir::HirExpression::Range(base, hi, lo) => {}
-                                        hir::HirExpression::Cast(cast) => {}
-                                        hir::HirExpression::Binary(bin) => {}
-                                        _ => {}
-                                    }
+                                    self.conversion_errors.truncate(errors_before);
+                                    self.pending_temp_signals.clear();
+                                    deferred_initializers.push(hir::HirAssignment {
+                                        id: hir::AssignmentId(u32::MAX),
+                                        comments: Vec::new(),
+                                        lhs: hir::HirLValue::Signal(hir_signal.id),
+                                        assignment_type: hir::HirAssignmentType::Combinational,
+                                        rhs: init_expr.clone(),
+                                    });
                                 }
                             }
                         }
@@ -1931,10 +1949,13 @@ impl<'hir> HirToMir<'hir> {
                         .chain(gen_assignments.iter())
                         .collect();
                     for (i, a) in all_assignments.iter().enumerate() {}
+                    let regular_assignment_count =
+                        impl_block.assignments.len() + gen_assignments.len();
                     let all_assignments_for_processing: Vec<_> = impl_block
                         .assignments
                         .iter()
                         .chain(gen_assignments.iter())
+                        .chain(deferred_initializers.iter())
                         .collect();
                     let total_assignments = all_assignments_for_processing.len();
                     for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate()
@@ -1956,6 +1977,28 @@ impl<'hir> HirToMir<'hir> {
 
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
+                        if idx >= regular_assignment_count && assigns.is_empty() {
+                            // A signal whose initializer cannot be lowered
+                            // would have no driver at all.
+                            let name = match &hir_assign.lhs {
+                                hir::HirLValue::Signal(id) => impl_block
+                                    .signals
+                                    .iter()
+                                    .chain(gen_signals.iter())
+                                    .find(|s| s.id == *id)
+                                    .map(|s| s.name.clone()),
+                                _ => None,
+                            }
+                            .unwrap_or_default();
+                            let entity = self.current_entity_name();
+                            self.conversion_errors.push((
+                                entity,
+                                format!(
+                                    "initializer of signal `{}` could not be lowered — the signal would have no driver",
+                                    name
+                                ),
+                            ));
+                        }
                         trace!(
                                 "[TRAIT_DEBUG_EXIT] convert_continuous_assignment_expanded returned {} assigns", assigns.len()
                             );
@@ -2740,14 +2783,17 @@ impl<'hir> HirToMir<'hir> {
                                 .pending_specializations
                                 .contains_key(&target_entity_name)
                         {
+                            // A specialization sitting in a loaded module's HIR
+                            // only counts when it was also given a module in this
+                            // design; otherwise the instance would resolve to an
+                            // entity with no module (and by its id, which belongs
+                            // to that other HIR, to an unrelated one).
                             let specialized_exists =
                                 hir.entities.iter().any(|e| e.name == target_entity_name)
                                     || self.root_hir.is_some_and(|r| {
                                         r.entities.iter().any(|e| e.name == target_entity_name)
                                     })
-                                    || self.module_hirs.values().any(|h| {
-                                        h.entities.iter().any(|e| e.name == target_entity_name)
-                                    });
+                                    || self.entity_name_to_module.contains_key(&target_entity_name);
                             if !specialized_exists {
                                 let generic_entity = hir
                                     .entities
@@ -2762,8 +2808,23 @@ impl<'hir> HirToMir<'hir> {
                                             .cloned()
                                     });
                                 if let Some(gent) = generic_entity {
-                                    if gent.generics.len() == resolved_generic_args.len() {
+                                    // Arguments left out must have defaults
+                                    // (`FpSqrt<IEEE754_32>` leaves the intent at
+                                    // DEFAULT_INTENT). A defaulted const takes its
+                                    // default value; an intent needs no const
+                                    // argument.
+                                    let explicit = resolved_generic_args.len();
+                                    let rest_defaulted = explicit <= gent.generics.len()
+                                        && gent.generics[explicit..].iter().all(|g| {
+                                            g.default_value.is_some()
+                                                || matches!(
+                                                    g.param_type,
+                                                    hir::HirGenericType::Intent
+                                                )
+                                        });
+                                    if rest_defaulted {
                                         let mut const_args: Vec<(String, ConstValue)> = Vec::new();
+                                        let mut needed = explicit;
                                         for (g, arg_expr) in
                                             gent.generics.iter().zip(resolved_generic_args.iter())
                                         {
@@ -2773,7 +2834,17 @@ impl<'hir> HirToMir<'hir> {
                                                 break;
                                             }
                                         }
-                                        if const_args.len() == gent.generics.len() {
+                                        for g in &gent.generics[explicit..] {
+                                            if let (hir::HirGenericType::Const(_), Some(default)) =
+                                                (&g.param_type, &g.default_value)
+                                            {
+                                                needed += 1;
+                                                if let Ok(v) = self.const_evaluator.eval(default) {
+                                                    const_args.push((g.name.clone(), v));
+                                                }
+                                            }
+                                        }
+                                        if const_args.len() == needed {
                                             trace!(
                                                 "[ON_DEMAND_SPEC] Recording pending specialization '{}' of generic '{}'",
                                                 target_entity_name,
@@ -2805,9 +2876,14 @@ impl<'hir> HirToMir<'hir> {
                                 root_hir.and_then(|r| {
                                     r.entities.iter().find(|e| e.name == target_entity_name)
                                 })
-                            })
-                            .or_else(|| hir.entities.iter().find(|e| e.name == resolved_type_name));
-                        // If not found in main HIR, search module HIRs (clone to avoid borrow conflict)
+                            });
+                        // Then the loaded module HIRs (clone to avoid a borrow
+                        // conflict). The SPECIALIZATION is looked for everywhere
+                        // before any copy of the generic is accepted: the bare
+                        // generic is often present in the main HIR too, and
+                        // taking it while `FpSqrt_fp32` sat in the stdlib's HIR
+                        // wired `sqrt(x)` in a design that never imported the fp
+                        // module to a template with no body.
                         let module_hir_entity: Option<hir::HirEntity>;
                         let entity = if entity.is_some() {
                             entity
@@ -2816,8 +2892,15 @@ impl<'hir> HirToMir<'hir> {
                                 .module_hirs
                                 .values()
                                 .flat_map(|h| h.entities.iter())
-                                .find(|e| {
-                                    e.name == target_entity_name || e.name == resolved_type_name
+                                .find(|e| e.name == target_entity_name)
+                                .or_else(|| {
+                                    hir.entities.iter().find(|e| e.name == resolved_type_name)
+                                })
+                                .or_else(|| {
+                                    self.module_hirs
+                                        .values()
+                                        .flat_map(|h| h.entities.iter())
+                                        .find(|e| e.name == resolved_type_name)
                                 })
                                 .cloned();
                             module_hir_entity.as_ref()
@@ -3201,6 +3284,30 @@ impl<'hir> HirToMir<'hir> {
                                                 field_init.name
                                             );
                                         }
+                                    }
+                                }
+
+                                // An output the instantiation does not bind (`inst m =
+                                // std_multiplier<N> { a: a, b: b }`, read later as
+                                // `m.product`) still drives the signal created for it
+                                // above. Without a connection the netlist instance left
+                                // the port open and every reader of `m.product` saw an
+                                // undriven wire.
+                                for (port_name, &sig_id) in &output_ports {
+                                    let bound = connections.contains_key(port_name)
+                                        || connections.keys().any(|k| {
+                                            k.starts_with(&format!(
+                                                "{}{}",
+                                                port_name, FIELD_SEPARATOR
+                                            ))
+                                        });
+                                    if !bound {
+                                        connections.insert(
+                                            port_name.clone(),
+                                            Expression::with_unknown_type(ExpressionKind::Ref(
+                                                LValue::Signal(sig_id),
+                                            )),
+                                        );
                                     }
                                 }
 
@@ -9146,6 +9253,30 @@ impl<'hir> HirToMir<'hir> {
                     _ => {} // Not an intent helper or intrinsic, continue to regular function handling
                 }
 
+                // Bit-manipulation builtins (`clz`, `ctz`, `popcount`,
+                // `is_power_of_2`, `min`, `max`) on run-time values. With
+                // constant arguments they fold in the frontend; with signals
+                // they used to reach the function inliner, find no definition,
+                // and drop the whole expression.
+                if let Some(lowered) = self.lower_runtime_builtin(call, depth) {
+                    return lowered;
+                }
+
+                // Trait methods called by name (`sqrt(x)`, `a.add(b)`).
+                if let Some((type_name, trait_name)) = self.resolve_trait_call(call) {
+                    let operands: Vec<&hir::HirExpression> = call.args.iter().collect();
+                    if let Some(result) = self.inline_trait_method_with_ctx(
+                        &type_name,
+                        trait_name,
+                        &call.function,
+                        &operands,
+                        None,
+                        depth,
+                    ) {
+                        return Some(result);
+                    }
+                }
+
                 // Enum variant constructor with payload: State::Transfer(0)
                 // call.function = "State::Transfer", call.args = [0]
                 if call.function.contains("::") {
@@ -11885,6 +12016,146 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Find a function by name in the current implementation or top-level functions
+    /// Lower a bit-manipulation builtin applied to run-time values into logic.
+    ///
+    /// Returns `None` when `call` is not one of these builtins, and
+    /// `Some(None)` when it is but an operand cannot be converted or has no
+    /// known width (the caller then reports the expression as not lowered).
+    fn lower_runtime_builtin(
+        &mut self,
+        call: &hir::HirCallExpr,
+        depth: usize,
+    ) -> Option<Option<Expression>> {
+        use skalp_frontend::types::Width;
+        let name = call.function.as_str();
+        let arity = match name {
+            "clz" | "ctz" | "popcount" | "is_power_of_2" => 1,
+            "min" | "max" => 2,
+            _ => return None,
+        };
+        if call.args.len() != arity {
+            return None;
+        }
+        let mut operands = Vec::with_capacity(arity);
+        for arg in &call.args {
+            let Some(expr) = self.convert_expression(arg, depth + 1) else {
+                return Some(None);
+            };
+            operands.push(expr);
+        }
+
+        if arity == 2 {
+            // min/max: select with a comparison of the operands' own type.
+            let (a, b) = (operands[0].clone(), operands[1].clone());
+            let ty = a.ty.clone();
+            let cond = Expression::new(
+                ExpressionKind::Binary {
+                    op: BinaryOp::Less,
+                    left: Box::new(a.clone()),
+                    right: Box::new(b.clone()),
+                },
+                Type::Bool,
+            );
+            let (then_expr, else_expr) = if name == "min" { (a, b) } else { (b, a) };
+            return Some(Some(Expression::new(
+                ExpressionKind::Conditional {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
+                ty,
+            )));
+        }
+
+        let x = operands.pop().expect("one operand");
+        let Some(width) = self
+            .try_mir_expr_width(&x)
+            .or_else(|| self.infer_hir_expression_width(&call.args[0]))
+        else {
+            return Some(None);
+        };
+        let w = width as usize;
+        let literal = |value: u64, bits: usize| {
+            Expression::new(
+                ExpressionKind::Literal(Value::BitVector { width: bits, value }),
+                Type::Bit(Width::Fixed(bits as u32)),
+            )
+        };
+        let binary = |op: BinaryOp, left: Expression, right: Expression, ty: Type| {
+            Expression::new(
+                ExpressionKind::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                ty,
+            )
+        };
+        let bit_set = |i: usize| {
+            let shifted = binary(
+                BinaryOp::RightShift,
+                x.clone(),
+                literal(i as u64, w),
+                x.ty.clone(),
+            );
+            let masked = binary(BinaryOp::BitwiseAnd, shifted, literal(1, w), x.ty.clone());
+            binary(BinaryOp::NotEqual, masked, literal(0, w), Type::Bool)
+        };
+        // Counts run from 0 to W inclusive.
+        let count_bits = (usize::BITS - w.leading_zeros()) as usize;
+        let count_ty = Type::Nat(Width::Fixed(count_bits as u32));
+        let select = |cond: Expression, then_expr: Expression, else_expr: Expression| {
+            Expression::new(
+                ExpressionKind::Conditional {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
+                Type::Nat(Width::Fixed(count_bits as u32)),
+            )
+        };
+
+        let lowered = match name {
+            // Priority encoders, built from the far end inwards so the
+            // outermost test is the highest-priority bit.
+            "clz" => {
+                let mut expr = literal(w as u64, count_bits);
+                // Bit (w-1-k) set with every bit above it clear => k.
+                for k in (0..w).rev() {
+                    expr = select(bit_set(w - 1 - k), literal(k as u64, count_bits), expr);
+                }
+                expr
+            }
+            "ctz" => {
+                let mut expr = literal(w as u64, count_bits);
+                for k in (0..w).rev() {
+                    expr = select(bit_set(k), literal(k as u64, count_bits), expr);
+                }
+                expr
+            }
+            "popcount" => {
+                let mut sum: Option<Expression> = None;
+                for i in 0..w {
+                    let one = select(bit_set(i), literal(1, count_bits), literal(0, count_bits));
+                    sum = Some(match sum {
+                        None => one,
+                        Some(acc) => binary(BinaryOp::Add, acc, one, count_ty.clone()),
+                    });
+                }
+                sum.unwrap_or_else(|| literal(0, count_bits))
+            }
+            "is_power_of_2" => {
+                let nonzero = binary(BinaryOp::NotEqual, x.clone(), literal(0, w), Type::Bool);
+                let minus_one = binary(BinaryOp::Sub, x.clone(), literal(1, w), x.ty.clone());
+                let low_bits = binary(BinaryOp::BitwiseAnd, x.clone(), minus_one, x.ty.clone());
+                let single = binary(BinaryOp::Equal, low_bits, literal(0, w), Type::Bool);
+                binary(BinaryOp::LogicalAnd, nonzero, single, Type::Bool)
+            }
+            _ => unreachable!("arity table covers every name"),
+        };
+        Some(Some(lowered))
+    }
+
     fn find_function(&self, function_name: &str) -> Option<&hir::HirFunction> {
         let hir = self.hir?;
 
@@ -18456,8 +18727,7 @@ impl<'hir> HirToMir<'hir> {
             type_name,
             trait_name,
             method_name,
-            left_expr,
-            right_expr,
+            &[left_expr, right_expr],
             None,
             0,
         )
@@ -18473,8 +18743,7 @@ impl<'hir> HirToMir<'hir> {
         type_name: &str,
         trait_name: &str,
         method_name: &str,
-        left_expr: &hir::HirExpression,
-        right_expr: &hir::HirExpression,
+        operands: &[&hir::HirExpression],
         module_ctx: Option<&ModuleSynthesisContext>,
         depth: usize,
     ) -> Option<Expression> {
@@ -18551,14 +18820,21 @@ impl<'hir> HirToMir<'hir> {
             body.len()
         );
 
-        // Build parameter substitution map
-        // For binary operators: param[0] = left, param[1] = right
-        let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
-        if !params.is_empty() {
-            param_map.insert(params[0].name.clone(), left_expr);
+        // Build parameter substitution map: param[i] = operands[i]
+        // (binary operators: left, right; unary methods such as `sqrt`: the argument)
+        if params.len() != operands.len() {
+            trace!(
+                "[TRAIT_INLINE] FAILED: {}::{} takes {} parameter(s), called with {}",
+                trait_name,
+                method_name,
+                params.len(),
+                operands.len()
+            );
+            return None;
         }
-        if params.len() >= 2 {
-            param_map.insert(params[1].name.clone(), right_expr);
+        let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
+        for (param, operand) in params.iter().zip(operands.iter()) {
+            param_map.insert(param.name.clone(), *operand);
         }
 
         // Bind impl generics for the concrete type.
@@ -18616,22 +18892,39 @@ impl<'hir> HirToMir<'hir> {
         // (see the Let arm below) and resolve through this overlay at
         // conversion time, which convert_expression checks FIRST (BUG #178).
         let mut operand_overlay: Vec<(String, Option<Expression>)> = Vec::new();
+        let operator_width = Self::extract_bit_width(type_name);
         {
             let mut converted: Vec<(String, Expression)> = Vec::new();
             let mut all_ok = true;
-            for (idx, opnd) in [(0usize, left_expr), (1usize, right_expr)] {
-                if params.len() > idx {
-                    let mir = if let Some(ctx) = module_ctx {
-                        self.convert_hir_expr_for_module(opnd, ctx, depth + 1)
-                    } else {
-                        self.convert_expression(opnd, 0)
-                    };
-                    match mir {
-                        Some(m) => converted.push((params[idx].name.clone(), m)),
-                        None => {
-                            all_ok = false;
-                            break;
-                        }
+            for (idx, opnd) in operands.iter().copied().enumerate() {
+                let mir = if let Some(ctx) = module_ctx {
+                    self.convert_hir_expr_for_module(opnd, ctx, depth + 1)
+                } else {
+                    self.convert_expression(opnd, 0)
+                };
+                match mir {
+                    Some(m) => {
+                        // The trait parameters are `Self` (`bit<N>`, N being the
+                        // operator's width). An operand narrower than N must be
+                        // extended BEFORE the body uses it: `impl Sub` passes
+                        // `~b` to the adder, and `~` of a 4-bit `clz(v)` that is
+                        // zero-extended afterwards is not `~` of the 32-bit
+                        // value (`11 - clz(v)` came out as 16 for clz = 11).
+                        let m = match (operator_width, self.try_mir_expr_width(&m)) {
+                            (Some(w), Some(mw)) if (mw as usize) < w => Expression::new(
+                                ExpressionKind::Cast {
+                                    expr: Box::new(m),
+                                    target_type: DataType::Bit(w),
+                                },
+                                Type::Bit(Width::Fixed(w as u32)),
+                            ),
+                            _ => m,
+                        };
+                        converted.push((params[idx].name.clone(), m))
+                    }
+                    None => {
+                        all_ok = false;
+                        break;
                     }
                 }
             }
@@ -18645,6 +18938,29 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
         }
+
+        // An impl from a loaded module the design never imported (the
+        // standard library's `impl Sqrt for fp32`, reached through `sqrt(x)`)
+        // names that module's constants: `FpSqrt<IEEE754_32>`. Unresolved, the
+        // argument is skipped, the instance falls back to the bare generic
+        // template — a module with no body — and the result floats. Make the
+        // defining module's top-level constants visible while its body
+        // converts. The operands were converted above, in the caller's scope.
+        let saved_constants = match self.find_trait_impl_with_origin(type_name, trait_name) {
+            Some((_, Some(origin))) => {
+                let saved = self.const_evaluator.save_constants();
+                for implementation in origin
+                    .implementations
+                    .iter()
+                    .filter(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+                {
+                    self.const_evaluator
+                        .register_constants(&implementation.constants);
+                }
+                Some(saved)
+            }
+            _ => None,
+        };
 
         // Trait-body entity instantiations register themselves in the
         // instance maps under the STDLIB impl's bare VariableIds — which
@@ -18773,6 +19089,9 @@ impl<'hir> HirToMir<'hir> {
         // Restore the instance maps clobbered by trait-body instantiation
         self.entity_instance_outputs = saved_instance_outputs;
         self.entity_instance_info = saved_instance_info;
+        if let Some(saved) = saved_constants {
+            self.const_evaluator.restore_constants(saved);
+        }
 
         // Restore the operand overlay (reverse order restores shadowed entries)
         for (name, old) in operand_overlay.into_iter().rev() {
@@ -18818,166 +19137,6 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
-    /// Inline a unary trait method call (e.g., Sqrt::sqrt(x))
-    ///
-    /// Similar to inline_trait_method but for single-argument trait methods like Sqrt, Abs, Neg.
-    /// This enables explicit trait method calls like `Sqrt::sqrt(x)` in the source code.
-    fn inline_trait_method_unary(
-        &mut self,
-        type_name: &str,
-        trait_name: &str,
-        method_name: &str,
-        arg_expr: &hir::HirExpression,
-    ) -> Option<Expression> {
-        trace!(
-            "[TRAIT_INLINE_UNARY] Inlining {}::{} for type '{}'",
-            trait_name,
-            method_name,
-            type_name
-        );
-
-        // Get the method definition (parameters) from the trait
-        let method_def = self.find_trait_method_definition(trait_name, method_name);
-        if method_def.is_none() {
-            trace!(
-                "[TRAIT_INLINE_UNARY] FAILED: Could not find method definition for {}::{}",
-                trait_name,
-                method_name
-            );
-            return None;
-        }
-        let method_def = method_def.unwrap();
-        let params = method_def.parameters.clone();
-
-        // Get the method implementation (body) from the impl
-        let trait_impl = self.find_trait_impl(type_name, trait_name);
-        if trait_impl.is_none() {
-            trace!(
-                "[TRAIT_INLINE_UNARY] FAILED: Could not find trait impl for {} on {}",
-                trait_name,
-                type_name
-            );
-            return None;
-        }
-        let trait_impl = trait_impl.unwrap();
-        let method_impl = trait_impl
-            .method_implementations
-            .iter()
-            .find(|m| m.name == method_name);
-        if method_impl.is_none() {
-            trace!(
-                "[TRAIT_INLINE_UNARY] FAILED: Could not find method impl '{}' in trait impl",
-                method_name
-            );
-            return None;
-        }
-        let method_impl = method_impl.unwrap();
-        let body = method_impl.body.clone();
-
-        if body.is_empty() {
-            trace!("[TRAIT_INLINE_UNARY] FAILED: Method body is empty, cannot inline");
-            return None;
-        }
-
-        // Extract generic binding info before releasing the borrow on self
-        let impl_generic_binding: Option<(String, usize)> = if !trait_impl.generics.is_empty() {
-            if let Some(width) = Self::extract_bit_width(type_name) {
-                if let hir::TraitImplTarget::Type(hir::HirType::BitParam(param_name)) =
-                    &trait_impl.target
-                {
-                    Some((param_name.clone(), width))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        trace!(
-            "[TRAIT_INLINE_UNARY] Found {} parameters and {} body statements",
-            params.len(),
-            body.len()
-        );
-
-        // Build parameter substitution map
-        // For unary methods: param[0] = arg
-        let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
-        if !params.is_empty() {
-            param_map.insert(params[0].name.clone(), arg_expr);
-        }
-
-        // Bind impl generics for the concrete type
-        // Shadow-and-restore, for the same reason as the binary case above:
-        // a unary operator can appear inside an operand that is itself being
-        // inlined, and an unconditional unbind would strip the outer binding.
-        let mut bound_generics: Vec<(String, Option<ConstValue>)> = Vec::new();
-        if let Some((param_name, width)) = impl_generic_binding {
-            let previous = self.const_evaluator.get_binding(&param_name).cloned();
-            self.const_evaluator
-                .bind(param_name.clone(), ConstValue::Nat(width));
-            bound_generics.push((param_name, previous));
-        }
-
-        // Build var_id -> name mapping for let bindings in the body
-        let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
-        self.collect_let_bindings(&body, &mut var_id_to_name);
-
-        // Convert body to expression (like inline_function_call does)
-        let body_expr = self.convert_body_to_expression(&body);
-        if body_expr.is_none() {
-            trace!("[TRAIT_INLINE_UNARY] FAILED: convert_body_to_expression returned None");
-            return None;
-        }
-        let body_expr = body_expr.unwrap();
-
-        trace!(
-            "[TRAIT_INLINE_UNARY] Body expression type: {:?}",
-            std::mem::discriminant(&body_expr)
-        );
-
-        // Substitute parameters in the body expression
-        let substituted =
-            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name);
-        if substituted.is_none() {
-            trace!("[TRAIT_INLINE_UNARY] FAILED: substitute_expression_with_var_map returned None");
-            return None;
-        }
-        let substituted = substituted.unwrap();
-
-        trace!(
-            "[TRAIT_INLINE_UNARY] Substituted expression type: {:?}",
-            std::mem::discriminant(&substituted)
-        );
-
-        // BUG #196/BUG #197 FIX: Keep match_arm_prefix for entity instance naming
-        // (Same fix as for binary trait methods - see inline_trait_method comments)
-        trace!(
-            "[BUG #196/197] Unary trait inline '{}::{}': keeping match_arm_prefix={:?}",
-            trait_name,
-            method_name,
-            self.match_arm_prefix
-        );
-
-        // Convert the substituted expression to MIR
-        let result = self.convert_expression(&substituted, 0);
-
-        // Restore what we shadowed
-        for (name, previous) in bound_generics.into_iter().rev() {
-            match previous {
-                Some(value) => self.const_evaluator.bind(name, value),
-                None => self.const_evaluator.unbind(&name),
-            }
-        }
-
-        if result.is_none() {
-            trace!("[TRAIT_INLINE_UNARY] FAILED: convert_expression returned None");
-        }
-        result
-    }
-
     /// Find a trait implementation for a given type and trait name
     ///
     /// This is used for trait-based operator resolution. When `a + b` is encountered
@@ -18990,6 +19149,18 @@ impl<'hir> HirToMir<'hir> {
         type_name: &str,
         trait_name: &str,
     ) -> Option<&'a hir::HirTraitImplementation> {
+        self.find_trait_impl_with_origin(type_name, trait_name)
+            .map(|(trait_impl, _)| trait_impl)
+    }
+
+    /// `find_trait_impl`, also returning the loaded module HIR that defines the
+    /// impl when it is not the file being converted (an impl from the
+    /// preloaded standard library that the design never imported).
+    fn find_trait_impl_with_origin(
+        &self,
+        type_name: &str,
+        trait_name: &str,
+    ) -> Option<(&'hir hir::HirTraitImplementation, Option<&'hir Hir>)> {
         trace!(
             "[FIND_TRAIT_IMPL] Looking for impl {} for {}, module_hirs.len()={}",
             trait_name,
@@ -19041,7 +19212,7 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // First, search in main HIR
-        if let Some(hir) = self.hir.as_ref() {
+        if let Some(hir) = self.hir {
             trace!(
                 "[FIND_TRAIT_IMPL] Looking for trait '{}' on type '{}', HIR has {} trait_impls",
                 trait_name,
@@ -19059,7 +19230,7 @@ impl<'hir> HirToMir<'hir> {
                     trait_name,
                     type_name
                 );
-                return Some(result);
+                return Some((result, None));
             }
         }
 
@@ -19087,7 +19258,7 @@ impl<'hir> HirToMir<'hir> {
                     trait_name,
                     type_name
                 );
-                return Some(result);
+                return Some((result, Some(*module_hir)));
             }
         }
 
@@ -19214,6 +19385,50 @@ impl<'hir> HirToMir<'hir> {
         )
     }
 
+    /// The name a type has in `impl Trait for <name>` lookups.
+    fn trait_lookup_type_name(ty: &hir::HirType) -> Option<String> {
+        Some(match ty {
+            hir::HirType::Custom(name) => name.clone(),
+            hir::HirType::Float32 => "fp32".to_string(),
+            hir::HirType::Float64 => "fp64".to_string(),
+            hir::HirType::Float16 => "fp16".to_string(),
+            // Support bit types with width annotation for trait lookup
+            hir::HirType::Bit(width) => format!("bit[{}]", width),
+            hir::HirType::Bool => "bool".to_string(),
+            hir::HirType::Int(width) => format!("int[{}]", width),
+            _ => return None,
+        })
+    }
+
+    /// Resolve a call written as a trait method — `sqrt(x)`, `a.add(b)`
+    /// (the frontend turns `a.add(b)` into `add(a, b)`) — to the
+    /// `(type name, trait name)` of the impl it names. A plain `fn` with the
+    /// same name takes precedence, as it does for every other call.
+    ///
+    /// Such calls must be inlined the way the operator they spell is
+    /// (`inline_trait_method_with_ctx`): the impl bodies instantiate entities
+    /// (`let adder = FpAdd<..> { .. }`, `let sqrt_op = FpSqrt<..> { .. }`),
+    /// and the generic function inliner treats those as struct literals — it
+    /// dropped `signal s: fp32 = a.add(b)` outright and, once the caller was
+    /// synthesized as a module, failed with "unknown type `FpSqrt`".
+    fn resolve_trait_call(&self, call: &hir::HirCallExpr) -> Option<(String, &'static str)> {
+        if self.find_function(&call.function).is_some() {
+            return None;
+        }
+        let arity = if Self::is_binary_trait_method(&call.function) {
+            2
+        } else {
+            1
+        };
+        if call.args.len() != arity {
+            return None;
+        }
+        let trait_name = Self::function_name_to_trait_name(&call.function)?;
+        let type_name = Self::trait_lookup_type_name(&self.infer_hir_type(&call.args[0])?)?;
+        self.find_trait_impl(&type_name, trait_name)?;
+        Some((type_name, trait_name))
+    }
+
     /// Try to find a trait method for a function call
     ///
     /// When `sqrt(x)` is called where x has type `fp32`:
@@ -19246,17 +19461,7 @@ impl<'hir> HirToMir<'hir> {
         let arg_type = self.infer_hir_type(&call.args[0])?;
 
         // Get type name for trait lookup
-        let type_name = match &arg_type {
-            hir::HirType::Custom(name) => name.clone(),
-            hir::HirType::Float32 => "fp32".to_string(),
-            hir::HirType::Float64 => "fp64".to_string(),
-            hir::HirType::Float16 => "fp16".to_string(),
-            // Support bit types with width annotation for trait lookup
-            hir::HirType::Bit(width) => format!("bit[{}]", width),
-            hir::HirType::Bool => "bool".to_string(),
-            hir::HirType::Int(width) => format!("int[{}]", width),
-            _ => return None,
-        };
+        let type_name = Self::trait_lookup_type_name(&arg_type)?;
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] Argument type is '{}', looking for impl {} for {}",
@@ -22350,17 +22555,23 @@ impl<'hir> HirToMir<'hir> {
 
     /// Check if a type name refers to an entity (directly or via alias).
     fn is_entity_or_alias(&self, type_name: &str) -> bool {
-        if let Some(hir) = self.hir {
-            // First check if it's an entity alias
-            let resolved_name = self.resolve_entity_alias(type_name);
-            // Check if the resolved name matches any entity
-            let base_name = resolved_name.split('_').next().unwrap_or(&resolved_name);
-            hir.entities
-                .iter()
-                .any(|e| e.name == resolved_name || e.name == base_name)
-        } else {
-            false
+        if self.hir.is_none() {
+            return false;
         }
+        // First check if it's an entity alias
+        let resolved_name = self.resolve_entity_alias(type_name);
+        // An entity may live in the file being converted, the root design, or
+        // any loaded module (the standard library's `std_adder`, instantiated
+        // from an operator impl, is in none of the first two).
+        let defines = |hir: &Hir, name: &str| hir.entities.iter().any(|e| e.name == name);
+        let known = |name: &str| {
+            self.hir.is_some_and(|h| defines(h, name))
+                || self.root_hir.is_some_and(|h| defines(h, name))
+                || self.module_hirs.values().any(|h| defines(h, name))
+        };
+        // Specialized names carry a suffix (`FpAdd_fp32` for `FpAdd`).
+        let base_name = resolved_name.split('_').next().unwrap_or(&resolved_name);
+        known(&resolved_name) || known(base_name)
     }
 
     fn is_entity_struct_literal(&self, type_name: &str) -> bool {
@@ -23101,6 +23312,23 @@ impl<'hir> HirToMir<'hir> {
                     call.function
                 );
 
+                // Trait methods called by name (`sqrt(x)`, `a.add(b)`): inline
+                // them like the operator they spell, keeping the module context
+                // (see `resolve_trait_call`).
+                if let Some((type_name, trait_name)) = self.resolve_trait_call(call) {
+                    let operands: Vec<&hir::HirExpression> = call.args.iter().collect();
+                    if let Some(result) = self.inline_trait_method_with_ctx(
+                        &type_name,
+                        trait_name,
+                        &call.function,
+                        &operands,
+                        Some(ctx),
+                        depth,
+                    ) {
+                        return Some(result);
+                    }
+                }
+
                 // BUG FIX #125: Check cache first to prevent duplicate module instances
                 // This is critical for tuple destructuring like `let (a, b, c) = func();`
                 // where multiple FieldAccess expressions reference the same Call
@@ -23421,8 +23649,7 @@ impl<'hir> HirToMir<'hir> {
                         &type_name,
                         trait_name,
                         method_name,
-                        &bin_expr.left,
-                        &bin_expr.right,
+                        &[&bin_expr.left, &bin_expr.right],
                         Some(ctx),
                         depth,
                     ) {

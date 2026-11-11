@@ -1,0 +1,39 @@
+// An instance input bound to a `let` that muxes a constant with a port. At
+// gate level (nexus) the instance saw the wrong low bits of `bb`.
+
+entity SigPad24 {
+    in x: bit[32]
+    out sig: bit[24]
+}
+impl SigPad24 {
+    sig = {1'b1, x[22:0]}
+}
+
+entity LetMuxInstInput {
+    in clk: clock
+    in a: bit[32]
+    in b: bit[32]
+    in sel: bit
+    out p: bit[48]
+    out q: bit[48]
+}
+impl LetMuxInstInput {
+    const ONE: bit[32] = 32'h3F80_0000
+    let bb: bit[32] = if sel == 1 { ONE } else { b }
+    inst ua = SigPad24 { x: a }
+    inst ub = SigPad24 { x: bb }
+    signal ma48: bit[48]
+    ma48 = {24'b0, ua.sig}
+    signal mb48: bit[48]
+    mb48 = {24'b0, ub.sig}
+    signal prod: bit[48]
+    prod = ma48 * mb48
+    signal r: bit[48] = 0
+    signal ms: bit[48] = 0
+    p = r
+    q = ms
+    on(clk.rise) {
+        r = prod
+        ms = ma48 ^ mb48
+    }
+}
