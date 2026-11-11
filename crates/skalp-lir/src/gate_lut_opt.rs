@@ -176,6 +176,7 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
     // Mark buffer cells for removal by clearing their outputs
     let buffer_ids: HashSet<CellId> = buffer_rewires.iter().map(|(id, _, _, _)| *id).collect();
     netlist.cells.retain(|c| !buffer_ids.contains(&c.id));
+    netlist.rebuild_net_connectivity();
 
     stats
 }
@@ -495,6 +496,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
     }
 
     netlist.cells.retain(|c| !cells_to_remove.contains(&c.id));
+    netlist.rebuild_net_connectivity();
 
     stats
 }

@@ -300,6 +300,7 @@ impl NclOptimizer {
 
         // Remove collapsed cells
         netlist.cells.retain(|c| !cells_to_remove.contains(&c.id));
+        netlist.rebuild_net_connectivity();
     }
 
     /// Propagate NOT operations by swapping rails
@@ -373,6 +374,7 @@ impl NclOptimizer {
 
         // Remove standalone NOT/INV cells that were absorbed
         netlist.cells.retain(|c| !cells_to_remove.contains(&c.id));
+        netlist.rebuild_net_connectivity();
     }
 
     /// Merge cascaded threshold gates into larger gates
@@ -522,6 +524,7 @@ impl NclOptimizer {
 
         // Remove duplicate completion cells
         netlist.cells.retain(|c| !cells_to_remove.contains(&c.id));
+        netlist.rebuild_net_connectivity();
     }
 
     /// Eliminate unused rails from dual-rail signals
@@ -552,6 +555,7 @@ impl NclOptimizer {
 
         // Remove dead cells
         netlist.cells.retain(|c| !cells_to_remove.contains(&c.id));
+        netlist.rebuild_net_connectivity();
 
         // Remove unused nets
         let nets_before = netlist.nets.len();

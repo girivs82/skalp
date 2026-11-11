@@ -890,6 +890,13 @@ impl GateNetlist {
 
     /// Add a cell and return its ID
     pub fn add_cell(&mut self, mut cell: Cell) -> CellId {
+        debug_assert!(
+            self.cells
+                .last()
+                .is_none_or(|last| last.id.0 as usize + 1 == self.cells.len()),
+            "cell ids out of step with their indices: a pass removed cells \
+             without calling rebuild_net_connectivity"
+        );
         let id = CellId(self.cells.len() as u32);
         cell.id = id;
 
@@ -934,8 +941,18 @@ impl GateNetlist {
 
     /// Rebuild driver and fanout information from cells
     /// Useful after net merging to ensure connectivity is accurate
+    ///
+    /// A cell's id is its index in `cells` ([`Self::get_cell`] and
+    /// [`Self::add_cell`] rely on it). A pass that removes cells from `cells`
+    /// directly calls this afterwards, which gives every cell the id of its
+    /// index again before recording drivers and fanouts. Without that, the next
+    /// `add_cell` reuses the id of a surviving cell, and a later pass that
+    /// removes cells by id deletes both.
     pub fn rebuild_net_connectivity(&mut self) {
-        // Count tie cells before rebuild
+        for (index, cell) in self.cells.iter_mut().enumerate() {
+            cell.id = CellId(index as u32);
+        }
+
         // Clear all existing driver/fanout info
         for net in &mut self.nets {
             net.driver = None;
@@ -969,6 +986,41 @@ impl GateNetlist {
     /// Get a cell by ID
     pub fn get_cell(&self, id: CellId) -> Option<&Cell> {
         self.cells.get(id.0 as usize)
+    }
+
+    /// Nets that feed a cell input but have no driver and are not primary inputs.
+    ///
+    /// Such a net is a floating input in hardware: simulation gives it some
+    /// fixed value while the device may read it as either level, so the two
+    /// silently disagree. It always means a pass lost the net's driver.
+    /// Connectivity is recomputed from the cells, so stale `driver`/`fanout`
+    /// fields cannot hide one.
+    pub fn undriven_nets_with_fanout(&self) -> Vec<GateNetId> {
+        let mut driven = vec![false; self.nets.len()];
+        let mut loaded = vec![false; self.nets.len()];
+        for cell in &self.cells {
+            for net in &cell.outputs {
+                if let Some(flag) = driven.get_mut(net.0 as usize) {
+                    *flag = true;
+                }
+            }
+            for net in cell
+                .inputs
+                .iter()
+                .chain(cell.clock.iter())
+                .chain(cell.reset.iter())
+            {
+                if let Some(flag) = loaded.get_mut(net.0 as usize) {
+                    *flag = true;
+                }
+            }
+        }
+        self.nets
+            .iter()
+            .enumerate()
+            .filter(|(index, net)| loaded[*index] && !driven[*index] && !net.is_input)
+            .map(|(index, _)| GateNetId(index as u32))
+            .collect()
     }
 
     /// Remove dead cells whose outputs have no fanout and aren't primary outputs
@@ -2526,6 +2578,67 @@ fn generate_ncl_reg_module() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inverter_chain() -> (GateNetlist, Vec<GateNetId>) {
+        let mut netlist = GateNetlist::new("chain".to_string(), "generic_asic".to_string());
+        let a = netlist.add_input("a".to_string());
+        let n1 = netlist.add_net(GateNet::new(GateNetId(0), "n1".to_string()));
+        let n2 = netlist.add_net(GateNet::new(GateNetId(0), "n2".to_string()));
+        let y = netlist.add_output("y".to_string());
+        for (index, (input, output)) in [(a, n1), (n1, n2), (n2, y)].into_iter().enumerate() {
+            netlist.add_cell(Cell::new_comb(
+                CellId(0),
+                "INV_X1".to_string(),
+                "generic_asic".to_string(),
+                0.1,
+                format!("top.inv{}", index),
+                vec![input],
+                vec![output],
+            ));
+        }
+        (netlist, vec![a, n1, n2, y])
+    }
+
+    #[test]
+    fn test_rebuild_connectivity_renumbers_cells_after_removal() {
+        let (mut netlist, nets) = inverter_chain();
+        // A pass removes the middle inverter and wires its input through.
+        netlist.cells.remove(1);
+        netlist.cells[1].inputs = vec![nets[1]];
+        netlist.rebuild_net_connectivity();
+        for (index, cell) in netlist.cells.iter().enumerate() {
+            assert_eq!(
+                cell.id,
+                CellId(index as u32),
+                "{} keeps a stale id",
+                cell.path
+            );
+        }
+        // A cell added afterwards gets a fresh id, not one already in use.
+        let added = netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "BUF_X1".to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            "top.buf".to_string(),
+            vec![nets[3]],
+            vec![nets[2]],
+        ));
+        assert_eq!(added, CellId(2));
+        let driver = netlist.nets[nets[3].0 as usize].driver.unwrap();
+        assert_eq!(netlist.cells[driver.0 as usize].path, "top.inv2");
+        assert!(netlist.undriven_nets_with_fanout().is_empty());
+    }
+
+    #[test]
+    fn test_undriven_net_with_fanout_is_reported() {
+        let (mut netlist, nets) = inverter_chain();
+        assert!(netlist.undriven_nets_with_fanout().is_empty());
+        // Drop the first inverter without rewiring: n1 still feeds inv1.
+        netlist.cells.remove(0);
+        netlist.rebuild_net_connectivity();
+        assert_eq!(netlist.undriven_nets_with_fanout(), vec![nets[1]]);
+    }
 
     #[test]
     fn test_gate_netlist_creation() {
