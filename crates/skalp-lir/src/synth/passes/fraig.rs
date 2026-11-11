@@ -112,6 +112,24 @@ impl SimSignature {
     }
 }
 
+/// One step of a xorshift64 generator.
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// Outcome of one equivalence check.
+enum Check {
+    Equal,
+    /// The values of the free nodes (inputs, latch outputs) under which the
+    /// two nodes differ
+    Differ(Vec<(AigNodeId, bool)>),
+    /// The conflict limit ran out
+    Unknown,
+}
+
 /// CNF generator for AIG
 struct CnfGenerator<'a> {
     aig: &'a Aig,
@@ -120,6 +138,9 @@ struct CnfGenerator<'a> {
     node_to_var: IndexMap<AigNodeId, u32>,
     /// Next available variable
     next_var: u32,
+    /// Inputs and latch outputs in the CNF: the free variables, whose values
+    /// in a model make a counterexample
+    free_nodes: Vec<(AigNodeId, u32)>,
 }
 
 impl<'a> CnfGenerator<'a> {
@@ -131,6 +152,7 @@ impl<'a> CnfGenerator<'a> {
             solver: Solver::new(num_vars),
             node_to_var: IndexMap::new(),
             next_var: 0,
+            free_nodes: Vec::new(),
         }
     }
 
@@ -176,7 +198,8 @@ impl<'a> CnfGenerator<'a> {
             }
             AigNode::Input { .. } => {
                 // Inputs are unconstrained
-                self.get_var(root);
+                let var = self.get_var(root);
+                self.free_nodes.push((root, var));
             }
             AigNode::And { left, right } => {
                 // First, add cones for children
@@ -196,10 +219,11 @@ impl<'a> CnfGenerator<'a> {
                 self.solver.add_clause(vec![out.negate(), r]);
                 self.solver.add_clause(vec![out, l.negate(), r.negate()]);
             }
-            AigNode::Latch { data, .. } => {
-                // For combinational equivalence, treat latch as an input
-                self.add_cone(data.node, visited);
-                self.get_var(root);
+            AigNode::Latch { .. } => {
+                // For combinational equivalence a latch output is a free
+                // variable; its data input is not part of the cone.
+                let var = self.get_var(root);
+                self.free_nodes.push((root, var));
             }
             AigNode::Barrier { data, .. } => {
                 // Barriers pass through their data
@@ -252,21 +276,19 @@ impl<'a> CnfGenerator<'a> {
         }
     }
 
-    /// Check if two nodes are functionally equivalent
-    /// Returns: Some(true) if equivalent, Some(false) if not, None if unknown
+    /// Check whether `node1` equals `node2` (or its inverse), adding the
+    /// cones the check needs to the CNF. `visited` holds the nodes already
+    /// encoded, so one generator serves many checks.
     fn check_equivalence(
         &mut self,
         node1: AigNodeId,
         node2: AigNodeId,
         inverted: bool,
-    ) -> Option<bool> {
-        // Add cones for both nodes
-        let mut visited = HashSet::new();
-        self.add_cone(node1, &mut visited);
-        self.add_cone(node2, &mut visited);
+        visited: &mut HashSet<AigNodeId>,
+    ) -> Check {
+        self.add_cone(node1, visited);
+        self.add_cone(node2, visited);
 
-        // Create XOR constraint: we want to prove node1 XOR node2 = 0
-        // If inverted, we prove node1 XNOR node2 = 0 (i.e., node1 = !node2)
         let lit1 = self.get_lit(AigLit::new(node1));
         let lit2 = if inverted {
             self.get_lit(AigLit::new(node2)).negate()
@@ -274,40 +296,24 @@ impl<'a> CnfGenerator<'a> {
             self.get_lit(AigLit::new(node2))
         };
 
-        // XOR(a, b) = 1 means: (a & !b) | (!a & b)
-        // We add this as an assumption by creating a new variable for XOR
-        let xor_var = self.next_var;
+        // A fresh variable that implies the two differ; assuming it asks for
+        // a distinguishing input, and the clauses stay harmless afterwards.
+        let differ = Lit::pos(self.next_var);
         self.next_var += 1;
-        let xor_lit = Lit::pos(xor_var);
-
-        // XOR clauses: xor = (a & !b) | (!a & b)
-        // Which in CNF is:
-        //   xor -> (a | b)      =>  !xor | a | b
-        //   xor -> (!a | !b)    =>  !xor | !a | !b
-        //   (a & !b) -> xor     =>  !a | b | xor
-        //   (!a & b) -> xor     =>  a | !b | xor
-        self.solver.add_clause(vec![xor_lit.negate(), lit1, lit2]);
+        self.solver.add_clause(vec![differ.negate(), lit1, lit2]);
         self.solver
-            .add_clause(vec![xor_lit.negate(), lit1.negate(), lit2.negate()]);
-        self.solver.add_clause(vec![lit1.negate(), lit2, xor_lit]);
-        self.solver.add_clause(vec![lit1, lit2.negate(), xor_lit]);
+            .add_clause(vec![differ.negate(), lit1.negate(), lit2.negate()]);
 
-        // Now check if XOR=1 is satisfiable
-        // If UNSAT, nodes are equivalent; if SAT, they're different
-        let result = self.solver.solve_with_assumptions(&[xor_lit]);
-
-        match result {
-            SatResult::Unsat => Some(true),   // Equivalent
-            SatResult::Sat(_) => Some(false), // Not equivalent
-            SatResult::Unknown => None,       // Resource limit
+        match self.solver.solve_with_assumptions(&[differ]) {
+            SatResult::Unsat => Check::Equal,
+            SatResult::Sat(model) => Check::Differ(
+                self.free_nodes
+                    .iter()
+                    .map(|&(node, var)| (node, model[var as usize]))
+                    .collect(),
+            ),
+            SatResult::Unknown => Check::Unknown,
         }
-    }
-
-    /// Get counterexample (input assignment) from last SAT call
-    fn get_counterexample(&self) -> Vec<(AigNodeId, bool)> {
-        // This would need to extract the model from the solver
-        // For now, return empty (we'll use random refinement instead)
-        Vec::new()
     }
 }
 
@@ -347,6 +353,7 @@ pub(super) fn prove_resub(
         solver: Solver::new(cone.len() as u32 + PATTERN_VARS),
         node_to_var: IndexMap::new(),
         next_var: 0,
+        free_nodes: Vec::new(),
     };
     cnf.solver.set_conflict_limit(conflict_limit);
 
@@ -434,237 +441,165 @@ impl Fraig {
         self.choices_recorded
     }
 
-    /// Simulate the AIG with random patterns
-    fn simulate(&self, aig: &Aig, seed: u64) -> IndexMap<AigNodeId, SimSignature> {
-        let mut signatures: IndexMap<AigNodeId, SimSignature> = IndexMap::new();
-        let num_patterns = self.config.sim_patterns.div_ceil(64); // Number of u64s needed
-
-        // Constant node is always 0
-        signatures.insert(AigNodeId::FALSE, SimSignature::new(num_patterns));
-
-        // Generate random patterns for inputs
-        let mut rng_state = seed;
-        for (id, _name) in aig.iter_inputs() {
-            let mut sig = SimSignature::new(num_patterns);
-            for pattern in &mut sig.patterns {
-                // xorshift64
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                *pattern = rng_state;
+    /// Simulate one 64-bit word: `free_word` gives the word of each input
+    /// and latch output (latch outputs are free, as in the SAT encoding).
+    fn simulate_word(
+        aig: &Aig,
+        mut free_word: impl FnMut(AigNodeId) -> u64,
+    ) -> IndexMap<AigNodeId, u64> {
+        let mut words: IndexMap<AigNodeId, u64> = IndexMap::new();
+        let lit_word = |words: &IndexMap<AigNodeId, u64>, lit: AigLit| {
+            let w = words.get(&lit.node).copied().unwrap_or(0);
+            if lit.inverted {
+                !w
+            } else {
+                w
             }
-            signatures.insert(id, sig);
-        }
-
-        // Propagate through nodes in topological order
+        };
         for (id, node) in aig.iter_nodes() {
-            match node {
-                AigNode::Const | AigNode::Input { .. } => {
-                    // Already handled
-                }
-                AigNode::And { left, right } => {
-                    let left_sig = self.get_lit_signature(&signatures, *left, num_patterns);
-                    let right_sig = self.get_lit_signature(&signatures, *right, num_patterns);
-                    signatures.insert(id, left_sig.and(&right_sig));
-                }
-                AigNode::Latch { data, .. } => {
-                    let data_sig = self.get_lit_signature(&signatures, *data, num_patterns);
-                    signatures.insert(id, data_sig);
-                }
-                AigNode::Barrier { data, .. } => {
-                    let data_sig = self.get_lit_signature(&signatures, *data, num_patterns);
-                    signatures.insert(id, data_sig);
-                }
-            }
+            let word = match node {
+                AigNode::Const => 0,
+                AigNode::Input { .. } | AigNode::Latch { .. } => free_word(id),
+                AigNode::And { left, right } => lit_word(&words, *left) & lit_word(&words, *right),
+                AigNode::Barrier { data, .. } => lit_word(&words, *data),
+            };
+            words.insert(id, word);
         }
+        words
+    }
 
+    /// Append a simulated word to every node's signature.
+    fn append_word(
+        signatures: &mut IndexMap<AigNodeId, SimSignature>,
+        words: IndexMap<AigNodeId, u64>,
+    ) {
+        for (id, word) in words {
+            signatures
+                .entry(id)
+                .or_insert_with(|| SimSignature::new(0))
+                .patterns
+                .push(word);
+        }
+    }
+
+    /// Signatures of `sim_patterns * sim_rounds` random patterns.
+    fn simulate(&self, aig: &Aig) -> IndexMap<AigNodeId, SimSignature> {
+        let mut signatures = IndexMap::new();
+        let total = (self.config.sim_patterns * self.config.sim_rounds).max(1);
+        let mut rng = self.config.seed | 1;
+        for _ in 0..total.div_ceil(64) {
+            let words = Self::simulate_word(aig, |_| xorshift(&mut rng));
+            Self::append_word(&mut signatures, words);
+        }
         signatures
     }
 
-    /// Get signature for a literal (handling inversion)
-    fn get_lit_signature(
-        &self,
-        signatures: &IndexMap<AigNodeId, SimSignature>,
-        lit: AigLit,
-        num_patterns: usize,
-    ) -> SimSignature {
-        let base = signatures
-            .get(&lit.node)
-            .cloned()
-            .unwrap_or_else(|| SimSignature::new(num_patterns));
-        if lit.inverted {
-            base.invert()
-        } else {
-            base
-        }
-    }
-
-    /// Find candidate equivalence classes from simulation signatures
+    /// Candidate equivalence classes: AND nodes with the same signature up
+    /// to inversion, leaving out `excluded` nodes. Each class lists its
+    /// nodes in topological order, so its first node can stand for the rest.
     fn find_candidate_classes(
-        &self,
         aig: &Aig,
         signatures: &IndexMap<AigNodeId, SimSignature>,
+        excluded: &IndexMap<AigNodeId, (AigNodeId, bool)>,
     ) -> Vec<Vec<(AigNodeId, bool)>> {
-        // Group nodes by canonical signature
-        let mut sig_to_nodes: IndexMap<SimSignature, Vec<(AigNodeId, bool)>> = IndexMap::new();
-
+        let mut by_signature: IndexMap<SimSignature, Vec<(AigNodeId, bool)>> = IndexMap::new();
         for (id, node) in aig.iter_nodes() {
-            // Skip constant, input, latch, and barrier nodes
-            match node {
-                AigNode::Const
-                | AigNode::Input { .. }
-                | AigNode::Latch { .. }
-                | AigNode::Barrier { .. } => {
-                    continue;
-                }
-                AigNode::And { .. } => {}
+            if !matches!(node, AigNode::And { .. }) || excluded.contains_key(&id) {
+                continue;
             }
-
             if let Some(sig) = signatures.get(&id) {
-                let (canon_sig, inverted) = sig.canonical();
-                sig_to_nodes
-                    .entry(canon_sig)
+                let (canonical, inverted) = sig.canonical();
+                by_signature
+                    .entry(canonical)
                     .or_default()
                     .push((id, inverted));
             }
         }
-
-        // Filter to classes with multiple members
-        sig_to_nodes
+        by_signature
             .into_values()
             .filter(|class| class.len() > 1)
             .collect()
     }
 
-    /// Verify and merge equivalence classes using SAT
-    fn verify_and_merge(
-        &mut self,
-        aig: &Aig,
-        candidates: Vec<Vec<(AigNodeId, bool)>>,
-    ) -> IndexMap<AigNodeId, AigLit> {
-        let mut node_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
-
-        for class in candidates {
-            if class.len() < 2 {
-                continue;
-            }
-
-            // Use the first node as the representative
-            let (repr_id, repr_inv) = class[0];
-
-            // Verify each other node against the representative
-            for &(node_id, node_inv) in &class[1..] {
-                if self.sat_calls >= self.config.max_sat_calls {
-                    break;
-                }
-
-                // Check if we've already mapped this node
-                if node_map.contains_key(&node_id) {
-                    continue;
-                }
-
-                // Create a fresh CNF generator for each check
-                let mut cnf = CnfGenerator::new(aig);
-                cnf.solver
-                    .set_conflict_limit(self.config.sat_conflict_limit);
-
-                // Determine if we're checking for equality or inverse equality
-                let inverted = repr_inv != node_inv;
-
-                self.sat_calls += 1;
-                match cnf.check_equivalence(repr_id, node_id, inverted) {
-                    Some(true) => {
-                        // Proven equivalent!
-                        self.sat_proofs += 1;
-                        let repr_lit = if repr_inv {
-                            AigLit::not(repr_id)
-                        } else {
-                            AigLit::new(repr_id)
-                        };
-                        let mapped_lit = if inverted {
-                            repr_lit.invert()
-                        } else {
-                            repr_lit
-                        };
-                        node_map.insert(node_id, mapped_lit);
-                    }
-                    Some(false) => {
-                        // Not equivalent (SAT found counterexample)
-                        self.sat_refutes += 1;
-                    }
-                    None => {
-                        // Unknown (resource limit)
-                    }
-                }
-            }
-        }
-
-        node_map
-    }
-
-    /// Record equivalences as choices instead of merging
+    /// Prove equivalences between AND nodes.
     ///
-    /// This method is used when `record_choices` is true. Instead of replacing
-    /// equivalent nodes, it records them as choices in the AIG. The technology
-    /// mapper can then explore all alternatives.
-    fn record_choices_from_candidates(
-        &mut self,
-        aig: &mut Aig,
-        candidates: Vec<Vec<(AigNodeId, bool)>>,
-    ) -> usize {
-        let mut choices_added = 0;
+    /// Random simulation proposes classes; each member is checked against
+    /// its class's first node on one incremental solver. A failed check
+    /// yields an input pattern that tells the two apart; once 64 of them are
+    /// collected (or the classes run out) they are simulated as one more
+    /// signature word, which splits every class they disprove, and the
+    /// classes are formed again. So each false candidate costs at most one
+    /// solver call, and simulation does the rest.
+    ///
+    /// Returns, for each proven node, its representative and whether it is
+    /// the representative's inverse.
+    fn prove_equivalences(&mut self, aig: &Aig) -> IndexMap<AigNodeId, (AigNodeId, bool)> {
+        let mut signatures = self.simulate(aig);
+        let mut proven: IndexMap<AigNodeId, (AigNodeId, bool)> = IndexMap::new();
+        let mut settled: HashSet<(AigNodeId, AigNodeId)> = HashSet::new();
+        let mut cnf = CnfGenerator::new(aig);
+        cnf.solver
+            .set_conflict_limit(self.config.sat_conflict_limit);
+        let mut encoded: HashSet<AigNodeId> = HashSet::new();
+        let mut rng = self.config.seed.rotate_left(17) | 1;
+        let mut first_pass = true;
 
-        for class in candidates {
-            if class.len() < 2 {
-                continue;
+        loop {
+            let classes = Self::find_candidate_classes(aig, &signatures, &proven);
+            if first_pass {
+                self.equiv_classes = classes.len();
+                first_pass = false;
             }
-
-            // Use the first node as the representative
-            let (repr_id, repr_inv) = class[0];
-
-            // Verify each other node against the representative
-            for &(node_id, node_inv) in &class[1..] {
-                if self.sat_calls >= self.config.max_sat_calls {
-                    break;
-                }
-
-                // Create a fresh CNF generator for each check
-                let mut cnf = CnfGenerator::new(aig);
-                cnf.solver
-                    .set_conflict_limit(self.config.sat_conflict_limit);
-
-                // Determine if we're checking for equality or inverse equality
-                let inverted = repr_inv != node_inv;
-
-                self.sat_calls += 1;
-                match cnf.check_equivalence(repr_id, node_id, inverted) {
-                    Some(true) => {
-                        // Proven equivalent - record as choice
-                        self.sat_proofs += 1;
-
-                        // Record node_id as a choice for repr_id
-                        let alternative = if inverted {
-                            AigLit::not(node_id)
-                        } else {
-                            AigLit::new(node_id)
-                        };
-
-                        if aig.add_choice(repr_id, alternative) {
-                            choices_added += 1;
+            let mut counterexamples: Vec<Vec<(AigNodeId, bool)>> = Vec::new();
+            'classes: for class in &classes {
+                let (repr, repr_inv) = class[0];
+                for &(node, node_inv) in &class[1..] {
+                    if self.sat_calls >= self.config.max_sat_calls || counterexamples.len() >= 64 {
+                        break 'classes;
+                    }
+                    if !settled.insert((repr, node)) {
+                        continue;
+                    }
+                    let inverted = repr_inv != node_inv;
+                    self.sat_calls += 1;
+                    match cnf.check_equivalence(repr, node, inverted, &mut encoded) {
+                        Check::Equal => {
+                            self.sat_proofs += 1;
+                            proven.insert(node, (repr, inverted));
                         }
-                    }
-                    Some(false) => {
-                        // Not equivalent (SAT found counterexample)
-                        self.sat_refutes += 1;
-                    }
-                    None => {
-                        // Unknown (resource limit)
+                        Check::Differ(values) => {
+                            self.sat_refutes += 1;
+                            counterexamples.push(values);
+                        }
+                        Check::Unknown => {}
                     }
                 }
             }
+            if counterexamples.is_empty() {
+                break;
+            }
+            // Bit k of a free node's word is its value in counterexample k
+            // (random where that counterexample leaves it open).
+            let mut assigned: IndexMap<AigNodeId, (u64, u64)> = IndexMap::new();
+            for (bit, values) in counterexamples.iter().enumerate() {
+                for &(node, value) in values {
+                    let entry = assigned.entry(node).or_insert((0, 0));
+                    entry.0 |= 1 << bit;
+                    if value {
+                        entry.1 |= 1 << bit;
+                    }
+                }
+            }
+            let words = Self::simulate_word(aig, |node| {
+                let random = xorshift(&mut rng);
+                match assigned.get(&node) {
+                    Some(&(mask, values)) => (random & !mask) | values,
+                    None => random,
+                }
+            });
+            Self::append_word(&mut signatures, words);
         }
-
-        choices_added
+        proven
     }
 
     /// Rebuild the AIG with merged nodes
@@ -864,53 +799,30 @@ impl Pass for Fraig {
         self.sat_refutes = 0;
         self.choices_recorded = 0;
 
-        // Run multiple simulation rounds with different seeds
-        let mut all_candidates: Vec<Vec<(AigNodeId, bool)>> = Vec::new();
-        let mut seen_pairs: HashSet<(AigNodeId, AigNodeId)> = HashSet::new();
-
-        for round in 0..self.config.sim_rounds {
-            let seed = self.config.seed.wrapping_add(round as u64 * 12345);
-            let signatures = self.simulate(aig, seed);
-            let candidates = self.find_candidate_classes(aig, &signatures);
-
-            for class in candidates {
-                // Only add new candidate pairs
-                let mut new_class = Vec::new();
-                for &(id, inv) in &class {
-                    let repr = class[0].0;
-                    let pair = if id < repr { (id, repr) } else { (repr, id) };
-                    if !seen_pairs.contains(&pair) {
-                        seen_pairs.insert(pair);
-                        new_class.push((id, inv));
-                    }
-                }
-                if new_class.len() > 1 {
-                    all_candidates.push(new_class);
-                }
-            }
-        }
-
-        self.equiv_classes = all_candidates.len();
-
-        if all_candidates.is_empty() {
-            result.record_after(aig);
-            result.add_extra("equiv_classes", "0");
-            result.add_extra("nodes_merged", "0");
-            result.add_extra("choices_recorded", "0");
-            result.add_extra("sat_calls", "0");
-            return result;
-        }
+        let proven = self.prove_equivalences(aig);
 
         if self.config.record_choices {
-            // Record equivalences as choices instead of merging
-            self.choices_recorded = self.record_choices_from_candidates(aig, all_candidates);
+            // Keep both implementations and let the mapper choose.
+            for (&node, &(repr, inverted)) in &proven {
+                let alternative = if inverted {
+                    AigLit::not(node)
+                } else {
+                    AigLit::new(node)
+                };
+                if aig.add_choice(repr, alternative) {
+                    self.choices_recorded += 1;
+                }
+            }
         } else {
-            // Verify with SAT and build merge map
-            let node_map = self.verify_and_merge(aig, all_candidates);
-            self.nodes_merged = node_map.len();
-
-            // Rebuild AIG if we merged any nodes
-            if !node_map.is_empty() {
+            self.nodes_merged = proven.len();
+            if !proven.is_empty() {
+                let node_map: IndexMap<AigNodeId, AigLit> = proven
+                    .iter()
+                    .map(|(&node, &(repr, inverted))| {
+                        let lit = AigLit::new(repr);
+                        (node, if inverted { lit.invert() } else { lit })
+                    })
+                    .collect();
                 let new_aig = self.rebuild_aig(aig, &node_map);
                 *aig = new_aig;
             }
@@ -1017,6 +929,7 @@ pub fn run_fraig_with_config(aig: &mut Aig, config: FraigConfig) -> FraigStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_fraig_config_default() {
@@ -1187,5 +1100,145 @@ mod tests {
 
         // Verify the method works
         assert_eq!(fraig.nodes_merged(), 0); // No nodes merged in choice mode
+    }
+
+    /// Evaluates every output of a purely combinational AIG for one input
+    /// assignment (inputs in `iter_inputs` order).
+    fn eval_outputs(aig: &Aig, assignment: &[bool]) -> Vec<bool> {
+        fn eval(aig: &Aig, lit: AigLit, values: &mut HashMap<AigNodeId, bool>) -> bool {
+            let node_value = if let Some(&v) = values.get(&lit.node) {
+                v
+            } else {
+                let v = match aig.get_node(lit.node).expect("node exists") {
+                    AigNode::Const => false,
+                    AigNode::And { left, right } => {
+                        eval(aig, *left, values) && eval(aig, *right, values)
+                    }
+                    other => panic!("unexpected node in combinational test AIG: {other:?}"),
+                };
+                values.insert(lit.node, v);
+                v
+            };
+            node_value ^ lit.inverted
+        }
+        let mut values: HashMap<AigNodeId, bool> = aig
+            .iter_inputs()
+            .map(|(id, _)| id)
+            .zip(assignment.iter().copied())
+            .collect();
+        aig.outputs()
+            .iter()
+            .map(|(_, lit)| eval(aig, *lit, &mut values))
+            .collect()
+    }
+
+    fn and_all(aig: &mut Aig, lits: &[AigLit]) -> AigLit {
+        let mut acc = lits[0];
+        for &l in &lits[1..] {
+            acc = aig.add_and(acc, l);
+        }
+        acc
+    }
+
+    #[test]
+    fn test_fraig_merges_structurally_different_equivalents() {
+        // XOR written two ways, and a 12-input AND chained in opposite orders:
+        // strash cannot see either equivalence, simulation plus SAT must.
+        let mut aig = Aig::new("test".to_string());
+        let ins: Vec<AigLit> = (0..12)
+            .map(|i| AigLit::new(aig.add_input(format!("i{i}"), None)))
+            .collect();
+        let (a, b) = (ins[0], ins[1]);
+        let x1 = {
+            let p = aig.add_and(a, b.invert());
+            let q = aig.add_and(a.invert(), b);
+            aig.add_or(p, q)
+        };
+        let x2 = {
+            let p = aig.add_and(a, b);
+            let q = aig.add_and(a.invert(), b.invert());
+            aig.add_or(p, q).invert()
+        };
+        let fwd = and_all(&mut aig, &ins);
+        let rev: Vec<AigLit> = ins.iter().rev().copied().collect();
+        let bwd = and_all(&mut aig, &rev);
+        aig.add_output("x1".to_string(), x1);
+        aig.add_output("x2".to_string(), x2);
+        aig.add_output("fwd".to_string(), fwd);
+        aig.add_output("bwd".to_string(), bwd);
+
+        let before = aig.and_count();
+        let reference: Vec<Vec<bool>> = (0u32..1 << 12)
+            .map(|m| eval_outputs(&aig, &(0..12).map(|i| m >> i & 1 == 1).collect::<Vec<_>>()))
+            .collect();
+
+        let mut fraig = Fraig::new();
+        fraig.run(&mut aig);
+
+        assert!(fraig.nodes_merged() > 0);
+        assert!(aig.and_count() < before);
+        let outs = aig.outputs();
+        assert_eq!(outs[0].1, outs[1].1, "XOR forms should share one node");
+        assert_eq!(outs[2].1, outs[3].1, "AND chains should share one node");
+        for (m, expected) in reference.iter().enumerate() {
+            let assignment: Vec<bool> = (0..12).map(|i| m >> i & 1 == 1).collect();
+            assert_eq!(&eval_outputs(&aig, &assignment), expected, "pattern {m:#x}");
+        }
+    }
+
+    #[test]
+    fn test_fraig_keeps_nodes_that_differ_on_one_rare_pattern() {
+        // Two 20-input ANDs that differ only in the polarity of the last input,
+        // plus their complements in other shapes. Random simulation almost
+        // never sets all 20 inputs to 1, so every node lands in the constant-0
+        // class; SAT must refute each candidate and nothing may be merged.
+        let mut aig = Aig::new("test".to_string());
+        let ins: Vec<AigLit> = (0..20)
+            .map(|i| AigLit::new(aig.add_input(format!("i{i}"), None)))
+            .collect();
+        let y1 = and_all(&mut aig, &ins);
+        let mut flipped = ins.clone();
+        flipped[19] = flipped[19].invert();
+        let y2 = and_all(&mut aig, &flipped);
+        let mut other = ins.clone();
+        other[0] = other[0].invert();
+        let y3 = and_all(&mut aig, &other);
+        aig.add_output("y1".to_string(), y1);
+        aig.add_output("y2".to_string(), y2);
+        aig.add_output("y3".to_string(), y3);
+
+        let before = aig.and_count();
+        let mut fraig = Fraig::new();
+        fraig.run(&mut aig);
+
+        assert_eq!(fraig.nodes_merged(), 0);
+        assert_eq!(aig.and_count(), before);
+        let mut all_ones = vec![true; 20];
+        assert_eq!(eval_outputs(&aig, &all_ones), vec![true, false, false]);
+        all_ones[19] = false;
+        assert_eq!(eval_outputs(&aig, &all_ones), vec![false, true, false]);
+        all_ones[19] = true;
+        all_ones[0] = false;
+        assert_eq!(eval_outputs(&aig, &all_ones), vec![false, false, true]);
+    }
+
+    #[test]
+    fn test_fraig_treats_latches_as_free_variables() {
+        // A latch output and an input are unrelated signals; FRAIG must not
+        // look through the latch to its next-state function and merge them.
+        let mut aig = Aig::new("test".to_string());
+        let a = aig.add_input("a".to_string(), None);
+        let b = aig.add_input("b".to_string(), None);
+        let q = aig.add_latch(AigLit::new(a), None, None, None);
+        let qa = aig.add_and(AigLit::new(q), AigLit::new(b));
+        let ab = aig.add_and(AigLit::new(a), AigLit::new(b));
+        aig.add_output("qa".to_string(), qa);
+        aig.add_output("ab".to_string(), ab);
+
+        let mut fraig = Fraig::new();
+        fraig.run(&mut aig);
+
+        assert_eq!(fraig.nodes_merged(), 0);
+        assert_ne!(aig.outputs()[0].1, aig.outputs()[1].1);
     }
 }

@@ -50,6 +50,8 @@ pub struct NexusBoard {
     pub uart: (u16, u16, u8),
     /// Boundary-scan bits confirmed on this board, with what they connect to.
     pub known_pads: &'static [(usize, &'static str)],
+    /// Package balls with a board label (LEDs, headers), as `(ball, label)`.
+    pub labelled_balls: &'static [(&'static str, &'static str)],
 }
 
 /// Boards with a confirmed PROGRAMN button. Add an entry for each new board
@@ -63,6 +65,7 @@ pub const NEXUS_BOARDS: [NexusBoard; 1] = [NexusBoard {
     package: "LFG672",
     uart: (0x0403, 0x6010, 1),
     known_pads: &[(533, "LED2 (pad PR31A)")],
+    labelled_balls: crate::boards::CERTUSPRO_VERSA.safe_outputs,
 }];
 
 impl NexusBoard {
@@ -80,6 +83,16 @@ impl NexusBoard {
         self.pad_name(bit)
             .map(str::to_string)
             .or_else(|| crate::device::nexus::sites::boundary_pad_names(self.package).remove(&bit))
+    }
+
+    /// The boundary-scan bit of each board-labelled ball, in the board's order,
+    /// as `(bit, "LED_5 (R7)")`.
+    pub fn labelled_pads(&self) -> Vec<(usize, String)> {
+        let bits = crate::device::nexus::sites::boundary_bits_by_ball(self.package);
+        self.labelled_balls
+            .iter()
+            .filter_map(|(ball, label)| Some((*bits.get(*ball)?, format!("{label} ({ball})"))))
+            .collect()
     }
 
     /// Look up a board by the name given to `--board`.
@@ -363,6 +376,33 @@ pub struct PadWatch {
     pub seconds: f64,
     /// Pads that changed, by bit index.
     pub active: Vec<PadActivity>,
+    /// Level of every bit in the last sample.
+    pub last: Vec<bool>,
+}
+
+impl PadWatch {
+    /// How the pad on boundary bit `bit` behaved over the watch.
+    pub fn describe(&self, bit: usize) -> String {
+        let level = |high: bool| if high { "high" } else { "low" };
+        match self.active.iter().find(|p| p.bit == bit) {
+            Some(pad) => match pad.mean_interval {
+                Some(interval) if pad.regular => format!(
+                    "toggling every {interval:.2} s ({} changes), last {}",
+                    pad.changes,
+                    level(self.last.get(bit).copied().unwrap_or(false))
+                ),
+                _ => format!(
+                    "changing irregularly ({} changes), last {}",
+                    pad.changes,
+                    level(self.last.get(bit).copied().unwrap_or(false))
+                ),
+            },
+            None => match self.last.get(bit) {
+                Some(&high) => format!("{} (steady)", level(high)),
+                None => "not sampled".to_string(),
+            },
+        }
+    }
 }
 
 /// Work out a shift register's length from a probe that shifted equal runs of
@@ -631,10 +671,14 @@ impl NexusJtagProgrammer {
             }
             sample = next;
         }
+        let last = (0..bits)
+            .map(|bit| (sample[bit / 8] >> (bit % 8)) & 1 == 1)
+            .collect();
         Ok(PadWatch {
             bits,
             samples,
             seconds: start.elapsed().as_secs_f64(),
+            last,
             active: changes
                 .into_iter()
                 .map(|(bit, times)| PadActivity::from_change_times(bit, &times))
@@ -939,6 +983,34 @@ mod tests {
     #[test]
     fn rejects_a_chain_with_no_delay() {
         assert_eq!(boundary_length(&[0x00, 0xFF]), None);
+    }
+
+    #[test]
+    fn versa_leds_have_boundary_bits() {
+        let board = NexusBoard::by_name("certuspro-versa").unwrap();
+        let pads = board.labelled_pads();
+        let led = |name: &str| pads.iter().find(|(_, l)| l.starts_with(name)).cloned();
+        assert_eq!(led("LED_0 "), Some((543, "LED_0 (R5)".to_string())));
+        assert_eq!(led("LED_2 "), Some((533, "LED_2 (R8)".to_string())));
+        assert_eq!(led("LED_7 "), Some((547, "LED_7 (P8)".to_string())));
+    }
+
+    #[test]
+    fn a_watch_reports_steady_levels_and_toggling_pads() {
+        let watch = PadWatch {
+            bits: 3,
+            samples: 10,
+            seconds: 4.0,
+            active: vec![PadActivity::from_change_times(2, &[0.0, 1.0, 2.0, 3.0])],
+            last: vec![false, true, true],
+        };
+        assert_eq!(watch.describe(0), "low (steady)");
+        assert_eq!(watch.describe(1), "high (steady)");
+        assert_eq!(
+            watch.describe(2),
+            "toggling every 1.00 s (4 changes), last high"
+        );
+        assert_eq!(watch.describe(3), "not sampled");
     }
 
     #[test]

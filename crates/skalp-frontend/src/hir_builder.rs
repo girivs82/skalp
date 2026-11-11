@@ -8774,75 +8774,48 @@ impl HirBuilderContext {
 
     /// Build concatenation expression: {a, b, c}
     fn build_concat_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        for child in node.children() {
-            trace!("  - {:?}", child.kind());
-        }
-
-        // BUG #210 FIX: Handle parser quirk where `a[0]` is split into [IdentExpr(a), IndexExpr([0])]
-        // We need to detect IdentExpr + IndexExpr pairs and skip the IdentExpr, letting IndexExpr
-        // incorporate its base from the preceding sibling.
-        let child_nodes: Vec<_> = node
-            .children()
-            .filter(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::IfExpr
-                        | SyntaxKind::MatchExpr
-                        | SyntaxKind::StructLiteral
-                        | SyntaxKind::ArrayLiteral
-                        | SyntaxKind::ConcatExpr
-                        | SyntaxKind::ReplicateExpr | SyntaxKind::SizedCastExpr // BUG #181 FIX: Include replication expressions in concat
-                        | SyntaxKind::CastExpr
-                )
-            })
-            .collect();
-
-        // Process nodes, skipping IdentExpr that are followed by IndexExpr (parser bug workaround)
-        let mut expressions: Vec<HirExpression> = Vec::new();
-        let mut i = 0;
-        while i < child_nodes.len() {
-            // Check if this is an IdentExpr/FieldExpr/PathExpr followed by IndexExpr
-            if i + 1 < child_nodes.len()
-                && matches!(
-                    child_nodes[i].kind(),
-                    SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
-                )
-                && child_nodes[i + 1].kind() == SyntaxKind::IndexExpr
-            {
-                // Build the IndexExpr - it will incorporate its base from the preceding sibling
-                if let Some(expr) = self.build_expression(&child_nodes[i + 1]) {
-                    expressions.push(expr);
+        // The parser emits postfix operations and binary-operator continuations
+        // as SIBLINGS of their base, so one element can be several child nodes:
+        // `{a[14:0], a[15] ^ a[13]}` has the children
+        // `[IdentExpr(a), IndexExpr([14:0]), IdentExpr(a), IndexExpr([15]), BinaryExpr(^ a), IndexExpr([13])]`.
+        // Building each child on its own (as this used to, beyond pairing an
+        // identifier with one index) turned the XOR into extra elements. Split
+        // the children at the top-level commas (or `++`) and build each element
+        // as one sibling chain.
+        let mut groups: Vec<Vec<SyntaxNode>> = vec![Vec::new()];
+        for elem in node.children_with_tokens() {
+            match elem {
+                // `a ++ b` builds the same node as `{a, b}`, with `++` between elements.
+                rowan::NodeOrToken::Token(t)
+                    if matches!(t.kind(), SyntaxKind::Comma | SyntaxKind::PlusPlus) =>
+                {
+                    groups.push(Vec::new());
                 }
-                i += 2; // Skip both IdentExpr and IndexExpr
-            } else {
-                // Build the node normally
-                if let Some(expr) = self.build_expression(&child_nodes[i]) {
-                    expressions.push(expr);
+                rowan::NodeOrToken::Node(n)
+                    if Self::is_replicate_operand_kind(n.kind())
+                        || matches!(
+                            n.kind(),
+                            SyntaxKind::MatchExpr | SyntaxKind::StructLiteral
+                        ) =>
+                {
+                    groups.last_mut().expect("groups starts non-empty").push(n);
                 }
-                i += 1;
+                _ => {}
             }
         }
 
+        let expressions: Vec<HirExpression> = groups
+            .iter()
+            .filter(|group| !group.is_empty())
+            .filter_map(|group| self.build_chained_rhs_expression(group))
+            .collect();
         trace!(
-            "[HIR_CONCAT_DEBUG] Found {} expressions in concat",
+            "[HIR_CONCAT_DEBUG] {} elements in concat",
             expressions.len()
         );
         if expressions.is_empty() {
             None
         } else {
-            trace!(
-                "[HIR_CONCAT_DEBUG] Returning Concat with {} elements",
-                expressions.len()
-            );
             Some(HirExpression::Concat(expressions))
         }
     }

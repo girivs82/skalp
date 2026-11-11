@@ -164,6 +164,9 @@ pub fn place_and_route(
         placer.place_with_carry_chains(netlist, &packing.carry_chains)?
     };
 
+    // Block RAM connections go to the RAM's own pins from here on.
+    let netlist = &crate::bitstream::prepare::map_ram_pins(netlist, &device);
+
     // Run routing — scale iterations to design size for faster small-design compilation
     let net_count = netlist.nets.len();
     let mut router_config =

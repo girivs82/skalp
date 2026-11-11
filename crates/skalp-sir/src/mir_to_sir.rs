@@ -755,7 +755,15 @@ impl<'a> MirToSirConverter<'a> {
         // any nesting of if, match and resolved chains. Lowering each
         // statement on its own would give it one flip-flop per statement, and
         // only the last would drive it.
-        let repeated = self.registers_of_several_statements(statements);
+        let mut repeated = self.registers_of_several_statements(statements);
+        // A register written in parts (`flags[5] <= x`, `r[7:4] <= y`,
+        // `bits[i] <= z`) keeps its other bits, so its parts must compose
+        // into one driver the same way.
+        for target in self.registers_written_in_parts(statements) {
+            if !repeated.contains(&target) {
+                repeated.push(target);
+            }
+        }
         if !repeated.is_empty() {
             for target in &repeated {
                 let hold = self.get_or_create_signal_driver(target);
@@ -840,6 +848,63 @@ impl<'a> MirToSirConverter<'a> {
         repeated
     }
 
+    /// Registers (bit vectors, not memories or typed arrays) that
+    /// `statements` write in parts: a bit or a range of them.
+    fn registers_written_in_parts(&self, statements: &[Statement]) -> Vec<String> {
+        fn collect(stmts: &[Statement], out: &mut Vec<LValue>) {
+            for stmt in stmts {
+                match stmt {
+                    Statement::Assignment(assign)
+                        if matches!(assign.kind, AssignmentKind::NonBlocking) =>
+                    {
+                        out.push(assign.lhs.clone())
+                    }
+                    Statement::ResolvedConditional(rc)
+                        if matches!(rc.kind, AssignmentKind::NonBlocking) =>
+                    {
+                        out.push(rc.target.clone())
+                    }
+                    Statement::If(if_stmt) => {
+                        collect(&if_stmt.then_block.statements, out);
+                        if let Some(else_block) = &if_stmt.else_block {
+                            collect(&else_block.statements, out);
+                        }
+                    }
+                    Statement::Case(case_stmt) => {
+                        for item in &case_stmt.items {
+                            collect(&item.block.statements, out);
+                        }
+                        if let Some(default_block) = &case_stmt.default {
+                            collect(&default_block.statements, out);
+                        }
+                    }
+                    Statement::Block(block) => collect(&block.statements, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut lvalues = Vec::new();
+        collect(statements, &mut lvalues);
+        let mut targets = Vec::new();
+        for lvalue in lvalues {
+            let base = match &lvalue {
+                LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => base,
+                _ => continue,
+            };
+            if !matches!(base.as_ref(), LValue::Signal(_) | LValue::Port(_))
+                || self.is_lvalue_typed_array(base)
+            {
+                continue;
+            }
+            let target = self.lvalue_to_string(base);
+            let internal = self.translate_to_internal_name(&target);
+            if self.sir.state_elements.contains_key(&internal) && !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+
     /// A copy of `statements` without the assignments to `targets`, which
     /// have been lowered already.
     fn without_assignments_to(
@@ -848,8 +913,16 @@ impl<'a> MirToSirConverter<'a> {
         targets: &[String],
     ) -> Vec<Statement> {
         let assigns_target = |lvalue: &LValue| {
-            matches!(lvalue, LValue::Signal(_) | LValue::Port(_))
-                && targets.contains(&self.lvalue_to_string(lvalue))
+            let whole = match lvalue {
+                LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. }
+                    if !self.is_lvalue_typed_array(base) =>
+                {
+                    base.as_ref()
+                }
+                _ => lvalue,
+            };
+            matches!(whole, LValue::Signal(_) | LValue::Port(_))
+                && targets.contains(&self.lvalue_to_string(whole))
         };
         let mut kept = Vec::with_capacity(statements.len());
         for stmt in statements {
@@ -1815,8 +1888,39 @@ impl<'a> MirToSirConverter<'a> {
                                     rhs_value,
                                     signal_width,
                                 );
-                            } else {
-                                current_value = self.create_expression_node(&assign.rhs);
+                            } else if let LValue::BitSelect { base, index } = &assign.lhs {
+                                if self.is_lvalue_typed_array(base) {
+                                    current_value = self.create_expression_node(&assign.rhs);
+                                } else {
+                                    // One bit at a run-time index of a bit vector:
+                                    // each bit takes the value when the index is its own.
+                                    let index_node = self.create_expression_node(index);
+                                    let rhs_value = self.create_expression_node(&assign.rhs);
+                                    let signal_width = self.get_signal_width(target);
+                                    let index_ref = self.node_to_signal_ref(index_node);
+                                    let index_width =
+                                        self.get_signal_width(&index_ref.signal_id).max(1);
+                                    let mut updated = current_value;
+                                    for bit in 0..signal_width as u64 {
+                                        if index_width < 64 && bit >> index_width != 0 {
+                                            break;
+                                        }
+                                        let bit_node = self.create_constant_node(bit, index_width);
+                                        let selected = self.create_binary_op_node(
+                                            &skalp_mir::BinaryOp::Equal,
+                                            index_node,
+                                            bit_node,
+                                        );
+                                        let inserted = self.create_bit_insert_node(
+                                            updated,
+                                            bit,
+                                            rhs_value,
+                                            signal_width,
+                                        );
+                                        updated = self.create_mux_node(selected, inserted, updated);
+                                    }
+                                    current_value = updated;
+                                }
                             }
                         } else if let LValue::RangeSelect { high, low, .. } = &assign.lhs {
                             // Handle RangeSelect (partial range assignment)

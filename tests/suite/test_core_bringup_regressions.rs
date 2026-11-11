@@ -221,3 +221,202 @@ fn test_async_read_memory_stays_out_of_block_ram() {
         "a combinationally read memory must not use block RAM"
     );
 }
+
+async fn check_nested_if_bit_set(mut tb: Testbench, what: &str) {
+    tb.set("x", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("q").await, 0, "{what}: no bit before x is set");
+    tb.set("x", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("q").await, 1 << 5, "{what}: flags[5] set");
+    tb.set("x", 0u8);
+    tb.clock(3).await;
+    assert_eq!(tb.get_u64("q").await, 1 << 5, "{what}: flags[5] stays set");
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_behavioral() {
+    let tb = Testbench::new(&fixture_path("nested_if_bit_set.sk"))
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_gate_level_asic() {
+    let path = fixture_path("nested_if_bit_set.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Bits", "generic_asic")
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "generic_asic").await;
+}
+
+#[tokio::test]
+async fn test_nested_if_bit_set_gate_level_nexus() {
+    let path = fixture_path("nested_if_bit_set.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Bits", "nexus")
+        .await
+        .unwrap();
+    check_nested_if_bit_set(tb, "nexus").await;
+}
+
+async fn check_register_part_writes(mut tb: Testbench, what: &str) {
+    // Power-up value, before any write.
+    tb.set("rst", 0u8)
+        .set("op", 1u8)
+        .set("v", 0xAu8)
+        .set("idx", 0u8);
+    assert_eq!(tb.get_u64("r").await, 0xA5, "{what}: power-up value");
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0xA5, "{what}: r[7:4] <= v");
+    tb.set("rst", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0, "{what}: reset");
+    assert_eq!(tb.get_u64("p").await, 0x0F, "{what}: p reset");
+    tb.set("rst", 0u8).set("op", 0u8).set("v", 1u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0x42, "{what}: two bits in one cycle");
+    tb.set("op", 1u8).set("v", 0x9u8);
+    tb.clock(1).await;
+    assert_eq!(
+        tb.get_u64("r").await,
+        0x92,
+        "{what}: range write keeps low bits"
+    );
+    tb.set("op", 2u8).set("idx", 3u8);
+    tb.clock(1).await;
+    assert_eq!(tb.get_u64("r").await, 0x9A, "{what}: run-time index");
+    assert_eq!(
+        tb.get_u64("p").await,
+        0x07,
+        "{what}: port bit at run-time index"
+    );
+    tb.set("op", 3u8).set("v", 0xCu8);
+    tb.clock(1).await;
+    assert_eq!(
+        tb.get_u64("r").await,
+        0xA9,
+        "{what}: whole write after parts"
+    );
+    assert_eq!(tb.get_u64("p").await, 0x0C, "{what}: port range write");
+}
+
+#[tokio::test]
+async fn test_register_part_writes_behavioral() {
+    let tb = Testbench::new(&fixture_path("register_part_writes.sk"))
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_register_part_writes_gate_level_asic() {
+    let path = fixture_path("register_part_writes.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Parts", "generic_asic")
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "generic_asic").await;
+}
+
+#[tokio::test]
+async fn test_register_part_writes_gate_level_nexus() {
+    let path = fixture_path("register_part_writes.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "Parts", "nexus")
+        .await
+        .unwrap();
+    check_register_part_writes(tb, "nexus").await;
+}
+
+// Instance ports wired to expressions -----------------------------------------
+//
+// `inst u = M { x: ~a }` lowers the expression into a parent signal
+// `u__port__x` that the child port is stitched to. The lowering used by the
+// gate flows did not create that signal, so the child input had no driver.
+
+fn port_expression_expected(a: u64, b: u64) -> u64 {
+    (!a ^ (b & 0b0110)) & 0xF
+}
+
+async fn check_port_expressions(mut tb: Testbench, what: &str) {
+    for a in 0..16u64 {
+        for b in [0u64, 0b0010, 0b0100, 0b0110, 0b1111] {
+            tb.set("a", a).set("b", b);
+            tb.step().await;
+            assert_eq!(
+                tb.get_u64("z").await,
+                port_expression_expected(a, b),
+                "{what}: a={a:#x} b={b:#x}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_instance_port_expressions_behavioral() {
+    let path = fixture_path("instance_port_expression.sk");
+    let tb = Testbench::with_top_module(&path, "PortExpr").await.unwrap();
+    check_port_expressions(tb, "behavioral").await;
+}
+
+#[tokio::test]
+async fn test_instance_port_expressions_gate_level_asic() {
+    let path = fixture_path("instance_port_expression.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "PortExpr", "generic_asic")
+        .await
+        .unwrap();
+    check_port_expressions(tb, "generic_asic").await;
+}
+
+#[tokio::test]
+async fn test_instance_port_expressions_gate_level_nexus() {
+    let path = fixture_path("instance_port_expression.sk");
+    let tb = Testbench::gate_level_with_top_and_library(&path, "PortExpr", "nexus")
+        .await
+        .unwrap();
+    check_port_expressions(tb, "nexus").await;
+}
+
+/// The CLI gate flow without optimisation (the path NCL designs take) refuses
+/// a netlist with an undriven input, so a lost port expression fails the build.
+#[test]
+fn test_instance_port_expressions_unoptimised_gate_build() {
+    for fixture in [
+        "instance_port_expression.sk",
+        "instance_port_expression_async.sk",
+    ] {
+        let out = std::env::temp_dir().join(format!(
+            "skalp_port_expr_{}_{}",
+            std::process::id(),
+            fixture.trim_end_matches(".sk")
+        ));
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+            .args(["build", "-s", &fixture_path(fixture), "-o"])
+            .arg(&out)
+            .args(["--target", "gates", "--no-synth-opt", "--no-async-sta"])
+            .output()
+            .expect("failed to run skalp");
+        assert!(
+            output.status.success(),
+            "{fixture}: gate build failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The expression signals are driven inside the design; they must not
+        // turn into primary inputs of the top.
+        let json =
+            std::fs::read_to_string(out.join("design_gates.json")).expect("gate netlist written");
+        let _ = std::fs::remove_dir_all(&out);
+        let netlist: skalp_lir::gate_netlist::GateNetlist =
+            serde_json::from_str(&json).expect("gate netlist parses");
+        let leaked: Vec<&str> = netlist
+            .nets
+            .iter()
+            .filter(|n| n.is_input && n.name.contains("__port__"))
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "{fixture}: port expressions became top inputs: {leaked:?}"
+        );
+    }
+}

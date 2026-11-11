@@ -21,13 +21,9 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-quick-${{ hashFiles('**/Cargo.lock') }}
+          key: quick
 
       - name: Check formatting
         run: cargo fmt --all -- --check
