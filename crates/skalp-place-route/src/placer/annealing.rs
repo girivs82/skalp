@@ -442,8 +442,15 @@ pub struct SimulatedAnnealing<'a, D: Device> {
 /// Move-generation data that stays fixed for a whole annealing run, so a
 /// move costs O(1) instead of a scan over every cell.
 struct MoveContext {
-    /// All placed cells
+    /// All placed cells a move may take to any compatible BEL
     cells: Vec<CellId>,
+    /// Cells whose BEL uses up other BELs of its tile (distributed RAM,
+    /// wide LUTs), by BEL type. One moves only by swapping with another of
+    /// its type: the two footprints trade places, so every BEL that was
+    /// reserved stays reserved.
+    footprint_cells: HashMap<BelType, Vec<CellId>>,
+    /// Number of cells in `footprint_cells`
+    footprint_count: usize,
     /// Cells on critical nets (criticality > 0.5), most critical quarter
     critical: Vec<CellId>,
     /// BELs no move may target: the LUTs under fixed two-bit carry cells
@@ -497,18 +504,27 @@ impl MoveContext {
                 }
             }
         }
+        let movable = |c: &CellId| carry_layout.is_none() || !chain_membership.contains_key(c);
         let cells: Vec<CellId> = placement
             .placements
             .iter()
-            .filter(|(c, loc)| {
-                !has_footprint(loc.bel_type)
-                    && (carry_layout.is_none() || !chain_membership.contains_key(c))
-            })
+            .filter(|(c, loc)| !has_footprint(loc.bel_type) && movable(c))
             .map(|(&c, _)| c)
             .collect();
+        let mut footprint_cells: HashMap<BelType, Vec<CellId>> = HashMap::new();
+        for (c, loc) in &placement.placements {
+            if has_footprint(loc.bel_type) && movable(c) {
+                footprint_cells.entry(loc.bel_type).or_default().push(*c);
+            }
+        }
+        // Same order as `cells`, which follows the placement map
+        for list in footprint_cells.values_mut() {
+            list.sort_unstable_by_key(|c| c.0);
+        }
+        let footprint_count = footprint_cells.values().map(Vec::len).sum();
         let mut critical: Vec<(CellId, f64)> = Vec::new();
         if !net_criticalities.is_empty() {
-            for &cell_id in &cells {
+            for &cell_id in cells.iter().chain(footprint_cells.values().flatten()) {
                 if let Some(cell) = netlist.get_cell(cell_id) {
                     let crit = cell
                         .outputs
@@ -526,6 +542,8 @@ impl MoveContext {
         let top_n = (critical.len() / 4).max(1).min(critical.len());
         Self {
             cells,
+            footprint_cells,
+            footprint_count,
             critical: critical[..top_n].iter().map(|&(c, _)| c).collect(),
             reserved,
             control_sets: control_sets(netlist),
@@ -1131,7 +1149,17 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         rng: &mut R,
     ) -> Move {
         let cells = &ctx.cells;
-        let cell = cells[rng.gen_range(0..cells.len())];
+        let pick = rng.gen_range(0..cells.len() + ctx.footprint_count);
+        let Some(&cell) = cells.get(pick) else {
+            let mut index = pick - cells.len();
+            for list in ctx.footprint_cells.values() {
+                if index < list.len() {
+                    return self.generate_footprint_swap(placement, ctx, list[index], rlim, rng);
+                }
+                index -= list.len();
+            }
+            unreachable!("footprint_count counts footprint_cells");
+        };
 
         // A carry chain cell on a device without a fixed chain layout: half
         // the time move the whole chain
@@ -1627,7 +1655,43 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             return self.generate_move(placement, ctx, loc_map, rlim, rng);
         }
         let cell_id = ctx.critical[rng.gen_range(0..ctx.critical.len())];
+        if has_footprint(placement.placements[&cell_id].bel_type) {
+            return self.generate_footprint_swap(placement, ctx, cell_id, rlim, rng);
+        }
         self.generate_window_move(placement, ctx, loc_map, cell_id, rlim, rng)
+    }
+
+    /// Swap `cell_id`, whose BEL uses up other BELs of its tile, with another
+    /// cell of its BEL type within `rlim` tiles. Returns a no-op move if no
+    /// such cell turns up.
+    fn generate_footprint_swap<R: Rng>(
+        &self,
+        placement: &PlacementResult,
+        ctx: &MoveContext,
+        cell_id: CellId,
+        rlim: u32,
+        rng: &mut R,
+    ) -> Move {
+        let loc = placement.placements[&cell_id];
+        let Some(peers) = ctx.footprint_cells.get(&loc.bel_type) else {
+            return Move::Relocate(cell_id, loc);
+        };
+        const ATTEMPTS: usize = 16;
+        let r = rlim.max(1);
+        for _ in 0..ATTEMPTS {
+            let other = peers[rng.gen_range(0..peers.len())];
+            if other == cell_id {
+                continue;
+            }
+            let target = placement.placements[&other];
+            if target.tile_x.abs_diff(loc.tile_x) <= r && target.tile_y.abs_diff(loc.tile_y) <= r {
+                return Move::Relocate(
+                    cell_id,
+                    PlacementLoc::new(target.tile_x, target.tile_y, target.bel_index, loc.bel_type),
+                );
+            }
+        }
+        Move::Relocate(cell_id, loc)
     }
 
     /// Estimate timing score for final placement (worst slack)
@@ -1666,5 +1730,129 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 | (BelType::DffSrE, BelType::DffE)
                 | (BelType::DffSrE, BelType::DffSr)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::nexus::{NexusDevice, NexusVariant};
+    use rand::SeedableRng;
+    use skalp_lir::gate_netlist::{Cell, GateNet};
+
+    /// Wide LUTs (whose BEL takes its slice's two LUTs) move by swapping
+    /// with each other, so their footprints trade places; nothing else ever
+    /// lands on a footprint BEL.
+    #[test]
+    fn footprint_cells_move_by_swapping() {
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let (width, height) = device.grid_size();
+        // Two logic tiles with wide-LUT sites, three tiles apart
+        let wide_sites = |x: u32, y: u32| -> Vec<usize> {
+            device
+                .tile_at(x, y)
+                .map(|t| {
+                    t.bels()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, b)| b.bel_type == BelType::WideLut)
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (x0, y0) = (0..width)
+            .flat_map(|x| (0..height).map(move |y| (x, y)))
+            .find(|&(x, y)| !wide_sites(x, y).is_empty() && !wide_sites(x + 3, y).is_empty())
+            .expect("a logic tile");
+        let (x1, y1) = (x0 + 3, y0);
+
+        let mut netlist = GateNetlist::new("wide".to_string(), "nexus".to_string());
+        let net = |n: &mut GateNetlist, name: &str| {
+            n.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let a = net(&mut netlist, "a");
+        let cell = |n: &mut GateNetlist, ty: &str, name: &str, ins, outs| {
+            n.add_cell(Cell::new_comb(
+                CellId(0),
+                ty.to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                ins,
+                outs,
+            ))
+        };
+        let w0_out = net(&mut netlist, "w0");
+        let w1_out = net(&mut netlist, "w1");
+        let w0 = cell(&mut netlist, "OXIDE_LUT5", "w0", vec![a], vec![w0_out]);
+        let w1 = cell(&mut netlist, "OXIDE_LUT5", "w1", vec![a], vec![w1_out]);
+        let l_out = net(&mut netlist, "l");
+        let l = cell(
+            &mut netlist,
+            "OXIDE_COMB",
+            "l",
+            vec![w0_out, w1_out],
+            vec![l_out],
+        );
+
+        let mut placement = PlacementResult::new();
+        let s0 = wide_sites(x0, y0)[0];
+        let s1 = wide_sites(x1, y1)[0];
+        placement
+            .placements
+            .insert(w0, PlacementLoc::new(x0, y0, s0, BelType::WideLut));
+        placement
+            .placements
+            .insert(w1, PlacementLoc::new(x1, y1, s1, BelType::WideLut));
+        let lut = device
+            .tile_at(x0, y0 + 1)
+            .and_then(|t| t.bels().iter().position(|b| b.bel_type == BelType::Lut4))
+            .expect("a LUT");
+        placement
+            .placements
+            .insert(l, PlacementLoc::new(x0, y0 + 1, lut, BelType::Lut4));
+        let mut loc_map: HashMap<(u32, u32, usize), CellId> = HashMap::new();
+        for (&c, loc) in &placement.placements {
+            loc_map.insert((loc.tile_x, loc.tile_y, loc.bel_index), c);
+        }
+
+        let annealer = SimulatedAnnealing::new(&device, 1.0, 0.9, 10);
+        let ctx = MoveContext::build(
+            &placement,
+            &netlist,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &|x, y, bel| device.bel_footprint(x, y, bel),
+        );
+        assert_eq!(ctx.cells, vec![l]);
+        assert_eq!(ctx.footprint_count, 2);
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let mut swapped = false;
+        for _ in 0..200 {
+            let Move::Relocate(mover, target) =
+                annealer.generate_move(&placement, &ctx, &loc_map, 10, &mut rng)
+            else {
+                panic!("no carry chains here");
+            };
+            let key = (target.tile_x, target.tile_y, target.bel_index);
+            if mover == l {
+                assert!(
+                    !ctx.reserved.contains(&key),
+                    "a LUT moved onto a wide LUT's BELs"
+                );
+            } else if placement.placements[&mover] != target {
+                let other = if mover == w0 { w1 } else { w0 };
+                assert_eq!(
+                    loc_map.get(&key),
+                    Some(&other),
+                    "a wide LUT moves only by a swap"
+                );
+                swapped = true;
+            }
+        }
+        assert!(swapped, "wide LUTs never moved");
     }
 }

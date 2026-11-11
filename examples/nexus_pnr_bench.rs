@@ -102,7 +102,10 @@ fn main() {
     let t = Instant::now();
     if route {
         let mut config = PnrConfig::default();
-        // Experiment knobs: PLACER_ITERS, TIMING_WEIGHT
+        // Experiment knobs: PLACER_ITERS, TIMING_WEIGHT, SEED
+        if let Some(v) = std::env::var("SEED").ok().and_then(|v| v.parse().ok()) {
+            config.placer.seed = v;
+        }
         if let Some(v) = std::env::var("PLACER_ITERS")
             .ok()
             .and_then(|v| v.parse().ok())
