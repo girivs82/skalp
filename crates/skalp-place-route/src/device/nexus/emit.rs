@@ -382,10 +382,10 @@ fn emit_bits(
             .filter(|&i| tied.value(cell, first + i) == Some(false))
             .collect()
     };
-    // The two flip-flops of a slice share its clock, enable and set/reset
-    // inputs: each slice's control set, and a flip-flop holding it
+    // Each slice's control set, and a flip-flop holding it
     let control_sets = crate::placer::control_sets::control_sets(netlist);
     let mut slices_with_ff: HashMap<(u32, u32, char), (ControlSet, &str)> = HashMap::new();
+    let mut pairs_with_ff: HashMap<(u32, u32, &str), (ControlSet, &str)> = HashMap::new();
     // Tiles whose slice C is a distributed RAM's write port
     let mut ram_write_tiles: HashSet<(u32, u32)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
@@ -484,19 +484,26 @@ fn emit_bits(
                     .get(&cell.id)
                     .copied()
                     .ok_or_else(|| emit_err(format!("Flip-flop '{}' has no clock", cell.path)))?;
-                match slices_with_ff.get(&(x, y, slice)) {
+                // Slices A and B share one clock, enable and set/reset
+                // line of the tile, and C and D the other
+                let pair = if slice <= 'B' { "A and B" } else { "C and D" };
+                match pairs_with_ff.get(&(x, y, pair)) {
                     Some((held, other)) if *held != set => {
                         return Err(emit_err(format!(
-                            "Flip-flops '{other}' and '{}' share slice {slice} of tile \
-                             ({x}, {y}) but not their clock, reset and enable",
+                            "Flip-flops '{other}' and '{}' share the control lines of \
+                             slices {pair} of tile ({x}, {y}) but not their clock, reset \
+                             and enable",
                             cell.path
                         )));
                     }
                     Some(_) => {}
                     None => {
-                        slices_with_ff.insert((x, y, slice), (set, cell.path.as_str()));
+                        pairs_with_ff.insert((x, y, pair), (set, cell.path.as_str()));
                     }
                 }
+                slices_with_ff
+                    .entry((x, y, slice))
+                    .or_insert((set, cell.path.as_str()));
             }
             BelType::DistRam => {
                 if (0..cell.inputs.len()).any(|i| tied.value(cell.id, i).is_some()) {

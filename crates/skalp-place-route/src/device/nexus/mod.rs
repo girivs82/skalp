@@ -2083,8 +2083,9 @@ impl Device for NexusDevice {
     }
 
     fn ff_control_group(&self, x: u32, y: u32, bel_index: usize) -> Option<usize> {
-        // A slice's two flip-flops share its CLK, CE and LSR
-        super::ff_slice_group(self, x, y, bel_index)
+        // Slices A and B take their CLK, CE and LSR from one set of tile
+        // wires (JCLK0, JCE0, JLSR0), and slices C and D from the other
+        super::ff_slice_group(self, x, y, bel_index, 4)
     }
 
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {

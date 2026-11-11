@@ -269,13 +269,16 @@ pub const RAM_PIN_READ_CLK: usize = 103;
 /// Cell parameter holding where a multiplier's added low-driven inputs start.
 pub const DSP_EXTRA_INPUTS_PARAM: &str = "DSP_EXTRA_INPUTS_FROM";
 
-/// [`Device::ff_control_group`] for a tile whose flip-flops pair up into
-/// slices in BEL order (Lattice Nexus and ECP5: two per slice).
+/// [`Device::ff_control_group`] for a tile whose flip-flops share their
+/// control signals in runs of `group_size`, in BEL order (two per ECP5
+/// slice; four on Nexus, whose slices A and B, and C and D, share one
+/// clock, clock enable and set/reset line).
 pub(crate) fn ff_slice_group<D: Device + ?Sized>(
     device: &D,
     x: u32,
     y: u32,
     bel_index: usize,
+    group_size: usize,
 ) -> Option<usize> {
     let tile = device.tile_at(x, y)?;
     let bels = tile.bels();
@@ -286,7 +289,7 @@ pub(crate) fn ff_slice_group<D: Device + ?Sized>(
         .iter()
         .filter(|b| b.bel_type.is_ff())
         .count();
-    Some(ordinal / 2)
+    Some(ordinal / group_size)
 }
 
 /// Whether a router pin number is a clock pin, routed on the clock network.
