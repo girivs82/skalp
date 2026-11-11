@@ -274,7 +274,7 @@ impl GateNetlistToSirConverter {
             // Without alias resolution, cells point to undriven nets.
 
             let expected_inputs = cell.inputs.len();
-            let inputs: Vec<SirSignalId> = cell
+            let mut inputs: Vec<SirSignalId> = cell
                 .inputs
                 .iter()
                 .filter_map(|net_id| {
@@ -296,6 +296,20 @@ impl GateNetlistToSirConverter {
                     inputs.len(),
                     expected_inputs - inputs.len()
                 );
+            }
+            // A flip-flop's own reset follows its D (and enable) inputs: see
+            // `own_reset_input`
+            if matches!(
+                cell.function,
+                Some(CellFunction::DffR) | Some(CellFunction::DffRE)
+            ) && inputs.len() == expected_inputs
+            {
+                if let Some(&reset) = cell
+                    .reset
+                    .and_then(|net| self.net_to_signal.get(&netlist.resolve_alias(net)))
+                {
+                    inputs.push(reset);
+                }
             }
 
             let expected_outputs = cell.outputs.len();
@@ -1133,6 +1147,18 @@ pub fn convert_gate_netlist_to_sir(netlist: &GateNetlist) -> GateNetlistToSirRes
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// Which input of a flip-flop primitive is the flip-flop's own reset (to 0),
+/// when it has one: a `DffR` becomes a `DffSR` with inputs `[D, reset]`, a
+/// `DffRE` a `DffE` with inputs `[D, enable, reset]`. The reset overrides the
+/// enable.
+pub(crate) fn own_reset_input(ptype: &PrimitiveType) -> Option<usize> {
+    match ptype {
+        PrimitiveType::DffSR => Some(1),
+        PrimitiveType::DffE => Some(2),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

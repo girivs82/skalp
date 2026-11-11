@@ -69,6 +69,57 @@ fn test_targets_without_distributed_ram_use_registers() {
     }
 }
 
+/// A memory whose write data is computed from its own read data is no
+/// combinational loop: its read port does not wait on its write port. The
+/// logic around it must still be built in dependency order, or the address
+/// logic reads signals not built yet, which come out as constant 0.
+#[test]
+fn test_read_modify_write_memory_keeps_its_address_logic() {
+    let path = std::path::PathBuf::from(fixture_path("distram_read_modify_write.sk"));
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).unwrap();
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .unwrap();
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    // Flattened, the counter feeding the address is built in the same pass
+    let net = skalp_lir::synthesize(
+        &hier.flatten(),
+        &library,
+        skalp_lir::synth::SynthPreset::Full,
+    )
+    .netlist;
+    let rams: Vec<_> = net
+        .cells
+        .iter()
+        .filter(|c| c.function == Some(CellFunction::DistRam16x4))
+        .collect();
+    assert_eq!(rams.len(), 8, "64 x 8: 4 banks x 2 slices");
+    let driver = |n: &skalp_lir::GateNetId| {
+        net.cells
+            .iter()
+            .find(|c| c.outputs.contains(n))
+            .map(|c| c.cell_type.clone())
+    };
+    for ram in rams {
+        // Inputs: DI[0..4], WAD[4..8], WRE, RAD[9..13]
+        for (pin, net_id) in ram
+            .inputs
+            .iter()
+            .enumerate()
+            .filter(|&(p, _)| p != 8 && p >= 4)
+        {
+            let cell = driver(net_id).unwrap_or_default();
+            assert!(
+                !cell.starts_with("TIE"),
+                "{} address pin {pin} is tied constant ({cell})",
+                ram.path
+            );
+        }
+    }
+}
+
 #[test]
 fn test_distributed_ram_verilog_ports() {
     let v = synthesize("fpga_distram_regfile.sk", "nexus").to_verilog();

@@ -551,9 +551,16 @@ impl<'a> LirToSynthAig<'a> {
 
     /// Topologically sort LIR nodes (Kahn's algorithm)
     fn topological_sort(&self) -> Vec<usize> {
+        // Registers and physical ops (memories, carry chains, DSPs) produce
+        // nothing the combinational order must wait for: their outputs are
+        // AIG inputs created before this sort. Counting them would make a
+        // memory whose write data is computed from its own read data (a
+        // read-modify-write) look like a combinational loop.
         let mut signal_producer: HashMap<u32, usize> = HashMap::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
+            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. })
+                || self.is_physical_op(&node.op)
+            {
                 continue;
             }
             signal_producer.insert(node.output.0, idx);
@@ -612,8 +619,33 @@ impl<'a> LirToSynthAig<'a> {
         }
 
         if sorted.len() != n {
+            let stuck: Vec<String> = (0..n)
+                .filter(|&i| in_degree[i] > 0)
+                .take(12)
+                .map(|i| {
+                    let node = &self.lir.nodes[i];
+                    let name = |s: &LirSignalId| {
+                        self.lir
+                            .signals
+                            .get(s.0 as usize)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default()
+                    };
+                    let op = format!("{:?}", node.op);
+                    let op = op.split([' ', '{', '(']).next().unwrap_or_default();
+                    format!(
+                        "{} {} [{}] -> {}",
+                        node.path,
+                        op,
+                        node.inputs.iter().map(name).collect::<Vec<_>>().join(", "),
+                        name(&node.output)
+                    )
+                })
+                .collect();
             tracing::warn!(
-                "[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order"
+                "[LIR_SYNTH_AIG] Cycle detected in topological sort, using original order; {} nodes unsorted, e.g. {:#?}",
+                n - sorted.len(),
+                stuck
             );
             (0..n).collect()
         } else {

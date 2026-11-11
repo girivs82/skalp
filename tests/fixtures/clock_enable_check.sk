@@ -1,0 +1,153 @@
+// Clock-enable flip-flops checked against registers that never hold.
+//
+// GatedAsync (asynchronous reset) and GatedSync (synchronous reset) keep their
+// registers under conditions that synthesis turns into clock enables. Every
+// clock, EnableCheck compares them with reference registers that cannot be
+// given an enable: each stores its value XOR a phase bit that flips every
+// clock, so it changes on every edge. Flag k (k = 0..2) latches high when a, b
+// or c of GatedAsync differs from the reference, flag 3 + k the same for
+// GatedSync. Expected: all flags low.
+entity EnableCheck {
+    in clk: clock
+    out led: bit[8]
+}
+impl EnableCheck {
+    signal por: bit[8] = 0
+    signal rst: bit
+    rst = if por == 255 { 0 } else { 1 }
+    signal lfsr: bit[16] = 16'hace1
+    signal en: bit
+    en = lfsr[0] | lfsr[5]
+    signal sel: bit
+    sel = lfsr[3] & lfsr[9]
+    signal x: bit[8]
+    x = lfsr[15:8]
+
+    inst ga = GatedAsync { clk: clk, rst: rst, en: en, sel: sel, x: x }
+    inst gs = GatedSync { clk: clk, rst: rst, en: en, sel: sel, x: x }
+
+    signal phase: bit = 0
+    signal pm: bit[8]
+    pm = if phase == 1 { 255 } else { 0 }
+    signal aref: bit[16] = 0
+    signal benc: bit[8] = 0
+    signal cenc: bit[8] = 0
+    signal bref: bit[8]
+    bref = benc ^ pm
+    signal cref: bit[8]
+    cref = cenc ^ pm
+    signal bnext: bit[8]
+    bnext = if (en & sel) { x } else { bref }
+    signal cnext: bit[8]
+    cnext = if (sel) { x ^ 8'h5a } else { if (en) { cref & x } else { cref } }
+    signal npm: bit[8]
+    npm = if phase == 1 { 0 } else { 255 }
+
+    signal flags: bit[8] = 0
+    signal errs: bit[8]
+    errs = {2'b00,
+        if gs.c != cref { 1 } else { 0 },
+        if gs.b != bref { 1 } else { 0 },
+        if gs.a != aref { 1 } else { 0 },
+        if ga.c != cref { 1 } else { 0 },
+        if ga.b != bref { 1 } else { 0 },
+        if ga.a != aref { 1 } else { 0 }}
+
+    on(clk.rise) {
+        if por != 255 {
+            por = por + 1
+        }
+        lfsr = {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]}
+        phase = phase ^ 1
+        if (rst) {
+            aref = 0
+            benc = 255 ^ npm
+            cenc = npm
+        } else {
+            aref = aref + {15'b0, en}
+            benc = bnext ^ npm
+            cenc = cnext ^ npm
+            flags = flags | errs
+        }
+    }
+    led = flags
+}
+
+// Registers whose hold conditions become clock enables (asynchronous reset)
+entity GatedAsync {
+    in clk: clock
+    in rst: reset(active_high)
+    in en: bit
+    in sel: bit
+    in x: bit[8]
+    out a: bit[16]
+    out b: bit[8]
+    out c: bit[8]
+}
+impl GatedAsync {
+    signal ar: bit[16] = 0
+    signal br: bit[8] = 0
+    signal cr: bit[8] = 0
+    on(clk.rise | rst.active) {
+        if (rst) {
+            ar = 0
+            br = 255
+            cr = 0
+        } else {
+            if (en) {
+                ar = ar + 1
+            }
+            if (en & sel) {
+                br = x
+            }
+            if (sel) {
+                cr = x ^ 8'h5a
+            } else if (en) {
+                cr = cr & x
+            }
+        }
+    }
+    a = ar
+    b = br
+    c = cr
+}
+
+// The same registers with a synchronous reset
+entity GatedSync {
+    in clk: clock
+    in rst: bit
+    in en: bit
+    in sel: bit
+    in x: bit[8]
+    out a: bit[16]
+    out b: bit[8]
+    out c: bit[8]
+}
+impl GatedSync {
+    signal ar: bit[16] = 0
+    signal br: bit[8] = 0
+    signal cr: bit[8] = 0
+    on(clk.rise) {
+        if (rst) {
+            ar = 0
+            br = 255
+            cr = 0
+        } else {
+            if (en) {
+                ar = ar + 1
+            }
+            if (en & sel) {
+                br = x
+            }
+            if (sel) {
+                cr = x ^ 8'h5a
+            } else if (en) {
+                cr = cr & x
+            }
+        }
+    }
+    a = ar
+    b = br
+    c = cr
+}
+

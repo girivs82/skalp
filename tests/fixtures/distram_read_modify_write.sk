@@ -1,0 +1,37 @@
+// A distributed RAM whose write data is computed from its own read data
+// (read-modify-write), addressed by a child instance's output. Flattened,
+// the read data feeds the write data of the same memory node: a loop at
+// the word level that is not a combinational loop.
+
+entity Counter {
+    in clk: clock
+    out a: bit[8]
+}
+
+impl Counter {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        r = r + 1
+    }
+    a = r
+}
+
+entity ReadModifyWrite {
+    in clk: clock
+    in d: bit[4]
+    out q: bit[4]
+}
+
+impl ReadModifyWrite {
+    signal m: bit[8][64]
+    inst c = Counter {
+        clk: clk,
+    }
+    let ra: bit[6] = c.a[7:2]
+    signal word: bit[8]
+    word = m[ra]
+    on(clk.rise) {
+        m[ra] = word ^ {d, d}
+    }
+    q = word[3:0] ^ word[7:4]
+}

@@ -1,18 +1,20 @@
-//! DFF Functional Decomposition via AIG Cofactoring
+//! Flip-flop enable extraction.
 //!
-//! For each latch in the AIG, decomposes its data function `F(inputs, Q)` into
-//! enable, sync-reset, and sync-set signals using Boolean cofactors:
+//! A register that keeps its value under some condition reads its own output
+//! back through its data logic: `F(x, Q) = E(x) ? D(x) : Q`. Built that way,
+//! the hold path costs LUT inputs (`Q` and the conditions) and often a LUT
+//! level in front of the flip-flop. A flip-flop with a clock enable holds by
+//! itself: this pass finds `E` and `D` so the writer can emit one (`DffE`),
+//! leaving `D` free of `Q` and of the hold conditions.
 //!
-//! ```text
-//! E  = ~(F|Q=0 XOR F|Q=1)     -- enable: where F depends on Q
-//! F' = F|R=0                   -- function with reset deasserted
-//! ```
-//!
-//! This is purely functional — it works regardless of how deeply nested the
-//! MUX structure is, unlike structural pattern matching.
-//!
-//! Target decomposition for iCE40 SB_DFFESR:
-//!   `F = S ? 1 : (R ? 0 : (E ? D : Q))`
+//! The decomposition is exact and structural. Every node of the latch's data
+//! cone that depends on `Q` is written as `E ? D : Q ^ p`: a node that does
+//! not depend on `Q` loads itself (`E = 1`); `Q` holds (`E = 0`); a
+//! multiplexer takes `E` and `D` from its branches through its select; an
+//! AND (with inverted inputs, any AND/OR) of such forms is again of that
+//! form, because each operand is either a constant or `Q ^ p` for a given
+//! input. A cone that mixes `Q` and `!Q` (a toggle, an XOR) has no such form
+//! and keeps its data logic.
 
 use super::aig::{Aig, AigLit, AigNode, AigNodeId};
 use std::collections::{HashMap, HashSet};
@@ -30,158 +32,326 @@ pub struct LatchDecomp {
     pub reset_value: bool,
 }
 
-/// Decompose all latches in an AIG.
+/// Most nodes depending on `Q` that one latch's decomposition walks; a
+/// larger cone (wide feedback arithmetic, say) keeps its data logic.
+const MAX_FEEDBACK_CONE: usize = 512;
+
+/// Extract a clock enable for every latch whose data function holds its
+/// value under some condition (see the module documentation).
 ///
-/// Analyzes each latch's data cone to extract enable and sync-reset signals
-/// using Boolean cofactoring. Does NOT modify the AIG — only builds new nodes
-/// (via structural hashing) for the decomposed sub-functions.
+/// The returned enable and data are those of the cell the writer builds:
 ///
-/// Returns a map from latch AigNodeId to its decomposition. Latches that
-/// can't be decomposed (no enable, no reset) are omitted.
+/// - Without a reset, `F = E ? D : Q`.
+/// - With an asynchronous reset, the reset pin stays and overrides the
+///   enable (as a `DffRE` does), so `E` and `D` only have to match `F` while
+///   the reset is released: the reset reads as 0 in them.
+/// - With a synchronous reset, the cell has no reset pin: the reset loads
+///   the reset value through the enable and data,
+///   `E' = rst | E`, `D' = rst ? init : D`.
+///
+/// Only builds new nodes (with structural hashing); the latches keep their
+/// data. Returns, per decomposed latch, its enable and its new data.
 pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
-    // TEMPORARILY DISABLED for debugging — return empty to use plain DFFs
-    return HashMap::new();
-
-    #[allow(unreachable_code)]
-    let mut results = HashMap::new();
-
-    // Collect latch info to avoid borrow issues
-    let latches: Vec<(AigNodeId, AigLit, Option<AigNodeId>)> = aig
+    let latches: Vec<(AigNodeId, AigLit, Option<AigNodeId>, bool, bool)> = aig
         .iter_latches()
-        .map(|(id, node)| {
-            if let AigNode::Latch { data, reset, .. } = node {
-                (id, *data, *reset)
-            } else {
-                unreachable!()
-            }
+        .filter_map(|(id, node)| match node {
+            AigNode::Latch {
+                data,
+                init,
+                reset,
+                sync_reset,
+                ..
+            } => Some((id, *data, *reset, *sync_reset, *init == Some(true))),
+            _ => None,
         })
         .collect();
 
-    for (latch_id, data_lit, reset_node) in &latches {
-        let q_lit = AigLit::new(*latch_id);
-
-        // Check if Q is in the transitive fanin of D
-        if !is_in_fanin(aig, data_lit.node, *latch_id) {
-            tracing::trace!(
-                "[DFF_DECOMP] latch {:?}: Q not in fanin, skipping",
-                latch_id
-            );
-            continue; // Q doesn't feed back — no enable possible
+    let mut results = HashMap::new();
+    for (latch, data, reset, sync_reset, init) in latches {
+        let mut peeler = Peeler::new(latch, reset);
+        if reset.is_some_and(|r| peeler.depends_on_q(aig, r)) {
+            continue;
         }
-
-        // Step 1: Try sync reset detection
-        // Look for the latch's reset signal where F|reset=1 = constant
-        let mut sync_reset: Option<(AigLit, bool)> = None;
-        let mut data_after_reset = *data_lit;
-
-        if let Some(reset_id) = *reset_node {
-            let reset_lit = AigLit::new(reset_id);
-            let cofactor_r1 = cofactor(aig, *data_lit, reset_lit, true);
-            if cofactor_r1.const_value() == Some(false) {
-                // Active-high sync reset to 0
-                let cofactor_r0 = cofactor(aig, *data_lit, reset_lit, false);
-                sync_reset = Some((reset_lit, false));
-                data_after_reset = cofactor_r0;
-            } else if cofactor_r1.const_value() == Some(true) {
-                // Active-high sync set to 1
-                let cofactor_r0 = cofactor(aig, *data_lit, reset_lit, false);
-                sync_reset = Some((reset_lit, true));
-                data_after_reset = cofactor_r0;
+        let Some(form) = peeler.peel_lit(aig, data) else {
+            continue;
+        };
+        // F = E ? D : Q, not !Q; E neither always (no hold) nor never
+        if form.polarity != Some(false) || form.enable.is_const() {
+            continue;
+        }
+        let q = AigLit::new(latch);
+        let (enable, new_data, reference, released) = match reset {
+            Some(rst) if sync_reset => {
+                let rst = AigLit::new(rst);
+                let value = if init {
+                    AigLit::true_lit()
+                } else {
+                    AigLit::false_lit()
+                };
+                let enable = aig.add_or(rst, form.enable);
+                let new_data = aig.add_mux(rst, value, form.data);
+                // The writer loads the reset value over F
+                let next = aig.add_mux(rst, value, data);
+                (enable, new_data, next, None)
             }
-        }
-
-        // Step 2: Enable detection via Boolean difference
-        // dF/dQ = F|Q=1 XOR F|Q=0;  E = ~(dF/dQ)
-        let f_q0 = cofactor(aig, data_after_reset, q_lit, false);
-        let f_q1 = cofactor(aig, data_after_reset, q_lit, true);
-        let bool_diff = build_xor(aig, f_q0, f_q1);
-
-        tracing::trace!(
-            "[DFF_DECOMP] latch {:?}: f_q0={:?}, f_q1={:?}, bool_diff={:?} const={:?}",
-            latch_id,
-            f_q0,
-            f_q1,
-            bool_diff,
-            bool_diff.const_value()
-        );
-
-        let enable = if bool_diff.const_value() == Some(false) {
-            // dF/dQ = 0: F doesn't depend on Q (after reset peeling).
-            // Q dropped out — no enable pattern.
-            tracing::trace!("[DFF_DECOMP] latch {:?}: dF/dQ=0, no enable", latch_id);
-            None
-        } else if bool_diff.const_value() == Some(true) {
-            // dF/dQ = 1: F always depends on Q. This means F = Q or F = ~Q,
-            // not a MUX enable pattern.
-            tracing::trace!(
-                "[DFF_DECOMP] latch {:?}: dF/dQ=1, always depends on Q",
-                latch_id
+            _ => (form.enable, form.data, data, reset),
+        };
+        let rebuilt = build_mux(aig, enable, new_data, q);
+        if !verify_equivalence(aig, reference, rebuilt, latch, released) {
+            // The algebra is exact; a mismatch is a bug, never a reason to
+            // build a wrong register
+            tracing::warn!(
+                "[DFF_ENABLE] latch {:?}: enable decomposition failed simulation, kept as is",
+                latch
             );
-            None
-        } else {
-            // Non-trivial enable: E = ~bool_diff
-            let e_lit = bool_diff.invert();
-            tracing::trace!("[DFF_DECOMP] latch {:?}: enable={:?}", latch_id, e_lit);
-            Some(e_lit)
-        };
-
-        if enable.is_none() && sync_reset.is_none() {
-            continue; // Nothing to decompose
+            continue;
         }
-
-        // Compute D_new: the data function with enable and Q factored out.
-        // F = E*D_new + ~E*Q, so F|Q=0 = E*D_new.
-        // D_new = F|Q=0 with E forced to 1 (cofactor with E=1).
-        let new_data = if let Some(e_lit) = enable {
-            cofactor(aig, f_q0, e_lit, true)
-        } else {
-            data_after_reset
-        };
-
-        // Verify decomposition by simulation before accepting it.
-        // Compare against data_after_reset (not data_lit) since E/D_new
-        // are computed from the reset-stripped function.
-        let decomp_ok = if let Some(e_lit) = enable {
-            // Reconstructed: F_recon = mux(E, D_new, Q)
-            let f_recon = build_mux(aig, e_lit, new_data, q_lit);
-            verify_equivalence(aig, data_after_reset, f_recon, *latch_id)
-        } else {
-            // Reset peeling (sync_reset present) is straightforward — trust it;
-            // and with no reset there is nothing to verify.
-            true
-        };
-
-        if !decomp_ok {
-            tracing::debug!(
-                "[DFF_DECOMP] latch {:?}: VERIFICATION FAILED, skipping",
-                latch_id
-            );
-            continue; // Decomposition incorrect, skip this latch
-        }
-        tracing::trace!("[DFF_DECOMP] latch {:?}: decomposition accepted (enable={:?}, data={:?}, sync_reset={:?})",
-            latch_id, enable, new_data, sync_reset);
-
         results.insert(
-            *latch_id,
+            latch,
             LatchDecomp {
-                enable,
+                enable: Some(enable),
                 data: new_data,
-                sync_reset: sync_reset.map(|(s, _)| s),
-                reset_value: sync_reset.map(|(_, v)| v).unwrap_or(false),
+                sync_reset: None,
+                reset_value: false,
             },
         );
     }
-
     results
 }
 
+/// A function written as `enable ? data : Q ^ polarity`, where `polarity`
+/// is `None` for a function that never passes `Q` through (`enable` is 1).
+#[derive(Debug, Clone, Copy)]
+struct HoldForm {
+    enable: AigLit,
+    data: AigLit,
+    polarity: Option<bool>,
+}
+
+impl HoldForm {
+    fn invert(self) -> Self {
+        HoldForm {
+            enable: self.enable,
+            data: self.data.invert(),
+            polarity: self.polarity.map(|p| !p),
+        }
+    }
+}
+
+/// Both polarities of `Q` agree (or one side has none).
+fn merge_polarity(a: Option<bool>, b: Option<bool>) -> Option<Option<bool>> {
+    match (a, b) {
+        (None, p) | (p, None) => Some(p),
+        (Some(a), Some(b)) if a == b => Some(Some(a)),
+        _ => None,
+    }
+}
+
+struct Peeler {
+    latch: AigNodeId,
+    /// An asynchronous reset, read as released (0)
+    released: Option<AigNodeId>,
+    /// Whether a node's cone contains the latch output
+    depends: HashMap<AigNodeId, bool>,
+    /// Hold form of each node depending on `Q` (`None`: it has none)
+    forms: HashMap<AigNodeId, Option<HoldForm>>,
+}
+
+impl Peeler {
+    fn new(latch: AigNodeId, released: Option<AigNodeId>) -> Self {
+        Self {
+            latch,
+            released,
+            depends: HashMap::new(),
+            forms: HashMap::new(),
+        }
+    }
+
+    fn depends_on_q(&mut self, aig: &Aig, node: AigNodeId) -> bool {
+        if node == self.latch {
+            return true;
+        }
+        if let Some(&d) = self.depends.get(&node) {
+            return d;
+        }
+        // Iterative post-order: data cones can be deep
+        let mut stack = vec![(node, false)];
+        while let Some((n, expanded)) = stack.pop() {
+            if n == self.latch || self.depends.contains_key(&n) {
+                continue;
+            }
+            match aig.get_node(n) {
+                Some(AigNode::And { left, right }) => {
+                    let (l, r) = (left.node, right.node);
+                    if expanded {
+                        let dep = |x: AigNodeId, m: &HashMap<AigNodeId, bool>| {
+                            x == self.latch || m.get(&x).copied().unwrap_or(false)
+                        };
+                        let d = dep(l, &self.depends) || dep(r, &self.depends);
+                        self.depends.insert(n, d);
+                    } else {
+                        stack.push((n, true));
+                        stack.push((l, false));
+                        stack.push((r, false));
+                    }
+                }
+                // Inputs, other latches, barriers, constants
+                _ => {
+                    self.depends.insert(n, false);
+                }
+            }
+        }
+        self.depends[&node]
+    }
+
+    /// The value of `lit` while the reset is released, when it is the reset.
+    fn released_value(&self, lit: AigLit) -> Option<bool> {
+        (Some(lit.node) == self.released).then_some(lit.inverted)
+    }
+
+    fn peel_lit(&mut self, aig: &mut Aig, lit: AigLit) -> Option<HoldForm> {
+        if let Some(value) = self.released_value(lit) {
+            return Some(HoldForm {
+                enable: AigLit::true_lit(),
+                data: if value {
+                    AigLit::true_lit()
+                } else {
+                    AigLit::false_lit()
+                },
+                polarity: None,
+            });
+        }
+        if !self.depends_on_q(aig, lit.node) {
+            return Some(HoldForm {
+                enable: AigLit::true_lit(),
+                data: lit,
+                polarity: None,
+            });
+        }
+        let form = if lit.node == self.latch {
+            HoldForm {
+                enable: AigLit::false_lit(),
+                data: AigLit::false_lit(),
+                polarity: Some(false),
+            }
+        } else {
+            self.peel_node(aig, lit.node)?
+        };
+        Some(if lit.inverted { form.invert() } else { form })
+    }
+
+    /// Hold form of an AND node whose cone contains `Q`.
+    fn peel_node(&mut self, aig: &mut Aig, node: AigNodeId) -> Option<HoldForm> {
+        if let Some(&form) = self.forms.get(&node) {
+            return form;
+        }
+        if self.forms.len() >= MAX_FEEDBACK_CONE {
+            return None;
+        }
+        // Visited, not yet known: a revisit means a cycle, which an AIG has not
+        self.forms.insert(node, None);
+        let form = self.peel_and(aig, node);
+        self.forms.insert(node, form);
+        form
+    }
+
+    fn peel_and(&mut self, aig: &mut Aig, node: AigNodeId) -> Option<HoldForm> {
+        let Some(&AigNode::And { left, right }) = aig.get_node(node) else {
+            return None;
+        };
+
+        // node = !(s ? a : b), s not depending on Q: select from the
+        // branches through s
+        if let Some((select, a, b)) = as_inverted_mux(aig, left, right)
+            .filter(|&(select, _, _)| !self.depends_on_q(aig, select.node))
+        {
+            // A released reset selects one branch
+            if let Some(s) = self.released_value(select) {
+                return Some(self.peel_lit(aig, if s { a } else { b })?.invert());
+            }
+            let fa = self.peel_lit(aig, a)?;
+            let fb = self.peel_lit(aig, b)?;
+            let polarity = merge_polarity(fa.polarity, fb.polarity)?;
+            let enable = aig.add_mux(select, fa.enable, fb.enable);
+            // Where a branch never loads, its data is never read
+            let data = if fb.enable.const_value() == Some(false) {
+                fa.data
+            } else if fa.enable.const_value() == Some(false) {
+                fb.data
+            } else {
+                aig.add_mux(select, fa.data, fb.data)
+            };
+            let mux = HoldForm {
+                enable,
+                data,
+                polarity,
+            };
+            return Some(mux.invert());
+        }
+
+        let fl = self.peel_lit(aig, left)?;
+        let fr = self.peel_lit(aig, right)?;
+        let polarity = merge_polarity(fl.polarity, fr.polarity)?;
+        // l & r: where one operand is a constant 0 the AND loads 0; where
+        // both load, it loads both data ANDed; elsewhere it passes Q ^ p.
+        let (enable, data) = match (fl.polarity, fr.polarity) {
+            // One side does not see Q: it is its own data
+            (None, _) => (
+                aig.add_or(fl.data.invert(), fr.enable),
+                aig.add_and(fl.data, fr.data),
+            ),
+            (_, None) => (
+                aig.add_or(fr.data.invert(), fl.enable),
+                aig.add_and(fr.data, fl.data),
+            ),
+            _ => {
+                let both = aig.add_and(fl.enable, fr.enable);
+                let left_zero = aig.add_and(fl.enable, fl.data.invert());
+                let right_zero = aig.add_and(fr.enable, fr.data.invert());
+                let zero = aig.add_or(left_zero, right_zero);
+                (aig.add_or(both, zero), aig.add_and(fl.data, fr.data))
+            }
+        };
+        Some(HoldForm {
+            enable,
+            data,
+            polarity,
+        })
+    }
+}
+
+/// `left & right` as `!(s ? a : b)`: both operands inverted ANDs, one with
+/// `s` and one with `!s`.
+fn as_inverted_mux(aig: &Aig, left: AigLit, right: AigLit) -> Option<(AigLit, AigLit, AigLit)> {
+    if !left.inverted || !right.inverted {
+        return None;
+    }
+    let operands = |lit: AigLit| match aig.get_node(lit.node) {
+        Some(&AigNode::And { left, right }) => Some([left, right]),
+        _ => None,
+    };
+    let l = operands(left)?;
+    let r = operands(right)?;
+    for i in 0..2 {
+        for j in 0..2 {
+            if l[i] == r[j].invert() {
+                // !(s & a) & !(!s & b)
+                return Some((l[i], l[1 - i], r[1 - j]));
+            }
+        }
+    }
+    None
+}
+
 /// Verify that two AIG literals are functionally equivalent using random simulation.
-/// Checks 256 random input patterns (4 rounds of 64-bit parallel sim).
+/// Checks 256 random input patterns (4 rounds of 64-bit parallel sim), with
+/// `released` (an asynchronous reset) held at 0.
 fn verify_equivalence(
     aig: &Aig,
     original: AigLit,
     reconstructed: AigLit,
     latch_id: AigNodeId,
+    released: Option<AigNodeId>,
 ) -> bool {
     // Collect all input nodes (PIs and latches) in the transitive fanin of both functions
     let mut inputs_orig = HashSet::new();
@@ -221,6 +391,9 @@ fn verify_equivalence(
             rng_state ^= rng_state >> 7;
             rng_state ^= rng_state << 17;
             values.insert(input, rng_state);
+        }
+        if let Some(reset) = released {
+            values.insert(reset, 0);
         }
 
         let orig_val = eval_lit(aig, original, &mut values);
@@ -293,111 +466,6 @@ fn eval_node(aig: &Aig, node: AigNodeId, values: &mut HashMap<AigNodeId, u64>) -
     val
 }
 
-/// Check if `target` is in the transitive fanin of `node`.
-fn is_in_fanin(aig: &Aig, node: AigNodeId, target: AigNodeId) -> bool {
-    let mut visited = HashMap::new();
-    is_in_fanin_rec(aig, node, target, &mut visited)
-}
-
-fn is_in_fanin_rec(
-    aig: &Aig,
-    node: AigNodeId,
-    target: AigNodeId,
-    visited: &mut HashMap<AigNodeId, bool>,
-) -> bool {
-    if node == target {
-        return true;
-    }
-    if node == AigNodeId::FALSE {
-        return false;
-    }
-    if let Some(&result) = visited.get(&node) {
-        return result;
-    }
-    let result = match aig.get_node(node) {
-        Some(AigNode::And { left, right }) => {
-            is_in_fanin_rec(aig, left.node, target, visited)
-                || is_in_fanin_rec(aig, right.node, target, visited)
-        }
-        _ => false,
-    };
-    visited.insert(node, result);
-    result
-}
-
-/// Cofactor an AIG literal with respect to a variable.
-///
-/// Returns a new AIG literal representing `F|var=value`.
-/// Builds new AND nodes as needed (with structural hashing via add_and).
-fn cofactor(aig: &mut Aig, lit: AigLit, var: AigLit, value: bool) -> AigLit {
-    let mut cache: HashMap<AigNodeId, AigLit> = HashMap::new();
-    cofactor_rec(aig, lit, var, value, &mut cache)
-}
-
-fn cofactor_rec(
-    aig: &mut Aig,
-    lit: AigLit,
-    var: AigLit,
-    value: bool,
-    cache: &mut HashMap<AigNodeId, AigLit>,
-) -> AigLit {
-    // Base: constant
-    if lit.node == AigNodeId::FALSE {
-        return lit;
-    }
-
-    // Check if this literal IS the variable we're cofactoring
-    if lit.node == var.node {
-        let effective_inv = lit.inverted ^ var.inverted;
-        let const_val = value ^ effective_inv;
-        return if const_val {
-            AigLit::true_lit()
-        } else {
-            AigLit::false_lit()
-        };
-    }
-
-    // Check cache (keyed by positive node, handle inversion outside)
-    if let Some(&cached) = cache.get(&lit.node) {
-        return if lit.inverted {
-            cached.invert()
-        } else {
-            cached
-        };
-    }
-
-    // Only recurse into AND nodes
-    let result = match aig.get_node(lit.node) {
-        Some(AigNode::And { left, right }) => {
-            let left = *left;
-            let right = *right;
-            let new_left = cofactor_rec(aig, left, var, value, cache);
-            let new_right = cofactor_rec(aig, right, var, value, cache);
-            aig.add_and(new_left, new_right)
-        }
-        _ => {
-            // Input, Latch, Barrier — not dependent on var
-            AigLit::new(lit.node)
-        }
-    };
-
-    cache.insert(lit.node, result);
-
-    if lit.inverted {
-        result.invert()
-    } else {
-        result
-    }
-}
-
-/// Build XOR: a XOR b = ~(~(a & ~b) & ~(~a & b))
-fn build_xor(aig: &mut Aig, a: AigLit, b: AigLit) -> AigLit {
-    let a_and_nb = aig.add_and(a, b.invert());
-    let na_and_b = aig.add_and(a.invert(), b);
-    let nor = aig.add_and(a_and_nb.invert(), na_and_b.invert());
-    nor.invert()
-}
-
 /// Build MUX: sel ? d1 : d0 = (sel & d1) | (~sel & d0)
 pub fn build_mux(aig: &mut Aig, sel: AigLit, d1: AigLit, d0: AigLit) -> AigLit {
     let sel_and_d1 = aig.add_and(sel, d1);
@@ -431,7 +499,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_enable_detection() {
         let mut aig = make_mux_enable_aig();
         let decomps = decompose_latches(&mut aig);
@@ -443,7 +510,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_deeply_nested_enable() {
         // Build: F = MUX(c1, MUX(c2, D, Q), Q)
         // Equivalent to: MUX(c1 & c2, D, Q)
@@ -486,7 +552,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_three_level_nested_enable() {
         // F = MUX(c1, MUX(c2, MUX(c3, D, Q), Q), Q)
         // Enable = c1 & c2 & c3
@@ -516,7 +581,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "decompose_latches is disabled (f9345f2, NCL timing rework) — un-ignore when re-enabled"]
     fn test_enable_with_multiple_data_paths() {
         // F = MUX(c1, D1, MUX(c2, D2, Q))
         // Enable = c1 | c2, Data = MUX(c1, D1, D2) when enabled
@@ -546,5 +610,181 @@ mod tests {
             decomp.enable.is_some(),
             "Should detect enable with multiple data paths"
         );
+    }
+
+    /// Every assignment of `inputs` (and Q) gives the same value for the
+    /// latch data and for `E ? D : Q`.
+    fn assert_exact(aig: &Aig, latch: AigNodeId, data: AigLit, decomp: &LatchDecomp) {
+        let mut inputs = HashSet::new();
+        collect_inputs(aig, data.node, &mut inputs, &mut HashSet::new());
+        inputs.insert(latch);
+        let inputs: Vec<AigNodeId> = inputs.into_iter().collect();
+        assert!(inputs.len() <= 6);
+        // 64 patterns in parallel: bit k of input i's word is bit i of k
+        let mut values = HashMap::new();
+        values.insert(AigNodeId::FALSE, 0);
+        for (i, &input) in inputs.iter().enumerate() {
+            let word = (0..64u64).fold(0u64, |w, k| w | (((k >> i) & 1) << k));
+            values.insert(input, word);
+        }
+        let mut v = values.clone();
+        let f = eval_lit(aig, data, &mut v);
+        let mut v = values.clone();
+        let e = eval_lit(aig, decomp.enable.unwrap(), &mut v);
+        let d = eval_lit(aig, decomp.data, &mut v);
+        let q = values[&latch];
+        let rebuilt = (e & d) | (!e & q);
+        let used = if inputs.len() == 6 {
+            u64::MAX
+        } else {
+            (1u64 << (1 << inputs.len())) - 1
+        };
+        assert_eq!(f & used, rebuilt & used, "F != E ? D : Q");
+    }
+
+    fn latch_data(aig: &Aig, latch: AigNodeId) -> AigLit {
+        match aig.get_node(latch) {
+            Some(AigNode::Latch { data, .. }) => *data,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_reset_in_logic_folds_into_enable_and_data() {
+        // F = !rst & (en ? d : Q), rst plain logic: it loads 0 whatever en says
+        let mut aig = Aig::new("test".to_string());
+        let rst = AigLit::new(aig.add_input("rst".to_string(), None));
+        let en = AigLit::new(aig.add_input("en".to_string(), None));
+        let d = AigLit::new(aig.add_input("d".to_string(), None));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let q = AigLit::new(q_node);
+        let hold = build_mux(&mut aig, en, d, q);
+        let f = aig.add_and(rst.invert(), hold);
+        aig.update_latch_data(q_node, f);
+
+        let decomps = decompose_latches(&mut aig);
+        let decomp = &decomps[&q_node];
+        assert_exact(&aig, q_node, latch_data(&aig, q_node), decomp);
+    }
+
+    #[test]
+    fn test_hold_in_both_branches() {
+        // F = s ? (t ? a : Q) : (u ? Q : b)
+        let mut aig = Aig::new("test".to_string());
+        let [s, t, u, a, b] =
+            ["s", "t", "u", "a", "b"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let q = AigLit::new(q_node);
+        let then_ = build_mux(&mut aig, t, a, q);
+        let else_ = build_mux(&mut aig, u, q, b);
+        let f = build_mux(&mut aig, s, then_, else_);
+        aig.update_latch_data(q_node, f);
+
+        let decomps = decompose_latches(&mut aig);
+        let decomp = &decomps[&q_node];
+        assert_exact(&aig, q_node, f, decomp);
+    }
+
+    #[test]
+    fn test_enable_is_the_select_alone() {
+        // F = en ? (a & b) : Q: the enable is en, the data does not read en
+        let mut aig = Aig::new("test".to_string());
+        let [en, a, b] = ["en", "a", "b"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let ab = aig.add_and(a, b);
+        let f = build_mux(&mut aig, en, ab, AigLit::new(q_node));
+        aig.update_latch_data(q_node, f);
+
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(en));
+        assert_eq!(decomp.data, ab);
+    }
+
+    #[test]
+    fn test_toggle_has_no_enable() {
+        // F = t ? !Q : Q (a T flip-flop) passes Q and !Q: no hold form
+        let mut aig = Aig::new("test".to_string());
+        let t = AigLit::new(aig.add_input("t".to_string(), None));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let q = AigLit::new(q_node);
+        let f = build_mux(&mut aig, t, q.invert(), q);
+        aig.update_latch_data(q_node, f);
+        assert!(decompose_latches(&mut aig).is_empty());
+    }
+
+    #[test]
+    fn test_select_reading_q_is_handled_as_logic() {
+        // F = Q ? a : (en ? b : Q): the select reads Q itself
+        let mut aig = Aig::new("test".to_string());
+        let [a, b, en] = ["a", "b", "en"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let q = AigLit::new(q_node);
+        let inner = build_mux(&mut aig, en, b, q);
+        let f = build_mux(&mut aig, q, a, inner);
+        aig.update_latch_data(q_node, f);
+        if let Some(decomp) = decompose_latches(&mut aig).get(&q_node) {
+            assert_exact(&aig, q_node, f, decomp);
+        }
+    }
+
+    /// A latch with reset `rst` whose data is `!rst & (en ? d : Q)`, as
+    /// LIR lowering builds a register with a reset and an enable.
+    fn reset_latch(sync: bool) -> (Aig, AigNodeId, [AigLit; 3]) {
+        let mut aig = Aig::new("test".to_string());
+        let [en, d] = ["en", "d"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
+        let rst = aig.add_input("rst".to_string(), None);
+        let q_node = aig.add_latch(AigLit::false_lit(), Some(false), None, Some(rst));
+        if sync {
+            aig.mark_latch_sync_reset(q_node);
+        }
+        let hold = build_mux(&mut aig, en, d, AigLit::new(q_node));
+        let f = aig.add_and(AigLit::new(rst).invert(), hold);
+        aig.update_latch_data(q_node, f);
+        (aig, q_node, [en, d, AigLit::new(rst)])
+    }
+
+    #[test]
+    fn test_async_reset_leaves_enable_and_data_free_of_it() {
+        // The reset pin overrides the enable, so the cell needs E and D only
+        // with the reset released
+        let (mut aig, q_node, [en, d, _]) = reset_latch(false);
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(en));
+        assert_eq!(decomp.data, d);
+    }
+
+    #[test]
+    fn test_async_reset_in_a_select_picks_the_released_branch() {
+        // F = rst ? 0 : (en ? d : Q)
+        let mut aig = Aig::new("test".to_string());
+        let [en, d] = ["en", "d"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
+        let rst = aig.add_input("rst".to_string(), None);
+        let q_node = aig.add_latch(AigLit::false_lit(), Some(false), None, Some(rst));
+        let hold = build_mux(&mut aig, en, d, AigLit::new(q_node));
+        let f = build_mux(&mut aig, AigLit::new(rst), AigLit::true_lit(), hold);
+        aig.update_latch_data(q_node, f);
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(en));
+        assert_eq!(decomp.data, d);
+    }
+
+    #[test]
+    fn test_sync_reset_loads_through_enable_and_data() {
+        // No reset pin: E = rst | en, D = rst ? 0 : d
+        let (mut aig, q_node, [en, d, rst]) = reset_latch(true);
+        let decomp = decompose_latches(&mut aig)[&q_node].clone();
+        let mut inputs = HashMap::new();
+        inputs.insert(AigNodeId::FALSE, 0u64);
+        for (i, lit) in [en, d, rst, AigLit::new(q_node)].iter().enumerate() {
+            let word = (0..64u64).fold(0u64, |w, k| w | (((k >> i) & 1) << k));
+            inputs.insert(lit.node, word);
+        }
+        let mut v = inputs.clone();
+        let e = eval_lit(&aig, decomp.enable.unwrap(), &mut v);
+        let dd = eval_lit(&aig, decomp.data, &mut v);
+        let [en, d, rst, q] = [en, d, rst, AigLit::new(q_node)].map(|l| inputs[&l.node]);
+        let expected = !rst & ((en & d) | (!en & q));
+        assert_eq!((e & dd) | (!e & q), expected);
+        assert_ne!(e, en, "the reset must load even when en is low");
     }
 }

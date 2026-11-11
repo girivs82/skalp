@@ -35,6 +35,7 @@ mod test_bug71_metal;
 mod test_cdc_attribute;
 mod test_cdc_verification;
 mod test_chained_operator_specialization;
+mod test_clock_enable;
 mod test_complete_hardware_flow;
 mod test_cone_extraction;
 mod test_const_eval;
