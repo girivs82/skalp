@@ -166,7 +166,7 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         }
         if !dedicated {
             eprintln!(
-                "warning: clock net '{}' has no dedicated path from its source, so it uses general routing and may have high skew",
+                "warning: clock net '{}' has no dedicated path from its source, so general routing carries it to the clock network and it may have high skew",
                 net.name
             );
             routing.general.insert(net.id);
