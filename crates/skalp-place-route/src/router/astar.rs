@@ -182,14 +182,6 @@ impl SearchBounds {
     pub fn contains(&self, x: u32, y: u32) -> bool {
         x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
     }
-
-    /// Whether the two regions share a tile
-    pub fn overlaps(&self, other: &SearchBounds) -> bool {
-        self.min_x <= other.max_x
-            && other.min_x <= self.max_x
-            && self.min_y <= other.max_y
-            && other.min_y <= self.max_y
-    }
 }
 
 /// A* router
