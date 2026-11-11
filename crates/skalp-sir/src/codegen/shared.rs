@@ -552,7 +552,27 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
-        None
+        // A chained ArrayWrite (several writes to one array in a clocked
+        // block) has the type of the array it updates; follow the chain back
+        // to the array it started from.
+        for node in &self.module.combinational_nodes {
+            if matches!(node.kind, SirNodeKind::ArrayWrite)
+                && !node.inputs.is_empty()
+                && node.outputs.iter().any(|o| o.signal_id == signal)
+            {
+                return self.get_array_type_for_signal(&node.inputs[0].signal_id);
+            }
+        }
+
+        // Otherwise use the signal's own declared type when it is an array.
+        self.module
+            .signals
+            .iter()
+            .find(|s| s.name == signal)
+            .and_then(|s| match &s.sir_type {
+                t @ SirType::Array(_, _) => Some(t.clone()),
+                _ => None,
+            })
     }
 
     /// Check if a signal (by output name) is produced by an array-related node
