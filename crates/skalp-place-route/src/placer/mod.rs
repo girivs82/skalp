@@ -8,6 +8,7 @@
 
 mod analytical;
 mod annealing;
+mod congestion;
 mod constraints;
 pub mod control_sets;
 mod legalization;
@@ -354,6 +355,7 @@ impl<D: Device + Clone> Placer<D> {
                     t_stage.elapsed().as_secs_f64()
                 );
                 Self::log_placement_stats(&legalized, netlist);
+                self.log_congestion("legalized", &legalized, netlist);
 
                 // SA refinement with carry chain awareness
                 let timing_weight = if matches!(
@@ -395,6 +397,7 @@ impl<D: Device + Clone> Placer<D> {
                     "placer: annealing took {:.1} s",
                     t_stage.elapsed().as_secs_f64()
                 );
+                self.log_congestion("annealed", &annealed, netlist);
                 annealed
             }
             _ => {
@@ -1017,6 +1020,31 @@ impl<D: Device + Clone> Placer<D> {
         if log::log_enabled!(log::Level::Debug) {
             Self::log_routing_demand(result, netlist);
         }
+    }
+
+    /// Debug: routing demand against the device's routing supply
+    /// ([`congestion::CongestionMap`]): the overflow cost and the busiest
+    /// bins
+    fn log_congestion(&self, stage: &str, result: &PlacementResult, netlist: &GateNetlist) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let Some(mut map) = congestion::CongestionMap::new(&self.device) else {
+            return;
+        };
+        map.build(netlist, result);
+        let busiest: Vec<String> = map
+            .busiest(12)
+            .into_iter()
+            .map(|(x, y, d, c)| format!("({x},{y}) {:.2}", d / c))
+            .collect();
+        log::debug!(
+            "placer: {stage}: congestion overflow {:.0}, mean load {:.2}; busiest bins (x, y) \
+             demand/capacity: {}",
+            map.total(),
+            map.mean_load(),
+            busiest.join(" ")
+        );
     }
 
     /// Debug: where the placement asks most of the routing, by 8x8-tile

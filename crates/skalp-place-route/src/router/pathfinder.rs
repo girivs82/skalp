@@ -474,6 +474,42 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     .filter_map(|w| self.device.wire(w).map(|wire| wire.name.clone()))
                     .collect();
                 log::debug!("pathfinder: some overused wires: {sample:?}");
+                // The nets on the most overused wires, with their sinks and
+                // the tiles their pins span
+                let overused: HashSet<WireId> = congestion.overused_wires().into_iter().collect();
+                let mut by_net: Vec<(usize, GateNetId)> = result
+                    .routes
+                    .iter()
+                    .map(|(&id, r)| (r.wires.iter().filter(|w| overused.contains(w)).count(), id))
+                    .filter(|&(n, _)| n > 0)
+                    .collect();
+                by_net.sort_by(|a, b| b.0.cmp(&a.0).then(a.1 .0.cmp(&b.1 .0)));
+                by_net.truncate(15);
+                let nets: Vec<String> = by_net
+                    .iter()
+                    .map(|&(n, id)| {
+                        let net = &netlist.nets[id.0 as usize];
+                        let tiles: Vec<(u32, u32)> = net
+                            .driver
+                            .iter()
+                            .chain(net.fanout.iter().map(|(c, _)| c))
+                            .filter_map(|c| placement.get(*c))
+                            .map(|l| (l.tile_x, l.tile_y))
+                            .collect();
+                        let lo = tiles
+                            .iter()
+                            .fold((u32::MAX, u32::MAX), |a, t| (a.0.min(t.0), a.1.min(t.1)));
+                        let hi = tiles
+                            .iter()
+                            .fold((0, 0), |a, t| (a.0.max(t.0), a.1.max(t.1)));
+                        format!(
+                            "{} ({n} overused, {} sinks, tiles {lo:?}-{hi:?})",
+                            net.name,
+                            net.fanout.len()
+                        )
+                    })
+                    .collect();
+                log::debug!("pathfinder: nets on the most overused wires: {nets:?}");
             }
             // Check convergence: no congestion
             if !congestion.has_overuse() {
