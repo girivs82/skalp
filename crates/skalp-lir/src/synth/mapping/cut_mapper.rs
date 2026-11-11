@@ -685,7 +685,7 @@ impl CutMapper {
                 } => {
                     roots.push(data.node);
                     roots.extend(clock.iter().copied());
-                    roots.extend(reset.iter().copied());
+                    roots.extend(reset.iter().map(|r| r.node));
                 }
                 AigNode::Barrier {
                     data,
@@ -697,7 +697,7 @@ impl CutMapper {
                     roots.push(data.node);
                     roots.extend(enable.iter().map(|e| e.node));
                     roots.extend(clock.iter().copied());
-                    roots.extend(reset.iter().copied());
+                    roots.extend(reset.iter().map(|r| r.node));
                 }
                 _ => {}
             }

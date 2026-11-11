@@ -634,7 +634,7 @@ impl Fraig {
             AigLit,
             Option<bool>,
             Option<AigNodeId>,
-            Option<AigNodeId>,
+            Option<AigLit>,
         );
         // (old_id, barrier_type, data, enable, clock, reset, init)
         type BarrierInfo = (
@@ -643,7 +643,7 @@ impl Fraig {
             AigLit,
             Option<AigLit>,
             Option<AigNodeId>,
-            Option<AigNodeId>,
+            Option<AigLit>,
             Option<bool>,
         );
         let mut latch_ids: Vec<LatchInfo> = Vec::new();
@@ -663,7 +663,8 @@ impl Fraig {
                     sync_reset,
                 } => {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
-                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
+                    let new_reset = reset
+                        .and_then(|r| old_to_new.get(&r.node).map(|l| l.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_latch_with_safety(
                         AigLit::false_lit(),
@@ -687,7 +688,8 @@ impl Fraig {
                     init,
                 } => {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
-                    let new_reset = reset.and_then(|r| old_to_new.get(&r).map(|l| l.node));
+                    let new_reset = reset
+                        .and_then(|r| old_to_new.get(&r.node).map(|l| l.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(old_id).cloned().unwrap_or_default();
                     let new_id = new_aig.add_barrier_with_safety(
                         barrier_type.clone(),
@@ -747,16 +749,24 @@ impl Fraig {
         }
 
         // Phase 3: Update latch/barrier data with resolved values
-        for (old_id, data, _init, _clock, _reset) in latch_ids {
+        for (old_id, data, _init, clock, reset) in latch_ids {
             let new_node_id = old_to_new.get(&old_id).map(|lit| lit.node).unwrap();
             let new_data = self.translate_lit(&old_to_new, data);
             new_aig.update_latch_data(new_node_id, new_data);
+            let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
+            let new_reset =
+                reset.and_then(|r| old_to_new.get(&r.node).map(|l| l.invert_if(r.inverted)));
+            new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
         }
-        for (old_id, _barrier_type, data, enable, _clock, _reset, _init) in barrier_ids {
+        for (old_id, _barrier_type, data, enable, clock, reset, _init) in barrier_ids {
             let new_node_id = old_to_new.get(&old_id).map(|lit| lit.node).unwrap();
             let new_data = self.translate_lit(&old_to_new, data);
             let new_enable = enable.map(|e| self.translate_lit(&old_to_new, e));
             new_aig.update_barrier_data(new_node_id, new_data, new_enable);
+            let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
+            let new_reset =
+                reset.and_then(|r| old_to_new.get(&r.node).map(|l| l.invert_if(r.inverted)));
+            new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
         }
 
         // Add outputs

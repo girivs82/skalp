@@ -52,7 +52,7 @@ const MAX_FEEDBACK_CONE: usize = 512;
 /// Only builds new nodes (with structural hashing); the latches keep their
 /// data. Returns, per decomposed latch, its enable and its new data.
 pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
-    let latches: Vec<(AigNodeId, AigLit, Option<AigNodeId>, bool, bool)> = aig
+    let latches: Vec<(AigNodeId, AigLit, Option<AigLit>, bool, bool)> = aig
         .iter_latches()
         .filter_map(|(id, node)| match node {
             AigNode::Latch {
@@ -69,7 +69,7 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
     let mut results = HashMap::new();
     for (latch, data, reset, sync_reset, init) in latches {
         let mut peeler = Peeler::new(latch, reset);
-        if reset.is_some_and(|r| peeler.depends_on_q(aig, r)) {
+        if reset.is_some_and(|r| peeler.depends_on_q(aig, r.node)) {
             continue;
         }
         let Some(form) = peeler.peel_lit(aig, data) else {
@@ -82,7 +82,6 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
         let q = AigLit::new(latch);
         let (enable, new_data, reference, released) = match reset {
             Some(rst) if sync_reset => {
-                let rst = AigLit::new(rst);
                 let value = if init {
                     AigLit::true_lit()
                 } else {
@@ -149,8 +148,8 @@ fn merge_polarity(a: Option<bool>, b: Option<bool>) -> Option<Option<bool>> {
 
 struct Peeler {
     latch: AigNodeId,
-    /// An asynchronous reset, read as released (0)
-    released: Option<AigNodeId>,
+    /// An asynchronous reset literal, read as released (0)
+    released: Option<AigLit>,
     /// Whether a node's cone contains the latch output
     depends: HashMap<AigNodeId, bool>,
     /// Hold form of each node depending on `Q` (`None`: it has none)
@@ -158,7 +157,7 @@ struct Peeler {
 }
 
 impl Peeler {
-    fn new(latch: AigNodeId, released: Option<AigNodeId>) -> Self {
+    fn new(latch: AigNodeId, released: Option<AigLit>) -> Self {
         Self {
             latch,
             released,
@@ -206,7 +205,10 @@ impl Peeler {
 
     /// The value of `lit` while the reset is released, when it is the reset.
     fn released_value(&self, lit: AigLit) -> Option<bool> {
-        (Some(lit.node) == self.released).then_some(lit.inverted)
+        // The reset literal reads 0 when released
+        self.released
+            .filter(|r| r.node == lit.node)
+            .map(|r| r.inverted != lit.inverted)
     }
 
     fn peel_lit(&mut self, aig: &mut Aig, lit: AigLit) -> Option<HoldForm> {
@@ -345,13 +347,13 @@ fn as_inverted_mux(aig: &Aig, left: AigLit, right: AigLit) -> Option<(AigLit, Ai
 
 /// Verify that two AIG literals are functionally equivalent using random simulation.
 /// Checks 256 random input patterns (4 rounds of 64-bit parallel sim), with
-/// `released` (an asynchronous reset) held at 0.
+/// `released` (an asynchronous reset literal) held at 0.
 fn verify_equivalence(
     aig: &Aig,
     original: AigLit,
     reconstructed: AigLit,
     latch_id: AigNodeId,
-    released: Option<AigNodeId>,
+    released: Option<AigLit>,
 ) -> bool {
     // Collect all input nodes (PIs and latches) in the transitive fanin of both functions
     let mut inputs_orig = HashSet::new();
@@ -393,7 +395,8 @@ fn verify_equivalence(
             values.insert(input, rng_state);
         }
         if let Some(reset) = released {
-            values.insert(reset, 0);
+            // The node value that makes the reset literal 0
+            values.insert(reset.node, if reset.inverted { u64::MAX } else { 0 });
         }
 
         let orig_val = eval_lit(aig, original, &mut values);
@@ -733,7 +736,12 @@ mod tests {
         let mut aig = Aig::new("test".to_string());
         let [en, d] = ["en", "d"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
         let rst = aig.add_input("rst".to_string(), None);
-        let q_node = aig.add_latch(AigLit::false_lit(), Some(false), None, Some(rst));
+        let q_node = aig.add_latch(
+            AigLit::false_lit(),
+            Some(false),
+            None,
+            Some(AigLit::new(rst)),
+        );
         if sync {
             aig.mark_latch_sync_reset(q_node);
         }
@@ -759,7 +767,12 @@ mod tests {
         let mut aig = Aig::new("test".to_string());
         let [en, d] = ["en", "d"].map(|n| AigLit::new(aig.add_input(n.to_string(), None)));
         let rst = aig.add_input("rst".to_string(), None);
-        let q_node = aig.add_latch(AigLit::false_lit(), Some(false), None, Some(rst));
+        let q_node = aig.add_latch(
+            AigLit::false_lit(),
+            Some(false),
+            None,
+            Some(AigLit::new(rst)),
+        );
         let hold = build_mux(&mut aig, en, d, AigLit::new(q_node));
         let f = build_mux(&mut aig, AigLit::new(rst), AigLit::true_lit(), hold);
         aig.update_latch_data(q_node, f);

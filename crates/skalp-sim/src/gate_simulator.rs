@@ -1192,24 +1192,6 @@ impl GateLevelSimulator {
                 };
 
                 if matches_edge {
-                    // Check if reset is active
-                    let reset_active = if let Some(reset_spec) = &block.reset {
-                        let reset_value = self
-                            .state
-                            .signals
-                            .get(&reset_spec.signal.0)
-                            .and_then(|v: &Vec<bool>| v.first().copied())
-                            .unwrap_or(false);
-                        // Check against active_high flag
-                        if reset_spec.active_high {
-                            reset_value
-                        } else {
-                            !reset_value
-                        }
-                    } else {
-                        false
-                    };
-
                     // Phase 1: Evaluate each DFF's D-input from CURRENT state,
                     // collecting new Q values without updating state yet.
                     for op in &block.operations {
@@ -1330,29 +1312,6 @@ impl GateLevelSimulator {
                                     let mut bits = vec![false; width];
                                     bits[0] = value;
                                     pending_updates.push((out_id.0, bits));
-                                }
-                            }
-                        }
-                    }
-
-                    // For DffSR (sync reset to 0) cells: override output to 0 when reset active.
-                    // DffSR cells rely on built-in sync reset (no explicit MUX in the netlist).
-                    // Other DFF types with non-zero reset use MUX-based reset which is already
-                    // handled by combinational evaluation setting the correct D input.
-                    if reset_active {
-                        for op in &block.operations {
-                            if let SirOperation::Primitive {
-                                ptype: PrimitiveType::DffSR,
-                                outputs,
-                                ..
-                            } = op
-                            {
-                                for out_id in outputs {
-                                    let width =
-                                        self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                                    // Override pending update for this DFF
-                                    pending_updates.retain(|(id, _)| *id != out_id.0);
-                                    pending_updates.push((out_id.0, vec![false; width]));
                                 }
                             }
                         }

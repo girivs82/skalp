@@ -1039,8 +1039,19 @@ impl GateNetlist {
     pub fn remove_dead_cells(&mut self) -> usize {
         use std::collections::HashSet;
 
-        // Identify output nets that must be preserved
-        let output_nets: HashSet<GateNetId> = self.outputs.iter().copied().collect();
+        // Identify output nets that must be preserved: primary outputs, and
+        // clock and reset nets, whose loads are not in `fanout` (it lists
+        // data input pins only)
+        let output_nets: HashSet<GateNetId> = self
+            .outputs
+            .iter()
+            .copied()
+            .chain(
+                self.cells
+                    .iter()
+                    .flat_map(|cell| cell.clock.iter().chain(cell.reset.iter()).copied()),
+            )
+            .collect();
 
         // Identify cells that are dead (all outputs have no fanout and aren't primary outputs)
         let dead_cells: HashSet<CellId> = self

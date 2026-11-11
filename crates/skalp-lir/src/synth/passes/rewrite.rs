@@ -417,8 +417,8 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
                 }
             }
             if let Some(r) = reset {
-                if !reachable.contains(r) {
-                    stack.push(*r);
+                if !reachable.contains(&r.node) {
+                    stack.push(r.node);
                 }
             }
         }
@@ -539,7 +539,8 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
                 } => {
                     // Resolve clock/reset through node_map (now populated with inputs)
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
-                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let new_reset = reset
+                        .and_then(|r| node_map.get(&r.node).map(|lit| lit.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     // Create latch with false_lit as placeholder data - will be updated in phase 2
                     let new_id = new_aig.add_latch_with_safety(
@@ -559,7 +560,8 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
                     ..
                 } => {
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
-                    let new_reset = reset.and_then(|r| node_map.get(&r).map(|lit| lit.node));
+                    let new_reset = reset
+                        .and_then(|r| node_map.get(&r.node).map(|lit| lit.invert_if(r.inverted)));
                     let safety = aig.get_safety_info(id).cloned().unwrap_or_default();
                     // Create barrier with false_lit as placeholder data - will be updated in phase 2
                     let new_id = new_aig.add_barrier_with_safety(
@@ -667,17 +669,30 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
         };
 
         match node {
-            AigNode::Latch { data, .. } => {
+            AigNode::Latch {
+                data, clock, reset, ..
+            } => {
                 let new_data = resolve_lit(&node_map, data);
                 new_aig.update_latch_data(new_node_id, new_data);
+                let new_clock = clock.and_then(|c| node_map.get(&c).map(|l| l.node));
+                let new_reset =
+                    reset.and_then(|r| node_map.get(&r.node).map(|l| l.invert_if(r.inverted)));
+                new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
             }
-            AigNode::Barrier { data, enable, .. } => {
+            AigNode::Barrier {
+                data,
+                enable,
+                clock,
+                reset,
+                ..
+            } => {
                 let new_data = resolve_lit(&node_map, data);
                 let new_enable = enable.map(|e| resolve_lit(&node_map, e));
-                // For barriers, we need to update data and enable
-                // Using update_latch_data as a workaround (barriers use same data field)
-                new_aig.update_latch_data(new_node_id, new_data);
-                // TODO: Also update enable if needed
+                new_aig.update_barrier_data(new_node_id, new_data, new_enable);
+                let new_clock = clock.and_then(|c| node_map.get(&c).map(|l| l.node));
+                let new_reset =
+                    reset.and_then(|r| node_map.get(&r.node).map(|l| l.invert_if(r.inverted)));
+                new_aig.set_sequential_controls(new_node_id, new_clock, new_reset);
             }
             _ => {} // Inputs and ANDs already processed
         }

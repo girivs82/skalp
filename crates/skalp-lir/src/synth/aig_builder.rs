@@ -10,7 +10,7 @@ use std::collections::HashSet;
 /// Set to true to enable verbose AIG builder debug output
 use crate::tech_library::CellFunction;
 
-use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo, BarrierType};
+use super::aig::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
 
 /// Builder for converting GateNetlist to AIG
 pub struct AigBuilder<'a> {
@@ -54,10 +54,43 @@ impl<'a> AigBuilder<'a> {
         // Phase 3: Process cells in topological order
         self.process_cells();
 
+        // Phase 3b: a clock or reset driven by logic had no node when its
+        // latch was pre-created; connect them now that every net has one
+        self.connect_sequential_controls();
+
         // Phase 4: Create outputs
         self.build_outputs();
 
         self.aig
+    }
+
+    /// Set the clock and reset of every pre-created latch from the nets
+    /// of its cell, keeping the reset's polarity.
+    fn connect_sequential_controls(&mut self) {
+        for cell in &self.netlist.cells {
+            if cell.clock.is_none() {
+                continue;
+            }
+            let Some(q) = cell
+                .outputs
+                .first()
+                .and_then(|n| self.net_map[n.0 as usize])
+            else {
+                continue;
+            };
+            if !matches!(
+                self.aig.get_node(q.node),
+                Some(AigNode::Latch { .. } | AigNode::Barrier { .. })
+            ) {
+                continue;
+            }
+            let clock = cell
+                .clock
+                .and_then(|c| self.net_map[c.0 as usize])
+                .map(|l| l.node);
+            let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
+            self.aig.set_sequential_controls(q.node, clock, reset);
+        }
     }
 
     /// Pre-create latch nodes for all DFF cells to handle feedback loops
@@ -94,10 +127,7 @@ impl<'a> AigBuilder<'a> {
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
                     .map(|l| l.node);
-                let reset = cell
-                    .reset
-                    .and_then(|r| self.net_map[r.0 as usize])
-                    .map(|l| l.node);
+                let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
 
                 // A flip-flop that powers up high keeps doing so through
                 // re-synthesis.
@@ -573,10 +603,7 @@ impl<'a> AigBuilder<'a> {
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
                     .map(|l| l.node);
-                let reset = cell
-                    .reset
-                    .and_then(|r| self.net_map[r.0 as usize])
-                    .map(|l| l.node);
+                let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
 
                 let latch_id =
                     self.aig
@@ -733,10 +760,7 @@ impl<'a> AigBuilder<'a> {
                     .clock
                     .and_then(|c| self.net_map[c.0 as usize])
                     .map(|l| l.node);
-                let reset = cell
-                    .reset
-                    .and_then(|r| self.net_map[r.0 as usize])
-                    .map(|l| l.node);
+                let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
 
                 let barrier_id = self.aig.add_barrier_with_safety(
                     BarrierType::RetentionDffR,

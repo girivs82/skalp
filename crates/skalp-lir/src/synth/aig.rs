@@ -110,6 +110,16 @@ impl AigLit {
         }
     }
 
+    /// This literal, inverted when `inverted` is set: a literal read
+    /// through another that stands for its node.
+    pub fn invert_if(self, inverted: bool) -> Self {
+        if inverted {
+            self.invert()
+        } else {
+            self
+        }
+    }
+
     /// Check if this is a constant
     pub fn is_const(&self) -> bool {
         self.node == AigNodeId::FALSE
@@ -158,8 +168,9 @@ pub enum AigNode {
         init: Option<bool>,
         /// Clock input node
         clock: Option<AigNodeId>,
-        /// Reset input node
-        reset: Option<AigNodeId>,
+        /// Reset input: the literal that is 1 while the latch is in reset
+        /// (inverted for a reset that is active low)
+        reset: Option<AigLit>,
         /// AUDIT-2 #4: reset is SYNCHRONOUS — must fold into D (Dff +
         /// ResetMux), never the async reset pin of a DFFR.
         sync_reset: bool,
@@ -179,8 +190,9 @@ pub enum AigNode {
         enable: Option<AigLit>,
         /// Clock input (for sequential barriers like retention DFFs)
         clock: Option<AigNodeId>,
-        /// Reset input (for sequential barriers)
-        reset: Option<AigNodeId>,
+        /// Literal that is 1 while a sequential barrier is in reset
+        /// (inverted for a reset that is active low)
+        reset: Option<AigLit>,
         /// Initial value (for sequential barriers)
         init: Option<bool>,
     },
@@ -575,7 +587,7 @@ impl Aig {
         data: AigLit,
         init: Option<bool>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
     ) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
         self.nodes.push(AigNode::Latch {
@@ -603,7 +615,7 @@ impl Aig {
         data: AigLit,
         init: Option<bool>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
         safety: AigSafetyInfo,
     ) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
@@ -646,13 +658,34 @@ impl Aig {
         }
     }
 
+    /// Set the clock and reset of a latch or a sequential barrier.
+    ///
+    /// Passes that rebuild an AIG create latches before the logic, so a
+    /// clock or reset computed by logic has no node yet at that point: they
+    /// set it with this once every node is rebuilt.
+    pub fn set_sequential_controls(
+        &mut self,
+        id: AigNodeId,
+        new_clock: Option<AigNodeId>,
+        new_reset: Option<AigLit>,
+    ) {
+        match self.nodes.get_mut(id.0 as usize) {
+            Some(AigNode::Latch { clock, reset, .. })
+            | Some(AigNode::Barrier { clock, reset, .. }) => {
+                *clock = new_clock;
+                *reset = new_reset;
+            }
+            _ => {}
+        }
+    }
+
     /// Fill in a latch's clock and reset where it was created without them
     /// (their signals were not built yet), leaving ones it has alone
     pub fn complete_latch_controls(
         &mut self,
         latch_id: AigNodeId,
         new_clock: Option<AigNodeId>,
-        new_reset: Option<AigNodeId>,
+        new_reset: Option<AigLit>,
     ) {
         if let Some(AigNode::Latch { clock, reset, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
             if clock.is_none() {
@@ -692,7 +725,7 @@ impl Aig {
         data: AigLit,
         enable: Option<AigLit>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
         init: Option<bool>,
     ) -> AigNodeId {
         let id = AigNodeId(self.nodes.len() as u32);
@@ -724,7 +757,7 @@ impl Aig {
         data: AigLit,
         enable: Option<AigLit>,
         clock: Option<AigNodeId>,
-        reset: Option<AigNodeId>,
+        reset: Option<AigLit>,
         init: Option<bool>,
         safety: AigSafetyInfo,
     ) -> AigNodeId {
