@@ -1014,6 +1014,77 @@ impl<D: Device + Clone> Placer<D> {
             at(0.99),
             lengths[lengths.len() - 1]
         );
+        if log::log_enabled!(log::Level::Debug) {
+            Self::log_routing_demand(result, netlist);
+        }
+    }
+
+    /// Debug: where the placement asks most of the routing, by 8x8-tile
+    /// block: cells placed there, and the routing demand of the nets
+    /// crossing it (RUDY: each net spreads its half-perimeter evenly over
+    /// its bounding box)
+    fn log_routing_demand(result: &PlacementResult, netlist: &GateNetlist) {
+        const BLOCK: u32 = 8;
+        let mut cells: HashMap<(u32, u32), usize> = HashMap::new();
+        for loc in result.placements.values() {
+            *cells
+                .entry((loc.tile_x / BLOCK * BLOCK, loc.tile_y / BLOCK * BLOCK))
+                .or_default() += 1;
+        }
+        let mut demand: HashMap<(u32, u32), f64> = HashMap::new();
+        for net in &netlist.nets {
+            let mut locs = net
+                .driver
+                .iter()
+                .chain(net.fanout.iter().map(|(c, _)| c))
+                .filter_map(|c| result.placements.get(c));
+            let Some(first) = locs.next() else { continue };
+            let (mut x0, mut x1, mut y0, mut y1) =
+                (first.tile_x, first.tile_x, first.tile_y, first.tile_y);
+            let mut pins = 1;
+            for loc in locs {
+                x0 = x0.min(loc.tile_x);
+                x1 = x1.max(loc.tile_x);
+                y0 = y0.min(loc.tile_y);
+                y1 = y1.max(loc.tile_y);
+                pins += 1;
+            }
+            if pins < 2 {
+                continue;
+            }
+            let (w, h) = ((x1 - x0 + 1) as f64, (y1 - y0 + 1) as f64);
+            let per_tile = (w + h) / (w * h);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    *demand
+                        .entry((x / BLOCK * BLOCK, y / BLOCK * BLOCK))
+                        .or_default() += per_tile;
+                }
+            }
+        }
+        let mut demand: Vec<((u32, u32), f64)> = demand.into_iter().collect();
+        demand.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let top: Vec<((u32, u32), usize, usize)> = demand
+            .iter()
+            .take(20)
+            .map(|&(block, d)| {
+                (
+                    block,
+                    d.round() as usize,
+                    cells.get(&block).copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        log::debug!("placer: routing demand by 8x8 block ((x, y), demand, cells): {top:?}");
+        let mut columns: Vec<(u32, usize)> = Vec::new();
+        for (&(x, _), &n) in &cells {
+            match columns.iter_mut().find(|c| c.0 == x) {
+                Some(c) => c.1 += n,
+                None => columns.push((x, n)),
+            }
+        }
+        columns.sort_unstable();
+        log::debug!("placer: cells by 8-column band (x, cells): {columns:?}");
     }
 
     /// Calculate total wirelength (HPWL)
