@@ -1280,6 +1280,19 @@ impl GateLevelSimulator {
                                     outputs.iter().map(|s| s.0).collect::<Vec<_>>());
                             }
 
+                            // A flip-flop's own reset loads 0, whatever its enable says
+                            if crate::gate_netlist_to_sir::own_reset_input(ptype)
+                                .and_then(|i| input_values.get(i))
+                                == Some(&true)
+                            {
+                                for out_id in outputs {
+                                    let width =
+                                        self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                                    pending_updates.push((out_id.0, vec![false; width]));
+                                }
+                                continue;
+                            }
+
                             // DFF with enable: when enable is inactive, retain current Q (skip update)
                             if matches!(ptype, PrimitiveType::DffE) {
                                 let en = input_values.get(1).copied().unwrap_or(true);
