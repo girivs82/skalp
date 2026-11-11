@@ -115,6 +115,7 @@ pub fn fits_control_group<D: Device + ?Sized>(
 mod tests {
     use super::*;
     use crate::device::ice40::{Ice40Device, Ice40Variant};
+    use crate::device::nexus::{NexusDevice, NexusVariant};
     use crate::placer::{PlacementAlgorithm, Placer, PlacerConfig};
     use skalp_lir::gate_netlist::{Cell, GateNet};
     use skalp_lir::CellFunction;
@@ -225,5 +226,96 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!((conflicts[0].0, conflicts[0].1), (x, y));
         assert_eq!(conflicts[0].3.len(), 2);
+    }
+
+    /// The flip-flop BELs of the first Nexus logic tile, in slice order
+    /// (two per slice: A, A, B, B, C, C, D, D).
+    fn nexus_logic_tile_ffs(device: &NexusDevice) -> (u32, u32, Vec<usize>) {
+        let (width, height) = device.grid_size();
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let tile = device.tile_at(x, y)?;
+                let ffs: Vec<usize> = (0..tile.bels().len())
+                    .filter(|&b| tile.bels()[b].bel_type.is_ff())
+                    .collect();
+                (ffs.len() == 8).then_some((x, y, ffs))
+            })
+            .expect("a Nexus logic tile")
+    }
+
+    /// On Nexus, slices A and B take clock, enable and set/reset from one
+    /// set of tile wires (JCLK0, JCE0, JLSR0) and slices C and D from the
+    /// other, so the control group is the slice pair, not the slice.
+    #[test]
+    fn nexus_slice_pairs_share_control_lines() {
+        let device = NexusDevice::new(NexusVariant::Lfcpnx100);
+        let (x, y, ffs) = nexus_logic_tile_ffs(&device);
+        let groups: Vec<Option<usize>> = ffs
+            .iter()
+            .map(|&b| device.ff_control_group(x, y, b))
+            .collect();
+        let a_b = groups[0];
+        let c_d = groups[4];
+        assert!(a_b.is_some() && c_d.is_some());
+        assert_ne!(a_b, c_d);
+        assert!(groups[..4].iter().all(|g| *g == a_b), "{groups:?}");
+        assert!(groups[4..].iter().all(|g| *g == c_d), "{groups:?}");
+    }
+
+    /// A flip-flop without a reset in slice A beside flip-flops with one in
+    /// slice B is a conflict: on silicon the pair's shared LSR held slice B's
+    /// flip-flops in reset, and a processor's ALU stored wrong bits. The same
+    /// flip-flops in different slice pairs are fine.
+    #[test]
+    fn nexus_reset_and_plain_flip_flops_in_one_slice_pair_conflict() {
+        let device = NexusDevice::new(NexusVariant::Lfcpnx100);
+        let (x, y, ffs) = nexus_logic_tile_ffs(&device);
+        let netlist = mixed_flip_flops(1, 2, 0);
+        let sets = control_sets(&netlist);
+        let place = |bels: [usize; 3]| {
+            let mut placement = PlacementResult::new();
+            for (cell, bel) in netlist.cells.iter().zip(bels) {
+                placement.placements.insert(
+                    cell.id,
+                    PlacementLoc::new(x, y, ffs[bel], crate::device::BelType::Dff),
+                );
+            }
+            control_set_conflicts(&device, &placement, &sets)
+        };
+        // r0 (no reset) in slice A, r1 and r2 (reset) in slice B
+        let conflicts = place([1, 2, 3]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].3.len(), 3);
+        // r1 and r2 in slices C and D instead
+        assert!(place([1, 4, 6]).is_empty());
+    }
+
+    /// The placer keeps reset and plain flip-flops out of one Nexus slice
+    /// pair even when the design packs them densely.
+    #[test]
+    fn nexus_placement_keeps_slice_pairs_to_one_control_set() {
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let netlist = mixed_flip_flops(20, 20, 12);
+        let sets = control_sets(&netlist);
+        for algorithm in [
+            PlacementAlgorithm::AnalyticalTimingDriven,
+            PlacementAlgorithm::SimulatedAnnealing,
+        ] {
+            let config = PlacerConfig {
+                algorithm: algorithm.clone(),
+                max_tile_fill: Some(1.0),
+                ..PlacerConfig::default()
+            };
+            let mut placer = Placer::new(config, device.clone());
+            let placement = placer
+                .place(&netlist)
+                .unwrap_or_else(|e| panic!("{algorithm:?}: {e}"));
+            assert_eq!(placement.placements.len(), netlist.cells.len());
+            assert!(
+                control_set_conflicts(&device, &placement, &sets).is_empty(),
+                "{algorithm:?} mixed control sets in a slice pair"
+            );
+        }
     }
 }
