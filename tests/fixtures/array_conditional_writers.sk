@@ -1,0 +1,33 @@
+// An array written from several conditional blocks of one clocked block:
+// each write whose condition holds must land, whatever the later blocks do.
+entity ArrayConditionalWriters {
+    in clk: clock
+    in rst: bit
+    in we0: bit
+    in a0: bit[3]
+    in d0: bit[64]
+    in we1: bit
+    in a1: bit[3]
+    in d1: bit[64]
+    in ra: bit[3]
+    out q: bit[64]
+}
+impl ArrayConditionalWriters {
+    signal mem: bit[64][8]
+    signal clear_index: bit[3]
+    q = mem[ra]
+    on(clk.rise) {
+        if rst == 1 {
+            clear_index = clear_index + 1
+        }
+        if rst == 1 {
+            mem[clear_index] = 64'h0
+        }
+        if we0 == 1 {
+            mem[a0] = d0
+        }
+        if we1 == 1 {
+            mem[a1] = d1
+        }
+    }
+}

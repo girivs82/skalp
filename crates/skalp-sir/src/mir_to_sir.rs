@@ -87,6 +87,13 @@ struct MirToSirConverter<'a> {
     /// BUG #226 FIX: Stores default values from unconditional assignments in a sequential block
     /// These are used by conditional handlers (if/case) when their branches don't override the target.
     sequential_defaults: HashMap<String, usize>,
+    /// Next value of each array written in the clocked block being lowered,
+    /// in first-write order: every write to an array builds on the previous
+    /// writes of the block, and the array gets one flip-flop at the block's
+    /// end ([`Self::flush_array_writes`]).
+    pending_array_writes: Vec<(String, usize)>,
+    /// Nesting depth of [`Self::convert_sequential_block`]
+    sequential_depth: usize,
     /// Width-truncated read of a combinational signal, per internal signal name
     /// (see get_or_create_signal_driver).
     truncated_signal_reads: HashMap<String, usize>,
@@ -110,6 +117,8 @@ impl<'a> MirToSirConverter<'a> {
             instance_parent_module_ids: HashMap::new(),
             mir_to_internal_name: HashMap::new(),
             sequential_defaults: HashMap::new(),
+            pending_array_writes: Vec::new(),
+            sequential_depth: 0,
             truncated_signal_reads: HashMap::new(),
         }
     }
@@ -750,6 +759,56 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_sequential_block(&mut self, statements: &[Statement], clock: &str, edge: ClockEdge) {
+        self.sequential_depth += 1;
+        self.convert_sequential_block_statements(statements, clock, edge.clone());
+        self.sequential_depth -= 1;
+        if self.sequential_depth == 0 {
+            self.flush_array_writes(clock, edge);
+        }
+    }
+
+    /// The array value an array write in a clocked block builds on: the
+    /// block's earlier writes to it, or the array register itself. (Each
+    /// write used to start from the register and get its own flip-flop, so
+    /// only the last write statement of the block took effect.)
+    fn array_write_base(&mut self, base: &LValue, array_name: &str) -> usize {
+        match self
+            .pending_array_writes
+            .iter()
+            .find(|(name, _)| name == array_name)
+        {
+            Some(&(_, node)) => node,
+            None => self.create_lvalue_ref_node(base),
+        }
+    }
+
+    /// Record `node` as the next value of `array_name` (see
+    /// [`Self::array_write_base`])
+    fn record_array_write(&mut self, array_name: String, node: usize) {
+        match self
+            .pending_array_writes
+            .iter_mut()
+            .find(|(name, _)| *name == array_name)
+        {
+            Some(entry) => entry.1 = node,
+            None => self.pending_array_writes.push((array_name, node)),
+        }
+    }
+
+    /// Register each array written in the clocked block just lowered
+    fn flush_array_writes(&mut self, clock: &str, edge: ClockEdge) {
+        for (array_name, next) in std::mem::take(&mut self.pending_array_writes) {
+            let ff_node = self.create_flipflop_with_input(next, clock, edge.clone());
+            self.connect_node_to_signal(ff_node, &array_name);
+        }
+    }
+
+    fn convert_sequential_block_statements(
+        &mut self,
+        statements: &[Statement],
+        clock: &str,
+        edge: ClockEdge,
+    ) {
         // A register assigned by more than one statement of the block gets one
         // driver: the last assignment that applies, in source order, through
         // any nesting of if, match and resolved chains. Lowering each
@@ -1018,20 +1077,15 @@ impl<'a> MirToSirConverter<'a> {
                             // array[index] <= value
                             let array_name = self.lvalue_to_string(base);
 
-                            // Create nodes for the array write
-                            // For arrays that are state elements, we need to read from the register
-                            let old_array = self.create_lvalue_ref_node(base);
+                            // The write builds on the block's earlier writes
+                            // to the array; the array is registered once, at
+                            // the end of the block
+                            let old_array = self.array_write_base(base, &array_name);
                             let index_node = self.create_expression_node(index);
                             let value_node = self.create_expression_node(&assign.rhs);
-
-                            // Create ArrayWrite node
                             let array_write =
                                 self.create_array_write_node(old_array, index_node, value_node);
-
-                            // Create flip-flop to register the new array state
-                            let ff_node =
-                                self.create_flipflop_with_input(array_write, clock, edge.clone());
-                            self.connect_node_to_signal(ff_node, &array_name);
+                            self.record_array_write(array_name, array_write);
                         } else {
                             // Static bit select on bit-vector - treat as normal assignment
                             let target = self.lvalue_to_string(&assign.lhs);
@@ -1106,8 +1160,6 @@ impl<'a> MirToSirConverter<'a> {
                             let _ = index; // index comes from the write sites
                             self.handle_array_writes_in_if_with_list(
                                 &resolved.original,
-                                clock,
-                                edge.clone(),
                                 vec![((**base).clone(), array_name)],
                             );
                         } else {
@@ -1634,7 +1686,7 @@ impl<'a> MirToSirConverter<'a> {
             array_writes.iter().map(|(_, name)| name.clone()).collect();
 
         // Handle array writes separately since they need special processing
-        self.handle_array_writes_in_if_with_list(if_stmt, clock, edge.clone(), array_writes);
+        self.handle_array_writes_in_if_with_list(if_stmt, array_writes);
 
         // Synthesis-like approach: collect all conditions and values, then build priority mux
         let mut targets = std::collections::HashSet::new();
@@ -2069,8 +2121,6 @@ impl<'a> MirToSirConverter<'a> {
     fn handle_array_writes_in_if_with_list(
         &mut self,
         if_stmt: &IfStatement,
-        clock: &str,
-        edge: ClockEdge,
         array_writes: Vec<(LValue, String)>,
     ) {
         // Process each unique array write
@@ -2080,8 +2130,9 @@ impl<'a> MirToSirConverter<'a> {
             // 2. Build a mux tree for the write conditions
             // 3. Guard write value with write_enable (no-op when disabled)
             // 4. Create ArrayWrite node
-            // 5. Create flip-flop
-            let old_array = self.create_lvalue_ref_node(&array_base);
+            // 5. Record it as the array's next value (registered at the end
+            //    of the clocked block, after any later writes to it)
+            let old_array = self.array_write_base(&array_base, &array_name);
             let (index_node, value_node, write_enable) =
                 self.synthesize_array_write_in_if(if_stmt, &array_base);
 
@@ -2098,8 +2149,7 @@ impl<'a> MirToSirConverter<'a> {
                 };
                 let array_write =
                     self.create_array_write_node(old_array, index_node, guarded_value);
-                let ff_node = self.create_flipflop_with_input(array_write, clock, edge.clone());
-                self.connect_node_to_signal(ff_node, &array_name);
+                self.record_array_write(array_name, array_write);
             }
         }
     }

@@ -439,3 +439,61 @@ async fn test_wide_multiply_gate_level() {
         }
     }
 }
+
+fn dsp_count(net: &GateNetlist) -> usize {
+    net.cells.iter().filter(|c| c.dsp_ports().is_some()).count()
+}
+
+/// A multiply sized by its operands' significant bits: `{24'b0, a} * {24'b0, b}`
+/// needs 2 x 2 blocks, `c * d` (40 x 24 bits) 3 x 2, and the signed 40 x 40
+/// multiply truncated to 64 bits 3 x 3 less the one partial product entirely
+/// above bit 63.
+#[test]
+fn test_tiled_multiplies_use_dsp_blocks() {
+    let net = synthesize("multiply_tiled.sk", "nexus");
+    assert_eq!(dsp_count(&net), 4 + 6 + 8);
+}
+
+#[tokio::test]
+async fn test_tiled_multiplies_gate_level() {
+    let mask = |bits: u32| (1u128 << bits) - 1;
+    let to_signed = |v: u64, bits: u32| ((v as i128) << (128 - bits)) >> (128 - bits);
+    for library in ["nexus", "ecp5"] {
+        let mut tb = Testbench::gate_level_with_top_and_library(
+            &fixture_path("multiply_tiled.sk"),
+            "MultiplyTiled",
+            library,
+        )
+        .await
+        .unwrap();
+        for (x, y, z) in [
+            (0xFF_FFFFu64, 0xFF_FFFFu64, 0xFF_FFFFu64),
+            (12_345_678, 7_654_321, 0xAB_CDEF),
+            (0x3_FFFF, 0x4_0000, 1),
+            (0xFF_FFFF_FFFF, 0xFF_FFFF_FFFF, 0x80_0000),
+            (0x80_0000_0000, 0x7F_FFFF_FFFF, 0x12_3456),
+            (1, 0xFF_FFFF_FFFF, 0),
+            (0x12_3456_789A, 0xFE_DCBA_9876, 0x5A_5A5A),
+        ] {
+            let (a, b) = (x & 0xFF_FFFF, y & 0xFF_FFFF);
+            let (c, d) = (x & 0xFF_FFFF_FFFF, z & 0xFF_FFFF);
+            let (e, f) = (x & 0xFF_FFFF_FFFF, y & 0xFF_FFFF_FFFF);
+            tb.set("a", a);
+            tb.set("b", b);
+            tb.set("c", c);
+            tb.set("d", d);
+            tb.set("e", e);
+            tb.set("f", f);
+            tb.step().await;
+            assert_eq!(tb.get_u64("p").await, a * b, "{a} x {b} on {library}");
+            let q = (c as u128 * d as u128) & mask(64);
+            assert_eq!(tb.get_u64("q").await as u128, q, "{c} x {d} on {library}");
+            let r = (to_signed(e, 40) * to_signed(f, 40)) as u128 & mask(64);
+            assert_eq!(
+                tb.get_u64("r").await as u128,
+                r,
+                "signed {e:#x} x {f:#x} on {library}"
+            );
+        }
+    }
+}

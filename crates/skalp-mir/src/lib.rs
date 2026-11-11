@@ -24,6 +24,7 @@ pub mod upf;
 
 // Shared utility modules for consistent transformations
 pub mod logic_analyzer;
+pub mod memory_ports;
 pub mod name_registry;
 pub mod signal_naming;
 pub mod type_flattening;

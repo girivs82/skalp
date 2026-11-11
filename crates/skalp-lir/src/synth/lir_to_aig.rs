@@ -10,7 +10,9 @@
 //! and structural hashing.
 
 use crate::gate_netlist::GateNetId;
+use crate::known_bits::LeadingZeros;
 use crate::lir::{Lir, LirNode, LirOp, LirSignalId};
+use crate::tech_mapper::{dsp_tile_count, mul_operand_widths, MAX_DSP_TILES};
 
 use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo};
 
@@ -29,9 +31,12 @@ pub struct LirToSynthAig<'a> {
     signal_map: BTreeMap<(u32, u32), AigLit>,
     /// LIR node indices that cannot be represented in AIG (MemBlock, NCL, etc.)
     physical_nodes: Vec<usize>,
-    /// Max operand width for DSP inference (0 = no DSP). Mul ops with
-    /// width ≤ 2×dsp_max_width become physical; wider ones stay in AIG.
+    /// DSP block operand width (0 = no DSP). A Mul whose significant
+    /// operand bits tile onto at most `MAX_DSP_TILES` blocks becomes
+    /// physical; a wider one stays in the AIG.
     dsp_max_width: u32,
+    /// Known-zero top bits of signals (sizes multiplies for DSP tiling)
+    leading_zeros: LeadingZeros<'a>,
     /// Narrowest add/sub/compare mapped onto the target's carry chain
     /// (None = the target has no carry chain; arithmetic stays in the AIG).
     carry_chain_min_width: Option<u32>,
@@ -57,6 +62,7 @@ impl<'a> LirToSynthAig<'a> {
             signal_map: BTreeMap::new(),
             physical_nodes: Vec::new(),
             dsp_max_width: 0,
+            leading_zeros: LeadingZeros::new(lir),
             carry_chain_min_width: None,
         }
     }
@@ -69,8 +75,9 @@ impl<'a> LirToSynthAig<'a> {
         self
     }
 
-    /// Enable DSP inference with the given max operand width per block.
-    /// Mul ops with width ≤ 2×max_width will use DSP; wider ones go through AIG.
+    /// Enable DSP inference with the given operand width per block. A Mul
+    /// goes to DSP blocks when its significant operand bits tile onto at most
+    /// `MAX_DSP_TILES` of them; a wider one goes through the AIG.
     pub fn with_dsp_max_width(mut self, max_width: u32) -> Self {
         self.dsp_max_width = max_width;
         self
@@ -83,7 +90,7 @@ impl<'a> LirToSynthAig<'a> {
         for (idx, node) in self.lir.nodes.iter().enumerate() {
             if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
                 register_indices.push(idx);
-            } else if self.is_physical_op(&node.op) {
+            } else if self.is_physical(node) {
                 self.physical_nodes.push(idx);
             }
         }
@@ -110,7 +117,7 @@ impl<'a> LirToSynthAig<'a> {
         for node in &self.lir.nodes {
             // A register's data input counts: `counter <= counter + 1` reads
             // the carry chain only through the register.
-            if !self.is_physical_op(&node.op) {
+            if !self.is_physical(node) {
                 for &input_id in &node.inputs {
                     if phys_output_set.contains(&input_id.0) {
                         consumed_phys_outputs.insert(input_id.0);
@@ -253,7 +260,7 @@ impl<'a> LirToSynthAig<'a> {
             if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
                 continue; // Handled separately
             }
-            if self.is_physical_op(&node.op) {
+            if self.is_physical(node) {
                 continue; // Handled by physical partition
             }
             // Skip combinational nodes that output to a register signal —
@@ -442,18 +449,29 @@ impl<'a> LirToSynthAig<'a> {
             .is_some_and(|w| crate::carry_chain::is_carry_chain_op(op, w))
     }
 
-    /// Check if a LIR operation cannot be represented in AIG
-    fn is_physical_op(&self, op: &LirOp) -> bool {
-        if self.is_carry_chain_op(op) {
+    /// Whether a multiply maps onto DSP hard blocks: the target has them,
+    /// and the operands' significant bits tile onto few enough blocks.
+    fn mul_uses_dsp(&self, node: &LirNode) -> bool {
+        if self.dsp_max_width == 0 {
+            return false;
+        }
+        match mul_operand_widths(&self.leading_zeros, node) {
+            Some((a_bits, b_bits)) => {
+                a_bits > 0
+                    && b_bits > 0
+                    && dsp_tile_count(a_bits, b_bits, self.dsp_max_width) <= MAX_DSP_TILES
+            }
+            None => false,
+        }
+    }
+
+    /// Check if a LIR node cannot be represented in AIG
+    fn is_physical(&self, node: &LirNode) -> bool {
+        if self.is_carry_chain_op(&node.op) {
             return true;
         }
-        match op {
-            // Mul is physical only when DSP hard blocks are available and width fits
-            LirOp::Mul { width, .. }
-                if self.dsp_max_width > 0 && *width <= self.dsp_max_width * 2 =>
-            {
-                true
-            }
+        match &node.op {
+            LirOp::Mul { .. } => self.mul_uses_dsp(node),
             LirOp::MemBlock { .. }
             | LirOp::MemRead { .. }
             | LirOp::MemWrite { .. }
@@ -560,8 +578,7 @@ impl<'a> LirToSynthAig<'a> {
         // read-modify-write) look like a combinational loop.
         let mut signal_producer: HashMap<u32, usize> = HashMap::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. })
-                || self.is_physical_op(&node.op)
+            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) || self.is_physical(node)
             {
                 continue;
             }
@@ -936,7 +953,7 @@ impl<'a> LirToSynthAig<'a> {
                 width,
                 result_width,
                 signed,
-            } if self.dsp_max_width == 0 || *width > self.dsp_max_width * 2 => {
+            } if !self.mul_uses_dsp(node) => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 
@@ -1093,7 +1110,7 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Reg { .. } | LirOp::Latch { .. } => {}
 
             // Physical ops handled separately
-            _ if self.is_physical_op(&node.op) => {}
+            _ if self.is_physical(node) => {}
 
             // Unimplemented ops: create placeholder false outputs
             _ => {

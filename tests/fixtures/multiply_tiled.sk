@@ -1,0 +1,24 @@
+// Multiplies mapped onto several hard multiplier blocks: operands whose top
+// bits are constant zero, an unsigned multiply needing more than four blocks,
+// and a signed one truncated to its low 64 bits. (Numeric types throughout:
+// with the standard library loaded, `bit * bit` is its multiplier entity.)
+entity MultiplyTiled {
+    in a: bit[24]
+    in b: bit[24]
+    in c: nat[40]
+    in d: nat[24]
+    in e: int[40]
+    in f: int[40]
+    out p: nat[48]
+    out q: nat[64]
+    out r: int[64]
+}
+impl MultiplyTiled {
+    signal a48: nat[48]
+    a48 = {24'b0, a}
+    signal b48: nat[48]
+    b48 = {24'b0, b}
+    p = a48 * b48
+    q = c * d
+    r = e * f
+}
