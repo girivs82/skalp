@@ -5039,6 +5039,15 @@ fn report_pad_watch(
         result.samples,
         result.seconds
     );
+    if let Some(board) = board {
+        let pads = board.labelled_pads();
+        if !pads.is_empty() {
+            println!("   Board pins:");
+            for (bit, label) in pads {
+                println!("   {label}: {}", result.describe(bit));
+            }
+        }
+    }
     Ok(())
 }
 
