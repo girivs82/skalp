@@ -29,8 +29,19 @@ use crate::device::{BelType, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use crate::packing::CarryChain;
 use serde::{Deserialize, Serialize};
-use skalp_lir::gate_netlist::{CellId, GateNetlist};
+use skalp_lir::gate_netlist::{CellId, GateNet, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
+
+/// Whether a net is wired through the routing fabric, so placement should
+/// count its wire. A net driven by a constant cell is not: the constant cell
+/// is never placed, and the inputs it feeds are tied in the device's
+/// configuration instead (on Nexus a 1,216-input tie-low net per CPU core
+/// would otherwise pull every carry chain of the core together).
+pub(crate) fn is_routed_net(net: &GateNet, netlist: &GateNetlist) -> bool {
+    !net.driver
+        .and_then(|d| netlist.get_cell(d))
+        .is_some_and(|c| is_constant_cell(&c.cell_type))
+}
 
 /// Check if a cell is a constant driver (TIE_HIGH/TIE_LOW/GND/VCC).
 /// These don't need physical placement on FPGA — the fabric has hardwired VCC/GND.
@@ -1060,7 +1071,7 @@ impl<D: Device + Clone> Placer<D> {
                 .or_default() += 1;
         }
         let mut demand: HashMap<(u32, u32), f64> = HashMap::new();
-        for net in &netlist.nets {
+        for net in netlist.nets.iter().filter(|n| is_routed_net(n, netlist)) {
             let mut locs = net
                 .driver
                 .iter()
@@ -1119,7 +1130,7 @@ impl<D: Device + Clone> Placer<D> {
     fn calculate_wirelength(&self, result: &PlacementResult, netlist: &GateNetlist) -> u64 {
         let mut total_wl = 0u64;
 
-        for net in &netlist.nets {
+        for net in netlist.nets.iter().filter(|n| is_routed_net(n, netlist)) {
             // Get all connected cells
             let mut min_x = u32::MAX;
             let mut max_x = 0u32;

@@ -10,7 +10,7 @@
 
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
-use crate::placer::PlacementResult;
+use crate::placer::{is_routed_net, PlacementResult};
 use skalp_lir::gate_netlist::{GateNet, GateNetlist};
 
 /// Tiles per side of a bin
@@ -77,7 +77,11 @@ impl CongestionMap {
         self.boxes = netlist
             .nets
             .iter()
-            .map(|net| net_box(net, placement))
+            .map(|net| {
+                is_routed_net(net, netlist)
+                    .then(|| net_box(net, placement))
+                    .flatten()
+            })
             .collect();
         for b in self.boxes.clone().into_iter().flatten() {
             self.add_box(b, 1.0);
@@ -254,6 +258,52 @@ mod tests {
         assert_eq!(bins.len(), 3);
         assert!((bins[0].1 - 2.0 * 2.0 * 10.0 / 16.0).abs() < 1e-9);
         assert!((bins[1].1 - 4.0 * 2.0 * 10.0 / 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_net_from_a_constant_adds_no_demand() {
+        use crate::device::BelType;
+        use crate::placer::PlacementLoc;
+        use skalp_lir::gate_netlist::{Cell, CellId, GateNetId};
+
+        let mut netlist = GateNetlist::new("t".to_string(), "nexus".to_string());
+        let net = |n: &mut GateNetlist, name: &str| {
+            n.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let cell = |n: &mut GateNetlist, ty: &str, name: &str, ins, outs| {
+            n.add_cell(Cell::new_comb(
+                CellId(0),
+                ty.to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                ins,
+                outs,
+            ))
+        };
+        let zero = net(&mut netlist, "zero");
+        let a = net(&mut netlist, "a");
+        let b = net(&mut netlist, "b");
+        cell(&mut netlist, "TIE0_X1", "tie", vec![], vec![zero]);
+        let l0 = cell(&mut netlist, "OXIDE_COMB", "l0", vec![zero], vec![a]);
+        let l1 = cell(&mut netlist, "OXIDE_COMB", "l1", vec![zero, a], vec![b]);
+
+        // The LUTs sit 12 tiles apart; the constant is not placed
+        let mut placement = PlacementResult::new();
+        placement
+            .placements
+            .insert(l0, PlacementLoc::new(0, 0, 0, BelType::Lut4));
+        placement
+            .placements
+            .insert(l1, PlacementLoc::new(12, 0, 0, BelType::Lut4));
+
+        let mut m = map(4, 1, 100.0);
+        m.build(&netlist, &placement);
+        // Only net a: 13 x 1 tiles, 14 tile-lengths of wire
+        let total: f64 = m.demand.iter().sum();
+        assert!((total - 14.0).abs() < 1e-9, "{:?}", m.demand);
+        assert_eq!(m.boxes[zero.0 as usize], None);
+        assert_eq!(m.boxes[a.0 as usize], Some((0, 0, 12, 0)));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use super::congestion::{net_box, CongestionMap, NetBox};
 use super::control_sets::{control_sets, fits_control_group, ControlSet};
-use super::{PlacementLoc, PlacementResult};
+use super::{is_routed_net, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::Result;
@@ -217,6 +217,11 @@ impl NetCostCache {
         let mut cell_to_nets: HashMap<CellId, Vec<usize>> = HashMap::new();
 
         for (i, net) in netlist.nets.iter().enumerate() {
+            // A net placement need not wire costs nothing, and no move
+            // touches it
+            if !is_routed_net(net, netlist) {
+                continue;
+            }
             // Build cell_to_nets index
             if let Some(driver) = net.driver {
                 cell_to_nets.entry(driver).or_default().push(i);

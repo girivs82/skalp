@@ -9,7 +9,7 @@
 use super::sites::{bel_types_compatible, SiteMap};
 use super::spreading::{spread, CapacityMap, SpreadCell};
 use super::timing_estimate;
-use super::{is_constant_cell, PlacementLoc, PlacementResult};
+use super::{is_constant_cell, is_routed_net, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
@@ -85,6 +85,7 @@ fn net_pins(netlist: &GateNetlist, cell_indices: &HashMap<CellId, usize>) -> Vec
     netlist
         .nets
         .iter()
+        .filter(|net| is_routed_net(net, netlist))
         .map(|net| {
             net.driver
                 .iter()
@@ -226,6 +227,9 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
 
         // Process each net to build connectivity
         for (net_index, net) in netlist.nets.iter().enumerate() {
+            if !is_routed_net(net, netlist) {
+                continue;
+            }
             let net_weight = net_weights.map_or(1.0, |w| w[net_index]);
             let mut connected_cells: Vec<CellId> = Vec::new();
 
