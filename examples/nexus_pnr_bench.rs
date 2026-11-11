@@ -93,10 +93,24 @@ fn main() {
 
     let t = Instant::now();
     if route {
+        let mut config = PnrConfig::default();
+        // Experiment knobs: PLACER_ITERS, TIMING_WEIGHT
+        if let Some(v) = std::env::var("PLACER_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            config.placer.max_iterations = v;
+        }
+        if let Some(v) = std::env::var("TIMING_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            config.placer.timing_weight = v;
+        }
         let result = skalp_place_route::pnr::place_and_route_nexus_real(
             &netlist,
             NexusVariant::Lfcpnx100,
-            PnrConfig::default(),
+            config,
             &db,
         );
         match result {
