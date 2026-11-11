@@ -398,9 +398,18 @@ impl DelayMapper {
     ) -> IndexMap<AigNodeId, TimePs> {
         let mut required: IndexMap<AigNodeId, TimePs> = IndexMap::new();
 
-        // Initialize outputs with target period
+        // Outputs and the data of latches (and barriers) must arrive within
+        // the target period
         for (_, lit) in aig.outputs() {
             required.insert(lit.node, self.config.target_period);
+        }
+        for (_, node) in aig.iter_nodes() {
+            if let AigNode::Latch { data, .. } | AigNode::Barrier { data, .. } = node {
+                let slot = required
+                    .entry(data.node)
+                    .or_insert(self.config.target_period);
+                *slot = slot.min(self.config.target_period);
+            }
         }
 
         // Propagate backwards
@@ -412,7 +421,12 @@ impl DelayMapper {
 
             let current_req = required.get(&node_id).copied().unwrap_or(f64::MAX);
 
-            for fanin in node.fanins() {
+            // Only AND edges are combinational: a latch's data is read at
+            // the next clock edge
+            let AigNode::And { left, right } = node else {
+                continue;
+            };
+            for fanin in [left, right] {
                 // Subtract gate delay
                 let gate_delay = 25.0; // Conservative estimate
                 let new_req = current_req - gate_delay;
@@ -441,10 +455,11 @@ impl DelayMapper {
             }
             visited.insert(node);
 
-            if let Some(n) = aig.get_node(node) {
-                for fanin in n.fanins() {
-                    visit(aig, fanin.node, visited, order);
-                }
+            // Only AND edges are combinational. Following a latch's data
+            // would let a sequential loop put a node ahead of its fanins.
+            if let Some(AigNode::And { left, right }) = aig.get_node(node) {
+                visit(aig, left.node, visited, order);
+                visit(aig, right.node, visited, order);
             }
 
             order.push(node);

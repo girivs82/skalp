@@ -176,11 +176,14 @@ pub struct CutMatch {
     pub output_inverted: bool,
 }
 
-/// Library cell matcher
 /// Delay of a LUT5 made of two LUT4s and a mux, relative to one LUT4. A
 /// mapping level stands for a LUT and the route into it: on Nexus 276 ps
-/// against 213 ps through the cell, plus ~700 ps of routing either way.
-const WIDE_LUT_DELAY_FACTOR: f64 = 1.1;
+/// against 213 ps through the cell, plus ~700 ps of routing either way, so
+/// (276 + 700) / (213 + 700) = 1.07. Rounding this up costs depth: the
+/// mapper then takes an extra LUT4 level to save a few LUT5s.
+const WIDE_LUT_DELAY_FACTOR: f64 = 1.07;
+
+/// Library cell matcher
 
 #[derive(Debug)]
 pub struct CellMatcher {

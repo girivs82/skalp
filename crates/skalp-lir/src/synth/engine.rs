@@ -276,6 +276,7 @@ impl SynthEngine {
 
         // Phase 2: Run optimization passes
         self.run_optimization_passes(&mut aig);
+        self.add_structural_choices(&mut aig);
         let final_stats = aig.compute_stats();
 
         // Phase 3: Run timing analysis if requested
@@ -373,6 +374,7 @@ impl SynthEngine {
         let initial_stats = aig.compute_stats();
 
         self.run_optimization_passes(&mut aig);
+        self.add_structural_choices(&mut aig);
         let final_stats = aig.compute_stats();
 
         // Timing analysis
@@ -668,6 +670,27 @@ impl SynthEngine {
         }
 
         self.pass_results.clone()
+    }
+
+    /// Give the mapper several structures of the logic to choose from
+    /// (`Dchoice`), for the presets whose mapping explores choices. Runs
+    /// after every optimization pass: those rebuild the AIG and would drop
+    /// the choices and the alternatives they point to.
+    fn add_structural_choices(&mut self, aig: &mut Aig) {
+        if !matches!(self.config.preset, SynthPreset::Full | SynthPreset::Resyn2)
+            || aig.and_count() <= 2
+        {
+            return;
+        }
+        let mut pass = Dchoice::new();
+        let result = pass.run(aig);
+        tracing::debug!(
+            "[DCH] {} choices, {} -> {} ANDs",
+            pass.choices_recorded(),
+            result.ands_before,
+            result.ands_after
+        );
+        self.pass_results.push(result);
     }
 
     /// Run the optimization pass sequence with convergence detection.

@@ -398,41 +398,58 @@ impl AigWriterState<'_> {
     /// Get topological order of nodes
     ///
     /// For latches with decompositions, also visits the decomposed data/enable
-    /// nodes before the latch so they're processed first.
+    /// nodes before the latch so they're processed first. A mapped node comes
+    /// after the leaves of its cut, which (with choices) need not be its AIG
+    /// fanins.
     fn topological_order(&self, aig: &Aig) -> Vec<AigNodeId> {
         let mut result = Vec::new();
         let mut visited = vec![false; aig.node_count()];
+        let mapping = self.mapping_result;
 
-        fn visit(aig: &Aig, id: AigNodeId, visited: &mut [bool], result: &mut Vec<AigNodeId>) {
-            if id.0 as usize >= visited.len() || visited[id.0 as usize] {
+        let fanins = |id: AigNodeId| -> Vec<AigNodeId> {
+            if let Some(mapped) = mapping.and_then(|m| m.mapped_nodes.get(&id)) {
+                return mapped.inputs.iter().map(|&(leaf, _)| leaf).collect();
+            }
+            aig.get_node(id)
+                .map(|node| node.fanins().iter().map(|f| f.node).collect())
+                .unwrap_or_default()
+        };
+        let visit = |root: AigNodeId, visited: &mut [bool], result: &mut Vec<AigNodeId>| {
+            if root.0 as usize >= visited.len() || visited[root.0 as usize] {
                 return;
             }
-            visited[id.0 as usize] = true;
-
-            if let Some(node) = aig.get_node(id) {
-                for fanin in node.fanins() {
-                    visit(aig, fanin.node, visited, result);
+            visited[root.0 as usize] = true;
+            let mut stack = vec![(root, fanins(root), 0usize)];
+            while let Some((id, list, next)) = stack.last_mut() {
+                if let Some(&child) = list.get(*next) {
+                    *next += 1;
+                    if (child.0 as usize) < visited.len() && !visited[child.0 as usize] {
+                        visited[child.0 as usize] = true;
+                        let grand = fanins(child);
+                        stack.push((child, grand, 0));
+                    }
+                } else {
+                    result.push(*id);
+                    stack.pop();
                 }
             }
-
-            result.push(id);
-        }
+        };
 
         // First pass: visit all nodes normally
         for (id, node) in aig.iter_nodes() {
             // For latches with decompositions, visit decomp nodes first
             if let AigNode::Latch { .. } = node {
                 if let Some(decomp) = self.latch_decomps.get(&id) {
-                    visit(aig, decomp.data.node, &mut visited, &mut result);
+                    visit(decomp.data.node, &mut visited, &mut result);
                     if let Some(e) = decomp.enable {
-                        visit(aig, e.node, &mut visited, &mut result);
+                        visit(e.node, &mut visited, &mut result);
                     }
                     if let Some(r) = decomp.sync_reset {
-                        visit(aig, r.node, &mut visited, &mut result);
+                        visit(r.node, &mut visited, &mut result);
                     }
                 }
             }
-            visit(aig, id, &mut visited, &mut result);
+            visit(id, &mut visited, &mut result);
         }
 
         result

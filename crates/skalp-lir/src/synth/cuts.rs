@@ -603,7 +603,16 @@ impl CutEnumeration {
                 .fold(0.0f32, f32::max)
         };
 
-        for (id, node) in aig.iter_nodes() {
+        // With choices, a node's alternatives are enumerated before it
+        let order: Vec<AigNodeId> = if params.use_choices && aig.choice_node_count() > 0 {
+            aig.choice_topological_order()
+        } else {
+            aig.iter_nodes().map(|(id, _)| id).collect()
+        };
+        for id in order {
+            let Some(node) = aig.get_node(id) else {
+                continue;
+            };
             let cut_set = match node {
                 AigNode::Const
                 | AigNode::Input { .. }
@@ -649,6 +658,11 @@ impl CutEnumeration {
                                 continue;
                             };
                             for choice_cut in &choice_cuts.cuts {
+                                // The alternative itself as a leaf would
+                                // be a buffer
+                                if choice_cut.leaves == [choice_lit.node] {
+                                    continue;
+                                }
                                 let mut cut = choice_cut.clone();
                                 if choice_lit.inverted {
                                     cut.truth_table = !cut.truth_table;
