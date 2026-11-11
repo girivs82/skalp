@@ -1038,6 +1038,16 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             }
             .map(|(wires, pips, _)| (wires, pips));
 
+            // A path searched from part of the tree (or from the source) can
+            // run through other wires of the tree; it joins the tree at the
+            // last one, so no wire gets a second driver
+            let path_result = path_result.map(|(wires, pips)| {
+                if is_matched {
+                    (wires, pips)
+                } else {
+                    Self::graft(wires, pips, &route_wire_set)
+                }
+            });
             match path_result {
                 Ok((wires, pips)) => {
                     // This branch's delay from the source: the arrival time at
@@ -1080,6 +1090,11 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                                 netlist,
                             )
                         {
+                            let (alt_wires, alt_pips) = if is_matched {
+                                (alt_wires, alt_pips)
+                            } else {
+                                Self::graft(alt_wires, alt_pips, &route_wire_set)
+                            };
                             let branch_delay =
                                 self.record_arrivals(&mut arrival, &alt_wires, &alt_pips);
 
@@ -1218,6 +1233,25 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             .filter(|s| reached.contains(s))
             .collect();
         Some((wires, pips, reached))
+    }
+
+    /// The part of a path (`wires`, joined by `pips`: `pips[i]` drives
+    /// `wires[i + 1]`) from the last of its wires already in a net's route
+    /// tree (`tree`) on. A path that started on the tree and ran through
+    /// other tree wires would give those a second driver; from its last tree
+    /// wire on it only adds new wires. A path that touches no tree wire is
+    /// returned whole.
+    fn graft(
+        wires: Vec<WireId>,
+        pips: Vec<crate::device::PipId>,
+        tree: &HashSet<WireId>,
+    ) -> (Vec<WireId>, Vec<crate::device::PipId>) {
+        match wires.iter().rposition(|w| tree.contains(w)) {
+            Some(last) if last > 0 && pips.len() + 1 == wires.len() => {
+                (wires[last..].to_vec(), pips[last..].to_vec())
+            }
+            _ => (wires, pips),
+        }
     }
 
     /// Record the arrival time (delay from the net's source) of each wire of
@@ -2044,6 +2078,30 @@ mod tests {
 
         // Sinks that differ from the net's pins: rerouted whole
         assert!(PathFinder::<NexusDevice>::prune_route(&route, &[w(3)], |_| false, ends).is_none());
+    }
+
+    #[test]
+    fn a_branch_joins_the_tree_at_its_last_tree_wire() {
+        let w = WireId;
+        let tree: HashSet<WireId> = [w(0), w(1), w(2), w(3)].into_iter().collect();
+        // Searched from wire 1 (a seed near the sink), the path runs
+        // 1 -> 10 -> 3 -> 11 -> sink 12: wire 3 is already driven in the
+        // tree, so the branch starts there
+        let (wires, pips) = PathFinder::<NexusDevice>::graft(
+            vec![w(1), w(10), w(3), w(11), w(12)],
+            vec![PipId(10), PipId(3), PipId(11), PipId(12)],
+            &tree,
+        );
+        assert_eq!(wires, vec![w(3), w(11), w(12)]);
+        assert_eq!(pips, vec![PipId(11), PipId(12)]);
+        // A path that leaves the tree for good is kept whole
+        let (wires, pips) = PathFinder::<NexusDevice>::graft(
+            vec![w(2), w(10), w(11)],
+            vec![PipId(10), PipId(11)],
+            &tree,
+        );
+        assert_eq!(wires, vec![w(2), w(10), w(11)]);
+        assert_eq!(pips.len(), 2);
     }
 
     #[test]
