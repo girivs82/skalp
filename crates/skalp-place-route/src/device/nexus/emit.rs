@@ -525,6 +525,25 @@ fn emit_bits(
                 let init = fold_tied_low(lut_init(cell)?, &low);
                 config.set_word(&tile, &format!("SLICE{slice}.K{lut}.INIT"), init)?;
             }
+            BelType::WideLut => {
+                // Both LUTs of the slice see inputs 0..3; the slice's wide
+                // mux picks LUT1 (the table's upper half) when input 4 is high.
+                let slice = SLICES[number];
+                let init = lut_init(cell)?;
+                let mut halves = [init & 0xFFFF, (init >> 16) & 0xFFFF];
+                match tied.value(cell.id, 4) {
+                    Some(true) => halves[0] = halves[1],
+                    Some(false) => halves[1] = halves[0],
+                    None if cell.inputs.len() <= 4 => halves[1] = halves[0],
+                    None => {}
+                }
+                let mut low = tied_low(cell.id, 0, 4);
+                low.extend(cell.inputs.len().min(4)..4);
+                for (lut, half) in halves.into_iter().enumerate() {
+                    let folded = fold_tied_low(half, &low);
+                    config.set_word(&tile, &format!("SLICE{slice}.K{lut}.INIT"), folded)?;
+                }
+            }
             other => {
                 return Err(emit_err(format!(
                     "Cell '{}' needs a {other:?} site, which the backend does not support yet",

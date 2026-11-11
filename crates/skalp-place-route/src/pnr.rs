@@ -628,8 +628,10 @@ pub fn place_and_route_nexus_real(
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         if !clock_routes.general.contains(&net.id) {
-            net.fanout
-                .retain(|(_, pin)| !crate::device::is_clock_pin(*pin));
+            net.fanout.retain(|&(cell, pin)| {
+                !crate::device::is_clock_pin(pin)
+                    && !clock_routes.dedicated_inputs.contains(&(cell, pin))
+            });
         }
     }
     let router_device = device.without_wires(&clock_routes.claimed);

@@ -493,6 +493,42 @@ impl<'a> LirToSynthAig<'a> {
             .and_then(|rst_id| self.signal_map.get(&(rst_id.0, 0)).map(|lit| lit.node))
     }
 
+    /// Combine `lits` pairwise, level by level, so a reduction over `n` bits
+    /// is about log2(n) gates deep rather than `n`. `empty` for no bits.
+    fn reduce_tree(
+        &mut self,
+        mut lits: Vec<AigLit>,
+        empty: AigLit,
+        combine: fn(&mut Aig, AigLit, AigLit) -> AigLit,
+    ) -> AigLit {
+        if lits.is_empty() {
+            return empty;
+        }
+        while lits.len() > 1 {
+            let next = lits
+                .chunks(2)
+                .map(|pair| match pair {
+                    [a, b] => combine(&mut self.aig, *a, *b),
+                    _ => pair[0],
+                })
+                .collect();
+            lits = next;
+        }
+        lits[0]
+    }
+
+    fn and_tree(&mut self, lits: Vec<AigLit>) -> AigLit {
+        self.reduce_tree(lits, AigLit::true_lit(), Aig::add_and)
+    }
+
+    fn or_tree(&mut self, lits: Vec<AigLit>) -> AigLit {
+        self.reduce_tree(lits, AigLit::false_lit(), Aig::add_or)
+    }
+
+    fn xor_tree(&mut self, lits: Vec<AigLit>) -> AigLit {
+        self.reduce_tree(lits, AigLit::false_lit(), Aig::add_xor)
+    }
+
     fn get_input_bit(&self, signal_id: LirSignalId, bit: u32) -> AigLit {
         self.signal_map
             .get(&(signal_id.0, bit))
@@ -730,26 +766,26 @@ impl<'a> LirToSynthAig<'a> {
 
             LirOp::Eq { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
-                let mut result = AigLit::true_lit();
-                for bit in 0..*width {
-                    let bit_eq = self
-                        .aig
-                        .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
-                        .invert();
-                    result = self.aig.add_and(result, bit_eq);
-                }
+                let bits: Vec<AigLit> = (0..*width)
+                    .map(|bit| {
+                        self.aig
+                            .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
+                            .invert()
+                    })
+                    .collect();
+                let result = self.and_tree(bits);
                 self.set_output_bit(node.output, 0, result);
             }
 
             LirOp::Ne { width } => {
                 let (a, b) = (node.inputs[0], node.inputs[1]);
-                let mut result = AigLit::false_lit();
-                for bit in 0..*width {
-                    let bit_ne = self
-                        .aig
-                        .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit));
-                    result = self.aig.add_or(result, bit_ne);
-                }
+                let bits: Vec<AigLit> = (0..*width)
+                    .map(|bit| {
+                        self.aig
+                            .add_xor(self.get_input_bit(a, bit), self.get_input_bit(b, bit))
+                    })
+                    .collect();
+                let result = self.or_tree(bits);
                 self.set_output_bit(node.output, 0, result);
             }
 
@@ -885,28 +921,28 @@ impl<'a> LirToSynthAig<'a> {
 
             LirOp::RedAnd { width } => {
                 let input = node.inputs[0];
-                let mut result = AigLit::true_lit();
-                for bit in 0..*width {
-                    result = self.aig.add_and(result, self.get_input_bit(input, bit));
-                }
+                let bits: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(input, bit))
+                    .collect();
+                let result = self.and_tree(bits);
                 self.set_output_bit(node.output, 0, result);
             }
 
             LirOp::RedOr { width } => {
                 let input = node.inputs[0];
-                let mut result = AigLit::false_lit();
-                for bit in 0..*width {
-                    result = self.aig.add_or(result, self.get_input_bit(input, bit));
-                }
+                let bits: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(input, bit))
+                    .collect();
+                let result = self.or_tree(bits);
                 self.set_output_bit(node.output, 0, result);
             }
 
             LirOp::RedXor { width } => {
                 let input = node.inputs[0];
-                let mut result = AigLit::false_lit();
-                for bit in 0..*width {
-                    result = self.aig.add_xor(result, self.get_input_bit(input, bit));
-                }
+                let bits: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(input, bit))
+                    .collect();
+                let result = self.xor_tree(bits);
                 self.set_output_bit(node.output, 0, result);
             }
 

@@ -262,6 +262,9 @@ pub const FF_PIN_LSR: usize = 102;
 /// First router pin number of a distributed RAM's read address connections:
 /// read-address bit `r` reaches LUT `j` of the RAM at `base + 4 * r + j`.
 pub const DIST_RAM_PIN_RAD: usize = 200;
+/// Router pin number of a wide LUT's select input. Its other inputs `i`
+/// (0..4) reach the first LUT at pin `i` and the second at pin `4 + i`.
+pub const WIDE_LUT_PIN_SEL: usize = 8;
 /// Router pin number of a block RAM's read clock. Its write clock is
 /// [`FF_PIN_CLK`].
 pub const RAM_PIN_READ_CLK: usize = 103;
@@ -309,6 +312,10 @@ pub fn is_clock_pin(pin: usize) -> bool {
 ///   outputs DO0..3) uses the pins of its footprint LUTs: DO`i` leaves on
 ///   read LUT `i`, RAD on read LUT 0, WRE on read LUT 1, DI and WAD on the
 ///   write-port LUTs (footprint LUTs 4 and 5).
+/// - A wide LUT (`WideLut`, a 5-input LUT cell) uses the pins of its two
+///   footprint LUTs: input `i` < 4 on the first at router pin `i` and on the
+///   second at `4 + i`, the select ([`WIDE_LUT_PIN_SEL`]) on the BEL's own
+///   `WIDE{n}_SEL` wire, the output on `WIDE{n}_Z`.
 /// - FF control pins (CE, LSR) are not modelled here.
 pub(crate) fn lattice_logic_pin_wire<D: Device + ?Sized>(
     device: &D,
@@ -362,6 +369,23 @@ pub(crate) fn lattice_logic_pin_wire<D: Device + ?Sized>(
                 }
                 CellPin::Output(o) if o < 2 => lut_pin(*slot.lut_bels.get(o)?, CellPin::Output(0)),
                 _ => None,
+            }
+        }
+        BelType::WideLut => {
+            let n = bels[..bel_index]
+                .iter()
+                .filter(|o| o.bel_type == BelType::WideLut)
+                .count();
+            let luts: Vec<usize> = device
+                .bel_footprint(x, y, bel_index)
+                .into_iter()
+                .filter(|&b| bels.get(b).is_some_and(|b| b.bel_type == BelType::Lut4))
+                .collect();
+            match pin {
+                CellPin::Input(WIDE_LUT_PIN_SEL) => wire(format!("WIDE{}_SEL", n)),
+                CellPin::Input(i) if i < 8 => lut_pin(*luts.get(i / 4)?, CellPin::Input(i % 4)),
+                CellPin::Input(_) => None,
+                CellPin::Output(_) => wire(format!("WIDE{}_Z", n)),
             }
         }
         BelType::DistRam => {
@@ -930,6 +954,11 @@ pub enum BelType {
     /// LUTs (Lattice DPR16X4). Its LUTs are the site's footprint
     /// ([`Device::bel_footprint`]).
     DistRam,
+    /// A wide LUT: a slice's two LUT4s and the mux between them, taking a
+    /// 5-input LUT (Lattice PFUMX / Nexus WIDEFN9). Its LUTs and the
+    /// flip-flop whose input carries the mux select are its footprint
+    /// ([`Device::bel_footprint`]).
+    WideLut,
     /// I/O cell
     IoCell,
     /// Global clock buffer

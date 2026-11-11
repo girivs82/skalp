@@ -5,7 +5,9 @@
 //! and dedicated carry paths) and fixing IO cells on their assigned sites.
 
 use crate::collections::{HashMap, HashMapExt};
-use crate::device::{BelType, Device, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR};
+use crate::device::{
+    BelType, Device, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_CLK, FF_PIN_LSR, WIDE_LUT_PIN_SEL,
+};
 use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
@@ -327,6 +329,17 @@ pub fn prepare_for_routing(
                 continue;
             }
             if is_carry(cell) && index == 8 {
+                continue;
+            }
+            if cell.function == Some(CellFunction::Lut5) {
+                // A wide LUT's inputs 0..3 feed both of its LUTs; input 4 is
+                // the select of the mux between them.
+                if index < 4 {
+                    connect(&mut prepared.nets, net, cell.id, index);
+                    connect(&mut prepared.nets, net, cell.id, 4 + index);
+                } else {
+                    connect(&mut prepared.nets, net, cell.id, WIDE_LUT_PIN_SEL);
+                }
                 continue;
             }
             if cell.function == Some(CellFunction::DistRam16x4) && (9..=12).contains(&index) {

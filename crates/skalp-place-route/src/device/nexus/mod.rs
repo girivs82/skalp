@@ -803,7 +803,8 @@ impl NexusDevice {
         }
     }
 
-    /// Create BELs for a logic tile (8 LUT4 + 8 DFF + 4 CCU2 carry cells)
+    /// Create BELs for a logic tile (8 LUT4 + 8 DFF + 4 CCU2 carry cells + 4
+    /// wide LUTs + 1 distributed RAM)
     fn make_logic_bels(bel_id: &mut u32, _x: u32, _y: u32) -> Vec<Bel> {
         let mut bels = Vec::with_capacity(20);
 
@@ -899,6 +900,30 @@ impl NexusDevice {
                     },
                     BelPin {
                         name: "COUT".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                ],
+            });
+        }
+
+        // 4 wide LUTs, one per slice: the slice's two LUTs on the same four
+        // inputs and the mux between them, selected by a fifth input
+        for (n, slice) in ['A', 'B', 'C', 'D'].into_iter().enumerate() {
+            let id = BelId(*bel_id);
+            *bel_id += 1;
+            bels.push(Bel {
+                id,
+                bel_type: BelType::WideLut,
+                name: format!("WIDEFN_{}", slice),
+                pins: vec![
+                    BelPin {
+                        name: format!("WIDE{n}_SEL"),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: format!("WIDE{n}_Z"),
                         direction: PinDirection::Output,
                         wire: None,
                     },
@@ -1333,6 +1358,68 @@ impl NexusDevice {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Wide LUT select and output, one pair per slice. They use
+                    // the locals of the slice's first flip-flop, which the
+                    // wide LUT takes (see bel_footprint).
+                    for slice in 0..4usize {
+                        let lc = 2 * slice;
+                        let locals = self.tile_wires.get(&(x, y)).cloned().unwrap_or_default();
+                        let mut pin_wire = |name: String| {
+                            let w = Wire {
+                                id: WireId(wire_id),
+                                name: format!("R{}C{}_{}", y, x, name),
+                                wire_type: WireType::BelPin,
+                                tile_x: x,
+                                tile_y: y,
+                                delay: 0,
+                            };
+                            Arc::make_mut(&mut self.wire_names).insert(w.name.clone(), w.id);
+                            Arc::make_mut(&mut self.bel_wires).insert((x, y, name), w.id);
+                            Arc::make_mut(&mut self.tile_wires)
+                                .entry((x, y))
+                                .or_default()
+                                .push(w.id);
+                            let id = w.id;
+                            Arc::make_mut(&mut self.wires).push(w);
+                            wire_id += 1;
+                            id
+                        };
+                        let sel = pin_wire(format!("WIDE{slice}_SEL"));
+                        let out = pin_wire(format!("WIDE{slice}_Z"));
+                        let mut wide_pips = Vec::new();
+                        if let Some(&lw) = locals.get((lc * 6 + 1) % LOCAL_WIRES) {
+                            wide_pips.push((out, lw, 20));
+                        }
+                        for j in 0..INPUT_MUX_WIDTH {
+                            if let Some(&lw) =
+                                locals.get((lc * 6 + 5 + j * INPUT_MUX_STRIDE) % LOCAL_WIRES)
+                            {
+                                wide_pips.push((lw, sel, 15));
+                            }
+                        }
+                        for (src_wire, dst_wire, delay) in wide_pips {
+                            let p = Pip {
+                                id: PipId(pip_id),
+                                src_wire,
+                                dst_wire,
+                                delay,
+                                configurable: true,
+                                tile_x: x,
+                                tile_y: y,
+                            };
+                            Arc::make_mut(&mut self.wire_to_pips)
+                                .entry(p.dst_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.wire_src_pips)
+                                .entry(p.src_wire)
+                                .or_default()
+                                .push(p.id);
+                            Arc::make_mut(&mut self.pips).push(p);
+                            pip_id += 1;
                         }
                     }
 
@@ -2062,6 +2149,7 @@ impl Device for NexusDevice {
     fn can_place(&self, cell_type: &str, bel_type: BelType) -> bool {
         match cell_type {
             "LUT4" | "OXIDE_COMB" => bel_type == BelType::Lut4,
+            "OXIDE_LUT5" => bel_type == BelType::WideLut,
             "DFF" | "OXIDE_FF" | "FD1P3IX" | "FD1P3DX" | "FD1S3BX" => bel_type.is_ff(),
             "CCU2" | "CCU2C" | "CARRY" => bel_type == BelType::Carry,
             "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
@@ -2091,39 +2179,74 @@ impl Device for NexusDevice {
     }
 
     fn bel_footprint(&self, x: u32, y: u32, bel_index: usize) -> Vec<usize> {
-        // The distributed RAM site uses LUTs 0..5 (slices A, B and the RAMW
-        // slice C); each of those LUTs, when used, blocks the RAM site. On real
-        // silicon slices C and D share clock and set/reset settings, and those
-        // carry the RAM's write port, so both slices' flip-flops are taken too.
-        const RAM_LUTS: usize = 6;
+        // What each BEL uses of its tile, as LUT and flip-flop numbers; two
+        // BELs that use the same one exclude each other, so each is in the
+        // other's footprint.
+        //
+        // - The distributed RAM site uses LUTs 0..5 (slices A, B and the
+        //   RAMW slice C). On real silicon slices C and D share clock and
+        //   set/reset settings, and those carry the RAM's write port, so both
+        //   slices' flip-flops are taken too.
+        // - A wide LUT uses its slice's two LUTs and the slice's first
+        //   flip-flop, whose M0 input carries the mux select.
+        //
+        // The footprint lists LUTs first, then flip-flops, then other BELs,
+        // each in BEL order: a RAM's pins are its footprint LUTs in order.
+        const RAM_LUTS: std::ops::Range<usize> = 0..6;
         const RAMW_FFS: std::ops::Range<usize> = 4..8;
         let Some(tile) = self.tile_at(x, y) else {
             return Vec::new();
         };
         let bels = tile.bels();
-        let Some(ram) = bels.iter().position(|b| b.bel_type == BelType::DistRam) else {
-            return Vec::new();
-        };
-        let mut footprint: Vec<usize> = bels
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.bel_type == BelType::Lut4)
-            .map(|(i, _)| i)
-            .take(RAM_LUTS)
-            .collect();
-        if !self.prjoxide_tiles.is_empty() {
-            let ffs = bels
+        let ordinal = |b: usize| {
+            bels[..b]
                 .iter()
-                .enumerate()
-                .filter(|(_, b)| b.bel_type.is_ff())
-                .map(|(i, _)| i);
-            footprint.extend(ffs.skip(RAMW_FFS.start).take(RAMW_FFS.len()));
+                .filter(|o| {
+                    o.bel_type == bels[b].bel_type
+                        || (o.bel_type.is_ff() && bels[b].bel_type.is_ff())
+                })
+                .count()
+        };
+        let real = !self.prjoxide_tiles.is_empty();
+        // (LUTs, flip-flops) a BEL uses
+        let uses = |b: usize| -> (Vec<usize>, Vec<usize>) {
+            match bels[b].bel_type {
+                BelType::Lut4 => (vec![ordinal(b)], Vec::new()),
+                t if t.is_ff() => (Vec::new(), vec![ordinal(b)]),
+                BelType::WideLut => {
+                    let s = ordinal(b);
+                    (vec![2 * s, 2 * s + 1], vec![2 * s])
+                }
+                BelType::DistRam => (
+                    RAM_LUTS.collect(),
+                    if real { RAMW_FFS.collect() } else { Vec::new() },
+                ),
+                _ => (Vec::new(), Vec::new()),
+            }
+        };
+        if bel_index >= bels.len() {
+            return Vec::new();
         }
-        match bels.get(bel_index).map(|b| b.bel_type) {
-            Some(BelType::DistRam) => footprint,
-            Some(_) if footprint.contains(&bel_index) => vec![ram],
-            _ => Vec::new(),
+        let (luts, ffs) = uses(bel_index);
+        if luts.is_empty() && ffs.is_empty() {
+            return Vec::new();
         }
+        let mut overlapping: Vec<(u8, usize)> = (0..bels.len())
+            .filter(|&b| b != bel_index)
+            .filter_map(|b| {
+                let (l, f) = uses(b);
+                let shares =
+                    l.iter().any(|x| luts.contains(x)) || f.iter().any(|x| ffs.contains(x));
+                let rank = match bels[b].bel_type {
+                    BelType::Lut4 => 0,
+                    t if t.is_ff() => 1,
+                    _ => 2,
+                };
+                shares.then_some((rank, b))
+            })
+            .collect();
+        overlapping.sort_unstable();
+        overlapping.into_iter().map(|(_, b)| b).collect()
     }
 
     fn wire_count(&self) -> usize {

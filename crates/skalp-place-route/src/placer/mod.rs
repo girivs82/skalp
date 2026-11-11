@@ -13,6 +13,7 @@ pub mod control_sets;
 mod legalization;
 mod sites;
 mod spreading;
+mod timing_estimate;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
@@ -54,6 +55,8 @@ pub(crate) fn cell_bel_type(cell: &skalp_lir::gate_netlist::Cell) -> BelType {
     let t = cell.cell_type.as_str();
     if cell.function == Some(CellFunction::DistRam16x4) {
         BelType::DistRam
+    } else if cell.function == Some(CellFunction::Lut5) {
+        BelType::WideLut
     } else if t.contains("LUT") {
         BelType::Lut4
     } else if t.contains("DFFE") || t.starts_with("SB_SDFFE") {
@@ -275,6 +278,11 @@ impl<D: Device + Clone> Placer<D> {
         Self { config, device }
     }
 
+    /// Delays for timing-driven placement on this device
+    fn delay_model(&self) -> crate::timing::DelayModel {
+        crate::timing::DelayModel::for_family(self.device.family())
+    }
+
     /// Place a design with carry chain constraints
     pub fn place_with_carry_chains(
         &mut self,
@@ -316,7 +324,14 @@ impl<D: Device + Clone> Placer<D> {
             PlacementAlgorithm::AnalyticalWithRefinement
             | PlacementAlgorithm::AnalyticalTimingDriven => {
                 // Analytical with carry chain column constraints
-                let analytical = AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                let mut analytical =
+                    AnalyticalPlacer::new(&self.device).with_fill_limit(fill_limit);
+                if matches!(
+                    self.config.algorithm,
+                    PlacementAlgorithm::AnalyticalTimingDriven
+                ) {
+                    analytical = analytical.with_timing(self.delay_model());
+                }
                 let t_stage = std::time::Instant::now();
                 let initial = if carry_chains.is_empty() {
                     analytical.place(netlist)?
@@ -371,6 +386,7 @@ impl<D: Device + Clone> Placer<D> {
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
                 .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model())
                 .with_carry_chains(carry_chains.to_vec());
 
                 let t_stage = std::time::Instant::now();
@@ -538,6 +554,7 @@ impl<D: Device + Clone> Placer<D> {
                 // Analytical + legalization + timing-driven SA refinement
                 let analytical = AnalyticalPlacer::new(&self.device)
                     .with_fill_limit(fill_limit)
+                    .with_timing(self.delay_model())
                     .with_resolved_constraints(resolved_constraints.clone());
                 let initial = analytical.place(netlist)?;
 
@@ -557,7 +574,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
-                .with_fill_limit(fill_limit);
+                .with_fill_limit(fill_limit)
+                .with_delay_model(self.delay_model());
                 annealer.optimize(legalized, netlist)?
             }
         };
@@ -636,15 +654,27 @@ impl<D: Device + Clone> Placer<D> {
         let (width, height) = self.device.grid_size();
         let mut available: HashMap<BelType, usize> = HashMap::new();
         let mut ram_footprint = 0usize;
+        let mut wide_footprint = 0usize;
         for y in 0..height {
             for x in 0..width {
                 let Some(tile) = self.device.tile_at(x, y) else {
                     continue;
                 };
-                for (i, bel) in tile.bels().iter().enumerate() {
+                let bels = tile.bels();
+                let luts_under = |i: usize| {
+                    self.device
+                        .bel_footprint(x, y, i)
+                        .iter()
+                        .filter(|&&b| bels.get(b).is_some_and(|b| b.bel_type.is_lut()))
+                        .count()
+                };
+                for (i, bel) in bels.iter().enumerate() {
                     *available.entry(bel.bel_type).or_default() += 1;
                     if bel.bel_type == BelType::DistRam && ram_footprint == 0 {
-                        ram_footprint = self.device.bel_footprint(x, y, i).len();
+                        ram_footprint = luts_under(i);
+                    }
+                    if bel.bel_type == BelType::WideLut && wide_footprint == 0 {
+                        wide_footprint = luts_under(i);
                     }
                 }
             }
@@ -665,6 +695,7 @@ impl<D: Device + Clone> Placer<D> {
             let blocked_luts = match required {
                 BelType::Carry => luts_per_carry,
                 BelType::DistRam => ram_footprint,
+                BelType::WideLut => wide_footprint,
                 _ => 0,
             };
             *demand.entry(BelType::Lut4).or_default() += blocked_luts;
@@ -912,6 +943,7 @@ impl<D: Device + Clone> Placer<D> {
             | BelType::DffSr
             | BelType::DffSrE
             | BelType::Carry
+            | BelType::WideLut
             | BelType::DistRam => TileType::Logic,
             BelType::IoCell => TileType::IoTop, // Will be refined during placement
             BelType::RamSlice => TileType::RamTop,
