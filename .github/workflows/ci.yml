@@ -12,26 +12,23 @@ env:
 
 jobs:
   test:
-    name: Test Suite
+    name: Linux stable
+    uses: ./.github/workflows/test-suite.yml
+
+  # Beta and macOS are only linted on every change; their full test runs
+  # happen before a release (see full-test-matrix.yml).
+  toolchains:
+    name: Clippy (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust:
-          - stable
-          - beta
+        include:
+          - os: ubuntu-latest
+            rust: beta
+          - os: macos-latest
+            rust: stable
     steps:
-      - name: Free disk space (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
-            /usr/local/graalvm /usr/local/share/powershell
-          sudo docker image prune --all --force || true
-          sudo apt-get clean
-          df -h /
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -39,37 +36,15 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.rust }}
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+          key: clippy-${{ matrix.rust }}
 
       - name: Run Clippy
         run: cargo clippy --workspace --exclude skalp-verify --exclude skalp-formal --lib --tests --bins --all-features -- -D warnings
-
-      # One test invocation with one feature set: every target is compiled
-      # once and every test runs once. (Separate per-crate steps with
-      # differing features used to rebuild the workspace and rerun the
-      # suite about 2.3 times.)
-      - name: Run all tests
-        run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --no-fail-fast
-
-      - name: Run doc tests
-        run: cargo test --doc --workspace --all-features --exclude skalp --exclude skalp-verify --exclude skalp-formal
-
-      - name: Run verification tests
-        if: runner.os == 'macOS'  # z3 only available on macOS
-        run: cargo test -p skalp-verify || echo "Skipping verification tests (z3 not installed)"
-
-      - name: Test Summary
-        if: always()
-        run: |
-          echo "Test run completed on ${{ matrix.os }} with Rust ${{ matrix.rust }}"
 
   coverage:
     name: Code Coverage

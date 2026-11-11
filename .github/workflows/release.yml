@@ -9,6 +9,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  tests:
+    name: Full test matrix
+    uses: ./.github/workflows/full-test-matrix.yml
+
   build-release:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
@@ -97,7 +101,7 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build-release, build-vsix]
+    needs: [tests, build-release, build-vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write

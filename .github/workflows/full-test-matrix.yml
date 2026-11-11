@@ -1,0 +1,16 @@
+name: Full Test Matrix
+
+# The whole test suite on Linux and macOS with stable and beta Rust.
+# Runs before every release (release.yml) and on demand from the Actions tab.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test:
+    name: Full matrix
+    uses: ./.github/workflows/test-suite.yml
+    with:
+      os: '["ubuntu-latest", "macos-latest"]'
+      rust: '["stable", "beta"]'
