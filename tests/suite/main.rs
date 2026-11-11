@@ -81,6 +81,7 @@ mod test_graphics_pipeline;
 mod test_graphics_pipeline_functional;
 mod test_hierarchical_ncl;
 mod test_hir_codegen;
+mod test_ice40_block_ram_pins;
 mod test_ice40_synthesis;
 mod test_impl_for_type;
 mod test_import_duplicate_entities;

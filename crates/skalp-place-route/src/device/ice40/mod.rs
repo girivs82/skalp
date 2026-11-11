@@ -6,6 +6,7 @@
 mod chipdb;
 pub mod chipdb_parser;
 pub mod data;
+pub mod ram;
 mod tiles;
 
 pub use chipdb::Ice40ChipDb;
@@ -1763,6 +1764,56 @@ impl Device for Ice40Device {
 
     fn padin_extra_bit(&self, glb_num: u8) -> Option<(u32, u32, u32)> {
         Ice40Device::padin_extra_bit(self, glb_num)
+    }
+
+    fn ram_input_pin(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<usize> {
+        ram::input_pin(ports, input).map(ram::InputPin::router_index)
+    }
+
+    fn ram_output_pin(&self, ports: &skalp_lir::gate_netlist::RamPorts, output: usize) -> usize {
+        ram::output_pin(ports, output)
+    }
+
+    /// A RAM input left unconnected reads as 0, except the clocks and clock
+    /// enables.
+    fn ram_input_needs_low_driver(
+        &self,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> bool {
+        ram::input_pin(ports, input).is_some_and(ram::InputPin::is_clock)
+    }
+
+    /// Block RAM pins, by the router pin numbering of [`ram::InputPin`] and
+    /// `RDATA` index; a block's pins are split between its two tiles.
+    fn bel_pin_wire(
+        &self,
+        x: u32,
+        y: u32,
+        _bel_index: usize,
+        pin: crate::device::CellPin,
+    ) -> Option<WireId> {
+        // The block's other tile: below a top tile, above a bottom one.
+        let other_row = match self.tile_at(x, y).map(|t| t.tile_type()) {
+            Some(TileType::RamTop) => y.checked_sub(1)?,
+            Some(TileType::RamBottom) => y + 1,
+            _ => return None,
+        };
+        let name = match pin {
+            crate::device::CellPin::Input(index) => ram::InputPin::from_router_index(index)?.name(),
+            crate::device::CellPin::Output(index) if index < ram::DATA_BITS => {
+                format!("RDATA_{index}")
+            }
+            crate::device::CellPin::Output(_) => return None,
+        };
+        let name = format!("ram/{name}");
+        [y, other_row]
+            .into_iter()
+            .find_map(|row| Ice40Device::bel_pin_wire(self, x, row, &name))
     }
 }
 

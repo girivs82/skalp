@@ -1869,10 +1869,7 @@ fn map_memblock_standalone(
             None,
         );
         cell.source_op = Some("MemBlock".to_string());
-        cell.parameters
-            .insert("READ_MODE".to_string(), block_width.to_string());
-        cell.parameters
-            .insert("WRITE_MODE".to_string(), block_width.to_string());
+        // The width and depth; each backend derives its own mode settings.
         cell.parameters.insert(
             RAM_ADDR_BITS_PARAM.to_string(),
             block_addr_width.to_string(),
