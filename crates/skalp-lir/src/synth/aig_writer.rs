@@ -470,6 +470,14 @@ impl AigWriterState<'_> {
 
     /// Process an AND node
     fn process_and_node(&mut self, aig: &Aig, id: AigNodeId, left: AigLit, right: AigLit) {
+        // A node a consumer needed before its turn in the topological order
+        // was written then (see get_or_create_lit_net); writing it again here
+        // would add a second, identical cell on a second net of the same name
+        // (which hierarchical flattening then merges into one net with two
+        // drivers).
+        if self.node_to_net.contains_key(&id) {
+            return;
+        }
         // Check if we have a technology-mapped cell for this node
         if let Some(mapping) = self.mapping_result {
             if let Some(mapped) = mapping.mapped_nodes.get(&id) {
