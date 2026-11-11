@@ -329,56 +329,7 @@ impl MirToLirTransform {
         self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
-        // When a module has instances with port connections that are expressions
-        // (not simple signal references), we need to synthesize those expressions
-        // into LIR nodes. This creates signals that can be referenced during flattening.
-        for inst in &module.instances {
-            for (port_name, expr) in &inst.connections {
-                // Check if this is a complex expression that needs synthesis
-                let needs_synthesis = match &expr.kind {
-                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
-                    ExpressionKind::Literal(_) => false, // Constant, handled separately
-                    // Cast expressions that wrap simple Refs don't need synthesis
-                    ExpressionKind::Cast { expr: inner, .. } => {
-                        !matches!(inner.kind, ExpressionKind::Ref(_))
-                    }
-                    _ => true, // Complex expression needs synthesis
-                };
-
-                if needs_synthesis {
-                    // Infer the width from the expression
-                    let port_width = self.infer_expression_width(expr);
-
-                    // Synthesize the expression into LIR nodes
-                    let expr_signal = self.transform_expression(expr, port_width);
-
-                    // Create a named signal for this expression so it can be found during flattening
-                    // The naming convention is: inst_name__port__{port_name}
-                    let synth_signal_name = format!("{}__port__{}", inst.name, port_name);
-                    let synth_signal_id =
-                        self.lir.add_signal(synth_signal_name.clone(), port_width);
-
-                    // Add a buffer to connect the expression result to the named signal
-                    let buf_node = crate::lir::LirNode {
-                        id: crate::lir::LirNodeId(self.lir.nodes.len() as u32),
-                        op: LirOp::Buf { width: port_width },
-                        inputs: vec![expr_signal],
-                        output: synth_signal_id,
-                        path: format!("{}.{}_conn", inst.name, port_name),
-                        clock: None,
-                        reset: None,
-                    };
-                    self.lir.nodes.push(buf_node);
-
-                    trace!(
-                        "[SYNTH_PORT] Synthesized expression for {}:{} -> signal '{}'",
-                        inst.name,
-                        port_name,
-                        synth_signal_name
-                    );
-                }
-            }
-        }
+        self.synthesize_instance_port_expressions(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -460,56 +411,7 @@ impl MirToLirTransform {
         self.record_initial_values(module);
 
         // Phase 4b: Synthesize instance port connection expressions
-        // When a module has instances with port connections that are expressions
-        // (not simple signal references), we need to synthesize those expressions
-        // into LIR nodes. This creates signals that can be referenced during flattening.
-        for inst in &module.instances {
-            for (port_name, expr) in &inst.connections {
-                // Check if this is a complex expression that needs synthesis
-                let needs_synthesis = match &expr.kind {
-                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
-                    ExpressionKind::Literal(_) => false, // Constant, handled separately
-                    // Cast expressions that wrap simple Refs don't need synthesis
-                    ExpressionKind::Cast { expr: inner, .. } => {
-                        !matches!(inner.kind, ExpressionKind::Ref(_))
-                    }
-                    _ => true, // Complex expression needs synthesis
-                };
-
-                if needs_synthesis {
-                    // Infer the width from the expression
-                    let port_width = self.infer_expression_width(expr);
-
-                    // Synthesize the expression into LIR nodes
-                    let expr_signal = self.transform_expression(expr, port_width);
-
-                    // Create a named signal for this expression so it can be found during flattening
-                    // The naming convention is: inst_name__port__{port_name}
-                    let synth_signal_name = format!("{}__port__{}", inst.name, port_name);
-                    let synth_signal_id =
-                        self.lir.add_signal(synth_signal_name.clone(), port_width);
-
-                    // Add a buffer to connect the expression result to the named signal
-                    let buf_node = crate::lir::LirNode {
-                        id: crate::lir::LirNodeId(self.lir.nodes.len() as u32),
-                        op: LirOp::Buf { width: port_width },
-                        inputs: vec![expr_signal],
-                        output: synth_signal_id,
-                        path: format!("{}.{}_conn", inst.name, port_name),
-                        clock: None,
-                        reset: None,
-                    };
-                    self.lir.nodes.push(buf_node);
-
-                    trace!(
-                        "[SYNTH_PORT] Synthesized expression for {}:{} -> signal '{}'",
-                        inst.name,
-                        port_name,
-                        synth_signal_name
-                    );
-                }
-            }
-        }
+        self.synthesize_instance_port_expressions(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -555,6 +457,64 @@ impl MirToLirTransform {
     ///
     /// This always produces single-rail LIR, even for async modules.
     /// The dual-rail NCL conversion is done later after gate-level optimization.
+    /// Phase 4b: give every instance port connected to an expression (not a
+    /// plain reference or constant) a named signal `{inst}__port__{port}`
+    /// driven by that expression. Hierarchical lowering connects the child
+    /// port to this signal by name, so every lowering entry point must create
+    /// it; without it the child's input is left with no driver.
+    fn synthesize_instance_port_expressions(&mut self, module: &Module) {
+        // When a module has instances with port connections that are expressions
+        // (not simple signal references), we need to synthesize those expressions
+        // into LIR nodes. This creates signals that can be referenced during flattening.
+        for inst in &module.instances {
+            for (port_name, expr) in &inst.connections {
+                // Check if this is a complex expression that needs synthesis
+                let needs_synthesis = match &expr.kind {
+                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
+                    ExpressionKind::Literal(_) => false, // Constant, handled separately
+                    // Cast expressions that wrap simple Refs don't need synthesis
+                    ExpressionKind::Cast { expr: inner, .. } => {
+                        !matches!(inner.kind, ExpressionKind::Ref(_))
+                    }
+                    _ => true, // Complex expression needs synthesis
+                };
+
+                if needs_synthesis {
+                    // Infer the width from the expression
+                    let port_width = self.infer_expression_width(expr);
+
+                    // Synthesize the expression into LIR nodes
+                    let expr_signal = self.transform_expression(expr, port_width);
+
+                    // Create a named signal for this expression so it can be found during flattening
+                    // The naming convention is: inst_name__port__{port_name}
+                    let synth_signal_name = format!("{}__port__{}", inst.name, port_name);
+                    let synth_signal_id =
+                        self.lir.add_signal(synth_signal_name.clone(), port_width);
+
+                    // Buffer the expression result into the named signal.
+                    // `add_node` records the buffer as the signal's driver;
+                    // hierarchical synthesis relies on that to keep the signal
+                    // as a parent output instead of treating it as an
+                    // undriven signal that a child drives.
+                    self.lir.add_node(
+                        LirOp::Buf { width: port_width },
+                        vec![expr_signal],
+                        synth_signal_id,
+                        format!("{}.{}_conn", inst.name, port_name),
+                    );
+
+                    trace!(
+                        "[SYNTH_PORT] Synthesized expression for {}:{} -> signal '{}'",
+                        inst.name,
+                        port_name,
+                        synth_signal_name
+                    );
+                }
+            }
+        }
+    }
+
     pub fn transform_skip_ncl(&mut self, module: &Module) -> MirToLirResult {
         self.hierarchy_path = module.name.clone();
 
@@ -594,6 +554,9 @@ impl MirToLirTransform {
         }
         self.mark_async_memory_reads(module);
         self.record_initial_values(module);
+
+        // Phase 4b: Synthesize instance port connection expressions
+        self.synthesize_instance_port_expressions(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);

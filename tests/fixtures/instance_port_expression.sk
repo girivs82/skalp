@@ -1,0 +1,25 @@
+// Child instance inputs wired to expressions rather than plain signals.
+
+entity PassThrough {
+    in x: bit[4]
+    in k: bit[4]
+    out y: bit[4]
+}
+
+impl PassThrough {
+    y = x ^ k
+}
+
+entity PortExpr {
+    in a: bit[4]
+    in b: bit[4]
+    out z: bit[4]
+}
+
+impl PortExpr {
+    inst u = PassThrough {
+        x: ~a,
+        k: b & 0b0110,
+    }
+    z = u.y
+}
