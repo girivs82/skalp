@@ -282,17 +282,40 @@ pub struct Placer<D: Device> {
     config: PlacerConfig,
     /// Target device
     device: D,
+    /// Connection delays measured on the device's routing graph, the first
+    /// time timing-driven placement needs them
+    route_delays: std::sync::OnceLock<Option<std::sync::Arc<crate::timing::RouteDelayTable>>>,
 }
 
 impl<D: Device + Clone> Placer<D> {
     /// Create a new placer
     pub fn new(config: PlacerConfig, device: D) -> Self {
-        Self { config, device }
+        Self {
+            config,
+            device,
+            route_delays: std::sync::OnceLock::new(),
+        }
     }
 
-    /// Delays for timing-driven placement on this device
+    /// Delays for timing-driven placement on this device: the family's cell
+    /// delays, and connection delays measured on the device's own routing
+    /// graph where it has PIP delays (see [`crate::timing::RouteDelayTable`]).
     fn delay_model(&self) -> crate::timing::DelayModel {
-        crate::timing::DelayModel::for_family(self.device.family())
+        let table = self.route_delays.get_or_init(|| {
+            let start = std::time::Instant::now();
+            let table = crate::timing::RouteDelayTable::measure(&self.device);
+            if let Some(t) = &table {
+                log::info!(
+                    "placer: measured connection delays in {:.1} s (1 tile {:.3} ns, 6 tiles {:.3} ns, 12 tiles {:.3} ns)",
+                    start.elapsed().as_secs_f64(),
+                    t.delay(1, 0),
+                    t.delay(6, 0),
+                    t.delay(12, 0)
+                );
+            }
+            table.map(std::sync::Arc::new)
+        });
+        crate::timing::DelayModel::for_family(self.device.family()).with_route_delays(table.clone())
     }
 
     /// Place a design with carry chain constraints

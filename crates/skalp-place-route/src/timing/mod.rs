@@ -5,8 +5,10 @@
 pub mod sta;
 
 mod delays;
+pub mod route_delays;
 
 pub use delays::DelayModel;
+pub use route_delays::RouteDelayTable;
 
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::Device;
