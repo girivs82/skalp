@@ -283,12 +283,10 @@ impl SynthEngine {
             self.run_timing_analysis(&aig);
         }
 
-        // Phase 3.5: DFF functional decomposition via cofactoring
-        // Extract enable/reset signals from latch data cones AFTER ABC optimization.
-        // decompose_latches adds new AND nodes for enable/data sub-functions.
-        // No DCE after this — the mapper's backward covering only maps required nodes,
-        // naturally skipping dead cofactored nodes without needing a separate DCE pass.
-        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+        // Phase 3.5: clock enables, extracted from the latch data cones after
+        // optimization. The new enable/data nodes are not mapper roots here,
+        // so the writer keeps any latch whose nodes got no cell as built.
+        let latch_decomps = extract_enables(&mut aig, library);
 
         // Phase 4: Map to library cells using available primitives
         self.run_technology_mapping(&aig, library);
@@ -384,7 +382,7 @@ impl SynthEngine {
 
         // DFF functional decomposition — run BEFORE tech mapping so cofactor-created
         // nodes are covered by the mapper's cut enumeration.
-        let latch_decomps = super::dff_decompose::decompose_latches(&mut aig);
+        let latch_decomps = extract_enables(&mut aig, library);
         let has_decomps = !latch_decomps.is_empty();
 
         if has_decomps {
@@ -1476,6 +1474,20 @@ impl SynthResult {
             self.total_time_ms
         )
     }
+}
+
+/// Clock enables for the latches that hold their value under some condition
+/// ([`super::dff_decompose`]), on an FPGA whose flip-flops take one. Designs
+/// with barrier cells (NCL, power intent) keep their latches as built.
+fn extract_enables(
+    aig: &mut Aig,
+    library: &TechLibrary,
+) -> std::collections::HashMap<super::aig::AigNodeId, super::dff_decompose::LatchDecomp> {
+    let has_barriers = aig.iter_nodes().any(|(_, node)| node.is_barrier());
+    if !library.is_fpga() || !library.has_function(&CellFunction::DffE) || has_barriers {
+        return std::collections::HashMap::new();
+    }
+    super::dff_decompose::decompose_latches(aig)
 }
 
 #[cfg(test)]

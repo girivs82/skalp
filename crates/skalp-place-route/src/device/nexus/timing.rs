@@ -305,7 +305,7 @@ impl TimingModel for NexusTiming<'_> {
             .map(|input| {
                 let (pin, setup_ps) = match (cell.cell_type.as_str(), input) {
                     (_, 0) => (0, setup("M")),
-                    ("OXIDE_FF_EN", 1) | ("OXIDE_FF_RSTE", 2) => (FF_PIN_CE, setup("CE")),
+                    ("OXIDE_FF_EN" | "OXIDE_FF_RSTE", 1) => (FF_PIN_CE, setup("CE")),
                     _ => (FF_PIN_LSR, setup("LSR")),
                 };
                 TimingEndpoint {

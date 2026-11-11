@@ -64,11 +64,13 @@ fn is_flip_flop(cell: &Cell) -> bool {
     cell.clock.is_some()
 }
 
-/// Router pin number of a flip-flop's `index`-th input.
+/// Router pin number of a flip-flop's `index`-th input. A flip-flop takes
+/// `[D]` or `[D, enable]`; its reset is [`Cell::reset`], except for a reset
+/// given as a second input.
 pub(crate) fn ff_pin(cell: &Cell, index: usize) -> usize {
     match (cell.function.as_ref(), index) {
-        (Some(CellFunction::DffE), 1) | (Some(CellFunction::DffRE), 2) => FF_PIN_CE,
-        (Some(CellFunction::DffR), 1) | (Some(CellFunction::DffRE), 1) => FF_PIN_LSR,
+        (Some(CellFunction::DffE | CellFunction::DffRE), 1) => FF_PIN_CE,
+        (Some(CellFunction::DffR), 1) => FF_PIN_LSR,
         _ => index,
     }
 }

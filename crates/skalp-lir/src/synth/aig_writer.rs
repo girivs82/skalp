@@ -728,7 +728,7 @@ impl AigWriterState<'_> {
             })
             .unwrap_or(CellSafetyClassification::Functional);
 
-        // Use cofactor-based decomposition for enable detection (functional, depth-independent)
+        // Enable extracted by dff_decompose (exact, structural).
         // When technology mapping is active, only use the decomposition if all referenced
         // nodes have cells or nets (the decomposition creates AND nodes that the mapper's
         // backward covering may not have reached).
@@ -746,19 +746,37 @@ impl AigWriterState<'_> {
             }
         });
 
-        if let Some((enable_lit, new_data_lit)) = enable_pattern {
-            let enable_net = self.get_or_create_lit_net(aig, enable_lit);
-            let new_data_net = self.get_or_create_lit_net(aig, new_data_lit);
+        // dff_decompose folds a synchronous reset into the enable and data;
+        // an asynchronous one stays on the reset pin of a DffRE
+        let sync_reset = reset_net.is_some() && aig.is_latch_sync_reset(id);
+        let async_reset = reset_net.filter(|_| !sync_reset);
+        let enable_pattern = enable_pattern.and_then(|pattern| {
+            let cell = match async_reset {
+                Some(_) => self.find_dffre_cell()?,
+                None => self.find_sdffe_cell(),
+            };
+            Some((pattern, cell))
+        });
 
-            // Use DffRE (enable + reset) when reset is present, DffE (enable only) otherwise
-            let (cell_type, cell_fit) = if reset_net.is_some() {
-                self.find_dffre_cell_or_fallback()
+        if let Some(((enable_lit, new_data_lit), (cell_type, cell_fit))) = enable_pattern {
+            // A DffRE resets to 0: a register resetting to 1 stores its
+            // inverse, as the DffR path below does
+            let reset_to_one = async_reset.is_some() && _init == Some(true);
+            let enable_net = self.get_or_create_lit_net(aig, enable_lit);
+            let stored_data = if reset_to_one {
+                new_data_lit.invert()
             } else {
-                self.find_sdffe_cell()
+                new_data_lit
+            };
+            let new_data_net = self.get_or_create_lit_net(aig, stored_data);
+            let q_net = if reset_to_one {
+                self.netlist
+                    .add_net(GateNet::new(GateNetId(0), format!("latch{}_qint", id.0)))
+            } else {
+                output_net
             };
 
-            // Create SDFFE cell with enable input
-            // Inputs: [D, E] where D is the new data and E is the enable
+            // Inputs: [D, E]; an asynchronous reset is the cell's reset.
             // AUDIT-2 #4: function must be set — analyses (and the DffR/Dff
             // counting in tests) key off CellFunction, and the NCL runtime
             // rejects function-less cells.
@@ -770,9 +788,9 @@ impl AigWriterState<'_> {
                 format!("aig.latch{}", id.0),
                 new_data_net,
                 enable_net,
-                output_net,
+                q_net,
                 clock_net.unwrap_or(GateNetId(0)),
-                reset_net,
+                async_reset,
             )
             .with_safety_classification(safety);
             if let Some(func) = self.lookup_cell_function(&cell_type) {
@@ -781,9 +799,11 @@ impl AigWriterState<'_> {
 
             self.next_cell_id += 1;
             self.netlist.add_cell(cell);
+            if reset_to_one {
+                self.add_output_inverter(id, q_net, output_net);
+            }
         } else {
             let data_net = self.get_or_create_lit_net(aig, data);
-            let sync_reset = reset_net.is_some() && aig.is_latch_sync_reset(id);
             let reset_to_one = reset_net.is_some() && !sync_reset && _init == Some(true);
 
             if sync_reset {
@@ -890,21 +910,7 @@ impl AigWriterState<'_> {
                 self.next_cell_id += 1;
                 self.netlist.add_cell(cell);
 
-                let mut invq = Cell::new_comb(
-                    CellId(self.next_cell_id),
-                    inv_type.clone(),
-                    self.library.name.clone(),
-                    inv_fit,
-                    format!("aig.latch{}_qinv", id.0),
-                    vec![q_int],
-                    vec![output_net],
-                );
-                invq.source_op = Some("AsyncResetInvQ".to_string());
-                if let Some(func) = self.lookup_cell_function(&inv_type) {
-                    invq = invq.with_function(func);
-                }
-                self.next_cell_id += 1;
-                self.netlist.add_cell(invq);
+                self.add_output_inverter(id, q_int, output_net);
             } else {
                 // Async reset to 0 (or no reset): DFFR/DFF directly.
                 let (cell_type, cell_fit) = if reset_net.is_some() {
@@ -1417,16 +1423,33 @@ impl AigWriterState<'_> {
         )
     }
 
-    /// Find a DffRE cell (DFF with enable + reset) in the library.
-    /// Falls back to DffE if DffRE is not available (reset handled externally).
-    fn find_dffre_cell_or_fallback(&self) -> (String, f64) {
-        // Try DffRE first (combined enable + reset)
-        let dffre_cells = self.library.find_cells_by_function(&CellFunction::DffRE);
-        if let Some(cell) = dffre_cells.first() {
-            return (cell.name.clone(), cell.fit);
+    /// Find a DffRE cell (DFF with enable and reset) in the library.
+    fn find_dffre_cell(&self) -> Option<(String, f64)> {
+        self.library
+            .find_cells_by_function(&CellFunction::DffRE)
+            .first()
+            .map(|cell| (cell.name.clone(), cell.fit))
+    }
+
+    /// The inverter that reads a register storing its inverse (to reset to
+    /// 1 with a cell that resets to 0) back into its output net.
+    fn add_output_inverter(&mut self, latch: AigNodeId, stored: GateNetId, output: GateNetId) {
+        let (inv_type, inv_fit) = self.find_inv_cell();
+        let mut invq = Cell::new_comb(
+            CellId(self.next_cell_id),
+            inv_type.clone(),
+            self.library.name.clone(),
+            inv_fit,
+            format!("aig.latch{}_qinv", latch.0),
+            vec![stored],
+            vec![output],
+        );
+        invq.source_op = Some("AsyncResetInvQ".to_string());
+        if let Some(func) = self.lookup_cell_function(&inv_type) {
+            invq = invq.with_function(func);
         }
-        // Fall back to DffE (enable only, reset handled as external MUX)
-        self.find_sdffe_cell()
+        self.next_cell_id += 1;
+        self.netlist.add_cell(invq);
     }
 
     /// Try to find a TIE_HIGH cell in the library (constant 1 driver)
