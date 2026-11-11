@@ -141,7 +141,44 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
     }
     drive_constant_flip_flop_data(&mut driven, &constants);
     drive_constant_pll_inputs(&mut driven, &constants, device);
+    drive_constant_pad_outputs(&mut driven, &constants);
     driven
+}
+
+/// Give an output pad that shows a constant a LUT that outputs it. Nothing
+/// else drives the pad's data input then: left unrouted, the input mux in
+/// front of it passes whatever wire it selects by default (on the
+/// CertusPro-NX, an LED meant to stay on followed a counter bit).
+fn drive_constant_pad_outputs(netlist: &mut GateNetlist, constants: &HashMap<GateNetId, bool>) {
+    let mut drivers: HashMap<bool, GateNetId> = HashMap::new();
+    for index in 0..netlist.cells.len() {
+        let cell = &netlist.cells[index];
+        if cell.function != Some(CellFunction::OutputPad) {
+            continue;
+        }
+        let Some(&value) = cell.inputs.first().and_then(|net| constants.get(net)) else {
+            continue;
+        };
+        let library = cell.library.clone();
+        let net = *drivers.entry(value).or_insert_with(|| {
+            let name = format!("constant_pad_output_{}", u8::from(value));
+            let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
+            let mut driver = Cell::new_comb(
+                CellId(0),
+                "LUT4".to_string(),
+                library,
+                0.0,
+                format!("{name}_driver"),
+                Vec::new(),
+                vec![net],
+            );
+            driver.function = Some(CellFunction::Lut4);
+            driver.lut_init = Some(if value { 0xFFFF } else { 0 });
+            netlist.add_cell(driver);
+            net
+        });
+        netlist.cells[index].inputs[0] = net;
+    }
 }
 
 /// Replace each constant input of a PLL with a LUT that outputs it: a PLL's
@@ -376,4 +413,50 @@ pub fn place_pads(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_pad_outputs_get_a_driver() {
+        let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+        let one = netlist.add_net(GateNet::new(GateNetId(0), "one".to_string()));
+        let pad = netlist.add_net(GateNet::new(GateNetId(0), "led_pad".to_string()));
+        let mut tie = Cell::new_comb(
+            CellId(0),
+            "TIE1_X1".to_string(),
+            "test".to_string(),
+            0.0,
+            "tie".to_string(),
+            Vec::new(),
+            vec![one],
+        );
+        tie.function = Some(CellFunction::TieHigh);
+        netlist.add_cell(tie);
+        let mut obuf = Cell::new_comb(
+            CellId(0),
+            "SEIO33_OB".to_string(),
+            "test".to_string(),
+            0.0,
+            "led_obuf".to_string(),
+            vec![one],
+            vec![pad],
+        );
+        obuf.function = Some(CellFunction::OutputPad);
+        netlist.add_cell(obuf);
+
+        let device =
+            crate::device::ice40::Ice40Device::new(crate::device::ice40::Ice40Variant::Hx1k);
+        let driven = drive_constant_inputs(&netlist, &device);
+        let obuf = driven.cells.iter().find(|c| c.path == "led_obuf").unwrap();
+        let driver = driven
+            .cells
+            .iter()
+            .find(|c| c.outputs.contains(&obuf.inputs[0]))
+            .expect("the pad's input has a driver");
+        assert_eq!(driver.function, Some(CellFunction::Lut4));
+        assert_eq!(driver.lut_init, Some(0xFFFF));
+    }
 }
