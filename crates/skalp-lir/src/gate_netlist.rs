@@ -2536,6 +2536,15 @@ fn generate_ncl_reg_module() -> String {
 // Tests
 // ============================================================================
 
+/// The bits of a truth table over `variables` inputs (at most 6).
+pub fn truth_table_mask(variables: usize) -> u64 {
+    if variables >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1usize << variables)) - 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2940,14 +2949,5 @@ mod tests {
         assert!(verilog.contains("input wire a"));
         assert!(verilog.contains("input wire b"));
         assert!(verilog.contains("output wire sum"));
-    }
-}
-
-/// The bits of a truth table over `variables` inputs (at most 6).
-pub fn truth_table_mask(variables: usize) -> u64 {
-    if variables >= 6 {
-        u64::MAX
-    } else {
-        (1u64 << (1usize << variables)) - 1
     }
 }
