@@ -30,6 +30,9 @@ pub struct ClockRouting {
     pub claimed: HashSet<WireId>,
     /// Clock nets left to general routing: their source has no dedicated path
     pub general: HashSet<GateNetId>,
+    /// Inputs other than clock pins that a clock net reaches on its dedicated
+    /// tree (a PLL's reference clock, say), as (cell, router pin)
+    pub dedicated_inputs: HashSet<(skalp_lir::gate_netlist::CellId, usize)>,
 }
 
 fn clock_pin_wire<D: Device + ?Sized>(
@@ -282,10 +285,42 @@ pub fn route_clock_nets<D: Device + ?Sized>(
                 tree.insert(pip.dst_wire);
             }
         }
+        // Other inputs on the net that the clock network reaches go on it
+        // too: the general router cannot use the wires claimed here, and
+        // some (a PLL's reference clock) are reachable only through them.
+        for &(cell, pin) in net.fanout.iter().filter(|(_, pin)| !is_clock_pin(*pin)) {
+            let Some(sink) = clock_pin_wire(device, placement, cell, CellPin::Input(pin)) else {
+                continue;
+            };
+            let path = if tree.contains(&sink) {
+                Vec::new()
+            } else {
+                match path_to(device, sink, &tree, &reached) {
+                    Some(path) => path,
+                    None => continue,
+                }
+            };
+            for pip_id in path {
+                let Some(pip) = device.pip(pip_id) else {
+                    continue;
+                };
+                route.delay += pip.delay;
+                route.pips.push(pip_id);
+                route.wires.push(pip.dst_wire);
+                tree.insert(pip.dst_wire);
+            }
+            route.sinks.push(sink);
+            routing.dedicated_inputs.insert((cell, pin));
+        }
         route.wires.push(source);
         for &wire in &tree {
             owners.insert(wire, net.id);
-            routing.claimed.insert(wire);
+            // The source wire stays open to the general router: only this
+            // net's driver drives it, and the net's other sinks (a PLL's
+            // reference input, say) are routed from it.
+            if wire != source {
+                routing.claimed.insert(wire);
+            }
         }
         routing.routes.push(route);
     }
