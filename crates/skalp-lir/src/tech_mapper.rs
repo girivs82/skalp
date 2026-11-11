@@ -1048,9 +1048,9 @@ fn map_dsp_standalone(
         } else {
             tie_low
         };
-        for bit in direct..total {
+        for (bit, &output) in outputs.iter().enumerate().take(total).skip(direct) {
             let from = if bit < live { extension } else { tie_low };
-            drive(netlist, from, outputs[bit], bit);
+            drive(netlist, from, output, bit);
         }
         return;
     }

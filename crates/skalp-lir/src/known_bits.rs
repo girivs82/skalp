@@ -66,13 +66,13 @@ impl<'a> LeadingZeros<'a> {
             return 0;
         }
         let width = self.width(sig);
-        let known = self.from_driver(sig, depth).min(width);
+        let known = self.of_driver(sig, depth).min(width);
         self.memo.borrow_mut().insert(sig.0, known);
         known
     }
 
     /// Known-zero top bits of `sig`, computed from its driving node.
-    fn from_driver(&self, sig: LirSignalId, depth: u32) -> u32 {
+    fn of_driver(&self, sig: LirSignalId, depth: u32) -> u32 {
         let width = self.width(sig);
         let Some(&idx) = self.driver.get(&sig.0) else {
             return 0;
