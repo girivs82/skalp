@@ -25,8 +25,11 @@ rand = "0.8"
 # Date/time for training data timestamps
 chrono = "0.4"
 
-# Optional: ONNX Runtime for inference
-ort = { version = "2.0.0-rc.10", optional = true }
+# Optional: ONNX Runtime for inference. The downloaded binaries link
+# statically, so ort's default `copy-dylibs` step (which copies optional
+# provider DLLs such as DirectML.dll next to the build output) is not needed;
+# it panics on Windows runners where neither the symlink nor the copy works.
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["std", "ndarray", "tracing", "download-binaries"] }
 ndarray = { version = "0.16", optional = true }
 
 [dev-dependencies]
