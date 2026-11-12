@@ -1052,9 +1052,13 @@ fn float_ram_pin(
         return Ok(());
     }
     let device = config.device;
-    let wire = device
-        .bel_wire(x, y, &format!("RAM_{pin}"))
-        .ok_or_else(|| emit_err(format!("No wire for block RAM pin {pin} at ({x}, {y})")))?;
+    // A pin the device data gives no connection to the fabric (LFCPNX's
+    // dynamic width selects, DWS0-4, which nothing drives) has no CIB mux
+    // to set: the block holds it at its own default.
+    let Some(wire) = device.bel_wire(x, y, &format!("RAM_{pin}")) else {
+        log::debug!("block RAM pin {pin} at ({x}, {y}) has no fabric connection");
+        return Ok(());
+    };
     float_high(config, wire, used_wires)
 }
 
