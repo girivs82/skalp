@@ -1,0 +1,15 @@
+mod parts;
+use parts::{Inc, Dbl};
+
+entity ImportedUnusedTop {
+    in x: bit[8]
+    out inc: bit[8]
+    out dbl: bit[8]
+}
+
+impl ImportedUnusedTop {
+    inst i = Inc { x: x }
+    inc = i.y
+    inst d = Dbl { x: x }
+    dbl = d.y
+}

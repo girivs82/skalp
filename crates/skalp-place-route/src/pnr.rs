@@ -595,6 +595,32 @@ pub fn place_and_route_nexus_real(
         t_delays.elapsed().as_secs_f64()
     );
 
+    // Retime the `#[pipeline]` regions again, now with this device's
+    // delays (synthesis balanced them by logic levels)
+    let retimed;
+    let netlist = if netlist.retime_regions.is_empty() {
+        netlist
+    } else {
+        let model = crate::device::nexus::timing::NexusTiming {
+            device: &device,
+            db: &timing_db,
+        };
+        let (clk_to_q, setup) = timing_db.register_ps();
+        // A connection between cells a couple of tiles apart
+        let connection_ps = crate::timing::RouteDelayTable::measure(&device)
+            .map_or(500, |table| (table.delay(2, 1) * 1000.0).round() as i64);
+        let delays = crate::timing::retime_delays::DeviceRetimeDelays::new(
+            &model,
+            clk_to_q,
+            setup,
+            connection_ps,
+        );
+        let mut copy = netlist.clone();
+        skalp_lir::retime::retime_pipelined(&mut copy, &delays);
+        retimed = copy;
+        &retimed
+    };
+
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
     let mut logic = prepare::logic_only_netlist(netlist);
     for cell in &mut logic.cells {
@@ -665,7 +691,8 @@ pub fn place_and_route_nexus_real(
             }
         }
     }
-    check_routes_disjoint(netlist, &device, &routing)?;
+    // An unfinished route shares wires by definition: report it as
+    // unfinished, not as the first overlap the disjointness check meets
     if !routing.success {
         let mut unrouted: Vec<&str> = routing
             .routes
@@ -675,6 +702,13 @@ pub fn place_and_route_nexus_real(
             .collect();
         unrouted.sort_unstable();
         unrouted.truncate(10);
+        if routing.unrouted_connections == 0 {
+            return Err(PlaceRouteError::RoutingFailed(format!(
+                "Routing did not converge on the real device: every connection has a route, \
+                 but some wires are still used by more than one net (congestion {:.2})",
+                routing.congestion
+            )));
+        }
         return Err(PlaceRouteError::RoutingFailed(format!(
             "Some nets could not be routed on the real device: {} connections unrouted{}{}",
             routing.unrouted_connections,
@@ -690,6 +724,7 @@ pub fn place_and_route_nexus_real(
             }
         )));
     }
+    check_routes_disjoint(netlist, &device, &routing)?;
 
     let uses_oscillator = netlist
         .cells

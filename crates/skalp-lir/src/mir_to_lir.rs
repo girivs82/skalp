@@ -6181,6 +6181,9 @@ pub struct HierarchicalMirToLirResult {
     pub top_module: String,
     /// Instance hierarchy (parent -> children)
     pub hierarchy: IndexMap<String, Vec<String>>,
+    /// Instance paths of entities with `#[pipeline]`, whose registers
+    /// retiming may move
+    pub retime_regions: Vec<String>,
 }
 
 /// LIR result for a single instance
@@ -7269,6 +7272,24 @@ fn select_top_module(mir: &Mir) -> &Module {
 /// This function traverses the module hierarchy starting from the top module,
 /// creating a separate LIR for each instance. Each instance can be specialized
 /// based on its context (constant inputs, unused outputs).
+/// Instance paths whose module has `#[pipeline]`
+fn pipelined_instance_paths(mir: &Mir, result: &HierarchicalMirToLirResult) -> Vec<String> {
+    let pipelined: std::collections::HashSet<&str> = mir
+        .modules
+        .iter()
+        .filter(|m| m.pipeline_config.is_some())
+        .map(|m| m.name.as_str())
+        .collect();
+    let mut paths: Vec<String> = result
+        .instances
+        .iter()
+        .filter(|(_, instance)| pipelined.contains(instance.module_name.as_str()))
+        .map(|(path, _)| path.clone())
+        .collect();
+    paths.sort();
+    paths
+}
+
 pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     // Build module lookup by ID and by name (for fallback)
     let module_map: IndexMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
@@ -7288,6 +7309,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         instances: IndexMap::new(),
         top_module: top_module.name.clone(),
         hierarchy: IndexMap::new(),
+        retime_regions: Vec::new(),
     };
 
     // Create LIR cache to avoid redundant NCL expansion for same module types
@@ -7312,6 +7334,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         lir_cache.len()
     );
 
+    result.retime_regions = pipelined_instance_paths(mir, &result);
     result
 }
 
@@ -7359,6 +7382,7 @@ pub fn lower_mir_hierarchical_with_top(
         instances: IndexMap::new(),
         top_module: top_module.name.clone(),
         hierarchy: IndexMap::new(),
+        retime_regions: Vec::new(),
     };
 
     // Create LIR cache to avoid redundant NCL expansion for same module types
@@ -7381,6 +7405,7 @@ pub fn lower_mir_hierarchical_with_top(
         lir_cache.len()
     );
 
+    result.retime_regions = pipelined_instance_paths(mir, &result);
     result
 }
 
@@ -7424,6 +7449,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         instances: IndexMap::new(),
         top_module: top_module.name.clone(),
         hierarchy: IndexMap::new(),
+        retime_regions: Vec::new(),
     };
 
     // Create LIR cache to avoid redundant LIR computation for same module types
@@ -7447,6 +7473,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         lir_cache.len()
     );
 
+    result.retime_regions = pipelined_instance_paths(mir, &result);
     (result, has_async)
 }
 

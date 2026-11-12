@@ -1,4 +1,3 @@
-use crate::pipeline::insert_pipeline_registers;
 use crate::sir::*;
 use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_mir::mir::PortDirection as MirPortDirection;
@@ -31,7 +30,8 @@ pub fn convert_mir_to_sir(mir_module: &Module) -> SirModule {
 pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirModule {
     let mut sir = SirModule::new(top_module.name.clone());
 
-    // Propagate pipeline configuration from MIR to SIR
+    // The configuration is metadata here: the stages it asks for are added
+    // in MIR (skalp_mir::pipelining), so every flow sees them
     sir.pipeline_config = top_module.pipeline_config.clone();
 
     let mut converter = MirToSirConverter::new(&mut sir, top_module, mir);
@@ -50,9 +50,6 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
     converter.convert_logic();
 
     converter.extract_clock_domains();
-
-    // Run pipeline register insertion pass if configured
-    let _ = insert_pipeline_registers(&mut sir);
 
     // Pre-compute topological order for efficient simulation
     sir.finalize_topological_order();

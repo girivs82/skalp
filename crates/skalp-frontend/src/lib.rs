@@ -23,6 +23,7 @@ pub mod module_resolver;
 pub mod monomorphization;
 pub mod parse;
 pub mod parser;
+pub mod pipeline_lock;
 pub mod safety_attributes;
 pub mod semantic;
 pub mod span;
@@ -215,6 +216,16 @@ pub fn parse_and_build_compilation_context_from_source(
     let mut engine = MonomorphizationEngine::new();
     let mut monomorphized_hir = engine.monomorphize(&hir);
     monomorphized_hir.main_entity_names = main_entity_names;
+
+    // Latencies synthesis chose for bare #[pipeline] entities
+    let lock = pipeline_lock::read(file_path)?;
+    for name in pipeline_lock::apply(&mut monomorphized_hir, &lock) {
+        tracing::warn!(
+            "`{name}` has #[pipeline] without stages and {} records no latency for it, \
+             so it keeps its own; synthesis for a target clock records one",
+            pipeline_lock::lock_path(file_path).display()
+        );
+    }
 
     // Extract all loaded module HIRs from the resolver
     let module_hirs: IndexMap<PathBuf, Hir> = resolver

@@ -16,6 +16,7 @@ pub mod mir;
 pub mod mir_validation;
 pub mod monomorphize;
 pub mod optimize;
+pub mod pipelining;
 pub mod ssa_conversion;
 pub mod timing;
 pub mod transform;

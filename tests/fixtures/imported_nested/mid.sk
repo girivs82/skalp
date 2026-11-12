@@ -1,0 +1,16 @@
+// Instantiates an entity of its own import, which the top never names
+mod leaf;
+use leaf::AddThree;
+
+entity AddThreeTwice {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl AddThreeTwice {
+    inst a = AddThree { x: x }
+    signal t: bit[8]
+    t = a.y
+    inst b = AddThree { x: t }
+    y = b.y
+}

@@ -22,6 +22,9 @@ pub struct HierarchicalNetlist {
     pub instances: IndexMap<InstancePath, InstanceNetlist>,
     /// Technology library name
     pub library: String,
+    /// Instance paths of entities with `#[pipeline]`, retimed on flattening
+    #[serde(default)]
+    pub retime_regions: Vec<String>,
 }
 
 /// A specialized instance with its netlist and port connections
@@ -79,6 +82,7 @@ impl HierarchicalNetlist {
             top_module,
             instances: IndexMap::new(),
             library,
+            retime_regions: Vec::new(),
         }
     }
 
@@ -395,6 +399,13 @@ impl HierarchicalNetlist {
             result.clocks.len(),
             result.resets.len()
         );
+
+        // Phase 8: the hierarchy is gone, so registers can move across
+        // instance boundaries: balance the stages `#[pipeline]` added
+        // (cell levels here; place and route retimes again with the
+        // device's delays)
+        result.retime_regions = self.retime_regions.clone();
+        crate::retime::retime_pipelined(&mut result, &crate::retime::LevelDelays);
 
         result.update_stats();
         result

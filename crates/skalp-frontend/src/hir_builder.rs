@@ -187,6 +187,8 @@ pub struct HirBuilderContext {
     /// Pending safety config from most recent safety attribute
     /// Set when we see `#[implements(...)]` before a signal or instance declaration
     pending_safety_config: Option<SafetyConfig>,
+    /// `#[latency(N)]` waiting for the instance it is written on
+    pending_latency: Option<u32>,
 
     /// Pending safety mechanism config from most recent attribute
     /// Set when we see `#[safety_mechanism(...)]` before an entity declaration
@@ -347,6 +349,7 @@ impl HirBuilderContext {
             pending_breakpoint_config: None,
             pending_power_config: None,
             pending_safety_config: None,
+            pending_latency: None,
             pending_safety_mechanism_config: None,
             pending_detection_config: None,
             pending_power_domain_config: None,
@@ -504,6 +507,12 @@ impl HirBuilderContext {
     /// Pre-register entities from merged HIR (for handling imports)
     pub fn preregister_entity(&mut self, entity: &HirEntity) {
         self.symbols.entities.insert(entity.name.clone(), entity.id);
+        // Entities of this file that were not preregistered (in a module, the
+        // ones nobody imported) get fresh ids. Those must not reuse a
+        // preregistered id: two entities with one id let an implementation be
+        // matched to the wrong entity, so one entity's body, instances and all,
+        // replaced another's.
+        self.next_entity_id = self.next_entity_id.max(entity.id.0.saturating_add(1));
         self.built_entities
             .insert(entity.name.clone(), entity.clone());
     }
@@ -2430,6 +2439,7 @@ impl HirBuilderContext {
                 named_generic_args: info.named_generic_args.clone(),
                 connections,
                 safety_config: None,
+                latency: None,
                 variable_id: None,
                 comments: vec![],
             });
@@ -2831,6 +2841,7 @@ impl HirBuilderContext {
 
         // Consume any pending safety config from preceding #[implements(...)] attribute
         let safety_config = self.pending_safety_config.take();
+        let latency = self.pending_latency.take();
 
         // `inst` form contract checks (uses the entity's declared port directions):
         //  - outputs must NOT appear in the port map (read them via `name.port`)
@@ -2886,6 +2897,7 @@ impl HirBuilderContext {
             named_generic_args,
             connections,
             safety_config,
+            latency,
             variable_id: None,
             comments: Self::collect_leading_comments(node),
         })
@@ -11295,6 +11307,12 @@ impl HirBuilderContext {
                 return;
             }
 
+            // Expected latency of an instance (e.g., #[latency(4)])
+            if let Some(latency) = Self::extract_latency_from_intent_value(&intent_value) {
+                self.pending_latency = Some(latency);
+                return;
+            }
+
             // Try to extract pipeline config (e.g., #[pipeline(stages=3)])
             if let Some(config) = self.extract_pipeline_config_from_intent_value(&intent_value) {
                 self.pending_pipeline_config = Some(config);
@@ -11407,6 +11425,23 @@ impl HirBuilderContext {
         }
     }
 
+    /// `#[latency(N)]`: the latency in cycles an instance is expected to have
+    fn extract_latency_from_intent_value(intent_value: &SyntaxNode) -> Option<u32> {
+        let tokens: Vec<_> = intent_value
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let first = tokens.first()?;
+        if first.kind() != SyntaxKind::Ident || first.text() != "latency" {
+            return None;
+        }
+        tokens
+            .iter()
+            .find(|t| t.kind() == SyntaxKind::IntLiteral)
+            .and_then(|t| t.text().replace('_', "").parse().ok())
+    }
+
     /// Extract unroll config from an IntentValue node
     /// Handles: #[unroll] -> Full, #[unroll(4)] -> Factor(4)
     fn extract_unroll_config_from_intent_value(
@@ -11474,43 +11509,48 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Look for "stages" identifier followed by "=" and a number
-        // The format is: #[pipeline(stages=N)]
+        // #[pipeline(stages = N)], #[pipeline(max_stages = N)] or a bare
+        // #[pipeline]; also target_freq = Hz and auto_balance
         let mut stages: Option<u32> = None;
+        let mut max_stages: Option<u32> = None;
         let mut target_freq: Option<u64> = None;
         let mut auto_balance = false;
-        let mut found_stages = false;
-        let mut found_target_freq = false;
+        let mut key: Option<&str> = None;
 
         for token in tokens.iter() {
-            if token.kind() == SyntaxKind::Ident && token.text() == "stages" {
-                found_stages = true;
-                found_target_freq = false;
-            } else if token.kind() == SyntaxKind::Ident && token.text() == "target_freq" {
-                found_target_freq = true;
-                found_stages = false;
-            } else if token.kind() == SyntaxKind::Ident && token.text() == "auto_balance" {
-                auto_balance = true;
-                found_stages = false;
-                found_target_freq = false;
-            } else if found_stages && token.kind() == SyntaxKind::IntLiteral {
-                // Remove underscores from integer literals like "100_000_000"
-                let text = token.text().replace('_', "");
-                stages = text.parse::<u32>().ok();
-                found_stages = false;
-            } else if found_target_freq && token.kind() == SyntaxKind::IntLiteral {
-                // Remove underscores from integer literals like "100_000_000"
-                let text = token.text().replace('_', "");
-                target_freq = text.parse::<u64>().ok();
-                found_target_freq = false;
+            match token.kind() {
+                SyntaxKind::Ident => match token.text() {
+                    "stages" => key = Some("stages"),
+                    "max_stages" => key = Some("max_stages"),
+                    "target_freq" => key = Some("target_freq"),
+                    "auto_balance" => {
+                        auto_balance = true;
+                        key = None;
+                    }
+                    _ => {}
+                },
+                SyntaxKind::IntLiteral => {
+                    // Remove underscores from integer literals like "100_000_000"
+                    let text = token.text().replace('_', "");
+                    match key.take() {
+                        Some("stages") => stages = text.parse().ok(),
+                        Some("max_stages") => max_stages = text.parse().ok(),
+                        Some("target_freq") => target_freq = text.parse().ok(),
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 
-        // If we found "pipeline" but no "stages=N", default to 1 stage
+        // Without stages = N, synthesis picks the latency (recorded in the
+        // pipeline lock file and filled in from there)
         let config = PipelineConfig {
-            stages: stages.unwrap_or(1),
+            stages: stages.unwrap_or(0),
             target_freq,
             auto_balance,
+            auto: stages.is_none(),
+            max_stages,
         };
 
         Some(config)

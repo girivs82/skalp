@@ -3391,6 +3391,7 @@ impl<'hir> HirToMir<'hir> {
                                     parameters: IndexMap::new(),
                                     span: None,
                                     safety_context: None,
+                                    latency: None,
                                 };
 
                                 // Collect output signals for the module
@@ -5340,6 +5341,7 @@ impl<'hir> HirToMir<'hir> {
                             parameters: IndexMap::new(),
                             span: None,
                             safety_context: None,
+                            latency: None,
                         };
 
                         // Push to pending list - will be drained when processing module
@@ -6227,6 +6229,7 @@ impl<'hir> HirToMir<'hir> {
             parameters,
             span: None,
             safety_context,
+            latency: instance.latency,
         })
     }
 
@@ -25637,6 +25640,7 @@ impl<'hir> HirToMir<'hir> {
                 parameters: IndexMap::new(),
                 span: None,
                 safety_context: None,
+                latency: None,
             };
 
             module.instances.push(instance);
