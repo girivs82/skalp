@@ -33,7 +33,7 @@ pub struct SirModule {
     /// This is computed once and stored for efficient simulation.
     pub sorted_combinational_node_ids: Vec<usize>,
     /// Pipeline configuration from `#[pipeline(stages=N)]` attribute
-    /// Used for automatic pipeline register insertion
+    /// (the stages themselves are added in MIR)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_config: Option<PipelineConfig>,
     /// Source location for error reporting

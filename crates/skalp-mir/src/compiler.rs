@@ -418,6 +418,14 @@ impl MirCompiler {
             }
         }
 
+        // Pipeline stages from `#[pipeline(stages = N)]`: added here, before
+        // anything reads the design, so every flow sees the same latency
+        for (name, before, after) in crate::pipelining::insert_pipeline_stages(&mut mir)
+            .map_err(|e| format!("pipeline stage insertion failed:\n  {e}"))?
+        {
+            tracing::info!("pipeline: `{name}` latency {before} -> {after} cycles");
+        }
+
         // Step 2: Perform CDC analysis
         let violations = self.perform_cdc_analysis(&mir);
 

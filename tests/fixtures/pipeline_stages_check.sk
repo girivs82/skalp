@@ -1,0 +1,229 @@
+// Pipeline stage insertion self-check.
+//
+// MulAddNorm multiplies, adds and normalises in two registered stages.
+// MulAddNormPiped is the same datapath with #[pipeline(stages = 4)], so SKALP
+// adds two stages to it. Both get the same LFSR stream; the plain unit's
+// outputs are delayed two cycles and compared with the piped unit's.
+// led0 latches high on the first mismatch; led1 latches high once 255
+// valid results have been compared (so it proves the check ran).
+// PipelineStagesFault compares against a one-cycle delay instead, so its led0
+// must rise: that shows the check can see a wrong latency.
+
+entity MulAddNorm {
+    in clk: clock
+    in rst: reset(active_high)
+    in in_valid: bit
+    in a: bit[16]
+    in b: bit[16]
+    in c: bit[32]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl MulAddNorm {
+    signal s1_valid: bit = 0
+    signal s1_p: bit[32] = 0
+    signal s1_c: bit[32] = 0
+    signal s2_valid: bit = 0
+    signal s2_y: bit[32] = 0
+    signal s2_shift: bit[5] = 0
+
+    signal p: bit[32]
+    p = a * b
+    signal sum: bit[32]
+    sum = s1_p + s1_c
+
+    // Normalise: shift left until bit 31 is set, counting the shift
+    let z16: bit = if sum[31:16] == 0 { 1'b1 } else { 1'b0 }
+    let n16: bit[32] = if z16 == 1 { {sum[15:0], 16'b0} } else { sum }
+    let z8: bit = if n16[31:24] == 0 { 1'b1 } else { 1'b0 }
+    let n8: bit[32] = if z8 == 1 { {n16[23:0], 8'b0} } else { n16 }
+    let z4: bit = if n8[31:28] == 0 { 1'b1 } else { 1'b0 }
+    let n4: bit[32] = if z4 == 1 { {n8[27:0], 4'b0} } else { n8 }
+    let z2: bit = if n4[31:30] == 0 { 1'b1 } else { 1'b0 }
+    let n2: bit[32] = if z2 == 1 { {n4[29:0], 2'b0} } else { n4 }
+    let z1: bit = if n2[31] == 0 { 1'b1 } else { 1'b0 }
+    let n1: bit[32] = if z1 == 1 { {n2[30:0], 1'b0} } else { n2 }
+
+    out_valid = s2_valid
+    y = s2_y
+    shift = s2_shift
+
+    on(clk.rise) {
+        if rst {
+            s1_valid = 0
+            s2_valid = 0
+        } else {
+            s1_valid = in_valid
+            s2_valid = s1_valid
+        }
+        s1_p = p
+        s1_c = c
+        s2_y = n1
+        s2_shift = {z16, z8, z4, z2, z1}
+    }
+}
+
+#[pipeline(stages = 4)]
+entity MulAddNormPiped {
+    in clk: clock
+    in rst: reset(active_high)
+    in in_valid: bit
+    in a: bit[16]
+    in b: bit[16]
+    in c: bit[32]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl MulAddNormPiped {
+    inst body = MulAddNorm {
+        clk: clk,
+        rst: rst,
+        in_valid: in_valid,
+        a: a,
+        b: b,
+        c: c
+    }
+    out_valid = body.out_valid
+    y = body.y
+    shift = body.shift
+}
+
+entity PipelineStagesCheck {
+    in clk: clock
+    out led: bit[2]
+}
+
+impl PipelineStagesCheck {
+    signal lfsr: bit[32] = 1
+    signal boot: bit[3] = 0
+    signal rst: bit = 1
+    signal d1_valid: bit = 0
+    signal d1_y: bit[32] = 0
+    signal d1_shift: bit[5] = 0
+    signal d2_valid: bit = 0
+    signal d2_y: bit[32] = 0
+    signal d2_shift: bit[5] = 0
+    signal checks: bit[8] = 0
+    signal failed: bit = 0
+    signal ran: bit = 0
+
+    inst plain = MulAddNorm {
+        clk: clk,
+        rst: rst,
+        in_valid: lfsr[3],
+        a: lfsr[15:0],
+        b: lfsr[31:16],
+        c: {lfsr[7:0], lfsr[31:8]}
+    }
+    inst piped = MulAddNormPiped {
+        clk: clk,
+        rst: rst,
+        in_valid: lfsr[3],
+        a: lfsr[15:0],
+        b: lfsr[31:16],
+        c: {lfsr[7:0], lfsr[31:8]}
+    }
+
+    on(clk.rise) {
+        lfsr = {lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31], lfsr[31:1]}
+        if boot != 7 {
+            boot = boot + 1
+        } else {
+            rst = 0
+        }
+        d1_valid = plain.out_valid
+        d1_y = plain.y
+        d1_shift = plain.shift
+        d2_valid = d1_valid
+        d2_y = d1_y
+        d2_shift = d1_shift
+        if rst == 0 {
+            if piped.out_valid != d2_valid {
+                failed = 1
+            }
+            if d2_valid == 1 {
+                if piped.y != d2_y || piped.shift != d2_shift {
+                    failed = 1
+                }
+                if checks != 255 {
+                    checks = checks + 1
+                } else {
+                    ran = 1
+                }
+            }
+        }
+    }
+    led = {ran, failed}
+}
+
+entity PipelineStagesFault {
+    in clk: clock
+    out led: bit[2]
+}
+
+impl PipelineStagesFault {
+    signal lfsr: bit[32] = 1
+    signal boot: bit[3] = 0
+    signal rst: bit = 1
+    signal d1_valid: bit = 0
+    signal d1_y: bit[32] = 0
+    signal d1_shift: bit[5] = 0
+    signal d2_valid: bit = 0
+    signal d2_y: bit[32] = 0
+    signal d2_shift: bit[5] = 0
+    signal checks: bit[8] = 0
+    signal failed: bit = 0
+    signal ran: bit = 0
+
+    inst plain = MulAddNorm {
+        clk: clk,
+        rst: rst,
+        in_valid: lfsr[3],
+        a: lfsr[15:0],
+        b: lfsr[31:16],
+        c: {lfsr[7:0], lfsr[31:8]}
+    }
+    inst piped = MulAddNormPiped {
+        clk: clk,
+        rst: rst,
+        in_valid: lfsr[3],
+        a: lfsr[15:0],
+        b: lfsr[31:16],
+        c: {lfsr[7:0], lfsr[31:8]}
+    }
+
+    on(clk.rise) {
+        lfsr = {lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31], lfsr[31:1]}
+        if boot != 7 {
+            boot = boot + 1
+        } else {
+            rst = 0
+        }
+        d1_valid = plain.out_valid
+        d1_y = plain.y
+        d1_shift = plain.shift
+        d2_valid = d1_valid
+        d2_y = d1_y
+        d2_shift = d1_shift
+        if rst == 0 {
+            if piped.out_valid != d1_valid {
+                failed = 1
+            }
+            if d1_valid == 1 {
+                if piped.y != d1_y || piped.shift != d1_shift {
+                    failed = 1
+                }
+                if checks != 255 {
+                    checks = checks + 1
+                } else {
+                    ran = 1
+                }
+            }
+        }
+    }
+    led = {ran, failed}
+}

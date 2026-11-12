@@ -1334,6 +1334,30 @@ impl Mir {
     /// specializations of generic entities (library leftovers, such as a
     /// stdlib core's default parameters). Modules from the main source file
     /// win over imported ones; among those, the one with the most content.
+    /// Keep only the module named `top` and the modules it instantiates,
+    /// directly or below, so [`Self::top_module`] can only pick `top`.
+    /// Returns false, leaving the design unchanged, if there is no such
+    /// module.
+    pub fn retain_reachable_from(&mut self, top: &str) -> bool {
+        let Some(root) = self.modules.iter().find(|m| m.name == top).map(|m| m.id) else {
+            return false;
+        };
+        let mut keep = std::collections::HashSet::from([root]);
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            let Some(module) = self.modules.iter().find(|m| m.id == id) else {
+                continue;
+            };
+            for instance in &module.instances {
+                if keep.insert(instance.module) {
+                    pending.push(instance.module);
+                }
+            }
+        }
+        self.modules.retain(|m| keep.contains(&m.id));
+        true
+    }
+
     pub fn top_module(&self) -> Option<&Module> {
         if self.modules.len() <= 1 {
             return self.modules.first();

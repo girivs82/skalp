@@ -127,6 +127,7 @@ mod test_phase8_final_success;
 mod test_phase8_success;
 mod test_phase9_safety;
 mod test_pipeline_annotation;
+mod test_pipeline_stages;
 mod test_pipelined_processor;
 mod test_popcount_in_mux;
 mod test_postfix_chain_regressions;
