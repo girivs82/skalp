@@ -90,3 +90,37 @@ async fn test_pipeline_stages_match_the_unpipelined_unit_delayed() {
         assert_eq!(flags, 0b11, "gate level {gate_level}: flags {flags:#b}");
     }
 }
+
+/// Synthesis moves the added stages into the unit: its registers are
+/// replaced by retimed ones, and the self-check above shows the result
+/// still matches
+#[test]
+fn test_pipeline_stages_are_retimed_into_the_logic() {
+    let mut mir = compile(std::path::Path::new(&fixture_path(
+        "pipeline_stages_check.sk",
+    )))
+    .unwrap();
+    assert!(mir.retain_reachable_from("PipelineStagesCheck"));
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    assert_eq!(hier.retime_regions, vec!["top.piped".to_string()]);
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let netlist = skalp_lir::synthesize_hierarchical(
+        &hier,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    )
+    .flatten();
+    let in_unit = |c: &&skalp_lir::gate_netlist::Cell| c.path.starts_with("top.piped.");
+    let retimed = netlist
+        .cells
+        .iter()
+        .filter(in_unit)
+        .filter(|c| c.path.contains(".retime"))
+        .count();
+    assert!(retimed > 0, "no registers were retimed");
+    // The unpipelined unit next to it is left alone
+    assert!(!netlist
+        .cells
+        .iter()
+        .any(|c| c.path.starts_with("top.plain.") && c.path.contains(".retime")));
+}

@@ -3040,6 +3040,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
         instances: new_instances,
         top_module: hier_lir.top_module.clone(),
         hierarchy: hier_lir.hierarchy.clone(),
+        retime_regions: hier_lir.retime_regions.clone(),
     }
 }
 

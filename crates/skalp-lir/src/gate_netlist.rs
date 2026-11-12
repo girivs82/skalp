@@ -782,6 +782,11 @@ pub struct GateNetlist {
     /// E.g., "signal" -> [(0, "signal[0]"), (1, "signal[1]"), ...]
     #[serde(skip, default)]
     bit_index: HashMap<String, Vec<(usize, String)>>,
+    /// Instance paths whose registers retiming may move: the entities with
+    /// `#[pipeline]`. Kept with the netlist so place and route can retime
+    /// again with the device's delays.
+    #[serde(default)]
+    pub retime_regions: Vec<String>,
 }
 
 impl GateNetlist {
@@ -802,6 +807,7 @@ impl GateNetlist {
             net_map: IndexMap::new(),
             stats: GateNetlistStats::default(),
             bit_index: HashMap::new(),
+            retime_regions: Vec::new(),
         }
     }
 

@@ -4108,6 +4108,7 @@ pub fn synthesize_hierarchical(
     use crate::mir_to_lir::PortConnectionInfo;
 
     let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
+    result.retime_regions = hier_lir.retime_regions.clone();
 
     // Bug B fix: Build map of internal signals that children reference in their
     // port connections. These must be promoted to outputs before synthesis so the

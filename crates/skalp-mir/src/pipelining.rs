@@ -262,10 +262,10 @@ fn clock_edge(module: &Module, clock: PortId) -> EdgeType {
 
 /// Least latency from each input port to each output port of `module`,
 /// with the results for instantiated modules cached by id
-fn latency_matrix<'a>(
+fn latency_matrix(
     mir: &Mir,
     module: &Module,
-    cache: &'a mut HashMap<ModuleId, LatencyMatrix>,
+    cache: &mut HashMap<ModuleId, LatencyMatrix>,
 ) -> LatencyMatrix {
     if let Some(found) = cache.get(&module.id) {
         return found.clone();

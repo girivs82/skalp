@@ -164,6 +164,14 @@ impl TimingDb {
     }
 }
 
+impl TimingDb {
+    /// A logic register's clock-to-output delay and data setup time, in
+    /// picoseconds
+    pub fn register_ps(&self) -> (i64, i64) {
+        (self.clk_to_q, self.setup.get("M").copied().unwrap_or(0))
+    }
+}
+
 /// The name and tile of a routing wire, split for pip classification.
 impl TimingDb {
     /// Delay of a PIP from the wire named `source` to the one named

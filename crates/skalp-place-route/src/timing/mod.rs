@@ -5,6 +5,7 @@
 pub mod sta;
 
 mod delays;
+pub mod retime_delays;
 pub mod route_delays;
 
 pub use delays::DelayModel;
