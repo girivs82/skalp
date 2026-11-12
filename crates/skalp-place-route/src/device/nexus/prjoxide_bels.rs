@@ -106,6 +106,24 @@ pub fn plc_bels() -> Vec<PlcBel> {
     bels
 }
 
+/// `(key, site wire)` of each register's in-slice data input: `FF{n}_DI`,
+/// the wire the register reads instead of its bypass pin (`FF{n}_D`) when
+/// its `SEL` is `DL`, driven by the LUT beside it.
+pub fn ff_lut_input_wires() -> Vec<(String, String)> {
+    SLICES
+        .iter()
+        .enumerate()
+        .flat_map(|(si, ch)| {
+            (0..2).map(move |reg| {
+                (
+                    format!("FF{}_DI", si * 2 + reg),
+                    format!("JDI{reg}_SLICE{ch}"),
+                )
+            })
+        })
+        .collect()
+}
+
 /// `(key, site wire)` of each distributed RAM connection in a logic tile.
 ///
 /// The RAM is built from slices A and B (the storage LUTs) and slice C (the

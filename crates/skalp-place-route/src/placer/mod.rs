@@ -11,6 +11,7 @@ mod annealing;
 mod congestion;
 mod constraints;
 pub mod control_sets;
+mod detail;
 mod legalization;
 mod sites;
 mod spreading;

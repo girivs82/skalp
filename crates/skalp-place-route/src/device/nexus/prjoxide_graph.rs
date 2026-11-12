@@ -691,7 +691,48 @@ fn tile_edges_with_clocks(
             });
         }
     }
+    for (src_name, dst_name) in register_lut_inputs(db) {
+        if let (Some(src), Some(dst)) = (
+            resolve_with_clocks(clocks, tx, ty, &src_name),
+            resolve_with_clocks(clocks, tx, ty, &dst_name),
+        ) {
+            edges.push(ResolvedEdge {
+                src,
+                dst,
+                configurable: true,
+                bits: Vec::new(),
+            });
+        }
+    }
     edges
+}
+
+/// The in-slice path from a slice's LUT output into its register, as arcs
+/// `JDI{r}_SLICE{s}` -> `JM{r}_SLICE{s}` of a logic tile (`db`).
+///
+/// A register's data input is modelled as its bypass pin `JM{r}_SLICE{s}`,
+/// fed from general routing through the data-in mux. With its `SEL` set to
+/// `DL` the register instead takes `JDI{r}_SLICE{s}`, which the slice drives
+/// from its LUT (`JF{r}`; register 0 also from the wide-function output
+/// `JOFX0`) without
+/// leaving the slice. The database has no arc for that choice, since it is a
+/// register setting rather than a routing mux; this arc stands for it, so the
+/// router can reach the register's data pin straight from the LUT beside it.
+/// A route that takes it has the register's `SEL` set to `DL` when the
+/// bitstream is written (and costs no routing bits of its own).
+fn register_lut_inputs(db: &TileBitsDb) -> Vec<(String, String)> {
+    db.pips
+        .keys()
+        .chain(db.conns.keys())
+        .filter_map(|dst| {
+            let rest = dst.strip_prefix("JDI")?;
+            let (reg, slice) = rest.split_once("_SLICE")?;
+            let register_pin = format!("JM{reg}_SLICE{slice}");
+            db.conns
+                .contains_key(&register_pin)
+                .then(|| (dst.clone(), register_pin))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1127,28 @@ mod tests {
                     }
         });
         assert!(has_conn, "fixed connection JA0_SLICEA resolved");
+
+        // Each register's data pin can be reached from its slice's LUT
+        // output without leaving the slice
+        let local = |name: &str| NodeKey::Local {
+            x: plc.x,
+            y: plc.y,
+            name: name.to_string(),
+        };
+        for slice in ["A", "B", "C", "D"] {
+            for reg in 0..2 {
+                let (src, dst) = (
+                    local(&format!("JDI{reg}_SLICE{slice}")),
+                    local(&format!("JM{reg}_SLICE{slice}")),
+                );
+                assert!(
+                    edges
+                        .iter()
+                        .any(|e| e.src == src && e.dst == dst && e.bits.is_empty()),
+                    "no in-slice path into register {reg} of slice {slice}"
+                );
+            }
+        }
 
         eprintln!(
             "M1b-part2 OK: PLC@({},{}) → {} edges ({} configurable pips + fixed conns), \

@@ -459,8 +459,8 @@ impl NetCostCache {
         }
 
         let mut timing = 0.0;
-        for (k, (cell_id, _)) in net.fanout.iter().enumerate() {
-            if let Some(loc) = placement.placements.get(cell_id) {
+        for (k, &(cell_id, pin)) in net.fanout.iter().enumerate() {
+            if let Some(loc) = placement.placements.get(&cell_id) {
                 let x = loc.tile_x as f64;
                 let y = loc.tile_y as f64;
                 min_x = min_x.min(x);
@@ -471,9 +471,12 @@ impl NetCostCache {
 
                 let criticality = criticalities.get(k).copied().unwrap_or(0.0);
                 if let (Some(from), true) = (driver, criticality >= MIN_TIMED_CRITICALITY) {
-                    let dx = from.tile_x.abs_diff(loc.tile_x);
-                    let dy = from.tile_y.abs_diff(loc.tile_y);
-                    timing += delay_model.connection_delay(dx, dy) * criticality * criticality;
+                    let delay = delay_model.bel_connection_delay(
+                        (from.tile_x, from.tile_y, from.bel_index),
+                        (loc.tile_x, loc.tile_y, loc.bel_index),
+                        pin,
+                    );
+                    timing += delay * criticality * criticality;
                 }
             }
         }
@@ -501,6 +504,10 @@ const RETIME_INTERVAL: usize = 5;
 /// Connections less critical than this carry no timing cost in the annealer:
 /// they have slack to spare, and wirelength alone places them well.
 const MIN_TIMED_CRITICALITY: f64 = 0.1;
+
+/// Passes of directed detail moves after annealing, criticality re-estimated
+/// before each.
+const DETAIL_PASSES: usize = 2;
 
 /// Record of changes made by apply_move_in_place, for efficient undo.
 struct UndoRecord {
@@ -1028,16 +1035,15 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
 
-        // Update metrics
-        let mut result = best;
-        result.cost = best_cost;
-
-        // Calculate timing score for timing-driven mode
-        if self.timing_weight > 0.0 {
-            result.timing_score = self.estimate_timing_score(&result, netlist);
-        }
-
-        Ok(result)
+        Ok(self.finish(
+            current,
+            current_cost,
+            best,
+            best_cost,
+            cost_cache,
+            &move_ctx,
+            netlist,
+        ))
     }
 
     /// Parallel simulated annealing optimization
@@ -1252,16 +1258,172 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             rlim = self.next_rlim(rlim, acceptance_rate);
         }
 
-        // Update metrics
-        let mut result = best;
-        result.cost = best_cost;
+        Ok(self.finish(
+            current,
+            current_cost,
+            best,
+            best_cost,
+            cost_cache,
+            &move_ctx,
+            netlist,
+        ))
+    }
 
-        // Calculate timing score for timing-driven mode
-        if self.timing_weight > 0.0 {
-            result.timing_score = self.estimate_timing_score(&result, netlist);
+    /// End annealing: take the better of the current and best placements,
+    /// make the directed moves of [`super::detail`] on it, and record its
+    /// cost and timing score.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        mut current: PlacementResult,
+        current_cost: f64,
+        best: PlacementResult,
+        best_cost: f64,
+        mut cost_cache: NetCostCache,
+        ctx: &MoveContext,
+        netlist: &GateNetlist,
+    ) -> PlacementResult {
+        if best_cost < current_cost {
+            // The cache follows `current`: rebuild it for `best`, on the
+            // same timing scale and criticalities that priced it
+            let scale = cost_cache.timing_scale;
+            let criticalities = std::mem::take(&mut cost_cache.connection_criticalities);
+            cost_cache = NetCostCache::build(
+                &best,
+                netlist,
+                criticalities,
+                &self.delay_model,
+                self.timing_weight,
+            )
+            .with_congestion(self.device, netlist, &best);
+            cost_cache.timing_scale = scale;
+            current = best;
         }
+        let mut loc_map: HashMap<(u32, u32, usize), CellId> = current
+            .placements
+            .iter()
+            .map(|(&cid, loc)| ((loc.tile_x, loc.tile_y, loc.bel_index), cid))
+            .collect();
+        for pass in 0..DETAIL_PASSES {
+            if self.timing_weight > 0.0 {
+                let (_, connections) = self.compute_criticalities(netlist, &current);
+                cost_cache.retime(&current, netlist, connections, &self.delay_model);
+            }
+            let before = cost_cache.combined_cost(self.timing_weight);
+            let moved =
+                self.refine_directed(&mut current, &mut loc_map, ctx, &mut cost_cache, netlist);
+            log::debug!(
+                "detail pass {}: {} cells moved, cost {:.1} -> {:.1}",
+                pass + 1,
+                moved,
+                before,
+                cost_cache.combined_cost(self.timing_weight)
+            );
+            if moved == 0 {
+                break;
+            }
+        }
+        current.cost = cost_cache.combined_cost(self.timing_weight);
+        if self.timing_weight > 0.0 {
+            current.timing_score = self.estimate_timing_score(&current, netlist);
+        }
+        current
+    }
 
-        Ok(result)
+    /// Try each move [`super::detail::candidates`] names, in its order: put
+    /// the cell on whichever acceptable BEL of the named tiles lowers the
+    /// cost most, if any does. Returns how many cells moved.
+    fn refine_directed(
+        &self,
+        placement: &mut PlacementResult,
+        loc_map: &mut HashMap<(u32, u32, usize), CellId>,
+        ctx: &MoveContext,
+        cost_cache: &mut NetCostCache,
+        netlist: &GateNetlist,
+    ) -> usize {
+        let movable: HashSet<CellId> = ctx.cells.iter().copied().collect();
+        let candidates =
+            super::detail::candidates(netlist, placement, &cost_cache.connection_criticalities);
+        let mut moved = 0;
+        for candidate in candidates {
+            let cell = candidate.cell;
+            if !movable.contains(&cell) {
+                continue;
+            }
+            let bel_type = placement.placements[&cell].bel_type;
+            let mut chosen: Option<(f64, PlacementLoc)> = None;
+            for &(x, y) in &candidate.tiles {
+                for bel in self.acceptable_bels(placement, ctx, loc_map, cell, x, y) {
+                    let target = PlacementLoc::new(x, y, bel, bel_type);
+                    let Some((delta, _, _)) = self.try_move(
+                        &Move::Relocate(cell, target),
+                        placement,
+                        loc_map,
+                        ctx,
+                        cost_cache,
+                        netlist,
+                        false,
+                    ) else {
+                        continue;
+                    };
+                    if chosen.is_none_or(|(best, _)| delta < best) {
+                        chosen = Some((delta, target));
+                    }
+                }
+            }
+            if let Some((delta, target)) = chosen {
+                if delta < -1e-9 {
+                    let (_, net_updates, side) = self
+                        .try_move(
+                            &Move::Relocate(cell, target),
+                            placement,
+                            loc_map,
+                            ctx,
+                            cost_cache,
+                            netlist,
+                            true,
+                        )
+                        .expect("the move held its control sets a moment ago");
+                    cost_cache.apply_updates(&net_updates, &side);
+                    moved += 1;
+                }
+            }
+        }
+        moved
+    }
+
+    /// Price `move_op`: its cost delta, or `None` when it would break a
+    /// control group. The placement is left moved if `keep`, else as it was.
+    #[allow(clippy::too_many_arguments)]
+    fn try_move(
+        &self,
+        move_op: &Move,
+        placement: &mut PlacementResult,
+        loc_map: &mut HashMap<(u32, u32, usize), CellId>,
+        ctx: &MoveContext,
+        cost_cache: &NetCostCache,
+        netlist: &GateNetlist,
+        keep: bool,
+    ) -> Option<CostDelta> {
+        let affected = self.moved_cells_with_displaced(move_op, placement, loc_map);
+        let undo = self.apply_move_in_place(placement, loc_map, move_op);
+        if !self.control_sets_hold(ctx, &affected, placement, loc_map) {
+            Self::undo_move(placement, loc_map, undo);
+            return None;
+        }
+        let affected_nets = cost_cache.affected_nets(&affected);
+        let delta = cost_cache.compute_delta(
+            &affected_nets,
+            &affected,
+            placement,
+            netlist,
+            &self.delay_model,
+            self.timing_weight,
+        );
+        if !keep {
+            Self::undo_move(placement, loc_map, undo);
+        }
+        Some(delta)
     }
 
     /// Generate a random move: a random cell goes to a random compatible BEL
@@ -1316,67 +1478,15 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let loc = placement.placements[&cell_id];
         let (width, height) = self.device.grid_size();
         let r = rlim.max(1) as i64;
-        let source_bel_type = self
-            .device
-            .tile_at(loc.tile_x, loc.tile_y)
-            .and_then(|t| t.bels().get(loc.bel_index).map(|b| b.bel_type))
-            .unwrap_or(loc.bel_type);
 
         const ATTEMPTS: usize = 8;
         for _ in 0..ATTEMPTS {
             let x = (loc.tile_x as i64 + rng.gen_range(-r..=r)).clamp(0, width as i64 - 1) as u32;
             let y = (loc.tile_y as i64 + rng.gen_range(-r..=r)).clamp(0, height as i64 - 1) as u32;
-            let Some(tile) = self.device.tile_at(x, y) else {
-                continue;
-            };
-            // Moving into another tile adds a cell to it, unless it swaps
-            // with one: a tile at its fill cap only takes swaps
-            let tile_full = self.fill_limit < 1.0
-                && (x, y) != (loc.tile_x, loc.tile_y)
-                && self.tile_at_fill_cap(tile, x, y, source_bel_type, loc_map, ctx);
             // Reservoir-sample one acceptable BEL of the tile
             let mut chosen = None;
-            let mut seen = 0u32;
-            for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                if (x, y, bel_idx) == (loc.tile_x, loc.tile_y, loc.bel_index)
-                    || !Self::bel_types_compatible(bel.bel_type, loc.bel_type)
-                    || ctx.reserved.contains(&(x, y, bel_idx))
-                {
-                    continue;
-                }
-                let occupant = loc_map.get(&(x, y, bel_idx));
-                if occupant.is_none() && tile_full {
-                    continue;
-                }
-                if let Some(&occupant) = occupant {
-                    if self.carry_chain_membership.contains_key(&occupant)
-                        || !Self::bel_types_compatible(
-                            source_bel_type,
-                            placement.placements[&occupant].bel_type,
-                        )
-                    {
-                        continue;
-                    }
-                }
-                // Flip-flops share a control group only with their own
-                // control set: the cell at its new BEL, and any occupant
-                // swapped back to the cell's old one
-                let lookup = |x: u32, y: u32, b: usize| loc_map.get(&(x, y, b)).copied();
-                let target = PlacementLoc::new(x, y, bel_idx, loc.bel_type);
-                let leaving: Vec<CellId> = occupant.copied().into_iter().collect();
-                if !fits_control_group(
-                    self.device,
-                    &ctx.control_sets,
-                    cell_id,
-                    &target,
-                    &leaving,
-                    lookup,
-                ) || occupant.is_some_and(|&o| {
-                    !fits_control_group(self.device, &ctx.control_sets, o, &loc, &[cell_id], lookup)
-                }) {
-                    continue;
-                }
-                seen += 1;
+            let acceptable = self.acceptable_bels(placement, ctx, loc_map, cell_id, x, y);
+            for (seen, bel_idx) in (1u32..).zip(acceptable) {
                 if rng.gen_range(0..seen) == 0 {
                     chosen = Some(bel_idx);
                 }
@@ -1387,6 +1497,78 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
         }
         Move::Relocate(cell_id, loc)
+    }
+
+    /// The BELs of tile (x, y) that `cell_id` may move to: compatible, not
+    /// reserved, not its own, within the tile fill cap, and, when taken, held
+    /// by a movable occupant that fits `cell_id`'s old BEL. Flip-flops keep
+    /// their control groups to one control set either way.
+    fn acceptable_bels(
+        &self,
+        placement: &PlacementResult,
+        ctx: &MoveContext,
+        loc_map: &HashMap<(u32, u32, usize), CellId>,
+        cell_id: CellId,
+        x: u32,
+        y: u32,
+    ) -> Vec<usize> {
+        let loc = placement.placements[&cell_id];
+        let Some(tile) = self.device.tile_at(x, y) else {
+            return Vec::new();
+        };
+        let source_bel_type = self
+            .device
+            .tile_at(loc.tile_x, loc.tile_y)
+            .and_then(|t| t.bels().get(loc.bel_index).map(|b| b.bel_type))
+            .unwrap_or(loc.bel_type);
+        // Moving into another tile adds a cell to it, unless it swaps with
+        // one: a tile at its fill cap only takes swaps
+        let tile_full = self.fill_limit < 1.0
+            && (x, y) != (loc.tile_x, loc.tile_y)
+            && self.tile_at_fill_cap(tile, x, y, source_bel_type, loc_map, ctx);
+        let mut bels = Vec::new();
+        for (bel_idx, bel) in tile.bels().iter().enumerate() {
+            if (x, y, bel_idx) == (loc.tile_x, loc.tile_y, loc.bel_index)
+                || !Self::bel_types_compatible(bel.bel_type, loc.bel_type)
+                || ctx.reserved.contains(&(x, y, bel_idx))
+            {
+                continue;
+            }
+            let occupant = loc_map.get(&(x, y, bel_idx));
+            if occupant.is_none() && tile_full {
+                continue;
+            }
+            if let Some(&occupant) = occupant {
+                if self.carry_chain_membership.contains_key(&occupant)
+                    || !Self::bel_types_compatible(
+                        source_bel_type,
+                        placement.placements[&occupant].bel_type,
+                    )
+                {
+                    continue;
+                }
+            }
+            // Flip-flops share a control group only with their own control
+            // set: the cell at its new BEL, and any occupant swapped back to
+            // the cell's old one
+            let lookup = |x: u32, y: u32, b: usize| loc_map.get(&(x, y, b)).copied();
+            let target = PlacementLoc::new(x, y, bel_idx, loc.bel_type);
+            let leaving: Vec<CellId> = occupant.copied().into_iter().collect();
+            if !fits_control_group(
+                self.device,
+                &ctx.control_sets,
+                cell_id,
+                &target,
+                &leaving,
+                lookup,
+            ) || occupant.is_some_and(|&o| {
+                !fits_control_group(self.device, &ctx.control_sets, o, &loc, &[cell_id], lookup)
+            }) {
+                continue;
+            }
+            bels.push(bel_idx);
+        }
+        bels
     }
 
     /// Whether every flip-flop a move touched (`affected`) shares its control
@@ -1718,12 +1900,13 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         // Calculate worst-case delay to any sink
         let mut max_delay: f64 = 0.0;
 
-        for (sink_id, _) in &net.fanout {
-            if let Some(sink_loc) = placement.placements.get(sink_id) {
-                // Manhattan distance
-                let dx = (driver_loc.tile_x as i32 - sink_loc.tile_x as i32).unsigned_abs();
-                let dy = (driver_loc.tile_y as i32 - sink_loc.tile_y as i32).unsigned_abs();
-                let routing_delay = self.delay_model.connection_delay(dx, dy);
+        for &(sink_id, pin) in &net.fanout {
+            if let Some(sink_loc) = placement.placements.get(&sink_id) {
+                let routing_delay = self.delay_model.bel_connection_delay(
+                    (driver_loc.tile_x, driver_loc.tile_y, driver_loc.bel_index),
+                    (sink_loc.tile_x, sink_loc.tile_y, sink_loc.bel_index),
+                    pin,
+                );
 
                 // Add cell delay for the driver
                 let cell_delay = if let Some(driver_id) = net.driver {
@@ -1753,13 +1936,20 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         netlist: &GateNetlist,
         placement: &PlacementResult,
     ) -> (HashMap<GateNetId, f64>, Vec<Vec<f64>>) {
-        let connections =
-            super::timing_estimate::connection_criticalities(netlist, &self.delay_model, |id| {
-                placement
-                    .placements
-                    .get(&id)
-                    .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
-            });
+        let bel = |id: CellId| {
+            placement
+                .placements
+                .get(&id)
+                .map(|loc| (loc.tile_x, loc.tile_y, loc.bel_index))
+        };
+        let connections = super::timing_estimate::connection_criticalities(
+            netlist,
+            &self.delay_model,
+            |driver, sink, pin| match (bel(driver), bel(sink)) {
+                (Some(from), Some(to)) => self.delay_model.bel_connection_delay(from, to, pin),
+                _ => 0.0,
+            },
+        );
         let nets = netlist
             .nets
             .iter()
@@ -2040,5 +2230,102 @@ mod tests {
             }
         }
         assert!(swapped, "wide LUTs never moved");
+    }
+
+    /// After annealing, a flip-flop left tiles away from the LUT feeding its
+    /// data input moves into that LUT's tile, which shortens the net.
+    #[test]
+    fn detail_moves_pull_a_register_into_its_drivers_tile() {
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let (width, height) = device.grid_size();
+        let first_bel = |x: u32, y: u32, ty: BelType| {
+            device
+                .tile_at(x, y)
+                .and_then(|t| t.bels().iter().position(|b| b.bel_type == ty))
+        };
+        let (x0, y0) = (0..width)
+            .flat_map(|x| (0..height).map(move |y| (x, y)))
+            .find(|&(x, y)| {
+                first_bel(x, y, BelType::Lut4).is_some()
+                    && first_bel(x + 8, y, BelType::DffSrE).is_some()
+            })
+            .expect("two logic tiles");
+
+        let mut netlist = GateNetlist::new("t".to_string(), "nexus".to_string());
+        let net = |n: &mut GateNetlist, name: &str| {
+            n.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let (clk, a, d, q) = (
+            net(&mut netlist, "clk"),
+            net(&mut netlist, "a"),
+            net(&mut netlist, "d"),
+            net(&mut netlist, "q"),
+        );
+        let cell = |ty: &str, name: &str, i, o| {
+            Cell::new_comb(
+                CellId(0),
+                ty.to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                vec![i],
+                vec![o],
+            )
+        };
+        let lut = netlist.add_cell(cell("OXIDE_COMB", "lut", a, d));
+        let mut ff = cell("OXIDE_FF", "ff", d, q);
+        ff.clock = Some(clk);
+        let ff = netlist.add_cell(ff);
+
+        let mut placement = PlacementResult::new();
+        placement.placements.insert(
+            lut,
+            PlacementLoc::new(
+                x0,
+                y0,
+                first_bel(x0, y0, BelType::Lut4).unwrap(),
+                BelType::Lut4,
+            ),
+        );
+        placement.placements.insert(
+            ff,
+            PlacementLoc::new(
+                x0 + 8,
+                y0,
+                first_bel(x0 + 8, y0, BelType::DffSrE).unwrap(),
+                BelType::DffSrE,
+            ),
+        );
+        let mut loc_map: HashMap<(u32, u32, usize), CellId> = placement
+            .placements
+            .iter()
+            .map(|(&c, l)| ((l.tile_x, l.tile_y, l.bel_index), c))
+            .collect();
+
+        let annealer = SimulatedAnnealing::new(&device, 1.0, 0.9, 10);
+        let ctx = MoveContext::build(
+            &placement,
+            &netlist,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &|x, y, bel| device.bel_footprint(x, y, bel),
+        );
+        let mut cache =
+            NetCostCache::build(&placement, &netlist, Vec::new(), &annealer.delay_model, 0.0);
+        let before = cache.combined_cost(0.0);
+
+        let moved =
+            annealer.refine_directed(&mut placement, &mut loc_map, &ctx, &mut cache, &netlist);
+        assert_eq!(moved, 1);
+        let at = placement.placements[&ff];
+        assert_eq!((at.tile_x, at.tile_y), (x0, y0));
+        assert_eq!(loc_map.get(&(x0, y0, at.bel_index)), Some(&ff));
+        assert!(cache.combined_cost(0.0) < before);
+
+        // Nothing left to pull in
+        let moved =
+            annealer.refine_directed(&mut placement, &mut loc_map, &ctx, &mut cache, &netlist);
+        assert_eq!(moved, 0);
     }
 }

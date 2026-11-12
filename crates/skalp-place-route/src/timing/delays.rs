@@ -369,6 +369,28 @@ impl DelayModel {
         }
     }
 
+    /// Delay (ns) of a connection from a cell on BEL `from` (tile x, tile
+    /// y, BEL index) to input `pin` of a cell on BEL `to`: the direct path
+    /// between the two when they share a tile and the device has one that
+    /// needs no general routing (a Nexus LUT into the register beside it),
+    /// otherwise [`Self::connection_delay`] for their tile offset.
+    pub fn bel_connection_delay(
+        &self,
+        from: (u32, u32, usize),
+        to: (u32, u32, usize),
+        pin: usize,
+    ) -> f64 {
+        let direct = (from.0, from.1) == (to.0, to.1) && from.2 != to.2;
+        self.route_delays
+            .as_ref()
+            .and_then(|table| {
+                direct
+                    .then(|| table.direct_delay(from.2, to.2, pin))
+                    .flatten()
+            })
+            .unwrap_or_else(|| self.connection_delay(from.0.abs_diff(to.0), from.1.abs_diff(to.1)))
+    }
+
     /// Get estimated path delay for a given distance.
     ///
     /// Uses a calibrated wire mix model: for a given Manhattan distance,
@@ -469,5 +491,25 @@ impl DelayModel {
         let estimated_avg = self.estimated_path_delay(total_manhattan_distance / route_count);
 
         (actual_avg, estimated_avg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timing::RouteDelayTable;
+    use std::sync::Arc;
+
+    /// A LUT feeding the register beside it takes the direct path; the same
+    /// LUT into another BEL of its tile, or a register in another tile, is
+    /// routed.
+    #[test]
+    fn direct_connections_are_priced_by_bel() {
+        let table = RouteDelayTable::from_values(2, 1, vec![0.3, 0.4]).with_direct(0, 2, 0, 0.01);
+        let model = DelayModel::nexus().with_route_delays(Some(Arc::new(table)));
+        assert_eq!(model.bel_connection_delay((5, 5, 0), (5, 5, 2), 0), 0.01);
+        assert_eq!(model.bel_connection_delay((5, 5, 0), (5, 5, 3), 0), 0.3);
+        assert_eq!(model.bel_connection_delay((5, 5, 0), (5, 5, 2), 1), 0.3);
+        assert_eq!(model.bel_connection_delay((5, 5, 0), (6, 5, 2), 0), 0.4);
     }
 }
