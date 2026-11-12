@@ -4,8 +4,9 @@
 //! Supports timing-driven placement by incorporating estimated path delays.
 //! Includes parallel move evaluation for improved performance on multi-core systems.
 
+use super::congestion::{net_box, CongestionMap, NetBox};
 use super::control_sets::{control_sets, fits_control_group, ControlSet};
-use super::{PlacementLoc, PlacementResult};
+use super::{is_routed_net, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{BelType, Device};
 use crate::error::Result;
@@ -17,8 +18,27 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Result of a placement-move cost evaluation:
-/// (total delta, per-net (index, new_wl, new_timing) updates, proximity (index, new_cost) updates).
-type CostDelta = (f64, Vec<(usize, f64, f64)>, Vec<(usize, f64)>);
+/// (total delta, per-net (index, new_wl, new_timing) updates, the other
+/// cost terms' updates).
+type CostDelta = (f64, Vec<(usize, f64, f64)>, SideUpdates);
+
+/// Updates to the cost terms beyond per-net wirelength and timing, kept
+/// from a move's evaluation for when it is accepted
+#[derive(Default)]
+struct SideUpdates {
+    /// Proximity (group index, new cost)
+    proximity: Vec<(usize, f64)>,
+    /// Congestion: each affected net's new box
+    net_boxes: Vec<(usize, Option<NetBox>)>,
+    /// Congestion: the demand change of each bin those boxes touch
+    bin_demand: Vec<(usize, f64)>,
+}
+
+/// Weight of routing congestion ([`CongestionMap::total`]) against
+/// wirelength. Within capacity congestion costs nothing; past it, a move
+/// that adds wire but lowers the overflow cost by more than half as much
+/// is taken, so nets detour around hot spots rather than through them.
+const CONGESTION_WEIGHT: f64 = 2.0;
 
 /// Probability of accepting an average uphill move at the start of an anneal
 /// from a random placement (VPR).
@@ -178,6 +198,8 @@ struct NetCostCache {
     cell_to_nets: HashMap<CellId, Vec<usize>>,
     /// NCL proximity cost tracker
     proximity: ProximityCostTracker,
+    /// Routing demand against supply, on devices that report their routing
+    congestion: Option<CongestionMap>,
 }
 
 impl NetCostCache {
@@ -195,6 +217,11 @@ impl NetCostCache {
         let mut cell_to_nets: HashMap<CellId, Vec<usize>> = HashMap::new();
 
         for (i, net) in netlist.nets.iter().enumerate() {
+            // A net placement need not wire costs nothing, and no move
+            // touches it
+            if !is_routed_net(net, netlist) {
+                continue;
+            }
             // Build cell_to_nets index
             if let Some(driver) = net.driver {
                 cell_to_nets.entry(driver).or_default().push(i);
@@ -231,7 +258,23 @@ impl NetCostCache {
             total_timing_cost,
             cell_to_nets,
             proximity,
+            congestion: None,
         }
+    }
+
+    /// Add a routing congestion term for `device`, if it reports which of
+    /// its wires are general routing
+    fn with_congestion<D: Device + ?Sized>(
+        mut self,
+        device: &D,
+        netlist: &GateNetlist,
+        placement: &PlacementResult,
+    ) -> Self {
+        self.congestion = CongestionMap::new(device).map(|mut map| {
+            map.build(netlist, placement);
+            map
+        });
+        self
     }
 
     /// Get the combined cost using the same formula as calculate_combined_cost.
@@ -246,6 +289,10 @@ impl NetCostCache {
         // Proximity penalty scaled to be comparable to wirelength cost.
         // Weight of 10.0 makes 1-tile excess equivalent to 10 HPWL units.
         base + 10.0 * self.proximity.total_cost
+            + self
+                .congestion
+                .as_ref()
+                .map_or(0.0, |c| CONGESTION_WEIGHT * c.total())
     }
 
     /// Collect the unique set of net indices affected by moving the given cells.
@@ -299,20 +346,43 @@ impl NetCostCache {
 
         // Proximity cost delta (only recomputes affected groups)
         let (prox_delta, prox_updates) = self.proximity.compute_delta(moved_cells, new_placement);
-        let delta = base_delta + 10.0 * prox_delta;
+        let mut delta = base_delta + 10.0 * prox_delta;
 
-        (delta, updates, prox_updates)
+        // Congestion: the affected nets' new boxes
+        let (mut net_boxes, mut bin_demand) = (Vec::new(), Vec::new());
+        if let Some(map) = &self.congestion {
+            let boxes: Vec<(usize, Option<NetBox>)> = affected
+                .iter()
+                .map(|&i| (i, net_box(&netlist.nets[i], new_placement)))
+                .collect();
+            let (congestion_delta, bins) = map.delta(&boxes);
+            delta += CONGESTION_WEIGHT * congestion_delta;
+            (net_boxes, bin_demand) = (boxes, bins);
+        }
+
+        (
+            delta,
+            updates,
+            SideUpdates {
+                proximity: prox_updates,
+                net_boxes,
+                bin_demand,
+            },
+        )
     }
 
     /// Apply cached updates after a move is accepted.
-    fn apply_updates(&mut self, net_updates: &[(usize, f64, f64)], prox_updates: &[(usize, f64)]) {
+    fn apply_updates(&mut self, net_updates: &[(usize, f64, f64)], side: &SideUpdates) {
         for &(net_idx, new_wl, new_timing) in net_updates {
             self.total_wl_cost += new_wl - self.net_wl_cost[net_idx];
             self.total_timing_cost += new_timing - self.net_timing_cost[net_idx];
             self.net_wl_cost[net_idx] = new_wl;
             self.net_timing_cost[net_idx] = new_timing;
         }
-        self.proximity.apply_updates(prox_updates);
+        self.proximity.apply_updates(&side.proximity);
+        if let Some(map) = &mut self.congestion {
+            map.apply(&side.net_boxes, &side.bin_demand);
+        }
     }
 
     /// Compute HPWL and timing cost for a net in a single pass over its cells.
@@ -782,7 +852,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &net_criticalities,
             &self.delay_model,
             self.timing_weight,
-        );
+        )
+        .with_congestion(self.device, netlist, &current);
         let mut current_cost = cost_cache.combined_cost(self.timing_weight);
         let carry_layout = self.device.carry_chain_layout();
         let move_ctx = MoveContext::build(
@@ -945,7 +1016,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &net_criticalities,
             &self.delay_model,
             self.timing_weight,
-        );
+        )
+        .with_congestion(self.device, netlist, &current);
         let mut current_cost = cost_cache.combined_cost(self.timing_weight);
         let mut best = current.clone();
         let mut best_cost = current_cost;
@@ -1033,7 +1105,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     HashMap<(u32, u32, usize), CellId>,
                     f64,
                     Vec<(usize, f64, f64)>,
-                    Vec<(usize, f64)>,
+                    SideUpdates,
                 )> = moves
                     .into_par_iter()
                     .map(|move_op| {
@@ -1054,7 +1126,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                                 new_loc_map,
                                 f64::INFINITY,
                                 Vec::new(),
-                                Vec::new(),
+                                SideUpdates::default(),
                             );
                         }
                         let affected_nets = cost_cache.affected_nets(&affected);
