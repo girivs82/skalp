@@ -281,6 +281,31 @@ impl NetCostCache {
         }
     }
 
+    /// Price timing with new connection criticalities (by net index, in
+    /// fanout order), keeping the timing scale set when the cache was built
+    /// so costs before and after stay comparable.
+    fn retime(
+        &mut self,
+        placement: &PlacementResult,
+        netlist: &GateNetlist,
+        connection_criticalities: Vec<Vec<f64>>,
+        delay_model: &DelayModel,
+    ) {
+        self.connection_criticalities = connection_criticalities;
+        for (i, net) in netlist.nets.iter().enumerate() {
+            if !is_routed_net(net, netlist) {
+                continue;
+            }
+            let criticalities = self
+                .connection_criticalities
+                .get(i)
+                .map_or(&[][..], Vec::as_slice);
+            self.net_timing_cost[i] =
+                Self::compute_net_costs(net, placement, delay_model, criticalities).1;
+        }
+        self.total_timing_cost = self.net_timing_cost.iter().sum();
+    }
+
     /// Add a routing congestion term for `device`, if it reports which of
     /// its wires are general routing
     fn with_congestion<D: Device + ?Sized>(
@@ -464,6 +489,15 @@ impl NetCostCache {
     }
 }
 
+/// Temperature steps between re-estimates of connection criticality during
+/// annealing. Criticality is first estimated on the starting placement; as
+/// cells move, paths that were short grow critical and critical ones get
+/// slack, and timing cost priced on stale criticality pulls the wrong cells
+/// together. Re-timing every 5 steps beat once-only, every 2 and every 20 on
+/// a RISC-V board design (8 seeds, LIFCL-40 77.7 -> 80.4 MHz, LFCPNX-100
+/// 77.5 -> 79.1 MHz) and added about 4% to annealing time.
+const RETIME_INTERVAL: usize = 5;
+
 /// Connections less critical than this carry no timing cost in the annealer:
 /// they have slack to spare, and wirelength alone places them well.
 const MIN_TIMED_CRITICALITY: f64 = 0.1;
@@ -492,7 +526,7 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     device: &'a D,
     initial_temp: f64,
     cooling_rate: f64,
-    max_iterations: usize,
+    maxiterations: usize,
     /// Timing weight (0.0 = pure wirelength, 1.0 = pure timing)
     timing_weight: f64,
     /// Delay model for timing estimation
@@ -631,12 +665,12 @@ impl MoveContext {
 
 impl<'a, D: Device> SimulatedAnnealing<'a, D> {
     /// Create a new simulated annealing optimizer (wirelength-driven)
-    pub fn new(device: &'a D, initial_temp: f64, cooling_rate: f64, max_iterations: usize) -> Self {
+    pub fn new(device: &'a D, initial_temp: f64, cooling_rate: f64, maxiterations: usize) -> Self {
         Self {
             device,
             initial_temp,
             cooling_rate,
-            max_iterations,
+            maxiterations,
             timing_weight: 0.0, // Pure wirelength mode
             delay_model: DelayModel::ice40_default(),
             parallel: false,
@@ -654,14 +688,14 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         device: &'a D,
         initial_temp: f64,
         cooling_rate: f64,
-        max_iterations: usize,
+        maxiterations: usize,
         timing_weight: f64,
     ) -> Self {
         Self {
             device,
             initial_temp,
             cooling_rate,
-            max_iterations,
+            maxiterations,
             timing_weight: timing_weight.clamp(0.0, 1.0),
             delay_model: DelayModel::ice40_default(),
             parallel: false,
@@ -898,9 +932,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let moves_per_temp = cells.len().max(100);
 
         // Scale iterations to design size — tiny designs converge quickly
-        let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
+        let effectiveiterations = self.maxiterations.min(cells.len() * 100 + 100);
 
-        for iteration in 0..effective_iterations {
+        for iteration in 0..effectiveiterations {
             let mut accepted_moves = 0u32;
             let window = rlim.round() as u32;
 
@@ -981,6 +1015,17 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             }
             temperature = self.next_temperature(temperature, acceptance_rate);
             rlim = self.next_rlim(rlim, acceptance_rate);
+
+            if self.timing_weight > 0.0 && (iteration + 1) % RETIME_INTERVAL == 0 {
+                // Cells have moved since criticality was last estimated:
+                // re-time, and restart the best-so-far from here, since
+                // costs under the old criticalities no longer compare.
+                let (_, connections) = self.compute_criticalities(netlist, &current);
+                cost_cache.retime(&current, netlist, connections, &self.delay_model);
+                current_cost = cost_cache.combined_cost(self.timing_weight);
+                best = current.clone();
+                best_cost = current_cost;
+            }
         }
 
         // Update metrics
@@ -1061,12 +1106,12 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let batches_per_temp = (cells.len().max(100) / batch_size).max(1);
 
         // Scale iterations to design size — tiny designs converge quickly
-        let effective_iterations = self.max_iterations.min(cells.len() * 100 + 100);
+        let effectiveiterations = self.maxiterations.min(cells.len() * 100 + 100);
 
         // Thread-safe counter for accepted moves (for statistics)
         let accepted_count = AtomicUsize::new(0);
 
-        for _iteration in 0..effective_iterations {
+        for iteration in 0..effectiveiterations {
             let window = rlim.round() as u32;
             let mut accepted_batches = 0usize;
             // Process batches at this temperature
@@ -1077,7 +1122,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     .map(|i| {
                         let mut rng = rand::rngs::StdRng::seed_from_u64(
                             self.seed
-                                .wrapping_add(_iteration as u64 * 1000)
+                                .wrapping_add(iteration as u64 * 1000)
                                 .wrapping_add(i as u64),
                         );
                         if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
@@ -1156,7 +1201,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 let mut best_move_idx: Option<usize> = None;
                 let mut best_delta = f64::MAX;
                 let mut rng =
-                    rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(_iteration as u64));
+                    rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(iteration as u64));
 
                 for (idx, (_, _, _, delta, _, _)) in evaluated.iter().enumerate() {
                     // Check acceptance
@@ -1195,6 +1240,13 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let acceptance_rate = accepted_batches as f64 / batches_per_temp as f64;
             if acceptance_rate < 0.001 || Self::is_frozen(temperature, current_cost, netlist) {
                 break;
+            }
+            if self.timing_weight > 0.0 && (iteration + 1) % RETIME_INTERVAL == 0 {
+                let (_, connections) = self.compute_criticalities(netlist, &current);
+                cost_cache.retime(&current, netlist, connections, &self.delay_model);
+                current_cost = cost_cache.combined_cost(self.timing_weight);
+                best = current.clone();
+                best_cost = current_cost;
             }
             temperature = self.next_temperature(temperature, acceptance_rate);
             rlim = self.next_rlim(rlim, acceptance_rate);
@@ -1847,6 +1899,31 @@ mod tests {
             NetCostCache::compute_net_costs(&net, &place(30, 12), &model, &[]).1,
             0.0
         );
+    }
+
+    /// Re-timing prices the same placement exactly as a cache built with the
+    /// new criticalities would, and keeps the timing scale it started with.
+    #[test]
+    fn retiming_reprices_timing_on_the_original_scale() {
+        let mut netlist = GateNetlist::new("t".to_string(), "test".to_string());
+        let n = netlist.add_net(GateNet::new(GateNetId(0), "n".to_string()));
+        netlist.nets[n.0 as usize].driver = Some(CellId(0));
+        netlist.nets[n.0 as usize].fanout = vec![(CellId(1), 0), (CellId(2), 0)];
+        let mut placement = PlacementResult::new();
+        for (id, x) in [(0, 10), (1, 14), (2, 25)] {
+            placement
+                .placements
+                .insert(CellId(id), PlacementLoc::new(x, 10, 0, BelType::Lut4));
+        }
+        let model = DelayModel::nexus();
+        let mut cache =
+            NetCostCache::build(&placement, &netlist, vec![vec![1.0, 0.0]], &model, 0.5);
+        let scale = cache.timing_scale;
+        cache.retime(&placement, &netlist, vec![vec![0.0, 1.0]], &model);
+        let fresh = NetCostCache::build(&placement, &netlist, vec![vec![0.0, 1.0]], &model, 0.5);
+        assert!((cache.total_timing_cost - fresh.total_timing_cost).abs() < 1e-12);
+        assert_eq!(cache.timing_scale, scale);
+        assert!(cache.total_timing_cost > 0.0);
     }
 
     /// Wide LUTs (whose BEL takes its slice's two LUTs) move by swapping
