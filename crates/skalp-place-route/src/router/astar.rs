@@ -442,8 +442,8 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         // A timing-driven search also pays the PIPs' timing terms; without
         // a bound on those the search expands every wire that is cheap in
         // base cost however slow it is
-        let timing = if timing_weight > 0.0 && !approach.far_entry() {
-            timing_weight * graph.timing_lower_bound(dx, dy)
+        let timing = if timing_weight > 0.0 {
+            timing_weight * graph.estimate_timing_to_sink(wire, approach)
         } else {
             0.0
         };
