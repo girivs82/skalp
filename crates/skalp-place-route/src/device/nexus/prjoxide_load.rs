@@ -141,10 +141,20 @@ impl NexusVariant {
         }
     }
 
-    /// Family whose timing tables apply. prjoxide has none for LFCPNX, which
-    /// shares the Nexus fabric with CrossLink-NX.
-    pub fn timing_family(&self) -> &'static str {
-        "LIFCL"
+    /// Directory of the delay tables for `grade`: the device family's own
+    /// when the database has them, else CrossLink-NX's, whose Nexus fabric the
+    /// other families share (upstream prjoxide has tables for LIFCL only).
+    pub fn timing_dir(&self, db_root: &Path, grade: &str) -> PathBuf {
+        let own = db_root.join(self.prjoxide_family()).join("timing");
+        if own.join(format!("cells_{grade}.json")).is_file() {
+            return own;
+        }
+        log::warn!(
+            "no {} delay tables for speed grade {grade} in {}; using CrossLink-NX's",
+            self.prjoxide_family(),
+            db_root.display()
+        );
+        db_root.join("LIFCL").join("timing")
     }
 
     /// Speed grade of the timing tables to use.
@@ -298,6 +308,21 @@ pub const BLOCK_RAM_WINDOWS_CONFIRMED: &[&str] = &["LFCPNX-100"];
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_family_uses_its_own_delay_tables_when_the_database_has_them() {
+        let db = tempfile::tempdir().unwrap();
+        let lifcl = db.path().join("LIFCL").join("timing");
+        let lfcpnx = db.path().join("LFCPNX").join("timing");
+        std::fs::create_dir_all(&lifcl).unwrap();
+        std::fs::create_dir_all(&lfcpnx).unwrap();
+        let variant = NexusVariant::Lfcpnx100;
+        // Not for this grade yet: the shared CrossLink-NX tables
+        assert_eq!(variant.timing_dir(db.path(), "12"), lifcl);
+        std::fs::write(lfcpnx.join("cells_12.json"), "{}").unwrap();
+        assert_eq!(variant.timing_dir(db.path(), "12"), lfcpnx);
+        assert_eq!(NexusVariant::Lifcl40.timing_dir(db.path(), "12"), lifcl);
+    }
 
     /// M1a acceptance: the real database reproduces the resource counts that
     /// `data.rs` hand-copied from prjoxide. Skipped if the DB isn't present.

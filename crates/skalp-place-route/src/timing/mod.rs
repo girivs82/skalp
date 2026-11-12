@@ -2,6 +2,7 @@
 //!
 //! Implements static timing analysis (STA) for FPGA designs.
 
+pub mod clock_targets;
 pub mod sta;
 
 mod delays;

@@ -4,9 +4,11 @@
 //! register-to-register path. What a delay is comes from a [`TimingModel`],
 //! which each FPGA family supplies from its own timing data.
 //!
-//! Scope: one clock at a time, without clock skew. Paths from and to the IO
-//! pads are not timed.
+//! Scope: each clock against its own frequency ([`ClockTargets`]), without
+//! clock skew and without paths between clocks. Paths from and to the IO pads
+//! are not timed.
 
+use super::clock_targets::ClockTargets;
 use super::{ClockSummary, CriticalPath, PathStep, TimingReport};
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -241,7 +243,7 @@ pub fn analyze<D: Device + ?Sized>(
     device: &D,
     model: &dyn TimingModel,
     design: &PlacedDesign<'_>,
-    target_mhz: f64,
+    targets: &ClockTargets,
 ) -> TimingReport {
     let mut engine = Engine {
         device,
@@ -253,12 +255,12 @@ pub fn analyze<D: Device + ?Sized>(
     };
 
     let netlist = design.netlist;
-    let target_ns = PS_PER_NS / target_mhz;
     let mut per_clock: BTreeMap<u32, (usize, f64)> = BTreeMap::new();
     let mut paths = Vec::new();
 
     for cell in &netlist.cells {
         let Some(clock) = cell.clock else { continue };
+        let target_ns = targets.required_ns(clock);
         let entry = per_clock.entry(clock.0).or_insert((0, 0.0));
         entry.0 += 1;
         for endpoint in model.endpoints(cell) {
@@ -289,9 +291,11 @@ pub fn analyze<D: Device + ?Sized>(
         }
     }
 
-    paths.sort_by(|a, b| b.0.delay.total_cmp(&a.0.delay));
+    // Worst slack first: with clocks at different frequencies, the longest
+    // path need not be the one that fails by most.
+    paths.sort_by(|a, b| a.0.slack.total_cmp(&b.0.slack));
     let failing_paths = paths.iter().filter(|p| p.0.slack < 0.0).count();
-    let worst_delay = paths.first().map_or(0.0, |p| p.0.delay);
+    let worst = paths.first().map(|p| (p.0.delay, p.0.required, p.0.slack));
     paths.truncate(10);
     let paths: Vec<CriticalPath> = paths
         .into_iter()
@@ -303,26 +307,38 @@ pub fn analyze<D: Device + ?Sized>(
 
     let clock_summaries = per_clock
         .iter()
-        .map(|(&net, &(registers, delay))| ClockSummary {
-            name: netlist.nets[net as usize].name.clone(),
-            frequency: if delay > 0.0 {
-                PS_PER_NS / delay
-            } else {
-                target_mhz
-            },
-            register_count: registers,
-            worst_slack: target_ns - delay,
+        .map(|(&net, &(registers, delay))| {
+            let clock = GateNetId(net);
+            ClockSummary {
+                name: netlist.nets[net as usize].name.clone(),
+                frequency: if delay > 0.0 {
+                    PS_PER_NS / (delay + targets.uncertainty_ns)
+                } else {
+                    targets.mhz(clock)
+                },
+                register_count: registers,
+                worst_slack: targets.required_ns(clock) - delay,
+            }
         })
         .collect();
 
+    // The report's headline is the clock with the worst slack. Its
+    // frequencies count the uncertainty in the period, as the check does.
+    let (target_frequency, design_frequency, worst_slack) = match worst {
+        Some((delay, required, slack)) if delay > 0.0 => {
+            let uncertainty = targets.uncertainty_ns;
+            (
+                PS_PER_NS / (required + uncertainty),
+                PS_PER_NS / (delay + uncertainty),
+                slack,
+            )
+        }
+        _ => (targets.default_mhz, targets.default_mhz, 0.0),
+    };
     TimingReport {
-        target_frequency: target_mhz,
-        design_frequency: if worst_delay > 0.0 {
-            PS_PER_NS / worst_delay
-        } else {
-            target_mhz
-        },
-        worst_negative_slack: (worst_delay - target_ns).max(0.0),
+        target_frequency,
+        design_frequency,
+        worst_negative_slack: (-worst_slack).max(0.0),
         failing_paths,
         meets_timing: failing_paths == 0,
         clock_summaries,

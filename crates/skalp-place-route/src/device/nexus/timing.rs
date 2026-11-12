@@ -72,8 +72,8 @@ pub struct TimingDb {
 impl TimingDb {
     /// Load a device's delay tables from the prjoxide database.
     pub fn load(db_root: &Path, variant: NexusVariant) -> Result<Self> {
-        let dir = db_root.join(variant.timing_family()).join("timing");
         let speed = variant.timing_speed_grade();
+        let dir = variant.timing_dir(db_root, speed);
         let read = |name: String| -> Result<String> {
             std::fs::read_to_string(dir.join(&name))
                 .map_err(|e| PlaceRouteError::BitstreamFailed(format!("reading {name}: {e}")))

@@ -11,7 +11,7 @@
 
 use super::prjoxide_load::PrjoxideTile;
 use crate::collections::{HashMap, HashMapExt};
-use skalp_lir::gate_netlist::{Cell, CellId, GateNetlist};
+use skalp_lir::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
 
 /// A PLL's input pins as the device names them, in router pin order.
 const INPUT_PINS: &[&str] = &[
@@ -468,6 +468,30 @@ pub fn output_frequencies(cell: &Cell, refclk_mhz: f64) -> Option<Vec<(&'static 
     )
 }
 
+/// Frequencies a PLL drives, by cell output index, once its reference
+/// clock's frequency is known (`known` gives a net's frequency in MHz).
+pub fn driven_frequencies(
+    cell: &Cell,
+    known: &dyn Fn(GateNetId) -> Option<f64>,
+) -> Vec<(usize, f64)> {
+    if !is_pll(cell) {
+        return Vec::new();
+    }
+    let reference = (0..cell.inputs.len())
+        .find(|&index| input_pin_name(cell, index) == Some("REFCK"))
+        .and_then(|index| known(cell.inputs[index]));
+    let Some(outputs) = reference.and_then(|mhz| output_frequencies(cell, mhz)) else {
+        return Vec::new();
+    };
+    (0..cell.outputs.len())
+        .filter_map(|index| {
+            let pin = OUTPUT_PINS[output_router_pin(cell, index)?];
+            let (_, mhz) = outputs.iter().find(|(name, _)| *name == pin)?;
+            Some((index, *mhz))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +540,20 @@ mod tests {
         assert_eq!(parse_number("0b0101"), Some(5));
         assert_eq!(corner_of_tile("GPLL_LLC_15K"), Some("LLC"));
         assert_eq!(corner_of_tile("GPLL_URC"), Some("URC"));
+    }
+
+    #[test]
+    fn a_pll_drives_its_outputs_once_its_reference_is_known() {
+        // 125 MHz in, CLKOP 137.5 MHz (VCO 1512.5 MHz)
+        let mut cell = pll(&[("REF_MMD_DIG", "10"), ("FBK_MMD_DIG", "11"), ("DIVA", "10")]);
+        cell.inputs = vec![GateNetId(7), GateNetId(8), GateNetId(9)];
+        cell.outputs = vec![GateNetId(10), GateNetId(11)];
+        let reference = |net: GateNetId| (net == GateNetId(7)).then_some(125.0);
+        let driven = driven_frequencies(&cell, &reference);
+        assert_eq!(driven.len(), 1, "CLKOP only, not LOCK: {driven:?}");
+        assert_eq!(driven[0].0, 0);
+        assert!((driven[0].1 - 137.5).abs() < 1e-9);
+        assert!(driven_frequencies(&cell, &|_| None).is_empty());
     }
 }
 
