@@ -44,6 +44,7 @@ struct CellTiming {
 struct IoPath {
     from_pin: String,
     to_pin: String,
+    minv: i64,
     maxv: i64,
 }
 
@@ -51,9 +52,25 @@ struct IoPath {
 struct SetupHold {
     pin: String,
     max_setup: i64,
+    #[serde(default)]
+    max_hold: i64,
 }
 
-/// Worst-case delays from prjoxide's timing database, in picoseconds.
+/// Which end of the process, voltage and temperature range a table covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    /// Slowest silicon, lowest voltage, hottest: the speed grade's own
+    /// tables, worst-case (largest) delays. Setup is checked here.
+    Slow,
+    /// Fastest silicon, highest voltage, coldest: prjoxide's `M` tables,
+    /// best-case (smallest) delays. Hold is checked here.
+    Fast,
+}
+
+/// Delays at one corner from prjoxide's timing database, in picoseconds.
+/// Where a cell has several arcs and the model uses one number, that number
+/// is the corner's extreme: the longest arc at the slow corner, the shortest
+/// at the fast one.
 pub struct TimingDb {
     pip_classes: HashMap<String, i64>,
     lut: i64,
@@ -67,12 +84,35 @@ pub struct TimingDb {
     multiplier: i64,
     ram_clk_to_q: i64,
     ram_setup: HashMap<String, i64>,
+    ram_hold: HashMap<String, i64>,
+    /// Hold time of each register pin
+    hold: HashMap<String, i64>,
 }
 
 impl TimingDb {
-    /// Load a device's delay tables from the prjoxide database.
+    /// Load a device's slow-corner delay tables from the prjoxide database.
     pub fn load(db_root: &Path, variant: NexusVariant) -> Result<Self> {
-        let speed = variant.timing_speed_grade();
+        Self::load_corner(db_root, variant, Corner::Slow)
+    }
+
+    /// Load a device's delay tables at `corner`.
+    pub fn load_corner(db_root: &Path, variant: NexusVariant, corner: Corner) -> Result<Self> {
+        let speed = match corner {
+            Corner::Slow => variant.timing_speed_grade(),
+            Corner::Fast => "M",
+        };
+        // The delay of one arc at this corner, and the extreme of several
+        let value = |p: &IoPath| match corner {
+            Corner::Slow => p.maxv,
+            Corner::Fast => p.minv,
+        };
+        let extreme = |values: &mut dyn Iterator<Item = i64>| {
+            match corner {
+                Corner::Slow => values.max(),
+                Corner::Fast => values.min(),
+            }
+            .unwrap_or(0)
+        };
         let dir = variant.timing_dir(db_root, speed);
         let read = |name: String| -> Result<String> {
             std::fs::read_to_string(dir.join(&name))
@@ -93,63 +133,70 @@ impl TimingDb {
                 PlaceRouteError::BitstreamFailed(format!("No timing data for {name}"))
             })
         };
-        let lut = cell("OXIDE_COMB:LUT4")?
-            .iopaths
-            .iter()
-            .map(|p| p.maxv)
-            .max()
-            .unwrap_or(0);
+        let lut = extreme(&mut cell("OXIDE_COMB:LUT4")?.iopaths.iter().map(value));
         let wide = cell("OXIDE_COMB:WIDEFN9")?;
         let wide_arc = |pins: &[&str]| {
-            wide.iopaths
-                .iter()
-                .filter(|p| pins.contains(&p.from_pin.as_str()))
-                .map(|p| p.maxv)
-                .max()
-                .unwrap_or(0)
+            extreme(
+                &mut wide
+                    .iopaths
+                    .iter()
+                    .filter(|p| pins.contains(&p.from_pin.as_str()))
+                    .map(value),
+            )
         };
         let wide_data = wide_arc(&["A", "B", "C", "D"]);
         let wide_select = wide_arc(&["SEL"]);
         let ff = cell("OXIDE_FF:PPP:SYNC")?;
-        let clk_to_q = ff.iopaths.iter().map(|p| p.maxv).max().unwrap_or(0);
+        let clk_to_q = extreme(&mut ff.iopaths.iter().map(value));
         let setup = ff
             .setupholds
             .iter()
             .map(|s| (s.pin.clone(), s.max_setup))
             .collect();
+        let hold = ff
+            .setupholds
+            .iter()
+            .map(|s| (s.pin.clone(), s.max_hold))
+            .collect();
         let ccu2 = cell("OXIDE_COMB:CCU2")?
             .iopaths
             .iter()
-            .map(|p| ((p.from_pin.clone(), p.to_pin.clone()), p.maxv))
+            .map(|p| ((p.from_pin.clone(), p.to_pin.clone()), value(p)))
             .collect();
 
-        // The worst path through each of a multiplier's chained blocks.
-        let worst_arc = |name: &str| -> Result<i64> {
-            Ok(cell(name)?
-                .iopaths
-                .iter()
-                .map(|p| p.maxv)
-                .max()
-                .unwrap_or(0))
-        };
+        // The corner's extreme path through each of a multiplier's chained
+        // blocks.
+        let worst_arc =
+            |name: &str| -> Result<i64> { Ok(extreme(&mut cell(name)?.iopaths.iter().map(value))) };
         let multiplier = worst_arc("PREADD9_CORE")?
             + worst_arc("MULT9_CORE")?
             + worst_arc("MULT18_CORE")?
             + worst_arc("REG18_CORE")?;
 
         let ram = cell("PDPSC16K_MODE")?;
-        let ram_clk_to_q = ram.iopaths.iter().map(|p| p.maxv).max().unwrap_or(0);
+        let ram_clk_to_q = extreme(&mut ram.iopaths.iter().map(value));
         let ram_setup = ram
             .setupholds
             .iter()
             .map(|s| (s.pin.clone(), s.max_setup))
+            .collect();
+        let ram_hold = ram
+            .setupholds
+            .iter()
+            .map(|s| (s.pin.clone(), s.max_hold))
             .collect();
 
         Ok(Self {
             pip_classes: interconnect
                 .pip_classes
                 .into_iter()
-                .map(|(name, class)| (name, class.base.1))
+                .map(|(name, class)| {
+                    let delay = match corner {
+                        Corner::Slow => class.base.1,
+                        Corner::Fast => class.base.0,
+                    };
+                    (name, delay)
+                })
                 .collect(),
             lut,
             wide_data,
@@ -160,6 +207,8 @@ impl TimingDb {
             multiplier,
             ram_clk_to_q,
             ram_setup,
+            ram_hold,
+            hold,
         })
     }
 }
@@ -323,15 +372,27 @@ impl NexusTiming<'_> {
         cell.function == Some(CellFunction::Lut5)
     }
 
-    /// Setup time of a block RAM pin, from the table's bus-wide entries.
-    fn ram_setup_ps(&self, pin: &str) -> i64 {
+    /// The table key of a block RAM pin: address buses have bus-wide
+    /// entries.
+    fn ram_table_key(pin: &str) -> String {
         let bus = pin.trim_end_matches(|c: char| c.is_ascii_digit());
-        let key = match (bus, pin[bus.len()..].parse::<usize>()) {
+        match (bus, pin[bus.len()..].parse::<usize>()) {
             ("ADA" | "ADB", Ok(bit)) if bit < 5 => format!("{bus}_4_0"),
             ("ADA" | "ADB", Ok(_)) => format!("{bus}_13_5"),
             _ => bus.to_string(),
-        };
+        }
+    }
+
+    /// Setup time of a block RAM pin.
+    fn ram_setup_ps(&self, pin: &str) -> i64 {
+        let key = Self::ram_table_key(pin);
         self.db.ram_setup.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Hold time of a block RAM pin.
+    fn ram_hold_ps(&self, pin: &str) -> i64 {
+        let key = Self::ram_table_key(pin);
+        self.db.ram_hold.get(&key).copied().unwrap_or(0)
     }
 }
 
@@ -368,6 +429,7 @@ impl TimingModel for NexusTiming<'_> {
 
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
         let setup = |name: &str| self.db.setup.get(name).copied().unwrap_or(0);
+        let hold = |name: &str| self.db.hold.get(name).copied().unwrap_or(0);
         if let Some(ports) = cell.ram_ports() {
             return (0..cell.inputs.len())
                 .filter_map(|input| {
@@ -376,6 +438,7 @@ impl TimingModel for NexusTiming<'_> {
                         input,
                         pin: ebr::router_pin(&name).unwrap_or(input),
                         setup_ps: self.ram_setup_ps(&name),
+                        hold_ps: self.ram_hold_ps(&name),
                     })
                 })
                 .collect();
@@ -386,20 +449,29 @@ impl TimingModel for NexusTiming<'_> {
                     input,
                     pin: input,
                     setup_ps: 0,
+                    hold_ps: 0,
                 })
                 .collect();
         }
         (0..cell.inputs.len())
             .map(|input| {
-                let (pin, setup_ps) = match (cell.cell_type.as_str(), input) {
-                    (_, 0) => (0, setup("M")),
-                    ("OXIDE_FF_EN" | "OXIDE_FF_RSTE", 1) => (FF_PIN_CE, setup("CE")),
-                    _ => (FF_PIN_LSR, setup("LSR")),
+                let (pin, name) = match (cell.cell_type.as_str(), input) {
+                    (_, 0) => (0, "M"),
+                    ("OXIDE_FF_EN" | "OXIDE_FF_RSTE", 1) => (FF_PIN_CE, "CE"),
+                    _ => (FF_PIN_LSR, "LSR"),
+                };
+                // Data reaches the register through the bypass (M) or from
+                // the slice's own LUT (DI); take the stricter of the two.
+                let (setup_ps, hold_ps) = if name == "M" {
+                    (setup("M").max(setup("DI")), hold("M").max(hold("DI")))
+                } else {
+                    (setup(name), hold(name))
                 };
                 TimingEndpoint {
                     input,
                     pin,
                     setup_ps,
+                    hold_ps,
                 }
             })
             .collect()

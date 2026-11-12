@@ -753,6 +753,7 @@ pub fn place_and_route_nexus_real(
         .timing
         .as_ref()
         .map_or(0.0, |t| t.clock_uncertainty + t.setup_margin);
+    clock_targets.hold_margin_ns = config.timing.as_ref().map_or(0.0, |t| t.hold_margin);
     let generator = NexusConfig {
         device: &device,
         variant,
@@ -768,7 +769,20 @@ pub fn place_and_route_nexus_real(
         device: &device,
         db: &timing_db,
     };
-    let timing = crate::timing::sta::analyze(&device, &timing_model, &design, &clock_targets);
+    let mut timing = crate::timing::sta::analyze(&device, &timing_model, &design, &clock_targets);
+    // Hold, with the fastest delays: the fast corner's tables
+    let fast_db = crate::device::nexus::timing::TimingDb::load_corner(
+        db_root,
+        variant,
+        crate::device::nexus::timing::Corner::Fast,
+    )?;
+    let fast_model = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &fast_db,
+    };
+    let hold = crate::timing::sta::analyze_hold(&device, &fast_model, &design, &clock_targets);
+    timing.meets_timing &= hold.violations == 0;
+    timing.hold = Some(hold);
 
     let bit_writer = NexusBitWriter {
         db_root,

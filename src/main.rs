@@ -4694,9 +4694,24 @@ fn run_nexus_pnr_on_netlist(
         println!("  Achieved: {:.2} MHz", timing.design_frequency);
         if timing.meets_timing {
             println!("  Status: ✅ Timing met");
-        } else {
+        } else if timing.failing_paths > 0 {
             println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
             println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
+        } else {
+            println!("  Status: ⚠️ hold violations");
+        }
+        if let Some(ref hold) = timing.hold {
+            if hold.violations == 0 {
+                println!(
+                    "  Hold (fast corner): ✅ met, worst slack {:.3} ns",
+                    hold.worst_slack
+                );
+            } else {
+                println!(
+                    "  Hold (fast corner): ⚠️ {} violations, worst slack {:.3} ns",
+                    hold.violations, hold.worst_slack
+                );
+            }
         }
         if let Some(path) = timing.critical_paths.first() {
             println!(

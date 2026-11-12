@@ -4,19 +4,26 @@
 //! register-to-register path. What a delay is comes from a [`TimingModel`],
 //! which each FPGA family supplies from its own timing data.
 //!
-//! Scope: each clock against its own frequency ([`ClockTargets`]), without
-//! clock skew and without paths between clocks. Paths from and to the IO pads
-//! are not timed.
+//! Each clock is checked against its own frequency ([`ClockTargets`]), with
+//! the clock's arrival at every register taken from its routed clock net, so
+//! skew counts. [`analyze`] checks setup with a slow-corner model;
+//! [`analyze_hold`] checks hold with a fast-corner one. Paths between clocks
+//! are not timed. Setup times paths from input pads as launched at the clock
+//! source; hold does not time them.
 
 use super::clock_targets::ClockTargets;
-use super::{ClockSummary, CriticalPath, PathStep, TimingReport};
+use super::{ClockSummary, CriticalPath, HoldReport, PathStep, TimingReport};
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
-use crate::device::{CellPin, Device, PipId, WireId};
+use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetId};
 use std::collections::BTreeMap;
 
 const PS_PER_NS: f64 = 1000.0;
+
+/// Arrival of a net no timed path reaches, in early (hold) analysis: far
+/// enough out that adding path delays to it stays far out.
+const NO_PATH: i64 = i64::MAX / 4;
 
 /// An input a clocked cell samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +34,8 @@ pub struct TimingEndpoint {
     pub pin: usize,
     /// Setup time in picoseconds
     pub setup_ps: i64,
+    /// Hold time in picoseconds
+    pub hold_ps: i64,
 }
 
 /// One FPGA family's delays.
@@ -57,7 +66,8 @@ pub trait TimingModel {
     }
 }
 
-/// Worst arrival at a net's driver output.
+/// Worst arrival at a net's driver output: the latest in setup analysis, the
+/// earliest in hold analysis.
 #[derive(Debug, Clone, Copy)]
 struct Arrival {
     time: i64,
@@ -78,6 +88,8 @@ struct Engine<'a, D: Device + ?Sized> {
     /// Worst arrival time at each net, and the input that set it
     arrivals: HashMap<GateNetId, Arrival>,
     visiting: HashSet<GateNetId>,
+    /// Earliest arrivals (hold) rather than latest (setup)
+    early: bool,
 }
 
 impl<D: Device + ?Sized> Engine<'_, D> {
@@ -117,12 +129,28 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         total
     }
 
+    /// Arrival time where nothing timed launches a path: time zero for
+    /// setup, which times such inputs from the clock source; none for hold.
+    fn untimed(&self) -> i64 {
+        if self.early {
+            NO_PATH
+        } else {
+            0
+        }
+    }
+
+    /// When a cell's clock reaches it, from the clock net's source.
+    fn clock_arrival(&mut self, cell: &Cell) -> i64 {
+        cell.clock
+            .map_or(0, |clock| self.route_delay(clock, cell.id, FF_PIN_CLK))
+    }
+
     fn net_arrival(&mut self, net: GateNetId) -> i64 {
         if let Some(arrival) = self.arrivals.get(&net) {
             return arrival.time;
         }
         if !self.visiting.insert(net) {
-            return 0;
+            return self.untimed();
         }
         let netlist = self.design.netlist;
         let info = &netlist.nets[net.0 as usize];
@@ -131,7 +159,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         let arrival = match driver {
             Some(cell) => self.output_time(cell, output),
             None => Arrival {
-                time: 0,
+                time: self.untimed(),
                 from: None,
                 route_ps: 0,
                 cell_ps: 0,
@@ -142,38 +170,59 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         arrival.time
     }
 
-    /// Latest arrival of an input at the cell and the routing delay part of
-    /// it, or `None` if it is not timed.
+    /// Arrival of an input at the cell (latest, or earliest in hold
+    /// analysis) and the routing delay part of it, or `None` if it is not
+    /// timed.
     fn input_time(&mut self, cell: &Cell, input: usize) -> Option<(i64, GateNetId, i64)> {
         let net = *cell.inputs.get(input)?;
         if self.design.tied.value(cell.id, input).is_some() {
             return None;
         }
         let arrival = self.net_arrival(net);
+        if arrival >= NO_PATH {
+            return None;
+        }
         if self.model.is_dedicated(cell, input) {
             return Some((arrival, net, 0));
         }
-        let routing = self
+        let delays = self
             .model
             .input_pins(cell, input)
             .into_iter()
             .map(|pin| self.route_delay(net, cell.id, pin))
-            .max()
-            .unwrap_or(0);
+            .collect::<Vec<_>>();
+        let routing = if self.early {
+            delays.into_iter().min()
+        } else {
+            delays.into_iter().max()
+        }
+        .unwrap_or(0);
         Some((arrival + routing, net, routing))
     }
 
     fn output_time(&mut self, cell: &Cell, output: usize) -> Arrival {
         if let Some(launch) = self.model.launch_ps(cell, output) {
+            // Pads and constants launch nothing hold has to check
+            if self.early && cell.clock.is_none() {
+                return Arrival {
+                    time: NO_PATH,
+                    from: None,
+                    route_ps: 0,
+                    cell_ps: 0,
+                };
+            }
+            // A register launches when its clock reaches it: the clock's
+            // routing shows as the routing into the launching cell.
+            let clock = self.clock_arrival(cell);
             return Arrival {
-                time: launch,
+                time: clock + launch,
                 from: None,
-                route_ps: 0,
+                route_ps: clock,
                 cell_ps: launch,
             };
         }
-        let mut worst = Arrival {
-            time: 0,
+        let mut best = Arrival {
+            time: self.untimed(),
             from: None,
             route_ps: 0,
             cell_ps: 0,
@@ -183,9 +232,15 @@ impl<D: Device + ?Sized> Engine<'_, D> {
                 continue;
             };
             if let Some((time, net, route_ps)) = self.input_time(cell, input) {
-                if time + delay > worst.time {
-                    worst = Arrival {
-                        time: time + delay,
+                let candidate = time + delay;
+                let better = if self.early {
+                    candidate < best.time
+                } else {
+                    candidate > best.time
+                };
+                if better {
+                    best = Arrival {
+                        time: candidate,
                         from: Some(net),
                         route_ps,
                         cell_ps: delay,
@@ -193,7 +248,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
                 }
             }
         }
-        worst
+        best
     }
 
     /// The nets on the worst path into `net`, from its start.
@@ -252,6 +307,7 @@ pub fn analyze<D: Device + ?Sized>(
         drivers: HashMap::new(),
         arrivals: HashMap::new(),
         visiting: HashSet::new(),
+        early: false,
     };
 
     let netlist = design.netlist;
@@ -263,12 +319,14 @@ pub fn analyze<D: Device + ?Sized>(
         let target_ns = targets.required_ns(clock);
         let entry = per_clock.entry(clock.0).or_insert((0, 0.0));
         entry.0 += 1;
+        let capture = engine.clock_arrival(cell);
         for endpoint in model.endpoints(cell) {
             let Some(routed) = engine.input_time_at(cell, endpoint) else {
                 continue;
             };
             let (time, net) = routed;
-            let delay_ns = (time + endpoint.setup_ps) as f64 / PS_PER_NS;
+            // From the capturing edge at the clock's source
+            let delay_ns = (time + endpoint.setup_ps - capture) as f64 / PS_PER_NS;
             let worst = per_clock.get_mut(&clock.0).expect("present");
             worst.1 = worst.1.max(delay_ns);
             let nets = engine.nets_through(net);
@@ -287,6 +345,7 @@ pub fn analyze<D: Device + ?Sized>(
                     steps: Vec::new(),
                 },
                 nets,
+                clock,
             ));
         }
     }
@@ -295,11 +354,11 @@ pub fn analyze<D: Device + ?Sized>(
     // path need not be the one that fails by most.
     paths.sort_by(|a, b| a.0.slack.total_cmp(&b.0.slack));
     let failing_paths = paths.iter().filter(|p| p.0.slack < 0.0).count();
-    let worst = paths.first().map(|p| (p.0.delay, p.0.required, p.0.slack));
+    let worst = paths.first().map(|p| (p.0.delay, p.0.slack, p.2));
     paths.truncate(10);
     let paths: Vec<CriticalPath> = paths
         .into_iter()
-        .map(|(mut path, nets)| {
+        .map(|(mut path, nets, _)| {
             path.steps = engine.path_steps(&nets);
             path
         })
@@ -325,14 +384,11 @@ pub fn analyze<D: Device + ?Sized>(
     // The report's headline is the clock with the worst slack. Its
     // frequencies count the uncertainty in the period, as the check does.
     let (target_frequency, design_frequency, worst_slack) = match worst {
-        Some((delay, required, slack)) if delay > 0.0 => {
-            let uncertainty = targets.uncertainty_ns;
-            (
-                PS_PER_NS / (required + uncertainty),
-                PS_PER_NS / (delay + uncertainty),
-                slack,
-            )
-        }
+        Some((delay, slack, clock)) if delay > 0.0 => (
+            targets.mhz(clock),
+            PS_PER_NS / (delay + targets.uncertainty_ns),
+            slack,
+        ),
         _ => (targets.default_mhz, targets.default_mhz, 0.0),
     };
     TimingReport {
@@ -343,6 +399,72 @@ pub fn analyze<D: Device + ?Sized>(
         meets_timing: failing_paths == 0,
         clock_summaries,
         critical_paths: paths,
+        hold: None,
+    }
+}
+
+/// Hold check of a placed and routed design: the earliest each register
+/// input can change after a clock edge, against the time it must hold after
+/// that edge reaches the register. `model` gives the fast corner's delays.
+pub fn analyze_hold<D: Device + ?Sized>(
+    device: &D,
+    model: &dyn TimingModel,
+    design: &PlacedDesign<'_>,
+    targets: &ClockTargets,
+) -> HoldReport {
+    let mut engine = Engine {
+        device,
+        model,
+        design,
+        drivers: HashMap::new(),
+        arrivals: HashMap::new(),
+        visiting: HashSet::new(),
+        early: true,
+    };
+    let margin_ps = targets.hold_margin_ns * PS_PER_NS;
+    let mut paths = Vec::new();
+    for cell in &design.netlist.cells {
+        if cell.clock.is_none() {
+            continue;
+        }
+        let capture = engine.clock_arrival(cell);
+        for endpoint in model.endpoints(cell) {
+            let Some((time, net)) = engine.input_time_at(cell, endpoint) else {
+                continue;
+            };
+            let delay = (time - capture) as f64 / PS_PER_NS;
+            let required = (endpoint.hold_ps as f64 + margin_ps) / PS_PER_NS;
+            paths.push((delay, required, net, cell));
+        }
+    }
+    paths.sort_by(|a, b| (a.0 - a.1).total_cmp(&(b.0 - b.1)));
+    let violations = paths.iter().filter(|p| p.0 < p.1).count();
+    let worst_slack = paths.first().map_or(0.0, |p| p.0 - p.1);
+    let netlist = design.netlist;
+    let paths = paths
+        .into_iter()
+        .take(10)
+        .map(|(delay, required, net, cell)| {
+            let nets = engine.nets_through(net);
+            let path: Vec<String> = nets
+                .iter()
+                .map(|n| netlist.nets[n.0 as usize].name.clone())
+                .collect();
+            CriticalPath {
+                delay,
+                required,
+                slack: delay - required,
+                source: path.first().cloned().unwrap_or_default(),
+                destination: cell.path.clone(),
+                path,
+                steps: engine.path_steps(&nets),
+            }
+        })
+        .collect();
+    HoldReport {
+        worst_slack,
+        violations,
+        paths,
     }
 }
 
@@ -354,6 +476,9 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             return None;
         }
         let arrival = self.net_arrival(net);
+        if arrival >= NO_PATH {
+            return None;
+        }
         Some((arrival + self.route_delay(net, cell.id, endpoint.pin), net))
     }
 }

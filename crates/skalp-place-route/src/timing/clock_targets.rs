@@ -19,6 +19,8 @@ pub struct ClockTargets {
     /// Taken off every clock period before paths are checked, in ns: clock
     /// jitter and uncertainty plus the user's setup margin
     pub uncertainty_ns: f64,
+    /// Added to every hold requirement, in ns
+    pub hold_margin_ns: f64,
 }
 
 impl ClockTargets {
@@ -28,6 +30,7 @@ impl ClockTargets {
             default_mhz: mhz,
             per_net: HashMap::new(),
             uncertainty_ns: 0.0,
+            hold_margin_ns: 0.0,
         }
     }
 
@@ -85,6 +88,7 @@ impl ClockTargets {
             default_mhz,
             per_net,
             uncertainty_ns: 0.0,
+            hold_margin_ns: 0.0,
         }
     }
 }
