@@ -1,0 +1,47 @@
+// Two entities the top imports, followed by two it does not. The unused ones
+// still have their own ids while this file is rebuilt with the imports
+// available, and must not take an id an imported entity already has.
+
+entity Inc {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl Inc {
+    y = x + 1
+}
+
+entity Dbl {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl Dbl {
+    y = x + x
+}
+
+entity Quad {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl Quad {
+    inst d1 = Dbl { x: x }
+    signal t: bit[8]
+    t = d1.y
+    inst d2 = Dbl { x: t }
+    y = d2.y
+}
+
+entity IncTwice {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl IncTwice {
+    inst i1 = Inc { x: x }
+    signal t: bit[8]
+    t = i1.y
+    inst i2 = Inc { x: t }
+    y = i2.y
+}

@@ -1,0 +1,12 @@
+mod mid;
+use mid::AddThreeTwice;
+
+entity ImportedNestedTop {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl ImportedNestedTop {
+    inst m = AddThreeTwice { x: x }
+    y = m.y
+}

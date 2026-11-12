@@ -783,9 +783,16 @@ impl Testbench {
 
         // Compile to MIR
         let compiler = MirCompiler::new();
-        let mir = compiler
+        let mut mir = compiler
             .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+        // Hierarchical lowering picks its own top; with several candidate
+        // tops in one file it could build a different one than was asked for
+        if let Some(top) = top_module_name {
+            if !mir.retain_reachable_from(top) {
+                anyhow::bail!("top module `{top}` not found");
+            }
+        }
 
         // Load technology library
         let library = get_stdlib_library(library_name).map_err(|e| {

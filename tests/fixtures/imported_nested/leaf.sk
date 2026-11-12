@@ -1,0 +1,8 @@
+entity AddThree {
+    in x: bit[8]
+    out y: bit[8]
+}
+
+impl AddThree {
+    y = x + 3
+}

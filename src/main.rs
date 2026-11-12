@@ -254,6 +254,12 @@ enum Commands {
         #[arg(long, default_value = "default")]
         pnr_preset: String,
 
+        /// Clock frequency in MHz to choose `#[pipeline]` latencies for,
+        /// overriding the clock's own (its `'clk: 100MHz` domain or its
+        /// board pin)
+        #[arg(long)]
+        frequency: Option<f64>,
+
         /// Dump an intermediate representation and exit (hir, mir, lir, aig)
         #[arg(long, value_name = "STAGE")]
         emit: Option<String>,
@@ -845,6 +851,7 @@ fn main() -> Result<()> {
             output,
             optimize,
             pnr_preset,
+            frequency,
             emit,
             power_stub,
             debug,
@@ -856,6 +863,7 @@ fn main() -> Result<()> {
                 &output,
                 &optimize,
                 &pnr_preset,
+                frequency,
                 emit.as_deref(),
                 power_stub,
                 debug,
@@ -4112,6 +4120,166 @@ fn generate_ec_html_report(
     html
 }
 
+/// The clock period, in picoseconds, that `#[pipeline]` latencies are
+/// chosen for: `--frequency`, else the top entity's clock domain frequency,
+/// else the frequency of the board pin the top's clock is on
+fn pipeline_clock_period_ps(
+    mir: &skalp_mir::Mir,
+    family: &str,
+    variant: &str,
+    frequency_mhz: Option<f64>,
+) -> Result<i64> {
+    use skalp_frontend::hir::PinLocation;
+    let hz = if let Some(mhz) = frequency_mhz {
+        mhz * 1e6
+    } else {
+        let top = find_top_level_module(mir)
+            .ok_or_else(|| anyhow::anyhow!("No top-level module in the design"))?;
+        let domain_hz: Vec<u64> = top
+            .clock_domains
+            .iter()
+            .filter_map(|d| d.frequency_hz)
+            .collect();
+        match domain_hz.as_slice() {
+            [hz] => *hz as f64,
+            [] => {
+                let pin = top
+                    .ports
+                    .iter()
+                    .filter(|p| matches!(p.port_type, skalp_mir::mir::DataType::Clock { .. }))
+                    .find_map(|p| {
+                        match p.physical_constraints.as_ref()?.pin_location.as_ref()? {
+                            PinLocation::Single(pin) => Some(pin.clone()),
+                            _ => None,
+                        }
+                    });
+                let board_hz = (family == "nexus")
+                    .then(|| nexus_variant(variant).ok())
+                    .flatten()
+                    .and_then(skalp_place_route::boards::for_nexus_variant)
+                    .zip(pin)
+                    .and_then(|(board, pin)| {
+                        skalp_place_route::boards::clock_frequency(board, &pin)
+                    });
+                board_hz.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "#[pipeline] without stages needs the clock frequency: give the clock a \
+                         frequency (`'clk: 100MHz`), put it on a board clock pin, or pass --frequency"
+                    )
+                })?
+            }
+            _ => anyhow::bail!(
+                "#[pipeline] without stages: the top entity has clock domains at several \
+                 frequencies; pass --frequency"
+            ),
+        }
+    };
+    Ok((1e12 / hz).round() as i64)
+}
+
+/// Choose the latency of every `#[pipeline]` entity that leaves it to
+/// synthesis, record it in the design's pipeline lock file and apply it to
+/// `hir`. Returns whether `hir` changed (so MIR must be compiled again).
+#[allow(clippy::too_many_arguments)]
+fn choose_pipeline_latencies(
+    source: &Path,
+    hir: &mut skalp_frontend::hir::Hir,
+    module_hirs: &indexmap::IndexMap<PathBuf, skalp_frontend::hir::Hir>,
+    mir: &skalp_mir::Mir,
+    library: &skalp_lir::TechLibrary,
+    preset: skalp_lir::synth::SynthPreset,
+    family: &str,
+    variant: &str,
+    frequency_mhz: Option<f64>,
+) -> Result<bool> {
+    use skalp_frontend::pipeline_lock;
+    if pipeline_lock::auto_configs(hir).is_empty() {
+        return Ok(false);
+    }
+    let period_ps = pipeline_clock_period_ps(mir, family, variant, frequency_mhz)?;
+
+    // Synthesize with every such entity at its own latency
+    let mut own = hir.clone();
+    pipeline_lock::apply(&mut own, &pipeline_lock::PipelineLock::new());
+    let own_mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&own, module_hirs)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+    let choices = if family == "nexus" {
+        let delays = nexus_retime_delays(variant)?;
+        skalp_lir::pipeline_choice::choose_pipeline_stages(
+            &own_mir, library, preset, &*delays, period_ps,
+        )
+    } else {
+        anyhow::bail!(
+            "#[pipeline] without stages needs the device's delays to choose a latency, \
+             and only Nexus devices have them so far; write #[pipeline(stages = N)]"
+        );
+    };
+
+    let old = pipeline_lock::read(source)?;
+    let mut lock = pipeline_lock::PipelineLock::new();
+    for choice in &choices {
+        let Some(latency) = choice.latency else {
+            anyhow::bail!(
+                "`{}` can't meet {:.1} MHz with up to {} cycles of latency (its own is {}); \
+                 raise max_stages or split its logic",
+                choice.entity,
+                1e6 / period_ps as f64,
+                choice.limit,
+                choice.own_latency
+            );
+        };
+        println!(
+            "Pipeline: `{}` latency {} cycles for {:.1} MHz (its own {})",
+            choice.entity,
+            latency,
+            1e6 / period_ps as f64,
+            choice.own_latency
+        );
+        lock.insert(choice.entity.clone(), latency);
+    }
+    if lock != old {
+        let path = pipeline_lock::write(
+            source,
+            &lock,
+            &format!("for a {:.1} MHz clock", 1e6 / period_ps as f64),
+        )?;
+        println!(
+            "⚠️  Pipeline latencies changed; recorded in {} (simulate again before trusting results)",
+            path.display()
+        );
+    }
+    pipeline_lock::apply(hir, &lock);
+    Ok(true)
+}
+
+/// The Nexus device's delays for choosing pipeline latencies
+#[cfg(feature = "nexus-real")]
+fn nexus_retime_delays(variant: &str) -> Result<Box<dyn skalp_lir::retime::RetimeDelays>> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+    let db_root = find_database().ok_or_else(|| {
+        anyhow::anyhow!(
+            "#[pipeline] without stages needs the device's delays, and the prjoxide database \
+             was not found. Set PRJOXIDE_DB or clone prjoxide next to this repository."
+        )
+    })?;
+    Ok(Box::new(
+        skalp_place_route::device::nexus::timing::NexusRetimeDelays::load(
+            &db_root,
+            nexus_variant(variant)?,
+        )?,
+    ))
+}
+
+#[cfg(not(feature = "nexus-real"))]
+fn nexus_retime_delays(_variant: &str) -> Result<Box<dyn skalp_lir::retime::RetimeDelays>> {
+    anyhow::bail!(
+        "#[pipeline] without stages needs the device's delays; this build has no Nexus device \
+         data (build with --features nexus-real), so write #[pipeline(stages = N)]"
+    )
+}
+
 /// Synthesize design for FPGA target
 #[allow(clippy::too_many_arguments)]
 fn synthesize_design(
@@ -4121,6 +4289,7 @@ fn synthesize_design(
     output_dir: &PathBuf,
     optimize: &str,
     pnr_preset: &str,
+    frequency: Option<f64>,
     emit: Option<&str>,
     power_stub: bool,
     debug: bool,
@@ -4200,9 +4369,44 @@ fn synthesize_design(
     // Lower to MIR with module resolution (trait impls, entity imports)
     let compiler =
         skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
-    let mir = compiler
+    let mut hir = hir;
+    let mut mir = compiler
         .compile_to_mir_with_modules(&hir, &module_hirs)
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    // Parse optimization preset
+    let preset = match optimize {
+        "quick" => skalp_lir::synth::SynthPreset::Quick,
+        "balanced" => skalp_lir::synth::SynthPreset::Balanced,
+        "full" => skalp_lir::synth::SynthPreset::Full,
+        "area" => skalp_lir::synth::SynthPreset::Area,
+        "resyn2" => skalp_lir::synth::SynthPreset::Resyn2,
+        "compress2" => skalp_lir::synth::SynthPreset::Compress2,
+        "auto" => skalp_lir::synth::SynthPreset::Auto,
+        _ => anyhow::bail!(
+            "Unknown optimization preset: '{}'. Options: quick, balanced, full, area, resyn2, compress2, auto",
+            optimize
+        ),
+    };
+
+    // Latencies for #[pipeline] entities that leave them to synthesis
+    if emit.is_none()
+        && choose_pipeline_latencies(
+            source,
+            &mut hir,
+            &module_hirs,
+            &mir,
+            &library,
+            preset,
+            family,
+            variant,
+            frequency,
+        )?
+    {
+        mir = compiler
+            .compile_to_mir_with_modules(&hir, &module_hirs)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+    }
 
     // --emit mir: dump MIR and exit
     if emit == Some("mir") {
@@ -4268,20 +4472,6 @@ fn synthesize_design(
         }
     }
 
-    // Parse optimization preset
-    let preset = match optimize {
-        "quick" => skalp_lir::synth::SynthPreset::Quick,
-        "balanced" => skalp_lir::synth::SynthPreset::Balanced,
-        "full" => skalp_lir::synth::SynthPreset::Full,
-        "area" => skalp_lir::synth::SynthPreset::Area,
-        "resyn2" => skalp_lir::synth::SynthPreset::Resyn2,
-        "compress2" => skalp_lir::synth::SynthPreset::Compress2,
-        "auto" => skalp_lir::synth::SynthPreset::Auto,
-        _ => anyhow::bail!(
-            "Unknown optimization preset: '{}'. Options: quick, balanced, full, area, resyn2, compress2, auto",
-            optimize
-        ),
-    };
     println!("Optimize: {}", optimize);
 
     // Hierarchical synthesis: each module independently, then flatten
@@ -4513,6 +4703,21 @@ fn run_nexus_pnr_on_netlist(
                 "  Critical path: {:.3} ns, ending at {}",
                 path.delay, path.destination
             );
+            let runs = path.time_by_instance();
+            if !runs.is_empty() {
+                println!("  Time along it by instance:");
+                for run in runs {
+                    let instance = if run.instance.is_empty() {
+                        "(top)"
+                    } else {
+                        &run.instance
+                    };
+                    println!(
+                        "    {:>7.3} ns  {:>3} cells  {}",
+                        run.delay, run.cells, instance
+                    );
+                }
+            }
         }
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;

@@ -5,6 +5,7 @@
 pub mod sta;
 
 mod delays;
+pub mod retime_delays;
 pub mod route_delays;
 
 pub use delays::DelayModel;
@@ -99,6 +100,47 @@ pub struct PathStep {
     pub route_in: f64,
     /// Delay through the driver from that input (or clock-to-output), in ns
     pub cell_delay: f64,
+}
+
+/// Time a critical path spends in one instance: a run of consecutive steps
+/// whose driving cells sit in the same instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstanceTime {
+    /// Instance path (a driving cell's path without its last component)
+    pub instance: String,
+    /// Routing into those cells plus their delays, in ns
+    pub delay: f64,
+    /// Cells of the path in this run
+    pub cells: usize,
+}
+
+impl CriticalPath {
+    /// Where the path spends its time, instance by instance in path order.
+    /// Consecutive steps in one instance are merged, so a path that leaves an
+    /// instance and comes back shows it twice. Empty when the analyzer did not
+    /// record steps.
+    pub fn time_by_instance(&self) -> Vec<InstanceTime> {
+        let mut runs: Vec<InstanceTime> = Vec::new();
+        for step in &self.steps {
+            let instance = match step.cell.rsplit_once('.') {
+                Some((parent, _)) => parent,
+                None => "",
+            };
+            let delay = step.route_in + step.cell_delay;
+            match runs.last_mut() {
+                Some(run) if run.instance == instance => {
+                    run.delay += delay;
+                    run.cells += 1;
+                }
+                _ => runs.push(InstanceTime {
+                    instance: instance.to_string(),
+                    delay,
+                    cells: 1,
+                }),
+            }
+        }
+        runs
+    }
 }
 
 /// Timing analysis report
@@ -652,5 +694,55 @@ impl<D: Device + Clone> TimingDrivenPlacer<D> {
         let report = analyzer.analyze_timing(netlist, &placement, &routing)?;
 
         Ok((placement, report))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(cell: &str, route_in: f64, cell_delay: f64) -> PathStep {
+        PathStep {
+            net: format!("{cell}.o"),
+            cell: cell.to_string(),
+            cell_type: "LUT4".to_string(),
+            tile: None,
+            arrival: 0.0,
+            route_in,
+            cell_delay,
+        }
+    }
+
+    #[test]
+    fn test_time_by_instance_merges_consecutive_steps() {
+        let path = CriticalPath {
+            delay: 4.0,
+            required: 10.0,
+            slack: 6.0,
+            source: "top.a.r".to_string(),
+            destination: "top.b.r".to_string(),
+            path: Vec::new(),
+            steps: vec![
+                step("top.a.r", 0.0, 0.5),
+                step("top.a.l1", 0.25, 0.25),
+                step("top.b.l2", 1.0, 0.5),
+                step("top.a.l3", 0.5, 0.5),
+                step("top.r", 0.5, 0.0),
+            ],
+        };
+        let runs = path.time_by_instance();
+        let summary: Vec<(&str, f64, usize)> = runs
+            .iter()
+            .map(|r| (r.instance.as_str(), r.delay, r.cells))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("top.a", 1.0, 2),
+                ("top.b", 1.5, 1),
+                ("top.a", 1.0, 1),
+                ("top", 0.5, 1)
+            ]
+        );
     }
 }

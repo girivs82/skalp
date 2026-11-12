@@ -23,6 +23,7 @@ This document provides a comprehensive reference for all attributes available in
   - [#[vendor_ip]](#vendor_ip)
 - [Synthesis Hints](#synthesis-hints)
   - [#[pipeline]](#pipeline)
+  - [#[latency]](#latency)
   - [#[unroll]](#unroll)
   - [#[parallel]](#parallel)
 
@@ -795,25 +796,90 @@ entity CustomPLL {
 ## Synthesis Hints
 
 The synthesis intent attributes that affect generated hardware today are
-`mux_style`, `pipeline_style`, `impl_style`, and `#[unroll]`. The others in
-this section parse and are recorded, but do not yet change the output.
+`#[pipeline(stages = N)]`, `mux_style`, `pipeline_style`, `impl_style`, and
+`#[unroll]`. The others in this section parse and are recorded, but do not yet
+change the output.
 
 ### #[pipeline]
 
-> **Status: recorded, not acted on.** `#[pipeline(stages = N)]` parses and is
-> stored as metadata, but the compiler does **not** insert pipeline registers —
-> the generated hardware is unchanged. Write pipeline stages explicitly with
-> registered assignments in `on(clk.rise)` blocks. Automatic retiming from this
-> attribute is planned.
+`#[pipeline(stages = N)]` gives an entity a total latency of N clock cycles
+and lets the compiler place the registers. Write the entity at whatever
+latency is natural (here two registers), and the compiler adds the rest:
 
 ```skalp
-#[pipeline(stages = 3)]
-entity PipelinedMultiplier<WIDTH: 32> {
-    in clk: clock,
-    in a: bit[WIDTH],
-    in b: bit[WIDTH],
-    out result: bit[WIDTH * 2],
+#[pipeline(stages = 4)]
+entity MulAdd {
+    in clk: clock
+    in rst: reset
+    in a: bit[16]
+    in b: bit[16]
+    in c: bit[32]
+    out y: bit[32]
 }
+```
+
+What happens:
+
+1. **In MIR**, before anything else reads the design, the entity becomes a
+   wrapper around its original body (`MulAdd__core`) that delays every input
+   except the clock by N − L cycles, where L is the body's own latency (the
+   fewest registers on any path from a data input to an output). The reset
+   is delayed too, starting asserted, so the wrapper behaves exactly like the
+   original run N − L cycles later. Behavioural simulation, SystemVerilog and
+   gate-level netlists all see the same latency.
+2. **In synthesis**, forward retiming moves those registers into the body's
+   logic to shorten its longest register-to-register path. Only plain
+   registers (no reset or enable) move, a carry chain moves as one block, and
+   each register's initial value is recomputed through the logic it crosses,
+   so the result matches simulation from the first cycle. Nexus place and
+   route retimes again with the device's own delays.
+
+Rules:
+
+- N is the total latency, not the number of registers added. N below the
+  body's latency is an error.
+- The entity needs exactly one clock, and no `inout` ports.
+- Retiming never adds registers beyond the N − L the wrapper added; it only
+  moves them. To find which entity a too-long path runs through, read the
+  "by instance" breakdown under the critical path in the `skalp pnr` report.
+
+#### Letting synthesis choose: `#[pipeline]` and `max_stages`
+
+Without `stages`, synthesis picks the latency:
+
+```skalp
+#[pipeline]                  // any latency that meets the clock
+#[pipeline(max_stages = 6)]  // at most 6 cycles
+```
+
+`skalp synth` synthesizes the design with the entity at its own latency,
+works out for each instance how many cycles retiming needs to meet the
+clock (with the device's own delays), and gives the entity its own latency
+plus the most any instance needs. The clock comes from `--frequency`, else
+the top entity's clock domain (`'clk: 100MHz`), else the board pin the
+clock is on.
+
+The latency changes what the design does cycle by cycle, so the choice is
+written to `<top>.pipeline.lock` beside the design's top file, one
+`Entity = cycles` line each, and every flow reads it: simulation,
+SystemVerilog and synthesis all use the same latency. Commit the lock file
+with the design. Until it records a latency for an entity, the entity
+keeps its own (with a warning). When synthesis changes a recorded latency
+it says so; simulate again before trusting earlier results. Use
+`#[latency(N)]` on instances whose surrounding code depends on the
+latency. Choosing a latency needs device delays, which only Nexus devices
+have so far.
+
+### #[latency]
+
+`#[latency(N)]` on an instance states the latency the surrounding code relies
+on. The build fails if the instantiated entity, `#[pipeline]` stages
+included, has a different latency, so changing an entity's stage count can't
+silently break the code that uses it:
+
+```skalp
+#[latency(4)]
+inst mac = MulAdd { clk: clk, rst: rst, a: a, b: b, c: c }
 ```
 
 ### #[unroll]
@@ -869,7 +935,8 @@ impl ParallelProcessor {
 | `#[xilinx_ip]` | entity | Xilinx IP wrapper |
 | `#[intel_ip]` | entity | Intel IP wrapper |
 | `#[vendor_ip]` | entity | Generic vendor IP |
-| `#[pipeline]` | entity/impl | Pipeline stages (recorded only; not yet acted on) |
+| `#[pipeline]` | entity | Total latency in cycles (`stages = N`, or chosen by synthesis and locked); the compiler adds and retimes the registers |
+| `#[latency]` | instance | Checked latency the parent relies on |
 | `#[unroll]` | for loop | Loop unrolling |
 | `#[parallel]` | impl | Parallel execution |
 
