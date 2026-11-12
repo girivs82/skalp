@@ -58,6 +58,10 @@ pub struct DelayModel {
     pub pip_global_to_local: f64,
     /// Fanout delay per additional load (ns)
     pub fanout_delay_per_load: f64,
+    /// Connection delays measured on the device's routing graph, used by
+    /// [`Self::connection_delay`] in place of the wire-span formula when set
+    #[serde(skip)]
+    pub route_delays: Option<std::sync::Arc<super::route_delays::RouteDelayTable>>,
 }
 
 impl Default for DelayModel {
@@ -135,6 +139,7 @@ impl DelayModel {
             pip_local_to_belpin: t.pip_local_to_belpin,
             pip_global_to_local: t.pip_global_to_local,
             fanout_delay_per_load: t.fanout_per_load,
+            route_delays: None,
         }
     }
 
@@ -166,6 +171,7 @@ impl DelayModel {
             pip_local_to_belpin: t.pip_local_to_bel,
             pip_global_to_local: t.pip_clock_to_local,
             fanout_delay_per_load: t.fanout_per_load,
+            route_delays: None,
         }
     }
 
@@ -197,6 +203,7 @@ impl DelayModel {
             pip_local_to_belpin: t.pip_to_bel,
             pip_global_to_local: t.pip_clock_to_local,
             fanout_delay_per_load: t.fanout_per_load,
+            route_delays: None,
         }
     }
 
@@ -241,6 +248,7 @@ impl DelayModel {
             pip_local_to_belpin: t.pip_bel_to_local, // symmetric estimate
             pip_global_to_local: t.pip_clock_to_local,
             fanout_delay_per_load: t.fanout_per_load,
+            route_delays: None,
         }
     }
 
@@ -333,6 +341,31 @@ impl DelayModel {
             crate::device::WireType::Neighbour => self.local_wire_delay,
             crate::device::WireType::CarryChain => self.carry_delay,
             crate::device::WireType::BelPin => 0.0, // No delay for BEL pins
+        }
+    }
+
+    /// Use connection delays measured on a device's routing graph (see
+    /// [`RouteDelayTable::measure`](super::route_delays::RouteDelayTable::measure)).
+    pub fn with_route_delays(
+        mut self,
+        table: Option<std::sync::Arc<super::route_delays::RouteDelayTable>>,
+    ) -> Self {
+        self.route_delays = table;
+        self
+    }
+
+    /// Delay (ns) of a routed connection from a cell output to a cell input
+    /// in tiles `dx` columns and `dy` rows apart, including the hops out of
+    /// the driver's tile and into the sink's: the measured table when there
+    /// is one, otherwise those hops plus [`Self::estimated_path_delay`].
+    pub fn connection_delay(&self, dx: u32, dy: u32) -> f64 {
+        match &self.route_delays {
+            Some(table) => table.delay(dx, dy),
+            None => {
+                self.pip_belpin_to_local
+                    + self.pip_local_to_belpin
+                    + self.estimated_path_delay(dx + dy)
+            }
         }
     }
 
