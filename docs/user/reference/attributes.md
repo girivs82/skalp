@@ -843,6 +843,33 @@ Rules:
   moves them. To find which entity a too-long path runs through, read the
   "by instance" breakdown under the critical path in the `skalp pnr` report.
 
+#### Letting synthesis choose: `#[pipeline]` and `max_stages`
+
+Without `stages`, synthesis picks the latency:
+
+```skalp
+#[pipeline]                  // any latency that meets the clock
+#[pipeline(max_stages = 6)]  // at most 6 cycles
+```
+
+`skalp synth` synthesizes the design with the entity at its own latency,
+works out for each instance how many cycles retiming needs to meet the
+clock (with the device's own delays), and gives the entity its own latency
+plus the most any instance needs. The clock comes from `--frequency`, else
+the top entity's clock domain (`'clk: 100MHz`), else the board pin the
+clock is on.
+
+The latency changes what the design does cycle by cycle, so the choice is
+written to `<top>.pipeline.lock` beside the design's top file, one
+`Entity = cycles` line each, and every flow reads it: simulation,
+SystemVerilog and synthesis all use the same latency. Commit the lock file
+with the design. Until it records a latency for an entity, the entity
+keeps its own (with a warning). When synthesis changes a recorded latency
+it says so; simulate again before trusting earlier results. Use
+`#[latency(N)]` on instances whose surrounding code depends on the
+latency. Choosing a latency needs device delays, which only Nexus devices
+have so far.
+
 ### #[latency]
 
 `#[latency(N)]` on an instance states the latency the surrounding code relies
@@ -908,7 +935,7 @@ impl ParallelProcessor {
 | `#[xilinx_ip]` | entity | Xilinx IP wrapper |
 | `#[intel_ip]` | entity | Intel IP wrapper |
 | `#[vendor_ip]` | entity | Generic vendor IP |
-| `#[pipeline]` | entity | Total latency in cycles; the compiler adds and retimes the registers |
+| `#[pipeline]` | entity | Total latency in cycles (`stages = N`, or chosen by synthesis and locked); the compiler adds and retimes the registers |
 | `#[latency]` | instance | Checked latency the parent relies on |
 | `#[unroll]` | for loop | Loop unrolling |
 | `#[parallel]` | impl | Parallel execution |
