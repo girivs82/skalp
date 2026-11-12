@@ -584,9 +584,16 @@ pub fn place_and_route_nexus_real(
         ram_count,
         dsp_count,
     );
-    let device =
+    let mut device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
             .map_err(PlaceRouteError::BitstreamFailed)?;
+    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
+    let t_delays = std::time::Instant::now();
+    device.set_pip_delays(&timing_db);
+    log::info!(
+        "nexus pnr: PIP delays from the timing database in {:.1} s",
+        t_delays.elapsed().as_secs_f64()
+    );
 
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
     let mut logic = prepare::logic_only_netlist(netlist);
@@ -704,7 +711,6 @@ pub fn place_and_route_nexus_real(
         routing: &routing,
         tied: &tied,
     };
-    let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
     let timing_model = crate::device::nexus::timing::NexusTiming {
         device: &device,
         db: &timing_db,

@@ -42,8 +42,29 @@ impl Resource {
     }
 }
 
-/// How much of each resource a cell of some BEL type uses.
+/// How much of each resource a cell of some BEL type uses, its main
+/// (scarcest) resource first.
 pub(crate) type Demand = Vec<(Resource, f64)>;
+
+/// Order `uses` by the share of each resource's `total` capacity it takes,
+/// largest first (a resource the device lacks counts as scarcest), ties
+/// going to LUTs, then flip-flops, then other BELs by name.
+fn sort_by_scarcity(uses: &mut Demand, total: &HashMap<Resource, f64>) {
+    let share = |&(r, amount): &(Resource, f64)| match total.get(&r) {
+        Some(&t) if t > 0.0 => amount / t,
+        _ => f64::INFINITY,
+    };
+    let rank = |r: &Resource| match r {
+        Resource::Lut => (0, String::new()),
+        Resource::Ff => (1, String::new()),
+        Resource::Other(t) => (2, format!("{t:?}")),
+    };
+    uses.sort_by(|a, b| {
+        share(b)
+            .total_cmp(&share(a))
+            .then_with(|| rank(&a.0).cmp(&rank(&b.0)))
+    });
+}
 
 /// Per-resource capacity of every tile, and what each BEL type uses up.
 pub(crate) struct CapacityMap {
@@ -105,9 +126,7 @@ impl CapacityMap {
                         {
                             *uses.entry(Resource::of(b.bel_type)).or_default() += 1.0;
                         }
-                        let mut uses: Demand = uses.into_iter().collect();
-                        uses.sort_by_key(|(r, _)| format!("{r:?}"));
-                        uses
+                        uses.into_iter().collect()
                     });
                 }
                 // I/O and other special tiles take their cells from fixed
@@ -125,6 +144,19 @@ impl CapacityMap {
                     cap[(y * width + x) as usize] += fill_cap(n, fill_limit) as f64;
                 }
             }
+        }
+        // A cell is spread by its scarcest resource: the one it uses the
+        // largest share of. Ordering by name made the flip-flops a Nexus
+        // wide LUT (2 LUTs, 1 flip-flop) or distributed RAM (6 LUTs, 4
+        // flip-flops) uses its main resource, so those cells were spread
+        // over flip-flop capacity as if they used no LUTs, and the RAMs
+        // ended up strung along the region's edges.
+        let total: HashMap<Resource, f64> = capacity
+            .iter()
+            .map(|(&r, cap)| (r, cap.iter().sum::<f64>()))
+            .collect();
+        for uses in demand.values_mut() {
+            sort_by_scarcity(uses, &total);
         }
         let prefix = capacity
             .into_iter()
@@ -345,6 +377,58 @@ fn bisect(
 mod tests {
     use super::*;
     use crate::device::ice40::{Ice40Device, Ice40Variant};
+
+    #[test]
+    fn a_cell_is_spread_by_its_scarcest_resource() {
+        // 8 LUTs and 16 flip-flops per tile: 6 LUTs + 4 flip-flops is
+        // mostly a LUT cell, 1 LUT + 8 flip-flops mostly a flip-flop one
+        let total = HashMap::from_iter([(Resource::Lut, 800.0), (Resource::Ff, 1600.0)]);
+        let mut ram = vec![(Resource::Ff, 4.0), (Resource::Lut, 6.0)];
+        sort_by_scarcity(&mut ram, &total);
+        assert_eq!(ram[0].0, Resource::Lut);
+        let mut regs = vec![(Resource::Lut, 1.0), (Resource::Ff, 8.0)];
+        sort_by_scarcity(&mut regs, &total);
+        assert_eq!(regs[0].0, Resource::Ff);
+        // Equal shares go to LUTs; a resource the device lacks comes first
+        let mut tie = vec![(Resource::Ff, 2.0), (Resource::Lut, 1.0)];
+        sort_by_scarcity(&mut tie, &total);
+        assert_eq!(tie[0].0, Resource::Lut);
+        let mut missing = vec![
+            (Resource::Lut, 1.0),
+            (Resource::Other(BelType::RamSlice), 1.0),
+        ];
+        sort_by_scarcity(&mut missing, &total);
+        assert_eq!(missing[0].0, Resource::Other(BelType::RamSlice));
+    }
+
+    /// Nexus wide LUTs and distributed RAM sit on a tile's LUTs and, on
+    /// the real device, take some of its flip-flops too: they are spread
+    /// over LUT capacity
+    #[test]
+    fn nexus_wide_luts_and_ram_spread_over_luts() {
+        use crate::device::nexus::{prjoxide_load, NexusDevice, NexusVariant};
+        let check = |device: &NexusDevice, uses_ffs: bool| {
+            let capacity = CapacityMap::new(device, 1.0);
+            for bel_type in [BelType::WideLut, BelType::DistRam] {
+                let demand = capacity.demand(bel_type);
+                assert_eq!(demand[0].0, Resource::Lut, "{bel_type:?}: {demand:?}");
+                if uses_ffs {
+                    assert!(
+                        demand.iter().any(|(r, _)| *r == Resource::Ff),
+                        "{bel_type:?}: {demand:?}"
+                    );
+                }
+            }
+        };
+        check(&NexusDevice::new(NexusVariant::Lifcl40), false);
+        let Some(db) = prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping the real device");
+            return;
+        };
+        let device = NexusDevice::from_prjoxide_bbox(NexusVariant::Lifcl40, &db, (10, 10, 20, 20))
+            .expect("build device");
+        check(&device, true);
+    }
 
     #[test]
     fn spreading_stays_within_capacity_and_keeps_order() {

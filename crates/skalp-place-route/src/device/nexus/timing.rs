@@ -165,6 +165,19 @@ impl TimingDb {
 }
 
 /// The name and tile of a routing wire, split for pip classification.
+impl TimingDb {
+    /// Delay of a PIP from the wire named `source` to the one named
+    /// `destination`, by its prjoxide PIP class (0 for a class with no
+    /// timing data)
+    pub fn pip_delay_ps(&self, source: &str, destination: &str) -> i64 {
+        let (sx, sy, source) = wire_parts(source);
+        let (dx, dy, destination) = wire_parts(destination);
+        prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination)
+            .and_then(|class| self.pip_classes.get(&class).copied())
+            .unwrap_or(0)
+    }
+}
+
 fn wire_parts(name: &str) -> (i32, i32, String) {
     if let Some(global) = name.strip_prefix("G:") {
         return (0, 0, global.to_string());
@@ -237,11 +250,7 @@ impl TimingModel for NexusTiming<'_> {
         ) else {
             return 0;
         };
-        let (sx, sy, source) = wire_parts(&src.name);
-        let (dx, dy, destination) = wire_parts(&dst.name);
-        prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination)
-            .and_then(|class| self.db.pip_classes.get(&class).copied())
-            .unwrap_or(0)
+        self.db.pip_delay_ps(&src.name, &dst.name)
     }
 
     fn launch_ps(&self, cell: &Cell, _output: usize) -> Option<i64> {
@@ -374,5 +383,39 @@ mod tests {
         assert_eq!(timing.lut, 213);
         assert_eq!(timing.clk_to_q, 307);
         assert_eq!(timing.setup.get("M"), Some(&0));
+    }
+
+    /// The device's PIPs carry the delays timing analysis charges them, so
+    /// the router minimises what the timing report measures
+    #[test]
+    fn device_pips_get_their_class_delays() {
+        let Some(db) = super::super::prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        let timing = TimingDb::load(&db, variant).unwrap();
+        let mut device = NexusDevice::from_prjoxide_bbox(variant, &db, (20, 20, 28, 28)).unwrap();
+        device.set_pip_delays(&timing);
+        let model = NexusTiming {
+            device: &device,
+            db: &timing,
+        };
+        let mut distinct = std::collections::BTreeSet::new();
+        let pips: Vec<PipId> = (0..device.wire_count())
+            .flat_map(|w| {
+                device
+                    .wire_src_pips(crate::device::WireId(w as u32))
+                    .to_vec()
+            })
+            .collect();
+        assert!(!pips.is_empty());
+        for pip in pips {
+            let delay = device.pip(pip).unwrap().delay;
+            assert_eq!(delay as i64, model.interconnect_ps(pip).max(0), "{pip:?}");
+            distinct.insert(delay);
+        }
+        // Neighbour, span-2, span-6 and in-tile PIPs differ
+        assert!(distinct.len() > 5, "{distinct:?}");
     }
 }

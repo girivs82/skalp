@@ -32,12 +32,13 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 /// Routing algorithm selection
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RoutingAlgorithm {
-    /// PathFinder with A* (default, good quality)
-    #[default]
+    /// PathFinder with A*, minimising congestion and wire use only
     PathFinderAStar,
     /// Simple maze routing (fast but lower quality)
     MazeRouting,
-    /// Timing-driven routing
+    /// PathFinder with A* that also charges each net's PIP delays in
+    /// proportion to how critical the net is (the default)
+    #[default]
     TimingDriven,
 }
 
@@ -66,13 +67,15 @@ pub struct RouterConfig {
 impl Default for RouterConfig {
     fn default() -> Self {
         Self {
-            algorithm: RoutingAlgorithm::PathFinderAStar,
+            algorithm: RoutingAlgorithm::TimingDriven,
             max_iterations: 100,
             allow_ripup: true,
             max_congestion: 1.5,
             history_cost_factor: 1.0,
             present_congestion_factor: 1.5,
-            timing_weight: 0.3,
+            // On a RISC-V board design on LIFCL-40, 4 seeds: 0.5 gave
+            // 74.0 MHz and 1.0 gave 74.6 MHz, against 67.8 untimed
+            timing_weight: 1.0,
             strict_congestion: true,
         }
     }

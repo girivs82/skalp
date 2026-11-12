@@ -546,6 +546,29 @@ impl NexusDevice {
     }
 
     /// Remove wires from routing, leaving them to whatever claimed them.
+    /// Give every PIP the delay `db` has for its class, so the router's
+    /// costs and timing terms see the delays timing analysis will report
+    /// (the routing graph is built with one nominal delay for every PIP).
+    #[cfg(feature = "nexus-bitstream")]
+    pub fn set_pip_delays(&mut self, db: &timing::TimingDb) {
+        let wires = &self.wires;
+        let name = |w: WireId| wires.get(w.0 as usize).map(|wire| wire.name.as_str());
+        let delays: Vec<Option<u32>> = self
+            .pips
+            .iter()
+            .map(|pip| {
+                let (src, dst) = (name(pip.src_wire)?, name(pip.dst_wire)?);
+                Some(db.pip_delay_ps(src, dst).max(0) as u32)
+            })
+            .collect();
+        let pips = Arc::make_mut(&mut self.pips);
+        for (pip, delay) in pips.iter_mut().zip(delays) {
+            if let Some(delay) = delay {
+                pip.delay = delay;
+            }
+        }
+    }
+
     pub fn without_wires(&self, claimed: &crate::collections::HashSet<WireId>) -> Self {
         // The routing graph is shared between copies. Only the adjacency
         // lists that touch a claimed wire are rebuilt, into small override

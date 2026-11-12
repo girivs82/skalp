@@ -118,12 +118,13 @@ fn main() {
         {
             config.placer.timing_weight = v;
         }
-        let result = skalp_place_route::pnr::place_and_route_nexus_real(
-            &netlist,
-            NexusVariant::Lfcpnx100,
-            config,
-            &db,
-        );
+        // DEVICE=LIFCL-40 to compare with tools that only support that die
+        let variant = match std::env::var("DEVICE").as_deref() {
+            Ok("LIFCL-40") => NexusVariant::Lifcl40,
+            _ => NexusVariant::Lfcpnx100,
+        };
+        let result =
+            skalp_place_route::pnr::place_and_route_nexus_real(&netlist, variant, config, &db);
         match result {
             Ok(r) => {
                 println!(

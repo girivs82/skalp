@@ -14,7 +14,7 @@ pub mod control_sets;
 mod legalization;
 mod sites;
 mod spreading;
-mod timing_estimate;
+pub(crate) mod timing_estimate;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;

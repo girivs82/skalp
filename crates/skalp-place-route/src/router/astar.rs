@@ -298,14 +298,18 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         wire_cost: impl Fn(WireId) -> f64,
         timing_weight: f64,
     ) -> Result<(Vec<WireId>, Vec<PipId>)> {
-        self.find_path_bounded(tree, sink, blocked, wire_cost, timing_weight, None)
+        self.find_path_bounded(tree, sink, blocked, wire_cost, timing_weight, |_| 0.0, None)
             .map(|(wires, pips, _)| (wires, pips))
     }
 
     /// [`Self::find_path_from_tree`] that only expands wires inside `bounds`
     /// (the tree's own wires may lie anywhere), also returning the path's
     /// cost. Fails if no path stays inside; a caller wanting any path
-    /// retries without bounds.
+    /// retries without bounds. The search starts from each tree wire at
+    /// `start_cost(wire)`: a timing-driven search charges the delay already
+    /// spent reaching that wire, so a critical sink does not branch off the
+    /// far end of a long tree just because the branch from there is short.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_path_bounded(
         &self,
         tree: &[WireId],
@@ -313,6 +317,7 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         blocked: &[WireId],
         wire_cost: impl Fn(WireId) -> f64,
         timing_weight: f64,
+        start_cost: impl Fn(WireId) -> f64,
         bounds: Option<SearchBounds>,
     ) -> Result<(Vec<WireId>, Vec<PipId>, f64)> {
         let source = *tree.first().ok_or_else(|| {
@@ -337,14 +342,25 @@ impl<'a, D: Device> AStarRouter<'a, D> {
 
         // Initialize with the source (and the rest of the tree)
         for &start in tree {
-            if !in_graph(start) || blocked_set.contains(&start) || scratch.g(start) == 0.0 {
+            if !in_graph(start) || blocked_set.contains(&start) {
                 continue;
             }
-            scratch.set(start, 0.0, None);
+            let g = start_cost(start);
+            if scratch.g(start) <= g {
+                continue;
+            }
+            scratch.set(start, g, None);
             open_set.push(AStarNode {
                 wire: start,
-                g_score: 0.0,
-                f_score: self.heuristic(graph, start, target_x, target_y, &approach),
+                g_score: g,
+                f_score: g + self.heuristic(
+                    graph,
+                    start,
+                    target_x,
+                    target_y,
+                    &approach,
+                    timing_weight,
+                ),
             });
         }
 
@@ -385,7 +401,14 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                         wire: neighbor,
                         g_score: tentative_g,
                         f_score: tentative_g
-                            + self.heuristic(graph, neighbor, target_x, target_y, &approach),
+                            + self.heuristic(
+                                graph,
+                                neighbor,
+                                target_x,
+                                target_y,
+                                &approach,
+                                timing_weight,
+                            ),
                     });
                 }
             }
@@ -409,18 +432,27 @@ impl<'a, D: Device> AStarRouter<'a, D> {
         target_x: u32,
         target_y: u32,
         approach: &SinkApproach,
+        timing_weight: f64,
     ) -> f64 {
         let Some((x, y)) = graph.tile(wire) else {
             return 0.0;
         };
         let dx = x.abs_diff(target_x);
         let dy = y.abs_diff(target_y);
+        // A timing-driven search also pays the PIPs' timing terms; without
+        // a bound on those the search expands every wire that is cheap in
+        // base cost however slow it is
+        let timing = if timing_weight > 0.0 && !approach.far_entry() {
+            timing_weight * graph.timing_lower_bound(dx, dy)
+        } else {
+            0.0
+        };
         if let Some(estimate) = self.device.route_cost_estimate(dx, dy) {
-            return if dx + dy == 0 { 0.0 } else { estimate };
+            return if dx + dy == 0 { 0.0 } else { estimate + timing };
         }
         // Derived from the routing graph itself, for any device: a lower
         // bound on paths through the general fabric
-        graph.estimate_to_sink(wire, approach)
+        graph.estimate_to_sink(wire, approach) + timing
     }
 
     /// Reconstruct the path ending at `sink` from the search scratch
@@ -470,6 +502,37 @@ mod tests {
             .expect("two logic tiles in a row")
     }
 
+    /// A search from a tree starts each tree wire at its start cost: a
+    /// wire next to the sink that is free to start from is where the path
+    /// begins, and once starting there costs more than the whole way from
+    /// the source, the path runs from the source instead
+    #[test]
+    fn a_tree_wire_is_charged_its_start_cost() {
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let astar = AStarRouter::new(&device);
+        let (src, dst, _, _) = pins(&device, 8);
+        let (direct, _, direct_cost) = astar
+            .find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, |_| 0.0, None)
+            .expect("a path");
+        // The wire just before the sink on that path, as a second tree wire
+        let near = direct[direct.len() - 2];
+        assert_ne!(near, src);
+        let tree = [src, near];
+
+        let (wires, _, cost) = astar
+            .find_path_bounded(&tree, dst, &[], |_| 1.0, 0.0, |_| 0.0, None)
+            .expect("a path");
+        assert_eq!(wires.first(), Some(&near));
+        assert!(cost < direct_cost);
+
+        let charged = |w: WireId| if w == near { direct_cost + 1.0 } else { 0.0 };
+        let (wires, _, cost) = astar
+            .find_path_bounded(&tree, dst, &[], |_| 1.0, 0.0, charged, None)
+            .expect("a path");
+        assert_eq!(wires.first(), Some(&src));
+        assert!((cost - direct_cost).abs() < 1e-6);
+    }
+
     #[test]
     fn bounded_search_stays_inside_its_region() {
         let device = NexusDevice::new(NexusVariant::Lifcl40);
@@ -484,7 +547,7 @@ mod tests {
             max_y: y + 2,
         };
         let (wires, pips, cost) = astar
-            .find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, Some(bounds))
+            .find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, |_| 0.0, Some(bounds))
             .expect("a path inside the net's box");
         assert_eq!(wires.first(), Some(&src));
         assert_eq!(wires.last(), Some(&dst));
@@ -515,7 +578,7 @@ mod tests {
             max_y: y,
         };
         assert!(astar
-            .find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, Some(tight))
+            .find_path_bounded(&[src], dst, &[], |_| 1.0, 0.0, |_| 0.0, Some(tight))
             .is_err());
     }
 
