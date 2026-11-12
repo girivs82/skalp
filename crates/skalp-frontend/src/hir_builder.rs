@@ -504,6 +504,12 @@ impl HirBuilderContext {
     /// Pre-register entities from merged HIR (for handling imports)
     pub fn preregister_entity(&mut self, entity: &HirEntity) {
         self.symbols.entities.insert(entity.name.clone(), entity.id);
+        // Entities of this file that were not preregistered (in a module, the
+        // ones nobody imported) get fresh ids. Those must not reuse a
+        // preregistered id: two entities with one id let an implementation be
+        // matched to the wrong entity, so one entity's body, instances and all,
+        // replaced another's.
+        self.next_entity_id = self.next_entity_id.max(entity.id.0.saturating_add(1));
         self.built_entities
             .insert(entity.name.clone(), entity.clone());
     }
