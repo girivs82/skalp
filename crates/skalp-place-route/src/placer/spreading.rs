@@ -9,8 +9,12 @@
 //! as in SimPL) and the final site assignment both start from something legal.
 //!
 //! Spreading is by recursive bisection: a region's cells are sorted along its
-//! longer side and split at the share of the region's capacity that lies on
-//! each side of the cut, down to single tiles. Capacity is counted per
+//! longer side and split at the cut, down to single tiles. Cells stay on the
+//! side they were solved on unless that side can't hold them at the target
+//! density; then just enough move across. A region filled to that density is
+//! so split at the share of its capacity on each side, while a sparse
+//! resource (a few multipliers among hundreds of sites) stays near its logic
+//! instead of being spread evenly over every site. Capacity is counted per
 //! resource ([`Resource`]) from the device's BELs, so the same code serves any
 //! family: a cell only competes with cells that need the same kind of BEL.
 
@@ -277,7 +281,7 @@ pub(crate) fn spread(
             .iter()
             .map(|&i| (i, out[i].0, out[i].1, weight(i)))
             .collect();
-        bisect(capacity, resource, region, &mut items, &mut out);
+        bisect(capacity, resource, region, density, &mut items, &mut out);
     }
     out
 }
@@ -320,11 +324,13 @@ fn root_region(
 }
 
 /// Split `items` (cell, x, y, weight) over `region` by recursive bisection,
+/// each side holding at most `density` of its capacity where the region can,
 /// writing each cell's final position to `out`.
 fn bisect(
     capacity: &CapacityMap,
     resource: Resource,
     region: Region,
+    density: f64,
     items: &mut [(usize, f64, f64, f64)],
     out: &mut [(f64, f64)],
 ) {
@@ -353,24 +359,44 @@ fn bisect(
     let cap_low = capacity.capacity(resource, low);
     let cap_high = capacity.capacity(resource, high);
     if cap_low <= 0.0 {
-        return bisect(capacity, resource, high, items, out);
+        return bisect(capacity, resource, high, density, items, out);
     }
     if cap_high <= 0.0 {
-        return bisect(capacity, resource, low, items, out);
+        return bisect(capacity, resource, low, density, items, out);
     }
     let key = |item: &(usize, f64, f64, f64)| if vertical_cut { item.1 } else { item.2 };
     items.sort_by(|a, b| key(a).total_cmp(&key(b)).then(a.0.cmp(&b.0)));
     let total: f64 = items.iter().map(|i| i.3).sum();
-    let target = total * cap_low / (cap_low + cap_high);
-    let mut split = 0;
-    let mut acc = 0.0;
-    while split < items.len() && acc + items[split].3 / 2.0 <= target {
-        acc += items[split].3;
-        split += 1;
-    }
+    let (max_low, max_high) = (cap_low * density, cap_high * density);
+    let split = if total > max_low + max_high {
+        // Over the target density: split at the capacity share
+        let target = total * cap_low / (cap_low + cap_high);
+        let mut split = 0;
+        let mut acc = 0.0;
+        while split < items.len() && acc + items[split].3 / 2.0 <= target {
+            acc += items[split].3;
+            split += 1;
+        }
+        split
+    } else {
+        // Each cell on the side it was solved on, then just enough moved
+        // across that neither side is over the density
+        let cut = if vertical_cut { low.2 } else { low.3 } as f64;
+        let mut split = items.partition_point(|i| key(i) < cut);
+        let mut low_weight: f64 = items[..split].iter().map(|i| i.3).sum();
+        while split > 0 && low_weight > max_low {
+            split -= 1;
+            low_weight -= items[split].3;
+        }
+        while split < items.len() && total - low_weight > max_high {
+            low_weight += items[split].3;
+            split += 1;
+        }
+        split
+    };
     let (a, b) = items.split_at_mut(split);
-    bisect(capacity, resource, low, a, out);
-    bisect(capacity, resource, high, b, out);
+    bisect(capacity, resource, low, density, a, out);
+    bisect(capacity, resource, high, density, b, out);
 }
 
 #[cfg(test)]

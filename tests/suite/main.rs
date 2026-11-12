@@ -118,6 +118,7 @@ mod test_ncl_std_cell_mode;
 mod test_netlist_writer;
 mod test_nexus_real_flow;
 mod test_nexus_saved_netlist;
+mod test_nexus_selfcheck;
 mod test_parametric_types_parsing;
 mod test_partitionable_adder;
 mod test_phase10_backends;
