@@ -169,8 +169,12 @@ fn test_extra_stages_for_a_target_period() {
     )
     .flatten();
     let delays = skalp_lir::retime::LevelDelays;
+    // From tight to far longer than any path in the unit (synthesis can
+    // differ with the stdlib other tests in this process load, so the
+    // sweep doesn't depend on the exact logic depth)
     let needed: Vec<(i64, u32)> = (2..=40)
         .map(|t| t * 100)
+        .chain([10_000, 100_000, 1_000_000])
         .filter_map(|target| {
             skalp_lir::retime::extra_stages_for_period(&netlist, &delays, "top.plain", target, 6)
                 .map(|k| (target, k))
