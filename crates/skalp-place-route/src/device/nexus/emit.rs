@@ -478,7 +478,14 @@ fn emit_bits(
                 let regset = if powers_up_high { "SET" } else { "RESET" };
                 config.set_enum(&tile, &format!("{prefix}.REGSET"), regset)?;
                 config.set_enum(&tile, &format!("{prefix}.LSRMODE"), "LSR")?;
-                config.set_enum(&tile, &format!("{prefix}.SEL"), "DF")?;
+                // Data from the LUT beside the register when its route took
+                // the in-slice path (`DL`), else from routing via the bypass
+                // pin (`DF`)
+                let from_lut = device
+                    .bel_pin_wire_by_name(x, y, &format!("FF{number}_DI"))
+                    .is_some_and(|wire| used_wires.contains(&wire));
+                let select = if from_lut { "DL" } else { "DF" };
+                config.set_enum(&tile, &format!("{prefix}.SEL"), select)?;
                 config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), "CLK")?;
                 let set = control_sets
                     .get(&cell.id)

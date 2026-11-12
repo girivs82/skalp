@@ -459,8 +459,8 @@ impl NetCostCache {
         }
 
         let mut timing = 0.0;
-        for (k, (cell_id, _)) in net.fanout.iter().enumerate() {
-            if let Some(loc) = placement.placements.get(cell_id) {
+        for (k, &(cell_id, pin)) in net.fanout.iter().enumerate() {
+            if let Some(loc) = placement.placements.get(&cell_id) {
                 let x = loc.tile_x as f64;
                 let y = loc.tile_y as f64;
                 min_x = min_x.min(x);
@@ -471,9 +471,12 @@ impl NetCostCache {
 
                 let criticality = criticalities.get(k).copied().unwrap_or(0.0);
                 if let (Some(from), true) = (driver, criticality >= MIN_TIMED_CRITICALITY) {
-                    let dx = from.tile_x.abs_diff(loc.tile_x);
-                    let dy = from.tile_y.abs_diff(loc.tile_y);
-                    timing += delay_model.connection_delay(dx, dy) * criticality * criticality;
+                    let delay = delay_model.bel_connection_delay(
+                        (from.tile_x, from.tile_y, from.bel_index),
+                        (loc.tile_x, loc.tile_y, loc.bel_index),
+                        pin,
+                    );
+                    timing += delay * criticality * criticality;
                 }
             }
         }
@@ -1482,9 +1485,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             let y = (loc.tile_y as i64 + rng.gen_range(-r..=r)).clamp(0, height as i64 - 1) as u32;
             // Reservoir-sample one acceptable BEL of the tile
             let mut chosen = None;
-            let mut seen = 0u32;
-            for bel_idx in self.acceptable_bels(placement, ctx, loc_map, cell_id, x, y) {
-                seen += 1;
+            let acceptable = self.acceptable_bels(placement, ctx, loc_map, cell_id, x, y);
+            for (seen, bel_idx) in (1u32..).zip(acceptable) {
                 if rng.gen_range(0..seen) == 0 {
                     chosen = Some(bel_idx);
                 }
@@ -1898,12 +1900,13 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         // Calculate worst-case delay to any sink
         let mut max_delay: f64 = 0.0;
 
-        for (sink_id, _) in &net.fanout {
-            if let Some(sink_loc) = placement.placements.get(sink_id) {
-                // Manhattan distance
-                let dx = (driver_loc.tile_x as i32 - sink_loc.tile_x as i32).unsigned_abs();
-                let dy = (driver_loc.tile_y as i32 - sink_loc.tile_y as i32).unsigned_abs();
-                let routing_delay = self.delay_model.connection_delay(dx, dy);
+        for &(sink_id, pin) in &net.fanout {
+            if let Some(sink_loc) = placement.placements.get(&sink_id) {
+                let routing_delay = self.delay_model.bel_connection_delay(
+                    (driver_loc.tile_x, driver_loc.tile_y, driver_loc.bel_index),
+                    (sink_loc.tile_x, sink_loc.tile_y, sink_loc.bel_index),
+                    pin,
+                );
 
                 // Add cell delay for the driver
                 let cell_delay = if let Some(driver_id) = net.driver {
@@ -1933,13 +1936,20 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         netlist: &GateNetlist,
         placement: &PlacementResult,
     ) -> (HashMap<GateNetId, f64>, Vec<Vec<f64>>) {
-        let connections =
-            super::timing_estimate::connection_criticalities(netlist, &self.delay_model, |id| {
-                placement
-                    .placements
-                    .get(&id)
-                    .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
-            });
+        let bel = |id: CellId| {
+            placement
+                .placements
+                .get(&id)
+                .map(|loc| (loc.tile_x, loc.tile_y, loc.bel_index))
+        };
+        let connections = super::timing_estimate::connection_criticalities(
+            netlist,
+            &self.delay_model,
+            |driver, sink, pin| match (bel(driver), bel(sink)) {
+                (Some(from), Some(to)) => self.delay_model.bel_connection_delay(from, to, pin),
+                _ => 0.0,
+            },
+        );
         let nets = netlist
             .nets
             .iter()

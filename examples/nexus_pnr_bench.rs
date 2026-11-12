@@ -6,7 +6,7 @@
 //! The synthesized netlist is cached next to the source as
 //! `<source>.<preset>.netlist.json`. `PRESET=compress2` (etc.) picks the
 //! synthesis preset (default `quick`); `PATHS=n` prints the n worst paths
-//! after routing.
+//! after routing; `PLACEMENT_DUMP=file` writes each cell's tile and BEL.
 
 use skalp_lir::GateNetlist;
 use skalp_place_route::device::nexus::prjoxide_load::{find_database, load_tilegrid};
@@ -138,6 +138,19 @@ fn main() {
                 );
                 if let Some(timing) = &r.timing {
                     print_paths(timing);
+                }
+                // PLACEMENT_DUMP=file writes `type<TAB>x<TAB>y<TAB>path<TAB>bel` per placed cell
+                if let Ok(path) = std::env::var("PLACEMENT_DUMP") {
+                    let mut out = String::new();
+                    for c in &netlist.cells {
+                        if let Some(l) = r.placement.placements.get(&c.id) {
+                            out.push_str(&format!(
+                                "{}\t{}\t{}\t{}\t{}\n",
+                                c.cell_type, l.tile_x, l.tile_y, c.path, l.bel_index
+                            ));
+                        }
+                    }
+                    std::fs::write(path, out).unwrap();
                 }
             }
             Err(e) => println!(

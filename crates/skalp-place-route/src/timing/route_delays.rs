@@ -11,14 +11,28 @@
 //! search (summing [`Pip::delay`](crate::device::Pip)) from the LUT outputs of
 //! a few logic tiles to the LUT inputs of every other one, as nextpnr's
 //! router lookahead does, and keeps the delay for each tile offset.
+//!
+//! Some connections never touch general routing: a Nexus slice feeds its
+//! LUT's output straight into the register beside it. The table also keeps
+//! those, by the BELs and pin they join, since what such a connection costs
+//! depends on which BELs of a tile its ends sit on, not just on the tile.
 
-use crate::device::{Device, WireId};
+use crate::collections::HashMap;
+use crate::device::{CellPin, Device, WireId};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 /// Logic tiles the search starts from: spread around the device's middle, so
 /// the table is not shaped by one tile's quirks or by the edge of the die.
 const SAMPLE_OFFSETS: [(i64, i64); 4] = [(0, 0), (-3, 2), (4, -3), (2, 4)];
+
+/// Most PIPs a connection off general routing takes (LUT output, slice
+/// data-in, register pin on Nexus).
+const DIRECT_HOPS: usize = 4;
+
+/// Input pins of a BEL searched for direct connections: data inputs, as
+/// opposed to clocks and control pins (router pins 100 and up).
+const DIRECT_PINS: usize = 8;
 
 /// Delay (ns) of a routed connection from a LUT output to a LUT input whose
 /// tiles are `dx` columns and `dy` rows apart.
@@ -28,6 +42,10 @@ pub struct RouteDelayTable {
     height: usize,
     /// ns, indexed by `dy * width + dx`
     delays: Vec<f64>,
+    /// Connections within a logic tile that need no general routing: ns,
+    /// by (driving BEL, sink BEL, sink input pin), BELs by their index in
+    /// the tile
+    direct: HashMap<(usize, usize, usize), f64>,
 }
 
 impl RouteDelayTable {
@@ -106,6 +124,7 @@ impl RouteDelayTable {
             width: w,
             height: h,
             delays,
+            direct: direct_connections_of(device, &samples),
         })
     }
 
@@ -117,7 +136,27 @@ impl RouteDelayTable {
             width,
             height,
             delays,
+            direct: HashMap::default(),
         }
+    }
+
+    /// The table with a direct connection added, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_direct(
+        mut self,
+        from_bel: usize,
+        to_bel: usize,
+        pin: usize,
+        ns: f64,
+    ) -> Self {
+        self.direct.insert((from_bel, to_bel, pin), ns);
+        self
+    }
+
+    /// Delay (ns) of a connection from BEL `from_bel` to input `pin` of BEL
+    /// `to_bel` in the same logic tile, when it needs no general routing.
+    pub fn direct_delay(&self, from_bel: usize, to_bel: usize, pin: usize) -> Option<f64> {
+        self.direct.get(&(from_bel, to_bel, pin)).copied()
     }
 
     /// Delay (ns) of a connection between tiles `dx` columns and `dy` rows
@@ -139,6 +178,95 @@ impl RouteDelayTable {
         let step_y = if y > 0 { at(x, y) - at(x, y - 1) } else { 0.0 };
         at(x, y) + beyond_x * step_x.max(0.0) + beyond_y * step_y.max(0.0)
     }
+}
+
+/// Direct connections (see [`RouteDelayTable::direct_delay`]) found in every
+/// one of the `samples` tiles, at the most any of them takes. Logic tiles
+/// are alike, so a connection missing from one is a quirk of that tile.
+fn direct_connections_of<D: Device + ?Sized>(
+    device: &D,
+    samples: &[(u32, u32)],
+) -> HashMap<(usize, usize, usize), f64> {
+    let mut found: Option<HashMap<(usize, usize, usize), f64>> = None;
+    for &(x, y) in samples {
+        let here = direct_connections(device, x, y);
+        found = Some(match found {
+            None => here,
+            Some(seen) => seen
+                .into_iter()
+                .filter_map(|(key, ns)| here.get(&key).map(|&other| (key, ns.max(other))))
+                .collect(),
+        });
+    }
+    found.unwrap_or_default()
+}
+
+/// Connections within tile (x, y) from a BEL's output to a BEL's data input
+/// over no general routing wire, with their least delay (ns). Empty when the
+/// device does not say which of its wires are general routing (any path
+/// would count then).
+fn direct_connections<D: Device + ?Sized>(
+    device: &D,
+    x: u32,
+    y: u32,
+) -> HashMap<(usize, usize, usize), f64> {
+    let mut direct = HashMap::default();
+    let reports_routing = device
+        .tile_wires(x, y)
+        .into_iter()
+        .any(|w| device.is_general_routing_wire(w));
+    let Some(tile) = device.tile_at(x, y) else {
+        return direct;
+    };
+    if !reports_routing {
+        return direct;
+    }
+    let bels = tile.bels().len();
+    let mut sinks: HashMap<WireId, Vec<(usize, usize)>> = HashMap::default();
+    for bel in 0..bels {
+        for pin in 0..DIRECT_PINS {
+            if let Some(wire) = device.bel_pin_wire(x, y, bel, CellPin::Input(pin)) {
+                sinks.entry(wire).or_default().push((bel, pin));
+            }
+        }
+    }
+    for from in 0..bels {
+        let Some(source) = device.bel_pin_wire(x, y, from, CellPin::Output(0)) else {
+            continue;
+        };
+        // Breadth-first by hops, keeping the least delay to each wire
+        let mut best: HashMap<WireId, u32> = HashMap::default();
+        best.insert(source, 0);
+        let mut frontier = vec![(source, 0u32)];
+        for _ in 0..DIRECT_HOPS {
+            let mut next = Vec::new();
+            for (wire, delay) in frontier {
+                for &pip_id in device.wire_src_pips(wire) {
+                    let Some(pip) = device.pip(pip_id) else {
+                        continue;
+                    };
+                    if device.is_general_routing_wire(pip.dst_wire) {
+                        continue;
+                    }
+                    let arrival = delay.saturating_add(pip.delay);
+                    if best.get(&pip.dst_wire).is_some_and(|&d| d <= arrival) {
+                        continue;
+                    }
+                    best.insert(pip.dst_wire, arrival);
+                    next.push((pip.dst_wire, arrival));
+                }
+            }
+            frontier = next;
+        }
+        for (wire, &delay) in &best {
+            for &(to, pin) in sinks.get(wire).into_iter().flatten() {
+                if to != from {
+                    direct.insert((from, to, pin), delay as f64 / 1000.0);
+                }
+            }
+        }
+    }
+    direct
 }
 
 /// The wires `pin(lc, k)` gives for the eight LUTs `lc` of a tile and the
@@ -270,5 +398,25 @@ mod tests {
         eprintln!("1: {near:.3}  6: {mid:.3}  12+6: {far:.3}");
         assert!(near > 0.1 && near < 0.6, "{near}");
         assert!(mid > near && far > mid, "{near} {mid} {far}");
+
+        // Each LUT reaches the register beside it without general routing,
+        // far quicker than through it
+        use crate::device::BelType;
+        let (x, y) = (25, 25);
+        let bels = device.tile_at(x, y).expect("a logic tile").bels();
+        let luts = bels.iter().filter(|b| b.bel_type == BelType::Lut4).count();
+        let into_registers: Vec<f64> = t
+            .direct
+            .iter()
+            .filter(|(&(from, to, pin), _)| {
+                bels[from].bel_type == BelType::Lut4 && bels[to].bel_type.is_ff() && pin == 0
+            })
+            .map(|(_, &ns)| ns)
+            .collect();
+        assert_eq!(into_registers.len(), luts, "{:?}", t.direct);
+        assert!(
+            into_registers.iter().all(|&ns| ns < near / 2.0),
+            "{into_registers:?}"
+        );
     }
 }

@@ -347,7 +347,10 @@ impl NexusDevice {
                     });
                     bel_id_counter += 1;
                 }
-                for (key, site_wire) in prjoxide_bels::dist_ram_wires() {
+                for (key, site_wire) in prjoxide_bels::dist_ram_wires()
+                    .into_iter()
+                    .chain(prjoxide_bels::ff_lut_input_wires())
+                {
                     if let Some(w) = resolve_wire(x, y, &site_wire)
                         .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
                     {

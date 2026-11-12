@@ -43,11 +43,24 @@ struct Analysis {
     worst: f64,
 }
 
-/// Static timing of `netlist` with cells at `position`.
+/// Delay (ns) of each connection, from its ends' positions: 0 when either
+/// end is unplaced.
+fn by_position<'a>(
+    model: &'a DelayModel,
+    position: impl Fn(CellId) -> Option<(f64, f64)> + 'a,
+) -> impl Fn(CellId, CellId, usize) -> f64 + 'a {
+    move |driver, sink, _| match (position(driver), position(sink)) {
+        (Some(from), Some(to)) => connection_delay(model, from, to),
+        _ => 0.0,
+    }
+}
+
+/// Static timing of `netlist` with each connection taking `wire(driver,
+/// sink, sink input)` ns.
 fn analyse(
     netlist: &GateNetlist,
     model: &DelayModel,
-    position: &impl Fn(CellId) -> Option<(f64, f64)>,
+    wire_delay: &impl Fn(CellId, CellId, usize) -> f64,
 ) -> Analysis {
     let nets = &netlist.nets;
     let cell_index: HashMap<CellId, usize> =
@@ -57,11 +70,8 @@ fn analyse(
             .and_then(|n| n.driver)
             .and_then(|id| cell_index.get(&id).map(|&i| &netlist.cells[i]))
     };
-    let wire = |net: GateNetId, sink: &Cell| -> f64 {
-        match (driver(net).and_then(|d| position(d.id)), position(sink.id)) {
-            (Some(from), Some(to)) => connection_delay(model, from, to),
-            _ => 0.0,
-        }
+    let wire = |net: GateNetId, sink: &Cell, pin: usize| -> f64 {
+        driver(net).map_or(0.0, |d| wire_delay(d.id, sink.id, pin))
     };
 
     // Combinational cells in topological order (Kahn). Cells on a
@@ -116,7 +126,8 @@ fn analyse(
         let latest = cell
             .inputs
             .iter()
-            .map(|&input| arrival[input.0 as usize] + wire(input, cell))
+            .enumerate()
+            .map(|(pin, &input)| arrival[input.0 as usize] + wire(input, cell, pin))
             .fold(0.0, f64::max);
         let out_time = latest + model.cell_delay(&cell.cell_type);
         for &out in &cell.outputs {
@@ -127,8 +138,8 @@ fn analyse(
     // Path ends: inputs of registers and pads.
     let mut worst = 0.0f64;
     for cell in netlist.cells.iter().filter(|c| is_path_boundary(c)) {
-        for &input in &cell.inputs {
-            worst = worst.max(arrival[input.0 as usize] + wire(input, cell) + model.dff_setup);
+        for (pin, &input) in cell.inputs.iter().enumerate() {
+            worst = worst.max(arrival[input.0 as usize] + wire(input, cell, pin) + model.dff_setup);
         }
     }
 
@@ -138,8 +149,8 @@ fn analyse(
     for (i, cell) in netlist.cells.iter().enumerate() {
         if is_path_boundary(cell) {
             input_required[i] = worst - model.dff_setup;
-            for &input in &cell.inputs {
-                let r = input_required[i] - wire(input, cell);
+            for (pin, &input) in cell.inputs.iter().enumerate() {
+                let r = input_required[i] - wire(input, cell, pin);
                 let slot = &mut required[input.0 as usize];
                 *slot = slot.min(r);
             }
@@ -156,8 +167,8 @@ fn analyse(
             continue;
         }
         input_required[i] = out_required - model.cell_delay(&cell.cell_type);
-        for &input in &cell.inputs {
-            let r = input_required[i] - wire(input, cell);
+        for (pin, &input) in cell.inputs.iter().enumerate() {
+            let r = input_required[i] - wire(input, cell, pin);
             let slot = &mut required[input.0 as usize];
             *slot = slot.min(r);
         }
@@ -179,7 +190,7 @@ pub fn net_criticalities(
     model: &DelayModel,
     position: impl Fn(CellId) -> Option<(f64, f64)>,
 ) -> Vec<f64> {
-    let a = analyse(netlist, model, &position);
+    let a = analyse(netlist, model, &by_position(model, position));
     if a.worst <= 0.0 {
         return vec![0.0; netlist.nets.len()];
     }
@@ -197,7 +208,10 @@ pub fn net_criticalities(
 }
 
 /// Criticality of each connection of each net in `netlist` (by net index,
-/// then in the order of the net's `fanout`), with cells at `position`.
+/// then in the order of the net's `fanout`), with each connection taking
+/// `wire(driver, sink, sink input)` ns: a placer that knows which BEL each
+/// cell is on can price a connection by its BELs, not only its tiles (see
+/// [`DelayModel::bel_connection_delay`]).
 ///
 /// A net's sinks need not be equally critical: one may sit on the worst path
 /// while the others have time to spare. Pricing each connection by its own
@@ -206,9 +220,9 @@ pub fn net_criticalities(
 pub fn connection_criticalities(
     netlist: &GateNetlist,
     model: &DelayModel,
-    position: impl Fn(CellId) -> Option<(f64, f64)>,
+    wire: impl Fn(CellId, CellId, usize) -> f64,
 ) -> Vec<Vec<f64>> {
-    let a = analyse(netlist, model, &position);
+    let a = analyse(netlist, model, &wire);
     let cell_index: HashMap<CellId, usize> =
         HashMap::from_iter(netlist.cells.iter().enumerate().map(|(i, c)| (c.id, i)));
     netlist
@@ -216,21 +230,17 @@ pub fn connection_criticalities(
         .iter()
         .enumerate()
         .map(|(n, net)| {
-            let from = net.driver.and_then(&position);
             net.fanout
                 .iter()
-                .map(|(sink, _)| {
-                    let Some(&i) = cell_index.get(sink) else {
+                .map(|&(sink, pin)| {
+                    let Some(&i) = cell_index.get(&sink) else {
                         return 0.0;
                     };
                     let required = a.input_required[i];
                     if a.worst <= 0.0 || !required.is_finite() {
                         return 0.0;
                     }
-                    let wire = match (from, position(*sink)) {
-                        (Some(from), Some(to)) => connection_delay(model, from, to),
-                        _ => 0.0,
-                    };
+                    let wire = net.driver.map_or(0.0, |d| wire(d, sink, pin));
                     let slack = required - (a.arrival[n] + wire);
                     (1.0 - slack / a.worst).clamp(0.0, 1.0)
                 })
@@ -313,7 +323,11 @@ mod tests {
         );
         let model = DelayModel::nexus();
         let per_net = net_criticalities(&n, &model, |id| positions.get(&id).copied());
-        let crit = connection_criticalities(&n, &model, |id| positions.get(&id).copied());
+        let crit = connection_criticalities(
+            &n,
+            &model,
+            by_position(&model, |id| positions.get(&id).copied()),
+        );
         let q = n.nets.iter().position(|x| x.name == "q").unwrap();
         let sink_name = |k: usize| {
             let id = n.nets[q].fanout[k].0;
