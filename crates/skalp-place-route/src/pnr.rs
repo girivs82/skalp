@@ -691,7 +691,8 @@ pub fn place_and_route_nexus_real(
             }
         }
     }
-    check_routes_disjoint(netlist, &device, &routing)?;
+    // An unfinished route shares wires by definition: report it as
+    // unfinished, not as the first overlap the disjointness check meets
     if !routing.success {
         let mut unrouted: Vec<&str> = routing
             .routes
@@ -701,6 +702,13 @@ pub fn place_and_route_nexus_real(
             .collect();
         unrouted.sort_unstable();
         unrouted.truncate(10);
+        if routing.unrouted_connections == 0 {
+            return Err(PlaceRouteError::RoutingFailed(format!(
+                "Routing did not converge on the real device: every connection has a route, \
+                 but some wires are still used by more than one net (congestion {:.2})",
+                routing.congestion
+            )));
+        }
         return Err(PlaceRouteError::RoutingFailed(format!(
             "Some nets could not be routed on the real device: {} connections unrouted{}{}",
             routing.unrouted_connections,
@@ -716,6 +724,7 @@ pub fn place_and_route_nexus_real(
             }
         )));
     }
+    check_routes_disjoint(netlist, &device, &routing)?;
 
     let uses_oscillator = netlist
         .cells
