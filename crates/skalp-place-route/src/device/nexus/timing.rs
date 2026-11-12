@@ -1,8 +1,9 @@
 //! Nexus timing data for the generic analyzer ([`crate::timing::sta`]).
 //!
 //! Uses prjoxide's delay tables: per-pip interconnect classes and per-cell
-//! timing arcs. CertusPro-NX has no tables of its own and shares the Nexus
-//! fabric, so its numbers are CrossLink-NX's and are estimates.
+//! timing arcs. A family without tables of its own (upstream prjoxide has
+//! CrossLink-NX's only) borrows CrossLink-NX's, whose Nexus fabric it shares;
+//! see [`NexusVariant::timing_tables`].
 
 use super::{dsp, ebr, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
@@ -97,10 +98,6 @@ impl TimingDb {
 
     /// Load a device's delay tables at `corner`.
     pub fn load_corner(db_root: &Path, variant: NexusVariant, corner: Corner) -> Result<Self> {
-        let speed = match corner {
-            Corner::Slow => variant.timing_speed_grade(),
-            Corner::Fast => "M",
-        };
         // The delay of one arc at this corner, and the extreme of several
         let value = |p: &IoPath| match corner {
             Corner::Slow => p.maxv,
@@ -113,8 +110,21 @@ impl TimingDb {
             }
             .unwrap_or(0)
         };
-        let dir = variant.timing_dir(db_root, speed);
-        let read = |name: String| -> Result<String> {
+        let tables = variant.timing_tables(db_root, corner == Corner::Fast);
+        let Some((dir, grade)) = tables.first().cloned() else {
+            return Err(PlaceRouteError::BitstreamFailed(format!(
+                "no Nexus delay tables in {}",
+                db_root.display()
+            )));
+        };
+        if !dir.starts_with(db_root.join(variant.prjoxide_family())) {
+            log::warn!(
+                "no {} delay tables in {}: using CrossLink-NX's grade {grade}",
+                variant.prjoxide_family(),
+                db_root.display()
+            );
+        }
+        let read = |dir: &Path, name: String| -> Result<String> {
             std::fs::read_to_string(dir.join(&name))
                 .map_err(|e| PlaceRouteError::BitstreamFailed(format!("reading {name}: {e}")))
         };
@@ -122,10 +132,28 @@ impl TimingDb {
             PlaceRouteError::BitstreamFailed(format!("parsing {name}: {e}"))
         };
 
-        let interconnect: InterconnectFile =
-            serde_json::from_str(&read(format!("interconnect_{speed}.json"))?)
-                .map_err(|e| bad("interconnect", e))?;
-        let cells: CellsFile = serde_json::from_str(&read(format!("cells_{speed}.json"))?)
+        // Pip classes from the first table that has each one: a family's own
+        // tables can lack classes its characterisation designs never used.
+        let mut classes: HashMap<String, PipClass> = HashMap::default();
+        for (index, (dir, grade)) in tables.iter().enumerate() {
+            let file: InterconnectFile =
+                serde_json::from_str(&read(dir, format!("interconnect_{grade}.json"))?)
+                    .map_err(|e| bad("interconnect", e))?;
+            let before = classes.len();
+            for (name, class) in file.pip_classes {
+                classes.entry(name).or_insert(class);
+            }
+            if index > 0 && classes.len() > before {
+                log::info!(
+                    "{} pip classes missing from {}'s grade {} tables taken from {}",
+                    classes.len() - before,
+                    variant.prjoxide_family(),
+                    tables[0].1,
+                    dir.display()
+                );
+            }
+        }
+        let cells: CellsFile = serde_json::from_str(&read(&dir, format!("cells_{grade}.json"))?)
             .map_err(|e| bad("cells", e))?;
 
         let cell = |name: &str| {
@@ -187,8 +215,7 @@ impl TimingDb {
             .collect();
 
         Ok(Self {
-            pip_classes: interconnect
-                .pip_classes
+            pip_classes: classes
                 .into_iter()
                 .map(|(name, class)| {
                     let delay = match corner {
@@ -530,10 +557,49 @@ mod tests {
             eprintln!("PRJOXIDE_DB not found — skipping");
             return;
         };
-        let timing = TimingDb::load(&db, NexusVariant::Lfcpnx100).unwrap();
+        let timing = TimingDb::load(&db, NexusVariant::Lifcl40).unwrap();
         assert_eq!(timing.lut, 213);
         assert_eq!(timing.clk_to_q, 307);
         assert_eq!(timing.setup.get("M"), Some(&0));
+    }
+
+    /// A family with tables of its own uses them for its cells, and fills the
+    /// pip classes they lack from CrossLink-NX's.
+    #[test]
+    fn a_family_with_its_own_tables_uses_them() {
+        let Some(db) = super::super::prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        let tables = variant.timing_tables(&db, false);
+        if tables.len() < 2 {
+            eprintln!("no LFCPNX delay tables in this database — skipping");
+            return;
+        }
+        let (own, grade) = &tables[0];
+        let read = |dir: &Path, name: String| std::fs::read_to_string(dir.join(name)).unwrap();
+        let cells: CellsFile =
+            serde_json::from_str(&read(own, format!("cells_{grade}.json"))).unwrap();
+        let lut = cells.celltypes["OXIDE_COMB:LUT4"]
+            .iopaths
+            .iter()
+            .map(|p| p.maxv)
+            .max()
+            .unwrap();
+        let timing = TimingDb::load(&db, variant).unwrap();
+        assert_eq!(timing.lut, lut);
+
+        let classes = |dir: &Path, grade: &str| -> InterconnectFile {
+            serde_json::from_str(&read(dir, format!("interconnect_{grade}.json"))).unwrap()
+        };
+        let own_classes = classes(own, grade);
+        let (shared, shared_grade) = &tables[1];
+        let shared_classes = classes(shared, shared_grade);
+        for (name, class) in &shared_classes.pip_classes {
+            let expected = own_classes.pip_classes.get(name).unwrap_or(class).base.1;
+            assert_eq!(timing.pip_classes.get(name), Some(&expected), "{name}");
+        }
     }
 
     /// The device's PIPs carry the delays timing analysis charges them, so

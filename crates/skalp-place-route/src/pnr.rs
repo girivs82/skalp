@@ -781,6 +781,14 @@ pub fn place_and_route_nexus_real(
         db: &fast_db,
     };
     let hold = crate::timing::sta::analyze_hold(&device, &fast_model, &design, &clock_targets);
+    // The other end of the range: what the design would reach on the
+    // fastest silicon, for comparing against a part on the bench
+    let fast_setup = crate::timing::sta::analyze(&device, &fast_model, &design, &clock_targets);
+    log::info!(
+        "nexus pnr: {:.1} MHz at the slow corner, {:.1} MHz at the fast corner",
+        timing.design_frequency,
+        fast_setup.design_frequency
+    );
     timing.meets_timing &= hold.violations == 0;
     timing.hold = Some(hold);
 
