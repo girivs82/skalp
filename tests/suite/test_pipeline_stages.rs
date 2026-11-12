@@ -150,3 +150,137 @@ fn test_pipeline_stages_are_retimed_into_the_logic() {
         .iter()
         .any(|c| c.path.starts_with("top.plain.") && c.path.contains(".retime")));
 }
+
+/// How many stages a target period needs: none for a slack target, more as
+/// the target tightens, and never fewer for a tighter target
+#[test]
+fn test_extra_stages_for_a_target_period() {
+    let mut mir = compile(std::path::Path::new(&fixture_path(
+        "pipeline_stages_check.sk",
+    )))
+    .unwrap();
+    assert!(mir.retain_reachable_from("PipelineStagesCheck"));
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let netlist = skalp_lir::synthesize_hierarchical(
+        &hier,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    )
+    .flatten();
+    let delays = skalp_lir::retime::LevelDelays;
+    let needed: Vec<(i64, u32)> = (2..=40)
+        .map(|t| t * 100)
+        .filter_map(|target| {
+            skalp_lir::retime::extra_stages_for_period(&netlist, &delays, "top.plain", target, 6)
+                .map(|k| (target, k))
+        })
+        .collect();
+    assert!(!needed.is_empty(), "no target was reachable");
+    assert_eq!(
+        needed.last().unwrap().1,
+        0,
+        "a slack target needs no stages: {needed:?}"
+    );
+    assert!(
+        needed.iter().any(|&(_, k)| k > 0),
+        "no target needed a stage: {needed:?}"
+    );
+    assert!(
+        needed.windows(2).all(|w| w[0].1 >= w[1].1),
+        "a tighter target needed fewer stages: {needed:?}"
+    );
+}
+
+/// The fixture with `MulAddNormPiped` leaving its latency to synthesis
+/// (`#[pipeline]` alone), written to `dir` with `lock` as its pipeline lock
+/// file when given
+fn auto_fixture(dir: &std::path::Path, lock: Option<&str>) -> std::path::PathBuf {
+    let fixture = std::fs::read_to_string(fixture_path("pipeline_stages_check.sk")).unwrap();
+    assert!(fixture.contains("#[pipeline(stages = 4)]\nentity"));
+    let path = dir.join("auto.sk");
+    std::fs::write(
+        &path,
+        fixture
+            .replace(
+                "#[pipeline(stages = 4)]\nentity",
+                "#[pipeline(max_stages = 6)]\nentity",
+            )
+            // the instance checks would hold the latency at 4
+            .replace("#[latency(4)]\n    inst piped", "inst piped"),
+    )
+    .unwrap();
+    if let Some(lock) = lock {
+        std::fs::write(skalp_frontend::pipeline_lock::lock_path(&path), lock).unwrap();
+    }
+    path
+}
+
+/// A bare #[pipeline] keeps the entity's own latency until the lock file
+/// records one, then takes the recorded latency in every flow
+#[test]
+fn test_pipeline_without_stages_takes_the_locked_latency() {
+    let dir = tempfile::tempdir().unwrap();
+    let mir = compile(&auto_fixture(dir.path(), None)).unwrap();
+    assert_eq!(latency(&mir, "MulAddNormPiped"), Some(2));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mir = compile(&auto_fixture(dir.path(), Some("MulAddNormPiped = 5\n"))).unwrap();
+    assert_eq!(latency(&mir, "MulAddNormPiped"), Some(5));
+
+    let dir = tempfile::tempdir().unwrap();
+    let error = compile(&auto_fixture(dir.path(), Some("MulAddNormPiped = 1\n"))).unwrap_err();
+    assert!(
+        error.contains("the pipeline lock file records 1; synthesize again"),
+        "unexpected error: {error}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let error = compile(&auto_fixture(dir.path(), Some("MulAddNormPiped = 7\n"))).unwrap_err();
+    assert!(
+        error.contains("#[pipeline(max_stages = 6)], but the pipeline lock file records 7"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Synthesis chooses the latency from the clock period: its own for a
+/// slack clock, more for a tight one, never above max_stages
+#[test]
+fn test_pipeline_latency_is_chosen_for_the_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mir = compile(&auto_fixture(dir.path(), None)).unwrap();
+    assert!(mir.retain_reachable_from("PipelineStagesCheck"));
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let choose = |period_ps| {
+        let choices = skalp_lir::pipeline_choice::choose_pipeline_stages(
+            &mir,
+            &library,
+            skalp_lir::synth::SynthPreset::Balanced,
+            &skalp_lir::retime::LevelDelays,
+            period_ps,
+        );
+        assert_eq!(choices.len(), 1, "{choices:?}");
+        assert_eq!(choices[0].entity, "MulAddNormPiped");
+        assert_eq!(choices[0].own_latency, 2);
+        assert_eq!(choices[0].limit, 6);
+        choices[0].latency
+    };
+    assert_eq!(choose(1_000_000), Some(2));
+    let tight: Vec<(i64, Option<u32>)> = (2..=20).map(|t| (t * 100, choose(t * 100))).collect();
+    assert!(
+        tight.iter().any(|&(_, l)| l.is_some_and(|l| l > 2)),
+        "no period needed more latency: {tight:?}"
+    );
+    assert!(
+        tight.iter().all(|&(_, l)| l.is_none_or(|l| l <= 6)),
+        "a latency went over max_stages: {tight:?}"
+    );
+    assert!(
+        tight.windows(2).all(|w| match (w[0].1, w[1].1) {
+            (Some(a), Some(b)) => a >= b,
+            (None, _) => true,
+            (Some(_), None) => false,
+        }),
+        "a tighter clock got less latency: {tight:?}"
+    );
+}

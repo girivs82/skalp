@@ -63,11 +63,29 @@ pub fn insert_pipeline_stages(mir: &mut Mir) -> Result<Vec<(String, u32, u32)>, 
     for index in candidates {
         let module = &mir.modules[index];
         let config = module.pipeline_config.clone().expect("filtered on Some");
+        // A bare #[pipeline] with no latency recorded yet keeps its own
+        if config.auto && config.stages == 0 {
+            continue;
+        }
         let current = module_latency(mir, module).unwrap_or(0);
         let wanted = config.stages;
         if wanted < current {
+            errors.push(if config.auto {
+                format!(
+                    "`{}` has a latency of {current} cycles, but the pipeline lock file records {wanted}; synthesize again to update it",
+                    module.name
+                )
+            } else {
+                format!(
+                    "`{}` has #[pipeline(stages = {wanted})] but already has a latency of {current} cycles; stages is the total latency, so it must be at least {current}",
+                    module.name
+                )
+            });
+            continue;
+        }
+        if let Some(max) = config.max_stages.filter(|&max| wanted > max) {
             errors.push(format!(
-                "`{}` has #[pipeline(stages = {wanted})] but already has a latency of {current} cycles; stages is the total latency, so it must be at least {current}",
+                "`{}` has #[pipeline(max_stages = {max})], but the pipeline lock file records {wanted}",
                 module.name
             ));
             continue;

@@ -11509,43 +11509,48 @@ impl HirBuilderContext {
             return None;
         }
 
-        // Look for "stages" identifier followed by "=" and a number
-        // The format is: #[pipeline(stages=N)]
+        // #[pipeline(stages = N)], #[pipeline(max_stages = N)] or a bare
+        // #[pipeline]; also target_freq = Hz and auto_balance
         let mut stages: Option<u32> = None;
+        let mut max_stages: Option<u32> = None;
         let mut target_freq: Option<u64> = None;
         let mut auto_balance = false;
-        let mut found_stages = false;
-        let mut found_target_freq = false;
+        let mut key: Option<&str> = None;
 
         for token in tokens.iter() {
-            if token.kind() == SyntaxKind::Ident && token.text() == "stages" {
-                found_stages = true;
-                found_target_freq = false;
-            } else if token.kind() == SyntaxKind::Ident && token.text() == "target_freq" {
-                found_target_freq = true;
-                found_stages = false;
-            } else if token.kind() == SyntaxKind::Ident && token.text() == "auto_balance" {
-                auto_balance = true;
-                found_stages = false;
-                found_target_freq = false;
-            } else if found_stages && token.kind() == SyntaxKind::IntLiteral {
-                // Remove underscores from integer literals like "100_000_000"
-                let text = token.text().replace('_', "");
-                stages = text.parse::<u32>().ok();
-                found_stages = false;
-            } else if found_target_freq && token.kind() == SyntaxKind::IntLiteral {
-                // Remove underscores from integer literals like "100_000_000"
-                let text = token.text().replace('_', "");
-                target_freq = text.parse::<u64>().ok();
-                found_target_freq = false;
+            match token.kind() {
+                SyntaxKind::Ident => match token.text() {
+                    "stages" => key = Some("stages"),
+                    "max_stages" => key = Some("max_stages"),
+                    "target_freq" => key = Some("target_freq"),
+                    "auto_balance" => {
+                        auto_balance = true;
+                        key = None;
+                    }
+                    _ => {}
+                },
+                SyntaxKind::IntLiteral => {
+                    // Remove underscores from integer literals like "100_000_000"
+                    let text = token.text().replace('_', "");
+                    match key.take() {
+                        Some("stages") => stages = text.parse().ok(),
+                        Some("max_stages") => max_stages = text.parse().ok(),
+                        Some("target_freq") => target_freq = text.parse().ok(),
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 
-        // If we found "pipeline" but no "stages=N", default to 1 stage
+        // Without stages = N, synthesis picks the latency (recorded in the
+        // pipeline lock file and filled in from there)
         let config = PipelineConfig {
-            stages: stages.unwrap_or(1),
+            stages: stages.unwrap_or(0),
             target_freq,
             auto_balance,
+            auto: stages.is_none(),
+            max_stages,
         };
 
         Some(config)

@@ -44,6 +44,7 @@ pub mod ncl_timing_closure;
 pub mod netlist;
 pub mod pattern_detector;
 pub mod pipeline_annotations;
+pub mod pipeline_choice;
 pub mod primitive_eval;
 pub mod primitives;
 pub mod retime;

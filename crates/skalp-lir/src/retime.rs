@@ -1025,6 +1025,54 @@ impl Plan {
     }
 }
 
+/// The fewest registers to add at the inputs of `region` (as
+/// `#[pipeline]` adds them) for forward retiming to bring the region's paths
+/// within `target_period_ps`, trying up to `max_extra`. `None` when even
+/// `max_extra` is not enough, or the region has no logic to retime.
+///
+/// Every edge into the region from a net driven outside it gets the extra
+/// registers, which is what delaying each input by that many cycles does.
+pub fn extra_stages_for_period(
+    netlist: &GateNetlist,
+    delays: &dyn RetimeDelays,
+    region: &str,
+    target_period_ps: i64,
+    max_extra: u32,
+) -> Option<u32> {
+    let regions = vec![region.to_string()];
+    let base = Graph::build(netlist, &regions)?;
+    let mut inside = vec![false; netlist.nets.len()];
+    for cell in &netlist.cells {
+        if region_of(&cell.path, &regions).is_some() {
+            for &net in &cell.outputs {
+                inside[netlist.resolve_alias(net).0 as usize] = true;
+            }
+        }
+    }
+    let inputs: Vec<usize> = base
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match e.origin {
+            Origin::Fixed(net) => !inside[netlist.resolve_alias(net).0 as usize],
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut graph = base;
+    for extra in 0..=max_extra {
+        if extra > 0 {
+            for &i in &inputs {
+                graph.edges[i].regs.push(false);
+            }
+        }
+        if graph.feasible(target_period_ps, delays).is_some() {
+            return Some(extra);
+        }
+    }
+    None
+}
+
 /// Retime the netlist's own regions ([`GateNetlist::retime_regions`]) as
 /// short as they go, logging what changed
 pub fn retime_pipelined(

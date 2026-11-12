@@ -170,6 +170,94 @@ impl TimingDb {
     pub fn register_ps(&self) -> (i64, i64) {
         (self.clk_to_q, self.setup.get("M").copied().unwrap_or(0))
     }
+
+    /// Delay through `cell` from `input` to `output`, in picoseconds, or
+    /// `None` when that input doesn't reach that output
+    pub fn cell_arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        if dsp::is_multiplier(cell) {
+            return dsp::input_pin(cell, input).map(|_| self.multiplier);
+        }
+        if NexusTiming::is_dist_ram(cell) {
+            return (9..=12).contains(&input).then_some(self.lut);
+        }
+        if NexusTiming::is_carry(cell) {
+            let arc = (ccu2_input(input), ccu2_output(output).to_string());
+            return self.ccu2.get(&arc).copied();
+        }
+        if NexusTiming::is_wide_lut(cell) {
+            return Some(if input < WIDE_LUT_SELECT {
+                self.wide_data
+            } else {
+                self.wide_select
+            });
+        }
+        Some(self.lut)
+    }
+}
+
+/// A Nexus device's delays for retiming before placement
+/// ([`skalp_lir::retime`]): cell arcs from the timing database, and one
+/// measured routing delay per connection, as for two cells a couple of
+/// tiles apart, since nothing is placed yet
+pub struct NexusRetimeDelays {
+    db: TimingDb,
+    connection_ps: i64,
+}
+
+/// Extra routing delay per load on a net, in picoseconds
+const RETIME_PER_LOAD_PS: i64 = 15;
+
+impl NexusRetimeDelays {
+    /// Load the timing database and measure a typical connection on a small
+    /// logic region of `variant`
+    pub fn load(db_root: &Path, variant: NexusVariant) -> Result<Self> {
+        let db = TimingDb::load(db_root, variant)?;
+        let tiles = super::prjoxide_load::load_tilegrid(db_root, variant)
+            .map_err(PlaceRouteError::BitstreamFailed)?;
+        let clocks = super::prjoxide_graph::ClockRegions::load(
+            db_root,
+            variant.prjoxide_family(),
+            variant.prjoxide_device(),
+        )
+        .map_err(PlaceRouteError::BitstreamFailed)?;
+        let region = super::sites::design_region(&tiles, &clocks, &[], 1000, 0, 0);
+        let mut device = NexusDevice::from_prjoxide_region(
+            variant,
+            db_root,
+            region.window,
+            Some(region.logic_rows),
+        )
+        .map_err(PlaceRouteError::BitstreamFailed)?;
+        device.set_pip_delays(&db);
+        let connection_ps = crate::timing::RouteDelayTable::measure(&device)
+            .map(|table| (table.delay(2, 1) * 1000.0).round() as i64)
+            .ok_or_else(|| {
+                PlaceRouteError::BitstreamFailed(
+                    "no logic tiles to measure routing delays on".to_string(),
+                )
+            })?;
+        Ok(Self { db, connection_ps })
+    }
+
+    /// The routing delay charged per connection, in picoseconds
+    pub fn connection_ps(&self) -> i64 {
+        self.connection_ps
+    }
+}
+
+impl skalp_lir::retime::RetimeDelays for NexusRetimeDelays {
+    fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        self.db.cell_arc_ps(cell, input, output)
+    }
+    fn clk_to_q_ps(&self) -> i64 {
+        self.db.register_ps().0
+    }
+    fn setup_ps(&self) -> i64 {
+        self.db.register_ps().1
+    }
+    fn net_ps(&self, fanout: usize) -> i64 {
+        self.connection_ps + RETIME_PER_LOAD_PS * fanout.saturating_sub(1) as i64
+    }
 }
 
 /// The name and tile of a routing wire, split for pip classification.
@@ -275,24 +363,7 @@ impl TimingModel for NexusTiming<'_> {
     }
 
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
-        if dsp::is_multiplier(cell) {
-            return dsp::input_pin(cell, input).map(|_| self.db.multiplier);
-        }
-        if Self::is_dist_ram(cell) {
-            return (9..=12).contains(&input).then_some(self.db.lut);
-        }
-        if Self::is_carry(cell) {
-            let arc = (ccu2_input(input), ccu2_output(output).to_string());
-            return self.db.ccu2.get(&arc).copied();
-        }
-        if Self::is_wide_lut(cell) {
-            return Some(if input < WIDE_LUT_SELECT {
-                self.db.wide_data
-            } else {
-                self.db.wide_select
-            });
-        }
-        Some(self.db.lut)
+        self.db.cell_arc_ps(cell, input, output)
     }
 
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
