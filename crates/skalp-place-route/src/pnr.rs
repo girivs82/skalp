@@ -726,15 +726,34 @@ pub fn place_and_route_nexus_real(
     }
     check_routes_disjoint(netlist, &device, &routing)?;
 
-    let uses_oscillator = netlist
-        .cells
-        .iter()
-        .any(|c| c.parameters.get("LOC").map(String::as_str) == Some(sites::OSC_PIN));
-    let target_mhz = if uses_oscillator {
-        crate::device::nexus::emit::OSC_FREQUENCY_MHZ
-    } else {
-        config.timing.as_ref().map_or(100.0, |t| t.target_frequency)
-    };
+    // Each clock is timed at the frequency its source runs at: a board
+    // clock pin, the on-chip oscillator, or a PLL output. The configured
+    // target covers clocks with no known source.
+    let board = crate::boards::for_nexus_variant(variant);
+    let mut clock_targets = crate::timing::clock_targets::ClockTargets::derive(
+        netlist,
+        config.timing.as_ref().map_or(100.0, |t| t.target_frequency),
+        |cell, known| {
+            if crate::device::nexus::pll::is_pll(cell) {
+                return crate::device::nexus::pll::driven_frequencies(cell, known);
+            }
+            let Some(pin) = cell.parameters.get("LOC") else {
+                return Vec::new();
+            };
+            let mhz = if pin == sites::OSC_PIN {
+                Some(crate::device::nexus::emit::OSC_FREQUENCY_MHZ)
+            } else {
+                board
+                    .and_then(|board| crate::boards::clock_frequency(board, pin).map(|hz| hz / 1e6))
+            };
+            mhz.map(|mhz| vec![(0, mhz)]).unwrap_or_default()
+        },
+    );
+    clock_targets.uncertainty_ns = config
+        .timing
+        .as_ref()
+        .map_or(0.0, |t| t.clock_uncertainty + t.setup_margin);
+    clock_targets.hold_margin_ns = config.timing.as_ref().map_or(0.0, |t| t.hold_margin);
     let generator = NexusConfig {
         device: &device,
         variant,
@@ -750,7 +769,28 @@ pub fn place_and_route_nexus_real(
         device: &device,
         db: &timing_db,
     };
-    let timing = crate::timing::sta::analyze(&device, &timing_model, &design, target_mhz);
+    let mut timing = crate::timing::sta::analyze(&device, &timing_model, &design, &clock_targets);
+    // Hold, with the fastest delays: the fast corner's tables
+    let fast_db = crate::device::nexus::timing::TimingDb::load_corner(
+        db_root,
+        variant,
+        crate::device::nexus::timing::Corner::Fast,
+    )?;
+    let fast_model = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &fast_db,
+    };
+    let hold = crate::timing::sta::analyze_hold(&device, &fast_model, &design, &clock_targets);
+    // The other end of the range: what the design would reach on the
+    // fastest silicon, for comparing against a part on the bench
+    let fast_setup = crate::timing::sta::analyze(&device, &fast_model, &design, &clock_targets);
+    log::info!(
+        "nexus pnr: {:.1} MHz at the slow corner, {:.1} MHz at the fast corner",
+        timing.design_frequency,
+        fast_setup.design_frequency
+    );
+    timing.meets_timing &= hold.violations == 0;
+    timing.hold = Some(hold);
 
     let bit_writer = NexusBitWriter {
         db_root,

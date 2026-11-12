@@ -66,6 +66,13 @@ fn blinker_builds_a_bitstream_for_the_real_device() {
     assert_eq!(timing.target_frequency, 18.0);
     assert!(timing.design_frequency > 100.0);
     assert!(!timing.critical_paths.is_empty());
+
+    // The counter's registers sit on one low-skew clock tree, so nothing
+    // races through in the fast corner either.
+    let hold = timing.hold.expect("hold is checked");
+    assert_eq!(hold.violations, 0, "{:?}", hold.paths.first());
+    assert!(hold.worst_slack > 0.0);
+    assert!(!hold.paths.is_empty());
 }
 
 #[test]
@@ -272,6 +279,28 @@ fn pll_builds_a_bitstream_for_the_real_device() {
     )
     .expect("the PLL design should place, route and emit");
     assert!(result.routing.success);
+
+    // Each clock is checked at the frequency its source gives it: 125 MHz
+    // from the board pin, 100 MHz from the PLL (VCO 1600 MHz / 16). A
+    // summary's period is its slack plus the time its worst path takes.
+    let timing = result
+        .timing
+        .as_ref()
+        .expect("the real flow reports timing");
+    let mut periods: Vec<f64> = timing
+        .clock_summaries
+        .iter()
+        .map(|c| c.worst_slack + 1000.0 / c.frequency)
+        .collect();
+    periods.sort_by(f64::total_cmp);
+    assert_eq!(periods.len(), 2, "{:?}", timing.clock_summaries);
+    assert!((periods[0] - 8.0).abs() < 1e-6, "{periods:?}");
+    assert!((periods[1] - 10.0).abs() < 1e-6, "{periods:?}");
+    assert_eq!(timing.target_frequency, 125.0, "the tighter clock leads");
+    let hold = timing.hold.as_ref().expect("hold is checked");
+    assert_eq!(hold.violations, 0, "{:?}", hold.paths.first());
+    assert!(hold.worst_slack > 0.0);
+
     let bus = skalp_place_route::device::nexus::prjoxide_pack::read_bus_config(
         &db,
         &result.bitstream.data,

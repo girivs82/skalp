@@ -2,6 +2,7 @@
 //!
 //! Implements static timing analysis (STA) for FPGA designs.
 
+pub mod clock_targets;
 pub mod sta;
 
 mod delays;
@@ -160,6 +161,24 @@ pub struct TimingReport {
     pub clock_summaries: Vec<ClockSummary>,
     /// Critical paths
     pub critical_paths: Vec<CriticalPath>,
+    /// Hold check at the fast corner, when the analyzer ran one
+    #[serde(default)]
+    pub hold: Option<HoldReport>,
+}
+
+/// Hold check: whether data launched by a clock edge reaches each register
+/// too early, overwriting what that edge should capture. Checked with the
+/// fastest delays, since faster silicon makes a hold failure more likely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HoldReport {
+    /// Smallest hold slack, in ns (negative: a violation)
+    pub worst_slack: f64,
+    /// Number of register inputs that violate hold
+    pub violations: usize,
+    /// The paths with the least hold slack, least first. `delay` is the
+    /// earliest data arrival and `required` the hold requirement, both
+    /// measured from the capturing clock edge at its source.
+    pub paths: Vec<CriticalPath>,
 }
 
 impl Default for TimingReport {
@@ -172,6 +191,7 @@ impl Default for TimingReport {
             failing_paths: 0,
             clock_summaries: Vec::new(),
             critical_paths: Vec::new(),
+            hold: None,
         }
     }
 }

@@ -141,16 +141,38 @@ impl NexusVariant {
         }
     }
 
-    /// Family whose timing tables apply. prjoxide has none for LFCPNX, which
-    /// shares the Nexus fabric with CrossLink-NX.
-    pub fn timing_family(&self) -> &'static str {
-        "LIFCL"
+    /// Delay tables to read, best first, as (directory, table grade): the
+    /// family's own tables for this part's grade, then CrossLink-NX's
+    /// equivalent, whose Nexus fabric the other families share. Upstream
+    /// prjoxide has tables for LIFCL only, and a family's own tables may lack
+    /// some pip classes; the later tables fill those in. Only tables the
+    /// database has are listed. `fast` picks the fast corner (`M`).
+    pub fn timing_tables(&self, db_root: &Path, fast: bool) -> Vec<(PathBuf, &'static str)> {
+        let own = (
+            db_root.join(self.prjoxide_family()).join("timing"),
+            if fast { "M" } else { self.timing_speed_grade() },
+        );
+        // LIFCL's table for a -9 part
+        let shared = (
+            db_root.join("LIFCL").join("timing"),
+            if fast { "M" } else { "12" },
+        );
+        let mut tables = vec![own];
+        if tables[0] != shared {
+            tables.push(shared);
+        }
+        tables.retain(|(dir, grade)| dir.join(format!("cells_{grade}.json")).is_file());
+        tables
     }
 
-    /// Speed grade of the timing tables to use.
+    /// The table grade of the part this variant's boards carry (all -9):
+    /// prjoxide names LIFCL's tables by nextpnr speed (-9 is `12`), LFCPNX's
+    /// by Radiant's `-sp` grade (`9`).
     pub fn timing_speed_grade(&self) -> &'static str {
-        // The fastest characterized grade; matches the parts these boards carry.
-        "12"
+        match self {
+            NexusVariant::Lifcl40 => "12",
+            NexusVariant::Lfcpnx100 => "9",
+        }
     }
 
     /// prjoxide device directory name (`LIFCL-40` / `LFCPNX-100`).
@@ -298,6 +320,37 @@ pub const BLOCK_RAM_WINDOWS_CONFIRMED: &[&str] = &["LFCPNX-100"];
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_family_uses_its_own_delay_tables_when_the_database_has_them() {
+        let db = tempfile::tempdir().unwrap();
+        let lifcl = db.path().join("LIFCL").join("timing");
+        let lfcpnx = db.path().join("LFCPNX").join("timing");
+        std::fs::create_dir_all(&lifcl).unwrap();
+        std::fs::create_dir_all(&lfcpnx).unwrap();
+        for grade in ["12", "M"] {
+            std::fs::write(lifcl.join(format!("cells_{grade}.json")), "{}").unwrap();
+        }
+        let variant = NexusVariant::Lfcpnx100;
+        // No tables of its own yet: CrossLink-NX's
+        assert_eq!(
+            variant.timing_tables(db.path(), false),
+            [(lifcl.clone(), "12")]
+        );
+        std::fs::write(lfcpnx.join("cells_9.json"), "{}").unwrap();
+        assert_eq!(
+            variant.timing_tables(db.path(), false),
+            [(lfcpnx.clone(), "9"), (lifcl.clone(), "12")]
+        );
+        assert_eq!(
+            variant.timing_tables(db.path(), true),
+            [(lifcl.clone(), "M")]
+        );
+        assert_eq!(
+            NexusVariant::Lifcl40.timing_tables(db.path(), false),
+            [(lifcl, "12")]
+        );
+    }
 
     /// M1a acceptance: the real database reproduces the resource counts that
     /// `data.rs` hand-copied from prjoxide. Skipped if the DB isn't present.
