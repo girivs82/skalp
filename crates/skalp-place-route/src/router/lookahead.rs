@@ -12,6 +12,12 @@
 //! reaching each tile around it. A wire of that class anywhere else is
 //! estimated by its displacement to the sink's tile.
 //!
+//! The same searches, run over the PIPs' timing terms instead of their base
+//! costs, give the least delay to each tile, which a timing-driven search
+//! adds (scaled by the net's timing weight) the way it adds the base cost
+//! estimate. Each table is minimised on its own, so their weighted sum never
+//! exceeds the cost of a path that minimises the sum.
+//!
 //! The fabric repeats, but not perfectly (block RAM and DSP columns, IO
 //! edges), so the estimate is not a strict bound everywhere: it is the
 //! least of two sample wires of the class, and the router uses it for speed
@@ -28,12 +34,24 @@ pub(super) const RADIUS: i32 = 20;
 
 const SIDE: usize = (2 * RADIUS + 1) as usize;
 
-/// Least cost from a wire of each class to each tile within [`RADIUS`]
+/// Least cost and least delay from a wire of each class to each tile
+/// within [`RADIUS`]
 #[derive(Debug, Clone, Default)]
 pub struct Lookahead {
     /// Per class, `SIDE * SIDE` costs indexed by displacement (infinite
     /// where no path was found), or none for a class too rare to measure
     tables: Vec<Option<Box<[f32]>>>,
+    /// The same for the PIPs' timing terms
+    delays: Vec<Option<Box<[f32]>>>,
+}
+
+/// What a lookahead search adds up along a path
+#[derive(Clone, Copy)]
+enum Measure {
+    /// The PIPs' base costs
+    Cost,
+    /// The PIPs' timing terms
+    Delay,
 }
 
 impl Lookahead {
@@ -58,42 +76,65 @@ impl Lookahead {
             (centre.0 + RADIUS as i64 / 2, centre.1 + RADIUS as i64 / 3),
         ];
         let n = graph.wire_count();
-        let tables: Vec<Option<Box<[f32]>>> = members
-            .par_iter()
-            .map_init(
-                || Scratch::new(n),
-                |scratch, wires| {
-                    if wires.len() < min_count {
-                        return None;
-                    }
-                    let mut table = vec![f32::INFINITY; SIDE * SIDE].into_boxed_slice();
-                    for &(sx, sy) in &samples {
-                        let start = wires.iter().copied().min_by_key(|&w| {
-                            let (x, y) = graph.tile(w).unwrap_or((0, 0));
-                            ((x as i64 - sx).abs() + (y as i64 - sy).abs(), w.0)
-                        })?;
-                        scratch.measure(graph, start, &mut table);
-                    }
-                    Some(table)
-                },
-            )
-            .collect();
+        let measure_all = |measure: Measure| -> Vec<Option<Box<[f32]>>> {
+            members
+                .par_iter()
+                .map_init(
+                    || Scratch::new(n),
+                    |scratch, wires| {
+                        if wires.len() < min_count {
+                            return None;
+                        }
+                        let mut table = vec![f32::INFINITY; SIDE * SIDE].into_boxed_slice();
+                        for &(sx, sy) in &samples {
+                            let start = wires.iter().copied().min_by_key(|&w| {
+                                let (x, y) = graph.tile(w).unwrap_or((0, 0));
+                                ((x as i64 - sx).abs() + (y as i64 - sy).abs(), w.0)
+                            })?;
+                            scratch.measure(graph, start, measure, &mut table);
+                        }
+                        Some(table)
+                    },
+                )
+                .collect()
+        };
+        let tables = measure_all(Measure::Cost);
+        // A graph without delays has nothing to measure
+        let timed = (0..n).any(|w| graph.edges(WireId(w as u32)).iter().any(|e| e.timing > 0.0));
+        let delays = if timed {
+            measure_all(Measure::Delay)
+        } else {
+            Vec::new()
+        };
         let measured = tables.iter().filter(|t| t.is_some()).count();
-        log::debug!("router lookahead: {measured} of {class_count} wire classes measured");
-        Self { tables }
+        log::debug!(
+            "router lookahead: {measured} of {class_count} wire classes measured{}",
+            if timed { ", with delays" } else { "" }
+        );
+        Self { tables, delays }
     }
 
     /// Least measured cost from a wire of class `class` to a tile `dx`, `dy`
     /// away, if the class was measured and the tile is within the radius
     /// and was reached
     pub(super) fn cost(&self, class: u32, dx: i32, dy: i32) -> Option<f64> {
+        Self::lookup(&self.tables, class, dx, dy)
+    }
+
+    /// Least measured sum of timing terms from a wire of class `class` to a
+    /// tile `dx`, `dy` away, as [`Self::cost`] gives the base cost
+    pub(super) fn delay(&self, class: u32, dx: i32, dy: i32) -> Option<f64> {
+        Self::lookup(&self.delays, class, dx, dy)
+    }
+
+    fn lookup(tables: &[Option<Box<[f32]>>], class: u32, dx: i32, dy: i32) -> Option<f64> {
         if dx.abs() > RADIUS || dy.abs() > RADIUS {
             return None;
         }
-        let table = self.tables.get(class as usize)?.as_ref()?;
+        let table = tables.get(class as usize)?.as_ref()?;
         let index = (dy + RADIUS) as usize * SIDE + (dx + RADIUS) as usize;
-        let cost = table[index];
-        cost.is_finite().then_some(cost as f64)
+        let value = table[index];
+        value.is_finite().then_some(value as f64)
     }
 }
 
@@ -111,10 +152,17 @@ impl Scratch {
         }
     }
 
-    /// Search outward from `start` over base PIP costs, keeping to the
-    /// tiles within a little more than the radius, and lower each tile's
-    /// entry of `table` to the least cost of any wire homed there
-    fn measure(&mut self, graph: &RoutingGraph, start: WireId, table: &mut [f32]) {
+    /// Search outward from `start` over the PIPs' base costs or timing
+    /// terms, keeping to the tiles within a little more than the radius,
+    /// and lower each tile's entry of `table` to the least sum reaching any
+    /// wire homed there
+    fn measure(
+        &mut self,
+        graph: &RoutingGraph,
+        start: WireId,
+        measure: Measure,
+        table: &mut [f32],
+    ) {
         let Some((x0, y0)) = graph.tile(start) else {
             return;
         };
@@ -146,7 +194,10 @@ impl Scratch {
                 if (tx as i32 - x0 as i32).abs() > reach || (ty as i32 - y0 as i32).abs() > reach {
                     continue;
                 }
-                let nd = d + e.cost;
+                let nd = d + match measure {
+                    Measure::Cost => e.cost,
+                    Measure::Delay => e.timing,
+                };
                 if nd < self.dist[to] {
                     if self.dist[to].is_infinite() {
                         self.touched.push(to as u32);

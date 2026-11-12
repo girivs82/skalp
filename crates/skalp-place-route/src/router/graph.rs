@@ -399,6 +399,38 @@ impl RoutingGraph {
         bound.max(measured + beyond + approach.entry)
     }
 
+    /// The router's estimate of the summed timing terms from `wire` to the
+    /// sink `approach` describes, as [`Self::estimate_to_sink`] is for base
+    /// costs: the least delay measured from a wire of the same class to a
+    /// tile at the same displacement, never less than
+    /// [`Self::timing_lower_bound`]
+    pub fn estimate_timing_to_sink(&self, wire: WireId, approach: &SinkApproach) -> f64 {
+        let Some((x, y)) = self.tile(wire) else {
+            return 0.0;
+        };
+        if approach.far_entry {
+            // Distance gives no bound on reaching such a sink
+            return 0.0;
+        }
+        let (tx, ty) = approach.tile;
+        let bound = self.timing_lower_bound(x.abs_diff(tx), y.abs_diff(ty));
+        if (x, y) == approach.tile {
+            return bound;
+        }
+        let Some(&class) = self.class.get(wire.0 as usize) else {
+            return bound;
+        };
+        let radius = lookahead::RADIUS;
+        let dx = tx as i32 - x as i32;
+        let dy = ty as i32 - y as i32;
+        let (near_dx, near_dy) = (dx.clamp(-radius, radius), dy.clamp(-radius, radius));
+        let Some(measured) = self.lookahead().delay(class, near_dx, near_dy) else {
+            return bound;
+        };
+        let beyond = self.timing_lower_bound(dx.abs_diff(near_dx), dy.abs_diff(near_dy));
+        bound.max(measured + beyond)
+    }
+
     /// The lookahead, measured on first use
     pub fn lookahead(&self) -> &Lookahead {
         self.lookahead
@@ -628,6 +660,16 @@ mod tests {
             let bound =
                 graph.cost_lower_bound(dx, dy) + timing_weight * graph.timing_lower_bound(dx, dy);
             assert!(bound <= cost + 1e-6, "bound {bound} above path cost {cost}");
+            // The measured delays tighten the timing part, and with the
+            // measured costs still never pass the real cost on this fabric
+            let approach = graph.sink_approach(dst);
+            let timing = graph.estimate_timing_to_sink(src, &approach);
+            assert!(timing >= graph.timing_lower_bound(dx, dy));
+            let estimate = graph.estimate_to_sink(src, &approach) + timing_weight * timing;
+            assert!(
+                estimate <= cost + 1e-6,
+                "estimate {estimate} above path cost {cost}"
+            );
             assert!(wires.len() > 1);
             checked += 1;
         }
