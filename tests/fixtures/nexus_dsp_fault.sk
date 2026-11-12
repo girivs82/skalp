@@ -1,0 +1,58 @@
+// POSITIVE CONTROL: the reference product is off by one on purpose, so led0 must go high.
+// Multiplier self-check: every 32 clocks two 18-bit operands come from an
+// LFSR; the product from the hardware multiplier (a * b) is compared with
+// one built by shift-and-add over 18 clocks (no multiplier involved).
+// led0 latches high on the first mismatch. led1 latches high once 256
+// products have been checked (so it proves the check ran). led7 toggles
+// about every 0.47 s (heartbeat). The other LEDs are always low.
+entity DspFault {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+impl DspFault {
+    signal lfsr: bit[32] = 1
+    signal phase: bit[5] = 0
+    signal checks: bit[8] = 0
+    signal beat: nat[24] = 0
+    signal a: nat[18] = 0
+    signal b: nat[18] = 0
+    signal p: nat[36] = 0
+    signal ra: nat[36] = 0
+    signal rb: bit[18] = 0
+    signal acc: nat[36] = 0
+    signal want: nat[36]
+    signal failed: bit = 0
+    signal ran: bit = 0
+    want = acc + 1
+    on(clk.rise) {
+        lfsr = {lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31], lfsr[31:1]}
+        phase = phase + 1
+        beat = beat + 1
+        p = a * b
+        if phase == 0 {
+            a = lfsr[17:0]
+            b = lfsr[31:14]
+            ra = lfsr[17:0]
+            rb = lfsr[31:14]
+            acc = 0
+        } else {
+            if phase <= 18 {
+                if rb[0] == 1 {
+                    acc = acc + ra
+                }
+                ra = ra << 1
+                rb = rb >> 1
+            }
+        }
+        if phase == 24 {
+            if p != want {
+                failed = 1
+            }
+            checks = checks + 1
+            if checks == 255 {
+                ran = 1
+            }
+        }
+    }
+    led = {beat[23], 0, 0, 0, 0, 0, ran, failed}
+}
