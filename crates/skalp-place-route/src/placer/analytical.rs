@@ -6,8 +6,9 @@
 //! 2. Solves Lx = b using conjugate gradient
 //! 3. Produces continuous cell positions
 
+use super::congestion::CongestionMap;
 use super::sites::{bel_types_compatible, SiteMap};
-use super::spreading::{spread, CapacityMap, SpreadCell};
+use super::spreading::{spread, CapacityMap, Demand, SpreadCell};
 use super::timing_estimate;
 use super::{is_constant_cell, is_routed_net, PlacementLoc, PlacementResult};
 use crate::collections::{HashMap, HashMapExt};
@@ -41,6 +42,16 @@ const CG_RELATIVE_TOLERANCE: f64 = 1e-5;
 /// Carry cells per tile when the device has no chain layout (iCE40: one
 /// per logic cell)
 const CARRY_CELLS_PER_TILE: usize = 8;
+
+/// First spreading round after which cells in congested routing are
+/// inflated: the early rounds' positions are still far from final
+const INFLATE_FROM_ROUND: usize = 10;
+
+/// Share of cells, least pressed first, that are never inflated in a round
+const INFLATE_QUANTILE: f64 = 0.9;
+
+/// Most a cell is inflated, over all rounds
+const MAX_INFLATION: f64 = 2.0;
 
 /// The quadratic wirelength system `A x = b` for each axis: `A` as its
 /// off-diagonal entries per row plus its diagonal.
@@ -442,6 +453,12 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let chains = self.chain_shapes(carry_chains, cell_indices);
         let pins = net_pins(netlist, cell_indices);
 
+        // Routability: cells where the routing is over its limit take more
+        // room in later rounds, so spreading thins those areas out
+        let mut routing = CongestionMap::new(self.device);
+        let base_demand: Vec<Demand> = movable.iter().map(|c| c.demand.clone()).collect();
+        let mut inflation = vec![1.0; movable.len()];
+
         let mut targets: Vec<(f64, f64)> = Vec::new();
         for round in 0..MAX_SPREAD_ROUNDS {
             targets = spread(&capacity, &movable, &x, &y, SPREAD_DENSITY);
@@ -462,6 +479,35 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             targets = movable.iter().map(|c| (tx[c.index], ty[c.index])).collect();
             if solved_wl >= SPREAD_CONVERGED * spread_wl {
                 break;
+            }
+
+            if let Some(map) = routing.as_mut().filter(|_| round + 1 >= INFLATE_FROM_ROUND) {
+                map.build_from_positions(&pins, &tx, &ty);
+                // Spread positions ask more of the routing everywhere than
+                // the final placement will, so only the most pressed cells
+                // (over the limit, and in the top share of all cells) grow
+                let pressure: Vec<f64> = movable
+                    .iter()
+                    .map(|c| map.pressure(tx[c.index], ty[c.index]))
+                    .collect();
+                let mut sorted = pressure.clone();
+                sorted.sort_by(f64::total_cmp);
+                let threshold = sorted[(sorted.len() as f64 * INFLATE_QUANTILE) as usize].max(1.0);
+                let mut inflated = 0;
+                for (k, cell) in movable.iter_mut().enumerate() {
+                    let p = pressure[k] / threshold;
+                    if p > 1.0 {
+                        inflation[k] = (inflation[k] * p.sqrt()).min(MAX_INFLATION);
+                        inflated += 1;
+                    }
+                    cell.demand = base_demand[k]
+                        .iter()
+                        .map(|&(r, a)| (r, a * inflation[k]))
+                        .collect();
+                }
+                log::debug!(
+                    "analytical: round {round}: {inflated} cells where routing is over its limit"
+                );
             }
 
             // Timing-driven: weight each net by how critical it is with the
