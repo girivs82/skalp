@@ -66,3 +66,43 @@ async fn test_imported_entities_gate_level() {
         .unwrap();
     exercise(&mut tb).await;
 }
+
+/// A top that imports `AddThreeTwice` from `mid`, which instantiates
+/// `AddThree` from its own import `leaf`. The top never names `AddThree`.
+/// `mid` used to be built before its imports were merged, so its instances
+/// of `AddThree` were dropped and `AddThree` never reached the design: the
+/// build failed with "assignment `port_1 = FieldAccess(...)` could not be
+/// lowered".
+fn nested_top_path() -> String {
+    format!(
+        "{}/tests/fixtures/imported_nested/imported_nested_top.sk",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+const NESTED_TOP: &str = "ImportedNestedTop";
+
+async fn exercise_nested(tb: &mut Testbench) {
+    for x in [0u8, 1, 7, 100, 250, 255] {
+        tb.set("x", x);
+        tb.clock(1).await;
+        assert_eq!(tb.get_u64("y").await, x.wrapping_add(6) as u64, "x = {x}");
+    }
+}
+
+#[tokio::test]
+async fn test_entity_of_a_nested_import_behavioral() {
+    let mut tb = Testbench::with_top_module(&nested_top_path(), NESTED_TOP)
+        .await
+        .unwrap();
+    exercise_nested(&mut tb).await;
+}
+
+#[tokio::test]
+async fn test_entity_of_a_nested_import_gate_level() {
+    let mut tb =
+        Testbench::gate_level_with_top_and_library(&nested_top_path(), NESTED_TOP, "nexus")
+            .await
+            .unwrap();
+    exercise_nested(&mut tb).await;
+}

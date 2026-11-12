@@ -491,6 +491,17 @@ impl ModuleResolver {
             }
         }
 
+        // Instances of imported entities could not be built above: the
+        // entities were not known yet. Merge the imported entities (with the
+        // entities they instantiate) and rebuild this file's own entities with
+        // them preregistered, so the module's implementations hold every
+        // instance. Without this, a file that imports an entity its importer
+        // does not also import lost that instance: the entity never reached
+        // the design, and the instance's outputs were left undriven.
+        if !hir.unresolved_instances.is_empty() {
+            hir = self.rebuild_with_imported_entities(hir, &syntax_tree, &dep_paths)?;
+        }
+
         // Mark as done loading
         self.loading.remove(path);
 
@@ -521,6 +532,102 @@ impl ModuleResolver {
     /// Get all loaded modules
     pub fn loaded_modules(&self) -> impl Iterator<Item = (&PathBuf, &Hir)> {
         self.loaded_modules.iter()
+    }
+
+    /// Rebuild a module whose first build left instances unresolved, with the
+    /// entities it imports merged in. The imported entities keep the ids the
+    /// merge gave them; the file's own entities and implementations are
+    /// replaced by the rebuilt ones, which now include those instances.
+    fn rebuild_with_imported_entities(
+        &self,
+        hir: Hir,
+        syntax_tree: &crate::syntax::SyntaxNode,
+        dep_paths: &[(HirImport, PathBuf)],
+    ) -> Result<Hir> {
+        let own_entities: HashSet<String> = hir.entities.iter().map(|e| e.name.clone()).collect();
+        let mut merged = hir;
+        for (import, dep_path) in dep_paths {
+            let Some(dep_hir) = self.loaded_modules.get(dep_path) else {
+                continue;
+            };
+            let names: Vec<&String> = match &import.path {
+                HirImportPath::Simple { segments } | HirImportPath::Renamed { segments, .. } => {
+                    segments.last().into_iter().collect()
+                }
+                HirImportPath::Nested { paths, .. } => paths
+                    .iter()
+                    .filter_map(|p| match p {
+                        HirImportPath::Simple { segments }
+                        | HirImportPath::Renamed { segments, .. } => segments.last(),
+                        _ => None,
+                    })
+                    .collect(),
+                HirImportPath::Glob { .. } => dep_hir.entities.iter().map(|e| &e.name).collect(),
+            };
+            for name in names {
+                if dep_hir.entities.iter().any(|e| &e.name == name) {
+                    crate::merge_symbol(&mut merged, dep_hir, name)?;
+                }
+            }
+        }
+
+        let mut builder = HirBuilderContext::new();
+        for type_alias in &merged.type_aliases {
+            builder.preregister_type_alias(type_alias);
+        }
+        for distinct in &merged.distinct_types {
+            builder.preregister_distinct_type(distinct);
+        }
+        for entity in &merged.entities {
+            builder.preregister_entity(entity);
+        }
+        for function in &merged.functions {
+            builder.preregister_function(function);
+        }
+        for implementation in &merged.implementations {
+            for function in &implementation.functions {
+                builder.preregister_function(function);
+            }
+            for constant in &implementation.constants {
+                builder.preregister_constant(constant);
+            }
+        }
+        let rebuilt = builder.build(syntax_tree).map_err(|errors| {
+            anyhow::anyhow!(
+                "Failed to rebuild HIR with imported entities: {}",
+                errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "unknown error".to_string())
+            )
+        })?;
+
+        // Preregistration kept every entity's id, so the rebuilt entities and
+        // implementations replace their first-build versions one for one.
+        let rebuilt_ids: HashSet<crate::hir::EntityId> = rebuilt
+            .entities
+            .iter()
+            .filter(|e| own_entities.contains(&e.name))
+            .map(|e| e.id)
+            .collect();
+        merged.entities.retain(|e| !own_entities.contains(&e.name));
+        merged
+            .implementations
+            .retain(|i| !rebuilt_ids.contains(&i.entity));
+        merged.entities.extend(
+            rebuilt
+                .entities
+                .into_iter()
+                .filter(|e| own_entities.contains(&e.name)),
+        );
+        merged.implementations.extend(
+            rebuilt
+                .implementations
+                .into_iter()
+                .filter(|i| rebuilt_ids.contains(&i.entity)),
+        );
+        merged.unresolved_instances = rebuilt.unresolved_instances;
+        Ok(merged)
     }
 
     /// Merge imported symbols from a dependency INTO the target HIR
