@@ -425,6 +425,8 @@ impl MirCompiler {
         {
             tracing::info!("pipeline: `{name}` latency {before} -> {after} cycles");
         }
+        crate::pipelining::check_instance_latencies(&mir)
+            .map_err(|e| format!("instance latency check failed:\n  {e}"))?;
 
         // Step 2: Perform CDC analysis
         let violations = self.perform_cdc_analysis(&mir);

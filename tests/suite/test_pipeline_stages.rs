@@ -68,6 +68,32 @@ impl TwoDeep {
     );
 }
 
+/// `#[latency(N)]` on an instance must match the entity's latency, stages
+/// included: the fixture's instances pass, and a wrong count is an error
+#[test]
+fn test_instance_latency_attribute_is_checked() {
+    let fixture = std::fs::read_to_string(fixture_path("pipeline_stages_check.sk")).unwrap();
+    assert!(fixture.contains("#[latency(4)]\n    inst piped"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wrong_latency.sk");
+    std::fs::write(
+        &path,
+        fixture.replacen(
+            "#[latency(4)]\n    inst piped",
+            "#[latency(3)]\n    inst piped",
+            1,
+        ),
+    )
+    .unwrap();
+    let error = compile(&path).unwrap_err();
+    assert!(
+        error.contains(
+            "in `PipelineStagesCheck`: instance `piped` has #[latency(3)] but `MulAddNormPiped` has a latency of 4 cycles"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
 async fn flags_after(top: &str, gate_level: bool) -> u64 {
     let path = fixture_path("pipeline_stages_check.sk");
     let mut tb = if gate_level {

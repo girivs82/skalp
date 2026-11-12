@@ -328,6 +328,11 @@ pub struct HirInstance {
     /// When present, indicates this instance implements a safety mechanism from a safety_goal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_config: Option<SafetyConfig>,
+    /// The latency in cycles the instantiating code relies on, from
+    /// `#[latency(N)]`. The build fails when the instantiated entity's latency
+    /// (after any `#[pipeline]` stages) is different.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<u32>,
     /// Variable ID for symbol table registration (allows field access like `instance.port`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variable_id: Option<VariableId>,

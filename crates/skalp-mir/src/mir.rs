@@ -1043,6 +1043,10 @@ pub struct ModuleInstance {
     /// Indicates which safety goal/mechanism this instance implements
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<SafetyContext>,
+    /// Latency in cycles the parent relies on (`#[latency(N)]`), checked
+    /// once `#[pipeline]` stages are in place
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<u32>,
 }
 
 /// Synthesis-resolved conditional assignment

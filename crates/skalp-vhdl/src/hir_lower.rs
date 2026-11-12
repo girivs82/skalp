@@ -2824,6 +2824,7 @@ impl VhdlHirBuilder {
             named_generic_args: IndexMap::new(),
             connections,
             safety_config: None,
+            latency: None,
             variable_id: None,
             comments: collect_leading_comments(node),
         })

@@ -111,6 +111,7 @@ impl PipelineStagesCheck {
     signal failed: bit = 0
     signal ran: bit = 0
 
+    #[latency(2)]
     inst plain = MulAddNorm {
         clk: clk,
         rst: rst,
@@ -119,6 +120,7 @@ impl PipelineStagesCheck {
         b: lfsr[31:16],
         c: {lfsr[7:0], lfsr[31:8]}
     }
+    #[latency(4)]
     inst piped = MulAddNormPiped {
         clk: clk,
         rst: rst,
@@ -179,6 +181,7 @@ impl PipelineStagesFault {
     signal failed: bit = 0
     signal ran: bit = 0
 
+    #[latency(2)]
     inst plain = MulAddNorm {
         clk: clk,
         rst: rst,
@@ -187,6 +190,7 @@ impl PipelineStagesFault {
         b: lfsr[31:16],
         c: {lfsr[7:0], lfsr[31:8]}
     }
+    #[latency(4)]
     inst piped = MulAddNormPiped {
         clk: clk,
         rst: rst,

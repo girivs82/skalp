@@ -88,6 +88,40 @@ pub fn insert_pipeline_stages(mir: &mut Mir) -> Result<Vec<(String, u32, u32)>, 
     }
 }
 
+/// Check every instance written with `#[latency(N)]`: the entity it
+/// instantiates must have exactly that latency, stages included. Code around
+/// an instance is written for its latency, so a pipelined entity whose stage
+/// count changes would otherwise go on simulating and building, just wrong.
+pub fn check_instance_latencies(mir: &Mir) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for module in &mir.modules {
+        for instance in &module.instances {
+            let Some(expected) = instance.latency else {
+                continue;
+            };
+            let Some(child) = mir.modules.iter().find(|m| m.id == instance.module) else {
+                continue;
+            };
+            let actual = module_latency(mir, child);
+            if actual != Some(expected) {
+                let actual = match actual {
+                    Some(cycles) => format!("{cycles} cycles"),
+                    None => "no path from an input to an output".to_string(),
+                };
+                errors.push(format!(
+                    "in `{}`: instance `{}` has #[latency({expected})] but `{}` has a latency of {actual}",
+                    module.name, instance.name, child.name
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n  "))
+    }
+}
+
 /// Turn module `index` into a wrapper that delays its inputs by `extra`
 /// cycles around a copy of its original body
 fn wrap_with_delays(mir: &mut Mir, index: usize, extra: u32) -> Result<(), String> {
@@ -237,6 +271,7 @@ fn wrap_with_delays(mir: &mut Mir, index: usize, extra: u32) -> Result<(), Strin
         parameters: IndexMap::new(),
         span: None,
         safety_context: None,
+        latency: None,
     });
 
     mir.modules[index] = wrapper;
