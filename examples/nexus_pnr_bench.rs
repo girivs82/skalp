@@ -201,5 +201,12 @@ fn print_paths(timing: &skalp_place_route::timing::TimingReport) {
                 step.net
             );
         }
+        println!("  by instance:");
+        for run in path.time_by_instance() {
+            println!(
+                "  {:8.3} ns {:4} cells  {}",
+                run.delay, run.cells, run.instance
+            );
+        }
     }
 }

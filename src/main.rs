@@ -4513,6 +4513,21 @@ fn run_nexus_pnr_on_netlist(
                 "  Critical path: {:.3} ns, ending at {}",
                 path.delay, path.destination
             );
+            let runs = path.time_by_instance();
+            if !runs.is_empty() {
+                println!("  Time along it by instance:");
+                for run in runs {
+                    let instance = if run.instance.is_empty() {
+                        "(top)"
+                    } else {
+                        &run.instance
+                    };
+                    println!(
+                        "    {:>7.3} ns  {:>3} cells  {}",
+                        run.delay, run.cells, instance
+                    );
+                }
+            }
         }
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
