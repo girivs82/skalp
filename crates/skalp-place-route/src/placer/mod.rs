@@ -355,6 +355,7 @@ impl<D: Device + Clone> Placer<D> {
                     t_stage.elapsed().as_secs_f64()
                 );
                 Self::log_placement_stats(&initial, netlist);
+                Self::log_hard_blocks("analytical", &initial, netlist);
 
                 // Legalize with carry chain consecutive-row constraints
                 let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
@@ -367,6 +368,7 @@ impl<D: Device + Clone> Placer<D> {
                 );
                 Self::log_placement_stats(&legalized, netlist);
                 self.log_congestion("legalized", &legalized, netlist);
+                Self::log_hard_blocks("legalized", &legalized, netlist);
 
                 // SA refinement with carry chain awareness
                 let timing_weight = if matches!(
@@ -409,6 +411,7 @@ impl<D: Device + Clone> Placer<D> {
                     t_stage.elapsed().as_secs_f64()
                 );
                 self.log_congestion("annealed", &annealed, netlist);
+                Self::log_hard_blocks("annealed", &annealed, netlist);
                 annealed
             }
             _ => {
@@ -1036,6 +1039,67 @@ impl<D: Device + Clone> Placer<D> {
     /// Debug: routing demand against the device's routing supply
     /// ([`congestion::CongestionMap`]): the overflow cost and the busiest
     /// bins
+    /// Debug: each multiplier and block RAM, against the median position of
+    /// the cells it connects to
+    fn log_hard_blocks(stage: &str, result: &PlacementResult, netlist: &GateNetlist) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        let mut neighbours: HashMap<CellId, Vec<CellId>> = HashMap::new();
+        for net in netlist.nets.iter().filter(|n| is_routed_net(n, netlist)) {
+            let pins: Vec<CellId> = net
+                .driver
+                .iter()
+                .copied()
+                .chain(net.fanout.iter().map(|(c, _)| *c))
+                .collect();
+            if pins.len() > 64 {
+                continue;
+            }
+            for &a in &pins {
+                neighbours
+                    .entry(a)
+                    .or_default()
+                    .extend(pins.iter().filter(|&&b| b != a));
+            }
+        }
+        let mut lines = Vec::new();
+        for cell in &netlist.cells {
+            let t = &cell.cell_type;
+            if !(t.contains("MULT")
+                || t.contains("DP16K")
+                || t.contains("PDP")
+                || t.contains("EBR"))
+            {
+                continue;
+            }
+            let Some(loc) = result.placements.get(&cell.id) else {
+                continue;
+            };
+            let (mut xs, mut ys): (Vec<u32>, Vec<u32>) = neighbours
+                .get(&cell.id)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| result.placements.get(c))
+                .map(|l| (l.tile_x, l.tile_y))
+                .unzip();
+            xs.sort_unstable();
+            ys.sort_unstable();
+            let med = |v: &[u32]| v.get(v.len() / 2).copied().unwrap_or(0);
+            lines.push(format!(
+                "{} {} at ({},{}) neighbours' median ({},{}) of {}",
+                t,
+                cell.path,
+                loc.tile_x,
+                loc.tile_y,
+                med(&xs),
+                med(&ys),
+                xs.len()
+            ));
+        }
+        log::debug!("placer: {stage}: hard blocks: {}", lines.join("; "));
+    }
+
     fn log_congestion(&self, stage: &str, result: &PlacementResult, netlist: &GateNetlist) {
         if !log::log_enabled!(log::Level::Debug) {
             return;

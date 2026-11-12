@@ -1,0 +1,44 @@
+// Block RAM self-check: writes all 1024 words of a 1024 x 18 memory, reads
+// them back and compares, over and over. Each round writes a different
+// pattern, so a read that returns a previous round's data is caught too.
+// led0 latches high on the first mismatch. led1 latches high once a full
+// read-back round has completed (so it proves the check ran). led7 toggles
+// about every 0.47 s (heartbeat). The other LEDs are always low.
+entity EbrCheck {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+impl EbrCheck {
+    signal c: bit[14] = 0
+    signal round: bit[8] = 0
+    signal beat: nat[24] = 0
+    signal mem: bit[18][1024]
+    signal q: bit[18] = 0
+    signal failed: bit = 0
+    signal ran: bit = 0
+    signal addr: bit[10]
+    signal pattern: bit[18]
+    signal want: bit[18]
+    addr = c[12:3]
+    pattern = {addr[7:0] ^ round, addr}
+    want = pattern
+    on(clk.rise) {
+        c = c + 1
+        beat = beat + 1
+        if c[13] == 0 {
+            if c[2:0] == 3 {
+                mem[addr] = pattern
+            }
+        } else {
+            q = mem[addr]
+            if c[2:0] == 5 && q != want {
+                failed = 1
+            }
+            if c[12:0] == 8191 {
+                ran = 1
+                round = round + 1
+            }
+        }
+    }
+    led = {beat[23], 0, 0, 0, 0, 0, ran, failed}
+}
