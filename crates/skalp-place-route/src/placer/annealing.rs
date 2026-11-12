@@ -188,12 +188,22 @@ impl ProximityCostTracker {
 struct NetCostCache {
     /// Per-net HPWL cost (already weighted by sqrt(fanout))
     net_wl_cost: Vec<f64>,
-    /// Per-net timing cost (delay * criticality²)
+    /// Per-net timing cost: the sum over its connections of delay times
+    /// the connection's criticality²
     net_timing_cost: Vec<f64>,
+    /// Criticality of each connection, by net index and then in the order
+    /// of the net's fanout; empty when placing for wirelength only
+    connection_criticalities: Vec<Vec<f64>>,
     /// Total wirelength cost (sum of net_wl_cost)
     total_wl_cost: f64,
     /// Total timing cost (sum of net_timing_cost)
     total_timing_cost: f64,
+    /// Factor that puts timing cost on the scale of wirelength cost: their
+    /// ratio in the placement the cache was built for. Timing is in ns and
+    /// wirelength in tiles, and a tile of wire costs only tens of ps, so
+    /// unscaled the timing term all but vanished next to wirelength whatever
+    /// the timing weight (VPR normalises both terms the same way).
+    timing_scale: f64,
     /// Cell → list of net indices that the cell participates in
     cell_to_nets: HashMap<CellId, Vec<usize>>,
     /// NCL proximity cost tracker
@@ -207,7 +217,7 @@ impl NetCostCache {
     fn build(
         placement: &PlacementResult,
         netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
+        connection_criticalities: Vec<Vec<f64>>,
         delay_model: &DelayModel,
         timing_weight: f64,
     ) -> Self {
@@ -231,12 +241,14 @@ impl NetCostCache {
             }
 
             // Compute HPWL + timing in a single pass over the net's cells
-            let criticality = if timing_weight > 0.0 {
-                net_criticalities.get(&net.id).copied().unwrap_or(0.0)
+            let criticalities = if timing_weight > 0.0 {
+                connection_criticalities
+                    .get(i)
+                    .map_or(&[][..], Vec::as_slice)
             } else {
-                0.0
+                &[]
             };
-            let (wl, timing) = Self::compute_net_costs(net, placement, delay_model, criticality);
+            let (wl, timing) = Self::compute_net_costs(net, placement, delay_model, criticalities);
             net_wl_cost[i] = wl;
             net_timing_cost[i] = timing;
         }
@@ -247,15 +259,22 @@ impl NetCostCache {
             nets.dedup();
         }
 
-        let total_wl_cost = net_wl_cost.iter().sum();
-        let total_timing_cost = net_timing_cost.iter().sum();
+        let total_wl_cost: f64 = net_wl_cost.iter().sum();
+        let total_timing_cost: f64 = net_timing_cost.iter().sum();
+        let timing_scale = if total_timing_cost > 0.0 {
+            total_wl_cost / total_timing_cost
+        } else {
+            1.0
+        };
         let proximity = ProximityCostTracker::build(netlist, placement);
 
         Self {
             net_wl_cost,
             net_timing_cost,
+            connection_criticalities,
             total_wl_cost,
             total_timing_cost,
+            timing_scale,
             cell_to_nets,
             proximity,
             congestion: None,
@@ -284,7 +303,8 @@ impl NetCostCache {
         let base = if timing_weight == 0.0 {
             self.total_wl_cost
         } else {
-            (1.0 - timing_weight) * self.total_wl_cost + timing_weight * self.total_timing_cost
+            (1.0 - timing_weight) * self.total_wl_cost
+                + timing_weight * self.timing_scale * self.total_timing_cost
         };
         // Proximity penalty scaled to be comparable to wirelength cost.
         // Weight of 10.0 makes 1-tile excess equivalent to 10 HPWL units.
@@ -315,7 +335,6 @@ impl NetCostCache {
         moved_cells: &[CellId],
         new_placement: &PlacementResult,
         netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
         delay_model: &DelayModel,
         timing_weight: f64,
     ) -> CostDelta {
@@ -325,13 +344,15 @@ impl NetCostCache {
 
         for &net_idx in affected {
             let net = &netlist.nets[net_idx];
-            let criticality = if timing_weight > 0.0 {
-                net_criticalities.get(&net.id).copied().unwrap_or(0.0)
+            let criticalities = if timing_weight > 0.0 {
+                self.connection_criticalities
+                    .get(net_idx)
+                    .map_or(&[][..], Vec::as_slice)
             } else {
-                0.0
+                &[]
             };
             let (new_wl, new_timing) =
-                Self::compute_net_costs(net, new_placement, delay_model, criticality);
+                Self::compute_net_costs(net, new_placement, delay_model, criticalities);
 
             wl_delta += new_wl - self.net_wl_cost[net_idx];
             timing_delta += new_timing - self.net_timing_cost[net_idx];
@@ -341,7 +362,7 @@ impl NetCostCache {
         let base_delta = if timing_weight == 0.0 {
             wl_delta
         } else {
-            (1.0 - timing_weight) * wl_delta + timing_weight * timing_delta
+            (1.0 - timing_weight) * wl_delta + timing_weight * self.timing_scale * timing_delta
         };
 
         // Proximity cost delta (only recomputes affected groups)
@@ -386,12 +407,14 @@ impl NetCostCache {
     }
 
     /// Compute HPWL and timing cost for a net in a single pass over its cells.
-    /// Returns (wirelength_cost, timing_cost).
+    /// Returns (wirelength_cost, timing_cost). `criticalities` are the net's
+    /// connection criticalities in fanout order (empty: no timing cost);
+    /// connections below [`MIN_TIMED_CRITICALITY`] cost no timing.
     fn compute_net_costs(
         net: &skalp_lir::gate_netlist::GateNet,
         placement: &PlacementResult,
         delay_model: &DelayModel,
-        criticality: f64,
+        criticalities: &[f64],
     ) -> (f64, f64) {
         let mut min_x = f64::MAX;
         let mut max_x = f64::MIN;
@@ -399,31 +422,19 @@ impl NetCostCache {
         let mut max_y = f64::MIN;
         let mut connected = 0u32;
 
-        // Track driver location for delay computation
-        let mut driver_x = 0i32;
-        let mut driver_y = 0i32;
-        let mut has_driver = false;
-        let mut max_delay: f64 = 0.0;
-        let compute_timing = criticality >= 0.1;
-
-        if let Some(driver) = net.driver {
-            if let Some(loc) = placement.placements.get(&driver) {
-                let x = loc.tile_x as f64;
-                let y = loc.tile_y as f64;
-                min_x = x;
-                max_x = x;
-                min_y = y;
-                max_y = y;
-                connected += 1;
-                if compute_timing {
-                    driver_x = loc.tile_x as i32;
-                    driver_y = loc.tile_y as i32;
-                    has_driver = true;
-                }
-            }
+        let driver = net.driver.and_then(|d| placement.placements.get(&d));
+        if let Some(loc) = driver {
+            let x = loc.tile_x as f64;
+            let y = loc.tile_y as f64;
+            min_x = x;
+            max_x = x;
+            min_y = y;
+            max_y = y;
+            connected += 1;
         }
 
-        for (cell_id, _) in &net.fanout {
+        let mut timing = 0.0;
+        for (k, (cell_id, _)) in net.fanout.iter().enumerate() {
             if let Some(loc) = placement.placements.get(cell_id) {
                 let x = loc.tile_x as f64;
                 let y = loc.tile_y as f64;
@@ -433,12 +444,11 @@ impl NetCostCache {
                 max_y = max_y.max(y);
                 connected += 1;
 
-                // Compute delay in same pass (avoids re-fetching placement)
-                if compute_timing && has_driver {
-                    let dx = (driver_x - loc.tile_x as i32).unsigned_abs();
-                    let dy = (driver_y - loc.tile_y as i32).unsigned_abs();
-                    let routing_delay = delay_model.estimated_path_delay(dx + dy);
-                    max_delay = max_delay.max(routing_delay);
+                let criticality = criticalities.get(k).copied().unwrap_or(0.0);
+                if let (Some(from), true) = (driver, criticality >= MIN_TIMED_CRITICALITY) {
+                    let dx = from.tile_x.abs_diff(loc.tile_x);
+                    let dy = from.tile_y.abs_diff(loc.tile_y);
+                    timing += delay_model.connection_delay(dx, dy) * criticality * criticality;
                 }
             }
         }
@@ -450,15 +460,13 @@ impl NetCostCache {
             0.0
         };
 
-        let timing = if compute_timing {
-            max_delay * criticality * criticality
-        } else {
-            0.0
-        };
-
         (wl, timing)
     }
 }
+
+/// Connections less critical than this carry no timing cost in the annealer:
+/// they have slack to spare, and wirelength alone places them well.
+const MIN_TIMED_CRITICALITY: f64 = 0.1;
 
 /// Record of changes made by apply_move_in_place, for efficient undo.
 struct UndoRecord {
@@ -742,7 +750,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         ctx: &MoveContext,
         cost_cache: &NetCostCache,
         netlist: &GateNetlist,
-        net_criticalities: &HashMap<GateNetId, f64>,
         rlim: u32,
     ) -> f64 {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed.wrapping_add(CALIBRATION_STREAM));
@@ -764,7 +771,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 &affected,
                 &cal_placement,
                 netlist,
-                net_criticalities,
                 &self.delay_model,
                 self.timing_weight,
             );
@@ -839,17 +845,17 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let mut current = initial;
 
         // Compute net criticalities for timing-driven mode
-        let net_criticalities = if self.timing_weight > 0.0 {
-            self.compute_net_criticalities(netlist, &current)
+        let (net_criticalities, connection_criticalities) = if self.timing_weight > 0.0 {
+            self.compute_criticalities(netlist, &current)
         } else {
-            HashMap::new()
+            (HashMap::new(), Vec::new())
         };
 
         // Build incremental cost cache: O(nets) once, then O(affected) per move
         let mut cost_cache = NetCostCache::build(
             &current,
             netlist,
-            &net_criticalities,
+            connection_criticalities,
             &self.delay_model,
             self.timing_weight,
         )
@@ -883,7 +889,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &move_ctx,
             &cost_cache,
             netlist,
-            &net_criticalities,
             rlim.round() as u32,
         );
         let mut best = current.clone();
@@ -931,7 +936,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     &affected,
                     &current,
                     netlist,
-                    &net_criticalities,
                     &self.delay_model,
                     self.timing_weight,
                 );
@@ -1003,17 +1007,17 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         let mut current = initial;
 
         // Compute net criticalities for timing-driven mode
-        let net_criticalities = if self.timing_weight > 0.0 {
-            self.compute_net_criticalities(netlist, &current)
+        let (net_criticalities, connection_criticalities) = if self.timing_weight > 0.0 {
+            self.compute_criticalities(netlist, &current)
         } else {
-            HashMap::new()
+            (HashMap::new(), Vec::new())
         };
 
         // Build incremental cost cache
         let mut cost_cache = NetCostCache::build(
             &current,
             netlist,
-            &net_criticalities,
+            connection_criticalities,
             &self.delay_model,
             self.timing_weight,
         )
@@ -1049,7 +1053,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &move_ctx,
             &cost_cache,
             netlist,
-            &net_criticalities,
             rlim.round() as u32,
         );
 
@@ -1135,7 +1138,6 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             &affected,
                             &new_placement,
                             netlist,
-                            &net_criticalities,
                             &self.delay_model,
                             self.timing_weight,
                         );
@@ -1669,10 +1671,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 // Manhattan distance
                 let dx = (driver_loc.tile_x as i32 - sink_loc.tile_x as i32).unsigned_abs();
                 let dy = (driver_loc.tile_y as i32 - sink_loc.tile_y as i32).unsigned_abs();
-                let distance = dx + dy;
-
-                // Estimate routing delay based on distance
-                let routing_delay = self.delay_model.estimated_path_delay(distance);
+                let routing_delay = self.delay_model.connection_delay(dx, dy);
 
                 // Add cell delay for the driver
                 let cell_delay = if let Some(driver_id) = net.driver {
@@ -1693,25 +1692,29 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         max_delay
     }
 
-    /// Compute net criticalities based on topology and path depth
-    fn compute_net_criticalities(
+    /// Criticality of each net (that of its most critical connection) and
+    /// of each connection (see [`timing_estimate::connection_criticalities`]).
+    ///
+    /// [`timing_estimate::connection_criticalities`]: super::timing_estimate::connection_criticalities
+    fn compute_criticalities(
         &self,
         netlist: &GateNetlist,
         placement: &PlacementResult,
-    ) -> HashMap<GateNetId, f64> {
-        let critical =
-            super::timing_estimate::net_criticalities(netlist, &self.delay_model, |id| {
+    ) -> (HashMap<GateNetId, f64>, Vec<Vec<f64>>) {
+        let connections =
+            super::timing_estimate::connection_criticalities(netlist, &self.delay_model, |id| {
                 placement
                     .placements
                     .get(&id)
                     .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
             });
-        netlist
+        let nets = netlist
             .nets
             .iter()
-            .zip(critical)
-            .map(|(net, c)| (net.id, c))
-            .collect()
+            .zip(&connections)
+            .map(|(net, c)| (net.id, c.iter().copied().fold(0.0, f64::max)))
+            .collect();
+        (nets, connections)
     }
 
     /// Generate a move biased toward cells on critical paths
@@ -1768,7 +1771,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
 
     /// Estimate timing score for final placement (worst slack)
     fn estimate_timing_score(&self, placement: &PlacementResult, netlist: &GateNetlist) -> f64 {
-        let criticalities = self.compute_net_criticalities(netlist, placement);
+        let (criticalities, _) = self.compute_criticalities(netlist, placement);
 
         // Sum of critical path delays
         let mut max_delay = 0.0f64;
@@ -1811,6 +1814,40 @@ mod tests {
     use crate::device::nexus::{NexusDevice, NexusVariant};
     use rand::SeedableRng;
     use skalp_lir::gate_netlist::{Cell, GateNet};
+
+    /// A net's timing cost follows each connection's own criticality: moving
+    /// its non-critical sink away costs nothing, moving the critical one away
+    /// costs that connection's extra delay.
+    #[test]
+    fn timing_cost_is_priced_per_connection() {
+        let mut net = GateNet::new(GateNetId(0), "n".to_string());
+        net.driver = Some(CellId(0));
+        net.fanout = vec![(CellId(1), 0), (CellId(2), 0)];
+        let model = DelayModel::nexus();
+        let place = |critical_at: u32, idle_at: u32| {
+            let mut p = PlacementResult::new();
+            for (id, x) in [(0, 10), (1, critical_at), (2, idle_at)] {
+                p.placements
+                    .insert(CellId(id), PlacementLoc::new(x, 10, 0, BelType::Lut4));
+            }
+            p
+        };
+        let crit = [1.0, 0.0];
+        let cost = |p: &PlacementResult| NetCostCache::compute_net_costs(&net, p, &model, &crit).1;
+        let base = cost(&place(11, 12));
+        assert_eq!(cost(&place(11, 30)), base, "the idle sink is free to move");
+        let far = cost(&place(30, 12));
+        let expected = model.connection_delay(20, 0) - model.connection_delay(1, 0);
+        assert!(
+            (far - base - expected).abs() < 1e-9,
+            "{far} {base} {expected}"
+        );
+        // No criticalities: wirelength only
+        assert_eq!(
+            NetCostCache::compute_net_costs(&net, &place(30, 12), &model, &[]).1,
+            0.0
+        );
+    }
 
     /// Wide LUTs (whose BEL takes its slice's two LUTs) move by swapping
     /// with each other, so their footprints trade places; nothing else ever
