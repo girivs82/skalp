@@ -185,6 +185,8 @@ pub struct NexusDevice {
     hop_costs: Vec<f64>,
     /// Package pin mappings
     packages: HashMap<String, PackagePins>,
+    /// Pad driving each bank's input reference voltage, by bank
+    vref_drivers: Arc<HashMap<u32, sites::VrefDriver>>,
     /// Routing architecture
     routing: RoutingArchitecture,
     /// Clock resources
@@ -543,6 +545,7 @@ impl NexusDevice {
             prjoxide_tiles: Arc::new(all_tiles),
             hop_costs: Vec::new(),
             packages: sites::package_pins(db_root, variant, &all_tiles_for_pins)?,
+            vref_drivers: Arc::new(sites::vref_drivers(db_root, variant)?),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles,
@@ -647,6 +650,11 @@ impl NexusDevice {
             .unwrap_or(&[])
     }
 
+    /// The pad that drives `bank`'s first input reference voltage.
+    pub fn vref_driver(&self, bank: u32) -> Option<&sites::VrefDriver> {
+        self.vref_drivers.get(&bank)
+    }
+
     /// A BEL pin's wire, by its conventional key.
     pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
         self.bel_wires.get(&(x, y, key.to_string())).copied()
@@ -709,6 +717,7 @@ impl NexusDevice {
             prjoxide_tiles: Arc::default(),
             hop_costs: Vec::new(),
             packages: HashMap::new(),
+            vref_drivers: Arc::default(),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles: Vec::new(),

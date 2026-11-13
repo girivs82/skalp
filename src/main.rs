@@ -321,6 +321,11 @@ enum Commands {
         /// after loading if a bitstream is given
         #[arg(long, value_name = "SECONDS")]
         watch: Option<u64>,
+
+        /// Load even if the bitstream drives pins the named board does not
+        /// list as safe to drive
+        #[arg(long)]
+        force: bool,
     },
 
     /// Read a logic analyzer capture from a board running a `synth --debug` build
@@ -896,8 +901,9 @@ fn main() -> Result<()> {
             reset_only,
             list,
             watch,
+            force,
         } => {
-            program_device(bitstream.as_ref(), &board, reset_only, list, watch)?;
+            program_device(bitstream.as_ref(), &board, reset_only, list, watch, force)?;
         }
 
         Commands::Fmt { files, check } => {
@@ -4648,10 +4654,6 @@ fn run_nexus_pnr_on_netlist(
     use skalp_place_route::{PnrConfig, TimingConfig};
 
     let nexus = nexus_variant(variant)?;
-    if let Some(board) = skalp_place_route::boards::for_nexus_variant(nexus) {
-        skalp_place_route::boards::check_outputs(gate_netlist, board)
-            .map_err(|refusal| anyhow::anyhow!(refusal))?;
-    }
     let mut config = match preset.to_lowercase().as_str() {
         "fast" => PnrConfig::fast(),
         "default" => PnrConfig::default(),
@@ -4747,7 +4749,46 @@ fn run_nexus_pnr_on_netlist(
         bit_path,
         result.bitstream.data.len()
     );
+    // The pins the bitstream drives, for `program --board` to check
+    let mut driven = skalp_place_route::boards::driven_outputs(gate_netlist);
+    driven.extend(nexus_reference_voltage_pins(gate_netlist, nexus)?);
+    let pins_path = bit_path.with_extension("pins.json");
+    fs::write(&pins_path, serde_json::to_string_pretty(&driven)?)?;
     Ok(())
+}
+
+/// The balls a Nexus build drives for its reference-voltage inputs.
+#[cfg(feature = "nexus-real")]
+fn nexus_reference_voltage_pins(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: skalp_place_route::NexusVariant,
+) -> Result<Vec<skalp_place_route::boards::DrivenPin>> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+    let (Some(db_root), Some(package)) = (find_database(), variant.default_package()) else {
+        return Ok(Vec::new());
+    };
+    Ok(
+        skalp_place_route::device::nexus::sites::reference_voltage_pins(
+            &db_root, variant, package, netlist,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?
+        .into_iter()
+        .map(|(pin, bank)| skalp_place_route::boards::DrivenPin {
+            pin,
+            what: format!("bank {bank}'s reference voltage"),
+            override_reason: None,
+        })
+        .collect(),
+    )
+}
+
+/// Without real device data there is no bitstream to load.
+#[cfg(not(feature = "nexus-real"))]
+fn nexus_reference_voltage_pins(
+    _netlist: &skalp_lir::gate_netlist::GateNetlist,
+    _variant: skalp_place_route::NexusVariant,
+) -> Result<Vec<skalp_place_route::boards::DrivenPin>> {
+    Ok(Vec::new())
 }
 
 /// Use the real device data when this build and machine have it.
@@ -4919,12 +4960,41 @@ fn probe_nexus_device() -> Option<(String, String)> {
     Some((format!("{name} (IDCODE 0x{idcode:08x})"), state))
 }
 
+/// Before loading a bitstream onto a named board, check the pins it drives
+/// (saved beside it by the build) against what the board lists as safe.
+fn check_board_pins(bitstream: &std::path::Path, board_name: &str, force: bool) -> Result<()> {
+    let Some(board) = skalp_place_route::boards::by_name(board_name) else {
+        return Ok(());
+    };
+    let pins_path = bitstream.with_extension("pins.json");
+    let Ok(text) = std::fs::read_to_string(&pins_path) else {
+        println!(
+            "⚠️  No pin list beside the bitstream ({:?}), so the pins it drives were not checked against the {}.",
+            pins_path, board.name
+        );
+        return Ok(());
+    };
+    let pins: Vec<skalp_place_route::boards::DrivenPin> = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("Cannot read pin list {:?}: {}", pins_path, e))?;
+    match skalp_place_route::boards::check_driven(&pins, board) {
+        Ok(()) => Ok(()),
+        Err(unsafe_pins) if force => {
+            println!("⚠️  {unsafe_pins}\nLoading anyway (--force).");
+            Ok(())
+        }
+        Err(unsafe_pins) => {
+            anyhow::bail!("{unsafe_pins}\nNot loaded. Pass --force to load it anyway.")
+        }
+    }
+}
+
 /// Load a bitstream into SRAM of a Lattice Nexus device over JTAG.
 fn program_nexus_board(
     bitstream: Option<&PathBuf>,
     board: Option<&skalp_place_route::programmer::nexus_jtag::NexusBoard>,
     reset_only: bool,
     watch: Option<u64>,
+    force: bool,
 ) -> Result<()> {
     use skalp_place_route::programmer::nexus_jtag::{
         check_target, chip_name, parse_bitstream, LoadEvent, NexusJtagProgrammer,
@@ -4952,6 +5022,10 @@ fn program_nexus_board(
         .transpose()
         .map_err(|e| anyhow::anyhow!("{}", e))?
         .map(|b| b.idcode);
+
+    if let (Some(board), Some(path)) = (board, bitstream) {
+        check_board_pins(path, board.name, force)?;
+    }
 
     let mut programmer = NexusJtagProgrammer::open().map_err(|e| anyhow::anyhow!("{}", e))?;
     let idcode = programmer
@@ -5298,6 +5372,7 @@ fn program_device(
     reset_only: bool,
     list: bool,
     watch: Option<u64>,
+    force: bool,
 ) -> Result<()> {
     use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
 
@@ -5316,13 +5391,13 @@ fn program_device(
             );
         }
         if nexus_board.is_some() || nexus_file {
-            return program_nexus_board(bitstream, nexus_board, reset_only, watch);
+            return program_nexus_board(bitstream, nexus_board, reset_only, watch, force);
         }
         // Don't let auto-detection drive a Nexus board as an iCE40 SPI target.
         if board.to_lowercase() == "auto" {
             if let Some((device, _)) = probe_nexus_device() {
                 if reset_only || (bitstream.is_none() && watch.is_some()) {
-                    return program_nexus_board(bitstream, None, reset_only, watch);
+                    return program_nexus_board(bitstream, None, reset_only, watch, force);
                 }
                 anyhow::bail!(
                     "Connected device is {}, but this file is not a Lattice Nexus .bit bitstream.",
