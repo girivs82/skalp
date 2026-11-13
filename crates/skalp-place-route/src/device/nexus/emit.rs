@@ -1631,7 +1631,9 @@ fn emit_vref_drivers(
             VREF_DRIVER_BASE_TYPE,
         )?;
         set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
-        set_ram_enum(config, tiles, &format!("{prefix}.VREF"), "VREF1_DRIVER")?;
+        // Drive the bank's VREF1 rail from this pad (prjoxide models this as
+        // its own setting, apart from the VREF load selection, as on LIFCL)
+        set_ram_enum(config, tiles, &format!("{prefix}.VREF1_DRIVER"), "ON")?;
         // The bank's VREF1 generator, enabled from the pair's second tile by
         // the setting prjoxide names `PIOA.SEIO18.VREF.VREF1_LOAD` there
         let generator = config
