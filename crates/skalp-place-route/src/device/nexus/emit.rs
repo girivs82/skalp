@@ -1276,7 +1276,7 @@ fn bank_voltage(standard: &str) -> Result<&'static str> {
 
 /// The input reference level, in mV, of a standard that compares against
 /// its bank's reference voltage; `None` for one that does not.
-fn vref_level(standard: &str) -> Option<u32> {
+pub(crate) fn vref_level(standard: &str) -> Option<u32> {
     match standard {
         "SSTL15_I" | "SSTL15_II" | "HSTL15_I" => Some(750),
         "SSTL135_I" | "SSTL135_II" => Some(675),

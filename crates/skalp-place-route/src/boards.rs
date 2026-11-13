@@ -142,6 +142,31 @@ pub fn check_outputs(netlist: &GateNetlist, board: &BoardPins) -> Result<(), Str
     ))
 }
 
+/// Check the pins the build itself drives for a design, each with the
+/// reason, against what its board allows.
+pub fn check_build_driven(pins: &[(String, String)], board: &BoardPins) -> Result<(), String> {
+    let refusals: Vec<String> = pins
+        .iter()
+        .filter(|(pin, _)| !board.safe_outputs.iter().any(|(safe, _)| safe == pin))
+        .map(|(pin, why)| {
+            let what = board
+                .connected
+                .iter()
+                .find(|(known, _)| known == pin)
+                .map_or("not listed as safe to drive", |(_, what)| *what);
+            format!("  {pin} ({why}): {what}")
+        })
+        .collect();
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "The build would drive these pins on the {}, which are not safe to drive, so the design was refused:\n{}",
+        board.name,
+        refusals.join("\n")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +193,15 @@ mod tests {
             netlist.add_cell(cell);
         }
         netlist
+    }
+
+    #[test]
+    fn a_pin_the_build_drives_must_be_safe() {
+        let vref = |pin: &str| vec![(pin.to_string(), "bank 4's reference voltage".to_string())];
+        assert!(check_build_driven(&vref("AB26"), &CERTUSPRO_VERSA).is_ok());
+        let error = check_build_driven(&vref("P24"), &CERTUSPRO_VERSA).unwrap_err();
+        assert!(error.contains("125 MHz oscillator"), "{error}");
+        assert!(error.contains("reference voltage"), "{error}");
     }
 
     #[test]

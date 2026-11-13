@@ -4766,6 +4766,22 @@ fn place_and_route_nexus_for_cli(
         );
     };
     println!("Using real device data from {:?}", db_root);
+    // Reference-voltage inputs make the build drive their bank's VREF pin
+    if let (Some(board), Some(package)) = (
+        skalp_place_route::boards::for_nexus_variant(variant),
+        variant.default_package(),
+    ) {
+        let driven: Vec<(String, String)> =
+            skalp_place_route::device::nexus::sites::reference_voltage_pins(
+                &db_root, variant, package, netlist,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?
+            .into_iter()
+            .map(|(pin, bank)| (pin, format!("bank {bank}'s reference voltage")))
+            .collect();
+        skalp_place_route::boards::check_build_driven(&driven, board)
+            .map_err(|refusal| anyhow::anyhow!(refusal))?;
+    }
     Ok(skalp_place_route::pnr::place_and_route_nexus_real(
         netlist, variant, config, &db_root,
     )?)

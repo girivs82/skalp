@@ -163,6 +163,59 @@ pub fn vref_drivers(
     Ok(drivers)
 }
 
+/// The balls of `package` whose pads the build drives to give a design's
+/// reference-voltage inputs their bank's VREF1, each with its bank. A
+/// board must allow these to be driven, as it must the design's outputs.
+pub fn reference_voltage_pins(
+    db_root: &Path,
+    variant: NexusVariant,
+    package: &str,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+) -> Result<Vec<(String, u32)>, String> {
+    use skalp_lir::tech_library::CellFunction;
+
+    let io = load_io_database(db_root, variant)?;
+    let Some(index) = io.packages.iter().position(|p| p == package) else {
+        return Ok(Vec::new());
+    };
+    let ball_of = |pad: &IoPad| pad.pins.get(index).filter(|b| *b != "-").cloned();
+    let mut banks: Vec<u32> = netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.function,
+                Some(CellFunction::InputPad | CellFunction::ClockPad)
+            )
+        })
+        .filter(|c| {
+            c.parameters
+                .get("IO_STANDARD")
+                .is_some_and(|s| super::emit::vref_level(s).is_some())
+        })
+        .filter_map(|c| c.parameters.get("LOC"))
+        .filter_map(|loc| {
+            io.pads
+                .iter()
+                .find(|pad| ball_of(pad).as_deref() == Some(loc.as_str()))
+        })
+        .filter_map(|pad| u32::try_from(pad.bank).ok())
+        .collect();
+    banks.sort_unstable();
+    banks.dedup();
+    let mut pins = Vec::new();
+    for bank in banks {
+        let driver = io
+            .pads
+            .iter()
+            .find(|pad| pad.func.iter().any(|f| *f == format!("VREF{bank}_1")));
+        if let Some(ball) = driver.and_then(ball_of) {
+            pins.push((ball, bank));
+        }
+    }
+    Ok(pins)
+}
+
 /// Narrowest routing window, leaving logic room beside the clock path.
 const MIN_REGION_COLUMNS: u32 = 40;
 
@@ -371,6 +424,38 @@ mod tests {
         // CrossLink-NX's come from prjoxide's own data
         let lifcl = vref_drivers(&db, NexusVariant::Lifcl40).unwrap();
         assert!([3, 4, 5].iter().all(|bank| lifcl.contains_key(bank)));
+    }
+
+    #[test]
+    fn reference_voltage_inputs_name_their_banks_driver_ball() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let mut netlist = skalp_lir::gate_netlist::GateNetlist::new("top".into(), "nexus".into());
+        let pad = |loc: &str, standard: &str| {
+            let mut cell = skalp_lir::gate_netlist::Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(0),
+                "OXIDE_IB".into(),
+                "nexus".into(),
+                0.0,
+                format!("top.{loc}"),
+                vec![],
+                vec![],
+            );
+            cell.function = Some(skalp_lir::tech_library::CellFunction::InputPad);
+            cell.parameters.insert("LOC".into(), loc.into());
+            cell.parameters
+                .insert("IO_STANDARD".into(), standard.into());
+            cell
+        };
+        // Two SSTL15 inputs in bank 4, one LVCMOS18H input in bank 5
+        netlist.add_cell(pad("AF14", "SSTL15_I"));
+        netlist.add_cell(pad("AF13", "SSTL15_I"));
+        netlist.add_cell(pad("AD23", "LVCMOS18H"));
+        let pins =
+            reference_voltage_pins(&db, NexusVariant::Lfcpnx100, "LFG672", &netlist).unwrap();
+        assert_eq!(pins, vec![("AE22".to_string(), 4)]);
     }
 
     #[test]
