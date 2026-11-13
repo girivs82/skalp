@@ -405,6 +405,10 @@ impl NexusDevice {
                         format!("PIO{pio}_I"),
                         format!("JPADDI_{core}_CORE_IO{side}"),
                     );
+                    wire_of(
+                        format!("PIO{pio}_T"),
+                        format!("JPADDT_{core}_CORE_IO{side}"),
+                    );
                     bels.push(Bel {
                         id: BelId(bel_id_counter),
                         bel_type: BelType::IoCell,

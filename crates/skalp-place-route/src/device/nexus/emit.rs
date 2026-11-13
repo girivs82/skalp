@@ -190,6 +190,71 @@ fn float_high(
     Ok(())
 }
 
+/// Turn an output pad's driver on: hold its tristate input high (the pad's
+/// TMUX inverts it, so the driver sees enable).
+///
+/// The tristate input comes from a CIB mux, as data does. Left without a
+/// selection, that mux's choice is not documented, and on some pads it
+/// follows the pad's data, so the pin would float whenever the data is high.
+/// Vendor tools select one of the mux's CIB inputs that nothing drives: an
+/// undriven CIB input reads its default constant, high. Do the same,
+/// preferring the D inputs as they do, and never the mux's default input.
+fn drive_output_enable(
+    config: &mut ConfigDb<'_>,
+    enable: crate::device::WireId,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let device = config.device;
+    let mux = find_cib_mux(device, enable)
+        .ok_or_else(|| emit_err("no CIB mux feeds its output enable".to_string()))?;
+    let mux_name = device
+        .wire(mux)
+        .map_or("?", |w| w.name.as_str())
+        .to_string();
+    if used_wires.contains(&mux) {
+        return Err(emit_err(format!(
+            "its output enable mux {mux_name} carries a routed net"
+        )));
+    }
+    let wire_name =
+        |w: crate::device::WireId| device.wire(w).map_or(String::new(), |w| w.name.clone());
+    // A CIB input is free when neither it nor anything that drives it
+    // carries a net: then it reads its default, high.
+    let free = |input: crate::device::WireId| {
+        !used_wires.contains(&input)
+            && device.wire_pips(input).into_iter().all(|p| {
+                device
+                    .pip(p)
+                    .is_some_and(|pip| !used_wires.contains(&pip.src_wire))
+            })
+    };
+    let candidates: Vec<(crate::device::PipId, crate::device::WireId)> = device
+        .wire_pips(mux)
+        .into_iter()
+        .filter_map(|p| device.pip(p).map(|pip| (p, pip.src_wire)))
+        .filter(|&(_, src)| wire_name(src).contains("CIBMUXIN") && free(src))
+        .collect();
+    // D first, then C and B: each is an explicit selection. A is the
+    // mux's zero-bit default, the choice not to rely on.
+    let (pip, _) = ["CIBMUXIND", "CIBMUXINC", "CIBMUXINB", "CIBMUXINA"]
+        .iter()
+        .find_map(|input| {
+            candidates
+                .iter()
+                .find(|&&(_, src)| wire_name(src).contains(input))
+        })
+        .copied()
+        .ok_or_else(|| {
+            emit_err(format!(
+                "no free CIB input on its output enable mux {mux_name}"
+            ))
+        })?;
+    config
+        .bits
+        .extend(device.pip_config_bits(pip).iter().cloned());
+    Ok(())
+}
+
 /// Hold the clock enable high on every clock buffer a route passes through.
 ///
 /// A clock left without it never leaves the buffer.
@@ -1170,6 +1235,20 @@ fn emit_multiplier(
     Ok(())
 }
 
+/// Pad bias from the port's `pull` constraint (none when it has none).
+fn pull_mode(cell: &Cell) -> Result<&'static str> {
+    match cell.parameters.get("TERMINATION").map(String::as_str) {
+        None | Some("None") => Ok("NONE"),
+        Some("PullUp") => Ok("UP"),
+        Some("PullDown") => Ok("DOWN"),
+        Some("Keeper") => Ok("KEEPER"),
+        Some(other) => Err(emit_err(format!(
+            "Pad '{}' asks for pull '{other}', which Nexus pads do not have",
+            cell.path
+        ))),
+    }
+}
+
 /// Bank voltage a standard runs at.
 fn bank_voltage(standard: &str) -> Result<&'static str> {
     let voltage = standard.trim_matches(|c: char| c.is_alphabetic());
@@ -1262,7 +1341,12 @@ fn emit_pad(
             direction.to_lowercase()
         ))
     })?;
-    set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
+    set_ram_enum(
+        config,
+        tiles,
+        &format!("{prefix}.PULLMODE"),
+        pull_mode(cell)?,
+    )?;
     if !high_performance {
         set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
     }
@@ -1270,6 +1354,12 @@ fn emit_pad(
         set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
         set_ram_enum(config, tiles, &format!("{prefix}.SLEWRATE"), "MED")?;
         set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), "INV")?;
+        let enable = config
+            .device
+            .bel_wire(x, y, &format!("PIO{bel_index}_T"))
+            .ok_or_else(|| emit_err(format!("Pad '{}' has no output enable wire", cell.path)))?;
+        drive_output_enable(config, enable, used_wires)
+            .map_err(|e| emit_err(format!("Pad '{}': {e}", cell.path)))?;
     }
 
     // High-performance banks have no VCC setting to make.
@@ -1333,10 +1423,99 @@ mod tests {
         assert_eq!(fold_tied_low(0x1234, &[]), 0x1234);
     }
 
+    fn pad_with_termination(termination: Option<&str>) -> Cell {
+        let mut cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "OXIDE_IB".to_string(),
+            "nexus".to_string(),
+            0.0,
+            "top.pin_ibuf".to_string(),
+            vec![],
+            vec![],
+        );
+        if let Some(t) = termination {
+            cell.parameters.insert("TERMINATION".into(), t.into());
+        }
+        cell
+    }
+
+    #[test]
+    fn a_pull_constraint_sets_the_pad_bias() {
+        let mode = |t| pull_mode(&pad_with_termination(t)).unwrap();
+        assert_eq!(mode(None), "NONE");
+        assert_eq!(mode(Some("None")), "NONE");
+        assert_eq!(mode(Some("PullUp")), "UP");
+        assert_eq!(mode(Some("PullDown")), "DOWN");
+        assert_eq!(mode(Some("Keeper")), "KEEPER");
+        assert!(pull_mode(&pad_with_termination(Some("Bus"))).is_err());
+    }
+
     #[test]
     fn slices_pair_up_luts() {
         assert_eq!(slice_of(0), 'A');
         assert_eq!(slice_of(1), 'A');
         assert_eq!(slice_of(7), 'D');
+    }
+}
+
+#[cfg(all(test, feature = "nexus-bitstream"))]
+mod device_tests {
+    use super::find_cib_mux;
+    use crate::device::nexus::prjoxide_load::{find_database, load_tilegrid};
+    use crate::device::nexus::{NexusDevice, NexusVariant};
+    use crate::device::Device;
+
+    /// Every output pad of the CertusPro-NX, in every bank, can have its
+    /// driver turned on: its tristate input comes from a CIB mux with an
+    /// explicit (configured) input to select, as `drive_output_enable` needs.
+    #[test]
+    fn every_certuspro_pad_can_enable_its_driver() {
+        let Some(db) = find_database() else { return };
+        let variant = NexusVariant::Lfcpnx100;
+        let tiles = load_tilegrid(&db, variant).unwrap();
+        let width = tiles.iter().map(|t| t.x).max().unwrap();
+        let height = tiles.iter().map(|t| t.y).max().unwrap();
+        // One strip per device edge, deep enough for the CIB beside each pad
+        let strips = [
+            (0, 0, width, 3),
+            (0, height - 3, width, height),
+            (0, 0, 3, height),
+            (width - 3, 0, width, height),
+        ];
+        let mut checked = 0;
+        for bbox in strips {
+            let device = NexusDevice::from_prjoxide_bbox(variant, &db, bbox).unwrap();
+            let name = |w| device.wire(w).map(|x| x.name.clone()).unwrap_or_default();
+            for tile in tiles.iter().filter(|t| {
+                t.tiletype.starts_with("SYSIO_B")
+                    && t.x >= bbox.0
+                    && t.x <= bbox.2
+                    && t.y >= bbox.1
+                    && t.y <= bbox.3
+            }) {
+                for pad in 0..2 {
+                    if device
+                        .bel_wire(tile.x, tile.y, &format!("PIO{pad}_O"))
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let at = format!("{} pad {pad}", tile.tiletype);
+                    let enable = device
+                        .bel_wire(tile.x, tile.y, &format!("PIO{pad}_T"))
+                        .unwrap_or_else(|| panic!("{at}: no output enable wire"));
+                    let mux = find_cib_mux(&device, enable)
+                        .unwrap_or_else(|| panic!("{at}: no CIB mux feeds the enable"));
+                    let explicit = device.wire_pips(mux).into_iter().any(|p| {
+                        let pip = device.pip(p).unwrap();
+                        name(pip.src_wire).contains("CIBMUXIN")
+                            && !device.pip_config_bits(p).is_empty()
+                    });
+                    assert!(explicit, "{at}: {} has no configured input", name(mux));
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "only {checked} pads checked");
     }
 }
