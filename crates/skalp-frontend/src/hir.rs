@@ -171,6 +171,9 @@ pub struct Hir {
     /// The system power state table, if declared (spec §18)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_states_decl: Option<HirPowerStatesDecl>,
+    /// Development boards declared with `board Name { ... }`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boards: Vec<HirBoard>,
 }
 
 /// Entity in HIR
@@ -2483,6 +2486,7 @@ impl HirBuilder {
             name: "main".to_string(),
             power_domain_decls: Vec::new(),
             power_states_decl: None,
+            boards: Vec::new(),
             comments: vec![],
             entities: Vec::new(),
             entity_aliases: Vec::new(),
@@ -2601,6 +2605,7 @@ impl Hir {
             main_entity_names: Vec::new(),
             power_domain_decls: Vec::new(),
             power_states_decl: None,
+            boards: Vec::new(),
         }
     }
 }
@@ -3225,6 +3230,57 @@ pub struct PhysicalConstraints {
     /// Why this output may drive a pin the board's safe list does not include
     #[serde(default)]
     pub drive_override: Option<String>,
+    /// A binding to a declared board's pin (`@ Board.pin[hi:lo]`), which
+    /// [`crate::boards::resolve_board_bindings`] turns into the pins and
+    /// I/O settings above
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_pin: Option<BoardPinRef>,
+}
+
+/// A port's binding to a board pin group, or part of one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardPinRef {
+    /// The board's name
+    pub board: String,
+    /// The pin group's name on the board
+    pub pin: String,
+    /// The bits of the group bound, `(hi, lo)`; the whole group when `None`
+    pub bits: Option<(u32, u32)>,
+}
+
+/// What a board pin group is to the FPGA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoardPinKind {
+    /// Something on the board drives it (a switch, a clock)
+    Input,
+    /// The FPGA may drive it (an LED, a free header pin)
+    Output,
+    /// Either
+    Inout,
+    /// Wired to something the design must leave alone
+    Reserved,
+}
+
+/// A group of a board's pins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirBoardPin {
+    pub name: String,
+    pub kind: BoardPinKind,
+    /// Pins in the group, one per bit (bit 0 first)
+    pub width: u32,
+    /// Its pins and I/O settings
+    pub constraints: PhysicalConstraints,
+    /// What it is wired to, for messages
+    pub connected: Option<String>,
+}
+
+/// A development board: the FPGA it carries and what each pin is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirBoard {
+    pub name: String,
+    /// The FPGA device, as `skalp build -d` names it
+    pub device: Option<String>,
+    pub pins: Vec<HirBoardPin>,
 }
 
 /// Pin location specification

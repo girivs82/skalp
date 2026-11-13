@@ -122,6 +122,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 main_entity_names: hir.main_entity_names.clone(),
                 power_domain_decls: hir.power_domain_decls.clone(),
                 power_states_decl: hir.power_states_decl.clone(),
+                boards: hir.boards.clone(),
             };
 
             // Collect instantiations from current state
@@ -445,6 +446,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             main_entity_names: hir.main_entity_names.clone(),
             power_domain_decls: hir.power_domain_decls.clone(),
             power_states_decl: hir.power_states_decl.clone(),
+            boards: hir.boards.clone(),
         }
     }
 

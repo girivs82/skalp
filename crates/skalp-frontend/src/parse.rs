@@ -84,6 +84,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::Ident) if self.at_ident_text("power_states") => {
                     self.parse_power_states_decl()
                 }
+                Some(SyntaxKind::Ident) if self.at_board_decl() => self.parse_board_decl(),
                 Some(SyntaxKind::ConstKw) => {
                     // Check if this is 'const fn' or just 'const'
                     if self.peek_kind(1) == Some(SyntaxKind::FnKw) {
@@ -620,11 +621,112 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::Colon);
         self.parse_type();
 
-        // Optional physical constraint block: @ { ... }
+        // Optional physical constraint block, `@ { ... }`, or a binding to a
+        // board's pin, `@ Board.pin` / `@ Board.pin[hi:lo]`
         if self.at(SyntaxKind::At) {
-            self.parse_physical_constraint_block();
+            if self.peek_kind(1) == Some(SyntaxKind::Ident) {
+                self.parse_board_pin_binding();
+            } else {
+                self.parse_physical_constraint_block();
+            }
         }
 
+        self.finish_node();
+    }
+
+    /// `board Name { ... }` starts with the contextual keyword `board`.
+    fn at_board_decl(&self) -> bool {
+        self.at_ident_text("board")
+            && self.peek_kind(1) == Some(SyntaxKind::Ident)
+            && self.peek_kind(2) == Some(SyntaxKind::LBrace)
+    }
+
+    /// A development board's pins, from the FPGA's side:
+    ///
+    /// ```text
+    /// board Name {
+    ///     device: "LFCPNX-100"
+    ///     out led: bit[8] @ { pins: [...], io_standard: "LVCMOS33" }
+    ///     in sw: bit[4] @ { pins: [...], io_standard: "LVCMOS33" }
+    ///     reserved dram: bit[2] @ { pins: [...], connected: "DRAM" }
+    /// }
+    /// ```
+    fn parse_board_decl(&mut self) {
+        self.start_node(SyntaxKind::BoardDecl);
+        self.bump(); // 'board'
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::LBrace);
+        while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {
+            let before = self.current;
+            if self.at_ident_text("device") && self.peek_kind(1) == Some(SyntaxKind::Colon) {
+                self.start_node(SyntaxKind::BoardDevice);
+                self.bump(); // 'device'
+                self.expect(SyntaxKind::Colon);
+                self.expect(SyntaxKind::StringLiteral);
+                self.finish_node();
+            } else {
+                self.parse_board_pin();
+            }
+            if self.at(SyntaxKind::Comma) || self.at(SyntaxKind::Semicolon) {
+                self.bump();
+            }
+            if self.current == before {
+                self.error_and_bump("expected a board pin or 'device'");
+            }
+        }
+        self.expect(SyntaxKind::RBrace);
+        self.finish_node();
+    }
+
+    /// One board pin group: `in|out|inout|reserved name: type @ { ... }`.
+    fn parse_board_pin(&mut self) {
+        self.start_node(SyntaxKind::BoardPin);
+        self.start_node(SyntaxKind::PortDirection);
+        let direction = self.at(SyntaxKind::InKw)
+            || self.at(SyntaxKind::OutKw)
+            || self.at(SyntaxKind::InoutKw)
+            || self.at_ident_text("reserved");
+        if direction {
+            self.bump();
+        } else {
+            self.error("expected 'in', 'out', 'inout' or 'reserved'");
+        }
+        self.finish_node();
+        if self.at(SyntaxKind::Ident) || self.current_kind().is_some_and(|k| k.is_keyword()) {
+            self.bump();
+        } else {
+            self.error("expected a pin name");
+        }
+        self.expect(SyntaxKind::Colon);
+        self.parse_type();
+        if self.at(SyntaxKind::At) {
+            self.parse_physical_constraint_block();
+        } else {
+            self.error("a board pin needs its pins: @ { pin: ... } or @ { pins: [...] }");
+        }
+        self.finish_node();
+    }
+
+    /// `@ Board.pin`, optionally `[bit]` or `[hi:lo]`.
+    fn parse_board_pin_binding(&mut self) {
+        self.start_node(SyntaxKind::BoardPinBinding);
+        self.expect(SyntaxKind::At);
+        self.expect(SyntaxKind::Ident);
+        self.expect(SyntaxKind::Dot);
+        if self.at(SyntaxKind::Ident) || self.current_kind().is_some_and(|k| k.is_keyword()) {
+            self.bump();
+        } else {
+            self.error("expected a board pin name");
+        }
+        if self.at(SyntaxKind::LBracket) {
+            self.bump();
+            self.expect(SyntaxKind::IntLiteral);
+            if self.at(SyntaxKind::Colon) {
+                self.bump();
+                self.expect(SyntaxKind::IntLiteral);
+            }
+            self.expect(SyntaxKind::RBracket);
+        }
         self.finish_node();
     }
 
@@ -6936,6 +7038,7 @@ impl ParseState<'_> {
             Some(SyntaxKind::ModKw) => self.parse_module_decl(),
             Some(SyntaxKind::UseKw) => self.parse_use_decl(), // pub use re-exports
             Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
+            Some(SyntaxKind::Ident) if self.at_board_decl() => self.parse_board_decl(),
             Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
             Some(SyntaxKind::TypeKw) => self.parse_type_alias(),
             Some(SyntaxKind::DistinctKw) => self.parse_distinct_type(),

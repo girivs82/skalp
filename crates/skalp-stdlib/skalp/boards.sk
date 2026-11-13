@@ -1,0 +1,44 @@
+// Reference development boards: what each FPGA pin is wired to.
+//
+// Directions are from the FPGA's side: `in` pins are driven by the board
+// (switches, clocks), `out` pins may be driven by the FPGA (LEDs, free
+// header pins), and `reserved` pins are wired to parts a design must leave
+// alone. Bind a port with `@ Board.pin` or `@ Board.pin[hi:lo]`.
+
+// Lattice CertusPro-NX Versa evaluation board (LFCPNX-100, LFG672), from its
+// user guide and schematic (FPGA-EB-02053). The LEDs and the seven-segment
+// display light when their pin is low.
+board CertusProVersa {
+    device: "LFCPNX-100"
+
+    // 125 MHz oscillator
+    in clk_125: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+    // Segments A-G, then the decimal point
+    out segment: bit[8] @ { pins: ["M4", "M3", "M2", "M1", "N1", "N2", "N3", "N4"], io_standard: "LVCMOS33" }
+    // Digit selects of the seven-segment display
+    out digit: bit[3] @ { pins: ["AC21", "W22", "AE26"], io_standard: "LVCMOS18H" }
+
+    // DIP switches, shorted to ground when closed
+    in switch: bit[5] @ { pins: ["AA23", "AB22", "AC22", "AA22", "W21"], io_standard: "LVCMOS18H", pull: up }
+    // FPGA_RESET push button SW3
+    in reset_button: bit @ { pin: "N9", io_standard: "LVCMOS33" }
+
+    // UART to the FTDI chip: the FPGA transmits on uart_tx, receives on uart_rx
+    out uart_tx: bit @ { pin: "M9", io_standard: "LVCMOS33" }
+    in uart_rx: bit @ { pin: "L8", io_standard: "LVCMOS33" }
+
+    // High-performance header pins HP_GPIO1-8
+    inout hp_gpio: bit[8] @ { pins: ["AD23", "AC24", "AC25", "AC26", "AB26", "AB23", "AB24", "AD26"], io_standard: "LVCMOS18H" }
+    // PMOD headers, pins 1-4 and 7-10
+    inout pmod0: bit[8] @ { pins: ["T3", "T2", "U1", "U6", "V2", "W1", "W3", "AB1"], io_standard: "LVCMOS33" }
+    inout pmod1: bit[8] @ { pins: ["T1", "U2", "U3", "V1", "V3", "W2", "Y1", "AA1"], io_standard: "LVCMOS33" }
+
+    // Configuration and other parts' pins
+    reserved programn: bit @ { pin: "G4", connected: "PROGRAMN button SW2, restarts configuration" }
+    reserved usb_reset: bit @ { pin: "H21", connected: "USB reset button SW7" }
+    reserved bank4_vref: bit @ { pin: "AE22", connected: "LPDDR4 address A0, channel A" }
+    reserved bank3_vref: bit @ { pin: "AA12", connected: "LPDDR4 DQ15, channel B" }
+    reserved bank5_vref: bit @ { pin: "V24", connected: "SFP cage 3 RX+" }
+}

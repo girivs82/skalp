@@ -623,6 +623,18 @@ impl HirBuilderContext {
                         hir.power_domain_decls.push(decl);
                     }
                 }
+                SyntaxKind::BoardDecl => {
+                    if let Some(board) = self.build_board(&child) {
+                        if hir.boards.iter().any(|b| b.name == board.name) {
+                            self.errors.push(HirError {
+                                message: format!("board '{}' is declared twice", board.name),
+                                span: self.make_span(&child),
+                            });
+                        } else {
+                            hir.boards.push(board);
+                        }
+                    }
+                }
                 SyntaxKind::EntityDecl => {
                     if let Some(mut entity) = self.build_entity(&child) {
                         // Apply pending visibility
@@ -1713,6 +1725,140 @@ impl HirBuilderContext {
         })
     }
 
+    /// Build a `board Name { ... }` declaration.
+    fn build_board(&mut self, node: &SyntaxNode) -> Option<crate::hir::HirBoard> {
+        use crate::hir::{BoardPinKind, HirBoard, HirBoardPin, PinLocation};
+
+        let name = node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == SyntaxKind::Ident)
+            .nth(1)? // after the contextual 'board'
+            .text()
+            .to_string();
+        let device = node
+            .first_child_of_kind(SyntaxKind::BoardDevice)
+            .and_then(|d| {
+                d.first_token_of_kind(SyntaxKind::StringLiteral)
+                    .map(|t| t.text().trim_matches('"').to_string())
+            });
+        let mut pins: Vec<HirBoardPin> = Vec::new();
+        for pin_node in node.children().filter(|c| c.kind() == SyntaxKind::BoardPin) {
+            let Some(pin_name) = self.extract_name_allow_keywords(&pin_node) else {
+                continue;
+            };
+            let kind = match pin_node.first_child_of_kind(SyntaxKind::PortDirection) {
+                Some(dir) if dir.first_token_of_kind(SyntaxKind::InKw).is_some() => {
+                    BoardPinKind::Input
+                }
+                Some(dir) if dir.first_token_of_kind(SyntaxKind::OutKw).is_some() => {
+                    BoardPinKind::Output
+                }
+                Some(dir) if dir.first_token_of_kind(SyntaxKind::InoutKw).is_some() => {
+                    BoardPinKind::Inout
+                }
+                _ => BoardPinKind::Reserved,
+            };
+            let block = pin_node.first_child_of_kind(SyntaxKind::PhysicalConstraintBlock);
+            let Some(constraints) = block
+                .as_ref()
+                .and_then(|b| self.extract_physical_constraints(b))
+            else {
+                continue;
+            };
+            let width = match &constraints.pin_location {
+                Some(PinLocation::Single(_)) | Some(PinLocation::Differential { .. }) => 1,
+                Some(PinLocation::Multiple(pins)) => pins.len() as u32,
+                None => {
+                    self.errors.push(HirError {
+                        message: format!(
+                            "board pin '{name}.{pin_name}' needs its pins: pin: \"...\" or pins: [...]"
+                        ),
+                        span: self.make_span(&pin_node),
+                    });
+                    continue;
+                }
+            };
+            let connected = block
+                .as_ref()
+                .and_then(|b| Self::constraint_string(b, "connected"));
+            if pins.iter().any(|p| p.name == pin_name) {
+                self.errors.push(HirError {
+                    message: format!("board '{name}' declares pin '{pin_name}' twice"),
+                    span: self.make_span(&pin_node),
+                });
+                continue;
+            }
+            pins.push(HirBoardPin {
+                name: pin_name,
+                kind,
+                width,
+                constraints,
+                connected,
+            });
+        }
+        Some(HirBoard { name, device, pins })
+    }
+
+    /// A string constraint's value from a constraint block, by key.
+    fn constraint_string(block: &SyntaxNode, key: &str) -> Option<String> {
+        block
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::ConstraintPair)
+            .find_map(|pair| {
+                let mut tokens = pair
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| !t.kind().is_trivia());
+                let k = tokens.next()?;
+                if k.text() != key {
+                    return None;
+                }
+                tokens
+                    .find(|t| t.kind() == SyntaxKind::StringLiteral)
+                    .map(|t| t.text().trim_matches('"').to_string())
+            })
+    }
+
+    /// `@ Board.pin[hi:lo]`: a port's binding to a board pin, resolved once
+    /// imports are merged.
+    fn extract_board_pin_binding(&self, node: &SyntaxNode) -> Option<PhysicalConstraints> {
+        let tokens: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        // '@' Board '.' pin ['[' hi [':' lo] ']']
+        let board = tokens.get(1)?.text().to_string();
+        let pin = tokens.get(3)?.text().to_string();
+        let numbers: Vec<u32> = tokens
+            .iter()
+            .skip(4)
+            .filter(|t| t.kind() == SyntaxKind::IntLiteral)
+            .filter_map(|t| t.text().replace('_', "").parse().ok())
+            .collect();
+        let bits = match numbers.as_slice() {
+            [] => None,
+            [bit] => Some((*bit, *bit)),
+            [hi, lo, ..] => Some((*hi, *lo)),
+        };
+        Some(PhysicalConstraints {
+            pin_location: None,
+            io_standard: None,
+            drive_strength: None,
+            slew_rate: None,
+            termination: None,
+            schmitt_trigger: None,
+            bank: None,
+            diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
+            drive_override: None,
+            board_pin: Some(crate::hir::BoardPinRef { board, pin, bits }),
+        })
+    }
+
     /// Build port from syntax node
     fn build_port(&mut self, node: &SyntaxNode) -> Option<HirPort> {
         let id = self.next_port_id();
@@ -1743,10 +1889,14 @@ impl HirBuilderContext {
             .first_child_of_kind(SyntaxKind::TypeAnnotation)
             .and_then(|ty| Self::find_domain_lifetime(&ty));
 
-        // Extract physical constraints if present
+        // Extract physical constraints if present, or a binding to a board pin
         let physical_constraints = node
             .first_child_of_kind(SyntaxKind::PhysicalConstraintBlock)
-            .and_then(|constraint_node| self.extract_physical_constraints(&constraint_node));
+            .and_then(|constraint_node| self.extract_physical_constraints(&constraint_node))
+            .or_else(|| {
+                let binding = node.first_child_of_kind(SyntaxKind::BoardPinBinding)?;
+                self.extract_board_pin_binding(&binding)
+            });
 
         // Register in symbol table
         self.symbols.ports.insert(name.clone(), id);
@@ -14080,6 +14230,7 @@ impl HirBuilderContext {
             pad_cell: None,
             ldo_config: None,
             drive_override: None,
+            board_pin: None,
         };
 
         for pair in node

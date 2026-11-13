@@ -510,6 +510,7 @@ mod tests {
                 pad_cell: None,
                 ldo_config: None,
                 drive_override: None,
+                board_pin: None,
             }),
         };
         module_ports.push(clk_port);
@@ -537,6 +538,7 @@ mod tests {
                 pad_cell: None,
                 ldo_config: None,
                 drive_override: None,
+                board_pin: None,
             }),
         };
         module_ports.push(data_port);
@@ -562,6 +564,7 @@ mod tests {
                 pad_cell: None,
                 ldo_config: None,
                 drive_override: None,
+                board_pin: None,
             }),
         };
         module_ports.push(diff_port);

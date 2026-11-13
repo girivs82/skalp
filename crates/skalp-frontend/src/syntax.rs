@@ -547,6 +547,12 @@ pub enum SyntaxKind {
     SystemPowerState,
     PowerTransitionList,
 
+    // Board declarations: a development board's pins, and port bindings to them
+    BoardDecl,
+    BoardDevice,
+    BoardPin,
+    BoardPinBinding,
+
     // Placeholder for the end
     __Last,
 }
