@@ -1,0 +1,11 @@
+// SSTL15 (0.75 V reference) and SSTL135 (0.675 V) inputs in one bank,
+// which has a single reference voltage; the build must refuse it.
+entity VrefMixedLevels {
+    in fast: bit @ { pin: "AF22", io_standard: "SSTL15_I" }
+    in low: bit @ { pin: "AD20", io_standard: "SSTL135_I" }
+    out led: bit[2] @ { pins: ["R8", "R9"], io_standard: "LVCMOS33" }
+}
+
+impl VrefMixedLevels {
+    led = {low, fast}
+}

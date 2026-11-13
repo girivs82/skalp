@@ -455,6 +455,7 @@ fn emit_bits(
     let mut ram_write_tiles: HashSet<(u32, u32)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
     let mut used_multipliers: HashSet<(u32, u32, usize)> = HashSet::new();
+    let mut vref_banks: HashMap<u32, VrefBank> = HashMap::new();
 
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
@@ -467,7 +468,15 @@ fn emit_bits(
         let (x, y) = (loc.tile_x, loc.tile_y);
 
         if is_pad(cell) {
-            emit_pad(&mut config, cell, x, y, loc.bel_index, &used_wires)?;
+            emit_pad(
+                &mut config,
+                cell,
+                x,
+                y,
+                loc.bel_index,
+                &used_wires,
+                &mut vref_banks,
+            )?;
             continue;
         }
         if loc.bel_type == BelType::DspSlice {
@@ -626,6 +635,7 @@ fn emit_bits(
     }
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
+    emit_vref_drivers(&mut config, netlist, placement, &vref_banks)?;
 
     for (&(x, y, slice), &(set, path)) in &slices_with_ff {
         if matches!(slice, 'C' | 'D') && ram_write_tiles.contains(&(x, y)) {
@@ -1263,6 +1273,89 @@ fn bank_voltage(standard: &str) -> Result<&'static str> {
     }
 }
 
+/// The input reference level, in mV, of a standard that compares against
+/// its bank's reference voltage; `None` for one that does not.
+fn vref_level(standard: &str) -> Option<u32> {
+    match standard {
+        "SSTL15_I" | "SSTL15_II" | "HSTL15_I" => Some(750),
+        "SSTL135_I" | "SSTL135_II" => Some(675),
+        "HSUL12" => Some(600),
+        _ => None,
+    }
+}
+
+/// Base type of a bank's reference voltage pad: Radiant's bits for it,
+/// which are the same whatever standard the bank's inputs use.
+const VREF_DRIVER_BASE_TYPE: &str = "INPUT_SSTL15_II";
+
+/// A bank whose inputs compare against its first reference voltage.
+#[derive(Debug, Clone)]
+struct VrefBank {
+    standard: String,
+    level: u32,
+    /// A pad that uses it, for messages
+    user: String,
+}
+
+/// Where a pad's settings are: the tiles holding them, the prefix of their
+/// names, the pad's bank, and whether the bank is high-performance.
+struct PadSettings {
+    tiles: Vec<PrjoxideTile>,
+    prefix: String,
+    bank: u32,
+    high_performance: bool,
+}
+
+fn pad_settings(
+    config: &ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    side: char,
+    path: &str,
+) -> Result<PadSettings> {
+    let tile = config
+        .device
+        .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
+        .cloned()
+        .ok_or_else(|| emit_err(format!("Pad '{path}' has no IO tile")))?;
+    let bank = tile
+        .tiletype
+        .strip_prefix("SYSIO_B")
+        .and_then(|rest| rest.chars().next())
+        .and_then(|c| c.to_digit(10))
+        .ok_or_else(|| emit_err(format!("Unrecognized IO tile {}", tile.tiletype)))?;
+    let high_performance = super::sites::is_high_performance_io(&tile.tiletype);
+    // In a high-performance bank the B pad's settings sit in the next tile.
+    let (settings_tile, prefix) = if high_performance {
+        let column = if side == 'A' { x } else { x + 1 };
+        let tile = config
+            .device
+            .prjoxide_tile(column, y, |t| t.starts_with("SYSIO_B"))
+            .cloned()
+            .ok_or_else(|| emit_err(format!("Pad '{path}' has no settings tile")))?;
+        (tile, format!("PIO{side}.SEIO18"))
+    } else {
+        (tile, format!("PIO{side}"))
+    };
+    // A corner site (`_C`) keeps the rest of its settings in the tile below.
+    let mut tiles = vec![settings_tile.clone()];
+    if settings_tile.tiletype.ends_with("_C") {
+        let rest = settings_tile.tiletype.replace("_C", "_REM");
+        let below = config
+            .device
+            .prjoxide_tile(x, y + 1, |t| t == rest)
+            .cloned()
+            .ok_or_else(|| emit_err(format!("Pad '{path}' has no {rest} tile")))?;
+        tiles.push(below);
+    }
+    Ok(PadSettings {
+        tiles,
+        prefix,
+        bank,
+        high_performance,
+    })
+}
+
 fn emit_pad(
     config: &mut ConfigDb<'_>,
     cell: &Cell,
@@ -1270,24 +1363,20 @@ fn emit_pad(
     y: u32,
     bel_index: usize,
     used_wires: &HashSet<crate::device::WireId>,
+    vref_banks: &mut HashMap<u32, VrefBank>,
 ) -> Result<()> {
     if cell.parameters.get("LOC").map(String::as_str) == Some(super::OSC_PIN) {
         return emit_oscillator(config, x, y, used_wires);
     }
 
-    let tile = config
-        .device
-        .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
-        .cloned()
-        .ok_or_else(|| emit_err(format!("Pad '{}' has no IO tile", cell.path)))?;
-    let bank = tile
-        .tiletype
-        .strip_prefix("SYSIO_B")
-        .and_then(|rest| rest.chars().next())
-        .ok_or_else(|| emit_err(format!("Unrecognized IO tile {}", tile.tiletype)))?;
     let side = ['A', 'B'][bel_index];
+    let PadSettings {
+        tiles: settings_tiles,
+        prefix,
+        bank,
+        high_performance,
+    } = pad_settings(config, x, y, side, &cell.path)?;
     let is_output = cell.function == Some(CellFunction::OutputPad);
-    let high_performance = super::sites::is_high_performance_io(&tile.tiletype);
     let standard = cell
         .parameters
         .get("IO_STANDARD")
@@ -1298,29 +1387,28 @@ fn emit_pad(
             "LVCMOS33"
         });
     let direction = if is_output { "OUTPUT" } else { "INPUT" };
-    let voltage = bank_voltage(standard)?;
-    // In a high-performance bank the B pad's settings sit in the next tile.
-    let (settings_tile, prefix) = if high_performance {
-        let column = if side == 'A' { x } else { x + 1 };
-        let tile = config
-            .device
-            .prjoxide_tile(column, y, |t| t.starts_with("SYSIO_B"))
-            .cloned()
-            .ok_or_else(|| emit_err(format!("Pad '{}' has no settings tile", cell.path)))?;
-        (tile, format!("PIO{side}.SEIO18"))
-    } else {
-        (tile, format!("PIO{side}"))
-    };
-    // A corner site (`_C`) keeps the rest of its settings in the tile below.
-    let mut settings_tiles = vec![settings_tile.clone()];
-    if settings_tile.tiletype.ends_with("_C") {
-        let rest = settings_tile.tiletype.replace("_C", "_REM");
-        let below = config
-            .device
-            .prjoxide_tile(x, y + 1, |t| t == rest)
-            .cloned()
-            .ok_or_else(|| emit_err(format!("Pad '{}' has no {rest} tile", cell.path)))?;
-        settings_tiles.push(below);
+    let vref = vref_level(standard);
+    if vref.is_some() {
+        if is_output {
+            return Err(emit_err(format!(
+                "Pad '{}' is an {standard} output; only {standard} inputs are supported so far",
+                cell.path
+            )));
+        }
+        if pull_mode(cell)? != "NONE" {
+            return Err(emit_err(format!(
+                "Pad '{}' is an {standard} input, which compares against its bank's \
+                 reference voltage and cannot have a pull",
+                cell.path
+            )));
+        }
+        if !high_performance {
+            return Err(emit_err(format!(
+                "Pad '{}' is on a wide-range I/O, which has no {standard}; use a \
+                 high-performance bank",
+                cell.path
+            )));
+        }
     }
     let tiles = settings_tiles.as_slice();
     set_ram_enum(
@@ -1347,6 +1435,26 @@ fn emit_pad(
         &format!("{prefix}.PULLMODE"),
         pull_mode(cell)?,
     )?;
+    if let Some(level) = vref {
+        set_ram_enum(config, tiles, &format!("{prefix}.VREF"), "VREF1_LOAD")?;
+        enable_vref_receiver(config, x, y, side, &cell.path)?;
+        let user = VrefBank {
+            standard: standard.to_string(),
+            level,
+            user: cell.path.clone(),
+        };
+        let first = vref_banks.entry(bank).or_insert_with(|| user.clone());
+        if first.level != level {
+            return Err(emit_err(format!(
+                "Pads '{}' ({}) and '{}' ({standard}) need different reference \
+                 voltages, but bank {bank} has one",
+                first.user, first.standard, cell.path
+            )));
+        }
+        return Ok(());
+    }
+
+    let voltage = bank_voltage(standard)?;
     if !high_performance {
         set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
     }
@@ -1373,6 +1481,107 @@ fn emit_pad(
             .cloned()
             .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
         config.set_enum(&bank_tile, &format!("BANK{bank}.VCC"), voltage)?;
+    }
+    Ok(())
+}
+
+/// Turn on the comparator a reference-voltage input reads through: the
+/// pad pair's differential receiver.
+///
+/// Pad A's sits in the pair's first tile and pad B's in its second, both
+/// under the name `PIOA.DIFFIO18.BASE_TYPE`; the receiver settings Radiant
+/// writes decode as a SUBLVDS input in the first and an SSTL15D_II input in
+/// the second.
+fn enable_vref_receiver(
+    config: &mut ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    side: char,
+    path: &str,
+) -> Result<()> {
+    let (column, option) = match side {
+        'A' => (x, "INPUT_SUBLVDS"),
+        _ => (x + 1, "INPUT_SSTL15D_II"),
+    };
+    let tile = config
+        .device
+        .prjoxide_tile(column, y, |t| t.starts_with("SYSIO_B"))
+        .cloned()
+        .ok_or_else(|| emit_err(format!("Pad '{path}' has no receiver tile")))?;
+    set_ram_enum(
+        config,
+        std::slice::from_ref(&tile),
+        "PIOA.DIFFIO18.BASE_TYPE",
+        option,
+    )
+}
+
+/// Give each bank whose inputs use a reference voltage the pad that drives
+/// it. The pad is the bank's, so no design signal may sit on it.
+fn emit_vref_drivers(
+    config: &mut ConfigDb<'_>,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    placement: &crate::placer::PlacementResult,
+    vref_banks: &HashMap<u32, VrefBank>,
+) -> Result<()> {
+    let mut banks: Vec<_> = vref_banks.iter().collect();
+    banks.sort_by_key(|(bank, _)| **bank);
+    for (&bank, vref) in banks {
+        let driver = config.device.vref_driver(bank).cloned().ok_or_else(|| {
+            emit_err(format!(
+                "Pad '{}' ({}) needs bank {bank}'s reference voltage, which has no \
+                 pad on this device",
+                vref.user, vref.standard
+            ))
+        })?;
+        let (x, y, pio) = driver.site;
+        if let Some(cell) = netlist.cells.iter().find(|c| {
+            placement.placements.get(&c.id).is_some_and(|loc| {
+                (loc.tile_x, loc.tile_y, loc.bel_index) == (x, y, usize::from(pio)) && is_pad(c)
+            })
+        }) {
+            return Err(emit_err(format!(
+                "Pad '{}' is on {}, which drives bank {bank}'s reference voltage for \
+                 '{}' ({}); move it to another pin",
+                cell.path, driver.pad, vref.user, vref.standard
+            )));
+        }
+        if pio != 0 {
+            return Err(emit_err(format!(
+                "Bank {bank}'s reference voltage pad {} is a B pad, which is not supported yet",
+                driver.pad
+            )));
+        }
+        // The driver's settings are the same whatever standard its loads use
+        let settings = pad_settings(config, x, y, 'A', &driver.pad)?;
+        let tiles = settings.tiles.as_slice();
+        let prefix = &settings.prefix;
+        set_ram_enum(
+            config,
+            tiles,
+            &format!("{prefix}.BASE_TYPE"),
+            VREF_DRIVER_BASE_TYPE,
+        )?;
+        set_ram_enum(config, tiles, &format!("{prefix}.PULLMODE"), "NONE")?;
+        set_ram_enum(config, tiles, &format!("{prefix}.VREF"), "VREF1_DRIVER")?;
+        // The bank's VREF1 generator, enabled from the pair's second tile by
+        // the setting prjoxide names `PIOA.SEIO18.VREF.VREF1_LOAD` there
+        let generator = config
+            .device
+            .prjoxide_tile(x + 1, y, |t| t.starts_with("SYSIO_B"))
+            .cloned()
+            .ok_or_else(|| {
+                emit_err(format!(
+                    "Bank {bank}'s reference voltage pad {} has no partner tile",
+                    driver.pad
+                ))
+            })?;
+        set_ram_enum(
+            config,
+            std::slice::from_ref(&generator),
+            "PIOA.SEIO18.VREF",
+            "VREF1_LOAD",
+        )?;
     }
     Ok(())
 }

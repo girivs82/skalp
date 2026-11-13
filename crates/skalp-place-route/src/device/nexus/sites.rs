@@ -42,6 +42,36 @@ struct IoPad {
     /// PIO within the tile; negative for dedicated pins that have none
     pio: i32,
     side: String,
+    #[serde(default)]
+    bank: i32,
+    /// Special functions the pad can take, such as `VREF3_1`
+    #[serde(default)]
+    func: Vec<String>,
+}
+
+impl IoPad {
+    /// The pad's site, `(tile_x, tile_y, pio)`, on a `width` x `height` grid.
+    fn site(&self, width: u32, height: u32) -> Option<(u32, u32, u8)> {
+        let offset = u32::try_from(self.offset).ok()?;
+        let pio = u8::try_from(self.pio).ok()?;
+        let (x, y) = match self.side.as_str() {
+            "L" => (0, offset),
+            "R" => (width - 1, offset),
+            "T" => (offset, 0),
+            "B" => (offset, height - 1),
+            _ => return None,
+        };
+        Some((x, y, pio))
+    }
+}
+
+/// A pad that drives a bank's input reference voltage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VrefDriver {
+    /// The pad's name, such as `PB110A`, or its site when the data has none
+    pub pad: String,
+    /// `(tile_x, tile_y, pio)`
+    pub site: (u32, u32, u8),
 }
 
 /// Whether an IO tile belongs to a high-performance (1.8 V and below) bank.
@@ -55,19 +85,7 @@ pub fn package_pins(
     variant: NexusVariant,
     tiles: &[PrjoxideTile],
 ) -> Result<HashMap<String, PackagePins>, String> {
-    let path = db_root
-        .join(variant.prjoxide_family())
-        .join(variant.prjoxide_device())
-        .join("iodb.json");
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
-    let mut io: IoDatabase =
-        serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))?;
-    if io.pads.is_empty() && variant == NexusVariant::Lfcpnx100 {
-        io = serde_json::from_str(LFCPNX_100_IODB)
-            .map_err(|e| format!("parsing the bundled LFCPNX-100 pins: {e}"))?;
-    }
-
+    let io = load_io_database(db_root, variant)?;
     let (width, height) = variant.grid_size();
     let mut packages: HashMap<String, PackagePins> = HashMap::new();
     for (index, package) in io.packages.iter().enumerate() {
@@ -76,16 +94,8 @@ pub fn package_pins(
             .iter()
             .filter_map(|pad| {
                 let pin = pad.pins.get(index)?;
-                let offset = u32::try_from(pad.offset).ok()?;
-                let pio = u8::try_from(pad.pio).ok()?;
-                let location = match pad.side.as_str() {
-                    "L" => (0, offset),
-                    "R" => (width - 1, offset),
-                    "T" => (offset, 0),
-                    "B" => (offset, height - 1),
-                    _ => return None,
-                };
-                (pin != "-").then(|| (pin.clone(), (location.0, location.1, pio)))
+                let site = pad.site(width, height)?;
+                (pin != "-").then(|| (pin.clone(), site))
             })
             .collect();
         packages.insert(
@@ -103,6 +113,54 @@ pub fn package_pins(
         }
     }
     Ok(packages)
+}
+
+/// The device's IO data: prjoxide's, or the bundled data for devices it has
+/// none for.
+fn load_io_database(db_root: &Path, variant: NexusVariant) -> Result<IoDatabase, String> {
+    let path = db_root
+        .join(variant.prjoxide_family())
+        .join(variant.prjoxide_device())
+        .join("iodb.json");
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
+    let io: IoDatabase =
+        serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))?;
+    if io.pads.is_empty() && variant == NexusVariant::Lfcpnx100 {
+        return serde_json::from_str(LFCPNX_100_IODB)
+            .map_err(|e| format!("parsing the bundled LFCPNX-100 pins: {e}"));
+    }
+    Ok(io)
+}
+
+/// The pad that drives each bank's first reference voltage (VREF1), by bank.
+///
+/// Inputs of the SSTL, HSTL and HSUL standards compare against it; the pad
+/// carries the `VREF{bank}_1` function in the device's IO data.
+pub fn vref_drivers(
+    db_root: &Path,
+    variant: NexusVariant,
+) -> Result<HashMap<u32, VrefDriver>, String> {
+    let io = load_io_database(db_root, variant)?;
+    let (width, height) = variant.grid_size();
+    let mut drivers = HashMap::new();
+    for pad in &io.pads {
+        let Ok(bank) = u32::try_from(pad.bank) else {
+            continue;
+        };
+        if !pad.func.iter().any(|f| *f == format!("VREF{bank}_1")) {
+            continue;
+        }
+        let Some(site) = pad.site(width, height) else {
+            continue;
+        };
+        let name = pad
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("({}, {}) PIO {}", site.0, site.1, site.2));
+        drivers.insert(bank, VrefDriver { pad: name, site });
+    }
+    Ok(drivers)
 }
 
 /// Narrowest routing window, leaving logic room beside the clock path.
@@ -289,6 +347,30 @@ mod tests {
         assert_eq!(pins["P24"], (0, 42, 0), "the 125 MHz clock, pad PL42A");
         assert_eq!(boundary_pad_names("LFG672")[&533], "PR31A (ball R8)");
         assert_eq!(pins[OSC_PIN], (137, 0, 0));
+    }
+
+    #[test]
+    fn each_bank_has_its_reference_voltage_pad() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        let drivers = vref_drivers(&db, variant).unwrap();
+        let tiles = load_tilegrid(&db, variant).unwrap();
+        let pins = &package_pins(&db, variant, &tiles).unwrap()["LFG672"].pins;
+        // Lattice's pinout: VREF3_1 on AA12, VREF4_1 on AE22, VREF5_1 on V24
+        for (bank, pad, ball) in [
+            (3, "PB110A", "AA12"),
+            (4, "PB50A", "AE22"),
+            (5, "PB2A", "V24"),
+        ] {
+            assert_eq!(drivers[&bank].pad, pad);
+            assert_eq!(drivers[&bank].site, pins[ball], "bank {bank}");
+        }
+        // CrossLink-NX's come from prjoxide's own data
+        let lifcl = vref_drivers(&db, NexusVariant::Lifcl40).unwrap();
+        assert!([3, 4, 5].iter().all(|bank| lifcl.contains_key(bank)));
     }
 
     #[test]

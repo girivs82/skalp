@@ -1,0 +1,10 @@
+// Two SSTL15 inputs in high-performance bank 4, which compare against the
+// bank's reference voltage, shown on two LEDs.
+entity VrefInput {
+    in data: bit[2] @ { pins: ["AF22", "AD20"], io_standard: "SSTL15_I" }
+    out led: bit[2] @ { pins: ["R8", "R9"], io_standard: "LVCMOS33" }
+}
+
+impl VrefInput {
+    led = data
+}

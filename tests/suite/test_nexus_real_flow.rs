@@ -339,3 +339,63 @@ fn wide_lut_builds_a_bitstream_for_the_real_device() {
     let timing = result.timing.expect("the real flow reports timing");
     assert!(timing.meets_timing);
 }
+
+/// Inputs that compare against their bank's reference voltage build, and the
+/// pad driving that voltage is set up for them.
+#[test]
+fn reference_voltage_inputs_build_for_the_real_device() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_vref_input.sk", "VrefInput");
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("SSTL15 inputs should build");
+    assert!(result.routing.success);
+}
+
+/// The pin driving a bank's reference voltage is the bank's: a design signal
+/// placed on it is refused, naming the pin.
+#[test]
+fn a_signal_on_a_reference_voltage_pin_is_refused() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_vref_pin_taken.sk", "VrefPinTaken");
+    let error = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect_err("the reference voltage pin is taken")
+    .to_string();
+    assert!(error.contains("PB50A"), "{error}");
+    assert!(error.contains("reference voltage"), "{error}");
+}
+
+/// A bank has one reference voltage, so inputs needing different levels
+/// cannot share it.
+#[test]
+fn mixed_reference_levels_in_one_bank_are_refused() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_vref_mixed_levels.sk", "VrefMixedLevels");
+    let error = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect_err("SSTL15 and SSTL135 need different reference voltages")
+    .to_string();
+    assert!(error.contains("bank 4"), "{error}");
+}

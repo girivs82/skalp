@@ -1,0 +1,11 @@
+// An SSTL15 input in bank 4 beside a second input on the pin that drives
+// bank 4's reference voltage (AE22), which the build must refuse.
+entity VrefPinTaken {
+    in data: bit @ { pin: "AF22", io_standard: "SSTL15_I" }
+    in other: bit @ { pin: "AE22", io_standard: "LVCMOS18H" }
+    out led: bit[2] @ { pins: ["R8", "R9"], io_standard: "LVCMOS33" }
+}
+
+impl VrefPinTaken {
+    led = {other, data}
+}
