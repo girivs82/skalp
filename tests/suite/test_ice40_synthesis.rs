@@ -2008,6 +2008,7 @@ fn test_io_constraint_propagation() {
             pad_cell: None,
             ldo_config: None,
             drive_override: None,
+            board_pin: None,
         },
     );
     port_constraints.insert(
@@ -2025,6 +2026,7 @@ fn test_io_constraint_propagation() {
             pad_cell: None,
             ldo_config: None,
             drive_override: None,
+            board_pin: None,
         },
     );
 

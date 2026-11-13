@@ -8,6 +8,7 @@
 //! - HIR (High-level IR) generation
 
 pub mod ast;
+pub mod boards;
 pub mod const_eval;
 pub mod constraints;
 pub mod diagnostic_render;
@@ -210,6 +211,11 @@ pub fn parse_and_build_compilation_context_from_source(
             details
         );
     }
+
+    // Ports bound to a board's pins take their pins from it, and every pin
+    // of an entity on a board is checked against it
+    boards::resolve_board_bindings(&mut hir)
+        .map_err(|errors| anyhow::anyhow!("board pin errors:\n  {}", errors.join("\n  ")))?;
 
     // Monomorphize
     use monomorphization::MonomorphizationEngine;
@@ -1640,6 +1646,13 @@ fn rewrite_trait_impl_generic_params(
 
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
+    if let Some(board) = source.boards.iter().find(|b| b.name == symbol_name) {
+        if !target.boards.iter().any(|b| b.name == symbol_name) {
+            target.boards.push(board.clone());
+        }
+        return Ok(());
+    }
+
     // FIRST: Merge trait implementations for types we already have
     // This ensures that when we import an entity from a module that has trait impls
     // for types we already have (like fp32), those impls are available
@@ -2289,6 +2302,12 @@ fn extract_entity_refs_from_expr(expr: &hir::HirExpression, names: &mut Vec<Stri
 fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     use hir::HirVisibility;
 
+    for board in &source.boards {
+        if !target.boards.iter().any(|b| b.name == board.name) {
+            target.boards.push(board.clone());
+        }
+    }
+
     // BUG #183 FIX: Use two-pass approach to ensure all entities are available
     // before processing implementations (which may reference other entities)
 
@@ -2608,6 +2627,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         main_entity_names: Vec::new(),
         power_domain_decls: Vec::new(),
         power_states_decl: None,
+        boards: Vec::new(),
     })
 }
 

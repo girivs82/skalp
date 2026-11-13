@@ -1245,6 +1245,53 @@ voltages, `io_defaults`, floorplan regions) is parsed at top level.
 There is no CLI flag for merging external constraint files (PCF/XDC);
 inline constraints are the mechanism.
 
+### 17.1 Boards
+
+A board declares what each of its FPGA's pins is wired to, in named
+groups. A design binds its ports to those groups by name, so its top level
+names no balls or I/O standards:
+
+```skalp
+board DemoBoard {
+    device: "LFCPNX-100"
+    in clk_25: clock @ { pin: "C1", io_standard: "LVCMOS33" }
+    out led: bit[4] @ { pins: ["A1", "A2", "A3", "A4"], io_standard: "LVCMOS33" }
+    in button: bit[2] @ { pins: ["B1", "B2"], io_standard: "LVCMOS33", pull: up }
+    inout gpio: bit[2] @ { pins: ["D1", "D2"], io_standard: "LVCMOS18H" }
+    reserved dram: bit[2] @ { pins: ["E1", "E2"], connected: "DRAM address" }
+}
+
+entity Top {
+    in clk: clock @ DemoBoard.clk_25
+    in buttons: bit[2] @ DemoBoard.button
+    out lights: bit[2] @ DemoBoard.led[3:2]
+}
+```
+
+`board` is a contextual keyword at top level. Each group's direction is
+from the FPGA's side: `in` pins are driven by the board (switches,
+clocks), `out` pins may be driven by the FPGA (LEDs), `inout` pins either
+way, and `reserved` pins are wired to parts a design must leave alone;
+`connected:` says what, for messages. `pins` lists bit 0 first.
+
+A port bound with `@ Board.group`, `@ Board.group[bit]` or
+`@ Board.group[hi:lo]` takes the group's pins and I/O settings. The
+compiler refuses, naming the port and the board pin:
+
+- a port whose direction the group does not allow (an output on a
+  switch, an input on an LED);
+- a port whose width differs from the pins bound;
+- a reserved group;
+- a pin used by two ports;
+- in an entity bound to a board, a port given raw `pin`/`pins` that are a
+  reserved pin of that board, a pin of the wrong direction, or at another
+  I/O standard than the board's.
+
+A design that binds no port to a board is not checked against any board.
+Reference boards live in the standard library (`use
+skalp::boards::CertusProVersa;`); a custom board is declared the same way
+in the design's own files.
+
 ## 18. Power Domains
 
 Power domains are modeled **in-language**: the supply tree is declared at

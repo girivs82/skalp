@@ -29,6 +29,7 @@ fn create_simple_entity() -> Hir {
         entity_aliases: vec![],
         power_domain_decls: vec![],
         power_states_decl: None,
+        boards: Vec::new(),
     };
 
     // Create entity
