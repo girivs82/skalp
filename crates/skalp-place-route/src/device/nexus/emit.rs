@@ -636,6 +636,7 @@ fn emit_bits(
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
     emit_vref_drivers(&mut config, netlist, placement, &vref_banks)?;
+    release_unused_pads(&mut config, netlist, placement, &vref_banks)?;
 
     for (&(x, y, slice), &(set, path)) in &slices_with_ff {
         if matches!(slice, 'C' | 'D') && ram_write_tiles.contains(&(x, y)) {
@@ -1481,6 +1482,73 @@ fn emit_pad(
             .cloned()
             .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
         config.set_enum(&bank_tile, &format!("BANK{bank}.VCC"), voltage)?;
+    }
+    Ok(())
+}
+
+/// Set every bonded pad the design leaves unused to `BASE_TYPE = NONE`, as
+/// Radiant does: in most tiles that is a bit of its own, not the all-zero
+/// state. Pads whose tile has no such setting are left as they are.
+fn release_unused_pads(
+    config: &mut ConfigDb<'_>,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    placement: &crate::placer::PlacementResult,
+    vref_banks: &HashMap<u32, VrefBank>,
+) -> Result<()> {
+    let device = config.device;
+    let packages = device.packages();
+    let package = device
+        .default_package()
+        .and_then(|name| packages.get(name))
+        .or_else(|| {
+            let first = packages.keys().min()?;
+            packages.get(first)
+        });
+    let Some(package) = package else {
+        return Ok(());
+    };
+    let mut used: HashSet<(u32, u32, usize)> = netlist
+        .cells
+        .iter()
+        .filter(|c| is_pad(c))
+        .filter_map(|c| placement.placements.get(&c.id))
+        .map(|loc| (loc.tile_x, loc.tile_y, loc.bel_index))
+        .collect();
+    for bank in vref_banks.keys() {
+        if let Some(driver) = device.vref_driver(*bank) {
+            let (x, y, pio) = driver.site;
+            used.insert((x, y, usize::from(pio)));
+        }
+    }
+    let mut unused: Vec<(&String, (u32, u32, u8))> = package
+        .pins
+        .iter()
+        .filter(|(pin, _)| pin.as_str() != super::OSC_PIN)
+        .map(|(pin, &site)| (pin, site))
+        .filter(|(_, (x, y, pio))| !used.contains(&(*x, *y, usize::from(*pio))))
+        .collect();
+    unused.sort_by_key(|&(pin, site)| (site, pin.clone()));
+    unused.dedup_by_key(|(_, site)| *site);
+    for (pin, (x, y, pio)) in unused {
+        if device
+            .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
+            .is_none()
+        {
+            continue;
+        }
+        let side = ['A', 'B'][usize::from(pio)];
+        let settings = pad_settings(config, x, y, side, pin)?;
+        let name = format!("{}.BASE_TYPE", settings.prefix);
+        let mut defined = false;
+        for tile in &settings.tiles {
+            defined |= config
+                .db(&tile.tiletype)?
+                .enum_option(&name, "NONE")
+                .is_some();
+        }
+        if defined {
+            set_ram_enum(config, &settings.tiles, &name, "NONE")?;
+        }
     }
     Ok(())
 }
