@@ -1,9 +1,9 @@
 //! What a development board connects to its FPGA's pins.
 //!
 //! Driving a pin that something else on the board also drives can damage both
-//! ends, so a pin is only allowed as an output if its board lists it as safe.
-//! Everything else, DRAM, PCIe, SFP, flash, other chips, switches and clock
-//! sources included, is refused unless the design gives a reason to override.
+//! ends. Builds are not tied to a board: a build saves the pins its bitstream
+//! drives beside it, and loading it onto a named board checks them against
+//! that board's list, which the person loading it can override.
 
 use crate::device::nexus::NexusVariant;
 use skalp_lir::gate_netlist::{GateNetlist, DRIVE_OVERRIDE_PARAM};
@@ -114,63 +114,69 @@ pub fn clock_frequency(board: &BoardPins, pin: &str) -> Option<f64> {
         .map(|(_, hz)| *hz)
 }
 
-/// Check every pad a design drives against what its board allows.
-pub fn check_outputs(netlist: &GateNetlist, board: &BoardPins) -> Result<(), String> {
-    let refusals: Vec<String> = netlist
+/// A pin a bitstream drives, saved beside it so that loading it on a board
+/// can be checked.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DrivenPin {
+    /// Package ball
+    pub pin: String,
+    /// What drives it
+    pub what: String,
+    /// The design's reason for driving it anyway (`drive_override`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_reason: Option<String>,
+}
+
+/// The pins a design's output pads drive.
+pub fn driven_outputs(netlist: &GateNetlist) -> Vec<DrivenPin> {
+    netlist
         .cells
         .iter()
         .filter(|cell| {
             matches!(
                 cell.function,
                 Some(CellFunction::OutputPad) | Some(CellFunction::BidirPad)
-            ) && !cell.parameters.contains_key(DRIVE_OVERRIDE_PARAM)
+            )
         })
         .filter_map(|cell| {
-            let pin = cell.parameters.get("LOC")?;
-            if board.safe_outputs.iter().any(|(safe, _)| safe == pin) {
-                return None;
-            }
+            Some(DrivenPin {
+                pin: cell.parameters.get("LOC")?.clone(),
+                what: format!("'{}'", cell.path),
+                override_reason: cell.parameters.get(DRIVE_OVERRIDE_PARAM).cloned(),
+            })
+        })
+        .collect()
+}
+
+/// Check the pins a bitstream drives against what a board lists as safe to
+/// drive. Pins the design gave a reason for pass.
+pub fn check_driven(pins: &[DrivenPin], board: &BoardPins) -> Result<(), String> {
+    let refusals: Vec<String> = pins
+        .iter()
+        .filter(|p| p.override_reason.is_none())
+        .filter(|p| !board.safe_outputs.iter().any(|(safe, _)| *safe == p.pin))
+        .map(|p| {
             let what = board
                 .connected
                 .iter()
-                .find(|(known, _)| known == pin)
+                .find(|(known, _)| *known == p.pin)
                 .map_or("not listed as safe to drive", |(_, what)| *what);
-            Some(format!("  {pin} ('{}'): {what}", cell.path))
+            format!("  {} ({}): {what}", p.pin, p.what)
         })
         .collect();
     if refusals.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "These pins are not safe to drive on the {}, so the design was refused:\n{}\nIf you are sure, add drive_override: \"reason\" to that pin's constraints.",
+        "This bitstream drives pins the {} does not list as safe to drive:\n{}",
         board.name,
         refusals.join("\n")
     ))
 }
 
-/// Check the pins the build itself drives for a design, each with the
-/// reason, against what its board allows.
-pub fn check_build_driven(pins: &[(String, String)], board: &BoardPins) -> Result<(), String> {
-    let refusals: Vec<String> = pins
-        .iter()
-        .filter(|(pin, _)| !board.safe_outputs.iter().any(|(safe, _)| safe == pin))
-        .map(|(pin, why)| {
-            let what = board
-                .connected
-                .iter()
-                .find(|(known, _)| known == pin)
-                .map_or("not listed as safe to drive", |(_, what)| *what);
-            format!("  {pin} ({why}): {what}")
-        })
-        .collect();
-    if refusals.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "The build would drive these pins on the {}, which are not safe to drive, so the design was refused:\n{}",
-        board.name,
-        refusals.join("\n")
-    ))
+/// A board's pin list by its display name.
+pub fn by_name(name: &str) -> Option<&'static BoardPins> {
+    [&CERTUSPRO_VERSA].into_iter().find(|b| b.name == name)
 }
 
 #[cfg(test)]
@@ -202,38 +208,29 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_the_build_drives_must_be_safe() {
-        let vref = |pin: &str| vec![(pin.to_string(), "bank 4's reference voltage".to_string())];
-        assert!(check_build_driven(&vref("AB26"), &CERTUSPRO_VERSA).is_ok());
-        let error = check_build_driven(&vref("AE22"), &CERTUSPRO_VERSA).unwrap_err();
-        assert!(error.contains("LPDDR4"), "{error}");
-        assert!(error.contains("reference voltage"), "{error}");
-    }
-
-    #[test]
     fn an_led_may_be_driven() {
         let netlist = design(vec![pad("R8", CellFunction::OutputPad)]);
-        assert!(check_outputs(&netlist, &CERTUSPRO_VERSA).is_ok());
+        assert!(check_driven(&driven_outputs(&netlist), &CERTUSPRO_VERSA).is_ok());
     }
 
     #[test]
     fn a_switch_is_refused_and_named() {
         let netlist = design(vec![pad("AA23", CellFunction::OutputPad)]);
-        let error = check_outputs(&netlist, &CERTUSPRO_VERSA).unwrap_err();
+        let error = check_driven(&driven_outputs(&netlist), &CERTUSPRO_VERSA).unwrap_err();
         assert!(error.contains("DIP switch 1"), "{error}");
     }
 
     #[test]
     fn an_unlisted_pin_is_refused() {
         let netlist = design(vec![pad("AF12", CellFunction::OutputPad)]);
-        let error = check_outputs(&netlist, &CERTUSPRO_VERSA).unwrap_err();
+        let error = check_driven(&driven_outputs(&netlist), &CERTUSPRO_VERSA).unwrap_err();
         assert!(error.contains("not listed as safe"), "{error}");
     }
 
     #[test]
     fn the_same_pin_may_be_an_input() {
         let netlist = design(vec![pad("AA23", CellFunction::InputPad)]);
-        assert!(check_outputs(&netlist, &CERTUSPRO_VERSA).is_ok());
+        assert!(check_driven(&driven_outputs(&netlist), &CERTUSPRO_VERSA).is_ok());
     }
 
     #[test]
@@ -243,6 +240,24 @@ mod tests {
             DRIVE_OVERRIDE_PARAM.to_string(),
             "switch is open".to_string(),
         );
-        assert!(check_outputs(&design(vec![cell]), &CERTUSPRO_VERSA).is_ok());
+        assert!(check_driven(&driven_outputs(&design(vec![cell])), &CERTUSPRO_VERSA).is_ok());
+    }
+
+    #[test]
+    fn a_reference_voltage_pin_is_checked_too() {
+        let vref = vec![DrivenPin {
+            pin: "AE22".into(),
+            what: "bank 4's reference voltage".into(),
+            override_reason: None,
+        }];
+        let error = check_driven(&vref, &CERTUSPRO_VERSA).unwrap_err();
+        assert!(error.contains("LPDDR4"), "{error}");
+        assert!(error.contains("reference voltage"), "{error}");
+    }
+
+    #[test]
+    fn boards_are_found_by_name() {
+        assert!(by_name("CertusPro-NX Versa").is_some());
+        assert!(by_name("nothing").is_none());
     }
 }
