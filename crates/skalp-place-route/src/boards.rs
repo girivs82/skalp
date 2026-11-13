@@ -83,6 +83,12 @@ pub const CERTUSPRO_VERSA: BoardPins = BoardPins {
         ("H21", "USB reset button SW7"),
         ("P24", "the 125 MHz oscillator"),
         ("L8", "the FTDI chip's UART transmit line"),
+        ("AE22", "LPDDR4 address A0, channel A (bank 4's VREF pad)"),
+        ("AA12", "LPDDR4 DQ15, channel B (bank 3's VREF pad)"),
+        (
+            "V24",
+            "SFP cage 3 RX+, driven by a fitted module (bank 5's VREF pad)",
+        ),
     ],
     debug_uart_tx: Some(("M9", "LVCMOS33")),
     clock_pins: &[("P24", 125_000_000.0)],
@@ -199,8 +205,8 @@ mod tests {
     fn a_pin_the_build_drives_must_be_safe() {
         let vref = |pin: &str| vec![(pin.to_string(), "bank 4's reference voltage".to_string())];
         assert!(check_build_driven(&vref("AB26"), &CERTUSPRO_VERSA).is_ok());
-        let error = check_build_driven(&vref("P24"), &CERTUSPRO_VERSA).unwrap_err();
-        assert!(error.contains("125 MHz oscillator"), "{error}");
+        let error = check_build_driven(&vref("AE22"), &CERTUSPRO_VERSA).unwrap_err();
+        assert!(error.contains("LPDDR4"), "{error}");
         assert!(error.contains("reference voltage"), "{error}");
     }
 
