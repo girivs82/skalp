@@ -93,6 +93,9 @@ struct Engine<'a, D: Device + ?Sized> {
     /// Cells of bundled-data async blocks: clocked timing does not cross
     /// them (their own matched delays time them, see [`check_bundles`])
     async_cells: HashSet<CellId>,
+    /// Only registers on this clock launch paths (hold inside one async
+    /// block, whose registers share its step clock)
+    launch_clock: Option<GateNetId>,
 }
 
 impl<D: Device + ?Sized> Engine<'_, D> {
@@ -214,7 +217,10 @@ impl<D: Device + ?Sized> Engine<'_, D> {
     fn output_time(&mut self, cell: &Cell, output: usize) -> Arrival {
         if let Some(launch) = self.model.launch_ps(cell, output) {
             // Pads and constants launch nothing hold has to check
-            if self.early && cell.clock.is_none() {
+            let other_clock = self
+                .launch_clock
+                .is_some_and(|clock| cell.clock != Some(clock));
+            if self.early && (cell.clock.is_none() || other_clock) {
                 return Arrival {
                     time: NO_PATH,
                     from: None,
@@ -320,6 +326,7 @@ pub fn analyze<D: Device + ?Sized>(
         visiting: HashSet::new(),
         early: false,
         async_cells: async_block_cells(design.netlist),
+        launch_clock: None,
     };
 
     let netlist = design.netlist;
@@ -428,7 +435,8 @@ pub fn analyze_hold<D: Device + ?Sized>(
     design: &PlacedDesign<'_>,
     targets: &ClockTargets,
 ) -> HoldReport {
-    let mut engine = Engine {
+    let async_cells = async_block_cells(design.netlist);
+    let engine = |launch_clock, async_cells| Engine {
         device,
         model,
         design,
@@ -436,23 +444,52 @@ pub fn analyze_hold<D: Device + ?Sized>(
         arrivals: HashMap::new(),
         visiting: HashSet::new(),
         early: true,
-        async_cells: async_block_cells(design.netlist),
+        async_cells,
+        launch_clock,
     };
     let margin_ps = targets.hold_margin_ns * PS_PER_NS;
-    let mut paths = Vec::new();
+    // Synchronous registers, timed through everything but async blocks;
+    // then each async block's step clock on its own, from its registers to
+    // its registers. Its step clock comes from fabric logic, so its skew can
+    // be large; what enters from other blocks is held by the handshake.
+    let mut groups: Vec<(Option<GateNetId>, Vec<&Cell>)> = vec![(None, Vec::new())];
+    let mut by_clock: BTreeMap<u32, Vec<&Cell>> = BTreeMap::new();
     for cell in &design.netlist.cells {
-        if cell.clock.is_none() || engine.async_cells.contains(&cell.id) {
-            continue;
+        let Some(clock) = cell.clock else { continue };
+        if async_cells.contains(&cell.id) {
+            by_clock.entry(clock.0).or_default().push(cell);
+        } else {
+            groups[0].1.push(cell);
         }
-        let capture = engine.clock_arrival(cell);
-        for endpoint in model.endpoints(cell) {
-            let Some((time, net)) = engine.input_time_at(cell, endpoint) else {
-                continue;
-            };
-            let delay = (time - capture) as f64 / PS_PER_NS;
-            let required = (endpoint.hold_ps as f64 + margin_ps) / PS_PER_NS;
-            paths.push((delay, required, net, cell));
+    }
+    groups.extend(
+        by_clock
+            .into_iter()
+            .map(|(clock, cells)| (Some(GateNetId(clock)), cells)),
+    );
+    let mut engines = Vec::new();
+    let mut paths = Vec::new();
+    for (launch_clock, cells) in groups {
+        let mut e = engine(
+            launch_clock,
+            if launch_clock.is_some() {
+                HashSet::new()
+            } else {
+                async_cells.clone()
+            },
+        );
+        for cell in cells {
+            let capture = e.clock_arrival(cell);
+            for endpoint in model.endpoints(cell) {
+                let Some((time, net)) = e.input_time_at(cell, endpoint) else {
+                    continue;
+                };
+                let delay = (time - capture) as f64 / PS_PER_NS;
+                let required = (endpoint.hold_ps as f64 + margin_ps) / PS_PER_NS;
+                paths.push((delay, required, net, cell, engines.len()));
+            }
         }
+        engines.push(e);
     }
     paths.sort_by(|a, b| (a.0 - a.1).total_cmp(&(b.0 - b.1)));
     let violations = paths.iter().filter(|p| p.0 < p.1).count();
@@ -461,7 +498,8 @@ pub fn analyze_hold<D: Device + ?Sized>(
     let paths = paths
         .into_iter()
         .take(10)
-        .map(|(delay, required, net, cell)| {
+        .map(|(delay, required, net, cell, group)| {
+            let engine = &engines[group];
             let nets = engine.nets_through(net);
             let path: Vec<String> = nets
                 .iter()
@@ -575,6 +613,7 @@ pub fn check_bundles<D: Device + ?Sized>(
         visiting: HashSet::new(),
         early: false,
         async_cells: HashSet::new(),
+        launch_clock: None,
     };
     let delays = RoutedBundleDelays {
         engine: std::cell::RefCell::new(&mut engine),

@@ -1,0 +1,36 @@
+// A clocked parent stepping an async (bundled-data) shift register. The
+// block's registers are clocked by its own step signal, which fabric logic
+// generates, so hold between them depends on that signal's skew.
+
+async entity HoldShift {
+    out o: bit
+}
+
+impl HoldShift {
+    signal v: bit[16] = 16'hACE1
+    on() {
+        v = if v[0] == 1 { (v >> 1) ^ 16'hB400 } else { v >> 1 }
+    }
+    o = v[15]
+}
+
+entity HoldTop {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl HoldTop {
+    signal count: nat[8] = 0
+    signal req: bit = 0
+    signal seen: bit = 0
+
+    inst sh = HoldShift { ncl_req: req }
+
+    on(clk.rise) {
+        count = count + 1
+        req = count[7]
+        seen = sh.o
+    }
+
+    led = seen
+}
