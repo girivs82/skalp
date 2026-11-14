@@ -3198,8 +3198,10 @@ fn merge_physical_nodes_into_netlist(
             LirOp::NclMatchedDelay { width } => {
                 // out = in & delay(in): one kept buffer, then a kept AND of
                 // the input and the buffer. The sizing pass
-                // (`ncl_bundle::size_matched_delays`) lengthens the chain to
-                // cover the data paths the output times.
+                // (`ncl_bundle::size_matched_delays`) lengthens the chain
+                // with kept ANDs of the input and the previous stage, so a
+                // rising input ripples through every stage while a falling
+                // one clears them all at once (see `ncl_bundle`).
                 for i in 0..*width as usize {
                     let a = input_nets
                         .first()

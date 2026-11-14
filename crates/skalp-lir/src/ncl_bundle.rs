@@ -12,6 +12,15 @@
 //!   block's registers compute from their own outputs (the next control
 //!   edge only comes after the parent has seen the acknowledge).
 //!
+//! A chain resets fast: its first stage is a buffer of the input and every
+//! later stage is a kept AND of the input and the stage before. A rising
+//! input ripples through the whole chain, but a falling one clears every
+//! stage within one gate delay. Without that, a request that falls and rises
+//! again before the falling edge has left a plain buffer chain would find
+//! the chain's tail still high and raise the control at once, without the
+//! delay the data paths need. With it, the return to zero is as quick as the
+//! handshake around it.
+//!
 //! [`check_matched_delays`] measures both against a delay model: library
 //! estimates before placement ([`LibraryDelays`]), routed delays after (the
 //! place-and-route crate supplies its own [`BundleDelays`]).
@@ -32,7 +41,8 @@ pub struct MatchedDelay {
     pub prefix: String,
     /// The kept AND whose output is the timed control signal
     pub and_cell: CellId,
-    /// The chain's buffers, from the source to the AND
+    /// The chain's stages (a buffer, then ANDs with the source), from the
+    /// source to the AND
     pub chain: Vec<CellId>,
     /// The net being delayed (the request, or the previous control)
     pub source: GateNetId,
@@ -117,14 +127,20 @@ pub fn find_matched_delays(netlist: &GateNetlist) -> Vec<MatchedDelay> {
             let Some(driver) = netlist.nets.get(net.0 as usize).and_then(|n| n.driver) else {
                 break;
             };
-            let Some(buf) = netlist.cells.get(driver.0 as usize) else {
+            let Some(stage) = netlist.cells.get(driver.0 as usize) else {
                 break;
             };
-            if !buf.is_kept() || buf.inputs.len() != 1 {
+            if !stage.is_kept() || stage.source_op.as_deref() != Some(MATCHED_DELAY_OP) {
                 break;
             }
-            chain.push(buf.id);
-            net = buf.inputs[0];
+            // A buffer of the source, or an AND of the source and the
+            // previous stage
+            net = match stage.inputs.as_slice() {
+                [prev] => *prev,
+                [s, prev] if *s == source => *prev,
+                _ => break,
+            };
+            chain.push(stage.id);
         }
         if !ok {
             continue;
@@ -524,21 +540,23 @@ impl BundleDelays for LibraryDelays<'_> {
     }
 }
 
-/// Add `count` buffers to a matched delay's chain, just before its AND
+/// Add `count` stages to a matched delay's chain, just before its AND. Each
+/// stage is an AND of the delayed source and the stage before (a copy of the
+/// final AND cell), so the chain still clears at once when the source falls.
 pub fn extend_matched_delay(netlist: &mut GateNetlist, md: &MatchedDelay, count: usize) {
     if count == 0 {
         return;
     }
-    let template = match md.chain.last() {
-        Some(&id) => netlist.cells[id.0 as usize].clone(),
-        None => return,
+    let Some(&last) = md.chain.last() else {
+        return;
     };
     let and_idx = md.and_cell.0 as usize;
-    let mut net = netlist.cells[and_idx].inputs[1];
-    let base = template
-        .path
+    let template = netlist.cells[and_idx].clone();
+    let mut net = template.inputs[1];
+    let last_path = &netlist.cells[last.0 as usize].path;
+    let base = last_path
         .rsplit_once('_')
-        .map_or(template.path.as_str(), |(b, _)| b)
+        .map_or(last_path.as_str(), |(b, _)| b)
         .to_string();
     let first = md.chain.len();
     for k in 0..count {
@@ -546,12 +564,12 @@ pub fn extend_matched_delay(netlist: &mut GateNetlist, md: &MatchedDelay, count:
             GateNetId(0),
             format!("{}_n{}", base, first + k),
         ));
-        let mut buf = template.clone();
-        buf.id = CellId(0);
-        buf.path = format!("{}_{}", base, first + k);
-        buf.inputs = vec![net];
-        buf.outputs = vec![out];
-        netlist.add_cell(buf);
+        let mut stage = template.clone();
+        stage.id = CellId(0);
+        stage.path = format!("{}_{}", base, first + k);
+        stage.inputs = vec![md.source, net];
+        stage.outputs = vec![out];
+        netlist.add_cell(stage);
         net = out;
     }
     netlist.cells[and_idx].inputs[1] = net;
@@ -839,5 +857,36 @@ mod tests {
             "{:?}",
             report.checks
         );
+    }
+
+    /// Stages added to a chain are ANDs with the source, so a falling source
+    /// clears every stage at once, and the chain is still found afterwards
+    #[test]
+    fn extended_chains_reset_fast() {
+        let mut netlist = block_with_feedback();
+        let before = find_matched_delays(&netlist);
+        let done = before
+            .iter()
+            .find(|md| netlist.cells[md.and_cell.0 as usize].path.contains("done"))
+            .unwrap()
+            .clone();
+        extend_matched_delay(&mut netlist, &done, 3);
+        let after = find_matched_delays(&netlist);
+        let done = after
+            .iter()
+            .find(|md| md.and_cell == done.and_cell)
+            .expect("chain still found after extending");
+        assert_eq!(done.chain.len(), 4);
+        for &id in &done.chain[1..] {
+            let stage = &netlist.cells[id.0 as usize];
+            assert_eq!(stage.inputs.len(), 2, "{}", stage.path);
+            assert_eq!(stage.inputs[0], done.source, "{}", stage.path);
+        }
+        // each stage takes the one before it
+        for pair in done.chain.windows(2) {
+            let prev = &netlist.cells[pair[0].0 as usize];
+            let next = &netlist.cells[pair[1].0 as usize];
+            assert_eq!(next.inputs[1], prev.outputs[0]);
+        }
     }
 }
