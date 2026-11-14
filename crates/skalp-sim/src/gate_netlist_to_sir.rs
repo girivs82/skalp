@@ -365,10 +365,15 @@ impl GateNetlistToSirConverter {
             // block's step control runs through its matched delays, so the
             // zero-delay evaluation never sees a combinational loop, and the
             // control logic is exercised with a real (if coarse) delay.
-            if cell.source_op.as_deref() == Some(skalp_lir::gate_netlist::MATCHED_DELAY_OP)
-                && cell.path.ends_with("_and")
-                && !inputs.is_empty()
-            {
+            // The arbiter's deferred request (see `skalp_lir::tech_mapper`'s
+            // `arbiter_defer`) likewise rises one clock late.
+            let matched_delay = cell.source_op.as_deref()
+                == Some(skalp_lir::gate_netlist::MATCHED_DELAY_OP)
+                && cell.path.ends_with("_and");
+            let arbiter_defer = cell.source_op.as_deref()
+                == Some(skalp_lir::gate_netlist::ARBITER_OP)
+                && cell.path.contains(".arb_defer");
+            if (matched_delay || arbiter_defer) && !inputs.is_empty() {
                 seq_ops.push((
                     None,
                     SirOperation::Primitive {

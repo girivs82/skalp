@@ -1061,9 +1061,12 @@ pub enum LirOp {
     /// Arbiter of a self-timed block: grants (one-hot, or none) at most one
     /// of its requests, and keeps a grant while that request stays up.
     /// Inputs: the requests, then a release bit (while it is high every
-    /// request counts as low); output: the grants, same width as the
-    /// requests. Physical: a tree of mutual-exclusion elements
-    /// (cross-coupled gates), kept.
+    /// request counts as low), then optionally the one-hot arm granted last
+    /// (a register): that arm's request reaches the mutual exclusion a short
+    /// delay late, so a request that was already waiting wins the next
+    /// decision and no arm can be passed over for ever. Output: the grants,
+    /// same width as the requests. Physical: a tree of mutual-exclusion
+    /// elements (cross-coupled gates), kept.
     NclArbiter { width: u32 },
 }
 
@@ -1215,7 +1218,7 @@ impl LirOp {
             LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
             LirOp::NclMatchedDelay { .. } => 1,
             LirOp::NclStepControl => 4,
-            LirOp::NclArbiter { .. } => 2,
+            LirOp::NclArbiter { .. } => 3,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

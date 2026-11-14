@@ -3335,6 +3335,19 @@ fn merge_physical_nodes_into_netlist(
                     }
                     None => requests,
                 };
+                // The arm granted last waits a little before it competes again
+                // (see `LirOp::NclArbiter`): `r' = r & (!last | defer(r))`
+                let last = input_nets.get(2).filter(|v| v.len() == requests.len());
+                let requests: Vec<GateNetId> = match last {
+                    Some(last) => requests
+                        .iter()
+                        .zip(last)
+                        .map(|(&r, &last)| {
+                            arbiter_defer(netlist, &cells, path, r, last, &mut counter)
+                        })
+                        .collect(),
+                    None => requests,
+                };
                 let (_, local) = build_arbiter_tree(netlist, &cells, path, &requests, &mut counter);
                 for (local, &grant) in local.into_iter().zip(&grants) {
                     // the grant nets are the op's outputs
@@ -4721,6 +4734,95 @@ fn arbiter_mutex(
     let g0 = grant(x0, x1);
     let g1 = grant(x1, x0);
     (g0, g1)
+}
+
+/// Stages of the delay that holds back the request of the arm granted last
+const ARBITER_DEFER_STAGES: usize = 4;
+
+/// `r & (!last | defer(r))`: request `r` as the mutual exclusion sees it.
+/// `defer(r)` rises a few gate delays after `r` (a chain of ANDs with `r`,
+/// so it falls at once with it); its last gate is named `defer`, which the
+/// gate-level simulator models as one clock of delay. `last` is a register
+/// that only changes on the block's strobe, while every request is held,
+/// so the result only ever rises late, never glitches.
+fn arbiter_defer(
+    netlist: &mut GateNetlist,
+    cells: &ArbiterCells,
+    path: &str,
+    r: GateNetId,
+    last: GateNetId,
+    counter: &mut usize,
+) -> GateNetId {
+    let mut prev = arbiter_net(netlist, path, "dly", counter);
+    arbiter_gate(
+        netlist,
+        &cells.buf,
+        &cells.library,
+        path,
+        "dly",
+        counter,
+        vec![r],
+        prev,
+    );
+    for _ in 1..ARBITER_DEFER_STAGES {
+        let next = arbiter_net(netlist, path, "dly", counter);
+        arbiter_gate(
+            netlist,
+            &cells.and2,
+            &cells.library,
+            path,
+            "dly",
+            counter,
+            vec![r, prev],
+            next,
+        );
+        prev = next;
+    }
+    let deferred = arbiter_net(netlist, path, "defer", counter);
+    arbiter_gate(
+        netlist,
+        &cells.and2,
+        &cells.library,
+        path,
+        "defer",
+        counter,
+        vec![r, prev],
+        deferred,
+    );
+    let not_last = arbiter_net(netlist, path, "nl", counter);
+    arbiter_gate(
+        netlist,
+        &cells.inv,
+        &cells.library,
+        path,
+        "inv",
+        counter,
+        vec![last],
+        not_last,
+    );
+    let pass = arbiter_net(netlist, path, "pass", counter);
+    arbiter_gate(
+        netlist,
+        &cells.or2,
+        &cells.library,
+        path,
+        "or",
+        counter,
+        vec![not_last, deferred],
+        pass,
+    );
+    let out = arbiter_net(netlist, path, "r", counter);
+    arbiter_gate(
+        netlist,
+        &cells.and2,
+        &cells.library,
+        path,
+        "and",
+        counter,
+        vec![r, pass],
+        out,
+    );
+    out
 }
 
 /// Arbiter over `requests`: a tree of two-way mutual-exclusion elements.

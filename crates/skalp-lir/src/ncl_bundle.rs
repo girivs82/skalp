@@ -250,6 +250,11 @@ struct Arrivals<'a> {
     /// given arrival (the other block's strobe is time 0); other inputs are
     /// not part of the check
     sources: Option<HashMap<GateNetId, i64>>,
+    /// The timed control nets (outputs of matched delays). They are not
+    /// data: a control only changes after the strobe it belongs to, so a
+    /// path from one into the block's logic (the arbiter's release from
+    /// `done`, the `busy` acknowledge of a self-timed block) is not timed.
+    controls: HashSet<GateNetId>,
 }
 
 impl<'a> Arrivals<'a> {
@@ -269,6 +274,10 @@ impl<'a> Arrivals<'a> {
             from: HashMap::new(),
             loop_cuts: 0,
             sources: None,
+            controls: find_matched_delays(netlist)
+                .into_iter()
+                .map(|m| m.control)
+                .collect(),
         }
     }
 
@@ -352,8 +361,15 @@ impl<'a> Arrivals<'a> {
                     }
                 } else {
                     let output = netlist.nets[net.0 as usize].driver_pin.unwrap_or(0);
+                    let timing_cell = matches!(
+                        cell.source_op.as_deref(),
+                        Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
+                    );
                     let mut best: Option<i64> = None;
                     for (i, &input) in cell.inputs.iter().enumerate() {
+                        if !timing_cell && self.controls.contains(&input) {
+                            continue;
+                        }
                         let Some(arc) = self.delays.arc_ps(cell, i, output) else {
                             continue;
                         };
@@ -563,8 +579,11 @@ fn check_arbiters(
         if !from_step || !arbitrates {
             continue;
         }
-        let mut full = Arrivals::new(netlist, delays, &md.prefix, true);
-        let (Some(request), Some(go)) = (full.at(md.source), full.at(md.control)) else {
+        // Separate walks: the step loop (go feeds back into the step
+        // request) leaves whichever net a walk meets second cut
+        let request = Arrivals::new(netlist, delays, &md.prefix, true).at(md.source);
+        let go = Arrivals::new(netlist, delays, &md.prefix, true).at(md.control);
+        let (Some(request), Some(go)) = (request, go) else {
             continue;
         };
         let wait = go - request;
@@ -876,6 +895,11 @@ pub fn size_matched_delays(
     margin_percent: i64,
 ) -> SizingReport {
     let mut report = SizingReport::default();
+    // Shortfall of each chain in the previous round: a chain whose
+    // shortfall does not shrink when it is lengthened times a path that
+    // goes through its own control, which no length can meet
+    let mut previous: HashMap<String, i64> = HashMap::new();
+    let mut stuck: HashSet<String> = HashSet::new();
     // Each round fixes the delays it can see; later delays depend on earlier
     // ones (a register-timing delay feeds the acknowledge delay), so repeat.
     for _ in 0..64 {
@@ -893,8 +917,30 @@ pub fn size_matched_delays(
                 })
                 .max()
                 .unwrap_or(0);
-            if worst <= 0 {
+            if worst <= 0 || stuck.contains(path) {
                 continue;
+            }
+            if previous.get(path).is_some_and(|&p| worst >= p) {
+                tracing::warn!(
+                    "NCL matched delay {}: still {} ps short after lengthening; the data it times depends on the delay itself, so it is left as it is",
+                    path,
+                    worst
+                );
+                stuck.insert(path.clone());
+                continue;
+            }
+            previous.insert(path.clone(), worst);
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                for c in checks.iter().filter(|c| &c.delay_path == path) {
+                    tracing::debug!(
+                        "NCL sizing {}: {} data {} ps, control {} ps, {} stages",
+                        path,
+                        c.times,
+                        c.data_ps,
+                        c.control_ps,
+                        c.chain_len
+                    );
+                }
             }
             // Per buffer: one cell delay plus one connection
             let per_buffer = md
@@ -1192,18 +1238,19 @@ mod tests {
         arb.source_op = Some(ARBITER_OP.to_string());
         netlist.add_cell(arb);
         let step = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_step_req".into()));
+        // `go` feeds back into the step request, as in the real step control
+        let go = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_go".into()));
         let mut st = Cell::new_comb(
             CellId(0),
             "LUT4".into(),
             "test".into(),
             0.0,
             "top.u.ncl_bundle.step.st_and".into(),
-            vec![grant],
+            vec![grant, go],
             vec![step],
         );
         st.source_op = Some(STEP_CONTROL_OP.to_string());
         netlist.add_cell(st);
-        let go = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_go".into()));
         matched_delay(&mut netlist, "go", step, go);
         matched_delay(&mut netlist, "done", go, ack);
         netlist.rebuild_net_connectivity();

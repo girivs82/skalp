@@ -2944,7 +2944,7 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
     // fixed-priority grant becomes a mutual-exclusion element. Its requests
     // are released while each step finishes (see below), so it decides
     // afresh for every step.
-    let mut arbiters: Vec<LirNodeId> = Vec::new();
+    let mut arbiters: Vec<(LirNodeId, Option<LirSignalId>)> = Vec::new();
     if ready.is_some() {
         use skalp_frontend::ncl_streams::NCL_ARBITER_PREFIX;
         for k in 0.. {
@@ -2956,6 +2956,11 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
                 break;
             };
             let (req_id, gnt_id, width) = (req_sig.id, gnt_sig.id, gnt_sig.width);
+            // the arm granted last (see `NclArbiter`)
+            let last = new_lir
+                .get_signal(&format!("{NCL_ARBITER_PREFIX}{k}_last"))
+                .filter(|s| s.width == width)
+                .map(|s| s.id);
             match gnt_sig.driver {
                 Some(driver) => {
                     let node = &mut new_lir.nodes[driver.0 as usize];
@@ -2963,15 +2968,16 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
                     node.inputs = vec![req_id];
                     node.clock = None;
                     node.reset = None;
-                    arbiters.push(driver);
+                    arbiters.push((driver, last));
                 }
                 None => {
-                    arbiters.push(new_lir.add_node(
+                    let node = new_lir.add_node(
                         LirOp::NclArbiter { width },
                         vec![req_id],
                         gnt_id,
                         format!("ncl_bundle.arbiter{k}"),
-                    ));
+                    );
+                    arbiters.push((node, last));
                 }
             }
         }
@@ -3046,8 +3052,10 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         // what its grant chose, and the next step arbitrates again. A tree
         // of mutual-exclusion elements whose side keeps some request up
         // would otherwise never let the other side in.
-        for &node in &arbiters {
-            new_lir.nodes[node.0 as usize].inputs.push(done);
+        for &(node, last) in &arbiters {
+            let inputs = &mut new_lir.nodes[node.0 as usize].inputs;
+            inputs.push(done);
+            inputs.extend(last);
         }
         new_lir.add_node(
             LirOp::NclStepControl,

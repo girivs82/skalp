@@ -76,6 +76,7 @@ async fn run_merge(mut tb: Testbench, cycles: usize) {
     tb.clock(2).await;
 
     let mut total = 0;
+    let mut counts = Vec::new();
     for (sent, n, sum) in [("sent_a", "na", "suma"), ("sent_b", "nb", "sumb")] {
         let sent = tb.get_u32(sent).await;
         let n = tb.get_u32(n).await;
@@ -88,7 +89,13 @@ async fn run_merge(mut tb: Testbench, cycles: usize) {
         let expected: u32 = (0..n).map(|k| k & 0xff).sum::<u32>() & 0xffff;
         assert_eq!(sum_got, expected, "{sum} after {n} values");
         total += n;
+        counts.push(n);
     }
+    // Both producers keep up with the consumer, so the arbiter sees both
+    // requests waiting at every decision: a fair arbiter serves them in
+    // turn, an unfair one lets one side through only now and then
+    let (lo, hi) = (counts[0].min(counts[1]), counts[0].max(counts[1]));
+    assert!(lo * 2 >= hi, "unfair arbitration: {counts:?}");
     // The `_ if` arm only wins when no value is waiting (the producers
     // here are usually faster), and never runs twice in a row
     let extra = tb.get_u32("extra").await;
