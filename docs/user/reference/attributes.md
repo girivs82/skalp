@@ -854,7 +854,9 @@ Rules:
 
 - N is the total latency, not the number of registers added. N below the
   body's latency is an error.
-- The entity needs exactly one clock, and no `inout` ports.
+- The entity needs exactly one clock, and no `inout` ports. On an `async
+  entity` (no clock) `#[pipeline]` and `#[retime]` are ignored, with a note
+  in the log, so one source can serve a clocked and an async build.
 - Retiming never adds registers beyond the N − L the wrapper added; it only
   moves them, and every loop keeps its register count.
 - Registers keep their initial values, so a register can't move back

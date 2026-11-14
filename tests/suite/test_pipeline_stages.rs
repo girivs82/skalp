@@ -773,3 +773,44 @@ fn test_pipeline_latency_carries_over_from_the_entity_file() {
     );
     assert_eq!(latency(&compile(&top).unwrap(), "MulAddNormPiped"), Some(4));
 }
+
+/// An async entity has no clock to pipeline against: #[pipeline] and
+/// #[retime] on one are ignored, even with a lock file naming a latency, so
+/// one source can serve a clocked and an async build of a design
+#[test]
+fn test_pipeline_and_retime_are_ignored_on_async_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("async_unit.sk");
+    std::fs::write(
+        &path,
+        "#[pipeline]\nasync entity AsyncSum {\n    in a: bit[8]\n    in b: bit[8]\n    \
+         out y: bit[8]\n}\n\nimpl AsyncSum {\n    y = a + b\n}\n\n\
+         #[retime]\nasync entity AsyncTop {\n    in a: bit[8]\n    in b: bit[8]\n    \
+         out y: bit[8]\n}\n\nimpl AsyncTop {\n    inst sum = AsyncSum {\n        a: a,\n        \
+         b: b\n    }\n    y = sum.y\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skalp_frontend::pipeline_lock::lock_path(&path),
+        "AsyncSum = 3\n",
+    )
+    .unwrap();
+    let mir = compile(&path).unwrap();
+    for name in ["AsyncSum", "AsyncTop"] {
+        let module = mir
+            .modules
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("no module {name}"));
+        assert!(module.is_async, "{name} lost its async flag");
+        assert!(
+            module.pipeline_config.is_none(),
+            "{name} kept its pipelining: {:?}",
+            module.pipeline_config
+        );
+    }
+    assert!(
+        !mir.modules.iter().any(|m| m.name.ends_with("__core")),
+        "an async entity was wrapped with stages"
+    );
+}
