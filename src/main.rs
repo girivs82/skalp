@@ -4749,14 +4749,15 @@ fn run_nexus_pnr_on_netlist(
         }
         for b in &timing.bundles {
             println!(
-                "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers)",
+                "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers, {} corner)",
                 b.block,
                 b.times,
                 if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
                 b.slack_ns.abs(),
                 b.data_ns,
                 b.control_ns,
-                b.chain_len
+                b.chain_len,
+                b.corner
             );
         }
         let timing_path = output_dir.join("timing_report.json");

@@ -546,6 +546,10 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
         self.model.launch_ps(cell, 0).unwrap_or(0)
     }
 
+    fn launches(&self, cell: &Cell, output: usize) -> bool {
+        cell.clock.is_some() && self.model.launch_ps(cell, output).is_some()
+    }
+
     fn setup_ps(&self, cell: &Cell, input: usize) -> i64 {
         self.model
             .endpoints(cell)
@@ -579,12 +583,12 @@ pub fn check_bundles<D: Device + ?Sized>(
     skalp_lir::ncl_bundle::check_matched_delays(design.netlist, &delays)
 }
 
-/// Worst-corner summary of bundle checks made at several corners
+/// Worst-corner summary of bundle checks made at several named corners
 pub fn summarize_bundles(
-    corners: &[Vec<skalp_lir::ncl_bundle::BundleCheck>],
+    corners: &[(&str, Vec<skalp_lir::ncl_bundle::BundleCheck>)],
 ) -> Vec<super::BundleReport> {
     let mut by_key: BTreeMap<(String, &'static str), super::BundleReport> = BTreeMap::new();
-    for checks in corners {
+    for (corner, checks) in corners {
         for c in checks {
             let slack_ns = c.slack_ps() as f64 / PS_PER_NS;
             let key = (c.delay_path.clone(), c.times);
@@ -600,6 +604,7 @@ pub fn summarize_bundles(
                         control_ns: c.control_ps as f64 / PS_PER_NS,
                         slack_ns,
                         chain_len: c.chain_len,
+                        corner: corner.to_string(),
                     },
                 );
             }

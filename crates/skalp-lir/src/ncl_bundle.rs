@@ -50,6 +50,13 @@ pub trait BundleDelays {
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64>;
     /// Clock-to-output delay of a register
     fn clock_to_out_ps(&self, cell: &Cell) -> i64;
+    /// Whether output `output` of clocked `cell` is launched by its clock
+    /// (a register output). A clocked cell can also have combinational
+    /// outputs, such as the read port of a distributed RAM, whose clock only
+    /// writes: those are timed through the cell's arcs instead.
+    fn launches(&self, cell: &Cell, _output: usize) -> bool {
+        cell.clock.is_some()
+    }
     /// Setup time of a register's data input `input`
     fn setup_ps(&self, cell: &Cell, input: usize) -> i64;
 }
@@ -144,9 +151,45 @@ struct Arrivals<'a> {
     through_registers: bool,
     memo: HashMap<GateNetId, Option<i64>>,
     visiting: HashSet<GateNetId>,
+    /// The input net that set each combinational arrival
+    from: HashMap<GateNetId, GateNetId>,
+    /// Nets where propagation met a combinational loop and stopped
+    loop_cuts: usize,
 }
 
-impl Arrivals<'_> {
+impl<'a> Arrivals<'a> {
+    fn new(
+        netlist: &'a GateNetlist,
+        delays: &'a dyn BundleDelays,
+        prefix: &'a str,
+        through_registers: bool,
+    ) -> Self {
+        Self {
+            netlist,
+            delays,
+            prefix,
+            through_registers,
+            memo: HashMap::new(),
+            visiting: HashSet::new(),
+            from: HashMap::new(),
+            loop_cuts: 0,
+        }
+    }
+
+    /// The path that sets the arrival at `net`, latest net first, with
+    /// each net's arrival
+    fn path(&mut self, net: GateNetId) -> Vec<(GateNetId, Option<i64>)> {
+        let mut path = vec![(net, self.at(net))];
+        let mut net = net;
+        while let Some(&prev) = self.from.get(&net) {
+            if path.iter().any(|(n, _)| *n == prev) {
+                break;
+            }
+            path.push((prev, self.at(prev)));
+            net = prev;
+        }
+        path
+    }
     fn inside(&self, cell: &Cell) -> bool {
         cell.path.starts_with(self.prefix)
     }
@@ -159,6 +202,16 @@ impl Arrivals<'_> {
         if !self.visiting.insert(net) {
             // A loop (state-holding gate): the path through it is not a
             // data path
+            self.loop_cuts += 1;
+            if self.loop_cuts <= 5 {
+                let n = &self.netlist.nets[net.0 as usize];
+                tracing::debug!(
+                    "NCL bundle: combinational loop through {} (driven by {})",
+                    n.name,
+                    n.driver
+                        .map_or("-", |d| self.netlist.cells[d.0 as usize].path.as_str())
+                );
+            }
             return None;
         }
         let netlist = self.netlist;
@@ -169,7 +222,10 @@ impl Arrivals<'_> {
                 if !self.inside(cell) {
                     // A block input: held stable by the parent
                     Some(0)
-                } else if let Some(clock) = cell.clock {
+                } else if let Some(clock) = cell.clock.filter(|_| {
+                    self.delays
+                        .launches(cell, netlist.nets[net.0 as usize].driver_pin.unwrap_or(0))
+                }) {
                     if self.through_registers {
                         self.at(clock).map(|t| {
                             t + self.delays.clock_wire_ps(netlist, clock, cell)
@@ -187,6 +243,9 @@ impl Arrivals<'_> {
                         };
                         if let Some(t) = self.at(input) {
                             let t = t + self.delays.wire_ps(netlist, input, cell, i) + arc;
+                            if best.is_none_or(|b| t > b) {
+                                self.from.insert(net, input);
+                            }
                             best = Some(best.map_or(t, |b| b.max(t)));
                         }
                     }
@@ -208,22 +267,8 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
 
     for md in &matched {
         let and_cell = &netlist.cells[md.and_cell.0 as usize];
-        let mut data_only = Arrivals {
-            netlist,
-            delays,
-            prefix: &md.prefix,
-            through_registers: false,
-            memo: HashMap::new(),
-            visiting: HashSet::new(),
-        };
-        let mut full = Arrivals {
-            netlist,
-            delays,
-            prefix: &md.prefix,
-            through_registers: true,
-            memo: HashMap::new(),
-            visiting: HashSet::new(),
-        };
+        let mut data_only = Arrivals::new(netlist, delays, &md.prefix, false);
+        let mut full = Arrivals::new(netlist, delays, &md.prefix, true);
         let Some(control_at) = full.at(md.control) else {
             continue;
         };
@@ -293,14 +338,49 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
         // again, so every such path must settle (with setup) before the
         // acknowledge rises.
         let mut next_ps: Option<i64> = None;
+        let mut worst: Option<(&Cell, GateNetId)> = None;
+        let mut endpoints = 0usize;
         for cell in netlist.cells.iter().filter(|c| {
             c.path.starts_with(&md.prefix) && c.clock.is_some_and(|k| controls.contains(&k))
         }) {
+            endpoints += 1;
             for (i, &input) in cell.inputs.iter().enumerate() {
                 if let Some(t) = full.at(input) {
                     let t = t + delays.wire_ps(netlist, input, cell, i) + delays.setup_ps(cell, i);
+                    if next_ps.is_none_or(|d| t > d) {
+                        worst = Some((cell, input));
+                    }
                     next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
                 }
+            }
+        }
+        if full.loop_cuts > 0 || data_only.loop_cuts > 0 {
+            tracing::warn!(
+                "NCL bundle {}: {} combinational loop(s) met inside the block; paths through them are not timed",
+                md.prefix.trim_end_matches('.'),
+                full.loop_cuts.max(data_only.loop_cuts)
+            );
+        }
+        if let Some((cell, input)) = worst {
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let path: Vec<String> = full
+                    .path(input)
+                    .into_iter()
+                    .map(|(n, t)| {
+                        let net = &netlist.nets[n.0 as usize];
+                        let driver = net
+                            .driver
+                            .map_or("-", |d| netlist.cells[d.0 as usize].path.as_str());
+                        format!("{} ({}) @ {:?} ps", net.name, driver, t)
+                    })
+                    .collect();
+                tracing::debug!(
+                    "NCL bundle {}: {} registers on its strobes; latest next state into {}:\n  {}",
+                    md.prefix.trim_end_matches('.'),
+                    endpoints,
+                    cell.path,
+                    path.join("\n  ")
+                );
             }
         }
         if let Some(data_ps) = next_ps {
@@ -362,6 +442,9 @@ fn block_output_driven_by(
     None
 }
 
+/// First read-address input of a `CellFunction::DistRam16x4` cell
+const DIST_RAM_READ_ADDRESS: usize = 9;
+
 /// Library-based delay estimates for timing matched delays before placement.
 ///
 /// Cell delays are the library's timing arcs; every connection gets a fixed
@@ -418,10 +501,20 @@ impl BundleDelays for LibraryDelays<'_> {
         self.wire_ps
     }
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        // A distributed RAM reads through its read address (RAD0..RAD3,
+        // after DI0..DI3, WAD0..WAD3 and WRE); its write side only reaches
+        // the outputs through the clock.
+        if cell.function == Some(CellFunction::DistRam16x4) && input < DIST_RAM_READ_ADDRESS {
+            return None;
+        }
         Some(self.arc(cell, input, output))
     }
     fn clock_to_out_ps(&self, cell: &Cell) -> i64 {
         self.arc(cell, 0, 0)
+    }
+    fn launches(&self, cell: &Cell, _output: usize) -> bool {
+        // A distributed RAM's read port is combinational from its address
+        cell.clock.is_some() && cell.function != Some(CellFunction::DistRam16x4)
     }
     fn setup_ps(&self, cell: &Cell, _input: usize) -> i64 {
         self.library
@@ -648,6 +741,92 @@ mod tests {
         assert_eq!(next.data_ps, 800);
         assert_eq!(next.slack_ps(), -400);
         assert!(next.delay_path.ends_with("done_and"));
+    }
+
+    /// A distributed RAM written by the strobe: its read port is
+    /// combinational from the address, so a read through it times from the
+    /// address register, not from the RAM's write clock.
+    #[test]
+    fn ram_reads_are_timed_from_their_address() {
+        struct RamDelays;
+        impl BundleDelays for RamDelays {
+            fn wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell, _: usize) -> i64 {
+                0
+            }
+            fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell) -> i64 {
+                0
+            }
+            fn arc_ps(&self, _: &Cell, _: usize, _: usize) -> Option<i64> {
+                Some(100)
+            }
+            fn clock_to_out_ps(&self, _: &Cell) -> i64 {
+                100
+            }
+            fn setup_ps(&self, _: &Cell, _: usize) -> i64 {
+                0
+            }
+            fn launches(&self, cell: &Cell, _: usize) -> bool {
+                cell.clock.is_some() && cell.function != Some(CellFunction::DistRam16x4)
+            }
+        }
+
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let req = netlist.add_input("req".into());
+        let ack = netlist.add_output("ack".into());
+        let go = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_go".into()));
+        matched_delay(&mut netlist, "go", req, go);
+        matched_delay(&mut netlist, "done", go, ack);
+        // address register -> three gates -> RAM read -> data register
+        let addr_q = netlist.add_net(GateNet::new(GateNetId(0), "top.u.addr".into()));
+        let mut net = addr_q;
+        for k in 0..3 {
+            let next = netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.a{k}")));
+            comb(
+                &mut netlist,
+                &format!("top.u.adec{k}"),
+                vec![net],
+                next,
+                false,
+            );
+            net = next;
+        }
+        let rd = netlist.add_net(GateNet::new(GateNetId(0), "top.u.rd".into()));
+        let mut ram = Cell::new_seq(
+            CellId(0),
+            "DPR16X4".into(),
+            "test".into(),
+            0.0,
+            "top.u.ram".into(),
+            vec![net],
+            vec![rd],
+            go,
+            None,
+        );
+        ram.function = Some(CellFunction::DistRam16x4);
+        netlist.add_cell(ram);
+        let data_q = netlist.add_net(GateNet::new(GateNetId(0), "top.u.data".into()));
+        for (path, d, q) in [
+            ("top.u.addr_r", data_q, addr_q),
+            ("top.u.data_r", rd, data_q),
+        ] {
+            netlist.add_cell(Cell::new_seq(
+                CellId(0),
+                "FD1P3IX".into(),
+                "test".into(),
+                0.0,
+                path.into(),
+                vec![d],
+                vec![q],
+                go,
+                None,
+            ));
+        }
+        netlist.rebuild_net_connectivity();
+
+        let checks = check_matched_delays(&netlist, &RamDelays);
+        let next = checks.iter().find(|c| c.times == "next state").unwrap();
+        // go 200, address register out 300, three gates 600, read 700
+        assert_eq!(next.data_ps, 700);
     }
 
     #[test]

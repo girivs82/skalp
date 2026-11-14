@@ -187,6 +187,9 @@ pub struct BundleReport {
     pub slack_ns: f64,
     /// Buffers in the delay's chain
     pub chain_len: usize,
+    /// Delay corner of the worst slack ("slow" or "fast")
+    #[serde(default)]
+    pub corner: String,
 }
 
 /// Hold check: whether data launched by a clock edge reaches each register
