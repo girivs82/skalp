@@ -278,6 +278,25 @@ pub fn block_ram_init_address(
     Ok(first + wid * (second - first))
 }
 
+/// Configuration-bus address of a large RAM's contents: the region the
+/// device's own `baseaddr.json` names after the site's pin location
+/// (`LRAM_CORE_R<row>C<column>`, see [`super::lram::init_region`]).
+pub fn large_ram_init_address(
+    db_root: &Path,
+    variant: NexusVariant,
+    region: &str,
+) -> Result<u32, String> {
+    let device = variant.prjoxide_device();
+    let regions = load_base_addresses(db_root, variant.prjoxide_family(), device)
+        .ok_or_else(|| format!("The device database has no {device}/baseaddr.json"))?;
+    regions.get(region).map(|r| r.addr).ok_or_else(|| {
+        format!(
+            "{device}/baseaddr.json has no {region} region, so this large RAM's \
+                 contents have no address"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +418,19 @@ mod tests {
             block_ram_init_address(&db, NexusVariant::Lfcpnx100, 3).unwrap(),
             0x2006_0000
         );
+    }
+
+    #[test]
+    fn large_ram_contents_go_to_the_region_named_after_the_site() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        assert_eq!(
+            large_ram_init_address(&db, NexusVariant::Lifcl40, "LRAM_CORE_R40C86").unwrap(),
+            0x2E22_0000
+        );
+        let missing = large_ram_init_address(&db, NexusVariant::Lifcl40, "LRAM_CORE_R1C1");
+        assert!(missing.unwrap_err().contains("LRAM_CORE_R1C1"));
     }
 }

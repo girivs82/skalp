@@ -269,8 +269,9 @@ pub const WIDE_LUT_PIN_SEL: usize = 8;
 /// [`FF_PIN_CLK`].
 pub const RAM_PIN_READ_CLK: usize = 103;
 
-/// Cell parameter holding where a multiplier's added low-driven inputs start.
-pub const DSP_EXTRA_INPUTS_PARAM: &str = "DSP_EXTRA_INPUTS_FROM";
+/// Cell parameter holding where a multiplier's or RAM's added low-driven
+/// inputs start.
+pub use skalp_lir::gate_netlist::EXTRA_INPUTS_PARAM;
 
 /// [`Device::ff_control_group`] for a tile whose flip-flops share their
 /// control signals in runs of `group_size`, in BEL order (two per ECP5
@@ -796,8 +797,10 @@ pub trait Device: Send + Sync {
         None
     }
 
-    /// Extra multiplier inputs the device needs held low with a real signal.
-    fn dsp_low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
+    /// Extra inputs of a multiplier or RAM cell the device needs held low
+    /// with a real signal, added after the cell's own (from the index in its
+    /// [`EXTRA_INPUTS_PARAM`] parameter).
+    fn low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
         0
     }
 
@@ -813,6 +816,7 @@ pub trait Device: Send + Sync {
     /// Router pin a block RAM input connects to, or `None` if it has no pin.
     fn ram_input_pin(
         &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
         _ports: &skalp_lir::gate_netlist::RamPorts,
         input: usize,
     ) -> Option<usize> {
@@ -820,7 +824,12 @@ pub trait Device: Send + Sync {
     }
 
     /// Router output pin a block RAM output comes from.
-    fn ram_output_pin(&self, _ports: &skalp_lir::gate_netlist::RamPorts, output: usize) -> usize {
+    fn ram_output_pin(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        output: usize,
+    ) -> usize {
         output
     }
 
@@ -828,6 +837,7 @@ pub trait Device: Send + Sync {
     /// because configuration alone cannot hold it low.
     fn ram_input_needs_low_driver(
         &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
         _ports: &skalp_lir::gate_netlist::RamPorts,
         _input: usize,
     ) -> bool {
@@ -955,6 +965,8 @@ pub enum BelType {
     Carry,
     /// Block RAM slice
     RamSlice,
+    /// Large RAM block, much bigger than a block RAM (Lattice Nexus LRAM)
+    LargeRam,
     /// Distributed (LUT) RAM site: a 16 × 4 RAM built from a logic tile's
     /// LUTs (Lattice DPR16X4). Its LUTs are the site's footprint
     /// ([`Device::bel_footprint`]).

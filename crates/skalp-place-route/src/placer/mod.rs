@@ -58,6 +58,12 @@ pub fn is_constant_cell(cell_type: &str) -> bool {
         || cell_type == "VCC"
 }
 
+/// Whether a cell type is a large RAM block (Lattice Nexus LRAM, whose
+/// primitives are named for their 512 Kbit size).
+pub(crate) fn is_large_ram_type(cell_type: &str) -> bool {
+    matches!(cell_type, "PDPSC512K" | "SP512K" | "DPSC512K" | "LRAM_CORE")
+}
+
 /// The BEL type a cell needs.
 ///
 /// Vendor primitive names are matched first (iCE40 `SB_*`, generic `LUT4`,
@@ -66,7 +72,9 @@ pub fn is_constant_cell(cell_type: &str) -> bool {
 /// is never placed on a LUT BEL just because its name lacks "DFF".
 pub(crate) fn cell_bel_type(cell: &skalp_lir::gate_netlist::Cell) -> BelType {
     let t = cell.cell_type.as_str();
-    if cell.function == Some(CellFunction::DistRam16x4) {
+    if is_large_ram_type(t) {
+        BelType::LargeRam
+    } else if cell.function == Some(CellFunction::DistRam16x4) {
         BelType::DistRam
     } else if cell.function == Some(CellFunction::Lut5) {
         BelType::WideLut
@@ -987,7 +995,7 @@ impl<D: Device + Clone> Placer<D> {
             | BelType::WideLut
             | BelType::DistRam => TileType::Logic,
             BelType::IoCell => TileType::IoTop, // Will be refined during placement
-            BelType::RamSlice => TileType::RamTop,
+            BelType::RamSlice | BelType::LargeRam => TileType::RamTop,
             BelType::GlobalBuf => TileType::GlobalBuf,
             BelType::Pll => TileType::Pll,
             BelType::DspSlice => TileType::Dsp,
