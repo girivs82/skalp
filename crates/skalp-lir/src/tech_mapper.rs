@@ -14,7 +14,7 @@
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
     DSP_A_BITS_PARAM, DSP_B_BITS_PARAM, DSP_C_BITS, DSP_P_BITS_PARAM, RAM_ADDR_BITS_PARAM,
-    RAM_DATA_BITS_PARAM,
+    RAM_DATA_BITS_PARAM, RAM_READ_ONLY_PARAM,
 };
 use crate::lir::{Lir, LirNodeId, LirOp, LirSignalId};
 use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
@@ -1723,7 +1723,7 @@ fn map_memblock_standalone(
     let ram_lookup = if total_bits < BRAM_MIN_BITS || async_read {
         None
     } else {
-        library.find_ram_cell()
+        library.find_ram_cell_for(data_width, depth)
     };
     // A memory read combinationally goes into distributed RAM when the target
     // has it and that is cheaper than registers (it nearly always is beyond a
@@ -1896,6 +1896,10 @@ fn map_memblock_standalone(
         );
         cell.parameters
             .insert(RAM_DATA_BITS_PARAM.to_string(), block_width.to_string());
+        if !has_write {
+            cell.parameters
+                .insert(RAM_READ_ONLY_PARAM.to_string(), "1".to_string());
+        }
         if let Some(words) = contents {
             cell.set_memory_init(&words);
         }

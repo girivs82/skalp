@@ -1768,13 +1768,19 @@ impl Device for Ice40Device {
 
     fn ram_input_pin(
         &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
         ports: &skalp_lir::gate_netlist::RamPorts,
         input: usize,
     ) -> Option<usize> {
         ram::input_pin(ports, input).map(ram::InputPin::router_index)
     }
 
-    fn ram_output_pin(&self, ports: &skalp_lir::gate_netlist::RamPorts, output: usize) -> usize {
+    fn ram_output_pin(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        output: usize,
+    ) -> usize {
         ram::output_pin(ports, output)
     }
 
@@ -1782,6 +1788,7 @@ impl Device for Ice40Device {
     /// enables.
     fn ram_input_needs_low_driver(
         &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
         ports: &skalp_lir::gate_netlist::RamPorts,
         input: usize,
     ) -> bool {

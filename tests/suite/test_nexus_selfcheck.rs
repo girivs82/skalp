@@ -71,3 +71,28 @@ async fn test_block_ram_preload_check_passes_and_sees_a_fault() {
         assert_eq!(fault, 0b1011, "gate level {gate_level}: flags {fault:#b}");
     }
 }
+
+/// A large RAM's preloaded contents are there before anything is written,
+/// over its whole address range, and it then reads back what is written:
+/// the same flags as the block RAM preload check.
+#[tokio::test]
+async fn test_large_ram_preload_check_passes_and_sees_a_fault() {
+    for gate_level in [false, true] {
+        let flags = |fixture, top| async move {
+            let path = fixture_path(fixture);
+            let mut tb = if gate_level {
+                Testbench::gate_level_with_top_and_library(&path, top, "nexus")
+                    .await
+                    .unwrap()
+            } else {
+                Testbench::with_top_module(&path, top).await.unwrap()
+            };
+            tb.clock(25_000).await;
+            tb.get_u64("led").await & 0b1111
+        };
+        let check = flags("nexus_lram_preload_check.sk", "LramPreloadCheck").await;
+        assert_eq!(check, 0b1010, "gate level {gate_level}: flags {check:#b}");
+        let fault = flags("nexus_lram_preload_fault.sk", "LramPreloadFault").await;
+        assert_eq!(fault, 0b1011, "gate level {gate_level}: flags {fault:#b}");
+    }
+}

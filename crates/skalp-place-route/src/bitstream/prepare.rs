@@ -104,9 +104,9 @@ pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
             continue;
         };
         for (index, &net) in cell.inputs.iter().enumerate() {
-            let pin = device.ram_input_pin(&ports, index).filter(|_| {
+            let pin = device.ram_input_pin(cell, &ports, index).filter(|_| {
                 constants.get(&net) != Some(&false)
-                    || device.ram_input_needs_low_driver(&ports, index)
+                    || device.ram_input_needs_low_driver(cell, &ports, index)
             });
             let fanout = &mut mapped.nets[net.0 as usize].fanout;
             if let Some(entry) = fanout.iter().position(|&(c, i)| c == cell.id && i == index) {
@@ -119,7 +119,8 @@ pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
             }
         }
         for (index, &net) in cell.outputs.iter().enumerate() {
-            mapped.nets[net.0 as usize].driver_pin = Some(device.ram_output_pin(&ports, index));
+            mapped.nets[net.0 as usize].driver_pin =
+                Some(device.ram_output_pin(cell, &ports, index));
         }
     }
     mapped
@@ -133,6 +134,22 @@ pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
 /// needs one, so those inputs are routed like any signal.
 pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
     let constants = constant_nets(netlist);
+    // A RAM whose write enable is tied low is never written: synthesis may
+    // keep a write port for a memory only ever read, with its enable folded
+    // to a constant
+    let mut marked = netlist.clone();
+    for cell in marked.cells.iter_mut() {
+        let read_only = cell
+            .ram_ports()
+            .is_some_and(|ports| constants.get(&cell.inputs[ports.write_en]) == Some(&false));
+        if read_only {
+            cell.parameters.insert(
+                skalp_lir::gate_netlist::RAM_READ_ONLY_PARAM.to_string(),
+                "1".to_string(),
+            );
+        }
+    }
+    let netlist = &marked;
     let mut driven = netlist.clone();
     for ram in netlist.cells.iter() {
         let ports = ram.ram_ports();
@@ -143,12 +160,12 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
             .filter(|&i| {
                 constants.get(&ram.inputs[i]) == Some(&false)
                     && match &ports {
-                        Some(ports) => device.ram_input_needs_low_driver(ports, i),
+                        Some(ports) => device.ram_input_needs_low_driver(ram, ports, i),
                         None => device.dsp_input_needs_low_driver(ram, i),
                     }
             })
             .collect();
-        let extra_low_inputs = device.dsp_low_driven_input_count(ram);
+        let extra_low_inputs = device.low_driven_input_count(ram);
         if inputs.is_empty() && extra_low_inputs == 0 {
             continue;
         }
@@ -175,7 +192,7 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
         }
         if extra_low_inputs > 0 {
             copy.parameters.insert(
-                crate::device::DSP_EXTRA_INPUTS_PARAM.to_string(),
+                crate::device::EXTRA_INPUTS_PARAM.to_string(),
                 copy.inputs.len().to_string(),
             );
             copy.inputs.extend(vec![net; extra_low_inputs]);
@@ -357,13 +374,13 @@ pub fn prepare_for_routing(
             for (index, &net) in cell.inputs.iter().enumerate() {
                 if let Some(&value) = constants.get(&net) {
                     tied.values.insert((cell.id, index), value);
-                } else if let Some(pin) = device.ram_input_pin(&ports, index) {
+                } else if let Some(pin) = device.ram_input_pin(cell, &ports, index) {
                     connect(&mut prepared.nets, net, cell.id, pin);
                 }
             }
             for (index, &net) in cell.outputs.iter().enumerate() {
                 prepared.nets[net.0 as usize].driver_pin =
-                    Some(device.ram_output_pin(&ports, index));
+                    Some(device.ram_output_pin(cell, &ports, index));
             }
             continue;
         }

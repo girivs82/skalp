@@ -487,3 +487,120 @@ fn mixed_bank_voltages_are_refused() {
     .to_string();
     assert!(error.contains("different bank voltages"), "{error}");
 }
+
+/// A copy of the device database (links to its files) whose base addresses
+/// add a large RAM region for each CertusPro-NX large RAM site: its own
+/// database has none yet.
+fn database_with_large_ram_regions(db: &std::path::Path) -> tempfile::TempDir {
+    let copy = tempfile::tempdir().unwrap();
+    let link = |from: &std::path::Path, to: &std::path::Path| {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(from, to).unwrap();
+        #[cfg(windows)]
+        if from.is_dir() {
+            std::os::windows::fs::symlink_dir(from, to).unwrap();
+        } else {
+            std::os::windows::fs::symlink_file(from, to).unwrap();
+        }
+    };
+    let entries = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    for entry in entries(db) {
+        let name = entry.file_name().unwrap();
+        if name != "LFCPNX" {
+            link(&entry, &copy.path().join(name));
+        }
+    }
+    let family = copy.path().join("LFCPNX");
+    let device = family.join("LFCPNX-100");
+    std::fs::create_dir_all(&device).unwrap();
+    for entry in entries(&db.join("LFCPNX")) {
+        let name = entry.file_name().unwrap();
+        if name != "LFCPNX-100" {
+            link(&entry, &family.join(name));
+        }
+    }
+    for entry in entries(&db.join("LFCPNX").join("LFCPNX-100")) {
+        let name = entry.file_name().unwrap();
+        if name != "baseaddr.json" {
+            link(&entry, &device.join(name));
+        }
+    }
+    let mut base: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(db.join("LFCPNX/LFCPNX-100/baseaddr.json")).unwrap(),
+    )
+    .unwrap();
+    let sites = [
+        "R21C158", "R41C158", "R57C158", "R1C90", "R1C105", "R1C110", "R1C125",
+    ];
+    for (slot, site) in sites.iter().enumerate() {
+        base["regions"][format!("LRAM_CORE_{site}")] = serde_json::json!({
+            "abits": 17,
+            "addr": 0x2E20_0000u32 + slot as u32 * 0x2_0000,
+        });
+    }
+    std::fs::write(device.join("baseaddr.json"), base.to_string()).unwrap();
+    copy
+}
+
+/// A 16K x 32 memory goes into a large RAM, which places, routes, and has
+/// its contents written to its site's region of the configuration bus.
+#[test]
+fn large_ram_builds_a_bitstream_with_its_contents() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_lram_preload_check.sk", "LramPreloadCheck");
+    let rams: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.ram_ports().is_some())
+        .collect();
+    assert_eq!(rams.len(), 1, "the 16K x 32 memory takes one large RAM");
+    assert_eq!(rams[0].cell_type, "PDPSC512K");
+
+    // The device's own data has no address for the contents yet
+    let refused = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    );
+    if let Err(e) = refused {
+        assert!(e.to_string().contains("LRAM_CORE_R"), "{e}");
+    }
+
+    let with_regions = database_with_large_ram_regions(&db);
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        with_regions.path(),
+    )
+    .unwrap();
+    assert!(result.routing.success);
+
+    let bus = skalp_place_route::device::nexus::prjoxide_pack::read_bus_config(
+        with_regions.path(),
+        &result.bitstream.data,
+    )
+    .expect("the bitstream parses");
+    let lram: Vec<_> = bus.iter().filter(|&&(a, _)| a >> 24 == 0x2E).collect();
+    assert!(!lram.is_empty(), "the contents are written");
+    let first = lram.iter().map(|&&(a, _)| a).min().unwrap();
+    assert_eq!(first & 0x1_FFFF, 0, "the contents start a region");
+    assert!(
+        (0x2E20_0000..0x2E2E_0000).contains(&first),
+        "the contents go to a site's region: {first:#x}"
+    );
+    assert!(
+        lram.iter().all(|&&(a, _)| a - first < 0x1_4000),
+        "one site's contents"
+    );
+    assert!(lram.iter().any(|&&(_, byte)| byte != 0));
+}

@@ -5,7 +5,7 @@
 //! CrossLink-NX's only) borrows CrossLink-NX's, whose Nexus fabric it shares;
 //! see [`NexusVariant::timing_tables`].
 
-use super::{dsp, ebr, NexusDevice, NexusVariant};
+use super::{dsp, ebr, lram, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::HashMap;
 use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR, WIDE_LUT_PIN_SEL};
@@ -86,6 +86,11 @@ pub struct TimingDb {
     ram_clk_to_q: i64,
     ram_setup: HashMap<String, i64>,
     ram_hold: HashMap<String, i64>,
+    /// A large RAM's clock-to-read-data delay
+    large_ram_clk_to_q: i64,
+    /// Setup and hold time of each large RAM pin, by bus name
+    large_ram_setup: HashMap<String, i64>,
+    large_ram_hold: HashMap<String, i64>,
     /// Hold time of each register pin
     hold: HashMap<String, i64>,
 }
@@ -213,6 +218,24 @@ impl TimingDb {
             .iter()
             .map(|s| (s.pin.clone(), s.max_hold))
             .collect();
+        let large_ram = cell("LRAM_CORE")?;
+        let large_ram_clk_to_q = extreme(
+            &mut large_ram
+                .iopaths
+                .iter()
+                .filter(|p| p.from_pin == "CLK" && (p.to_pin == "DOA" || p.to_pin == "DOB"))
+                .map(value),
+        );
+        let large_ram_setup = large_ram
+            .setupholds
+            .iter()
+            .map(|s| (s.pin.clone(), s.max_setup))
+            .collect();
+        let large_ram_hold = large_ram
+            .setupholds
+            .iter()
+            .map(|s| (s.pin.clone(), s.max_hold))
+            .collect();
 
         Ok(Self {
             pip_classes: classes
@@ -235,6 +258,9 @@ impl TimingDb {
             ram_clk_to_q,
             ram_setup,
             ram_hold,
+            large_ram_clk_to_q,
+            large_ram_setup,
+            large_ram_hold,
             hold,
         })
     }
@@ -296,7 +322,13 @@ impl NexusRetimeDelays {
             variant.prjoxide_device(),
         )
         .map_err(PlaceRouteError::BitstreamFailed)?;
-        let region = super::sites::design_region(&tiles, &clocks, &[], 1000, 0, 0);
+        let region = super::sites::design_region(
+            &tiles,
+            &clocks,
+            &[],
+            1000,
+            super::sites::HardBlockCounts::default(),
+        );
         let mut device = NexusDevice::from_prjoxide_region(
             variant,
             db_root,
@@ -444,6 +476,9 @@ impl TimingModel for NexusTiming<'_> {
         if Self::is_dist_ram(cell) {
             return None;
         }
+        if lram::is_large_ram(cell) {
+            return Some(self.db.large_ram_clk_to_q);
+        }
         if cell.ram_ports().is_some() {
             return Some(self.db.ram_clk_to_q);
         }
@@ -457,6 +492,34 @@ impl TimingModel for NexusTiming<'_> {
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
         let setup = |name: &str| self.db.setup.get(name).copied().unwrap_or(0);
         let hold = |name: &str| self.db.hold.get(name).copied().unwrap_or(0);
+        if let Some(ports) = cell.ram_ports().filter(|_| lram::is_large_ram(cell)) {
+            // The large RAM's table has one entry per bus
+            let bus = |pin: &str| {
+                pin.trim_end_matches(|c: char| c.is_ascii_digit())
+                    .to_string()
+            };
+            return (0..cell.inputs.len())
+                .filter_map(|input| {
+                    let name = self.device.large_ram_input_pin(cell, &ports, input)?;
+                    (name != "CLK").then(|| TimingEndpoint {
+                        input,
+                        pin: lram::router_pin(&name).unwrap_or(input),
+                        setup_ps: self
+                            .db
+                            .large_ram_setup
+                            .get(&bus(&name))
+                            .copied()
+                            .unwrap_or(0),
+                        hold_ps: self
+                            .db
+                            .large_ram_hold
+                            .get(&bus(&name))
+                            .copied()
+                            .unwrap_or(0),
+                    })
+                })
+                .collect();
+        }
         if let Some(ports) = cell.ram_ports() {
             return (0..cell.inputs.len())
                 .filter_map(|input| {
