@@ -853,8 +853,14 @@ pub fn place_and_route_nexus_real(
     // Matched delays of bundled-data async blocks, with routed delays at
     // both corners: the chain and the paths it covers scale differently
     timing.bundles = crate::timing::sta::summarize_bundles(&[
-        crate::timing::sta::check_bundles(&device, &timing_model, &design),
-        crate::timing::sta::check_bundles(&device, &fast_model, &design),
+        (
+            "slow",
+            crate::timing::sta::check_bundles(&device, &timing_model, &design),
+        ),
+        (
+            "fast",
+            crate::timing::sta::check_bundles(&device, &fast_model, &design),
+        ),
     ]);
     for b in &timing.bundles {
         log::info!(

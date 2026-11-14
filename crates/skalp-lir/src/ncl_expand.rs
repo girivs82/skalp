@@ -2693,10 +2693,17 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     // Step 3.5: If there are NclReg nodes, create input completion detection
     // The completion signal fires when all inputs have arrived (DATA phase)
     // and acts as the clock for internal NCL registers.
-    let has_ncl_regs = lir
-        .nodes
-        .iter()
-        .any(|n| matches!(n.op, LirOp::NclReg { .. }));
+    // The `on()` block's strobe, when lowering clocked its registers with it
+    let orig_go = lir
+        .get_signal(crate::mir_to_lir::NCL_GO_SIGNAL)
+        .filter(|s| s.driver.is_none())
+        .map(|s| s.id)
+        .filter(|go| lir.nodes.iter().any(|n| n.clock == Some(*go)));
+    let has_ncl_regs = orig_go.is_some()
+        || lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::NclReg { .. }));
     let input_completion_id = if has_ncl_regs && !dual_rail_map.is_empty() {
         let completion_id = new_lir.add_signal("__ncl_input_complete".to_string(), 1);
         let mut completion_inputs: Vec<LirSignalId> = Vec::new();
@@ -2758,6 +2765,18 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
                     orig_node.path.clone(),
                 );
             }
+        } else if let Some(clock) = orig_node.clock {
+            // A clocked node keeps its clock (and reset)
+            let clock = *signal_map.get(&clock).unwrap_or(&clock);
+            let reset = orig_node.reset.map(|r| *signal_map.get(&r).unwrap_or(&r));
+            new_lir.add_seq_node(
+                orig_node.op.clone(),
+                new_inputs,
+                new_output,
+                orig_node.path.clone(),
+                clock,
+                reset,
+            );
         } else {
             new_lir.add_node(
                 orig_node.op.clone(),
@@ -2766,6 +2785,17 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
                 orig_node.path.clone(),
             );
         }
+    }
+
+    // The `on()` block's strobe is the input completion here
+    if let (Some(go), Some(completion)) = (orig_go, input_completion_id) {
+        let go = *signal_map.get(&go).unwrap_or(&go);
+        new_lir.add_node(
+            LirOp::Buffer { width: 1 },
+            vec![completion],
+            go,
+            "ncl_go_from_completion".to_string(),
+        );
     }
 
     // Step 5: Encode outputs to dual-rail and add completion detection
@@ -2873,6 +2903,13 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
 /// Each `x & delay(x)` is a [`LirOp::NclMatchedDelay`], sized after mapping
 /// to cover the block's data paths.
 pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
+    expand_to_ncl_bridged_with(lir, false)
+}
+
+/// [`expand_to_ncl_bridged`] for a block whose coalesced async children have
+/// registers of their own (`children_have_regs`): those are clocked by this
+/// block's `go` strobe too, so the acknowledge must wait for them.
+pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExpandResult {
     use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
 
     let mut new_lir = lir.clone();
@@ -2896,8 +2933,12 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
         };
     };
 
-    // go = req & delay(req)
-    let go = new_lir.add_signal("__ncl_go".to_string(), 1);
+    // go = req & delay(req). Lowering made `__ncl_go` the clock of the
+    // `on()` block's registers and memories.
+    let go = match new_lir.get_signal(crate::mir_to_lir::NCL_GO_SIGNAL) {
+        Some(signal) if signal.driver.is_none() => signal.id,
+        _ => new_lir.add_signal(crate::mir_to_lir::NCL_GO_SIGNAL.to_string(), 1),
+    };
     new_lir.add_node(
         LirOp::NclMatchedDelay { width: 1 },
         vec![req],
@@ -2906,7 +2947,7 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
     );
 
     // `on()` registers update when `go` rises
-    let mut has_regs = false;
+    let mut has_regs = children_have_regs || new_lir.nodes.iter().any(|n| n.clock == Some(go));
     for node in new_lir.nodes.iter_mut() {
         if let LirOp::NclReg { width } = node.op {
             has_regs = true;
@@ -3003,6 +3044,52 @@ pub fn apply_boundary_ncl_to_hierarchy(
         false // No parent or parent not found → treat as sync parent
     };
 
+    // Async instances inside an async parent coalesce into the parent's
+    // block: their `on()` registers are clocked by the parent's `go` strobe.
+    // `go_users`: instances whose block needs that strobe, for their own
+    // registers or for those of coalesced descendants.
+    let coalesces = |path: &str, inst: &InstanceLirResult| -> bool {
+        inst.is_async
+            && parent_is_async(path)
+            && inst.ncl_boundary_mode != Some(NclBoundaryMode::ForceBoundary)
+    };
+    let mut go_users: std::collections::HashSet<String> = hier_lir
+        .instances
+        .iter()
+        .filter(|(_, inst)| {
+            inst.is_async
+                && inst
+                    .lir_result
+                    .lir
+                    .get_signal(crate::mir_to_lir::NCL_GO_SIGNAL)
+                    .is_some_and(|s| s.driver.is_none())
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    // Deepest first, so a user's parent is added before its own parent is checked
+    let mut by_depth: Vec<&String> = hier_lir.instances.keys().collect();
+    by_depth.sort_by_key(|p| std::cmp::Reverse(p.matches('.').count()));
+    for path in by_depth {
+        let inst = &hier_lir.instances[path];
+        if go_users.contains(path) && coalesces(path, inst) {
+            if let Some(parent) = child_to_parent.get(path.as_str()) {
+                go_users.insert((*parent).to_string());
+            }
+        }
+    }
+    // Whether a coalesced child of `path` uses the strobe
+    let children_use_go = |path: &str| -> bool {
+        hier_lir.hierarchy.get(path).is_some_and(|children| {
+            children.iter().any(|c| {
+                go_users.contains(c)
+                    && hier_lir
+                        .instances
+                        .get(c)
+                        .is_some_and(|inst| coalesces(c, inst))
+            })
+        })
+    };
+
     let mut new_instances = IndexMap::new();
 
     // Track which instances got NCL boundary applied, so we can update children's port_connections
@@ -3045,7 +3132,8 @@ pub fn apply_boundary_ncl_to_hierarchy(
             && !parent_is_async(path);
 
         if bridged {
-            let ncl_result = expand_to_ncl_bridged(&instance.lir_result.lir);
+            let ncl_result =
+                expand_to_ncl_bridged_with(&instance.lir_result.lir, children_use_go(path));
             new_instances.insert(
                 path.clone(),
                 InstanceLirResult {
@@ -3104,18 +3192,35 @@ pub fn apply_boundary_ncl_to_hierarchy(
                     path
                 );
             }
+            let mut lir = instance.lir_result.lir.clone();
+            let mut port_connections = instance.port_connections.clone();
+            if go_users.contains(path) && coalesces(path, instance) {
+                // Take the parent's strobe through a port named after it
+                let go_name = crate::mir_to_lir::NCL_GO_SIGNAL;
+                let go = match lir.get_signal(go_name) {
+                    Some(signal) => signal.id,
+                    None => lir.add_signal(go_name.to_string(), 1),
+                };
+                if !lir.inputs.contains(&go) {
+                    lir.inputs.push(go);
+                }
+                port_connections.insert(
+                    go_name.to_string(),
+                    PortConnectionInfo::Signal(go_name.to_string()),
+                );
+            }
             new_instances.insert(
                 path.clone(),
                 InstanceLirResult {
                     module_name: instance.module_name.clone(),
                     lir_result: MirToLirResult {
-                        lir: instance.lir_result.lir.clone(),
+                        lir,
                         stats: instance.lir_result.stats.clone(),
                         warnings: instance.lir_result.warnings.clone(),
                         compiled_ip_path: instance.lir_result.compiled_ip_path.clone(),
                         blackbox_info: instance.lir_result.blackbox_info.clone(),
                     },
-                    port_connections: instance.port_connections.clone(),
+                    port_connections,
                     children: instance.children.clone(),
                     is_async: instance.is_async,
                     ncl_boundary_mode: instance.ncl_boundary_mode,

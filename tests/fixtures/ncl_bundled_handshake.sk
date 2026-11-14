@@ -56,3 +56,110 @@ impl HsTop {
     total = total_r
     done = add.ncl_ack & acc.ncl_ack
 }
+
+// An async register file: one write per request, combinational read. Its
+// storage is a memory clocked by the request strobe like any register.
+async entity HsRf {
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[8]
+    in ra: bit[3]
+    out rd: bit[8]
+}
+
+impl HsRf {
+    signal mem: bit[8][8]
+    on() {
+        if we {
+            mem[wa] = wd
+        }
+    }
+    rd = mem[ra]
+}
+
+entity HsRfTop {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[8]
+    in ra: bit[3]
+    in go: bit
+    out rd: bit[8]
+    out done: bit
+}
+
+impl HsRfTop {
+    signal we_r: bit = 0
+    signal wa_r: bit[3] = 0
+    signal wd_r: bit[8] = 0
+    signal ra_r: bit[3] = 0
+    signal req: bit = 0
+    signal rd_r: bit[8] = 0
+
+    inst rf = HsRf { we: we_r, wa: wa_r, wd: wd_r, ra: ra_r, ncl_req: req }
+
+    on(clk.rise) {
+        we_r = we
+        wa_r = wa
+        wd_r = wd
+        ra_r = ra
+        req = go
+        rd_r = rf.rd
+    }
+    rd = rd_r
+    done = rf.ncl_ack
+}
+
+// Async blocks inside an async block coalesce into it: their registers step
+// with the parent's, once per parent request. Two accumulators and the
+// parent's own register, one handshake for all three.
+async entity HsCluster {
+    in a: bit[8]
+    in b: bit[8]
+    out s: bit[8]
+    out t: bit[8]
+    out n: bit[8]
+}
+
+impl HsCluster {
+    signal count: bit[8] = 0
+    on() {
+        count = count + 1
+    }
+    inst acc_a = HsAcc8 { a: a }
+    inst acc_b = HsAcc8 { a: sum_ab }
+    signal sum_ab: bit[8]
+    sum_ab = acc_a.s + b
+    s = acc_a.s
+    t = acc_b.s
+    n = count
+}
+
+entity HsClusterTop {
+    in clk: clock
+    in x: bit[8]
+    in y: bit[8]
+    in go: bit
+    out s: bit[8]
+    out t: bit[8]
+    out n: bit[8]
+    out done: bit
+}
+
+impl HsClusterTop {
+    signal xr: bit[8] = 0
+    signal yr: bit[8] = 0
+    signal req: bit = 0
+
+    inst c = HsCluster { a: xr, b: yr, ncl_req: req }
+
+    on(clk.rise) {
+        xr = x
+        yr = y
+        req = go
+    }
+    s = c.s
+    t = c.t
+    n = c.n
+    done = c.ncl_ack
+}
