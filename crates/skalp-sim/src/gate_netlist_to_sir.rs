@@ -25,7 +25,6 @@ use skalp_frontend::hir::DetectionMode;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
 use skalp_lir::tech_library::CellFunction;
-use std::collections::VecDeque;
 
 // ============================================================================
 // Converter
@@ -542,10 +541,8 @@ impl GateNetlistToSirConverter {
         }
     }
 
-    /// Compute topological order for operations using Kahn's algorithm
-    ///
-    /// Returns indices into the operations vector in evaluation order.
-    /// Operations with no dependencies come first.
+    /// Evaluation order of operations: indices into `ops`, each operation
+    /// after the ones it reads, with each feedback loop as one contiguous run
     fn compute_topological_order(ops: &[SirOperation]) -> Vec<usize> {
         let n = ops.len();
         if n == 0 {
@@ -565,8 +562,7 @@ impl GateNetlistToSirConverter {
             }
         }
 
-        // Build dependency counts: how many operations must run before this one
-        let mut in_degree = vec![0usize; n];
+        // dependents[i]: the operations reading an output of operation i
         let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
 
         for (idx, op) in ops.iter().enumerate() {
@@ -574,7 +570,6 @@ impl GateNetlistToSirConverter {
                 for in_sig in inputs {
                     if let Some(&producer_idx) = signal_producers.get(&in_sig.0) {
                         if producer_idx != idx {
-                            in_degree[idx] += 1;
                             dependents[producer_idx].push(idx);
                         }
                     }
@@ -582,52 +577,16 @@ impl GateNetlistToSirConverter {
             }
         }
 
-        // Kahn's algorithm for topological sort
+        // Strongly connected components in dependency order: acyclic logic
+        // in topological order, and each feedback loop (a latch, a
+        // mutual-exclusion element) as one contiguous run, which a
+        // simulator iterates until it settles
+        let components = crate::gate_simulator::strongly_connected(&dependents);
         let mut result = Vec::with_capacity(n);
-        let mut queue: VecDeque<usize> = VecDeque::new();
-
-        // Start with operations that have no dependencies
-        for (idx, &deg) in in_degree.iter().enumerate() {
-            if deg == 0 {
-                queue.push_back(idx);
-            }
+        for mut component in components.into_iter().rev() {
+            component.sort_unstable();
+            result.extend(component);
         }
-
-        while let Some(idx) = queue.pop_front() {
-            result.push(idx);
-
-            // Reduce in-degree of dependent operations
-            for &dep_idx in &dependents[idx] {
-                in_degree[dep_idx] -= 1;
-                if in_degree[dep_idx] == 0 {
-                    queue.push_back(dep_idx);
-                }
-            }
-        }
-
-        // If we didn't process all operations, there's a cycle
-        if result.len() != n {
-            eprintln!("[TOPO SORT WARNING] Cycle detected! Only sorted {}/{} operations. Falling back to original order.", result.len(), n);
-            // Debug: show which operations have remaining in-degree
-            for (idx, &deg) in in_degree.iter().enumerate() {
-                if deg > 0 {
-                    if let SirOperation::Primitive {
-                        ptype,
-                        inputs,
-                        outputs,
-                        path,
-                        ..
-                    } = &ops[idx]
-                    {
-                        eprintln!("[TOPO SORT]   stuck op[{}]: {:?} path={} in_degree={} inputs={:?} outputs={:?}",
-                            idx, ptype, path, deg, inputs, outputs);
-                    }
-                }
-            }
-            // Fall back to original order (shouldn't happen for well-formed combinational logic)
-            return (0..n).collect();
-        }
-
         result
     }
 
@@ -643,6 +602,8 @@ impl GateNetlistToSirConverter {
         if !comb_ops.is_empty() {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
+            let mut seen_inputs = std::collections::HashSet::new();
+            let mut seen_outputs = std::collections::HashSet::new();
 
             // Collect all inputs and outputs from operations
             for op in &comb_ops {
@@ -653,12 +614,12 @@ impl GateNetlistToSirConverter {
                 } = op
                 {
                     for &input in op_inputs {
-                        if !inputs.contains(&input) && !outputs.contains(&input) {
+                        if !seen_outputs.contains(&input) && seen_inputs.insert(input) {
                             inputs.push(input);
                         }
                     }
                     for &output in op_outputs {
-                        if !outputs.contains(&output) {
+                        if seen_outputs.insert(output) {
                             outputs.push(output);
                         }
                     }
@@ -666,7 +627,7 @@ impl GateNetlistToSirConverter {
             }
 
             // Remove internal signals from inputs (signals driven by other ops)
-            inputs.retain(|sig| !outputs.contains(sig));
+            inputs.retain(|sig| !seen_outputs.contains(sig));
 
             // Compute topological order for correct evaluation
             let eval_order = Self::compute_topological_order(&comb_ops);

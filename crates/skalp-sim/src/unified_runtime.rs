@@ -244,7 +244,7 @@ enum SimulatorBackend {
     #[cfg(target_os = "macos")]
     GateLevelGpu(crate::gpu_gate_runtime::GpuGateRuntime),
     /// NCL gate-level CPU simulation (asynchronous)
-    NclCpu(NclSimulator),
+    NclCpu(Box<NclSimulator>),
     /// NCL gate-level GPU simulation (macOS only, asynchronous)
     #[cfg(target_os = "macos")]
     NclGpu(crate::gpu_ncl_runtime::GpuNclRuntime),
@@ -557,7 +557,7 @@ impl UnifiedSimulator {
             debug: self.config.ncl_debug,
             track_stages: true,
         };
-        self.backend = SimulatorBackend::NclCpu(NclSimulator::new(netlist, ncl_config));
+        self.backend = SimulatorBackend::NclCpu(Box::new(NclSimulator::new(netlist, ncl_config)));
         Ok(())
     }
 
