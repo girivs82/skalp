@@ -56,6 +56,10 @@ pub fn apply_ncl_bridges(
         return errors;
     }
 
+    for module in mir.modules.iter_mut().filter(|m| m.is_async) {
+        share_parent_request(module, &async_modules);
+    }
+
     for module in mir.modules.iter_mut().filter(|m| !m.is_async) {
         let check = reachable.is_empty() || reachable.contains(&module.name);
         if let Err(e) = bridge_module(module, &async_modules) {
@@ -65,6 +69,33 @@ pub fn apply_ncl_bridges(
         }
     }
     errors
+}
+
+/// An async instance inside an async module is part of its parent's block
+/// (it coalesces): its `on()` registers step with the parent's, once per
+/// parent request. Connect its unconnected `ncl_req` to the parent's, so the
+/// behavioural model steps it on the same edge and synthesis clocks it by the
+/// parent's `go` strobe (see `skalp_lir::ncl_expand`).
+fn share_parent_request(module: &mut Module, async_modules: &HashMap<ModuleId, String>) {
+    let Some(req) = module
+        .ports
+        .iter()
+        .find(|p| p.name == NCL_REQ_PORT && p.direction == PortDirection::Input)
+        .map(|p| p.id)
+    else {
+        return;
+    };
+    for inst in module
+        .instances
+        .iter_mut()
+        .filter(|i| async_modules.contains_key(&i.module))
+    {
+        inst.connections
+            .entry(NCL_REQ_PORT.to_string())
+            .or_insert_with(|| {
+                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(req)))
+            });
+    }
 }
 
 /// Drive `ncl_ack` from `ncl_req` in an async module that leaves it undriven

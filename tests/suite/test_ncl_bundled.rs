@@ -129,3 +129,51 @@ async fn bundled_register_file_gate_level() {
         .expect("build gate-level testbench");
     run_rf(tb).await;
 }
+
+/// Async blocks inside an async block step with it: one handshake updates the
+/// parent's register and both children's accumulators together, from the
+/// values before the step.
+async fn run_cluster(mut tb: Testbench) {
+    tb.set("x", 0u8).set("y", 0u8).set("go", 0u8);
+    tb.clock(4).await;
+    let (mut a, mut b, mut n) = (0u8, 0u8, 0u8);
+    for (x, y) in [(3u8, 4u8), (200, 100), (17, 0), (255, 1), (90, 90), (1, 2)] {
+        tb.set("x", x).set("y", y).set("go", 1u8);
+        let mut cycles = 0;
+        while tb.get_u32("done").await == 0 {
+            tb.clock(1).await;
+            cycles += 1;
+            assert!(cycles < PHASE_LIMIT, "no acknowledge for x={x} y={y}");
+        }
+        let (a_old, b_old) = (a, b);
+        a = a_old.wrapping_add(x);
+        b = b_old.wrapping_add(a_old.wrapping_add(y));
+        n = n.wrapping_add(1);
+        assert_eq!(tb.get_u32("s").await, a as u32, "child A after x={x}");
+        assert_eq!(tb.get_u32("t").await, b as u32, "child B after y={y}");
+        assert_eq!(tb.get_u32("n").await, n as u32, "parent count");
+        tb.set("go", 0u8);
+        cycles = 0;
+        while tb.get_u32("done").await != 0 {
+            tb.clock(1).await;
+            cycles += 1;
+            assert!(cycles < PHASE_LIMIT, "acknowledge never fell");
+        }
+    }
+}
+
+#[tokio::test]
+async fn bundled_nested_async_behavioural() {
+    let tb = Testbench::behavioral_with_top(FIXTURE, "HsClusterTop")
+        .await
+        .expect("build behavioural testbench");
+    run_cluster(tb).await;
+}
+
+#[tokio::test]
+async fn bundled_nested_async_gate_level() {
+    let tb = Testbench::gate_level_with_top(FIXTURE, "HsClusterTop")
+        .await
+        .expect("build gate-level testbench");
+    run_cluster(tb).await;
+}
