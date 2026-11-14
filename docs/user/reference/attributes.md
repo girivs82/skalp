@@ -23,6 +23,7 @@ This document provides a comprehensive reference for all attributes available in
   - [#[vendor_ip]](#vendor_ip)
 - [Synthesis Hints](#synthesis-hints)
   - [#[pipeline]](#pipeline)
+  - [#[retime]](#retime)
   - [#[latency]](#latency)
   - [#[unroll]](#unroll)
   - [#[parallel]](#parallel)
@@ -827,12 +828,15 @@ What happens:
    is delayed too, starting asserted, so the wrapper behaves exactly like the
    original run N − L cycles later. Behavioural simulation, SystemVerilog and
    gate-level netlists all see the same latency.
-2. **In synthesis**, forward retiming moves those registers into the body's
-   logic to shorten its longest register-to-register path. Only plain
-   registers (no reset or enable) move, a carry chain moves as one block, and
-   each register's initial value is recomputed through the logic it crosses,
-   so the result matches simulation from the first cycle. Nexus place and
-   route retimes again with the device's own delays.
+2. **In synthesis**, retiming moves those registers into the body's logic
+   to shorten its longest register-to-register path. Only plain registers
+   (no reset or enable) move, a carry chain moves as one block, and each
+   register's initial value is carried through the logic it crosses (a
+   backward move is only made when some inputs give the values it needs),
+   so the result matches simulation from the first cycle. Registers can
+   also move back out of the entity into logic feeding it, when that logic
+   is retimable too (see [`#[retime]`](#retime)). Nexus place and route
+   retimes again with the device's own delays.
 
 Rules:
 
@@ -840,8 +844,9 @@ Rules:
   body's latency is an error.
 - The entity needs exactly one clock, and no `inout` ports.
 - Retiming never adds registers beyond the N − L the wrapper added; it only
-  moves them. To find which entity a too-long path runs through, read the
-  "by instance" breakdown under the critical path in the `skalp pnr` report.
+  moves them, and every loop keeps its register count. To find which entity
+  a too-long path runs through, read the "by instance" breakdown under the
+  critical path in the `skalp pnr` report.
 
 #### Letting synthesis choose: `#[pipeline]` and `max_stages`
 
@@ -869,6 +874,36 @@ it says so; simulate again before trusting earlier results. Use
 `#[latency(N)]` on instances whose surrounding code depends on the
 latency. Choosing a latency needs device delays, which only Nexus devices
 have so far.
+
+The choice is also recorded in `<file>.pipeline.lock` beside the file that
+defines the entity, so the entity built as its own top, or used in another
+design, starts from the same latency. The top's lock file wins where both
+name the entity.
+
+Only paths the entity's stages can shorten decide its latency. A too-long
+path that starts or ends outside the entity's retimable logic (say, from
+an arbiter in front of it into a register behind it) is printed as a
+warning naming the instances it runs through. If no latency up to the
+limit meets the clock, the error names the path, says whether it enters
+from outside, and suggests `#[retime]` or `#[pipeline]` for the entities it
+runs through.
+
+### #[retime]
+
+`#[retime]` on an entity lets registers move through its logic without
+changing its latency:
+
+```skalp
+#[retime]
+entity Arbiter { ... }
+```
+
+Its own registers are retimed like a `#[pipeline]` entity's, and registers
+of a `#[pipeline]` entity it feeds can move back into it. That is how a
+stage added to a shared unit reaches the arbiter and operand select in
+front of it. Behaviour is unchanged cycle for cycle: every path from an
+input to an output, and every loop (a request/grant handshake, a state
+machine), keeps its register count.
 
 ### #[latency]
 
@@ -936,6 +971,7 @@ impl ParallelProcessor {
 | `#[intel_ip]` | entity | Intel IP wrapper |
 | `#[vendor_ip]` | entity | Generic vendor IP |
 | `#[pipeline]` | entity | Total latency in cycles (`stages = N`, or chosen by synthesis and locked); the compiler adds and retimes the registers |
+| `#[retime]` | entity | Registers may move through its logic; latency unchanged |
 | `#[latency]` | instance | Checked latency the parent relies on |
 | `#[unroll]` | for loop | Loop unrolling |
 | `#[parallel]` | impl | Parallel execution |

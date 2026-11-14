@@ -63,6 +63,10 @@ pub fn insert_pipeline_stages(mir: &mut Mir) -> Result<Vec<(String, u32, u32)>, 
     for index in candidates {
         let module = &mir.modules[index];
         let config = module.pipeline_config.clone().expect("filtered on Some");
+        // #[retime] adds no stages; the module stays a retiming region
+        if config.retime_only {
+            continue;
+        }
         // A bare #[pipeline] with no latency recorded yet keeps its own
         if config.auto && config.stages == 0 {
             continue;
