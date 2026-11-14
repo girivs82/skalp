@@ -26,14 +26,17 @@
 //! place-and-route crate supplies its own [`BundleDelays`]).
 //! [`size_matched_delays`] lengthens each chain until its checks pass.
 //!
-//! A self-timed block that arbitrates between streams (`match arbitrate`)
-//! has a mutual-exclusion element in front of its step request. When two
-//! requests arrive at nearly the same time the element can take a while to
-//! decide (metastability); the chance that it is still undecided after a
-//! wait `t` falls as `exp(-t / tau)`. The step strobe `go` only rises once
-//! the step request has stayed high for the whole matched delay, so that
-//! delay is the resolution wait. The "arbiter" check makes it at least the
-//! wait a target mean time between failures needs ([`ArbiterTiming`]).
+//! A self-timed block decides to step in a latch set by two inputs that
+//! change independently of each other, its run request and its `ready`; a
+//! block that arbitrates between streams (`match arbitrate`) also has a
+//! mutual-exclusion element in front of `ready`. When two inputs change at
+//! nearly the same time such an element can take a while to decide
+//! (metastability); the chance that it is still undecided after a wait `t`
+//! falls as `exp(-t / tau)`. The step strobe `go` only rises once the step
+//! request has stayed high for the whole matched delay, so that delay is
+//! the resolution wait. The "arbiter" check (or "step decision", for a
+//! block without arbiters) makes it at least the wait a target mean time
+//! between failures needs ([`ArbiterTiming`]).
 //!
 //! All times are measured from the block's inputs, which the clocked parent
 //! holds stable from before it raises the request; the request itself is
@@ -148,13 +151,14 @@ pub struct BundleCheck {
     /// Path of the matched delay's AND cell
     pub delay_path: String,
     /// What the control times: "registers", "acknowledge", "next state",
-    /// "channel" or "arbiter"
+    /// "channel", "arbiter" or "step decision"
     pub times: &'static str,
-    /// Latest data arrival plus setup, in picoseconds. For an "arbiter"
-    /// check, the resolution wait its arbiters need.
+    /// Latest data arrival plus setup, in picoseconds. For an "arbiter" or
+    /// "step decision" check, the resolution wait the decision needs.
     pub data_ps: i64,
-    /// Arrival of the control signal, in picoseconds. For an "arbiter"
-    /// check, how long the step request must stay high before `go`.
+    /// Arrival of the control signal, in picoseconds. For an "arbiter" or
+    /// "step decision" check, how long the step request stays high before
+    /// `go`.
     pub control_ps: i64,
     /// Buffers in the chain
     pub chain_len: usize,
@@ -555,9 +559,13 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     checks
 }
 
-/// Arbiters of self-timed blocks: the strobe `go` waits a matched delay
-/// after the step request, which comes through the block's arbiters; that
-/// wait must cover their resolution time ([`ArbiterTiming`])
+/// Decisions of self-timed blocks: the strobe `go` waits a matched delay
+/// after the step request. The step request is a latch set by `ncl_req`
+/// and `ready`, which change independently of each other (and `ready`
+/// comes through the block's arbiters, if it has any), so it can be
+/// undecided for a while, like a mutual-exclusion element. The wait must
+/// cover that resolution time ([`ArbiterTiming`]); a block with arbiters
+/// reports it as "arbiter", any other as "step decision".
 fn check_arbiters(
     netlist: &GateNetlist,
     delays: &dyn BundleDelays,
@@ -576,7 +584,7 @@ fn check_arbiters(
             .cells
             .iter()
             .any(|c| c.source_op.as_deref() == Some(ARBITER_OP) && c.path.starts_with(&md.prefix));
-        if !from_step || !arbitrates {
+        if !from_step {
             continue;
         }
         // Separate walks: the step loop (go feeds back into the step
@@ -588,7 +596,7 @@ fn check_arbiters(
         };
         let wait = go - request;
         tracing::debug!(
-            "NCL arbiter {}: resolution wait {} ps (needs {} ps), MTBF {:.3e} years",
+            "NCL step decision {}: resolution wait {} ps (needs {} ps), MTBF {:.3e} years",
             md.prefix.trim_end_matches('.'),
             wait,
             required,
@@ -597,7 +605,11 @@ fn check_arbiters(
         checks.push(BundleCheck {
             prefix: md.prefix.clone(),
             delay_path: netlist.cells[md.and_cell.0 as usize].path.clone(),
-            times: "arbiter",
+            times: if arbitrates {
+                "arbiter"
+            } else {
+                "step decision"
+            },
             data_ps: required,
             control_ps: wait,
             chain_len: md.chain.len(),
@@ -710,7 +722,7 @@ fn step_control_ready<'a>(netlist: &'a GateNetlist, prefix: &str) -> Option<(&'a
         .find(|c| {
             c.source_op.as_deref() == Some(STEP_CONTROL_OP)
                 && c.path.starts_with(prefix)
-                && c.path.ends_with(".st_or")
+                && c.path.ends_with(".st_start")
         })
         .and_then(|c| c.inputs.first().map(|&n| (c, n)))
 }
@@ -1222,6 +1234,12 @@ mod tests {
     /// A self-timed block whose step request comes through an arbiter
     /// gate: `go` waits one buffer (100 ps) after it
     fn arbitrating_block() -> GateNetlist {
+        self_timed_block(true)
+    }
+
+    /// A self-timed block, with or without an arbiter gate before its step
+    /// request: `go` waits one buffer (100 ps) after the step request
+    fn self_timed_block(arbiter: bool) -> GateNetlist {
         let mut netlist = GateNetlist::new("top".into(), "test".into());
         let req = netlist.add_input("req".into());
         let ack = netlist.add_output("ack".into());
@@ -1231,11 +1249,14 @@ mod tests {
             "LUT4".into(),
             "test".into(),
             0.0,
-            "top.u.ncl_bundle.arb_nand0".into(),
+            "top.u.ncl_bundle.ready".into(),
             vec![req],
             vec![grant],
         );
-        arb.source_op = Some(ARBITER_OP.to_string());
+        if arbiter {
+            arb.path = "top.u.ncl_bundle.arb_nand0".into();
+            arb.source_op = Some(ARBITER_OP.to_string());
+        }
         netlist.add_cell(arb);
         let step = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_step_req".into()));
         // `go` feeds back into the step request, as in the real step control
@@ -1294,5 +1315,32 @@ mod tests {
         // a block without an arbiter gets no such check
         let plain = check_matched_delays(&block_with_feedback(), &UnitDelays);
         assert!(plain.iter().all(|c| c.times != "arbiter"));
+    }
+
+    /// A self-timed block's step request is a latch set by two independent
+    /// inputs (`ncl_req` and `ready`), so `go` must wait out its decision
+    /// even with no arbiter; a block stepped by its parent has no such latch
+    #[test]
+    fn step_decision_wait_is_checked_and_sized() {
+        let mut netlist = self_timed_block(false);
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        assert!(checks.iter().all(|c| c.times != "arbiter"));
+        let decision = checks
+            .iter()
+            .find(|c| c.times == "step decision")
+            .expect("a step decision check");
+        assert_eq!(decision.control_ps, 200);
+        assert_eq!(decision.data_ps, ArbiterTiming::default().resolution_ps());
+        assert!(decision.slack_ps() < 0);
+        let report = size_matched_delays(&mut netlist, &UnitDelays, 0);
+        let decision = report
+            .checks
+            .iter()
+            .find(|c| c.times == "step decision")
+            .expect("a step decision check after sizing");
+        assert!(decision.slack_ps() >= 0, "{decision:?}");
+
+        let parent_stepped = check_matched_delays(&block_with_feedback(), &UnitDelays);
+        assert!(parent_stepped.iter().all(|c| c.times != "step decision"));
     }
 }

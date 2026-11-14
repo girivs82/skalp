@@ -3240,8 +3240,9 @@ fn merge_physical_nodes_into_netlist(
             }
 
             LirOp::NclStepControl => {
-                // out = req & !done & (ready | go), as kept gates: each input
-                // is read once, so no single input change can glitch it
+                // out = !done & ((req & ready) | out), a latch of kept gates
+                // (see `LirOp::NclStepControl`): each input is read once, so
+                // no single input change can glitch it
                 let net = |k: usize| {
                     input_nets
                         .get(k)
@@ -3249,19 +3250,19 @@ fn merge_physical_nodes_into_netlist(
                         .copied()
                         .unwrap_or(GateNetId(0))
                 };
-                let (req, done, ready, go) = (net(0), net(1), net(2), net(3));
+                let (req, done, ready) = (net(0), net(1), net(2));
                 let out = output_nets.first().copied().unwrap_or(GateNetId(0));
                 let inv_cell = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
                 let not_done =
                     netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_not_done", path)));
+                let start =
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_start", path)));
                 let hold = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_hold", path)));
-                let enabled =
-                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_enabled", path)));
                 for (cell_info, name, inputs, output) in [
                     (&inv_cell, "st_inv", vec![done], not_done),
-                    (&or2_cell, "st_or", vec![ready, go], hold),
-                    (&and2_cell, "st_and0", vec![not_done, hold], enabled),
-                    (&and2_cell, "st_and", vec![req, enabled], out),
+                    (&and2_cell, "st_start", vec![ready, req], start),
+                    (&or2_cell, "st_or", vec![start, out], hold),
+                    (&and2_cell, "st_and", vec![not_done, hold], out),
                 ] {
                     let mut cell = Cell::new_comb(
                         CellId(0),
@@ -3335,15 +3336,16 @@ fn merge_physical_nodes_into_netlist(
                     }
                     None => requests,
                 };
-                // The arm granted last waits a little before it competes again
-                // (see `LirOp::NclArbiter`): `r' = r & (!last | defer(r))`
-                let last = input_nets.get(2).filter(|v| v.len() == requests.len());
+                // Round robin (see `LirOp::NclArbiter`): each request reaches
+                // the mutual exclusion later the closer it comes after the arm
+                // granted last
+                let last = input_nets
+                    .get(2)
+                    .filter(|v| v.len() == requests.len() && v.len() > 1);
                 let requests: Vec<GateNetId> = match last {
-                    Some(last) => requests
-                        .iter()
-                        .zip(last)
-                        .map(|(&r, &last)| {
-                            arbiter_defer(netlist, &cells, path, r, last, &mut counter)
+                    Some(last) => (0..requests.len())
+                        .map(|k| {
+                            arbiter_defer(netlist, &cells, path, &requests, k, last, &mut counter)
                         })
                         .collect(),
                     None => requests,
@@ -4736,81 +4738,110 @@ fn arbiter_mutex(
     (g0, g1)
 }
 
-/// Stages of the delay that holds back the request of the arm granted last
+/// Gates in one unit of the delay that holds back a request (see
+/// [`arbiter_defer`])
 const ARBITER_DEFER_STAGES: usize = 4;
 
-/// `r & (!last | defer(r))`: request `r` as the mutual exclusion sees it.
-/// `defer(r)` rises a few gate delays after `r` (a chain of ANDs with `r`,
-/// so it falls at once with it); its last gate is named `defer`, which the
-/// gate-level simulator models as one clock of delay. `last` is a register
-/// that only changes on the block's strobe, while every request is held,
-/// so the result only ever rises late, never glitches.
+/// Request `k` as the mutual exclusion sees it, for round-robin service.
+/// With `l` the arm granted last (the one-hot register `last`), request `k`
+/// is held back `(k - l - 1) mod n` units: the arm right after `l` not at
+/// all, `l` itself longest. When the requests rise together (every step
+/// releases them), the next arm in turn arrives first and wins; a request
+/// that arrives alone is merely a few gate delays late.
+///
+/// Unit `j` of the delay is `t_j = t_{j-1} & chain(t_{j-1})`, with `t_0`
+/// the request and each chain stage an AND with the request, so every tap
+/// falls at once with the request. The last gate of each unit is named
+/// `defer`; the gate-level simulator models it as one clock of delay of its
+/// first input. The result, `r & OR_l(last_l & t_d(k, l))`, only changes
+/// while `last` is stable (it changes on the block's strobe, while every
+/// request is held), so it rises late but never glitches.
 fn arbiter_defer(
     netlist: &mut GateNetlist,
     cells: &ArbiterCells,
     path: &str,
-    r: GateNetId,
-    last: GateNetId,
+    requests: &[GateNetId],
+    k: usize,
+    last: &[GateNetId],
     counter: &mut usize,
 ) -> GateNetId {
-    let mut prev = arbiter_net(netlist, path, "dly", counter);
-    arbiter_gate(
-        netlist,
-        &cells.buf,
-        &cells.library,
-        path,
-        "dly",
-        counter,
-        vec![r],
-        prev,
-    );
-    for _ in 1..ARBITER_DEFER_STAGES {
-        let next = arbiter_net(netlist, path, "dly", counter);
+    let n = requests.len();
+    let r = requests[k];
+    // taps[j]: the request after j units
+    let mut taps = vec![r];
+    for _ in 1..n {
+        let prev_tap = *taps.last().unwrap();
+        let mut prev = arbiter_net(netlist, path, "dly", counter);
+        arbiter_gate(
+            netlist,
+            &cells.buf,
+            &cells.library,
+            path,
+            "dly",
+            counter,
+            vec![prev_tap],
+            prev,
+        );
+        for _ in 1..ARBITER_DEFER_STAGES {
+            let next = arbiter_net(netlist, path, "dly", counter);
+            arbiter_gate(
+                netlist,
+                &cells.and2,
+                &cells.library,
+                path,
+                "dly",
+                counter,
+                vec![r, prev],
+                next,
+            );
+            prev = next;
+        }
+        let tap = arbiter_net(netlist, path, "defer", counter);
         arbiter_gate(
             netlist,
             &cells.and2,
             &cells.library,
             path,
-            "dly",
+            "defer",
             counter,
-            vec![r, prev],
-            next,
+            vec![prev_tap, prev],
+            tap,
         );
-        prev = next;
+        taps.push(tap);
     }
-    let deferred = arbiter_net(netlist, path, "defer", counter);
-    arbiter_gate(
-        netlist,
-        &cells.and2,
-        &cells.library,
-        path,
-        "defer",
-        counter,
-        vec![r, prev],
-        deferred,
-    );
-    let not_last = arbiter_net(netlist, path, "nl", counter);
-    arbiter_gate(
-        netlist,
-        &cells.inv,
-        &cells.library,
-        path,
-        "inv",
-        counter,
-        vec![last],
-        not_last,
-    );
-    let pass = arbiter_net(netlist, path, "pass", counter);
-    arbiter_gate(
-        netlist,
-        &cells.or2,
-        &cells.library,
-        path,
-        "or",
-        counter,
-        vec![not_last, deferred],
-        pass,
-    );
+    // OR over l of (last_l & taps[(k - l - 1) mod n])
+    let mut any: Option<GateNetId> = None;
+    for (l, &last_l) in last.iter().enumerate() {
+        let d = (k + n - l - 1) % n;
+        let term = arbiter_net(netlist, path, "sel", counter);
+        arbiter_gate(
+            netlist,
+            &cells.and2,
+            &cells.library,
+            path,
+            "and",
+            counter,
+            vec![last_l, taps[d]],
+            term,
+        );
+        any = Some(match any {
+            None => term,
+            Some(acc) => {
+                let out = arbiter_net(netlist, path, "sel", counter);
+                arbiter_gate(
+                    netlist,
+                    &cells.or2,
+                    &cells.library,
+                    path,
+                    "or",
+                    counter,
+                    vec![acc, term],
+                    out,
+                );
+                out
+            }
+        });
+    }
     let out = arbiter_net(netlist, path, "r", counter);
     arbiter_gate(
         netlist,
@@ -4819,7 +4850,7 @@ fn arbiter_defer(
         path,
         "and",
         counter,
-        vec![r, pass],
+        vec![r, any.unwrap_or(r)],
         out,
     );
     out

@@ -3035,18 +3035,23 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
 
     // Self-timed step loop:
     //
-    //   step_req = ncl_req & !done & (ready | go)
-    //   ncl_ack  = ncl_req | go | done
+    //   step_req = !done & ((ncl_req & ready) | step_req)   (a latch)
+    //   ncl_ack  = ncl_req | step_req | go | done
     //
-    // While the block waits (go and done low), `ready` can only rise: the
-    // channel phases it reads change only at the other end, and what the
-    // next step uses comes from registers that do not change until `go`.
-    // Once `go` is up the request holds by itself, whatever the new state
-    // does to `ready`; `done` ends the step and the request falls. The next
-    // step starts when `done` has fallen and `ready` is up again (the
-    // next-state check times `ready` against `done`). The acknowledge stays
-    // up while the block runs or is still finishing a step, so a parent that
-    // drops `ncl_req` sees it fall once the block has stopped.
+    // While the block waits (step_req, go and done low), `ready` can only
+    // rise: the channel phases it reads change only at the other end, and
+    // what the next step uses comes from registers that do not change until
+    // `go`. Once set, the step request holds itself until `done`, whatever
+    // the new state does to `ready` and whenever the parent drops `ncl_req`:
+    // a step that has begun always runs its full length, so `go` is never
+    // a runt. `ncl_req` falling just as `ready` rises can leave the latch
+    // undecided for a while; the matched delay to `go` covers that like an
+    // arbiter's wait (see `ncl_bundle`). `done` ends the step and the
+    // request falls. The next step starts when `done` has fallen and
+    // `ready` is up again (the next-state check times `ready` against
+    // `done`). The acknowledge stays up from the moment a step is decided
+    // until it has finished, so a parent that drops `ncl_req` sees it fall
+    // once the block has stopped.
     let done = if let Some(ready) = ready {
         // Arbiter requests drop while `done` is up: the step has latched
         // what its grant chose, and the next step arbitrates again. A tree
@@ -3059,14 +3064,21 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         }
         new_lir.add_node(
             LirOp::NclStepControl,
-            vec![req, done, ready, go],
+            vec![req, done, ready],
             step_req,
             "ncl_bundle.step".to_string(),
+        );
+        let started = new_lir.add_signal("__ncl_started".to_string(), 1);
+        new_lir.add_node(
+            LirOp::Or { width: 1 },
+            vec![step_req, go],
+            started,
+            "ncl_bundle.started".to_string(),
         );
         let stepping = new_lir.add_signal("__ncl_stepping".to_string(), 1);
         new_lir.add_node(
             LirOp::Or { width: 1 },
-            vec![go, done],
+            vec![started, done],
             stepping,
             "ncl_bundle.stepping".to_string(),
         );

@@ -1054,17 +1054,21 @@ pub enum LirOp {
     /// checked after routing, against the data paths the output times.
     NclMatchedDelay { width: u32 },
     /// Step request of a self-timed bundled-data async block (stream ports):
-    /// `out = req & !done & (ready | go)`, inputs `[req, done, ready, go]`.
-    /// Physical: kept gates, each input read once, so a change of one input
-    /// at a time (as the step handshake makes them) cannot glitch the output.
+    /// a latch, `out = !done & ((req & ready) | out)`, inputs
+    /// `[req, done, ready]`. Once set, only `done` clears it, so dropping
+    /// `req` never cuts a step short (a cut step would clock the block's
+    /// registers with a runt pulse). Where `req` falls just as `ready` rises
+    /// the latch may take a while to decide; the matched delay to `go`
+    /// covers that (see `skalp_lir::ncl_bundle`). Physical: kept gates, each
+    /// input read once.
     NclStepControl,
     /// Arbiter of a self-timed block: grants (one-hot, or none) at most one
     /// of its requests, and keeps a grant while that request stays up.
     /// Inputs: the requests, then a release bit (while it is high every
     /// request counts as low), then optionally the one-hot arm granted last
-    /// (a register): that arm's request reaches the mutual exclusion a short
-    /// delay late, so a request that was already waiting wins the next
-    /// decision and no arm can be passed over for ever. Output: the grants,
+    /// (a register): each request then reaches the mutual exclusion later
+    /// the closer it comes after that arm, so requests that are all waiting
+    /// are served in turn (round robin). Output: the grants,
     /// same width as the requests. Physical: a tree of mutual-exclusion
     /// elements (cross-coupled gates), kept.
     NclArbiter { width: u32 },
@@ -1217,7 +1221,7 @@ impl LirOp {
             // NCL dual-rail operations
             LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
             LirOp::NclMatchedDelay { .. } => 1,
-            LirOp::NclStepControl => 4,
+            LirOp::NclStepControl => 3,
             LirOp::NclArbiter { .. } => 3,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
