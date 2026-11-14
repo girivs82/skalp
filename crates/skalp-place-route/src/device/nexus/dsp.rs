@@ -24,7 +24,7 @@ const DSP_PIN_ASIGNED: usize = DSP_PIN_BASE + 2 * OPERAND_BITS;
 /// Router pin number of the B sign input.
 const DSP_PIN_BSIGNED: usize = DSP_PIN_ASIGNED + 1;
 
-use crate::device::DSP_EXTRA_INPUTS_PARAM as EXTRA_INPUTS_PARAM;
+use crate::device::EXTRA_INPUTS_PARAM;
 
 /// Inputs of the hard blocks the design does not use. Left alone they would
 /// float high, which makes the low halves signed and disturbs the product.

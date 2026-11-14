@@ -984,7 +984,7 @@ impl BitstreamGenerator {
                 | crate::device::BelType::DffSr
                 | crate::device::BelType::DffSrE => ffs += 1,
                 crate::device::BelType::IoCell => ios += 1,
-                crate::device::BelType::RamSlice => brams += 1,
+                crate::device::BelType::RamSlice | crate::device::BelType::LargeRam => brams += 1,
                 _ => {}
             }
         }

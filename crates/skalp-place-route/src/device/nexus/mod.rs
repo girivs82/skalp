@@ -16,6 +16,7 @@ pub mod data;
 pub mod dsp;
 pub mod ebr;
 pub mod emit;
+pub mod lram;
 pub mod pll;
 pub mod prjoxide_bels;
 pub mod prjoxide_graph;
@@ -35,7 +36,7 @@ use super::{
     Bel, BelId, BelPin, BelType, CellPin, ClockDomain, ClockResources, Device, DeviceFamily,
     DeviceStats, DspTile, IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip,
     PipId, RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId,
-    WireSegment, WireType,
+    WireSegment, WireType, EXTRA_INPUTS_PARAM,
 };
 
 /// Local wires per tile in the synthetic routing graph: the input-mux and
@@ -197,6 +198,14 @@ pub struct NexusDevice {
     pub io_tiles: Vec<IoTile>,
     /// Memory blocks (EBR)
     pub memory_blocks: Vec<MemoryBlock>,
+    /// Location of each large RAM site's pins, by the site's tile: its
+    /// contents' configuration-bus region is named after it
+    /// ([`lram::init_region`])
+    large_ram_pins: Arc<HashMap<(u32, u32), (u32, u32)>>,
+    /// Large RAM inputs driven low from the fabric ([`lram::low_pins`] that
+    /// reach the fabric at every site), in the order a cell's added inputs
+    /// take them
+    large_ram_low_pins: Arc<Vec<String>>,
     /// DSP tiles
     pub dsp_tiles: Vec<DspTile>,
 }
@@ -299,6 +308,12 @@ impl NexusDevice {
             .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
             .filter_map(|t| Some(((t.x, t.y), ebr::site_of_tile(&t.tiletype)?)))
             .collect();
+        let large_ram_sites: HashMap<(u32, u32), usize> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter_map(|t| Some(((t.x, t.y), lram::site_of_tile(&t.tiletype)?)))
+            .collect();
+        let mut large_ram_pins: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
 
         // PLL sites: the GPLL tile of each corner in the window
         let pll_sites: HashMap<(u32, u32), String> = all_tiles
@@ -499,6 +514,43 @@ impl NexusDevice {
                 });
                 bel_id_counter += 1;
             }
+            // A large RAM's pins sit one step from its tile, in a direction
+            // that differs between sites; a site whose pins are outside the
+            // window's routing is left out.
+            if let Some(&site) = large_ram_sites.get(&(x, y)) {
+                let wire_of = |step: &str, pin: &str| {
+                    resolve_wire(x, y, &lram::site_wire(step, pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                };
+                let step = lram::PIN_STEPS
+                    .into_iter()
+                    .find(|step| wire_of(step, "ADA0").is_some());
+                if let Some(step) = step {
+                    let outputs = lram::output_pins();
+                    for pin in lram::input_pins()
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once("CLK".to_string()))
+                        .chain(outputs)
+                    {
+                        if let Some(w) = wire_of(step, &pin) {
+                            bel_wires.insert((x, y, format!("LRAM_{pin}")), w);
+                        }
+                    }
+                    let (dx, dy) = lram::step_offset(step);
+                    large_ram_pins.insert(
+                        (x, y),
+                        ((i64::from(x) + dx) as u32, (i64::from(y) + dy) as u32),
+                    );
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: BelType::LargeRam,
+                        name: lram::bel_name(site),
+                        pins: Vec::new(),
+                    });
+                    bel_id_counter += 1;
+                }
+            }
             if let Some(corner) = pll_sites.get(&(x, y)) {
                 let wire_of = |step: &str, pin: &str| {
                     resolve_wire(x, y, &pll::site_wire(step, pin))
@@ -528,6 +580,16 @@ impl NexusDevice {
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
+        let large_ram_low_pins: Vec<String> = lram::low_pins()
+            .iter()
+            .filter(|pin| {
+                !large_ram_pins.is_empty()
+                    && large_ram_pins
+                        .keys()
+                        .all(|&(x, y)| bel_wires.contains_key(&(x, y, format!("LRAM_{pin}"))))
+            })
+            .map(|pin| pin.to_string())
+            .collect();
         Ok(Self {
             variant,
             grid_size: (width, height),
@@ -551,6 +613,8 @@ impl NexusDevice {
             logic_tiles,
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
+            large_ram_pins: Arc::new(large_ram_pins),
+            large_ram_low_pins: Arc::new(large_ram_low_pins),
             dsp_tiles: Vec::new(),
         })
     }
@@ -656,6 +720,36 @@ impl NexusDevice {
     }
 
     /// A BEL pin's wire, by its conventional key.
+    /// Location of the pins of the large RAM site whose tile is at (x, y).
+    pub fn large_ram_pin_location(&self, x: u32, y: u32) -> Option<(u32, u32)> {
+        self.large_ram_pins.get(&(x, y)).copied()
+    }
+
+    /// Large RAM inputs driven low from the fabric, in the order a cell's
+    /// added inputs take them.
+    pub fn large_ram_low_pins(&self) -> &[String] {
+        &self.large_ram_low_pins
+    }
+
+    /// The site pin of a large RAM cell's input, if it has one.
+    pub fn large_ram_input_pin(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        ports: &skalp_lir::gate_netlist::RamPorts,
+        input: usize,
+    ) -> Option<String> {
+        let extra_from = cell
+            .parameters
+            .get(EXTRA_INPUTS_PARAM)
+            .and_then(|v| v.parse::<usize>().ok());
+        let single_port = lram::is_single_port(cell);
+        let extra: Vec<String> = lram::low_pins_of(single_port, &self.large_ram_low_pins)
+            .into_iter()
+            .cloned()
+            .collect();
+        lram::input_pin(ports, input, single_port, extra_from, &extra)
+    }
+
     pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
         self.bel_wires.get(&(x, y, key.to_string())).copied()
     }
@@ -723,6 +817,8 @@ impl NexusDevice {
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
+            large_ram_pins: Arc::new(HashMap::new()),
+            large_ram_low_pins: Arc::new(Vec::new()),
             dsp_tiles: Vec::new(),
         };
 
@@ -2194,6 +2290,7 @@ impl Device for NexusDevice {
             "DPR16X4" | "DPR16X4C" => bel_type == BelType::DistRam,
             "IB" | "OB" | "BB" | "SEIO18" | "SEIO33" | "DIFFIO18" => bel_type == BelType::IoCell,
             "DP16K" | "DP16KD" | "PDPSC16K" | "SP16KD" | "EBR" => bel_type == BelType::RamSlice,
+            "PDPSC512K" | "SP512K" | "DPSC512K" | "LRAM_CORE" => bel_type == BelType::LargeRam,
             "MULT18X18" | "MULT18X18D" | "MULT9X9D" | "DSP" => bel_type == BelType::DspSlice,
             "EHXPLLL" | "PLL" => bel_type == BelType::Pll,
             _ => false,
@@ -2326,9 +2423,11 @@ impl Device for NexusDevice {
         dsp::is_multiplier(cell) && dsp::input_pin(cell, input).is_some()
     }
 
-    fn dsp_low_driven_input_count(&self, cell: &skalp_lir::gate_netlist::Cell) -> usize {
+    fn low_driven_input_count(&self, cell: &skalp_lir::gate_netlist::Cell) -> usize {
         if dsp::is_multiplier(cell) {
             dsp::low_driven_pins().len()
+        } else if lram::is_large_ram(cell) {
+            lram::low_pins_of(lram::is_single_port(cell), &self.large_ram_low_pins).len()
         } else {
             0
         }
@@ -2336,17 +2435,39 @@ impl Device for NexusDevice {
 
     fn ram_input_pin(
         &self,
+        cell: &skalp_lir::gate_netlist::Cell,
         ports: &skalp_lir::gate_netlist::RamPorts,
         input: usize,
     ) -> Option<usize> {
+        if lram::is_large_ram(cell) {
+            return lram::router_pin(&self.large_ram_input_pin(cell, ports, input)?);
+        }
         ebr::router_pin(&ebr::input_pin(ports, input)?)
+    }
+
+    fn ram_output_pin(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        _ports: &skalp_lir::gate_netlist::RamPorts,
+        output: usize,
+    ) -> usize {
+        if lram::is_large_ram(cell) {
+            return lram::router_output_pin(lram::is_single_port(cell), output);
+        }
+        output
     }
 
     fn ram_input_needs_low_driver(
         &self,
+        cell: &skalp_lir::gate_netlist::Cell,
         ports: &skalp_lir::gate_netlist::RamPorts,
         input: usize,
     ) -> bool {
+        if lram::is_large_ram(cell) {
+            return self
+                .large_ram_input_pin(cell, ports, input)
+                .is_some_and(|pin| !lram::has_inverter(&pin));
+        }
         ebr::input_pin(ports, input).is_some_and(|pin| !ebr::has_inverter(&pin))
     }
 
@@ -2389,6 +2510,18 @@ impl Device for NexusDevice {
                 CellPin::Input(n) => ebr::pin_of_router_pin(n)?.to_string(),
             };
             return self.bel_wires.get(&(x, y, format!("RAM_{name}"))).copied();
+        }
+        let is_large_ram = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::LargeRam);
+        if is_large_ram {
+            let name = match pin {
+                CellPin::Output(bit) => lram::output_pin(bit),
+                CellPin::Input(n) => lram::pin_of_router_pin(n)?.to_string(),
+            };
+            return self.bel_wires.get(&(x, y, format!("LRAM_{name}"))).copied();
         }
         let is_pll = !self.prjoxide_tiles.is_empty()
             && self

@@ -566,11 +566,17 @@ pub fn place_and_route_nexus_real(
         variant.prjoxide_device(),
     )
     .map_err(PlaceRouteError::BitstreamFailed)?;
+    let large_ram_count = netlist
+        .cells
+        .iter()
+        .filter(|c| crate::device::nexus::lram::is_large_ram(c))
+        .count();
     let ram_count = netlist
         .cells
         .iter()
         .filter(|c| c.ram_ports().is_some())
-        .count();
+        .count()
+        - large_ram_count;
     let dsp_count = netlist
         .cells
         .iter()
@@ -581,8 +587,11 @@ pub fn place_and_route_nexus_real(
         &clocks,
         &pad_sites,
         netlist.cells.len(),
-        ram_count,
-        dsp_count,
+        sites::HardBlockCounts {
+            block_rams: ram_count,
+            large_rams: large_ram_count,
+            multipliers: dsp_count,
+        },
     );
     let mut device =
         NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))

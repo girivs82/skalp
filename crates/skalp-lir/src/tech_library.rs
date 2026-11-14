@@ -1889,6 +1889,38 @@ impl TechLibrary {
             .and_then(|cell| cell.ram_info.as_ref().map(|info| (cell, info)))
     }
 
+    /// The RAM cell that holds a `data_width` x `depth` memory in the fewest
+    /// bits of silicon (blocks needed times bits per block), so a memory goes
+    /// into a large RAM only when that wastes less than tiling block RAMs.
+    /// Ties go to the cell [`Self::find_ram_cell`] would pick.
+    pub fn find_ram_cell_for(
+        &self,
+        data_width: u32,
+        depth: u32,
+    ) -> Option<(&LibraryCell, &RamCellInfo)> {
+        let preferred = self.find_ram_cell()?;
+        let cost = |info: &RamCellInfo| -> u64 {
+            info.aspect_ratios
+                .iter()
+                .map(|&(d, w)| u64::from(data_width.div_ceil(w)) * u64::from(depth.div_ceil(d)))
+                .min()
+                .map_or(u64::MAX, |blocks| blocks * u64::from(info.block_bits))
+        };
+        let mut best = preferred;
+        let mut best_cost = cost(preferred.1);
+        for cell in self.find_cells_by_function(&CellFunction::Ram) {
+            let Some(info) = cell.ram_info.as_ref() else {
+                continue;
+            };
+            let c = cost(info);
+            if c < best_cost {
+                best = (cell, info);
+                best_cost = c;
+            }
+        }
+        Some(best)
+    }
+
     /// Find a DSP cell in the library
     ///
     /// Returns the DSP cell and its capability metadata, or None if no DSP cell exists.
