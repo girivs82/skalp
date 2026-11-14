@@ -4529,7 +4529,9 @@ fn synthesize_design(
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        // The frequency latencies were chosen for is also what place and
+        // route times unknown clocks against and retimes for
+        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, frequency)?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -4682,6 +4684,7 @@ fn run_nexus_pnr_on_netlist(
             target_frequency: freq,
             ..TimingConfig::default()
         });
+        config.placer.retime_target_mhz = Some(freq);
     }
 
     println!("Variant: {:?}", nexus);

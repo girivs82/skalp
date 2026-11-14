@@ -75,6 +75,49 @@ pub trait RetimeDelays {
     fn carry_link_ps(&self) -> i64 {
         0
     }
+    /// Delays of one connection where the cells are placed, or `None` to
+    /// charge [`Self::net_ps`] by its fanout (nothing placed yet)
+    fn connection(&self, _connection: &Connection) -> Option<ConnectionDelays> {
+        None
+    }
+}
+
+/// A connection retiming times: from `driver` (`None`: an input of the
+/// design) to input `pin` of `load`, possibly through registers
+#[derive(Debug, Clone, Copy)]
+pub struct Connection<'c> {
+    pub driver: Option<&'c Cell>,
+    pub load: &'c Cell,
+    pub pin: usize,
+    /// Loads on the driver's net
+    pub fanout: usize,
+    /// The registers on it now, nearest the driver first and nearest the
+    /// load last (the same register when there is one)
+    pub registers: Option<(&'c Cell, &'c Cell)>,
+}
+
+/// Routing delays of a [`Connection`], in picoseconds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionDelays {
+    /// Driver to load, with no register between
+    pub direct_ps: i64,
+    /// Driver to a register on the connection: the one there now, or for
+    /// one retiming adds, a register beside the driver
+    pub to_register_ps: i64,
+    /// A register on the connection to the load (the one there now, or one
+    /// beside the driver)
+    pub from_register_ps: i64,
+}
+
+impl ConnectionDelays {
+    /// The same delay whatever the registers
+    pub fn uniform(ps: i64) -> Self {
+        Self {
+            direct_ps: ps,
+            to_register_ps: ps,
+            from_register_ps: ps,
+        }
+    }
 }
 
 /// Output of a carry cell that feeds the next cell of its chain
@@ -88,21 +131,34 @@ fn is_carry_out(cell: &Cell, pin: usize) -> bool {
     cell.function == Some(CellFunction::Ccu2) && pin == CARRY_OUT_PIN
 }
 
-/// Routing delay of a connection on (resolved) net `net`: a carry chain's
-/// dedicated link, or general routing by its fanout
+/// Routing delays from the driver of (resolved) net `net` to input `pin`
+/// of `load`, through `registers` when there are any: a carry chain's
+/// dedicated link, the placed connection, or general routing by fanout
+#[allow(clippy::too_many_arguments)]
 fn connection_ps(
     netlist: &GateNetlist,
     driver: &[Option<(CellId, usize)>],
     fanout: &[usize],
     net: usize,
+    load: &Cell,
+    pin: usize,
+    registers: Option<(&Cell, &Cell)>,
     delays: &dyn RetimeDelays,
-) -> i64 {
-    match driver[net] {
-        Some((id, pin)) if is_carry_out(&netlist.cells[id.0 as usize], pin) => {
-            delays.carry_link_ps()
-        }
-        _ => delays.net_ps(fanout[net]),
+) -> ConnectionDelays {
+    let from = driver[net].map(|(id, pin)| (&netlist.cells[id.0 as usize], pin));
+    if from.is_some_and(|(cell, pin)| is_carry_out(cell, pin)) {
+        return ConnectionDelays::uniform(delays.carry_link_ps());
     }
+    let connection = Connection {
+        driver: from.map(|(cell, _)| cell),
+        load,
+        pin,
+        fanout: fanout[net],
+        registers,
+    };
+    delays
+        .connection(&connection)
+        .unwrap_or_else(|| ConnectionDelays::uniform(delays.net_ps(fanout[net])))
 }
 
 /// Delays for a netlist without device timing: each logic cell counts as
@@ -155,6 +211,11 @@ pub struct RetimeReport {
     pub registers_after: usize,
     /// Logic cells registers moved through
     pub cells_crossed: usize,
+    /// For each cell of the netlist before, its id after (`None`: a
+    /// register retiming replaced). Ids shift as registers are removed.
+    pub cell_map: Vec<Option<CellId>>,
+    /// Ids of the registers retiming added (the last cells of the netlist)
+    pub added: std::ops::Range<usize>,
 }
 
 /// Where an edge's value comes from
@@ -183,10 +244,8 @@ struct Edge {
     sink: Sink,
     /// Initial values of the registers on the edge, origin end first
     regs: Vec<bool>,
-    /// Loads on the net leaving the origin, for the routing estimate
-    fanout: usize,
-    /// Whether the edge is a carry chain's dedicated link
-    carry: bool,
+    /// Routing delays along it, with and without registers
+    wire: ConnectionDelays,
     /// For an edge from something that stays put: when its value arrives
     /// (clock to output plus the logic outside the regions before it)
     entry_ps: i64,
@@ -231,6 +290,38 @@ struct Graph<'a> {
 /// every input combination for initial values; a wider cell tries all
 /// zeros and all ones
 const MAX_BACKWARD_INPUTS: usize = 12;
+
+/// Values to try on free inputs for a backward move, given the value each
+/// would best take (`prefer`): fewest departures from those first, then
+/// fewest ones. Every combination, or past [`MAX_BACKWARD_INPUTS`] the
+/// preferred values, all zeros and all ones.
+fn input_candidates(prefer: &[Option<bool>]) -> Vec<Vec<bool>> {
+    let count = prefer.len();
+    let misses = |values: &[bool]| {
+        values
+            .iter()
+            .zip(prefer)
+            .filter(|(v, p)| p.is_some_and(|p| p != **v))
+            .count()
+    };
+    if count > MAX_BACKWARD_INPUTS {
+        let preferred: Vec<bool> = prefer.iter().map(|p| p.unwrap_or(false)).collect();
+        let mut candidates = vec![preferred, vec![false; count], vec![true; count]];
+        candidates.dedup();
+        return candidates;
+    }
+    let mut candidates: Vec<(usize, u32, Vec<bool>)> = (0..1u32 << count)
+        .map(|mask| {
+            let values: Vec<bool> = (0..count).map(|bit| mask >> bit & 1 == 1).collect();
+            (misses(&values), mask, values)
+        })
+        .collect();
+    candidates.sort_by_key(|(miss, mask, _)| (*miss, mask.count_ones(), *mask));
+    candidates
+        .into_iter()
+        .map(|(_, _, values)| values)
+        .collect()
+}
 
 /// Departure times (see `Graph::departures`), per node, per input pin
 struct Departures {
@@ -324,6 +415,8 @@ struct Traced {
     times: Vec<i64>,
     /// The edge into the first node, unless it starts at a constant
     first_in: Option<usize>,
+    /// Time at the first node's input (0 with no edge into it)
+    first_at: i64,
     /// The edges between consecutive nodes
     links: Vec<usize>,
     start: TraceStart,
@@ -524,13 +617,15 @@ pub fn retime(
         let registers_before = graph.movable.len();
         let cells_crossed = lags.iter().filter(|&&r| r != 0).count();
         let plan = graph.plan(&regs)?;
-        let registers_after = plan.apply(netlist);
+        let (cell_map, added) = plan.apply(netlist);
         return Some(RetimeReport {
             period_before_ps: before,
             period_after_ps: after,
             registers_before,
-            registers_after,
+            registers_after: added.len(),
             cells_crossed,
+            cell_map,
+            added,
         });
     }
     None
@@ -615,6 +710,23 @@ fn region_of(path: &str, regions: &[String]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// The clock whose registers retiming moves in `regions`: the one most of
+/// their registers use
+pub fn region_clock(netlist: &GateNetlist, regions: &[String]) -> Option<GateNetId> {
+    let mut clocks: HashMap<GateNetId, usize> = HashMap::new();
+    for cell in &netlist.cells {
+        if cell.function == Some(CellFunction::Dff) && region_of(&cell.path, regions).is_some() {
+            if let Some(clock) = cell.clock {
+                *clocks.entry(netlist.resolve_alias(clock)).or_default() += 1;
+            }
+        }
+    }
+    clocks
+        .into_iter()
+        .max_by_key(|&(net, n)| (n, net.0))
+        .map(|(net, _)| net)
+}
+
 /// Timing of the logic outside the retiming regions, which stays put
 struct Outside<'n> {
     netlist: &'n GateNetlist,
@@ -642,8 +754,19 @@ impl Outside<'_> {
         self.netlist.resolve_alias(net).0 as usize
     }
 
-    fn net_ps(&self, net: usize) -> i64 {
-        connection_ps(self.netlist, self.driver, self.fanout, net, self.delays)
+    /// Routing delay from the driver of `net` to input `pin` of `load`
+    fn wire_ps(&self, net: usize, load: &Cell, pin: usize) -> i64 {
+        connection_ps(
+            self.netlist,
+            self.driver,
+            self.fanout,
+            net,
+            load,
+            pin,
+            None,
+            self.delays,
+        )
+        .direct_ps
     }
 
     fn source(&self, net: usize) -> Source {
@@ -708,7 +831,7 @@ impl Outside<'_> {
                         } else {
                             self.delays.clk_to_q_ps()
                         };
-                        Some(at + self.net_ps(input) + arc)
+                        Some(at + self.wire_ps(input, cell, pin) + arc)
                     })
                     .max()
                     .unwrap_or(self.delays.clk_to_q_ps());
@@ -728,14 +851,15 @@ impl Outside<'_> {
             .filter_map(|out| {
                 let arc = self.delays.arc_ps(cell, pin, out)?;
                 let net = self.resolve(cell.outputs[out]);
-                Some(arc + self.net_ps(net) + tails[net])
+                Some(arc + tails[net])
             })
             .max()
             .unwrap_or(0)
     }
 
-    /// Tail of every net: the longest delay from it to a register through
-    /// logic outside the regions (a load retiming owns ends the path)
+    /// Tail of every net: the longest delay from its driver to a register
+    /// through logic outside the regions, counting the routing to each
+    /// load (a load retiming owns ends the path)
     fn tails(&self) -> Vec<i64> {
         let count = self.netlist.nets.len();
         let mut tail = vec![0i64; count];
@@ -775,23 +899,22 @@ impl Outside<'_> {
                 tail[net] = self.loads[net]
                     .iter()
                     .map(|&(id, pin)| {
-                        if (self.inside)(id) {
+                        let cell = &self.netlist.cells[id.0 as usize];
+                        let wire = self.wire_ps(net, cell, pin);
+                        wire + if (self.inside)(id) {
                             0
+                        } else if cell.clock.is_some() {
+                            self.delays.setup_ps()
                         } else {
-                            let cell = &self.netlist.cells[id.0 as usize];
-                            if cell.clock.is_some() {
-                                self.delays.setup_ps()
-                            } else {
-                                (0..cell.outputs.len())
-                                    .filter_map(|out| {
-                                        let arc = self.delays.arc_ps(cell, pin, out)?;
-                                        let next = self.resolve(cell.outputs[out]);
-                                        let after = if state[next] == 2 { tail[next] } else { 0 };
-                                        Some(arc + self.net_ps(next) + after)
-                                    })
-                                    .max()
-                                    .unwrap_or(0)
-                            }
+                            (0..cell.outputs.len())
+                                .filter_map(|out| {
+                                    let arc = self.delays.arc_ps(cell, pin, out)?;
+                                    let next = self.resolve(cell.outputs[out]);
+                                    let after = if state[next] == 2 { tail[next] } else { 0 };
+                                    Some(arc + after)
+                                })
+                                .max()
+                                .unwrap_or(0)
                         }
                     })
                     .max()
@@ -839,17 +962,7 @@ impl<'a> Graph<'a> {
             }
         }
 
-        // The clock most region registers use
-        let mut clocks: HashMap<GateNetId, usize> = HashMap::new();
-        for cell in &netlist.cells {
-            if cell.function == Some(CellFunction::Dff) && region_of(&cell.path, regions).is_some()
-            {
-                if let Some(clock) = cell.clock {
-                    *clocks.entry(resolve(clock)).or_default() += 1;
-                }
-            }
-        }
-        let clock = clocks.into_iter().max_by_key(|&(net, n)| (n, net.0))?.0;
+        let clock = region_clock(netlist, regions)?;
 
         let is_movable_register = |cell: &Cell| {
             cell.function == Some(CellFunction::Dff)
@@ -956,12 +1069,15 @@ impl<'a> Graph<'a> {
             for (pin, &input) in cell.inputs.iter().enumerate() {
                 let mut net = resolve(input);
                 let mut regs = Vec::new();
+                // The registers' cells, load end first
+                let mut reg_cells: Vec<CellId> = Vec::new();
                 let mut steps = 0;
                 let origin = loop {
                     match driver[net.0 as usize] {
                         Some((d, _)) if is_movable.contains(&d) && steps < 100_000 => {
                             let reg = &netlist.cells[d.0 as usize];
                             regs.push(register_init(reg));
+                            reg_cells.push(d);
                             net = resolve(reg.inputs[0]);
                             steps += 1;
                         }
@@ -990,13 +1106,29 @@ impl<'a> Graph<'a> {
                     Some(node) => Sink::Node(node, pin),
                     None => Sink::Cell(cell.id, pin),
                 };
+                let registers = match (reg_cells.last(), reg_cells.first()) {
+                    (Some(&first), Some(&last)) if !regs.is_empty() => Some((
+                        &netlist.cells[first.0 as usize],
+                        &netlist.cells[last.0 as usize],
+                    )),
+                    _ => None,
+                };
+                let wire = connection_ps(
+                    netlist,
+                    &driver,
+                    &fanout,
+                    net.0 as usize,
+                    cell,
+                    pin,
+                    registers,
+                    delays,
+                );
                 let index = edges.len();
                 edges.push(Edge {
                     origin,
                     sink,
                     regs,
-                    fanout: 0,
-                    carry: false,
+                    wire,
                     entry_ps: 0,
                     exit_ps: 0,
                 });
@@ -1008,19 +1140,6 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        // Routing estimate by the fanout of the net leaving the origin
-        for edge in &mut edges {
-            let net = match edge.origin {
-                Origin::Node(node, out) => {
-                    resolve(netlist.cells[nodes[node].0 as usize].outputs[out])
-                }
-                Origin::Fixed(net) | Origin::Const(net, _) => net,
-            };
-            edge.fanout = fanout[net.0 as usize];
-            edge.carry = driver[net.0 as usize]
-                .is_some_and(|(id, pin)| is_carry_out(&netlist.cells[id.0 as usize], pin));
-        }
-
         // Timing at the edges of the regions
         let mut loads: Vec<Vec<(CellId, usize)>> = vec![Vec::new(); net_count];
         for cell in &netlist.cells {
@@ -1092,11 +1211,19 @@ impl<'a> Graph<'a> {
         edge.regs.len() as i64 + to - from
     }
 
-    fn net_delay(&self, edge: &Edge, delays: &dyn RetimeDelays) -> i64 {
-        if edge.carry {
-            return delays.carry_link_ps();
-        }
-        delays.net_ps(edge.fanout)
+    /// Routing delay of an edge with no register on it
+    fn wire_direct(&self, edge: &Edge) -> i64 {
+        edge.wire.direct_ps
+    }
+
+    /// Routing delay from an edge's origin to a register on it
+    fn wire_to_register(&self, edge: &Edge) -> i64 {
+        edge.wire.to_register_ps
+    }
+
+    /// Routing delay from a register on an edge to its sink
+    fn wire_after_register(&self, edge: &Edge) -> i64 {
+        edge.wire.from_register_ps
     }
 
     /// Longest delay from each node input to the next register, with
@@ -1129,11 +1256,11 @@ impl<'a> Graph<'a> {
                                 .iter()
                                 .map(|&e| {
                                     let edge = &self.edges[e];
-                                    let net = self.net_delay(edge, delays);
                                     if self.weight(edge, lags) > 0 {
-                                        let t = net + delays.setup_ps();
+                                        let t = self.wire_to_register(edge) + delays.setup_ps();
                                         return (t, t);
                                     }
+                                    let net = self.wire_direct(edge);
                                     match edge.sink {
                                         Sink::Node(x, pin) => {
                                             let (all, to_reg) =
@@ -1209,14 +1336,14 @@ impl<'a> Graph<'a> {
         if self.weight(edge, lags) > 0 {
             // Registers on the edge itself: the path ends there, and they
             // cannot move back past where it starts
-            return Some(edge.entry_ps + self.net_delay(edge, delays) + delays.setup_ps());
+            return Some(edge.entry_ps + self.wire_to_register(edge) + delays.setup_ps());
         }
         let Sink::Node(x, pin) = edge.sink else {
             return None;
         };
         let tail = departures.to_reg[x][pin];
         (self.weight(edge, lags) == 0 && tail > UNREACHED / 2)
-            .then(|| edge.entry_ps + self.net_delay(edge, delays) + tail)
+            .then(|| edge.entry_ps + self.wire_direct(edge) + tail)
     }
 
     /// Delay of the path starting at the register(s) on `edge`, if any
@@ -1230,10 +1357,9 @@ impl<'a> Graph<'a> {
         if matches!(edge.origin, Origin::Const(..)) || self.weight(edge, lags) < 1 {
             return None;
         }
-        let net = self.net_delay(edge, delays);
         Some(
             delays.clk_to_q_ps()
-                + net
+                + self.wire_after_register(edge)
                 + match edge.sink {
                     Sink::Node(x, pin) => departures.all[x][pin],
                     Sink::Cell(..) => edge.exit_ps,
@@ -1447,14 +1573,14 @@ impl<'a> Graph<'a> {
                                 return (UNREACHED, UNREACHED);
                             };
                             let edge = &self.edges[e];
-                            let net = self.net_delay(edge, delays);
                             if matches!(edge.origin, Origin::Const(..)) {
                                 return (UNREACHED, UNREACHED);
                             }
                             if self.weight(edge, lags) > 0 {
-                                let t = delays.clk_to_q_ps() + net;
+                                let t = delays.clk_to_q_ps() + self.wire_after_register(edge);
                                 return (t, t);
                             }
+                            let net = self.wire_direct(edge);
                             match edge.origin {
                                 // A path too long from where it starts is
                                 // reported once, not chased
@@ -1525,7 +1651,17 @@ impl<'a> Graph<'a> {
                 let arc = delays.arc_ps(cell, pin, out)?;
                 let input = self.netlist.resolve_alias(cell.inputs[pin]).0 as usize;
                 (self.net_arrival[input]
-                    + connection_ps(self.netlist, &self.driver, &self.net_fanout, input, delays)
+                    + connection_ps(
+                        self.netlist,
+                        &self.driver,
+                        &self.net_fanout,
+                        input,
+                        cell,
+                        pin,
+                        None,
+                        delays,
+                    )
+                    .direct_ps
                     + arc
                     == target)
                     .then_some(input)
@@ -1631,6 +1767,7 @@ impl<'a> Graph<'a> {
         let mut times = vec![arrivals[node][out].0];
         let mut into: Vec<usize> = Vec::new();
         let (mut node, mut out) = (node, out);
+        let mut first_at = 0;
         let start = loop {
             if nodes.len() > 100_000 {
                 break TraceStart::Open;
@@ -1646,10 +1783,10 @@ impl<'a> Graph<'a> {
                 let Some(arc) = delays.arc_ps(cell, pin, out) else {
                     continue;
                 };
-                let net = self.net_delay(edge, delays);
-                let as_register = self.weight(edge, lags) > 0
-                    || (matches!(edge.origin, Origin::Fixed(_)) && skip[e]);
-                let begin = if as_register {
+                let net = self.wire_direct(edge);
+                let begin = if self.weight(edge, lags) > 0 {
+                    delays.clk_to_q_ps() + self.wire_after_register(edge)
+                } else if matches!(edge.origin, Origin::Fixed(_)) && skip[e] {
                     delays.clk_to_q_ps() + net
                 } else {
                     match edge.origin {
@@ -1659,14 +1796,15 @@ impl<'a> Graph<'a> {
                     }
                 };
                 if begin + arc == target {
-                    next = Some(e);
+                    next = Some((e, begin));
                     break;
                 }
             }
-            let Some(e) = next else {
+            let Some((e, begin)) = next else {
                 break TraceStart::Open;
             };
             into.push(e);
+            first_at = begin;
             let edge = &self.edges[e];
             if self.weight(edge, lags) > 0 || (matches!(edge.origin, Origin::Fixed(_)) && skip[e]) {
                 break TraceStart::Register;
@@ -1699,6 +1837,7 @@ impl<'a> Graph<'a> {
             nodes,
             times,
             first_in,
+            first_at: if first_in.is_some() { first_at } else { 0 },
             links: links.to_vec(),
             start,
         }
@@ -1720,38 +1859,29 @@ impl<'a> Graph<'a> {
         let zero = self.zero();
         let count = path.nodes.len();
         let end_edge = &self.edges[end];
-        let end_net = self.net_delay(end_edge, delays);
-        // Time from a register before node `s` to the output of node `e`
+        // Time at the input of node `s` along the path as it is now
         let input_at = |s: usize| -> i64 {
             if s == 0 {
-                match path.first_in {
-                    Some(e) => {
-                        let edge = &self.edges[e];
-                        let net = self.net_delay(edge, delays);
-                        match path.start {
-                            TraceStart::Fixed(_) => edge.entry_ps + net,
-                            _ => delays.clk_to_q_ps() + net,
-                        }
-                    }
-                    None => 0,
-                }
+                path.first_at
             } else {
-                path.times[s - 1] + self.net_delay(&self.edges[path.links[s - 1]], delays)
+                path.times[s - 1] + self.wire_direct(&self.edges[path.links[s - 1]])
             }
         };
-        let link_net = |s: usize| -> i64 {
+        // The routing after a register put on the link into node `s`
+        let after_register = |s: usize| -> i64 {
             if s == 0 {
                 path.first_in
-                    .map_or(0, |e| self.net_delay(&self.edges[e], delays))
+                    .map_or(0, |e| self.wire_after_register(&self.edges[e]))
             } else {
-                self.net_delay(&self.edges[path.links[s - 1]], delays)
+                self.wire_after_register(&self.edges[path.links[s - 1]])
             }
         };
-        let out_net = |e: usize| -> i64 {
+        // The routing before a register put on the link out of node `e`
+        let before_register = |e: usize| -> i64 {
             if e + 1 < count {
-                self.net_delay(&self.edges[path.links[e]], delays)
+                self.wire_to_register(&self.edges[path.links[e]])
             } else {
-                end_net
+                self.wire_to_register(end_edge)
             }
         };
         // Registers originally between node `a` and node `b` (a <= b)
@@ -1771,7 +1901,7 @@ impl<'a> Graph<'a> {
                 (input_at(0), zero, first_regs)
             } else {
                 let s = s as usize;
-                (delays.clk_to_q_ps() + link_net(s), path.nodes[s], 0)
+                (delays.clk_to_q_ps() + after_register(s), path.nodes[s], 0)
             };
             let first = s.max(0) as usize;
             let offset = input_at(first);
@@ -1780,7 +1910,7 @@ impl<'a> Graph<'a> {
             }
             // Smallest end from here that is too long at a register
             while e < count
-                && base + path.times[e] - offset + out_net(e) + delays.setup_ps() <= period
+                && base + path.times[e] - offset + before_register(e) + delays.setup_ps() <= period
             {
                 e += 1;
             }
@@ -1788,7 +1918,10 @@ impl<'a> Graph<'a> {
                 let regs = regs_before + prefix[e] - prefix[first];
                 found.push((from, path.nodes[e], regs - 1));
             } else if into_fixed
-                && base + path.times[count - 1] - offset + end_net + end_edge.exit_ps > period
+                && base + path.times[count - 1] - offset
+                    + self.wire_direct(end_edge)
+                    + end_edge.exit_ps
+                    > period
             {
                 let regs = regs_before + prefix[count - 1] - prefix[first] + end_regs;
                 found.push((from, zero, regs - 1));
@@ -1879,10 +2012,9 @@ impl<'a> Graph<'a> {
         // stays put to registers on its first edge, and from registers on
         // an edge into something that stays put
         for (index, edge) in self.edges.iter().enumerate() {
-            let net = self.net_delay(edge, delays);
             match (edge.origin, edge.sink) {
                 (Origin::Fixed(_), _) => {
-                    let t = edge.entry_ps + net + delays.setup_ps();
+                    let t = edge.entry_ps + self.wire_to_register(edge) + delays.setup_ps();
                     if t > period {
                         let departures = self.departures(&lags, delays);
                         frozen.push(self.blocked(
@@ -1900,7 +2032,7 @@ impl<'a> Graph<'a> {
                     }
                 }
                 (Origin::Node(u, _), Sink::Cell(c, _)) => {
-                    let t = delays.clk_to_q_ps() + net + edge.exit_ps;
+                    let t = delays.clk_to_q_ps() + self.wire_after_register(edge) + edge.exit_ps;
                     if t > period {
                         let from = self.cell(u);
                         let sink = &self.netlist.cells[c.0 as usize];
@@ -1991,13 +2123,13 @@ impl<'a> Graph<'a> {
                 if arrival <= UNREACHED / 2 {
                     continue;
                 }
-                let net = self.net_delay(edge, delays);
                 let weight = self.weight(edge, &lags);
                 let (delay_ps, into_fixed) = match edge.sink {
-                    _ if weight > 0 || end_here[index] => {
-                        (arrival + net + delays.setup_ps(), false)
-                    }
-                    Sink::Cell(..) => (arrival + net + edge.exit_ps, true),
+                    _ if weight > 0 || end_here[index] => (
+                        arrival + self.wire_to_register(edge) + delays.setup_ps(),
+                        false,
+                    ),
+                    Sink::Cell(..) => (arrival + self.wire_direct(edge) + edge.exit_ps, true),
                     Sink::Node(..) => continue,
                 };
                 if delay_ps <= period {
@@ -2144,7 +2276,20 @@ impl<'a> Graph<'a> {
                     done[node] -= 1;
                     progress = true;
                 }
-                while done[node] < lags[node] {
+                while done[node] < lags[node] && self.blocks[self.block[node]].len() > 1 {
+                    // A carry chain moves back as one: its cells' inputs
+                    // are chosen together, so each carry in is one the
+                    // cell before can give
+                    if !self.back_through_chain(self.block[node], &mut regs)? {
+                        remaining = true;
+                        break;
+                    }
+                    for &member in &self.blocks[self.block[node]] {
+                        done[member] += 1;
+                    }
+                    progress = true;
+                }
+                while done[node] < lags[node] && self.blocks[self.block[node]].len() == 1 {
                     let outs = &self.out_edges[node];
                     if outs.iter().flatten().any(|&e| regs[e].is_empty()) {
                         remaining = true;
@@ -2163,7 +2308,7 @@ impl<'a> Graph<'a> {
                         }
                         wanted.push(value);
                     }
-                    let inputs = self.preimage(node, &wanted).ok_or(node)?;
+                    let inputs = self.preimage(node, &wanted, &regs).ok_or(node)?;
                     for &e in outs.iter().flatten() {
                         regs[e].remove(0);
                     }
@@ -2188,9 +2333,209 @@ impl<'a> Graph<'a> {
         Ok(regs)
     }
 
+    /// The value a register put on input edge `edge` by a backward move
+    /// should hold: what the registers nearest the origin hold on the other
+    /// edges from the same output, so the origin can later move back too
+    /// (its output registers must agree) and the edges share one register.
+    /// `None` when the edge already holds registers or no sibling does.
+    fn preferred_value(&self, edge: usize, regs: &[Vec<bool>]) -> Option<bool> {
+        if !regs[edge].is_empty() {
+            return None;
+        }
+        let Origin::Node(u, out) = self.edges[edge].origin else {
+            return None;
+        };
+        self.out_edges[u][out]
+            .iter()
+            .filter(|&&e| e != edge)
+            .find_map(|&e| regs[e].first().copied())
+    }
+
+    /// Whether `edge` joins two cells of one carry chain (carry out to
+    /// carry in)
+    fn is_carry_link(&self, edge: usize) -> bool {
+        match (self.edges[edge].origin, self.edges[edge].sink) {
+            (Origin::Node(u, CARRY_OUT_PIN), Sink::Node(v, CARRY_IN_PIN)) => {
+                self.block[u] == self.block[v] && is_carry_out(self.cell(u), CARRY_OUT_PIN)
+            }
+            _ => false,
+        }
+    }
+
+    /// The cells of carry block `block`, from the start of the chain
+    fn chain_order(&self, block: usize) -> Vec<usize> {
+        let members = &self.blocks[block];
+        let fed_by_chain = |node: usize| {
+            self.in_edges[node]
+                .get(CARRY_IN_PIN)
+                .copied()
+                .flatten()
+                .is_some_and(|e| self.is_carry_link(e))
+        };
+        let Some(&start) = members.iter().find(|&&n| !fed_by_chain(n)) else {
+            return members.clone();
+        };
+        let mut chain = vec![start];
+        while chain.len() < members.len() {
+            let last = *chain.last().expect("not empty");
+            let next = self.out_edges[last]
+                .get(CARRY_OUT_PIN)
+                .into_iter()
+                .flatten()
+                .find(|&&e| self.is_carry_link(e))
+                .and_then(|&e| match self.edges[e].sink {
+                    Sink::Node(v, _) => Some(v),
+                    Sink::Cell(..) => None,
+                });
+            match next {
+                Some(next) if !chain.contains(&next) => chain.push(next),
+                _ => break,
+            }
+        }
+        chain
+    }
+
+    /// Move one register back through every cell of carry block `block`.
+    /// The carry links inside the chain hold no register before or after:
+    /// the cells' inputs are found together, cell by cell from the start
+    /// of the chain, keeping for each the carry ins the cell before can
+    /// give. `Ok(false)` when an output has no register yet; the error is
+    /// the cell no inputs work for (or whose output registers disagree).
+    fn back_through_chain(&self, block: usize, regs: &mut [Vec<bool>]) -> Result<bool, usize> {
+        let chain = self.chain_order(block);
+        if chain.len() != self.blocks[block].len() {
+            return Err(chain[0]);
+        }
+        // The values the registers on each cell's outputs hold
+        let mut wanted: Vec<Vec<Option<bool>>> = Vec::with_capacity(chain.len());
+        for &node in &chain {
+            let mut values = Vec::with_capacity(self.out_edges[node].len());
+            for edges in &self.out_edges[node] {
+                let mut value = None;
+                for &e in edges {
+                    if self.is_carry_link(e) {
+                        continue;
+                    }
+                    let Some(&v) = regs[e].first() else {
+                        return Ok(false);
+                    };
+                    if value.is_some_and(|w| w != v) {
+                        return Err(node);
+                    }
+                    value = Some(v);
+                }
+                values.push(value);
+            }
+            wanted.push(values);
+        }
+        // Per cell, per carry out value: the carry in and inputs giving it
+        let mut choices: Vec<[Option<Vec<bool>>; 2]> = Vec::with_capacity(chain.len());
+        let first_carry_in = self.in_edges[chain[0]].get(CARRY_IN_PIN).copied().flatten();
+        let mut reach = match first_carry_in.map(|e| self.edges[e].origin) {
+            None => [true, false],
+            Some(Origin::Const(_, value)) => [!value, value],
+            Some(_) => [true, true],
+        };
+        for (k, &node) in chain.iter().enumerate() {
+            let cell = self.cell(node);
+            let primitive = primitive_for_cell(cell);
+            let pins = &self.in_edges[node];
+            let mut base = vec![false; pins.len()];
+            let mut free = Vec::new();
+            for (pin, e) in pins.iter().enumerate() {
+                if pin == CARRY_IN_PIN {
+                    continue;
+                }
+                if let Some(e) = *e {
+                    match self.edges[e].origin {
+                        Origin::Const(_, value) => base[pin] = value,
+                        _ => free.push(pin),
+                    }
+                }
+            }
+            let prefer: Vec<Option<bool>> = free
+                .iter()
+                .map(|&pin| pins[pin].and_then(|e| self.preferred_value(e, regs)))
+                .collect();
+            let candidates = input_candidates(&prefer);
+            let mut found: [Option<Vec<bool>>; 2] = [None, None];
+            for carry_in in [false, true] {
+                if !reach[carry_in as usize] {
+                    continue;
+                }
+                for values in &candidates {
+                    let mut inputs = base.clone();
+                    for (&pin, &value) in free.iter().zip(values) {
+                        inputs[pin] = value;
+                    }
+                    if let Some(slot) = inputs.get_mut(CARRY_IN_PIN) {
+                        *slot = carry_in;
+                    }
+                    let outputs = evaluate_primitive(&primitive, &inputs);
+                    let fits = wanted[k].iter().enumerate().all(|(out, w)| {
+                        w.is_none_or(|w| outputs.get(out).copied().unwrap_or(false) == w)
+                    });
+                    if !fits {
+                        continue;
+                    }
+                    let carry_out = outputs.get(CARRY_OUT_PIN).copied().unwrap_or(false);
+                    if found[carry_out as usize].is_none() {
+                        found[carry_out as usize] = Some(inputs);
+                    }
+                    if found.iter().all(Option::is_some) {
+                        break;
+                    }
+                }
+            }
+            reach = [found[0].is_some(), found[1].is_some()];
+            if reach == [false, false] {
+                return Err(node);
+            }
+            choices.push(found);
+        }
+        // Back from the end of the chain: each cell's carry in is the
+        // carry out the cell before must give
+        let mut chosen: Vec<Vec<bool>> = vec![Vec::new(); chain.len()];
+        let mut carry_out = if choices[chain.len() - 1][0].is_some() {
+            0
+        } else {
+            1
+        };
+        for k in (0..chain.len()).rev() {
+            let inputs = choices[k][carry_out]
+                .clone()
+                .expect("reachable by construction");
+            carry_out = inputs.get(CARRY_IN_PIN).copied().unwrap_or(false) as usize;
+            chosen[k] = inputs;
+        }
+        for (k, &node) in chain.iter().enumerate() {
+            for &e in self.out_edges[node].iter().flatten() {
+                if !self.is_carry_link(e) {
+                    regs[e].remove(0);
+                }
+            }
+            for (pin, e) in self.in_edges[node].iter().enumerate() {
+                if let Some(e) = *e {
+                    if !self.is_carry_link(e) && !matches!(self.edges[e].origin, Origin::Const(..))
+                    {
+                        regs[e].push(chosen[k][pin]);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Inputs of `node` for which its outputs take the `wanted` values
-    /// (`None`: any), fewest ones first; constant inputs keep their value
-    fn preimage(&self, node: usize, wanted: &[Option<bool>]) -> Option<Vec<bool>> {
+    /// (`None`: any), agreeing with the registers already on sibling edges
+    /// where they can ([`Self::preferred_value`]), then fewest ones first;
+    /// constant inputs keep their value
+    fn preimage(
+        &self,
+        node: usize,
+        wanted: &[Option<bool>],
+        regs: &[Vec<bool>],
+    ) -> Option<Vec<bool>> {
         let cell = self.cell(node);
         let primitive = primitive_for_cell(cell);
         let pins = &self.in_edges[node];
@@ -2204,17 +2549,11 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        let candidates: Vec<Vec<bool>> = if free.len() > MAX_BACKWARD_INPUTS {
-            vec![vec![false; free.len()], vec![true; free.len()]]
-        } else {
-            let mut masks: Vec<u32> = (0..1u32 << free.len()).collect();
-            masks.sort_by_key(|m| (m.count_ones(), *m));
-            masks
-                .into_iter()
-                .map(|mask| (0..free.len()).map(|bit| mask >> bit & 1 == 1).collect())
-                .collect()
-        };
-        candidates.into_iter().find_map(|values| {
+        let prefer: Vec<Option<bool>> = free
+            .iter()
+            .map(|&pin| pins[pin].and_then(|e| self.preferred_value(e, regs)))
+            .collect();
+        input_candidates(&prefer).into_iter().find_map(|values| {
             let mut inputs = base.clone();
             for (&pin, value) in free.iter().zip(values) {
                 inputs[pin] = value;
@@ -2290,9 +2629,20 @@ struct Plan {
 }
 
 impl Plan {
-    /// Replace the movable registers with the retimed ones. Returns the
-    /// number of registers placed.
-    fn apply(self, netlist: &mut GateNetlist) -> usize {
+    /// Replace the movable registers with the retimed ones. Returns each
+    /// old cell's new id and the ids of the registers added.
+    fn apply(self, netlist: &mut GateNetlist) -> (Vec<Option<CellId>>, std::ops::Range<usize>) {
+        // New registers take names no cell has yet (an earlier retiming of
+        // the same regions named its own the same way)
+        let taken: HashSet<String> = netlist.cells.iter().map(|c| c.path.clone()).collect();
+        let mut serial = 0usize;
+        let mut fresh = |prefix: &str| loop {
+            let path = format!("{prefix}.retime{serial}");
+            serial += 1;
+            if !taken.contains(&path) {
+                break path;
+            }
+        };
         // Registers on one net share a chain while their values agree:
         // (net, value) -> the register output holding it
         let mut chains: HashMap<(GateNetId, bool), GateNetId> = HashMap::new();
@@ -2304,7 +2654,7 @@ impl Plan {
                 net = match chains.get(&(net, value)) {
                     Some(&q) => q,
                     None => {
-                        let path = format!("{}.retime{}", edge.prefix, new_cells.len());
+                        let path = fresh(&edge.prefix);
                         let q = netlist.add_net_with_name(format!("{path}_q"));
                         let mut cell = self.template.clone();
                         cell.path = path;
@@ -2325,12 +2675,23 @@ impl Plan {
         for (cell, pin, net) in rewires {
             netlist.cells[cell.0 as usize].inputs[pin] = net;
         }
+        let mut next = 0u32;
+        let cell_map: Vec<Option<CellId>> = netlist
+            .cells
+            .iter()
+            .map(|c| {
+                (!self.removed.contains(&c.id)).then(|| {
+                    next += 1;
+                    CellId(next - 1)
+                })
+            })
+            .collect();
         netlist.cells.retain(|c| !self.removed.contains(&c.id));
-        let placed = new_cells.len();
+        let added = netlist.cells.len()..netlist.cells.len() + new_cells.len();
         netlist.cells.extend(new_cells);
         netlist.rebuild_net_connectivity();
         netlist.rebuild_cache();
-        placed
+        (cell_map, added)
     }
 }
 
@@ -2502,6 +2863,25 @@ fn cone_of(netlist: &GateNetlist, regions: &[String], region: &str) -> HashSet<C
         }
     }
     keep
+}
+
+/// The longest path through `regions` that retiming times (from a movable
+/// register, or into the regions' logic from something that stays put)
+/// with `delays` and the registers where they are: its delay in ps, then
+/// where it starts and the cells along it. `None` when the regions have
+/// nothing to retime.
+pub fn longest_path(
+    netlist: &GateNetlist,
+    delays: &dyn RetimeDelays,
+    regions: &[String],
+) -> Option<(i64, Vec<String>)> {
+    let graph = Graph::build(netlist, regions, delays, None)?;
+    let zero = vec![0i64; graph.nodes.len()];
+    let mut steps = graph.critical_path(&zero, delays);
+    if !steps.is_empty() {
+        steps.remove(0);
+    }
+    Some((graph.period(&zero, delays), steps))
 }
 
 /// Retime the netlist's own regions ([`GateNetlist::retime_regions`]) as

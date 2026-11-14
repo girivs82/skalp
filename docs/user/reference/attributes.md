@@ -833,10 +833,22 @@ What happens:
    (no reset or enable) move, a carry chain moves as one block, and each
    register's initial value is carried through the logic it crosses (a
    backward move is only made when some inputs give the values it needs),
-   so the result matches simulation from the first cycle. Registers can
-   also move back out of the entity into logic feeding it, when that logic
-   is retimable too (see [`#[retime]`](#retime)). Nexus place and route
-   retimes again with the device's own delays.
+   so the result matches simulation from the first cycle. A carry chain
+   moves back as one: its cells' inputs are chosen together, so each carry
+   in is one the cell before can give. Registers can also move back out of
+   the entity into logic feeding it, when that logic is retimable too (see
+   [`#[retime]`](#retime)).
+3. **In Nexus place and route**, the regions are retimed again with the
+   device's cell delays before placement, and once more after placement
+   with each connection's delay from where its ends were placed: two cells
+   twenty tiles apart cost what that route costs, not a typical estimate.
+   The second pass aims at the clock's period, so it changes nothing when
+   the placed design already meets it. Latency stays as chosen. A register
+   left where it was keeps its site; a new one goes on a free flip-flop in
+   the tile of the cell driving it (the one that cell reaches fastest,
+   such as the register beside a LUT), or the nearest free one whose
+   control set fits. The log line `retimed after placement` gives the
+   longest path before and after.
 
 Rules:
 
@@ -844,7 +856,12 @@ Rules:
   body's latency is an error.
 - The entity needs exactly one clock, and no `inout` ports.
 - Retiming never adds registers beyond the N − L the wrapper added; it only
-  moves them, and every loop keeps its register count. To find which entity
+  moves them, and every loop keeps its register count.
+- Registers keep their initial values, so a register can't move back
+  through a cell when no inputs give the values the registers after it
+  hold (two of its loads start with different values, say). Such a cell
+  holds registers after it where they are; the log names it at debug
+  level. To find which entity
   a too-long path runs through, read the "by instance" breakdown under the
   critical path in the `skalp pnr` report.
 

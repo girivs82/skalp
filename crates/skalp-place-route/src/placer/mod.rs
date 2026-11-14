@@ -13,6 +13,7 @@ mod constraints;
 pub mod control_sets;
 mod detail;
 mod legalization;
+mod retime;
 mod sites;
 mod spreading;
 pub(crate) mod timing_estimate;
@@ -24,6 +25,7 @@ pub use constraints::{
     PullResistor, PullType, RegionConstraint,
 };
 pub use legalization::Legalizer;
+pub use retime::{placed_retime_target, PlacedRetimeDelays, PlacedRetiming};
 
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::{BelType, Device, TileType};
@@ -170,6 +172,13 @@ pub struct PlacerConfig {
     /// `None`: [`DEFAULT_TILE_FILL`], or more if the design needs it to fit
     /// ([`Placer::fill_limit`]).
     pub max_tile_fill: Option<f64>,
+    /// Retime the `#[pipeline]` and `#[retime]` regions again once cells are
+    /// placed, with each connection's placed delay ([`Placer::retime_placed`])
+    pub retime_after_placement: bool,
+    /// Clock frequency (MHz) retiming after placement aims at, when it is
+    /// faster than what the regions' clock is timed at (the frequency
+    /// `#[pipeline]` latencies were chosen for, say)
+    pub retime_target_mhz: Option<f64>,
 }
 
 /// How full placement fills a tile's BELs of each type when the design
@@ -197,6 +206,8 @@ impl Default for PlacerConfig {
             parallel: false, // Default to serial for determinism
             parallel_batch_size: 64,
             max_tile_fill: None,
+            retime_after_placement: true,
+            retime_target_mhz: None,
         }
     }
 }

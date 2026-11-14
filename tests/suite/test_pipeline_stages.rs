@@ -318,6 +318,158 @@ async fn test_retime_across_the_unit_boundary_keeps_behaviour() {
     }
 }
 
+/// What retiming after placement did to the retime fixture
+#[derive(Default)]
+struct PlacedRetimeOutcome {
+    cells_crossed: usize,
+    added: usize,
+    kept_in_place: usize,
+    beside_driver: usize,
+    period_before_ps: i64,
+    period_after_ps: i64,
+}
+
+/// Cell delays a fifth of [`LevelDelays`](skalp_lir::retime::LevelDelays)
+/// and no routing estimate of their own, so the placed connection delays
+/// (tens of ps a tile on the synthetic device) set the timing, as routing
+/// does on silicon, and the registers synthesis balanced by logic levels are
+/// out of balance as placed
+struct FastCells;
+
+impl skalp_lir::retime::RetimeDelays for FastCells {
+    fn arc_ps(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+        output: usize,
+    ) -> Option<i64> {
+        skalp_lir::retime::RetimeDelays::arc_ps(
+            &skalp_lir::retime::LevelDelays,
+            cell,
+            input,
+            output,
+        )
+        .map(|ps| ps / 5)
+    }
+    fn clk_to_q_ps(&self) -> i64 {
+        20
+    }
+    fn setup_ps(&self) -> i64 {
+        0
+    }
+    fn net_ps(&self, _fanout: usize) -> i64 {
+        0
+    }
+}
+
+/// Place the netlist on a Nexus device, retime it with the placed
+/// connection delays, and check the placement it comes back with: every
+/// cell on a BEL of its own, flip-flops sharing a control group only with
+/// matching control sets
+fn place_and_retime(
+    netlist: skalp_lir::gate_netlist::GateNetlist,
+    outcome: &std::sync::Mutex<PlacedRetimeOutcome>,
+) -> skalp_lir::gate_netlist::GateNetlist {
+    use skalp_place_route::placer::control_sets::{control_set_conflicts, control_sets};
+    use skalp_place_route::{CellPacker, NexusDevice, NexusVariant, Placer, PlacerConfig};
+
+    assert!(
+        !netlist.retime_regions.is_empty(),
+        "the fixture has no retiming regions"
+    );
+    let device = NexusDevice::new(NexusVariant::Lifcl40);
+    let mut placer = Placer::new(PlacerConfig::default(), device.clone());
+    let packing = CellPacker::new(&netlist).pack();
+    let placement = if packing.carry_chains.is_empty() {
+        placer.place(&netlist)
+    } else {
+        placer.place_with_carry_chains(&netlist, &packing.carry_chains)
+    }
+    .expect("placement");
+    let found = placer
+        .retime_placed(&netlist, &placement, &FastCells, None)
+        .expect("retiming after placement")
+        .expect("placed delays left nothing to retime");
+
+    let retimed = &found.netlist;
+    for (old, new) in found.report.cell_map.iter().enumerate() {
+        if let Some(new) = new {
+            assert_eq!(
+                placement.get(skalp_lir::gate_netlist::CellId(old as u32)),
+                found.placement.get(*new),
+                "{} moved",
+                retimed.cells[new.0 as usize].path
+            );
+        }
+    }
+    let mut owner = std::collections::HashMap::new();
+    for index in found.report.added.clone() {
+        let cell = &retimed.cells[index];
+        assert!(
+            found.placement.get(cell.id).is_some(),
+            "{} was not placed",
+            cell.path
+        );
+    }
+    for (cell, loc) in found.placement.cells() {
+        if let Some(other) = owner.insert((loc.tile_x, loc.tile_y, loc.bel_index), *cell) {
+            panic!(
+                "{} and {} share a BEL",
+                retimed.cells[other.0 as usize].path, retimed.cells[cell.0 as usize].path
+            );
+        }
+    }
+    let conflicts = control_set_conflicts(&device, &found.placement, &control_sets(retimed));
+    assert!(conflicts.is_empty(), "control sets mixed: {conflicts:?}");
+
+    *outcome.lock().unwrap() = PlacedRetimeOutcome {
+        cells_crossed: found.report.cells_crossed,
+        added: found.report.added.len(),
+        kept_in_place: found.kept_in_place,
+        beside_driver: found.beside_driver,
+        period_before_ps: found.report.period_before_ps,
+        period_after_ps: found.report.period_after_ps,
+    };
+    found.netlist
+}
+
+/// Retiming again after placement, with each connection's placed delay,
+/// shortens the longest register path, leaves every kept cell where it
+/// was, places the registers it adds legally, mostly beside the logic
+/// driving them, and keeps the design's behaviour cycle for cycle: the
+/// pipelined unit still matches the unpipelined one delayed (and the fault
+/// twin, compared one cycle off, still trips)
+#[tokio::test]
+async fn test_retiming_after_placement_keeps_behaviour() {
+    let path = fixture_path("pipeline_stages_check.sk");
+    for (top, expected) in [("PipelineStagesCheck", 0b10), ("PipelineStagesFault", 0b11)] {
+        let outcome = std::sync::Mutex::new(PlacedRetimeOutcome::default());
+        let pass = |netlist| place_and_retime(netlist, &outcome);
+        let mut tb = Testbench::gate_level_with_netlist_pass(&path, top, "nexus", &pass)
+            .await
+            .unwrap();
+        tb.clock(1_000).await;
+        let flags = tb.get_u64("led").await & 0b11;
+        assert_eq!(flags, expected, "{top}: flags {flags:#b}");
+
+        let outcome = outcome.into_inner().unwrap();
+        assert!(outcome.cells_crossed > 0, "{top}: no register moved");
+        assert!(
+            outcome.period_after_ps < outcome.period_before_ps,
+            "{top}: the longest path did not shorten: {} -> {} ps",
+            outcome.period_before_ps,
+            outcome.period_after_ps
+        );
+        assert!(
+            outcome.kept_in_place + outcome.beside_driver > outcome.added / 2,
+            "{top}: most new registers were placed away from their logic: {} kept, {} beside, of {}",
+            outcome.kept_in_place,
+            outcome.beside_driver,
+            outcome.added
+        );
+    }
+}
+
 /// The flattened, synthesized retime fixture
 fn retime_fixture_netlist() -> (skalp_lir::gate_netlist::GateNetlist, Vec<String>) {
     let mut mir = compile(std::path::Path::new(&fixture_path(
