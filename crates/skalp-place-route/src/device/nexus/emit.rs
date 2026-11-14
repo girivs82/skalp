@@ -969,16 +969,9 @@ fn write_block_ram_init(
             words.len()
         ))
     })?;
-    let (base, unconfirmed) =
+    let base =
         super::prjoxide_load::block_ram_init_address(config.db_root, config.variant, wid as u32)
             .map_err(emit_err)?;
-    if unconfirmed {
-        log::warn!(
-            "{}: block RAM contents placed where other Nexus devices keep them; \
-             neither prjoxide nor a silicon check has located them on this device",
-            config.variant.prjoxide_device()
-        );
-    }
     let db = load_iptype(config.db_root, config.family, ebr::INIT_IPTYPE)
         .map_err(emit_err)?
         .ok_or_else(|| {
