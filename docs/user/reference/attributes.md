@@ -900,7 +900,10 @@ name the entity.
 Only paths the entity's stages can shorten decide its latency. A too-long
 path that starts or ends outside the entity's retimable logic (say, from
 an arbiter in front of it into a register behind it) is printed as a
-warning naming the instances it runs through. If no latency up to the
+warning naming the instances it runs through. So is one through the
+entity's own logic between registers that stay put (registers with a reset
+or enable, or on a loop such as a state machine's): no stages reach it, and
+the warning says to split that logic. If no latency up to the
 limit meets the clock, the error names the path, says whether it enters
 from outside, and suggests `#[retime]` or `#[pipeline]` for the entities it
 runs through.
