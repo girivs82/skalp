@@ -635,7 +635,16 @@ impl<'a> MirToSirConverter<'a> {
             self.convert_combinational_block(&process.body.statements);
         }
 
-        for process in sequential_processes {
+        // An async module's `on()` block takes one write per handshake
+        // request (see skalp_mir::ncl_bridge::handshake_clocked_process)
+        let handshake: Vec<skalp_mir::Process> = sequential_processes
+            .iter()
+            .map(|p| {
+                skalp_mir::ncl_bridge::handshake_clocked_process(self.mir, p)
+                    .unwrap_or_else(|| (*p).clone())
+            })
+            .collect();
+        for process in &handshake {
             match &process.kind {
                 ProcessKind::Sequential => {
                     if let SensitivityList::Edge(edges) = &process.sensitivity {
@@ -8253,6 +8262,10 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) {
+        // An async child's `on()` block takes one write per handshake request
+        let handshake = skalp_mir::ncl_bridge::handshake_clocked_process(child_module, process);
+        let process = handshake.as_ref().unwrap_or(process);
+
         // For sequential processes, we need to:
         // 1. Extract clock edge from sensitivity list
         // 2. Map the clock/reset signals through port connections

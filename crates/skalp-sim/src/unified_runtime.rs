@@ -432,7 +432,43 @@ impl UnifiedSimulator {
                 ),
                 _ => false,
             });
+        // Nor does it follow clocks the design's logic makes: it watches
+        // input clocks only
+        let input_ids: std::collections::HashSet<u32> = top
+            .signals
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.signal_type,
+                    crate::sir::SirSignalType::Port {
+                        direction: crate::sir::SirPortDirection::Input
+                    }
+                )
+            })
+            .map(|s| s.id.0)
+            .collect();
+        let buffered_inputs: std::collections::HashSet<u32> = top
+            .comb_blocks
+            .iter()
+            .flat_map(|b| b.operations.iter())
+            .filter_map(|op| match op {
+                crate::sir::SirOperation::Primitive {
+                    ptype: skalp_lir::lir::PrimitiveType::ClkBuf,
+                    inputs,
+                    outputs,
+                    ..
+                } if inputs.first().is_some_and(|i| input_ids.contains(&i.0)) => {
+                    outputs.first().map(|o| o.0)
+                }
+                _ => None,
+            })
+            .collect();
+        let has_internal_clock = top
+            .seq_blocks
+            .iter()
+            .any(|b| !input_ids.contains(&b.clock.0) && !buffered_inputs.contains(&b.clock.0));
         let use_gpu = !has_memory
+            && !has_internal_clock
             && match self.config.hw_accel {
                 HwAccel::Cpu => false,
                 HwAccel::Gpu => true,

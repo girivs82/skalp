@@ -124,6 +124,52 @@ fn reaching<D: Device + ?Sized>(
     seen
 }
 
+/// The PIPs of a shortest path from one of the wires `from` to `sink`, off
+/// the wires of `tree` (they have a driver already) and of other nets.
+fn branch_from<D: Device + ?Sized>(
+    device: &D,
+    from: &[WireId],
+    tree: &HashSet<WireId>,
+    sink: WireId,
+    other_nets: &HashMap<WireId, GateNetId>,
+) -> Option<Vec<PipId>> {
+    if from.contains(&sink) {
+        return Some(Vec::new());
+    }
+    let mut came_from: HashMap<WireId, PipId> = HashMap::new();
+    let mut seen: HashSet<WireId> = tree.clone();
+    seen.extend(from.iter().copied());
+    let mut queue: VecDeque<WireId> = from.iter().copied().collect();
+    let starts: HashSet<WireId> = from.iter().copied().collect();
+    while let Some(wire) = queue.pop_front() {
+        if wire == sink {
+            let mut path = Vec::new();
+            let mut cursor = wire;
+            while !starts.contains(&cursor) {
+                let &pip = came_from.get(&cursor)?;
+                path.push(pip);
+                cursor = device.pip(pip)?.src_wire;
+            }
+            path.reverse();
+            return Some(path);
+        }
+        if seen.len() > MAX_ENTRY_SEARCH {
+            return None;
+        }
+        for &pip_id in device.wire_src_pips(wire) {
+            let Some(pip) = device.pip(pip_id) else {
+                continue;
+            };
+            if other_nets.contains_key(&pip.dst_wire) || !seen.insert(pip.dst_wire) {
+                continue;
+            }
+            came_from.insert(pip.dst_wire, pip_id);
+            queue.push_back(pip.dst_wire);
+        }
+    }
+    None
+}
+
 /// Most entry points tried before a clock net is left to general routing.
 const MAX_ENTRY_TRIES: usize = 32;
 /// Most wires searched for an entry point.
@@ -238,6 +284,9 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         route.source = source;
         let mut tree = HashSet::from_iter([source]);
         let mut reached = reach_from(device, source, &owners);
+        // The fabric wires from the source to the network, when it has no
+        // dedicated path of its own
+        let mut stem: Vec<WireId> = Vec::new();
         if !sinks.iter().all(|s| reached.contains_key(s)) {
             // No dedicated path from the source itself: enter the network
             // through the fabric.
@@ -257,6 +306,17 @@ pub fn route_clock_nets<D: Device + ?Sized>(
                 device.wire(entry).map_or("?", |w| w.name.as_str()),
                 entry_path.len()
             );
+            log::debug!(
+                "clock net '{}' fabric entry from {}: {}",
+                net.name,
+                device.wire(source).map_or("?", |w| w.name.as_str()),
+                entry_path
+                    .iter()
+                    .filter_map(|&p| device.pip(p))
+                    .filter_map(|p| device.wire(p.dst_wire).map(|w| w.name.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            );
             for pip_id in entry_path {
                 let Some(pip) = device.pip(pip_id) else {
                     continue;
@@ -265,6 +325,7 @@ pub fn route_clock_nets<D: Device + ?Sized>(
                 route.pips.push(pip_id);
                 route.wires.push(pip.dst_wire);
                 tree.insert(pip.dst_wire);
+                stem.push(pip.dst_wire);
             }
             reached = entry_reached;
         }
@@ -311,6 +372,41 @@ pub fn route_clock_nets<D: Device + ?Sized>(
             }
             route.sinks.push(sink);
             routing.dedicated_inputs.insert((cell, pin));
+        }
+        // A source that enters the network through the fabric usually has a
+        // single way out of its tile, and the stem now holds it, so the
+        // general router could not reach the net's other inputs (logic that
+        // also reads a clock made in the fabric). Branch them off the stem
+        // here.
+        if !stem.is_empty() {
+            let mut from: Vec<WireId> = vec![source];
+            from.extend(stem.iter().copied());
+            for &(cell, pin) in net.fanout.iter().filter(|(_, pin)| !is_clock_pin(*pin)) {
+                if routing.dedicated_inputs.contains(&(cell, pin)) {
+                    continue;
+                }
+                let Some(sink) = clock_pin_wire(device, placement, cell, CellPin::Input(pin))
+                else {
+                    continue;
+                };
+                let Some(path) = branch_from(device, &from, &tree, sink, &owners) else {
+                    return Err(PlaceRouteError::RoutingFailed(format!(
+                        "Clock net '{}' enters the clock network through the fabric, and one of its other inputs cannot be reached from that path",
+                        net.name
+                    )));
+                };
+                for pip_id in path {
+                    let Some(pip) = device.pip(pip_id) else {
+                        continue;
+                    };
+                    route.pips.push(pip_id);
+                    route.wires.push(pip.dst_wire);
+                    tree.insert(pip.dst_wire);
+                    from.push(pip.dst_wire);
+                }
+                route.sinks.push(sink);
+                routing.dedicated_inputs.insert((cell, pin));
+            }
         }
         route.wires.push(source);
         for &wire in &tree {

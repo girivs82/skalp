@@ -2854,6 +2854,113 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     }
 }
 
+/// Bundled-data lowering of an async instance driven by a clocked parent.
+///
+/// The parent drives the instance with a four-phase handshake on the
+/// implicit `ncl_req`/`ncl_ack` ports (see `skalp_mir::ncl_bridge`): it holds
+/// the data inputs stable from before it raises `ncl_req` until `ncl_ack`
+/// falls again. The data ports therefore stay single-rail and `ncl_req` is
+/// the bundling signal:
+///
+/// ```text
+/// go      = ncl_req & delay(ncl_req)   // rises after the data paths settle,
+///                                      // falls as soon as the request does
+/// regs   <= next state   on go rising  // `on()` registers of the block
+/// ncl_ack = go & delay(go)             // with registers: after their outputs
+/// ncl_ack = go                         // without registers
+/// ```
+///
+/// Each `x & delay(x)` is a [`LirOp::NclMatchedDelay`], sized after mapping
+/// to cover the block's data paths.
+pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
+    use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
+
+    let mut new_lir = lir.clone();
+    new_lir.is_ncl = true;
+
+    let find = |ids: &[LirSignalId], name: &str| {
+        ids.iter()
+            .copied()
+            .find(|id| new_lir.signals[id.0 as usize].name == name)
+    };
+    let (Some(req), Some(ack)) = (
+        find(&new_lir.inputs, NCL_REQ_PORT),
+        find(&new_lir.outputs, NCL_ACK_PORT),
+    ) else {
+        // Not an async entity with the handshake ports (cannot happen for a
+        // frontend-built design); leave it untouched.
+        return NclExpandResult {
+            lir: new_lir,
+            dual_rail_map: IndexMap::new(),
+            stage_completions: Vec::new(),
+        };
+    };
+
+    // go = req & delay(req)
+    let go = new_lir.add_signal("__ncl_go".to_string(), 1);
+    new_lir.add_node(
+        LirOp::NclMatchedDelay { width: 1 },
+        vec![req],
+        go,
+        "ncl_bundle.go".to_string(),
+    );
+
+    // `on()` registers update when `go` rises
+    let mut has_regs = false;
+    for node in new_lir.nodes.iter_mut() {
+        if let LirOp::NclReg { width } = node.op {
+            has_regs = true;
+            node.op = LirOp::Reg {
+                width,
+                has_enable: false,
+                has_reset: false,
+                async_reset: false,
+                reset_value: Some(0),
+            };
+            node.clock = Some(go);
+        }
+    }
+
+    // done = go & delay(go): the registers' new outputs have settled
+    let done = if has_regs {
+        let done = new_lir.add_signal("__ncl_done".to_string(), 1);
+        new_lir.add_node(
+            LirOp::NclMatchedDelay { width: 1 },
+            vec![go],
+            done,
+            "ncl_bundle.done".to_string(),
+        );
+        done
+    } else {
+        go
+    };
+
+    // ncl_ack follows `done` instead of the behavioural `ncl_ack = ncl_req`
+    match new_lir.signals[ack.0 as usize].driver {
+        Some(driver) => {
+            let node = &mut new_lir.nodes[driver.0 as usize];
+            node.op = LirOp::Buffer { width: 1 };
+            node.inputs = vec![done];
+            node.clock = None;
+            node.reset = None;
+        }
+        None => {
+            new_lir.add_node(
+                LirOp::Buffer { width: 1 },
+                vec![done],
+                ack,
+                "ncl_bundle.ack".to_string(),
+            );
+        }
+    }
+
+    NclExpandResult {
+        lir: new_lir,
+        dual_rail_map: IndexMap::new(),
+        stage_completions: Vec::new(),
+    }
+}
+
 /// Apply boundary-only NCL to async modules in a hierarchical LIR result.
 ///
 /// Uses approach 3 for NCL boundary detection:
@@ -2929,7 +3036,34 @@ pub fn apply_boundary_ncl_to_hierarchy(
             instance.is_async && !parent_is_async(path)
         };
 
-        if needs_ncl_boundary {
+        // Under a clocked parent the instance is driven through its
+        // `ncl_req`/`ncl_ack` handshake (bundled data, single-rail ports);
+        // the top of the design keeps dual-rail ports.
+        let bridged = needs_ncl_boundary
+            && instance.is_async
+            && child_to_parent.contains_key(path.as_str())
+            && !parent_is_async(path);
+
+        if bridged {
+            let ncl_result = expand_to_ncl_bridged(&instance.lir_result.lir);
+            new_instances.insert(
+                path.clone(),
+                InstanceLirResult {
+                    module_name: instance.module_name.clone(),
+                    lir_result: MirToLirResult {
+                        lir: ncl_result.lir,
+                        stats: instance.lir_result.stats.clone(),
+                        warnings: instance.lir_result.warnings.clone(),
+                        compiled_ip_path: instance.lir_result.compiled_ip_path.clone(),
+                        blackbox_info: instance.lir_result.blackbox_info.clone(),
+                    },
+                    port_connections: instance.port_connections.clone(),
+                    children: instance.children.clone(),
+                    is_async: instance.is_async,
+                    ncl_boundary_mode: instance.ncl_boundary_mode,
+                },
+            );
+        } else if needs_ncl_boundary {
             ncl_boundary_instances.push(path.clone());
 
             // Apply boundary NCL

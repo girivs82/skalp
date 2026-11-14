@@ -82,6 +82,11 @@ pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 
+/// `source_op` of the buffer cells that make up a matched delay of a
+/// bundled-data async block (`LirOp::NclMatchedDelay`). Their delay is the
+/// point of them, so no optimization may remove or merge them.
+pub const MATCHED_DELAY_OP: &str = "NclMatchedDelay";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -152,6 +157,12 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// Whether optimization must leave this cell as it is (the buffers of a
+    /// matched delay: removing or merging them would shorten the delay)
+    pub fn is_kept(&self) -> bool {
+        self.source_op.as_deref() == Some(MATCHED_DELAY_OP)
+    }
+
     /// Number of variables of this cell's truth table, if it is a LUT whose
     /// table can be rewritten (at most 6 inputs). LUT4-sized cells with fewer
     /// inputs keep a 4-variable table, with the unused inputs as don't-cares.

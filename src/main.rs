@@ -4483,6 +4483,7 @@ fn synthesize_design(
     // Hierarchical synthesis: each module independently, then flatten
     let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
+    size_ncl_matched_delays(&mut gate_netlist, &library);
     if family == "nexus" {
         // Pads go in before the netlist is saved, so `skalp pnr` on the saved
         // netlist gets the same pins (and the on-chip clock) as the full flow.
@@ -4674,7 +4675,17 @@ fn run_nexus_pnr_on_netlist(
     println!("Preset: {}", preset);
     println!();
     println!("Running placement and routing...");
-    let result = place_and_route_nexus_for_cli(gate_netlist, nexus, config)?;
+    let mut netlist = gate_netlist.clone();
+    let mut result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
+    // Matched delays of async blocks that routing made too short: lengthen
+    // them by the shortfall and place and route again
+    for _ in 0..4 {
+        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
+            break;
+        }
+        result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
+    }
+    let gate_netlist = &netlist;
 
     println!("Placement:");
     println!("  Cells placed: {}", result.placement.placements.len());
@@ -4736,6 +4747,18 @@ fn run_nexus_pnr_on_netlist(
                 }
             }
         }
+        for b in &timing.bundles {
+            println!(
+                "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers)",
+                b.block,
+                b.times,
+                if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
+                b.slack_ns.abs(),
+                b.data_ns,
+                b.control_ns,
+                b.chain_len
+            );
+        }
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -4755,6 +4778,40 @@ fn run_nexus_pnr_on_netlist(
     let pins_path = bit_path.with_extension("pins.json");
     fs::write(&pins_path, serde_json::to_string_pretty(&driven)?)?;
     Ok(())
+}
+
+/// Lengthen each matched delay that routed timing found too short, by its
+/// shortfall (from the delay its chain has per buffer) plus a margin.
+/// Returns whether any changed.
+fn lengthen_short_matched_delays(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    timing: Option<&skalp_place_route::timing::TimingReport>,
+) -> bool {
+    let Some(timing) = timing else {
+        return false;
+    };
+    let matched = skalp_lir::ncl_bundle::find_matched_delays(netlist);
+    let mut changed = false;
+    for b in timing.bundles.iter().filter(|b| b.slack_ns < 0.0) {
+        let Some(md) = matched
+            .iter()
+            .find(|m| netlist.cells[m.and_cell.0 as usize].path == b.delay)
+        else {
+            continue;
+        };
+        // The control arrives after the chain plus the AND; spread that over
+        // the cells to get the delay one more buffer adds
+        let per_buffer_ns = (b.control_ns / (md.chain.len() + 1) as f64).max(0.1);
+        let shortfall_ns = -b.slack_ns * 1.25;
+        let count = (shortfall_ns / per_buffer_ns).ceil() as usize + 1;
+        println!(
+            "NCL: matched delay {} ({}) is {:.2} ns short after routing; adding {} buffer(s) and placing again",
+            b.block, b.times, -b.slack_ns, count
+        );
+        skalp_lir::ncl_bundle::extend_matched_delay(netlist, md, count);
+        changed = true;
+    }
+    changed
 }
 
 /// The balls a Nexus build drives for its reference-voltage inputs.
@@ -8176,6 +8233,28 @@ fn run_signal_trace(
     }
 
     Ok(())
+}
+
+/// Size the matched delays of bundled-data async instances (estimated with
+/// the library's delays; place and route checks them with routed delays)
+fn size_ncl_matched_delays(netlist: &mut skalp_lir::GateNetlist, library: &skalp_lir::TechLibrary) {
+    let delays = skalp_lir::ncl_bundle::LibraryDelays::new(library);
+    let report = skalp_lir::ncl_bundle::size_matched_delays(netlist, &delays, 50);
+    if report.checks.is_empty() {
+        return;
+    }
+    let worst = report.checks.iter().min_by_key(|c| c.slack_ps());
+    println!(
+        "NCL: {} matched-delay check(s), {} delay buffer(s) added{}",
+        report.checks.len(),
+        report.buffers_added,
+        worst.map_or(String::new(), |c| format!(
+            ", tightest {} of {} by {:.2} ns (estimate)",
+            c.times,
+            c.prefix.trim_end_matches('.'),
+            c.slack_ps() as f64 / 1000.0
+        ))
+    );
 }
 
 /// Refuse a gate netlist with a net that feeds cells but has no driver, or

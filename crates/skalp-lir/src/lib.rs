@@ -37,6 +37,7 @@ pub mod hierarchical_netlist;
 pub mod known_bits;
 pub mod lir;
 pub mod mir_to_lir;
+pub mod ncl_bundle;
 pub mod ncl_constraints;
 pub mod ncl_expand;
 pub mod ncl_optimizer;

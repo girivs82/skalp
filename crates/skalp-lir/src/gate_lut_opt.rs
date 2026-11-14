@@ -110,6 +110,9 @@ fn eliminate_buffer_luts(netlist: &mut GateNetlist) -> LutOptStats {
     };
 
     for cell in &netlist.cells {
+        if cell.is_kept() {
+            continue;
+        }
         let init = match cell.lut_init {
             Some(init) if cell.inputs.len() <= 4 => init & 0xFFFF, // LUT4
             _ => continue,
@@ -328,7 +331,11 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
     let mut already_merged: HashSet<CellId> = HashSet::new();
 
     for cell_a in &netlist.cells {
-        if cell_a.lut_init.is_none() || cell_a.outputs.is_empty() || cell_a.inputs.len() > 4 {
+        if cell_a.lut_init.is_none()
+            || cell_a.outputs.is_empty()
+            || cell_a.inputs.len() > 4
+            || cell_a.is_kept()
+        {
             continue;
         }
         if already_merged.contains(&cell_a.id) {
@@ -359,7 +366,7 @@ fn combine_lut_pairs(netlist: &mut GateNetlist) -> LutOptStats {
         };
         let cell_b = &netlist.cells[cell_b_idx];
 
-        if cell_b.lut_init.is_none() || cell_b.inputs.len() > 4 {
+        if cell_b.lut_init.is_none() || cell_b.inputs.len() > 4 || cell_b.is_kept() {
             continue;
         }
 
@@ -576,7 +583,7 @@ pub(crate) fn remove_flat_buffers(netlist: &mut GateNetlist) -> usize {
     let mut replace: HashMap<GateNetId, GateNetId> = HashMap::new();
     let mut removed: HashSet<CellId> = HashSet::new();
     for cell in &netlist.cells {
-        if !is_buffer_cell(cell) {
+        if !is_buffer_cell(cell) || cell.is_kept() {
             continue;
         }
         let (input, output) = (cell.inputs[0], cell.outputs[0]);
@@ -632,7 +639,7 @@ fn absorb_flat_inverters(netlist: &mut GateNetlist) -> usize {
         return 0;
     }
     for cell in &mut netlist.cells {
-        if !is_rewritable_lut(cell) || inverters.contains_key(&cell.outputs[0]) {
+        if !is_rewritable_lut(cell) || cell.is_kept() || inverters.contains_key(&cell.outputs[0]) {
             continue;
         }
         for pin in 0..cell.inputs.len() {

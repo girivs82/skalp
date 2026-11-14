@@ -2073,9 +2073,11 @@ pub fn absorb_inverters_into_luts(netlist: &mut GateNetlist) -> usize {
         };
 
         // ALL consumers must be LUT cells (have lut_init)
-        let all_consumers_are_luts = consumer_list
-            .iter()
-            .all(|&(ci, pin)| pin < RESET_PIN && netlist.cells[ci].lut_variables().is_some());
+        let all_consumers_are_luts = consumer_list.iter().all(|&(ci, pin)| {
+            pin < RESET_PIN
+                && netlist.cells[ci].lut_variables().is_some()
+                && !netlist.cells[ci].is_kept()
+        });
 
         if all_consumers_are_luts {
             inv_removals.push((cell_idx, inv_input, inv_output));
@@ -2380,7 +2382,11 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
 
         for (prod_idx, cell) in netlist.cells.iter().enumerate() {
             // Must be a LUT4 cell (a wider LUT's table does not compose here)
-            if cell.lut_init.is_none() || cell.outputs.is_empty() || cell.inputs.len() > 4 {
+            if cell.lut_init.is_none()
+                || cell.outputs.is_empty()
+                || cell.inputs.len() > 4
+                || cell.is_kept()
+            {
                 continue;
             }
 
@@ -2406,7 +2412,7 @@ pub fn merge_adjacent_luts(netlist: &mut GateNetlist) -> usize {
             }
 
             let consumer = &netlist.cells[cons_idx];
-            if consumer.lut_init.is_none() || consumer.inputs.len() > 4 {
+            if consumer.lut_init.is_none() || consumer.inputs.len() > 4 || consumer.is_kept() {
                 continue; // Consumer must also be a LUT4
             }
 
