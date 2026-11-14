@@ -3191,6 +3191,47 @@ fn merge_physical_nodes_into_netlist(
                 }
             }
 
+            LirOp::NclMatchedDelay { width } => {
+                // out = in & delay(in): one kept buffer, then a kept AND of
+                // the input and the buffer. The sizing pass
+                // (`ncl_bundle::size_matched_delays`) lengthens the chain to
+                // cover the data paths the output times.
+                for i in 0..*width as usize {
+                    let a = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let chain =
+                        netlist.add_net(GateNet::new(GateNetId(0), format!("{}.mdly{}", path, i)));
+                    let mut buf = Cell::new_comb(
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.mdly{}_0", path, i),
+                        vec![a],
+                        vec![chain],
+                    );
+                    buf_cell.apply_to_cell(&mut buf);
+                    buf.source_op = Some(crate::gate_netlist::MATCHED_DELAY_OP.to_string());
+                    netlist.add_cell(buf);
+                    let mut and = Cell::new_comb(
+                        CellId(0),
+                        and2_cell.name.clone(),
+                        library.name.clone(),
+                        and2_cell.fit,
+                        format!("{}.mdly{}_and", path, i),
+                        vec![a, chain],
+                        vec![out],
+                    );
+                    and2_cell.apply_to_cell(&mut and);
+                    and.source_op = Some(crate::gate_netlist::MATCHED_DELAY_OP.to_string());
+                    netlist.add_cell(and);
+                }
+            }
+
             LirOp::NclEncode { width } => {
                 // Boundary NCL: t-rail = value, f-rail = NOT(value).
                 // The AIG already produces y_f[i] = NOT(value) as a module output.

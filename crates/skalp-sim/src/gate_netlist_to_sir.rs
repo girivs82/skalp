@@ -88,7 +88,7 @@ impl GateNetlistToSirConverter {
 
         // Create result with conversion stats
         let has_comb = netlist.cells.iter().any(|c| !c.is_sequential());
-        let has_seq = netlist.cells.iter().any(|c| c.is_sequential());
+        let seq_blocks = sir.top_module.seq_blocks.len();
 
         GateNetlistToSirResult {
             sir,
@@ -96,7 +96,7 @@ impl GateNetlistToSirConverter {
                 signals_created: self.next_signal_id as usize,
                 primitives_created: self.next_primitive_id as usize,
                 comb_blocks: if has_comb { 1 } else { 0 },
-                seq_blocks: if has_seq { 1 } else { 0 },
+                seq_blocks,
                 total_fit: self.total_fit,
             },
         }
@@ -192,9 +192,11 @@ impl GateNetlistToSirConverter {
         &mut self,
         cells: &[Cell],
         netlist: &GateNetlist,
-    ) -> (Vec<SirOperation>, Vec<SirOperation>) {
+    ) -> (Vec<SirOperation>, Vec<(Option<GateNetId>, SirOperation)>) {
         let mut comb_ops = Vec::new();
+        // Each sequential operation with the net that clocks it
         let mut seq_ops = Vec::new();
+        let clock_of = |cell: &Cell| cell.clock.map(|net| netlist.resolve_alias(net));
 
         for cell in cells {
             let primitive_id = PrimitiveId(self.next_primitive_id);
@@ -312,17 +314,20 @@ impl GateNetlistToSirConverter {
                         .collect();
                     self.memory_init.insert(ram, words);
                 }
-                seq_ops.push(SirOperation::Primitive {
-                    id: primitive_id,
-                    ptype: PrimitiveType::DistRamWrite {
-                        ram,
-                        addr_width: AW as u8,
-                        data_width: DW as u8,
+                seq_ops.push((
+                    clock_of(cell),
+                    SirOperation::Primitive {
+                        id: primitive_id,
+                        ptype: PrimitiveType::DistRamWrite {
+                            ram,
+                            addr_width: AW as u8,
+                            data_width: DW as u8,
+                        },
+                        inputs: inputs[..DW + AW + 1].to_vec(),
+                        outputs: vec![],
+                        path: cell.path.clone(),
                     },
-                    inputs: inputs[..DW + AW + 1].to_vec(),
-                    outputs: vec![],
-                    path: cell.path.clone(),
-                });
+                ));
                 let read_id = PrimitiveId(self.next_primitive_id);
                 self.next_primitive_id += 1;
                 comb_ops.push(SirOperation::Primitive {
@@ -362,7 +367,7 @@ impl GateNetlistToSirConverter {
             };
 
             if cell.is_sequential() {
-                seq_ops.push(op);
+                seq_ops.push((clock_of(cell), op));
             } else {
                 comb_ops.push(op);
             }
@@ -602,7 +607,7 @@ impl GateNetlistToSirConverter {
         &self,
         module: &mut SirModule,
         comb_ops: Vec<SirOperation>,
-        seq_ops: Vec<SirOperation>,
+        seq_ops: Vec<(Option<GateNetId>, SirOperation)>,
         netlist: &GateNetlist,
     ) {
         // Build combinational block
@@ -652,15 +657,29 @@ impl GateNetlistToSirConverter {
             module.comb_blocks.push(comb_block);
         }
 
-        // Build sequential block (if any sequential cells exist)
-        if !seq_ops.is_empty() {
-            // Find clock signal (use first clock from netlist)
-            let clock_signal = netlist
-                .clocks
-                .first()
-                .and_then(|clk_net| self.net_to_signal.get(clk_net).copied())
-                .unwrap_or(SirSignalId(0));
-
+        // One sequential block per clock: a flip-flop updates on its own
+        // clock's edges only. A cell with no clock of its own takes the
+        // design's first clock.
+        let default_clock = netlist
+            .clocks
+            .first()
+            .and_then(|clk_net| {
+                self.net_to_signal
+                    .get(&netlist.resolve_alias(*clk_net))
+                    .copied()
+            })
+            .unwrap_or(SirSignalId(0));
+        let mut by_clock: Vec<(SirSignalId, Vec<SirOperation>)> = Vec::new();
+        for (clock_net, op) in seq_ops {
+            let clock = clock_net
+                .and_then(|net| self.net_to_signal.get(&net).copied())
+                .unwrap_or(default_clock);
+            match by_clock.iter_mut().find(|(c, _)| *c == clock) {
+                Some((_, ops)) => ops.push(op),
+                None => by_clock.push((clock, vec![op])),
+            }
+        }
+        for (index, (clock_signal, operations)) in by_clock.into_iter().enumerate() {
             // No block-wide reset: each flip-flop resets through its own
             // reset pin (see `own_reset_input`), with the polarity and the
             // reset net synthesis gave it. Resetting every flip-flop on the
@@ -670,22 +689,20 @@ impl GateNetlistToSirConverter {
 
             // Collect registers (output signals of sequential cells)
             let mut registers = Vec::new();
-            for op in &seq_ops {
+            for op in &operations {
                 if let SirOperation::Primitive { outputs, .. } = op {
                     registers.extend(outputs.iter().copied());
                 }
             }
 
-            let seq_block = SequentialBlock {
-                id: SeqBlockId(0),
+            module.seq_blocks.push(SequentialBlock {
+                id: SeqBlockId(index as u32),
                 clock: clock_signal,
                 clock_edge: EdgeType::Rising,
                 reset,
                 registers,
-                operations: seq_ops,
-            };
-
-            module.seq_blocks.push(seq_block);
+                operations,
+            });
         }
     }
 

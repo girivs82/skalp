@@ -791,6 +791,23 @@ pub fn place_and_route_nexus_real(
     );
     timing.meets_timing &= hold.violations == 0;
     timing.hold = Some(hold);
+    // Matched delays of bundled-data async blocks, with routed delays at
+    // both corners: the chain and the paths it covers scale differently
+    timing.bundles = crate::timing::sta::summarize_bundles(&[
+        crate::timing::sta::check_bundles(&device, &timing_model, &design),
+        crate::timing::sta::check_bundles(&device, &fast_model, &design),
+    ]);
+    for b in &timing.bundles {
+        log::info!(
+            "nexus pnr: matched delay {} ({}) slack {:.2} ns, data {:.2} ns, delay {:.2} ns",
+            b.delay,
+            b.times,
+            b.slack_ns,
+            b.data_ns,
+            b.control_ns
+        );
+    }
+    timing.meets_timing &= timing.bundles.iter().all(|b| b.slack_ns >= 0.0);
 
     let bit_writer = NexusBitWriter {
         db_root,

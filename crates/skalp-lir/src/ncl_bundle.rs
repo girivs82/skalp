@@ -1,0 +1,498 @@
+//! Matched delays of bundled-data async blocks
+//!
+//! An async instance under a clocked parent is lowered to single-rail logic
+//! timed by matched delays (see `ncl_expand::expand_to_ncl_bridged`). Each
+//! matched delay is `out = in & delay(in)`, mapped to a chain of kept buffer
+//! cells and a kept AND (`MATCHED_DELAY_OP`). Its output times either
+//!
+//! * the registers of the block clocked by it: their data inputs, computed
+//!   from the block's inputs, must settle before the clock edge reaches them;
+//! * the block's acknowledge output: every other output of the block must
+//!   settle before the acknowledge rises.
+//!
+//! [`check_matched_delays`] measures both against a delay model: library
+//! estimates before placement ([`LibraryDelays`]), routed delays after (the
+//! place-and-route crate supplies its own [`BundleDelays`]).
+//! [`size_matched_delays`] lengthens each chain until its checks pass.
+//!
+//! All times are measured from the block's inputs, which the clocked parent
+//! holds stable from before it raises the request; the request itself is
+//! one of those inputs.
+
+use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist, MATCHED_DELAY_OP};
+use crate::tech_library::{CellFunction, TechLibrary};
+use std::collections::{HashMap, HashSet};
+
+/// One matched delay found in a netlist
+#[derive(Debug, Clone)]
+pub struct MatchedDelay {
+    /// Hierarchical prefix of the async block it belongs to (`top.u.`)
+    pub prefix: String,
+    /// The kept AND whose output is the timed control signal
+    pub and_cell: CellId,
+    /// The chain's buffers, from the source to the AND
+    pub chain: Vec<CellId>,
+    /// The net being delayed (the request, or the previous control)
+    pub source: GateNetId,
+    /// The delayed control net
+    pub control: GateNetId,
+}
+
+/// Delays a bundle check needs, in picoseconds
+pub trait BundleDelays {
+    /// Routing delay of `net` to data input `input` of `cell`
+    fn wire_ps(&self, netlist: &GateNetlist, net: GateNetId, cell: &Cell, input: usize) -> i64;
+    /// Routing delay of `net` to the clock pin of `cell`
+    fn clock_wire_ps(&self, netlist: &GateNetlist, net: GateNetId, cell: &Cell) -> i64;
+    /// Delay through `cell` from `input` to `output`, `None` if no path
+    fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64>;
+    /// Clock-to-output delay of a register
+    fn clock_to_out_ps(&self, cell: &Cell) -> i64;
+    /// Setup time of a register's data input `input`
+    fn setup_ps(&self, cell: &Cell, input: usize) -> i64;
+}
+
+/// Result of timing one matched delay
+#[derive(Debug, Clone)]
+pub struct BundleCheck {
+    /// Block prefix (`top.u.`)
+    pub prefix: String,
+    /// Path of the matched delay's AND cell
+    pub delay_path: String,
+    /// What the control times: "registers" or "acknowledge"
+    pub times: &'static str,
+    /// Latest data arrival plus setup, in picoseconds
+    pub data_ps: i64,
+    /// Arrival of the control signal, in picoseconds
+    pub control_ps: i64,
+    /// Buffers in the chain
+    pub chain_len: usize,
+}
+
+impl BundleCheck {
+    /// Control arrival minus data arrival: negative means the delay is too short
+    pub fn slack_ps(&self) -> i64 {
+        self.control_ps - self.data_ps
+    }
+}
+
+/// The block prefix a matched delay's cell path belongs to
+fn prefix_of(path: &str) -> Option<String> {
+    path.find("ncl_bundle.").map(|i| path[..i].to_string())
+}
+
+/// Find every matched delay in `netlist`
+pub fn find_matched_delays(netlist: &GateNetlist) -> Vec<MatchedDelay> {
+    let mut result = Vec::new();
+    for cell in &netlist.cells {
+        if cell.source_op.as_deref() != Some(MATCHED_DELAY_OP)
+            || !cell.path.ends_with("_and")
+            || cell.inputs.len() < 2
+            || cell.outputs.is_empty()
+        {
+            continue;
+        }
+        let Some(prefix) = prefix_of(&cell.path) else {
+            continue;
+        };
+        let source = cell.inputs[0];
+        // Walk the chain back from the AND's second input to the source
+        let mut chain = Vec::new();
+        let mut net = cell.inputs[1];
+        let mut ok = false;
+        for _ in 0..=netlist.cells.len() {
+            if net == source {
+                ok = true;
+                break;
+            }
+            let Some(driver) = netlist.nets.get(net.0 as usize).and_then(|n| n.driver) else {
+                break;
+            };
+            let Some(buf) = netlist.cells.get(driver.0 as usize) else {
+                break;
+            };
+            if !buf.is_kept() || buf.inputs.len() != 1 {
+                break;
+            }
+            chain.push(buf.id);
+            net = buf.inputs[0];
+        }
+        if !ok {
+            continue;
+        }
+        chain.reverse();
+        result.push(MatchedDelay {
+            prefix,
+            and_cell: cell.id,
+            chain,
+            source,
+            control: cell.outputs[0],
+        });
+    }
+    result
+}
+
+/// Arrival-time propagation inside one block
+struct Arrivals<'a> {
+    netlist: &'a GateNetlist,
+    delays: &'a dyn BundleDelays,
+    prefix: &'a str,
+    /// Registers launch at their clock's arrival (false: register outputs
+    /// are not timed — the previous state, stable since the last edge)
+    through_registers: bool,
+    memo: HashMap<GateNetId, Option<i64>>,
+    visiting: HashSet<GateNetId>,
+}
+
+impl Arrivals<'_> {
+    fn inside(&self, cell: &Cell) -> bool {
+        cell.path.starts_with(self.prefix)
+    }
+
+    /// Latest arrival at `net`, `None` if nothing timed reaches it
+    fn at(&mut self, net: GateNetId) -> Option<i64> {
+        if let Some(&a) = self.memo.get(&net) {
+            return a;
+        }
+        if !self.visiting.insert(net) {
+            // A loop (state-holding gate): the path through it is not a
+            // data path
+            return None;
+        }
+        let netlist = self.netlist;
+        let result = match netlist.nets.get(net.0 as usize).and_then(|n| n.driver) {
+            None => Some(0),
+            Some(driver) => {
+                let cell = &netlist.cells[driver.0 as usize];
+                if !self.inside(cell) {
+                    // A block input: held stable by the parent
+                    Some(0)
+                } else if let Some(clock) = cell.clock {
+                    if self.through_registers {
+                        self.at(clock).map(|t| {
+                            t + self.delays.clock_wire_ps(netlist, clock, cell)
+                                + self.delays.clock_to_out_ps(cell)
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    let output = netlist.nets[net.0 as usize].driver_pin.unwrap_or(0);
+                    let mut best: Option<i64> = None;
+                    for (i, &input) in cell.inputs.iter().enumerate() {
+                        let Some(arc) = self.delays.arc_ps(cell, i, output) else {
+                            continue;
+                        };
+                        if let Some(t) = self.at(input) {
+                            let t = t + self.delays.wire_ps(netlist, input, cell, i) + arc;
+                            best = Some(best.map_or(t, |b| b.max(t)));
+                        }
+                    }
+                    best
+                }
+            }
+        };
+        self.visiting.remove(&net);
+        self.memo.insert(net, result);
+        result
+    }
+}
+
+/// Time every matched delay of `netlist` with `delays`
+pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    let matched = find_matched_delays(netlist);
+    let controls: HashSet<GateNetId> = matched.iter().map(|m| m.control).collect();
+
+    for md in &matched {
+        let and_cell = &netlist.cells[md.and_cell.0 as usize];
+        let mut data_only = Arrivals {
+            netlist,
+            delays,
+            prefix: &md.prefix,
+            through_registers: false,
+            memo: HashMap::new(),
+            visiting: HashSet::new(),
+        };
+        let mut full = Arrivals {
+            netlist,
+            delays,
+            prefix: &md.prefix,
+            through_registers: true,
+            memo: HashMap::new(),
+            visiting: HashSet::new(),
+        };
+        let Some(control_at) = full.at(md.control) else {
+            continue;
+        };
+
+        // Registers of the block clocked by this control
+        let mut reg_data: Option<i64> = None;
+        let mut reg_clock: Option<i64> = None;
+        for cell in netlist
+            .cells
+            .iter()
+            .filter(|c| c.clock == Some(md.control) && c.path.starts_with(&md.prefix))
+        {
+            let clk = control_at + delays.clock_wire_ps(netlist, md.control, cell);
+            reg_clock = Some(reg_clock.map_or(clk, |c: i64| c.min(clk)));
+            for (i, &input) in cell.inputs.iter().enumerate() {
+                if let Some(t) = data_only.at(input) {
+                    let t = t + delays.wire_ps(netlist, input, cell, i) + delays.setup_ps(cell, i);
+                    reg_data = Some(reg_data.map_or(t, |d: i64| d.max(t)));
+                }
+            }
+        }
+        if let (Some(data_ps), Some(control_ps)) = (reg_data, reg_clock) {
+            checks.push(BundleCheck {
+                prefix: md.prefix.clone(),
+                delay_path: and_cell.path.clone(),
+                times: "registers",
+                data_ps,
+                control_ps,
+                chain_len: md.chain.len(),
+            });
+        }
+
+        // The acknowledge: the block output this control drives (directly or
+        // through plain buffers). Matched delays that feed another matched
+        // delay time registers only.
+        let Some(ack) = block_output_driven_by(netlist, md.control, &md.prefix) else {
+            continue;
+        };
+        let mut data_ps: Option<i64> = None;
+        for (id, net) in netlist.nets.iter().enumerate() {
+            let id = GateNetId(id as u32);
+            if id == ack || controls.contains(&id) || !is_block_output(netlist, net, &md.prefix) {
+                continue;
+            }
+            if let Some(t) = full.at(id) {
+                data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
+            }
+        }
+        let (Some(data_ps), Some(control_ps)) = (data_ps, full.at(ack)) else {
+            continue;
+        };
+        checks.push(BundleCheck {
+            prefix: md.prefix.clone(),
+            delay_path: and_cell.path.clone(),
+            times: "acknowledge",
+            data_ps,
+            control_ps,
+            chain_len: md.chain.len(),
+        });
+    }
+    checks
+}
+
+/// Whether `net` is driven inside the block and read outside it (or is a
+/// design output)
+fn is_block_output(netlist: &GateNetlist, net: &GateNet, prefix: &str) -> bool {
+    let Some(driver) = net.driver else {
+        return false;
+    };
+    if !netlist.cells[driver.0 as usize].path.starts_with(prefix) {
+        return false;
+    }
+    net.is_output
+        || net
+            .fanout
+            .iter()
+            .any(|(c, _)| !netlist.cells[c.0 as usize].path.starts_with(prefix))
+}
+
+/// The block output `control` reaches through plain single-input buffers
+fn block_output_driven_by(
+    netlist: &GateNetlist,
+    control: GateNetId,
+    prefix: &str,
+) -> Option<GateNetId> {
+    let mut net = control;
+    for _ in 0..16 {
+        let n = &netlist.nets[net.0 as usize];
+        if is_block_output(netlist, n, prefix) {
+            return Some(net);
+        }
+        // Follow a lone buffer
+        let mut next = None;
+        for &(c, _) in &n.fanout {
+            let cell = &netlist.cells[c.0 as usize];
+            if cell.function == Some(CellFunction::Buf)
+                && cell.inputs.len() == 1
+                && !cell.is_kept()
+                && cell.clock.is_none()
+            {
+                next = cell.outputs.first().copied();
+            }
+        }
+        net = next?;
+    }
+    None
+}
+
+/// Library-based delay estimates for timing matched delays before placement.
+///
+/// Cell delays are the library's timing arcs; every connection gets a fixed
+/// routing estimate. Both sides of a check (the data paths and the delay
+/// chain) are estimated the same way; routed delays are checked after
+/// place and route.
+pub struct LibraryDelays<'a> {
+    pub library: &'a TechLibrary,
+    /// Routing estimate per connection, in picoseconds
+    pub wire_ps: i64,
+    /// Cell delay when the library has no arc for a cell, in picoseconds
+    pub default_cell_ps: i64,
+}
+
+impl<'a> LibraryDelays<'a> {
+    /// Estimates for `library` with the default routing estimate
+    pub fn new(library: &'a TechLibrary) -> Self {
+        Self {
+            library,
+            wire_ps: 500,
+            default_cell_ps: 400,
+        }
+    }
+
+    fn arc(&self, cell: &Cell, input: usize, output: usize) -> i64 {
+        let Some(lib_cell) = self.library.get_cell(&cell.cell_type) else {
+            return self.default_cell_ps;
+        };
+        let Some(timing) = lib_cell.timing.as_ref() else {
+            return self.default_cell_ps;
+        };
+        let worst = |arc: &crate::tech_library::TimingArc| {
+            arc.rise_delay_ps(0.0).max(arc.fall_delay_ps(0.0)).round() as i64
+        };
+        if let (Some(i), Some(o)) = (lib_cell.inputs.get(input), lib_cell.outputs.get(output)) {
+            if let Some(arc) = timing.arcs.get(&format!("{}->{}", i, o)) {
+                return worst(arc);
+            }
+        }
+        timing
+            .arcs
+            .values()
+            .map(worst)
+            .max()
+            .unwrap_or(self.default_cell_ps)
+    }
+}
+
+impl BundleDelays for LibraryDelays<'_> {
+    fn wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell, _: usize) -> i64 {
+        self.wire_ps
+    }
+    fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell) -> i64 {
+        self.wire_ps
+    }
+    fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        Some(self.arc(cell, input, output))
+    }
+    fn clock_to_out_ps(&self, cell: &Cell) -> i64 {
+        self.arc(cell, 0, 0)
+    }
+    fn setup_ps(&self, cell: &Cell, _input: usize) -> i64 {
+        self.library
+            .get_cell(&cell.cell_type)
+            .and_then(|c| c.setup_ps)
+            .map_or(200, i64::from)
+    }
+}
+
+/// Add `count` buffers to a matched delay's chain, just before its AND
+pub fn extend_matched_delay(netlist: &mut GateNetlist, md: &MatchedDelay, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let template = match md.chain.last() {
+        Some(&id) => netlist.cells[id.0 as usize].clone(),
+        None => return,
+    };
+    let and_idx = md.and_cell.0 as usize;
+    let mut net = netlist.cells[and_idx].inputs[1];
+    let base = template
+        .path
+        .rsplit_once('_')
+        .map_or(template.path.as_str(), |(b, _)| b)
+        .to_string();
+    let first = md.chain.len();
+    for k in 0..count {
+        let out = netlist.add_net(GateNet::new(
+            GateNetId(0),
+            format!("{}_n{}", base, first + k),
+        ));
+        let mut buf = template.clone();
+        buf.id = CellId(0);
+        buf.path = format!("{}_{}", base, first + k);
+        buf.inputs = vec![net];
+        buf.outputs = vec![out];
+        netlist.add_cell(buf);
+        net = out;
+    }
+    netlist.cells[and_idx].inputs[1] = net;
+    netlist.rebuild_net_connectivity();
+}
+
+/// Result of sizing the matched delays of a netlist
+#[derive(Debug, Clone, Default)]
+pub struct SizingReport {
+    /// Buffers added in total
+    pub buffers_added: usize,
+    /// Final checks, one per timed control
+    pub checks: Vec<BundleCheck>,
+}
+
+/// Lengthen every matched delay until its checks pass with `margin_percent`
+/// extra delay over the data paths it times, under `delays`
+pub fn size_matched_delays(
+    netlist: &mut GateNetlist,
+    delays: &dyn BundleDelays,
+    margin_percent: i64,
+) -> SizingReport {
+    let mut report = SizingReport::default();
+    // Each round fixes the delays it can see; later delays depend on earlier
+    // ones (a register-timing delay feeds the acknowledge delay), so repeat.
+    for _ in 0..64 {
+        let checks = check_matched_delays(netlist, delays);
+        let matched = find_matched_delays(netlist);
+        let mut changed = false;
+        for md in &matched {
+            let path = &netlist.cells[md.and_cell.0 as usize].path;
+            let worst = checks
+                .iter()
+                .filter(|c| &c.delay_path == path)
+                .map(|c| {
+                    let required = c.data_ps + c.data_ps.abs() * margin_percent / 100;
+                    required - c.control_ps
+                })
+                .max()
+                .unwrap_or(0);
+            if worst <= 0 {
+                continue;
+            }
+            // Per buffer: one cell delay plus one connection
+            let per_buffer = md
+                .chain
+                .first()
+                .map(|&id| {
+                    let cell = &netlist.cells[id.0 as usize];
+                    delays.arc_ps(cell, 0, 0).unwrap_or(0)
+                        + delays.wire_ps(netlist, cell.inputs[0], cell, 0)
+                })
+                .unwrap_or(1)
+                .max(1);
+            let count = ((worst + per_buffer - 1) / per_buffer) as usize;
+            extend_matched_delay(netlist, md, count);
+            report.buffers_added += count;
+            changed = true;
+        }
+        if !changed {
+            report.checks = checks;
+            break;
+        }
+    }
+    if report.checks.is_empty() {
+        report.checks = check_matched_delays(netlist, delays);
+    }
+    report
+}

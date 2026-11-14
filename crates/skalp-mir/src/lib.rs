@@ -15,6 +15,7 @@ pub mod hir_to_mir;
 pub mod mir;
 pub mod mir_validation;
 pub mod monomorphize;
+pub mod ncl_bridge;
 pub mod optimize;
 pub mod pipelining;
 pub mod ssa_conversion;
