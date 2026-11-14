@@ -1,0 +1,348 @@
+// Retiming across an entity boundary, self-check.
+//
+// A round-robin arbiter grants one of two clients (each holds its request
+// until granted: a request/grant loop) and feeds the winner's operands,
+// through a select and some logic, to a unit with #[pipeline(stages = 6)].
+// SharedArbiterRetimed is marked #[retime], so the unit's added stages may
+// move back into the arbiter's operand logic; SharedArbiterPlain is the
+// same arbiter unmarked. Both get the same client stream and must behave
+// identically cycle for cycle: grants, valids and results.
+// led0 latches high on the first mismatch; led1 latches high once 255
+// results have been compared (so it proves the check ran).
+
+entity MulAddNorm {
+    in clk: clock
+    in rst: reset(active_high)
+    in in_valid: bit
+    in a: bit[16]
+    in b: bit[16]
+    in c: bit[32]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl MulAddNorm {
+    signal s1_valid: bit = 0
+    signal s1_p: bit[32] = 0
+    signal s1_c: bit[32] = 0
+    signal s2_valid: bit = 0
+    signal s2_y: bit[32] = 0
+    signal s2_shift: bit[5] = 0
+
+    signal p: bit[32]
+    p = a * b
+    signal sum: bit[32]
+    sum = s1_p + s1_c
+
+    // Normalise: shift left until bit 31 is set, counting the shift
+    let z16: bit = if sum[31:16] == 0 { 1'b1 } else { 1'b0 }
+    let n16: bit[32] = if z16 == 1 { {sum[15:0], 16'b0} } else { sum }
+    let z8: bit = if n16[31:24] == 0 { 1'b1 } else { 1'b0 }
+    let n8: bit[32] = if z8 == 1 { {n16[23:0], 8'b0} } else { n16 }
+    let z4: bit = if n8[31:28] == 0 { 1'b1 } else { 1'b0 }
+    let n4: bit[32] = if z4 == 1 { {n8[27:0], 4'b0} } else { n8 }
+    let z2: bit = if n4[31:30] == 0 { 1'b1 } else { 1'b0 }
+    let n2: bit[32] = if z2 == 1 { {n4[29:0], 2'b0} } else { n4 }
+    let z1: bit = if n2[31] == 0 { 1'b1 } else { 1'b0 }
+    let n1: bit[32] = if z1 == 1 { {n2[30:0], 1'b0} } else { n2 }
+
+    out_valid = s2_valid
+    y = s2_y
+    shift = s2_shift
+
+    on(clk.rise) {
+        if rst {
+            s1_valid = 0
+            s2_valid = 0
+        } else {
+            s1_valid = in_valid
+            s2_valid = s1_valid
+        }
+        s1_p = p
+        s1_c = c
+        s2_y = n1
+        s2_shift = {z16, z8, z4, z2, z1}
+    }
+}
+
+#[pipeline(stages = 6)]
+entity MulAddNormPiped {
+    in clk: clock
+    in rst: reset(active_high)
+    in in_valid: bit
+    in a: bit[16]
+    in b: bit[16]
+    in c: bit[32]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl MulAddNormPiped {
+    inst body = MulAddNorm {
+        clk: clk,
+        rst: rst,
+        in_valid: in_valid,
+        a: a,
+        b: b,
+        c: c
+    }
+    out_valid = body.out_valid
+    y = body.y
+    shift = body.shift
+}
+
+#[retime]
+entity SharedArbiterRetimed {
+    in clk: clock
+    in rst: reset(active_high)
+    in req0: bit
+    in a0: bit[16]
+    in b0: bit[16]
+    in c0: bit[32]
+    in req1: bit
+    in a1: bit[16]
+    in b1: bit[16]
+    in c1: bit[32]
+    out gnt: bit[2]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl SharedArbiterRetimed {
+    // round robin: the client not served last wins a tie
+    signal last: bit = 0
+    signal win: bit
+    win = if req0 == 1 && req1 == 1 { ~last } else { req1 }
+    signal any: bit
+    any = req0 | req1
+    gnt = {any & win, any & ~win}
+
+    // operand select and some logic before the unit
+    signal sa: bit[16]
+    sa = if win == 1 { a1 } else { a0 }
+    signal sb: bit[16]
+    sb = if win == 1 { b1 } else { b0 }
+    signal sc: bit[32]
+    sc = if win == 1 { c1 } else { c0 }
+    // three absolute differences in a row: compare, subtract, select
+    signal d1: bit[16]
+    d1 = if sa > sb { sa - sb } else { sb - sa }
+    signal e1: bit[16]
+    e1 = d1 ^ {sb[7:0], sb[15:8]}
+    signal d2: bit[16]
+    d2 = if e1 > sa { e1 - sa } else { sa - e1 }
+    signal e2: bit[16]
+    e2 = d2 ^ {sa[3:0], sa[15:4]}
+    signal d3: bit[16]
+    d3 = if e2 > d1 { e2 - d1 } else { d1 - e2 }
+    signal ma: bit[16]
+    ma = d3 ^ sb
+    signal mc: bit[32]
+    mc = sc + {d2, d3}
+
+    inst unit = MulAddNormPiped {
+        clk: clk,
+        rst: rst,
+        in_valid: any,
+        a: ma,
+        b: sb,
+        c: mc
+    }
+    out_valid = unit.out_valid
+    y = unit.y
+    shift = unit.shift
+
+    on(clk.rise) {
+        if rst {
+            last = 0
+        } else {
+            if any == 1 {
+                last = win
+            }
+        }
+    }
+}
+
+entity SharedArbiterPlain {
+    in clk: clock
+    in rst: reset(active_high)
+    in req0: bit
+    in a0: bit[16]
+    in b0: bit[16]
+    in c0: bit[32]
+    in req1: bit
+    in a1: bit[16]
+    in b1: bit[16]
+    in c1: bit[32]
+    out gnt: bit[2]
+    out out_valid: bit
+    out y: bit[32]
+    out shift: bit[5]
+}
+
+impl SharedArbiterPlain {
+    // round robin: the client not served last wins a tie
+    signal last: bit = 0
+    signal win: bit
+    win = if req0 == 1 && req1 == 1 { ~last } else { req1 }
+    signal any: bit
+    any = req0 | req1
+    gnt = {any & win, any & ~win}
+
+    // operand select and some logic before the unit
+    signal sa: bit[16]
+    sa = if win == 1 { a1 } else { a0 }
+    signal sb: bit[16]
+    sb = if win == 1 { b1 } else { b0 }
+    signal sc: bit[32]
+    sc = if win == 1 { c1 } else { c0 }
+    // three absolute differences in a row: compare, subtract, select
+    signal d1: bit[16]
+    d1 = if sa > sb { sa - sb } else { sb - sa }
+    signal e1: bit[16]
+    e1 = d1 ^ {sb[7:0], sb[15:8]}
+    signal d2: bit[16]
+    d2 = if e1 > sa { e1 - sa } else { sa - e1 }
+    signal e2: bit[16]
+    e2 = d2 ^ {sa[3:0], sa[15:4]}
+    signal d3: bit[16]
+    d3 = if e2 > d1 { e2 - d1 } else { d1 - e2 }
+    signal ma: bit[16]
+    ma = d3 ^ sb
+    signal mc: bit[32]
+    mc = sc + {d2, d3}
+
+    inst unit = MulAddNormPiped {
+        clk: clk,
+        rst: rst,
+        in_valid: any,
+        a: ma,
+        b: sb,
+        c: mc
+    }
+    out_valid = unit.out_valid
+    y = unit.y
+    shift = unit.shift
+
+    on(clk.rise) {
+        if rst {
+            last = 0
+        } else {
+            if any == 1 {
+                last = win
+            }
+        }
+    }
+}
+
+entity SharedUnitRetimeCheck {
+    in clk: clock
+    out led: bit[2]
+}
+
+impl SharedUnitRetimeCheck {
+    signal lfsr: bit[32] = 1
+    signal boot: bit[3] = 0
+    signal rst: bit = 1
+    signal checks: bit[8] = 0
+    signal failed: bit = 0
+    signal ran: bit = 0
+    signal rp0: bit = 0
+    signal rp1: bit = 0
+    signal ra0: bit[16] = 0
+    signal rb0: bit[16] = 0
+    signal rc0: bit[32] = 0
+    signal ra1: bit[16] = 0
+    signal rb1: bit[16] = 0
+    signal rc1: bit[32] = 0
+    inst retimed = SharedArbiterRetimed {
+        clk: clk,
+        rst: rst,
+        req0: rp0,
+        a0: ra0,
+        b0: rb0,
+        c0: rc0,
+        req1: rp1,
+        a1: ra1,
+        b1: rb1,
+        c1: rc1
+    }
+    signal rg: bit[2]
+    rg = retimed.gnt
+    signal qp0: bit = 0
+    signal qp1: bit = 0
+    signal qa0: bit[16] = 0
+    signal qb0: bit[16] = 0
+    signal qc0: bit[32] = 0
+    signal qa1: bit[16] = 0
+    signal qb1: bit[16] = 0
+    signal qc1: bit[32] = 0
+    inst plain = SharedArbiterPlain {
+        clk: clk,
+        rst: rst,
+        req0: qp0,
+        a0: qa0,
+        b0: qb0,
+        c0: qc0,
+        req1: qp1,
+        a1: qa1,
+        b1: qb1,
+        c1: qc1
+    }
+    signal qg: bit[2]
+    qg = plain.gnt
+
+    on(clk.rise) {
+        lfsr = {lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31], lfsr[31:1]}
+        if boot != 7 {
+            boot = boot + 1
+        } else {
+            rst = 0
+        }
+        // a client holds its request until granted, then may ask again
+        if rp0 == 0 || rg[0] == 1 {
+            rp0 = lfsr[5] & ~rst
+            ra0 = lfsr[15:0]
+            rb0 = lfsr[31:16]
+            rc0 = {lfsr[7:0], lfsr[31:8]}
+        }
+        if rp1 == 0 || rg[1] == 1 {
+            rp1 = lfsr[9] & ~rst
+            ra1 = {lfsr[3:0], lfsr[31:20]}
+            rb1 = lfsr[19:4]
+            rc1 = {lfsr[15:0], lfsr[31:16]}
+        }
+        // a client holds its request until granted, then may ask again
+        if qp0 == 0 || qg[0] == 1 {
+            qp0 = lfsr[5] & ~rst
+            qa0 = lfsr[15:0]
+            qb0 = lfsr[31:16]
+            qc0 = {lfsr[7:0], lfsr[31:8]}
+        }
+        if qp1 == 0 || qg[1] == 1 {
+            qp1 = lfsr[9] & ~rst
+            qa1 = {lfsr[3:0], lfsr[31:20]}
+            qb1 = lfsr[19:4]
+            qc1 = {lfsr[15:0], lfsr[31:16]}
+        }
+        if rst == 0 {
+            if rg != qg || retimed.out_valid != plain.out_valid {
+                failed = 1
+            }
+            if plain.out_valid == 1 {
+                if retimed.y != plain.y || retimed.shift != plain.shift {
+                    failed = 1
+                }
+                if checks != 255 {
+                    checks = checks + 1
+                } else {
+                    ran = 1
+                }
+            }
+        }
+    }
+    led = {ran, failed}
+}

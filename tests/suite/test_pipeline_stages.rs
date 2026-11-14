@@ -176,8 +176,16 @@ fn test_extra_stages_for_a_target_period() {
         .map(|t| t * 100)
         .chain([10_000, 100_000, 1_000_000])
         .filter_map(|target| {
-            skalp_lir::retime::extra_stages_for_period(&netlist, &delays, "top.plain", target, 6)
-                .map(|k| (target, k))
+            skalp_lir::retime::extra_stages_for_period(
+                &netlist,
+                &delays,
+                &[],
+                "top.plain",
+                target,
+                6,
+            )
+            .ok()
+            .map(|(k, _)| (target, k))
         })
         .collect();
     assert!(!needed.is_empty(), "no target was reachable");
@@ -287,4 +295,357 @@ fn test_pipeline_latency_is_chosen_for_the_clock() {
         }),
         "a tighter clock got less latency: {tight:?}"
     );
+}
+
+/// The arbiter in front of a pipelined unit, retimed (#[retime]) and not:
+/// after synthesis both behave the same cycle for cycle, grants included
+#[tokio::test]
+async fn test_retime_across_the_unit_boundary_keeps_behaviour() {
+    let path = fixture_path("pipeline_retime_check.sk");
+    for gate_level in [false, true] {
+        let mut tb = if gate_level {
+            Testbench::gate_level_with_top_and_library(&path, "SharedUnitRetimeCheck", "nexus")
+                .await
+                .unwrap()
+        } else {
+            Testbench::with_top_module(&path, "SharedUnitRetimeCheck")
+                .await
+                .unwrap()
+        };
+        tb.clock(2_000).await;
+        let flags = tb.get_u64("led").await & 0b11;
+        assert_eq!(flags, 0b10, "gate level {gate_level}: flags {flags:#b}");
+    }
+}
+
+/// What retiming after placement did to the retime fixture
+#[derive(Default)]
+struct PlacedRetimeOutcome {
+    cells_crossed: usize,
+    added: usize,
+    kept_in_place: usize,
+    beside_driver: usize,
+    period_before_ps: i64,
+    period_after_ps: i64,
+}
+
+/// Cell delays a fifth of [`LevelDelays`](skalp_lir::retime::LevelDelays)
+/// and no routing estimate of their own, so the placed connection delays
+/// (tens of ps a tile on the synthetic device) set the timing, as routing
+/// does on silicon, and the registers synthesis balanced by logic levels are
+/// out of balance as placed
+struct FastCells;
+
+impl skalp_lir::retime::RetimeDelays for FastCells {
+    fn arc_ps(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+        output: usize,
+    ) -> Option<i64> {
+        skalp_lir::retime::RetimeDelays::arc_ps(
+            &skalp_lir::retime::LevelDelays,
+            cell,
+            input,
+            output,
+        )
+        .map(|ps| ps / 5)
+    }
+    fn clk_to_q_ps(&self) -> i64 {
+        20
+    }
+    fn setup_ps(&self) -> i64 {
+        0
+    }
+    fn net_ps(&self, _fanout: usize) -> i64 {
+        0
+    }
+}
+
+/// Place the netlist on a Nexus device, retime it with the placed
+/// connection delays, and check the placement it comes back with: every
+/// cell on a BEL of its own, flip-flops sharing a control group only with
+/// matching control sets
+fn place_and_retime(
+    netlist: skalp_lir::gate_netlist::GateNetlist,
+    outcome: &std::sync::Mutex<PlacedRetimeOutcome>,
+) -> skalp_lir::gate_netlist::GateNetlist {
+    use skalp_place_route::placer::control_sets::{control_set_conflicts, control_sets};
+    use skalp_place_route::{CellPacker, NexusDevice, NexusVariant, Placer, PlacerConfig};
+
+    assert!(
+        !netlist.retime_regions.is_empty(),
+        "the fixture has no retiming regions"
+    );
+    let device = NexusDevice::new(NexusVariant::Lifcl40);
+    let mut placer = Placer::new(PlacerConfig::default(), device.clone());
+    let packing = CellPacker::new(&netlist).pack();
+    let placement = if packing.carry_chains.is_empty() {
+        placer.place(&netlist)
+    } else {
+        placer.place_with_carry_chains(&netlist, &packing.carry_chains)
+    }
+    .expect("placement");
+    let found = placer
+        .retime_placed(&netlist, &placement, &FastCells, None)
+        .expect("retiming after placement")
+        .expect("placed delays left nothing to retime");
+
+    let retimed = &found.netlist;
+    for (old, new) in found.report.cell_map.iter().enumerate() {
+        if let Some(new) = new {
+            assert_eq!(
+                placement.get(skalp_lir::gate_netlist::CellId(old as u32)),
+                found.placement.get(*new),
+                "{} moved",
+                retimed.cells[new.0 as usize].path
+            );
+        }
+    }
+    let mut owner = std::collections::HashMap::new();
+    for index in found.report.added.clone() {
+        let cell = &retimed.cells[index];
+        assert!(
+            found.placement.get(cell.id).is_some(),
+            "{} was not placed",
+            cell.path
+        );
+    }
+    for (cell, loc) in found.placement.cells() {
+        if let Some(other) = owner.insert((loc.tile_x, loc.tile_y, loc.bel_index), *cell) {
+            panic!(
+                "{} and {} share a BEL",
+                retimed.cells[other.0 as usize].path, retimed.cells[cell.0 as usize].path
+            );
+        }
+    }
+    let conflicts = control_set_conflicts(&device, &found.placement, &control_sets(retimed));
+    assert!(conflicts.is_empty(), "control sets mixed: {conflicts:?}");
+
+    *outcome.lock().unwrap() = PlacedRetimeOutcome {
+        cells_crossed: found.report.cells_crossed,
+        added: found.report.added.len(),
+        kept_in_place: found.kept_in_place,
+        beside_driver: found.beside_driver,
+        period_before_ps: found.report.period_before_ps,
+        period_after_ps: found.report.period_after_ps,
+    };
+    found.netlist
+}
+
+/// Retiming again after placement, with each connection's placed delay,
+/// shortens the longest register path, leaves every kept cell where it
+/// was, places the registers it adds legally, mostly beside the logic
+/// driving them, and keeps the design's behaviour cycle for cycle: the
+/// pipelined unit still matches the unpipelined one delayed (and the fault
+/// twin, compared one cycle off, still trips)
+#[tokio::test]
+async fn test_retiming_after_placement_keeps_behaviour() {
+    let path = fixture_path("pipeline_stages_check.sk");
+    for (top, expected) in [("PipelineStagesCheck", 0b10), ("PipelineStagesFault", 0b11)] {
+        let outcome = std::sync::Mutex::new(PlacedRetimeOutcome::default());
+        let pass = |netlist| place_and_retime(netlist, &outcome);
+        let mut tb = Testbench::gate_level_with_netlist_pass(&path, top, "nexus", &pass)
+            .await
+            .unwrap();
+        tb.clock(1_000).await;
+        let flags = tb.get_u64("led").await & 0b11;
+        assert_eq!(flags, expected, "{top}: flags {flags:#b}");
+
+        let outcome = outcome.into_inner().unwrap();
+        assert!(outcome.cells_crossed > 0, "{top}: no register moved");
+        assert!(
+            outcome.period_after_ps < outcome.period_before_ps,
+            "{top}: the longest path did not shorten: {} -> {} ps",
+            outcome.period_before_ps,
+            outcome.period_after_ps
+        );
+        assert!(
+            outcome.kept_in_place + outcome.beside_driver > outcome.added / 2,
+            "{top}: most new registers were placed away from their logic: {} kept, {} beside, of {}",
+            outcome.kept_in_place,
+            outcome.beside_driver,
+            outcome.added
+        );
+    }
+}
+
+/// The flattened, synthesized retime fixture
+fn retime_fixture_netlist() -> (skalp_lir::gate_netlist::GateNetlist, Vec<String>) {
+    let mut mir = compile(std::path::Path::new(&fixture_path(
+        "pipeline_retime_check.sk",
+    )))
+    .unwrap();
+    assert!(mir.retain_reachable_from("SharedUnitRetimeCheck"));
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let regions = hier.retime_regions.clone();
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let netlist = skalp_lir::synthesize_hierarchical(
+        &hier,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    )
+    .flatten();
+    (netlist, regions)
+}
+
+/// #[retime] adds no stages but makes the arbiter a retiming region, and
+/// the unit's stages move back into its operand logic; nothing moves into
+/// the arbiter that is not marked
+#[test]
+fn test_unit_stages_move_back_into_a_retime_entity() {
+    let (netlist, regions) = retime_fixture_netlist();
+    assert_eq!(
+        regions,
+        vec![
+            "top.plain.unit".to_string(),
+            "top.retimed".to_string(),
+            "top.retimed.unit".to_string()
+        ]
+    );
+    let moved_back = netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            c.path.starts_with("top.retimed.")
+                && !c.path.starts_with("top.retimed.unit.")
+                && c.path.contains(".retime")
+        })
+        .count();
+    assert!(moved_back > 0, "no stage moved back into the arbiter");
+    assert!(!netlist.cells.iter().any(|c| {
+        c.path.starts_with("top.plain.")
+            && !c.path.starts_with("top.plain.unit.")
+            && c.path.contains(".retime")
+    }));
+}
+
+/// Choosing stages: the path through an unmarked arbiter can't be cut, so
+/// it is reported as limiting the clock; marking the arbiter #[retime] lets
+/// the stages reach it
+#[test]
+fn test_extra_stages_reach_back_through_retime_logic() {
+    let source = std::fs::read_to_string(fixture_path("pipeline_retime_check.sk")).unwrap();
+    let source = source.replace("#[pipeline(stages = 6)]", "#[pipeline(stages = 2)]");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retime.sk");
+    std::fs::write(&path, source).unwrap();
+    let mut mir = compile(&path).unwrap();
+    assert!(mir.retain_reachable_from("SharedUnitRetimeCheck"));
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let regions = hier.retime_regions.clone();
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let mut synth = skalp_lir::synthesize_hierarchical(
+        &hier,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    );
+    synth.retime_regions.clear();
+    let netlist = synth.flatten();
+    let delays = skalp_lir::retime::LevelDelays;
+    let extra = |unit: &str, target| {
+        skalp_lir::retime::extra_stages_for_period(&netlist, &delays, &regions, unit, target, 8)
+    };
+    // The tightest period the retimed arbiter's unit meets on every path
+    let met: Vec<i64> = (3..=40)
+        .map(|t| t * 100)
+        .filter(|&t| extra("top.retimed.unit", t).is_ok_and(|(_, limits)| limits.is_empty()))
+        .collect();
+    let tight = *met.first().expect("no period was met");
+    // The unmarked arbiter's path limits the same unit at that period, and
+    // is named, with what to do
+    let (_, limits) = extra("top.plain.unit", tight).expect("stages were chosen");
+    let path = limits
+        .iter()
+        .find(|p| p.from_outside)
+        .unwrap_or_else(|| panic!("no path from outside limits the plain unit: {limits:?}"));
+    assert!(
+        path.steps
+            .iter()
+            .any(|s| s.contains("top.plain.") && !s.contains("top.plain.unit.")),
+        "the limiting path doesn't name the arbiter: {path:?}"
+    );
+}
+
+/// The message for an unmet clock names the path through the unmarked
+/// logic, grouped by instance, and what to do about it
+#[test]
+fn test_unmet_clock_message_names_the_outside_path() {
+    let choice = skalp_lir::pipeline_choice::StageChoice {
+        entity: "Unit".to_string(),
+        own_latency: 2,
+        latency: None,
+        limit: 18,
+        blocked: Some(skalp_lir::retime::BlockedPath {
+            delay_ps: 9000,
+            from_outside: true,
+            steps: vec![
+                "OXIDE_FF top.client.aig.latch3".to_string(),
+                "OXIDE_COMB top.arb.aig.n12".to_string(),
+                "CCU2 top.arb.Arbiter.Greater_4.ccu2_0".to_string(),
+                "CCU2 top.arb.Arbiter.Greater_4.ccu2_1".to_string(),
+                "OXIDE_COMB top.arb.Arbiter.Mux_7.n3".to_string(),
+                "registers in front of MULT18X18 top.arb.unit.Unit.Mul_0".to_string(),
+            ],
+            why: "it ends at registers that are already as far back as they can go".to_string(),
+        }),
+        limits: Vec::new(),
+    };
+    let text = skalp_lir::pipeline_choice::unmet_message(&choice, 10_000);
+    assert!(text.contains("`Unit` can't meet 100.0 MHz"), "{text}");
+    assert!(text.contains("top.client: 1 cell"), "{text}");
+    assert!(
+        text.contains("top.arb: 4 cells (Greater_4, Mux_7)"),
+        "{text}"
+    );
+    assert!(text.contains("#[retime]"), "{text}");
+}
+
+/// A unit in its own file with a bare #[pipeline], and a top in another file
+/// using it; `unit_lock` and `top_lock` are the lock files beside them
+fn two_file_design(
+    dir: &std::path::Path,
+    unit_lock: Option<&str>,
+    top_lock: Option<&str>,
+) -> std::path::PathBuf {
+    let fixture = std::fs::read_to_string(fixture_path("pipeline_stages_check.sk")).unwrap();
+    let start = fixture.find("entity MulAddNorm {").unwrap();
+    let end = fixture.find("entity PipelineStagesCheck {").unwrap();
+    let unit = fixture[start..end].replace("#[pipeline(stages = 4)]", "#[pipeline]");
+    std::fs::write(dir.join("unit.sk"), unit).unwrap();
+    let top = "mod unit;\nuse unit::{MulAddNormPiped};\n\n\
+        entity Top {\n    in clk: clock\n    in rst: reset(active_high)\n    in a: bit[16]\n    \
+        out y: bit[32]\n}\n\nimpl Top {\n    inst piped = MulAddNormPiped {\n        clk: clk,\n        \
+        rst: rst,\n        in_valid: 1,\n        a: a,\n        b: a,\n        c: {a, a}\n    }\n    \
+        y = piped.y\n}\n";
+    let top_path = dir.join("top.sk");
+    std::fs::write(&top_path, top).unwrap();
+    if let Some(lock) = unit_lock {
+        std::fs::write(dir.join("unit.pipeline.lock"), lock).unwrap();
+    }
+    if let Some(lock) = top_lock {
+        std::fs::write(dir.join("top.pipeline.lock"), lock).unwrap();
+    }
+    top_path
+}
+
+/// A design whose lock file has no latency for an entity takes the one
+/// recorded beside the entity's own file; its own lock file wins
+#[test]
+fn test_pipeline_latency_carries_over_from_the_entity_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = two_file_design(dir.path(), None, None);
+    assert_eq!(latency(&compile(&top).unwrap(), "MulAddNormPiped"), Some(2));
+
+    let dir = tempfile::tempdir().unwrap();
+    let top = two_file_design(dir.path(), Some("MulAddNormPiped = 5\n"), None);
+    assert_eq!(latency(&compile(&top).unwrap(), "MulAddNormPiped"), Some(5));
+
+    let dir = tempfile::tempdir().unwrap();
+    let top = two_file_design(
+        dir.path(),
+        Some("MulAddNormPiped = 5\n"),
+        Some("MulAddNormPiped = 4\n"),
+    );
+    assert_eq!(latency(&compile(&top).unwrap(), "MulAddNormPiped"), Some(4));
 }

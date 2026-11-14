@@ -162,7 +162,8 @@ impl Testbench {
             ..Default::default()
         };
 
-        Self::from_source_gate_level_with_library(source_path, config, library_name, None).await
+        Self::from_source_gate_level_with_library(source_path, config, library_name, None, None)
+            .await
     }
 
     /// Create a gate-level synchronous testbench with explicit top module
@@ -196,6 +197,35 @@ impl Testbench {
             config,
             library_name,
             Some(top_module),
+            None,
+        )
+        .await
+    }
+
+    /// Gate-level testbench whose synthesized netlist goes through `pass`
+    /// (a place-and-route step, say) before it is simulated, so a test can
+    /// check that the step keeps the design's behaviour
+    pub async fn gate_level_with_netlist_pass(
+        source_path: &str,
+        top_module: &str,
+        library_name: &str,
+        pass: &(dyn Fn(skalp_lir::gate_netlist::GateNetlist) -> skalp_lir::gate_netlist::GateNetlist
+              + Sync),
+    ) -> Result<Self> {
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: HwAccel::Cpu,
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+        Self::from_source_gate_level_with_library(
+            source_path,
+            config,
+            library_name,
+            Some(top_module),
+            Some(pass),
         )
         .await
     }
@@ -760,7 +790,8 @@ impl Testbench {
 
     #[allow(dead_code)]
     async fn from_source_gate_level(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
-        Self::from_source_gate_level_with_library(source_path, config, "generic_asic", None).await
+        Self::from_source_gate_level_with_library(source_path, config, "generic_asic", None, None)
+            .await
     }
 
     async fn from_source_gate_level_with_library(
@@ -768,6 +799,10 @@ impl Testbench {
         config: UnifiedSimConfig,
         library_name: &str,
         top_module_name: Option<&str>,
+        pass: Option<
+            &(dyn Fn(skalp_lir::gate_netlist::GateNetlist) -> skalp_lir::gate_netlist::GateNetlist
+                  + Sync),
+        >,
     ) -> Result<Self> {
         use skalp_lir::{
             get_stdlib_library, lower_mir_module_to_lir, synthesize, synthesize_hierarchical,
@@ -843,6 +878,10 @@ impl Testbench {
                 skalp_lir::synth::SynthPreset::Balanced,
             );
             synth_result.netlist
+        };
+        let netlist = match pass {
+            Some(pass) => pass(netlist),
+            None => netlist,
         };
 
         if !(has_async || netlist.is_ncl) {

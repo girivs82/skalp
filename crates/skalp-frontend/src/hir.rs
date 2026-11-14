@@ -749,6 +749,7 @@ pub enum UnrollConfig {
 /// #[pipeline(stages = 4)]        // total latency 4 cycles
 /// #[pipeline]                    // SKALP picks the latency for the clock
 /// #[pipeline(max_stages = 6)]    // SKALP picks, at most 6 cycles
+/// #[retime]                      // latency kept; registers inside may move
 /// ```
 ///
 /// With `stages`, the MIR pass (`skalp_mir::pipelining`) delays the
@@ -758,6 +759,12 @@ pub enum UnrollConfig {
 /// pipeline lock file ([`crate::pipeline_lock`]), which every flow reads, so
 /// simulation and hardware agree. Until a latency is recorded, an `auto`
 /// entity keeps its own latency.
+///
+/// `#[retime]` (`retime_only`) adds no stages: the entity keeps its latency
+/// and behaviour cycle for cycle, but synthesis may move its registers, and
+/// stages a `#[pipeline]` entity it feeds may move back into it. It is for
+/// logic whose timing other logic depends on, such as an arbiter in a
+/// request/grant loop, where added latency would change the protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Total latency in cycles. For an `auto` entity, the recorded choice,
@@ -774,6 +781,9 @@ pub struct PipelineConfig {
     /// Most latency an `auto` entity may be given
     #[serde(default)]
     pub max_stages: Option<u32>,
+    /// `#[retime]`: no stages added, registers may move
+    #[serde(default)]
+    pub retime_only: bool,
 }
 
 impl PipelineConfig {
@@ -785,6 +795,15 @@ impl PipelineConfig {
             auto_balance: false,
             auto: false,
             max_stages: None,
+            retime_only: false,
+        }
+    }
+
+    /// `#[retime]`: keep the latency, let synthesis move registers
+    pub fn retime_only() -> Self {
+        Self {
+            retime_only: true,
+            ..Self::with_stages(0)
         }
     }
 }

@@ -604,30 +604,36 @@ pub fn place_and_route_nexus_real(
         t_delays.elapsed().as_secs_f64()
     );
 
-    // Retime the `#[pipeline]` regions again, now with this device's
-    // delays (synthesis balanced them by logic levels)
-    let retimed;
-    let netlist = if netlist.retime_regions.is_empty() {
-        netlist
-    } else {
-        let model = crate::device::nexus::timing::NexusTiming {
-            device: &device,
-            db: &timing_db,
-        };
+    // Delays for retiming the `#[pipeline]` and `#[retime]` regions: the
+    // cells' own from the timing database, and before placement a
+    // connection between cells a couple of tiles apart for every connection
+    let retime_model = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &timing_db,
+    };
+    let retime_delays = (!netlist.retime_regions.is_empty()).then(|| {
         let (clk_to_q, setup) = timing_db.register_ps();
-        // A connection between cells a couple of tiles apart
         let connection_ps = crate::timing::RouteDelayTable::measure(&device)
             .map_or(500, |table| (table.delay(2, 1) * 1000.0).round() as i64);
-        let delays = crate::timing::retime_delays::DeviceRetimeDelays::new(
-            &model,
+        crate::timing::retime_delays::DeviceRetimeDelays::new(
+            &retime_model,
             clk_to_q,
             setup,
             connection_ps,
-        );
-        let mut copy = netlist.clone();
-        skalp_lir::retime::retime_pipelined(&mut copy, &delays);
-        retimed = copy;
-        &retimed
+        )
+    });
+
+    // Retime the regions again, now with this device's delays (synthesis
+    // balanced them by logic levels)
+    let retimed;
+    let netlist = match &retime_delays {
+        None => netlist,
+        Some(delays) => {
+            let mut copy = netlist.clone();
+            skalp_lir::retime::retime_pipelined(&mut copy, delays);
+            retimed = copy;
+            &retimed
+        }
     };
 
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
@@ -668,6 +674,78 @@ pub fn place_and_route_nexus_real(
     }
     log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());
     Placer::<NexusDevice>::log_placement_stats(&placement, netlist);
+
+    // Each clock is timed at the frequency its source runs at: a board
+    // clock pin, the on-chip oscillator, or a PLL output. The configured
+    // target covers clocks with no known source.
+    let board = crate::boards::for_nexus_variant(variant);
+    let mut clock_targets = crate::timing::clock_targets::ClockTargets::derive(
+        netlist,
+        config.timing.as_ref().map_or(100.0, |t| t.target_frequency),
+        |cell, known| {
+            if crate::device::nexus::pll::is_pll(cell) {
+                return crate::device::nexus::pll::driven_frequencies(cell, known);
+            }
+            let Some(pin) = cell.parameters.get("LOC") else {
+                return Vec::new();
+            };
+            let mhz = if pin == sites::OSC_PIN {
+                Some(crate::device::nexus::emit::OSC_FREQUENCY_MHZ)
+            } else {
+                board
+                    .and_then(|board| crate::boards::clock_frequency(board, pin).map(|hz| hz / 1e6))
+            };
+            mhz.map(|mhz| vec![(0, mhz)]).unwrap_or_default()
+        },
+    );
+    clock_targets.uncertainty_ns = config
+        .timing
+        .as_ref()
+        .map_or(0.0, |t| t.clock_uncertainty + t.setup_margin);
+    clock_targets.hold_margin_ns = config.timing.as_ref().map_or(0.0, |t| t.hold_margin);
+    // Retime once more with each connection's delay as placed: the
+    // registers placed by the estimate above may not balance the paths as
+    // placed. Latency stays as chosen; new registers go beside their logic.
+    let placed_retiming;
+    let (netlist, placement) = match &retime_delays {
+        Some(delays) if config.placer.retime_after_placement => {
+            let t_retime = std::time::Instant::now();
+            let asked_ps = config
+                .placer
+                .retime_target_mhz
+                .filter(|&mhz| mhz > 0.0)
+                .map(|mhz| (1e6 / mhz).round() as i64);
+            let target = crate::placer::placed_retime_target(netlist, |clock| {
+                let clock_ps = (clock_targets.required_ns(clock) * 1000.0).round() as i64;
+                asked_ps.map_or(clock_ps, |asked| asked.min(clock_ps))
+            });
+            match placer.retime_placed(netlist, &placement, delays, target)? {
+                Some(found) => {
+                    log::info!(
+                        "nexus pnr: retimed after placement in {:.1} s: longest register path {} -> {} ps (target {}), {} registers -> {} ({} kept their place, {} beside their driver), through {} cells",
+                        t_retime.elapsed().as_secs_f64(),
+                        found.report.period_before_ps,
+                        found.report.period_after_ps,
+                        target.map_or("none".to_string(), |t| format!("{t} ps")),
+                        found.report.registers_before,
+                        found.report.registers_after,
+                        found.kept_in_place,
+                        found.beside_driver,
+                        found.report.cells_crossed
+                    );
+                    placed_retiming = found;
+                    (&placed_retiming.netlist, placed_retiming.placement.clone())
+                }
+                None => {
+                    log::info!(
+                        "nexus pnr: retiming after placement left the registers where they were"
+                    );
+                    (netlist, placement)
+                }
+            }
+        }
+        _ => (netlist, placement),
+    };
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
@@ -735,34 +813,6 @@ pub fn place_and_route_nexus_real(
     }
     check_routes_disjoint(netlist, &device, &routing)?;
 
-    // Each clock is timed at the frequency its source runs at: a board
-    // clock pin, the on-chip oscillator, or a PLL output. The configured
-    // target covers clocks with no known source.
-    let board = crate::boards::for_nexus_variant(variant);
-    let mut clock_targets = crate::timing::clock_targets::ClockTargets::derive(
-        netlist,
-        config.timing.as_ref().map_or(100.0, |t| t.target_frequency),
-        |cell, known| {
-            if crate::device::nexus::pll::is_pll(cell) {
-                return crate::device::nexus::pll::driven_frequencies(cell, known);
-            }
-            let Some(pin) = cell.parameters.get("LOC") else {
-                return Vec::new();
-            };
-            let mhz = if pin == sites::OSC_PIN {
-                Some(crate::device::nexus::emit::OSC_FREQUENCY_MHZ)
-            } else {
-                board
-                    .and_then(|board| crate::boards::clock_frequency(board, pin).map(|hz| hz / 1e6))
-            };
-            mhz.map(|mhz| vec![(0, mhz)]).unwrap_or_default()
-        },
-    );
-    clock_targets.uncertainty_ns = config
-        .timing
-        .as_ref()
-        .map_or(0.0, |t| t.clock_uncertainty + t.setup_margin);
-    clock_targets.hold_margin_ns = config.timing.as_ref().map_or(0.0, |t| t.hold_margin);
     let generator = NexusConfig {
         device: &device,
         variant,

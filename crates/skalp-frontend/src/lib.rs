@@ -223,8 +223,26 @@ pub fn parse_and_build_compilation_context_from_source(
     let mut monomorphized_hir = engine.monomorphize(&hir);
     monomorphized_hir.main_entity_names = main_entity_names;
 
-    // Latencies synthesis chose for bare #[pipeline] entities
-    let lock = pipeline_lock::read(file_path)?;
+    // Extract all loaded module HIRs from the resolver
+    let module_hirs: IndexMap<PathBuf, Hir> = resolver
+        .loaded_modules()
+        .map(|(path, hir)| (path.clone(), hir.clone()))
+        .collect();
+
+    // Latencies synthesis chose for bare #[pipeline] entities: the design's
+    // own lock file, then the lock files beside the files defining them
+    let defining = pipeline_lock::defining_files(&module_hirs);
+    let (lock, taken) = pipeline_lock::with_entity_locks(
+        pipeline_lock::read(file_path)?,
+        &mut monomorphized_hir,
+        &defining,
+    )?;
+    for (name, from) in taken {
+        tracing::info!(
+            "`{name}` takes its #[pipeline] latency from {}",
+            from.display()
+        );
+    }
     for name in pipeline_lock::apply(&mut monomorphized_hir, &lock) {
         tracing::warn!(
             "`{name}` has #[pipeline] without stages and {} records no latency for it, \
@@ -232,12 +250,6 @@ pub fn parse_and_build_compilation_context_from_source(
             pipeline_lock::lock_path(file_path).display()
         );
     }
-
-    // Extract all loaded module HIRs from the resolver
-    let module_hirs: IndexMap<PathBuf, Hir> = resolver
-        .loaded_modules()
-        .map(|(path, hir)| (path.clone(), hir.clone()))
-        .collect();
 
     Ok(CompilationContext {
         main_hir: monomorphized_hir,

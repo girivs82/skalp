@@ -4228,14 +4228,16 @@ fn choose_pipeline_latencies(
     for choice in &choices {
         let Some(latency) = choice.latency else {
             anyhow::bail!(
-                "`{}` can't meet {:.1} MHz with up to {} cycles of latency (its own is {}); \
-                 raise max_stages or split its logic",
-                choice.entity,
-                1e6 / period_ps as f64,
-                choice.limit,
-                choice.own_latency
+                "{}",
+                skalp_lir::pipeline_choice::unmet_message(choice, period_ps)
             );
         };
+        for path in &choice.limits {
+            println!(
+                "⚠️  {}",
+                skalp_lir::pipeline_choice::limit_message(choice, path)
+            );
+        }
         println!(
             "Pipeline: `{}` latency {} cycles for {:.1} MHz (its own {})",
             choice.entity,
@@ -4255,6 +4257,17 @@ fn choose_pipeline_latencies(
             "⚠️  Pipeline latencies changed; recorded in {} (simulate again before trusting results)",
             path.display()
         );
+    }
+    // The entities' own files keep the choice too, for builds of them
+    // alone and for other designs using them
+    let defining = pipeline_lock::defining_files(module_hirs);
+    for path in pipeline_lock::record_in_entity_locks(
+        source,
+        &lock,
+        &defining,
+        &format!("for a {:.1} MHz clock", 1e6 / period_ps as f64),
+    )? {
+        println!("   also recorded in {}", path.display());
     }
     pipeline_lock::apply(hir, &lock);
     Ok(true)
@@ -4516,7 +4529,9 @@ fn synthesize_design(
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        // The frequency latencies were chosen for is also what place and
+        // route times unknown clocks against and retimes for
+        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, frequency)?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -4669,6 +4684,7 @@ fn run_nexus_pnr_on_netlist(
             target_frequency: freq,
             ..TimingConfig::default()
         });
+        config.placer.retime_target_mhz = Some(freq);
     }
 
     println!("Variant: {:?}", nexus);

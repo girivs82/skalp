@@ -11691,10 +11691,18 @@ impl HirBuilderContext {
 
         let tokens = collect_all_tokens(intent_value);
 
-        // Look for "pipeline" identifier
-        let has_pipeline = tokens
+        // #[retime]: latency kept, registers may move
+        let idents: Vec<&str> = tokens
             .iter()
-            .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "pipeline");
+            .filter(|t| t.kind() == SyntaxKind::Ident)
+            .map(|t| t.text())
+            .collect();
+        if idents == ["retime"] {
+            return Some(PipelineConfig::retime_only());
+        }
+
+        // Look for "pipeline" identifier
+        let has_pipeline = idents.contains(&"pipeline");
 
         if !has_pipeline {
             return None;
@@ -11742,6 +11750,7 @@ impl HirBuilderContext {
             auto_balance,
             auto: stages.is_none(),
             max_stages,
+            retime_only: false,
         };
 
         Some(config)

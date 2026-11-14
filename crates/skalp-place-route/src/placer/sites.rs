@@ -218,15 +218,8 @@ impl SiteMap {
             return None;
         }
         // A flip-flop fits a control group holding none or its own control set
-        let group_fits = |bel: usize| match (set, tile.groups.get(bel)) {
-            (Some(set), Some(&Some(group))) => self
-                .group_sets
-                .get(&(idx, group))
-                .is_none_or(|held| held == set),
-            _ => true,
-        };
         let open = |bel: usize, t: BelType, taken: bool| {
-            !taken && tile.below_limit(t, self.fill_limit) && group_fits(bel)
+            !taken && tile.below_limit(t, self.fill_limit) && self.group_fits(idx, bel, set)
         };
         tile.bels
             .iter()
@@ -238,6 +231,61 @@ impl SiteMap {
                     .enumerate()
                     .position(|(i, &(t, taken))| compatible(t, required) && open(i, t, taken))
             })
+    }
+
+    /// Whether a flip-flop with control set `set` may join the BELs of
+    /// control group `group` of tile `idx`
+    fn group_fits(&self, idx: usize, bel: usize, set: Option<&ControlSet>) -> bool {
+        match (set, self.tiles[idx].groups.get(bel)) {
+            (Some(set), Some(&Some(group))) => self
+                .group_sets
+                .get(&(idx, group))
+                .is_none_or(|held| held == set),
+            _ => true,
+        }
+    }
+
+    /// The free BELs of tile (x, y) that can hold `required` (with control
+    /// set `set`, for a flip-flop) under the fill limit
+    pub fn open_bels(
+        &self,
+        x: u32,
+        y: u32,
+        required: BelType,
+        set: Option<&ControlSet>,
+        compatible: impl Fn(BelType, BelType) -> bool,
+    ) -> Vec<usize> {
+        if x >= self.width || y >= self.height {
+            return Vec::new();
+        }
+        let idx = self.tile_index(x, y);
+        let tile = &self.tiles[idx];
+        tile.bels
+            .iter()
+            .enumerate()
+            .filter(|&(i, &(t, taken))| {
+                !taken
+                    && compatible(t, required)
+                    && tile.below_limit(t, self.fill_limit)
+                    && self.group_fits(idx, i, set)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Take a BEL a cell held before, if it is still free and its control
+    /// group still takes `set` (the fill limit does not apply: the cell was
+    /// there already)
+    pub fn retake(&mut self, x: u32, y: u32, bel_index: usize, set: Option<ControlSet>) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let idx = self.tile_index(x, y);
+        let free = self.tiles[idx]
+            .bels
+            .get(bel_index)
+            .is_some_and(|&(_, taken)| !taken);
+        free && self.group_fits(idx, bel_index, set.as_ref()) && self.take(x, y, bel_index, set)
     }
 
     /// Take the free BEL nearest to (x, y) (Chebyshev rings, nearest tile first

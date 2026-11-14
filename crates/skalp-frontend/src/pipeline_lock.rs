@@ -11,6 +11,12 @@
 //!
 //! The format is one `Entity = cycles` line per entity; `#` starts a
 //! comment.
+//!
+//! Synthesis also records each choice in the lock file beside the file that
+//! defines the entity, and a design whose own lock file has no latency for
+//! an entity takes it from there. So an entity built as its own top (for a
+//! unit test) or used in another design keeps the latency its design chose.
+//! A design's own lock file wins over the entity's.
 
 use crate::hir::{Hir, PipelineConfig};
 use anyhow::{bail, Context, Result};
@@ -83,6 +89,80 @@ pub fn write(source: &Path, lock: &PipelineLock, note: &str) -> Result<PathBuf> 
     Ok(path)
 }
 
+/// The file defining each entity among `modules` (path to its HIR)
+pub fn defining_files<'a>(
+    modules: impl IntoIterator<Item = (&'a PathBuf, &'a Hir)>,
+) -> IndexMap<String, PathBuf> {
+    let mut files = IndexMap::new();
+    for (path, hir) in modules {
+        for entity in &hir.entities {
+            files
+                .entry(entity.name.clone())
+                .or_insert_with(|| path.clone());
+        }
+    }
+    files
+}
+
+/// `lock` with the latency of each `auto` entity of `hir` that it lacks
+/// filled in from the lock file beside the entity's defining file, when
+/// that records one. Returns the lock and what it took from where.
+pub fn with_entity_locks(
+    mut lock: PipelineLock,
+    hir: &mut Hir,
+    defining: &IndexMap<String, PathBuf>,
+) -> Result<(PipelineLock, Vec<(String, PathBuf)>)> {
+    let mut taken = Vec::new();
+    let names: Vec<String> = auto_configs(hir).into_iter().map(|(n, _)| n).collect();
+    for name in names {
+        if lock.contains_key(&name) {
+            continue;
+        }
+        let Some(file) = defining.get(&name) else {
+            continue;
+        };
+        if let Some(&cycles) = read(file)?.get(&name) {
+            lock.insert(name.clone(), cycles);
+            taken.push((name, lock_path(file)));
+        }
+    }
+    Ok((lock, taken))
+}
+
+/// Record `chosen` latencies in the lock files beside the files defining
+/// those entities (other than `top`, whose lock file the caller writes),
+/// keeping what else they record. Returns the files changed.
+pub fn record_in_entity_locks(
+    top: &Path,
+    chosen: &PipelineLock,
+    defining: &IndexMap<String, PathBuf>,
+    note: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut by_file: IndexMap<PathBuf, Vec<(&String, u32)>> = IndexMap::new();
+    for (name, &cycles) in chosen {
+        if let Some(file) = defining.get(name) {
+            if lock_path(file) != lock_path(top) {
+                by_file
+                    .entry(file.clone())
+                    .or_default()
+                    .push((name, cycles));
+            }
+        }
+    }
+    let mut changed = Vec::new();
+    for (file, entries) in by_file {
+        let old = read(&file)?;
+        let mut lock = old.clone();
+        for (name, cycles) in entries {
+            lock.insert(name.clone(), cycles);
+        }
+        if lock != old {
+            changed.push(write(&file, &lock, note)?);
+        }
+    }
+    Ok(changed)
+}
+
 /// Every `#[pipeline]` config in `hir` that leaves the latency to synthesis,
 /// by entity (or function) name
 pub fn auto_configs(hir: &mut Hir) -> Vec<(String, &mut PipelineConfig)> {
@@ -133,6 +213,33 @@ mod tests {
         let text = render(&lock, "for 100 MHz");
         assert!(text.contains("# for 100 MHz\n"));
         assert_eq!(parse(&text).unwrap(), lock);
+    }
+
+    #[test]
+    fn test_choices_are_recorded_beside_the_entity_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top.sk");
+        let unit = dir.path().join("unit.sk");
+        std::fs::write(lock_path(&unit), "Other = 3\n").unwrap();
+        let mut defining = IndexMap::new();
+        defining.insert("Unit".to_string(), unit.clone());
+        defining.insert("TopLocal".to_string(), top.clone());
+        let mut chosen = PipelineLock::new();
+        chosen.insert("Unit".to_string(), 7);
+        chosen.insert("TopLocal".to_string(), 2);
+        let changed = record_in_entity_locks(&top, &chosen, &defining, "for 50 MHz").unwrap();
+        assert_eq!(changed, vec![lock_path(&unit)]);
+        let lock = read(&unit).unwrap();
+        assert_eq!(lock.get("Unit"), Some(&7));
+        assert_eq!(lock.get("Other"), Some(&3));
+        assert!(!lock.contains_key("TopLocal"));
+        assert!(!lock_path(&top).exists());
+        // Nothing changes the second time
+        assert!(
+            record_in_entity_locks(&top, &chosen, &defining, "for 50 MHz")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
