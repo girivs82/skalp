@@ -34,7 +34,9 @@ pub struct StageChoice {
     pub blocked: Option<BlockedPath>,
     /// Paths through or next to the entity that are too long for the
     /// period whatever its latency (logic retiming can't reach): they limit
-    /// the clock, and are reported, but are not the entity's to fix
+    /// the clock and are reported, but don't stop the choice. Those through
+    /// the entity's own logic run between registers that stay put
+    /// ([`BlockedPath::through_region`]); only splitting that logic helps.
     pub limits: Vec<BlockedPath>,
 }
 
@@ -101,14 +103,17 @@ pub fn choose_pipeline_stages(
                     Ok((extra, found)) => {
                         for path in found {
                             // Instances of the entity often hit the same
-                            // path; say it once
-                            let same = |p: &BlockedPath| {
+                            // path, and the bits of a bus each have their
+                            // own: say it once, at its slowest
+                            let route = instances_along(&path.steps);
+                            match limits.iter_mut().find(|p| {
                                 p.why == path.why
-                                    && p.delay_ps == path.delay_ps
-                                    && summarize_path(&p.steps) == summarize_path(&path.steps)
-                            };
-                            if !limits.iter().any(same) {
-                                limits.push(path);
+                                    && p.through_region == path.through_region
+                                    && instances_along(&p.steps) == route
+                            }) {
+                                Some(p) if p.delay_ps < path.delay_ps => *p = path,
+                                Some(_) => {}
+                                None => limits.push(path),
                             }
                         }
                         Some(extra)
@@ -171,6 +176,16 @@ pub fn unmet_message(choice: &StageChoice, period_ps: i64) -> String {
         None => text.push_str("; raise max_stages or split its logic"),
     }
     text
+}
+
+/// The instances a path runs through, in order, without cell counts or
+/// operations: paths along the same instances are one limit to report
+fn instances_along(steps: &[String]) -> Vec<String> {
+    summarize_path(steps)
+        .into_iter()
+        .filter(|line| !line.starts_with("then "))
+        .map(|line| line.split(": ").next().unwrap_or_default().to_string())
+        .collect()
 }
 
 /// A path's steps grouped by the instance they are in: one line per run of
@@ -250,7 +265,9 @@ pub fn summarize_path(steps: &[String]) -> Vec<String> {
                 // Where it ends in logic that stays put, how much is left
                 if let Some((_, rest)) = step.split_once("(stays put; ") {
                     flush(&mut run, &mut lines);
-                    lines.push(format!("then {}", rest.trim_end_matches(')')));
+                    if !rest.starts_with("0 ps ") {
+                        lines.push(format!("then {}", rest.trim_end_matches(')')));
+                    }
                 }
             }
             None => {
@@ -266,7 +283,11 @@ pub fn summarize_path(steps: &[String]) -> Vec<String> {
 /// What to tell the designer about a path that limits the clock whatever
 /// `choice` latency is
 pub fn limit_message(choice: &StageChoice, path: &BlockedPath) -> String {
-    let advice = if path.from_outside {
+    let advice = if path.through_region {
+        "it runs through its own logic between registers that stay put (with a reset or \
+         enable, or on a loop), which added stages can't reach: split that logic, or make \
+         those registers plain"
+    } else if path.from_outside {
         "it starts outside the retimable logic: mark the entities it runs through \
          #[retime] (latency unchanged) or #[pipeline], or shorten it"
     } else {

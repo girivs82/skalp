@@ -567,6 +567,129 @@ fn test_extra_stages_reach_back_through_retime_logic() {
     );
 }
 
+/// An iterative unit: operands are decoded (multiplied) into registers that
+/// load on `start`, then one step runs between registers that load on a
+/// state bit. Stages added at its inputs can cut the decode, but not the
+/// step: those registers have enables and stay put.
+const ITERATIVE_UNIT: &str = "\
+entity IterUnit {
+    in clk: clock
+    in rst: reset(active_high)
+    in start: bit
+    in a: bit[16]
+    in b: bit[16]
+    out done: bit
+    out y: bit[32]
+}
+
+impl IterUnit {
+    signal busy: bit = 0
+    signal r_p: bit[32] = 0
+    signal r_y: bit[32] = 0
+    signal r_done: bit = 0
+    signal p: bit[32]
+    p = (a * b) + {a, b}
+    let z16: bit = if r_p[31:16] == 0 { 1'b1 } else { 1'b0 }
+    let n16: bit[32] = if z16 == 1 { {r_p[15:0], 16'b0} } else { r_p }
+    let z8: bit = if n16[31:24] == 0 { 1'b1 } else { 1'b0 }
+    let n8: bit[32] = if z8 == 1 { {n16[23:0], 8'b0} } else { n16 }
+    let z4: bit = if n8[31:28] == 0 { 1'b1 } else { 1'b0 }
+    let n4: bit[32] = if z4 == 1 { {n8[27:0], 4'b0} } else { n8 }
+    let next_y: bit[32] = n4 + r_y
+    done = r_done
+    y = r_y
+
+    on(clk.rise) {
+        r_done = 0
+        if rst {
+            busy = 0
+        } else if busy == 0 {
+            if start == 1 {
+                r_p = p
+                busy = 1
+            }
+        } else {
+            r_y = next_y
+            busy = 0
+            r_done = 1
+        }
+    }
+}
+
+entity IterTop {
+    in clk: clock
+    in rst: reset(active_high)
+    in start: bit
+    in a: bit[16]
+    in b: bit[16]
+    out done: bit
+    out y: bit[32]
+}
+
+impl IterTop {
+    inst unit = IterUnit {
+        clk: clk,
+        rst: rst,
+        start: start,
+        a: a,
+        b: b
+    }
+    done = unit.done
+    y = unit.y
+}
+";
+
+/// A too-long path through the unit's own logic between registers that stay
+/// put limits the clock whatever the latency: the choice still goes ahead
+/// for the paths stages can cut, and the path is reported with what to do
+#[test]
+fn test_path_between_fixed_registers_limits_but_does_not_stop_the_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("iter.sk");
+    std::fs::write(&path, ITERATIVE_UNIT).unwrap();
+    let mut mir = compile(&path).unwrap();
+    assert!(mir.retain_reachable_from("IterTop"));
+    let (hier, _) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let netlist = skalp_lir::synthesize_hierarchical(
+        &hier,
+        &library,
+        skalp_lir::synth::SynthPreset::Balanced,
+    )
+    .flatten();
+    let delays = skalp_lir::retime::LevelDelays;
+    // From tight to slack: some period is too short for the step but the
+    // stages are still chosen, with the step reported as the limit
+    let limited = (2..=60).map(|t| t * 100).find_map(|target| {
+        let (_, limits) = skalp_lir::retime::extra_stages_for_period(
+            &netlist,
+            &delays,
+            &[],
+            "top.unit",
+            target,
+            6,
+        )
+        .ok()?;
+        let path = limits.into_iter().find(|p| p.through_region)?;
+        Some((target, path))
+    });
+    let (target, path) = limited.expect("no choice was made with the step as its limit");
+    assert!(
+        path.steps.iter().any(|s| s.contains("top.unit.")),
+        "the limit doesn't name the unit's logic: {path:?}"
+    );
+    let choice = skalp_lir::pipeline_choice::StageChoice {
+        entity: "IterUnit".to_string(),
+        own_latency: 1,
+        latency: Some(1),
+        limit: 7,
+        blocked: None,
+        limits: vec![path.clone()],
+    };
+    let text = skalp_lir::pipeline_choice::limit_message(&choice, &path);
+    assert!(text.contains("split that logic"), "at {target} ps: {text}");
+}
+
 /// The message for an unmet clock names the path through the unmarked
 /// logic, grouped by instance, and what to do about it
 #[test]
@@ -579,6 +702,7 @@ fn test_unmet_clock_message_names_the_outside_path() {
         blocked: Some(skalp_lir::retime::BlockedPath {
             delay_ps: 9000,
             from_outside: true,
+            through_region: false,
             steps: vec![
                 "OXIDE_FF top.client.aig.latch3".to_string(),
                 "OXIDE_COMB top.arb.aig.n12".to_string(),
