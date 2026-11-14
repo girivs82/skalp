@@ -4336,8 +4336,49 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
+    /// The design's flip-flops grouped by the clock they take (its signal
+    /// and edge), groups ordered by clock name then edge, and each group's
+    /// flip-flops by output name, as `generate_sequential_body` orders them.
+    pub fn clock_groups(&self) -> Vec<(String, ClockEdge, Vec<&'a SirNode>)> {
+        let edge_key = |e: &ClockEdge| match e {
+            ClockEdge::Rising => 0u8,
+            ClockEdge::Falling => 1,
+            ClockEdge::Both => 2,
+        };
+        let mut groups: Vec<(String, ClockEdge, Vec<&'a SirNode>)> = Vec::new();
+        let module: &'a SirModule = self.module;
+        for node in &module.sequential_nodes {
+            let SirNodeKind::FlipFlop { clock_edge } = &node.kind else {
+                continue;
+            };
+            let Some(clock) = node.inputs.first() else {
+                continue;
+            };
+            match groups
+                .iter_mut()
+                .find(|(c, e, _)| *c == clock.signal_id && edge_key(e) == edge_key(clock_edge))
+            {
+                Some(group) => group.2.push(node),
+                None => groups.push((clock.signal_id.clone(), clock_edge.clone(), vec![node])),
+            }
+        }
+        groups.sort_by(|a, b| a.0.cmp(&b.0).then(edge_key(&a.1).cmp(&edge_key(&b.1))));
+        for group in &mut groups {
+            group.2.sort_by(|a, b| {
+                let name = |n: &SirNode| {
+                    n.outputs
+                        .first()
+                        .map(|o| o.signal_id.clone())
+                        .unwrap_or_default()
+                };
+                name(a).cmp(&name(b))
+            });
+        }
+        groups
+    }
+
     /// Generate flip-flop update
-    fn generate_flipflop_update(&mut self, node: &SirNode, _current_reg: &str, next_reg: &str) {
+    pub fn generate_flipflop_update(&mut self, node: &SirNode, _current_reg: &str, next_reg: &str) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
             return;
         }

@@ -82,6 +82,11 @@ pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 
+/// `source_op` of the buffer cells that make up a matched delay of a
+/// bundled-data async block (`LirOp::NclMatchedDelay`). Their delay is the
+/// point of them, so no optimization may remove or merge them.
+pub const MATCHED_DELAY_OP: &str = "NclMatchedDelay";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -94,6 +99,14 @@ pub const BLACKBOX_OUTPUTS_PARAM: &str = "BLACKBOX_OUTPUTS";
 pub const RAM_ADDR_BITS_PARAM: &str = "RAM_ADDR_BITS";
 /// Parameter holding a block RAM cell's data width in bits.
 pub const RAM_DATA_BITS_PARAM: &str = "RAM_DATA_BITS";
+/// Parameter set to "1" on a RAM cell the design never writes (a ROM): its
+/// write port's inputs are all tied off, so a backend may run the block as a
+/// single-port RAM.
+pub const RAM_READ_ONLY_PARAM: &str = "RAM_READ_ONLY";
+/// Parameter holding the index of the first input a place-and-route backend
+/// added after a hard block's own inputs (pins its device needs driven low),
+/// so the cell's own port layout stays as synthesis made it.
+pub const EXTRA_INPUTS_PARAM: &str = "EXTRA_INPUTS_FROM";
 
 /// Parameter holding a hard multiplier's A operand width in bits.
 pub const DSP_A_BITS_PARAM: &str = "DSP_A_WIDTH";
@@ -152,6 +165,12 @@ impl RamPorts {
 }
 
 impl Cell {
+    /// Whether optimization must leave this cell as it is (the buffers of a
+    /// matched delay: removing or merging them would shorten the delay)
+    pub fn is_kept(&self) -> bool {
+        self.source_op.as_deref() == Some(MATCHED_DELAY_OP)
+    }
+
     /// Number of variables of this cell's truth table, if it is a LUT whose
     /// table can be rewritten (at most 6 inputs). LUT4-sized cells with fewer
     /// inputs keep a 4-variable table, with the unused inputs as don't-cares.
@@ -228,8 +247,17 @@ impl Cell {
             write_clk,
             write_clk_en: write_clk + 1,
             write_en,
-            write_mask: write_en + 1..self.inputs.len(),
+            write_mask: write_en + 1..self.own_input_count(),
         })
+    }
+
+    /// Number of the cell's own inputs: all of them, unless a backend added
+    /// inputs after them (see [`EXTRA_INPUTS_PARAM`]).
+    pub fn own_input_count(&self) -> usize {
+        self.parameters
+            .get(EXTRA_INPUTS_PARAM)
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(self.inputs.len(), |first| first.min(self.inputs.len()))
     }
 
     /// Create a new combinational cell

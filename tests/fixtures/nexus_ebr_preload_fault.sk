@@ -1,0 +1,60 @@
+// Block RAM preload check: a 1024 x 18 block RAM starts with word
+// a = {a[7:0] ^ 0x5A, a} from nexus_ebr_preload.hex. Phase 1 reads all 1024 words
+// before anything is written and compares each with that pattern
+// (led0 latches high on a mismatch, led1 rises when the pass is done).
+// Phase 2 then writes the inverted pattern and reads it back, over and over
+// (led2 latches high on a mismatch, led3 rises after the first full round),
+// which keeps the memory a writable block RAM. led7 is a heartbeat.
+entity EbrPreloadFault {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+impl EbrPreloadFault {
+    #[memory(depth = 1024, init = "nexus_ebr_preload.hex")]
+    signal mem: bit[18][1024]
+    signal c: bit[14] = 0
+    signal phase: bit = 0
+    signal beat: nat[24] = 0
+    signal q: bit[18] = 0
+    signal preload_bad: bit = 0
+    signal preload_done: bit = 0
+    signal rw_bad: bit = 0
+    signal rw_done: bit = 0
+    signal addr: bit[10]
+    signal initial: bit[18]
+    signal want: bit[18]
+    addr = c[12:3]
+    initial = {addr[7:0] ^ 0x5A, addr}
+    // The check build compares with the preloaded pattern; the fault build
+    // flips bit 0 of the reference on purpose (positive control)
+    want = initial ^ 1
+    on(clk.rise) {
+        c = c + 1
+        beat = beat + 1
+        q = mem[addr]
+        if phase == 0 {
+            if c[2:0] == 5 && q != want {
+                preload_bad = 1
+            }
+            if c[12:0] == 8191 {
+                preload_done = 1
+                phase = 1
+                c = 0
+            }
+        } else {
+            if c[13] == 0 {
+                if c[2:0] == 3 {
+                    mem[addr] = ~initial
+                }
+            } else {
+                if c[2:0] == 5 && q != ~initial {
+                    rw_bad = 1
+                }
+                if c[12:0] == 8191 {
+                    rw_done = 1
+                }
+            }
+        }
+    }
+    led = {beat[23], 0, 0, 0, rw_done, rw_bad, preload_done, preload_bad}
+}

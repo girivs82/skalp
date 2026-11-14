@@ -868,7 +868,7 @@ impl GateOptimizer {
             netlist.nets.iter().filter_map(|net| net.alias_of).collect();
 
         for cell in &netlist.cells {
-            if self.cells_to_remove.contains(&cell.id) {
+            if self.cells_to_remove.contains(&cell.id) || cell.is_kept() {
                 continue;
             }
 

@@ -165,7 +165,13 @@ fn main() {
     let tiles = load_tilegrid(&db, variant).unwrap();
     let clocks =
         ClockRegions::load(&db, variant.prjoxide_family(), variant.prjoxide_device()).unwrap();
-    let region = sites::design_region(&tiles, &clocks, &[], netlist.cells.len(), 0, 0);
+    let region = sites::design_region(
+        &tiles,
+        &clocks,
+        &[],
+        netlist.cells.len(),
+        sites::HardBlockCounts::default(),
+    );
     println!("region {:?}", region);
     let device =
         NexusDevice::from_prjoxide_region(variant, &db, region.window, Some(region.logic_rows))

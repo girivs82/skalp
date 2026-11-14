@@ -257,65 +257,45 @@ pub fn hard_block_base_address(db_root: &Path, variant: NexusVariant, region: &s
 ///
 /// Each block RAM's contents sit in their own window of the configuration
 /// bus, chosen by the `WID` number the RAM is configured with: window `n`
-/// starts at `EBR_WID0 + n × (EBR_WID1 − EBR_WID0)` (prjoxide's rule). A
-/// device whose `baseaddr.json` lacks these regions borrows them from another
-/// device of the Nexus database that has them: every device prjoxide has
-/// fuzzed (LIFCL-17, LIFCL-40, LFD2NX-40) places them identically. Returns
-/// the address and whether it is unconfirmed: borrowed for a device not in
-/// [`BLOCK_RAM_WINDOWS_CONFIRMED`].
+/// starts at `EBR_WID0 + n × (EBR_WID1 − EBR_WID0)` (prjoxide's rule), from
+/// the device's own `baseaddr.json`.
 pub fn block_ram_init_address(
     db_root: &Path,
     variant: NexusVariant,
     wid: u32,
-) -> Result<(u32, bool), String> {
-    let window = |regions: &HashMap<String, BaseAddrRegion>| {
-        let first = regions.get("EBR_WID0")?.addr;
-        let second = regions.get("EBR_WID1")?.addr;
-        Some(first + wid * (second - first))
+) -> Result<u32, String> {
+    let device = variant.prjoxide_device();
+    let regions = load_base_addresses(db_root, variant.prjoxide_family(), device)
+        .ok_or_else(|| format!("The device database has no {device}/baseaddr.json"))?;
+    let address = |name: &str| {
+        regions
+            .get(name)
+            .map(|r| r.addr)
+            .ok_or_else(|| format!("{device}/baseaddr.json has no {name} region"))
     };
-    let family = variant.prjoxide_family();
-    if let Some(addr) = load_base_addresses(db_root, family, variant.prjoxide_device())
-        .as_ref()
-        .and_then(window)
-    {
-        return Ok((addr, false));
-    }
-    // Any other device's, own family first, in a fixed order
-    let mut candidates: Vec<(bool, String, String)> = Vec::new();
-    for entry in std::fs::read_dir(db_root)
-        .map_err(|e| e.to_string())?
-        .flatten()
-    {
-        let fam = entry.file_name().to_string_lossy().to_string();
-        let Ok(devices) = std::fs::read_dir(entry.path()) else {
-            continue;
-        };
-        for device in devices.flatten() {
-            let dev = device.file_name().to_string_lossy().to_string();
-            if device.path().join("baseaddr.json").is_file() {
-                candidates.push((fam != family, fam.clone(), dev));
-            }
-        }
-    }
-    candidates.sort();
-    candidates
-        .iter()
-        .find_map(|(_, fam, dev)| {
-            load_base_addresses(db_root, fam, dev)
-                .as_ref()
-                .and_then(window)
-        })
-        .map(|addr| {
-            let confirmed = BLOCK_RAM_WINDOWS_CONFIRMED.contains(&variant.prjoxide_device());
-            (addr, !confirmed)
-        })
-        .ok_or_else(|| "no device in the prjoxide database locates block RAM contents".to_string())
+    let first = address("EBR_WID0")?;
+    let second = address("EBR_WID1")?;
+    Ok(first + wid * (second - first))
 }
 
-/// Devices whose `baseaddr.json` lacks the block RAM windows, but where the
-/// borrowed windows were checked on silicon: a ROM preloaded this way read
-/// back its contents (LFCPNX-100 on a CertusPro-NX Versa board, 2026-11-10).
-pub const BLOCK_RAM_WINDOWS_CONFIRMED: &[&str] = &["LFCPNX-100"];
+/// Configuration-bus address of a large RAM's contents: the region the
+/// device's own `baseaddr.json` names after the site's pin location
+/// (`LRAM_CORE_R<row>C<column>`, see [`super::lram::init_region`]).
+pub fn large_ram_init_address(
+    db_root: &Path,
+    variant: NexusVariant,
+    region: &str,
+) -> Result<u32, String> {
+    let device = variant.prjoxide_device();
+    let regions = load_base_addresses(db_root, variant.prjoxide_family(), device)
+        .ok_or_else(|| format!("The device database has no {device}/baseaddr.json"))?;
+    regions.get(region).map(|r| r.addr).ok_or_else(|| {
+        format!(
+            "{device}/baseaddr.json has no {region} region, so this large RAM's \
+                 contents have no address"
+        )
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -429,15 +409,28 @@ mod tests {
             eprintln!("PRJOXIDE_DB not found — skipping");
             return;
         };
-        // CrossLink-NX has the windows fuzzed
+        // Each device's own windows
         assert_eq!(
             block_ram_init_address(&db, NexusVariant::Lifcl40, 2).unwrap(),
-            (0x2004_0000, false)
+            0x2004_0000
         );
-        // CertusPro-NX borrows them, checked on silicon
         assert_eq!(
             block_ram_init_address(&db, NexusVariant::Lfcpnx100, 3).unwrap(),
-            (0x2006_0000, false)
+            0x2006_0000
         );
+    }
+
+    #[test]
+    fn large_ram_contents_go_to_the_region_named_after_the_site() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        assert_eq!(
+            large_ram_init_address(&db, NexusVariant::Lifcl40, "LRAM_CORE_R40C86").unwrap(),
+            0x2E22_0000
+        );
+        let missing = large_ram_init_address(&db, NexusVariant::Lifcl40, "LRAM_CORE_R1C1");
+        assert!(missing.unwrap_err().contains("LRAM_CORE_R1C1"));
     }
 }

@@ -31,6 +31,15 @@ type CombinationalEvalFn = unsafe extern "C" fn(*const c_void, *const c_void, *m
 type SequentialUpdateFn =
     unsafe extern "C" fn(*const c_void, *const c_void, *const c_void, *mut c_void);
 type BatchedSimulationFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, u32);
+type SequentialUpdateClockFn =
+    unsafe extern "C" fn(*const c_void, *const c_void, *const c_void, *mut c_void, u32);
+
+/// One clock of the kernel's flip-flops (must match C++ SkalpClockEntry)
+#[repr(C)]
+struct SkalpClockEntry {
+    name: *const std::os::raw::c_char,
+    edge: u32,
+}
 
 /// A single field entry from the C++ offset table (must match C++ SkalpFieldEntry)
 #[repr(C)]
@@ -55,7 +64,62 @@ struct SkalpKernel {
     registers_field_count: usize,
     signals_fields: *const SkalpFieldEntry,
     signals_field_count: usize,
+    sequential_update_clock: SequentialUpdateClockFn,
+    clocks: *const SkalpClockEntry,
+    clock_count: usize,
 }
+
+/// Where a flip-flop clock's value is read from
+#[derive(Debug, Clone)]
+enum ClockSource {
+    /// A design input
+    Input(FieldInfo),
+    /// A register
+    Register(FieldInfo),
+    /// A signal made by combinational logic
+    Signal(FieldInfo),
+    /// Not found in the kernel's buffers: these flip-flops update whenever
+    /// another clock has an edge, as every flip-flop did before clocks were
+    /// told apart
+    Unknown,
+}
+
+/// The clock of one group of flip-flops (see `sequential_update_clock`)
+#[derive(Debug, Clone)]
+struct KernelClock {
+    name: String,
+    /// 0 = rising, 1 = falling, 2 = both
+    edge: u32,
+    source: ClockSource,
+    /// Value at the last look; `None` until first looked at, for a clock
+    /// made inside the design (its starting value is not an edge)
+    prev: Option<u64>,
+}
+
+impl KernelClock {
+    fn initial_prev(source: &ClockSource) -> Option<u64> {
+        match source {
+            // An input starts low, so raising it on the first step is an edge
+            ClockSource::Input(_) => Some(0),
+            _ => None,
+        }
+    }
+
+    fn fires(&self, curr: u64) -> bool {
+        let Some(prev) = self.prev else {
+            return false;
+        };
+        match self.edge {
+            0 => prev == 0 && curr == 1,
+            1 => prev == 1 && curr == 0,
+            _ => prev != curr,
+        }
+    }
+}
+
+/// Most rounds of edges from clocks made inside the design that one step
+/// follows (a clock that keeps toggling itself never settles)
+const MAX_DERIVED_CLOCK_ROUNDS: usize = 64;
 
 /// Compiled CPU runtime for high-performance simulation
 pub struct CompiledCpuRuntime {
@@ -85,6 +149,8 @@ pub struct CompiledCpuRuntime {
     clock_names: Vec<String>,
     /// Previous clock values for edge detection
     prev_clocks: Vec<u64>,
+    /// The clocks the flip-flops take, one per kernel clock group
+    kernel_clocks: Vec<KernelClock>,
 }
 
 /// A mapping from field names to their offset and size in the buffer
@@ -264,6 +330,10 @@ impl CompiledCpuRuntime {
 
         let prev_clocks = vec![0u64; clock_names.len()];
 
+        let kernel_clocks = unsafe {
+            Self::build_kernel_clocks(kernel, &input_fields, &register_fields, &signal_fields)
+        };
+
         let mut runtime = Self {
             _library: library,
             kernel,
@@ -279,6 +349,7 @@ impl CompiledCpuRuntime {
             module: module.clone(),
             clock_names,
             prev_clocks,
+            kernel_clocks,
         };
         runtime.load_initial_values();
         Ok(runtime)
@@ -319,6 +390,91 @@ impl CompiledCpuRuntime {
             }
         }
         self.shadow_registers.copy_from(&self.registers);
+    }
+
+    /// The kernel's flip-flop clocks, each with where its value is read from
+    unsafe fn build_kernel_clocks(
+        kernel: *const SkalpKernel,
+        input_fields: &FieldMap,
+        register_fields: &FieldMap,
+        signal_fields: &FieldMap,
+    ) -> Vec<KernelClock> {
+        let k = &*kernel;
+        (0..k.clock_count)
+            .map(|i| {
+                let entry = &*k.clocks.add(i);
+                let name = std::ffi::CStr::from_ptr(entry.name)
+                    .to_string_lossy()
+                    .into_owned();
+                let source = if let Some(f) = input_fields.get(&name) {
+                    ClockSource::Input(f.clone())
+                } else if let Some(f) = register_fields.get(&name) {
+                    ClockSource::Register(f.clone())
+                } else if let Some(f) = signal_fields.get(&name) {
+                    ClockSource::Signal(f.clone())
+                } else {
+                    ClockSource::Unknown
+                };
+                KernelClock {
+                    name,
+                    edge: entry.edge,
+                    prev: KernelClock::initial_prev(&source),
+                    source,
+                }
+            })
+            .collect()
+    }
+
+    /// The current value (bit 0) of a kernel clock; `None` for an unknown one
+    fn kernel_clock_value(&self, clock: &KernelClock) -> Option<u64> {
+        let (buffer, field) = match &clock.source {
+            ClockSource::Input(f) => (&self.inputs, f),
+            ClockSource::Register(f) => (&self.registers, f),
+            ClockSource::Signal(f) => (&self.signals, f),
+            ClockSource::Unknown => return None,
+        };
+        let bytes = buffer.read(field.offset, field.size.max(1));
+        Some(bytes.first().map_or(0, |b| (*b & 1) as u64))
+    }
+
+    /// Look at every known clock: the groups with an edge since the last
+    /// look, and the last-seen values brought up to date
+    fn take_clock_edges(&mut self) -> Vec<usize> {
+        let mut fired = Vec::new();
+        for i in 0..self.kernel_clocks.len() {
+            let Some(curr) = self.kernel_clock_value(&self.kernel_clocks[i]) else {
+                continue;
+            };
+            if self.kernel_clocks[i].fires(curr) {
+                fired.push(i);
+            }
+            self.kernel_clocks[i].prev = Some(curr);
+        }
+        fired
+    }
+
+    /// Update the flip-flops of the clock groups `fired` together: every one
+    /// samples the state from before any of them updates
+    fn eval_sequential_clocks(&mut self, fired: &[usize]) {
+        unsafe {
+            let kernel = &*self.kernel;
+            self.shadow_registers.copy_from(&self.registers);
+            for &clock in fired {
+                (kernel.sequential_update_clock)(
+                    self.inputs.as_ptr(),
+                    self.shadow_registers.as_ptr(),
+                    self.signals.as_ptr(),
+                    self.registers.as_mut_ptr(),
+                    clock as u32,
+                );
+            }
+        }
+    }
+
+    fn reset_kernel_clocks(&mut self) {
+        for clock in &mut self.kernel_clocks {
+            clock.prev = KernelClock::initial_prev(&clock.source);
+        }
     }
 
     /// Build field offset maps by reading the C++ offset tables emitted via offsetof()/sizeof().
@@ -606,6 +762,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
         self.load_initial_values();
         self.current_cycle = 0;
         self.prev_clocks.iter_mut().for_each(|c| *c = 0);
+        self.reset_kernel_clocks();
         Ok(())
     }
 
@@ -633,12 +790,48 @@ impl SimulationRuntime for CompiledCpuRuntime {
             self.prev_clocks[i] = curr;
         }
 
-        if has_rising_edge || self.clock_names.is_empty() {
-            self.eval_sequential();
+        if self.kernel_clocks.is_empty() {
+            // No flip-flops on any clock the kernel lists
+            if has_rising_edge || self.clock_names.is_empty() {
+                self.eval_sequential();
+            }
+            self.eval_combinational();
+        } else {
+            // Each flip-flop updates on its own clock. Clocks that the
+            // design's logic makes (a strobe from a register, say) change
+            // only once registers update, so their edges are followed round
+            // by round until no clock changes.
+            let unknown: Vec<usize> = (0..self.kernel_clocks.len())
+                .filter(|&i| matches!(self.kernel_clocks[i].source, ClockSource::Unknown))
+                .collect();
+            let mut fired = self.take_clock_edges();
+            if has_rising_edge || !fired.is_empty() {
+                fired.extend(unknown.iter().copied());
+            }
+            let mut rounds = 0;
+            while !fired.is_empty() {
+                self.eval_sequential_clocks(&fired);
+                self.eval_combinational();
+                rounds += 1;
+                if rounds >= MAX_DERIVED_CLOCK_ROUNDS {
+                    tracing::warn!(
+                        "simulation cycle {}: clocks made by the design's logic still changing after {} rounds ({})",
+                        self.current_cycle,
+                        rounds,
+                        self.kernel_clocks
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    break;
+                }
+                fired = self.take_clock_edges();
+            }
+            if rounds == 0 {
+                self.eval_combinational();
+            }
         }
-
-        // Phase 3: Combinational evaluation again (to propagate new register values)
-        self.eval_combinational();
 
         self.current_cycle += 1;
         Ok(self.extract_state())
@@ -647,8 +840,15 @@ impl SimulationRuntime for CompiledCpuRuntime {
     async fn run(&mut self, cycles: u64) -> SimulationResult<Vec<SimulationState>> {
         let mut states = Vec::with_capacity(cycles as usize);
 
-        // Use batched simulation for efficiency if more than a few cycles
-        if cycles > 10 {
+        // Use batched simulation for efficiency if more than a few cycles.
+        // It updates every flip-flop each cycle, so only a design whose
+        // flip-flops all take one input clock can use it.
+        let one_input_clock = self.kernel_clocks.len() <= 1
+            && self
+                .kernel_clocks
+                .iter()
+                .all(|c| matches!(c.source, ClockSource::Input(_) | ClockSource::Unknown));
+        if cycles > 10 && one_input_clock {
             unsafe {
                 let kernel = &*self.kernel;
                 (kernel.batched_simulation)(
@@ -675,6 +875,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
         self.load_initial_values();
         self.current_cycle = 0;
         self.prev_clocks.iter_mut().for_each(|c| *c = 0);
+        self.reset_kernel_clocks();
 
         // Run one combinational eval to propagate reset values
         self.eval_combinational();

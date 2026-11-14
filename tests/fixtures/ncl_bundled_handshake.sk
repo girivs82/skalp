@@ -1,0 +1,58 @@
+// A clocked parent driving async (NCL) instances through their implicit
+// `ncl_req`/`ncl_ack` handshake: a combinational adder and an accumulator
+// whose register is written once per request.
+
+async entity HsAdd8 {
+    in a: bit[8]
+    in b: bit[8]
+    out s: bit[8]
+}
+
+impl HsAdd8 {
+    s = a + b
+}
+
+async entity HsAcc8 {
+    in a: bit[8]
+    out s: bit[8]
+}
+
+impl HsAcc8 {
+    signal acc: bit[8] = 0
+    on() {
+        acc = acc + a
+    }
+    s = acc
+}
+
+entity HsTop {
+    in clk: clock
+    in x: bit[8]
+    in y: bit[8]
+    in go: bit
+    out sum: bit[8]
+    out total: bit[8]
+    out done: bit
+}
+
+impl HsTop {
+    signal xr: bit[8] = 0
+    signal yr: bit[8] = 0
+    signal req: bit = 0
+    signal sum_r: bit[8] = 0
+    signal total_r: bit[8] = 0
+
+    inst add = HsAdd8 { a: xr, b: yr, ncl_req: req }
+    inst acc = HsAcc8 { a: xr, ncl_req: req }
+
+    on(clk.rise) {
+        xr = x
+        yr = y
+        req = go
+        sum_r = add.s
+        total_r = acc.s
+    }
+    sum = sum_r
+    total = total_r
+    done = add.ncl_ack & acc.ncl_ack
+}

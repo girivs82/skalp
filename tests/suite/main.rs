@@ -112,6 +112,7 @@ mod test_multi_sub;
 mod test_named_generic_function_calls;
 mod test_ncl_async_simulation;
 mod test_ncl_behavioral;
+mod test_ncl_bundled;
 mod test_ncl_cle_patterns;
 mod test_ncl_convergence_mwe;
 mod test_ncl_expansion_fix;

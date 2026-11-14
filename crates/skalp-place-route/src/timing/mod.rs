@@ -164,6 +164,29 @@ pub struct TimingReport {
     /// Hold check at the fast corner, when the analyzer ran one
     #[serde(default)]
     pub hold: Option<HoldReport>,
+    /// Matched delays of bundled-data async blocks, checked with routed
+    /// delays (worst corner)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundles: Vec<BundleReport>,
+}
+
+/// One matched delay of a bundled-data async block, checked after routing
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BundleReport {
+    /// The async block (`top.u`)
+    pub block: String,
+    /// Path of the matched delay's cell
+    pub delay: String,
+    /// What it times: "registers" or "acknowledge"
+    pub times: String,
+    /// Latest data arrival (plus setup), in ns, at the corner of the worst slack
+    pub data_ns: f64,
+    /// Arrival of the delayed control, in ns, at that corner
+    pub control_ns: f64,
+    /// Control minus data at the worst corner, in ns (negative: too short)
+    pub slack_ns: f64,
+    /// Buffers in the delay's chain
+    pub chain_len: usize,
 }
 
 /// Hold check: whether data launched by a clock edge reaches each register
@@ -192,6 +215,7 @@ impl Default for TimingReport {
             clock_summaries: Vec::new(),
             critical_paths: Vec::new(),
             hold: None,
+            bundles: Vec::new(),
         }
     }
 }

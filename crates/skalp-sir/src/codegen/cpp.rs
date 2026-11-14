@@ -136,6 +136,7 @@ static inline uint32_t _fp32_to_fp16(float f) {
 
         // Generate sequential update function
         output.push_str(&self.generate_sequential_function());
+        output.push_str(&self.generate_clocked_sequential_function());
 
         // Generate batched simulation function
         output.push_str(&self.generate_batched_function());
@@ -191,6 +192,77 @@ extern "C" void sequential_update(
         output.push_str(&self.shared.take_output());
 
         output.push_str("}\n\n");
+        output
+    }
+
+    /// Generate the per-clock sequential update and the clock table.
+    ///
+    /// `sequential_update_clock(.., clock)` updates only the flip-flops of
+    /// entry `clock` of `clock_table` (a clock signal and the edge its
+    /// flip-flops take), and leaves the rest of `next_registers` as it is:
+    /// the runtime copies the current registers into it once, then calls it
+    /// for each clock with an edge, so a design with several clocks, or with
+    /// a clock made by its own logic, updates each register on its own
+    /// clock only.
+    fn generate_clocked_sequential_function(&mut self) -> String {
+        let mut output = String::new();
+        output.push_str(
+            r#"// Clocks of the flip-flops: edge 0 = rising, 1 = falling, 2 = both
+struct SkalpClockEntry {
+    const char* name;
+    uint32_t edge;
+};
+
+// Sequential update of the flip-flops on one clock of clock_table
+extern "C" void sequential_update_clock(
+    const Inputs* inputs,
+    const Registers* current_registers,
+    const Signals* signals,
+    Registers* next_registers,
+    uint32_t clock
+) {
+    switch (clock) {
+"#,
+        );
+        let groups = self.shared.clock_groups();
+        let mut table = Vec::new();
+        for (index, (clock, edge, nodes)) in groups.iter().enumerate() {
+            output.push_str(&format!("    case {index}: {{\n"));
+            self.shared.indent();
+            self.shared.indent();
+            for node in nodes {
+                self.shared
+                    .generate_flipflop_update(node, "current_registers", "next_registers");
+            }
+            self.shared.dedent();
+            self.shared.dedent();
+            output.push_str(&self.shared.take_output());
+            output.push_str("        break;\n    }\n");
+            let edge = match edge {
+                crate::sir::ClockEdge::Rising => 0,
+                crate::sir::ClockEdge::Falling => 1,
+                crate::sir::ClockEdge::Both => 2,
+            };
+            table.push(format!(
+                "    {{\"{}\", {}}},\n",
+                self.shared.sanitize_name(clock),
+                edge
+            ));
+        }
+        output.push_str("    default:\n        break;\n    }\n}\n\n");
+        if table.is_empty() {
+            output.push_str("static const SkalpClockEntry* const clock_table = nullptr;\n");
+        } else {
+            output.push_str("static const SkalpClockEntry clock_table[] = {\n");
+            for entry in table {
+                output.push_str(&entry);
+            }
+            output.push_str("};\n");
+        }
+        output.push_str(&format!(
+            "static const size_t clock_count = {};\n\n",
+            groups.len()
+        ));
         output
     }
 
@@ -404,6 +476,9 @@ struct SkalpKernel {
     size_t registers_field_count;
     const SkalpFieldEntry* signals_fields;
     size_t signals_field_count;
+    void (*sequential_update_clock)(const Inputs*, const Registers*, const Signals*, Registers*, uint32_t);
+    const SkalpClockEntry* clocks;
+    size_t clock_count;
 };
 
 extern "C" const SkalpKernel SKALP_KERNEL = {
@@ -418,7 +493,10 @@ extern "C" const SkalpKernel SKALP_KERNEL = {
     registers_field_table,
     registers_field_count,
     signals_field_table,
-    signals_field_count
+    signals_field_count,
+    sequential_update_clock,
+    clock_table,
+    clock_count
 };
 "#,
         );

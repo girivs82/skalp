@@ -41,6 +41,10 @@ use crate::sir::{
 };
 use indexmap::IndexMap;
 
+/// Most rounds of edges from clocks the design's logic makes that one step
+/// follows (a clock that keeps toggling itself never settles)
+const MAX_INTERNAL_CLOCK_ROUNDS: usize = 64;
+
 /// Gate-level simulation state
 #[derive(Debug, Clone)]
 pub struct GateSimulationState {
@@ -50,6 +54,10 @@ pub struct GateSimulationState {
     pub signals: IndexMap<u32, Vec<bool>>,
     /// Previous clock values for edge detection
     pub prev_clocks: IndexMap<u32, bool>,
+    /// Last seen values of clocks the design's own logic makes (a strobe
+    /// from a register, say); a clock is absent until first looked at, since
+    /// its starting value is not an edge
+    pub prev_internal_clocks: IndexMap<u32, bool>,
 }
 
 impl GateSimulationState {
@@ -59,6 +67,7 @@ impl GateSimulationState {
             cycle: 0,
             signals: IndexMap::new(),
             prev_clocks: IndexMap::new(),
+            prev_internal_clocks: IndexMap::new(),
         }
     }
 }
@@ -344,6 +353,9 @@ pub struct GateLevelSimulator {
     /// Map from buffered clock signal → source clock signal.
     /// Built during init by scanning ClkBuf primitives.
     clock_buffer_map: std::collections::HashMap<u32, SirSignalId>,
+    /// Clocks of sequential blocks that the design's logic makes: neither
+    /// an input nor a buffered input
+    internal_clocks: Vec<SirSignalId>,
     /// Active fault injection (if any)
     active_fault: Option<FaultInjectionConfig>,
     /// Domain-loss injection: every primitive in this set has its outputs
@@ -375,6 +387,7 @@ impl GateLevelSimulator {
             output_ports: Vec::new(),
             clock_signals: Vec::new(),
             clock_buffer_map: std::collections::HashMap::new(),
+            internal_clocks: Vec::new(),
             active_fault: None,
             active_domain_kill: None,
             detection_signals: Vec::new(),
@@ -385,7 +398,45 @@ impl GateLevelSimulator {
         sim.initialize();
         sim.initialize_ram_state();
         sim.build_clock_buffer_map();
+        sim.find_internal_clocks();
         sim
+    }
+
+    /// Clocks of sequential blocks that are neither inputs nor buffered inputs
+    fn find_internal_clocks(&mut self) {
+        let mut internal = Vec::new();
+        for block in &self.sir.top_module.seq_blocks {
+            let clock = block.clock;
+            if self.clock_signals.contains(&clock)
+                || self.input_ports.contains(&clock)
+                || self.clock_buffer_map.contains_key(&clock.0)
+                || internal.contains(&clock)
+            {
+                continue;
+            }
+            internal.push(clock);
+        }
+        self.internal_clocks = internal;
+    }
+
+    /// Edges of the internal clocks since they were last looked at, as
+    /// (clock, edge); brings their last-seen values up to date
+    fn take_internal_clock_edges(&mut self) -> Vec<(SirSignalId, EdgeType)> {
+        let mut edges = Vec::new();
+        for &clock in &self.internal_clocks {
+            let curr = self
+                .state
+                .signals
+                .get(&clock.0)
+                .and_then(|v| v.first().copied())
+                .unwrap_or(false);
+            match self.state.prev_internal_clocks.insert(clock.0, curr) {
+                Some(false) if curr => edges.push((clock, EdgeType::Rising)),
+                Some(true) if !curr => edges.push((clock, EdgeType::Falling)),
+                _ => {}
+            }
+        }
+        edges
     }
 
     /// Initialize the simulator from SIR
@@ -836,13 +887,31 @@ impl GateLevelSimulator {
         // Phase 2: Evaluate combinational logic
         self.evaluate_combinational();
 
-        // Phase 3: Update sequential logic on clock edges
-        for (clock_id, edge) in &clock_edges {
-            self.update_sequential(*clock_id, edge.clone());
+        // Phase 3: Update sequential logic on clock edges. Every register
+        // with an edge samples the state from before any of them updates.
+        // Clocks the design's logic makes (from inputs, or from registers
+        // that just updated) are followed round by round until none changes.
+        let mut fired = clock_edges;
+        fired.extend(self.take_internal_clock_edges());
+        let mut rounds = 0;
+        while !fired.is_empty() {
+            self.update_sequential_all(&fired);
+            // Phase 4: Re-evaluate combinational with new register values
+            self.evaluate_combinational();
+            rounds += 1;
+            if rounds >= MAX_INTERNAL_CLOCK_ROUNDS {
+                eprintln!(
+                    "warning: gate-level cycle {}: clocks made by the design's logic still changing after {} rounds",
+                    self.state.cycle, rounds
+                );
+                break;
+            }
+            fired = self.take_internal_clock_edges();
         }
-
-        // Phase 4: Re-evaluate combinational with new register values
-        self.evaluate_combinational();
+        if rounds == 0 {
+            // Phase 4 with no register update, as before
+            self.evaluate_combinational();
+        }
 
         // Update cycle counter
         self.state.cycle += 1;
@@ -1173,7 +1242,24 @@ impl GateLevelSimulator {
     /// Phase 2: Apply all new Q values to state at once
     /// This prevents read-after-write hazards in pipeline designs where one DFF's
     /// output feeds another DFF's input (e.g., writeback_data <= execute_result).
-    fn update_sequential(&mut self, clock_id: SirSignalId, edge: EdgeType) {
+    /// Every register of every (clock, edge) in `edges` updates together.
+    fn update_sequential_all(&mut self, edges: &[(SirSignalId, EdgeType)]) {
+        let mut pending_updates: Vec<(u32, Vec<bool>)> = Vec::new();
+        for (clock_id, edge) in edges {
+            pending_updates.extend(self.collect_sequential_updates(*clock_id, edge.clone()));
+        }
+        for (signal_id, value) in pending_updates {
+            self.state.signals.insert(signal_id, value);
+        }
+    }
+
+    /// The new values of the registers that `edge` of `clock_id` updates,
+    /// computed from the current state (memory writes take effect at once)
+    fn collect_sequential_updates(
+        &mut self,
+        clock_id: SirSignalId,
+        edge: EdgeType,
+    ) -> Vec<(u32, Vec<bool>)> {
         // Collect all pending DFF updates: (signal_id, new_value)
         let mut pending_updates: Vec<(u32, Vec<bool>)> = Vec::new();
 
@@ -1320,10 +1406,7 @@ impl GateLevelSimulator {
             }
         }
 
-        // Phase 2: Apply all DFF updates simultaneously
-        for (signal_id, value) in pending_updates {
-            self.state.signals.insert(signal_id, value);
-        }
+        pending_updates
     }
 
     /// Run simulation for N cycles

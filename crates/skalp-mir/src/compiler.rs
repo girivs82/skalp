@@ -250,6 +250,8 @@ impl MirCompiler {
                             port.direction,
                             HirPortDirection::Input | HirPortDirection::Bidirectional
                         ) && !instance.connections.iter().any(|c| c.port == port.name)
+                            // checked by the NCL bridge (only a clocked parent needs it)
+                            && port.name != skalp_frontend::hir::NCL_REQ_PORT
                         {
                             inst_errors.push(format!(
                                 "input port `{p}` of `{t}` is not connected in `inst {n}` (in entity `{o}`)",
@@ -337,6 +339,20 @@ impl MirCompiler {
                         .map(|s| s.as_str())
                         .collect::<Vec<_>>()
                         .join("\n  ")
+                ));
+            }
+        }
+
+        // Clocked parents drive async instances through a registered request
+        // and a synchronised acknowledge (and async modules get a behavioural
+        // acknowledge) before the undriven-output check runs.
+        {
+            let ncl_errors = crate::ncl_bridge::apply_ncl_bridges(&mut mir, &reachable_names);
+            if !ncl_errors.is_empty() {
+                return Err(format!(
+                    "async handshake check failed with {} error(s):\n  {}",
+                    ncl_errors.len(),
+                    ncl_errors.join("\n  ")
                 ));
             }
         }

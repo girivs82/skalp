@@ -1434,6 +1434,13 @@ impl HirBuilderContext {
                 }
             }
 
+            // `async` entities get the implicit handshake ports a clocked
+            // parent uses to drive them (four-phase req/ack, see
+            // `hir::NCL_REQ_PORT`), unless the entity declares them itself.
+            if is_async {
+                self.add_ncl_handshake_ports(&mut ports);
+            }
+
             // Second pass: build entity body items (signals, assignments, let bindings)
             // Clear only SIGNAL-LEVEL pending attribute state from first pass
             // NOTE: Do NOT clear entity-level attributes (safety_mechanism_config, assumed_mechanisms)
@@ -1857,6 +1864,37 @@ impl HirBuilderContext {
             drive_override: None,
             board_pin: Some(crate::hir::BoardPinRef { board, pin, bits }),
         })
+    }
+
+    /// Add the implicit `ncl_req` input and `ncl_ack` output of an `async`
+    /// entity to its port list (each only if not declared explicitly)
+    fn add_ncl_handshake_ports(&mut self, ports: &mut Vec<HirPort>) {
+        for (name, direction) in [
+            (crate::hir::NCL_REQ_PORT, HirPortDirection::Input),
+            (crate::hir::NCL_ACK_PORT, HirPortDirection::Output),
+        ] {
+            if ports.iter().any(|p| p.name == name) {
+                continue;
+            }
+            let id = self.next_port_id();
+            let port_type = HirType::Bit(1);
+            self.symbols.ports.insert(name.to_string(), id);
+            self.symbols.port_types.insert(id, port_type.clone());
+            self.symbols.add_to_scope(name, SymbolId::Port(id));
+            ports.push(HirPort {
+                id,
+                name: name.to_string(),
+                direction,
+                port_type,
+                clock_domain_name: None,
+                physical_constraints: None,
+                detection_config: None,
+                power_domain_config: None,
+                isolation_config: None,
+                retention_config: None,
+                comments: Vec::new(),
+            });
+        }
     }
 
     /// Build port from syntax node
@@ -3025,6 +3063,9 @@ impl HirBuilderContext {
                         port.direction,
                         HirPortDirection::Input | HirPortDirection::Bidirectional
                     ) && !connections.iter().any(|c| c.port == port.name)
+                        // `ncl_req` is only required under a clocked parent,
+                        // which MIR lowering checks (an async parent coalesces)
+                        && port.name != crate::hir::NCL_REQ_PORT
                     {
                         self.errors.push(HirError {
                             message: format!(

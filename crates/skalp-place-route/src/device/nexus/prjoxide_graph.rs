@@ -254,32 +254,24 @@ pub fn load_tiletype(
 
 /// Load the bit database of a hard block's configuration registers
 /// (`iptypes/<TYPE>.ron`, such as `EBR_INIT`), whose bit `frame`s are byte
-/// offsets from the block's bus address. CertusPro-NX has none fuzzed; it
-/// takes CrossLink-NX's, as for its tiles.
+/// offsets from the block's bus address.
 pub fn load_iptype(
     db_root: &Path,
     family: &str,
     iptype: &str,
 ) -> Result<Option<TileBitsDb>, String> {
-    let load = |family: &str| -> Result<Option<TileBitsDb>, String> {
-        let path = db_root
-            .join(family)
-            .join("iptypes")
-            .join(format!("{iptype}.ron"));
-        if !path.exists() {
-            return Ok(None);
-        }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {}", path.display(), e))?;
-        ron::from_str(&text)
-            .map(Some)
-            .map_err(|e| format!("parsing {}: {}", path.display(), e))
-    };
-    match load(family)? {
-        Some(db) => Ok(Some(db)),
-        None if family == "LFCPNX" => load("LIFCL"),
-        None => Ok(None),
+    let path = db_root
+        .join(family)
+        .join("iptypes")
+        .join(format!("{iptype}.ron"));
+    if !path.exists() {
+        return Ok(None);
     }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
+    ron::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("parsing {}: {}", path.display(), e))
 }
 
 /// Complete a CertusPro-NX tile description from CrossLink-NX.

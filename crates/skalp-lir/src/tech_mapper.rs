@@ -14,7 +14,7 @@
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
     DSP_A_BITS_PARAM, DSP_B_BITS_PARAM, DSP_C_BITS, DSP_P_BITS_PARAM, RAM_ADDR_BITS_PARAM,
-    RAM_DATA_BITS_PARAM,
+    RAM_DATA_BITS_PARAM, RAM_READ_ONLY_PARAM,
 };
 use crate::lir::{Lir, LirNodeId, LirOp, LirSignalId};
 use crate::tech_library::{CellFunction, LibraryCell, LibraryFailureMode, TechLibrary};
@@ -1723,7 +1723,7 @@ fn map_memblock_standalone(
     let ram_lookup = if total_bits < BRAM_MIN_BITS || async_read {
         None
     } else {
-        library.find_ram_cell()
+        library.find_ram_cell_for(data_width, depth)
     };
     // A memory read combinationally goes into distributed RAM when the target
     // has it and that is cheaper than registers (it nearly always is beyond a
@@ -1896,6 +1896,10 @@ fn map_memblock_standalone(
         );
         cell.parameters
             .insert(RAM_DATA_BITS_PARAM.to_string(), block_width.to_string());
+        if !has_write {
+            cell.parameters
+                .insert(RAM_READ_ONLY_PARAM.to_string(), "1".to_string());
+        }
         if let Some(words) = contents {
             cell.set_memory_init(&words);
         }
@@ -3188,6 +3192,47 @@ fn merge_physical_nodes_into_netlist(
                     cell.source_op = Some("NclDecode".to_string());
                     buf_cell.apply_to_cell(&mut cell);
                     netlist.add_cell(cell);
+                }
+            }
+
+            LirOp::NclMatchedDelay { width } => {
+                // out = in & delay(in): one kept buffer, then a kept AND of
+                // the input and the buffer. The sizing pass
+                // (`ncl_bundle::size_matched_delays`) lengthens the chain to
+                // cover the data paths the output times.
+                for i in 0..*width as usize {
+                    let a = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let chain =
+                        netlist.add_net(GateNet::new(GateNetId(0), format!("{}.mdly{}", path, i)));
+                    let mut buf = Cell::new_comb(
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{}.mdly{}_0", path, i),
+                        vec![a],
+                        vec![chain],
+                    );
+                    buf_cell.apply_to_cell(&mut buf);
+                    buf.source_op = Some(crate::gate_netlist::MATCHED_DELAY_OP.to_string());
+                    netlist.add_cell(buf);
+                    let mut and = Cell::new_comb(
+                        CellId(0),
+                        and2_cell.name.clone(),
+                        library.name.clone(),
+                        and2_cell.fit,
+                        format!("{}.mdly{}_and", path, i),
+                        vec![a, chain],
+                        vec![out],
+                    );
+                    and2_cell.apply_to_cell(&mut and);
+                    and.source_op = Some(crate::gate_netlist::MATCHED_DELAY_OP.to_string());
+                    netlist.add_cell(and);
                 }
             }
 

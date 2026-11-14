@@ -239,13 +239,23 @@ const MAX_REGION_FILL: f64 = 0.6;
 /// window always includes them. Logic stays within one clock spine's rows when
 /// it fits, keeping the loaded part of the device small; a larger design gets
 /// every spine and then the full width of the chip.
+/// How many of each hard block a design uses, for [`design_region`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HardBlockCounts {
+    /// Block RAMs (EBR)
+    pub block_rams: usize,
+    /// Large RAMs (LRAM)
+    pub large_rams: usize,
+    /// Multipliers
+    pub multipliers: usize,
+}
+
 pub fn design_region(
     tiles: &[PrjoxideTile],
     clocks: &ClockRegions,
     sites: &[(u32, u32)],
     lut_count: usize,
-    ram_count: usize,
-    dsp_count: usize,
+    hard_blocks: HardBlockCounts,
 ) -> DesignRegion {
     let clock_tiles = tiles
         .iter()
@@ -299,9 +309,18 @@ pub fn design_region(
             .filter(inside)
             .filter(|t| super::dsp::slot_of_tile(&t.tiletype).is_some())
             .count();
+        // Large RAMs sit on the device's edges, outside the logic rows: any
+        // in the window's columns and rows count. Their pins are a step into
+        // the fabric, which the window must also hold.
+        let large_ram_sites = tiles
+            .iter()
+            .filter(|t| t.x > x0 && t.x <= x1 && t.y < region.window.3)
+            .filter(|t| super::lram::site_of_tile(&t.tiletype).is_some())
+            .count();
         lut_count as f64 <= capacity as f64 * MAX_REGION_FILL
-            && ram_count <= ram_sites
-            && dsp_count <= dsp_sites
+            && hard_blocks.block_rams <= ram_sites
+            && hard_blocks.large_rams <= large_ram_sites
+            && hard_blocks.multipliers <= dsp_sites
     };
 
     let right_edge = (first_col + MIN_REGION_COLUMNS).max(site_x1);
@@ -377,8 +396,20 @@ mod tests {
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
         let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
-        let small = design_region(&tiles, &clocks, &[(159, 31)], 100, 0, 0);
-        let large = design_region(&tiles, &clocks, &[(159, 31)], 45_000, 0, 0);
+        let small = design_region(
+            &tiles,
+            &clocks,
+            &[(159, 31)],
+            100,
+            HardBlockCounts::default(),
+        );
+        let large = design_region(
+            &tiles,
+            &clocks,
+            &[(159, 31)],
+            45_000,
+            HardBlockCounts::default(),
+        );
         assert_eq!(small.logic_rows, (1, 37));
         assert_eq!(large.logic_rows, (1, 73));
         assert!(large.window.3 > small.window.3);
@@ -480,7 +511,13 @@ mod tests {
         };
         let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
         let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
-        let region = design_region(&tiles, &clocks, &[(159, 31)], 100, 0, 0);
+        let region = design_region(
+            &tiles,
+            &clocks,
+            &[(159, 31)],
+            100,
+            HardBlockCounts::default(),
+        );
         assert_eq!(region.window, (73, 0, 159, 40));
         assert_eq!(region.logic_rows, (1, 37));
     }

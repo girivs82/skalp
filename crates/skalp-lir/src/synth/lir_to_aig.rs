@@ -123,6 +123,14 @@ impl<'a> LirToSynthAig<'a> {
                         consumed_phys_outputs.insert(input_id.0);
                     }
                 }
+                // So does a register's clock or reset: a register clocked by
+                // a physical cell's output (the matched delay of an async
+                // block) otherwise had no clock net and was wired to net 0
+                for control in [node.clock, node.reset].into_iter().flatten() {
+                    if phys_output_set.contains(&control.0) {
+                        consumed_phys_outputs.insert(control.0);
+                    }
+                }
             }
         }
         // Physical outputs that are module outputs are also "consumed" —
@@ -494,6 +502,7 @@ impl<'a> LirToSynthAig<'a> {
             | LirOp::NclReg { .. }
             | LirOp::NclComplete { .. }
             | LirOp::NclNull { .. }
+            | LirOp::NclMatchedDelay { .. }
             | LirOp::Tristate { .. } => true,
             _ => false,
         }

@@ -90,6 +90,9 @@ struct Engine<'a, D: Device + ?Sized> {
     visiting: HashSet<GateNetId>,
     /// Earliest arrivals (hold) rather than latest (setup)
     early: bool,
+    /// Cells of bundled-data async blocks: clocked timing does not cross
+    /// them (their own matched delays time them, see [`check_bundles`])
+    async_cells: HashSet<CellId>,
 }
 
 impl<D: Device + ?Sized> Engine<'_, D> {
@@ -157,6 +160,14 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         let driver = info.driver.and_then(|id| netlist.get_cell(id));
         let output = info.driver_pin.unwrap_or(0);
         let arrival = match driver {
+            // An async block's output: its handshake, not this clock, says
+            // when it is read
+            Some(cell) if self.async_cells.contains(&cell.id) => Arrival {
+                time: self.untimed(),
+                from: None,
+                route_ps: 0,
+                cell_ps: 0,
+            },
             Some(cell) => self.output_time(cell, output),
             None => Arrival {
                 time: self.untimed(),
@@ -308,6 +319,7 @@ pub fn analyze<D: Device + ?Sized>(
         arrivals: HashMap::new(),
         visiting: HashSet::new(),
         early: false,
+        async_cells: async_block_cells(design.netlist),
     };
 
     let netlist = design.netlist;
@@ -316,6 +328,9 @@ pub fn analyze<D: Device + ?Sized>(
 
     for cell in &netlist.cells {
         let Some(clock) = cell.clock else { continue };
+        if engine.async_cells.contains(&cell.id) {
+            continue;
+        }
         let target_ns = targets.required_ns(clock);
         let entry = per_clock.entry(clock.0).or_insert((0, 0.0));
         entry.0 += 1;
@@ -400,6 +415,7 @@ pub fn analyze<D: Device + ?Sized>(
         clock_summaries,
         critical_paths: paths,
         hold: None,
+        bundles: Vec::new(),
     }
 }
 
@@ -420,11 +436,12 @@ pub fn analyze_hold<D: Device + ?Sized>(
         arrivals: HashMap::new(),
         visiting: HashSet::new(),
         early: true,
+        async_cells: async_block_cells(design.netlist),
     };
     let margin_ps = targets.hold_margin_ns * PS_PER_NS;
     let mut paths = Vec::new();
     for cell in &design.netlist.cells {
-        if cell.clock.is_none() {
+        if cell.clock.is_none() || engine.async_cells.contains(&cell.id) {
             continue;
         }
         let capture = engine.clock_arrival(cell);
@@ -481,4 +498,131 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         }
         Some((arrival + self.route_delay(net, cell.id, endpoint.pin), net))
     }
+}
+
+/// Routed delays for checking the matched delays of bundled-data async
+/// blocks (see `skalp_lir::ncl_bundle`).
+struct RoutedBundleDelays<'e, 'a, D: Device + ?Sized> {
+    engine: std::cell::RefCell<&'e mut Engine<'a, D>>,
+    model: &'a dyn TimingModel,
+}
+
+impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDelays<'_, '_, D> {
+    fn wire_ps(
+        &self,
+        _netlist: &skalp_lir::gate_netlist::GateNetlist,
+        net: GateNetId,
+        cell: &Cell,
+        input: usize,
+    ) -> i64 {
+        if self.model.is_dedicated(cell, input) {
+            return 0;
+        }
+        let mut engine = self.engine.borrow_mut();
+        self.model
+            .input_pins(cell, input)
+            .into_iter()
+            .map(|pin| engine.route_delay(net, cell.id, pin))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn clock_wire_ps(
+        &self,
+        _netlist: &skalp_lir::gate_netlist::GateNetlist,
+        net: GateNetId,
+        cell: &Cell,
+    ) -> i64 {
+        self.engine
+            .borrow_mut()
+            .route_delay(net, cell.id, FF_PIN_CLK)
+    }
+
+    fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        self.model.arc_ps(cell, input, output)
+    }
+
+    fn clock_to_out_ps(&self, cell: &Cell) -> i64 {
+        self.model.launch_ps(cell, 0).unwrap_or(0)
+    }
+
+    fn setup_ps(&self, cell: &Cell, input: usize) -> i64 {
+        self.model
+            .endpoints(cell)
+            .iter()
+            .find(|e| e.input == input)
+            .map_or(0, |e| e.setup_ps)
+    }
+}
+
+/// Check the matched delays of bundled-data async blocks against routed
+/// delays from `model` (one corner).
+pub fn check_bundles<D: Device + ?Sized>(
+    device: &D,
+    model: &dyn TimingModel,
+    design: &PlacedDesign<'_>,
+) -> Vec<skalp_lir::ncl_bundle::BundleCheck> {
+    let mut engine = Engine {
+        device,
+        model,
+        design,
+        drivers: HashMap::new(),
+        arrivals: HashMap::new(),
+        visiting: HashSet::new(),
+        early: false,
+        async_cells: HashSet::new(),
+    };
+    let delays = RoutedBundleDelays {
+        engine: std::cell::RefCell::new(&mut engine),
+        model,
+    };
+    skalp_lir::ncl_bundle::check_matched_delays(design.netlist, &delays)
+}
+
+/// Worst-corner summary of bundle checks made at several corners
+pub fn summarize_bundles(
+    corners: &[Vec<skalp_lir::ncl_bundle::BundleCheck>],
+) -> Vec<super::BundleReport> {
+    let mut by_key: BTreeMap<(String, &'static str), super::BundleReport> = BTreeMap::new();
+    for checks in corners {
+        for c in checks {
+            let slack_ns = c.slack_ps() as f64 / PS_PER_NS;
+            let key = (c.delay_path.clone(), c.times);
+            let worse = by_key.get(&key).is_none_or(|r| slack_ns < r.slack_ns);
+            if worse {
+                by_key.insert(
+                    key,
+                    super::BundleReport {
+                        block: c.prefix.trim_end_matches('.').to_string(),
+                        delay: c.delay_path.clone(),
+                        times: c.times.to_string(),
+                        data_ns: c.data_ps as f64 / PS_PER_NS,
+                        control_ns: c.control_ps as f64 / PS_PER_NS,
+                        slack_ns,
+                        chain_len: c.chain_len,
+                    },
+                );
+            }
+        }
+    }
+    by_key.into_values().collect()
+}
+
+/// Cells of the bundled-data async blocks of a netlist (found from their
+/// matched delays)
+fn async_block_cells(netlist: &skalp_lir::gate_netlist::GateNetlist) -> HashSet<CellId> {
+    let prefixes: Vec<String> = skalp_lir::ncl_bundle::find_matched_delays(netlist)
+        .into_iter()
+        .map(|m| m.prefix)
+        .collect();
+    let mut cells = HashSet::new();
+    if prefixes.is_empty() {
+        return cells;
+    }
+    for cell in &netlist.cells {
+        if prefixes.iter().any(|p| cell.path.starts_with(p.as_str())) {
+            cells.insert(cell.id);
+        }
+    }
+    cells
 }

@@ -1047,6 +1047,12 @@ pub enum LirOp {
     /// NCL NULL generator
     /// Outputs all-zeros dual-rail (NULL spacer)
     NclNull { width: u32 },
+    /// Matched delay of a bundled-data async block: the output rises a
+    /// matched delay after the input rises, and falls as soon as the input
+    /// falls (`out = in & delay(in)`). Physical: a chain of buffer cells and
+    /// an AND that synthesis keeps; the chain is sized after mapping, and
+    /// checked after routing, against the data paths the output times.
+    NclMatchedDelay { width: u32 },
 }
 
 impl LirOp {
@@ -1108,6 +1114,7 @@ impl LirOp {
             }
             // NCL threshold gates - single-rail output
             LirOp::Th12 { width } | LirOp::Th22 { width } => *width,
+            LirOp::NclMatchedDelay { width } => *width,
             // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
@@ -1192,6 +1199,7 @@ impl LirOp {
             LirOp::Th12 { .. } | LirOp::Th22 { .. } => 2,
             // NCL dual-rail operations
             LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
+            LirOp::NclMatchedDelay { .. } => 1,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

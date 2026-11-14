@@ -9,7 +9,7 @@
 use super::prjoxide_graph::{
     load_iptype, load_tiletype, node_name, resolve_wire, ConfigBit, GlobalBit, TileBitsDb,
 };
-use super::{dsp, ebr, pll};
+use super::{dsp, ebr, lram, pll};
 use super::{NexusDevice, NexusVariant, PrjoxideTile};
 use crate::bitstream::config::{ConfigGenerator, ConfigSpace, DesignBit, PlacedDesign};
 use crate::bitstream::prepare::{constant_value, is_pad};
@@ -175,19 +175,116 @@ fn float_high(
             name()
         )));
     }
-    let pip = device
-        .wire_pips(mux)
-        .into_iter()
-        .find(|&p| {
-            device
-                .pip(p)
-                .is_some_and(|i| !used_wires.contains(&i.src_wire))
-        })
+    let pip = free_cib_input(device, mux, used_wires)
         .ok_or_else(|| emit_err(format!("No free input on the CIB mux for {}", name())))?;
     config
         .bits
         .extend(device.pip_config_bits(pip).iter().cloned());
     Ok(())
+}
+
+/// Whether a CIB mux input carries no net: neither it nor anything wired
+/// to it is on a route. Such an input reads its default constant, high.
+fn cib_input_is_free(
+    device: &NexusDevice,
+    input: crate::device::WireId,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> bool {
+    !used_wires.contains(&input)
+        && device.wire_pips(input).into_iter().all(|p| {
+            device
+                .pip(p)
+                .is_some_and(|pip| !used_wires.contains(&pip.src_wire))
+        })
+}
+
+/// The pip that gives a CIB mux an input no net drives, as vendor tools
+/// choose one: D first, then C and B, each an explicit selection, and A,
+/// the mux's zero-bit default, last.
+fn free_cib_input(
+    device: &NexusDevice,
+    mux: crate::device::WireId,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Option<crate::device::PipId> {
+    let wire_name =
+        |w: crate::device::WireId| device.wire(w).map_or(String::new(), |w| w.name.clone());
+    let candidates: Vec<(crate::device::PipId, String)> = device
+        .wire_pips(mux)
+        .into_iter()
+        .filter_map(|p| device.pip(p).map(|pip| (p, pip.src_wire)))
+        .filter(|&(_, src)| cib_input_is_free(device, src, used_wires))
+        .map(|(p, src)| (p, wire_name(src)))
+        .filter(|(_, name)| name.contains("CIBMUXIN"))
+        .collect();
+    ["CIBMUXIND", "CIBMUXINC", "CIBMUXINB", "CIBMUXINA"]
+        .iter()
+        .find_map(|input| candidates.iter().find(|(_, name)| name.contains(input)))
+        .map(|&(pip, _)| pip)
+}
+
+/// Keep every CIB mux no net uses off the nets beside it.
+///
+/// A CIB mux left without a selection takes its zero-bit default input, A.
+/// When a route passes through that input on its way to another of the
+/// tile's muxes, the idle mux follows the net too, and so does whatever it
+/// feeds, which may be a hard-block pin the design leaves unused and the
+/// backend expects at its default. Give each such mux an input no net
+/// drives (an undriven CIB input reads high), as vendor tools do for the
+/// CIB inputs they leave unused.
+fn isolate_idle_cib_muxes(config: &mut ConfigDb<'_>, used_wires: &HashSet<crate::device::WireId>) {
+    let device = config.device;
+    let is_named = |w: crate::device::WireId, part: &str| {
+        device.wire(w).is_some_and(|w| w.name.contains(part))
+    };
+    let downstream = |w: crate::device::WireId| {
+        device
+            .wire_src_pips(w)
+            .iter()
+            .filter_map(|&p| device.pip(p).map(|pip| pip.dst_wire))
+            .collect::<Vec<_>>()
+    };
+    // CIB mux inputs a net reaches, directly or through their fixed wiring
+    let mut inputs: HashSet<crate::device::WireId> = HashSet::new();
+    for &wire in used_wires {
+        if is_named(wire, "CIBMUXIN") {
+            inputs.insert(wire);
+        }
+        inputs.extend(
+            downstream(wire)
+                .into_iter()
+                .filter(|&d| is_named(d, "CIBMUXIN")),
+        );
+    }
+    let mut idle: Vec<crate::device::WireId> = inputs
+        .iter()
+        .flat_map(|&input| downstream(input))
+        .filter(|&mux| is_named(mux, "CIBMUXOUT") && !used_wires.contains(&mux))
+        .collect();
+    idle.sort_unstable_by_key(|w| w.0);
+    idle.dedup();
+    for mux in idle {
+        // The input the mux takes with none of its bits set
+        let default = device.wire_pips(mux).into_iter().find(|&p| {
+            device.pip(p).is_some_and(|pip| pip.configurable)
+                && device.pip_config_bits(p).iter().all(|b| b.invert)
+        });
+        let Some(default) = default else { continue };
+        let Some(src) = device.pip(default).map(|pip| pip.src_wire) else {
+            continue;
+        };
+        if cib_input_is_free(device, src, used_wires) {
+            continue;
+        }
+        match free_cib_input(device, mux, used_wires) {
+            Some(pip) => config
+                .bits
+                .extend(device.pip_config_bits(pip).iter().cloned()),
+            None => log::debug!(
+                "CIB mux {} follows a net: none of its inputs is free",
+                device.wire(mux).map_or("?", |w| w.name.as_str())
+            ),
+        }
+    }
 }
 
 /// Turn an output pad's driver on: hold its tristate input high (the pad's
@@ -216,39 +313,11 @@ fn drive_output_enable(
             "its output enable mux {mux_name} carries a routed net"
         )));
     }
-    let wire_name =
-        |w: crate::device::WireId| device.wire(w).map_or(String::new(), |w| w.name.clone());
-    // A CIB input is free when neither it nor anything that drives it
-    // carries a net: then it reads its default, high.
-    let free = |input: crate::device::WireId| {
-        !used_wires.contains(&input)
-            && device.wire_pips(input).into_iter().all(|p| {
-                device
-                    .pip(p)
-                    .is_some_and(|pip| !used_wires.contains(&pip.src_wire))
-            })
-    };
-    let candidates: Vec<(crate::device::PipId, crate::device::WireId)> = device
-        .wire_pips(mux)
-        .into_iter()
-        .filter_map(|p| device.pip(p).map(|pip| (p, pip.src_wire)))
-        .filter(|&(_, src)| wire_name(src).contains("CIBMUXIN") && free(src))
-        .collect();
-    // D first, then C and B: each is an explicit selection. A is the
-    // mux's zero-bit default, the choice not to rely on.
-    let (pip, _) = ["CIBMUXIND", "CIBMUXINC", "CIBMUXINB", "CIBMUXINA"]
-        .iter()
-        .find_map(|input| {
-            candidates
-                .iter()
-                .find(|&&(_, src)| wire_name(src).contains(input))
-        })
-        .copied()
-        .ok_or_else(|| {
-            emit_err(format!(
-                "no free CIB input on its output enable mux {mux_name}"
-            ))
-        })?;
+    let pip = free_cib_input(device, mux, used_wires).ok_or_else(|| {
+        emit_err(format!(
+            "no free CIB input on its output enable mux {mux_name}"
+        ))
+    })?;
     config
         .bits
         .extend(device.pip_config_bits(pip).iter().cloned());
@@ -440,6 +509,7 @@ fn emit_bits(
         .flat_map(|r| r.wires.iter().copied())
         .collect();
     enable_clock_buffers(&mut config, routing, &used_wires)?;
+    isolate_idle_cib_muxes(&mut config, &used_wires);
 
     let is_tied_high = |cell: CellId, index: usize| tied.value(cell, index) == Some(true);
     let tied_low = |cell: CellId, first: usize, count: usize| -> Vec<usize> {
@@ -492,6 +562,10 @@ fn emit_bits(
         }
         if loc.bel_type == BelType::Pll {
             emit_pll(&mut config, cell, x, y, &used_wires)?;
+            continue;
+        }
+        if loc.bel_type == BelType::LargeRam {
+            emit_large_ram(&mut config, cell, x, y, tied, &used_wires)?;
             continue;
         }
         if loc.bel_type == BelType::RamSlice {
@@ -969,16 +1043,9 @@ fn write_block_ram_init(
             words.len()
         ))
     })?;
-    let (base, unconfirmed) =
+    let base =
         super::prjoxide_load::block_ram_init_address(config.db_root, config.variant, wid as u32)
             .map_err(emit_err)?;
-    if unconfirmed {
-        log::warn!(
-            "{}: block RAM contents placed where other Nexus devices keep them; \
-             neither prjoxide nor a silicon check has located them on this device",
-            config.variant.prjoxide_device()
-        );
-    }
     let db = load_iptype(config.db_root, config.family, ebr::INIT_IPTYPE)
         .map_err(emit_err)?
         .ok_or_else(|| {
@@ -1115,6 +1182,260 @@ fn emit_block_ram(
         }
     }
     Ok(())
+}
+
+/// Write a large RAM's initial contents to the configuration-bus region of
+/// its site. Every byte of the region is written, the unused ones zero, as
+/// prjoxide does.
+fn write_large_ram_init(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    region: &str,
+    words: &[u64],
+) -> Result<()> {
+    let image = lram::init_image(words).ok_or_else(|| {
+        emit_err(format!(
+            "Large RAM '{}' has {} initial words, more than the {} it holds",
+            cell.path,
+            words.len(),
+            lram::INIT_ROWS * lram::ROW_BITS / 40
+        ))
+    })?;
+    let base = super::prjoxide_load::large_ram_init_address(config.db_root, config.variant, region)
+        .map_err(emit_err)?;
+    let db = load_iptype(config.db_root, config.family, lram::INIT_IPTYPE)
+        .map_err(emit_err)?
+        .ok_or_else(|| {
+            emit_err("No large RAM initialisation data in the device database".to_string())
+        })?;
+    // Every row has the layout of the first; rows are ROW_STRIDE bytes apart
+    let layout = db
+        .word(&lram::init_word_name(0))
+        .ok_or_else(|| emit_err(format!("No large RAM setting {}", lram::init_word_name(0))))?;
+    for byte in 0..lram::INIT_BYTES {
+        for bit in 0..8 {
+            config.bus_bits.push((base + byte, bit, false));
+        }
+    }
+    for (index, row) in image.iter().enumerate() {
+        let row_base = base + index as u32 * lram::ROW_STRIDE;
+        for (i, group) in layout.iter().enumerate() {
+            let on = row.get(i).copied().unwrap_or(false);
+            for bit in group {
+                config.bus_bits.push((
+                    row_base + bit.frame as u32,
+                    bit.bit as u32,
+                    on ^ bit.invert,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Configure a large RAM site, its pins, and its contents.
+///
+/// The settings are nextpnr's for an LRAM (no output register, byte enables,
+/// no ECC, synchronous reset); the pins the design leaves unconnected read
+/// high or are held by their inverters, and the byte enables are driven low
+/// by the inputs the backend added ([`super::lram::low_pins`]).
+fn emit_large_ram(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    x: u32,
+    y: u32,
+    tied: &crate::bitstream::prepare::TiedInputs,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    let ports = cell
+        .ram_ports()
+        .ok_or_else(|| emit_err(format!("'{}' has no RAM port layout", cell.path)))?;
+    if ports.read_addr.len() != lram::ADDRESS_BITS || ports.data_width() != lram::DATA_BITS {
+        return Err(emit_err(format!(
+            "Large RAM '{}' is {} words of {} bits; the block is {} words of {}",
+            cell.path,
+            1usize << ports.read_addr.len(),
+            ports.data_width(),
+            1usize << lram::ADDRESS_BITS,
+            lram::DATA_BITS
+        )));
+    }
+    if cell.inputs[ports.read_clk] != cell.inputs[ports.write_clk] {
+        return Err(emit_err(format!(
+            "Large RAM '{}' reads and writes on different clocks; the block has one",
+            cell.path
+        )));
+    }
+    let device = config.device;
+    let tile = device
+        .prjoxide_tile(x, y, |t| lram::site_of_tile(t).is_some())
+        .cloned()
+        .ok_or_else(|| emit_err(format!("No large RAM tile at column {x}, row {y}")))?;
+    let site = lram::site_of_tile(&tile.tiletype).expect("selected by this test");
+    let (pin_x, pin_y) = device
+        .large_ram_pin_location(x, y)
+        .ok_or_else(|| emit_err(format!("Large RAM site at ({x}, {y}) has no pins")))?;
+    log::info!(
+        "large RAM '{}' on {} ({}, pins at R{pin_y}C{pin_x})",
+        cell.path,
+        lram::bel_name(site),
+        tile.tiletype
+    );
+    let tiles = [tile];
+    let prefix = lram::bel_name(site);
+    let setting = |name: &str| format!("{prefix}.{name}");
+
+    // A site that names its mode needs it set (CrossLink-NX-17, CertusPro-NX)
+    if config
+        .db(&tiles[0].tiletype)?
+        .enum_option(&setting("MODE"), "LRAM_CORE")
+        .is_some()
+    {
+        set_ram_enum(config, &tiles, &setting("MODE"), "LRAM_CORE")?;
+    }
+    // A memory the design never writes runs single-port through port A, as
+    // Radiant builds one, leaving port B at its defaults
+    let single_port = lram::is_single_port(cell);
+    set_ram_enum(
+        config,
+        &tiles,
+        &setting("EBR_SP_EN"),
+        if single_port { "ENABLE" } else { "DISABLE" },
+    )?;
+    for (name, option) in [
+        ("ASYNC_RST_RELEASE", "SYNC"),
+        ("ECC_BYTE_SEL", "BYTE_EN"),
+        ("GSR", "DISABLED"),
+        ("OUT_REGMODE_A", "NO_REG"),
+        ("OUT_REGMODE_B", "NO_REG"),
+        ("RESETMODE", "SYNC"),
+        ("UNALIGNED_READ", "DISABLE"),
+    ] {
+        set_ram_enum(config, &tiles, &setting(name), option)?;
+    }
+    if let Some(words) = cell.memory_init() {
+        write_large_ram_init(config, cell, &lram::init_region(pin_x, pin_y), &words)?;
+    }
+
+    // Everything the design connects, by site pin
+    let mut pins: HashMap<String, RamPin> = HashMap::new();
+    for input in 0..cell.inputs.len() {
+        let state = match tied.value(cell.id, input) {
+            Some(true) => RamPin::High,
+            Some(false) => RamPin::Low,
+            None => RamPin::Signal,
+        };
+        match device.large_ram_input_pin(cell, &ports, input) {
+            Some(pin) => {
+                pins.insert(pin, state);
+            }
+            // One clock, and writes gated by the write enable alone
+            None if input == ports.write_clk => {}
+            None if input == ports.write_clk_en && state != RamPin::Signal => {}
+            // A single-port RAM's write port is all tied off
+            None if single_port && state != RamPin::Signal => {}
+            None => {
+                return Err(emit_err(format!(
+                    "Large RAM '{}' drives input {input}, which the backend does not support yet",
+                    cell.path
+                )))
+            }
+        }
+    }
+
+    if pins.get("CLK") != Some(&RamPin::Signal) {
+        return Err(emit_err(format!("Large RAM '{}' has no clock", cell.path)));
+    }
+    set_ram_enum(config, &tiles, &setting("CLKMUX"), "CLK")?;
+    // Port B never writes and neither port is reset; a single-port RAM
+    // leaves port B alone
+    let held_low: &[&str] = if single_port {
+        &["RSTA"]
+    } else {
+        &["RSTA", "RSTB", "WEB"]
+    };
+    for &pin in held_low {
+        if pins.get(pin).is_some_and(|&p| p == RamPin::Signal) {
+            return Err(emit_err(format!(
+                "Large RAM '{}' drives {pin}, which the backend does not support yet",
+                cell.path
+            )));
+        }
+        pins.insert(pin.to_string(), RamPin::Low);
+    }
+    for pin in lram::input_pins().iter().map(String::as_str) {
+        // A single-port RAM's port B keeps its default inversions, and its
+        // pins read high, as Radiant ties them
+        if single_port && lram::is_port_b_pin(pin) {
+            if pins.get(pin) == Some(&RamPin::Signal) {
+                return Err(emit_err(format!(
+                    "Single-port large RAM '{}' drives port B pin {pin}",
+                    cell.path
+                )));
+            }
+            float_large_ram_pin(config, x, y, pin, used_wires)?;
+            continue;
+        }
+        let mux = setting(&format!("{pin}MUX"));
+        match pins.get(pin).copied() {
+            Some(RamPin::Signal) => {
+                if lram::has_inverter(pin) {
+                    set_ram_enum(config, &tiles, &mux, pin)?;
+                }
+            }
+            Some(RamPin::Low) if lram::has_inverter(pin) => {
+                set_ram_enum(config, &tiles, &mux, "INV")?;
+                float_large_ram_pin(config, x, y, pin, used_wires)?;
+            }
+            Some(RamPin::Low) => {
+                return Err(emit_err(format!(
+                    "Large RAM '{}' pin {pin} is tied low with no driver",
+                    cell.path
+                )))
+            }
+            Some(RamPin::High) | None => float_large_ram_pin(config, x, y, pin, used_wires)?,
+        }
+    }
+    Ok(())
+}
+
+/// Let a large RAM pin read high, if it reaches the fabric.
+fn float_large_ram_pin(
+    config: &mut ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    pin: &str,
+    used_wires: &HashSet<crate::device::WireId>,
+) -> Result<()> {
+    // A pin the device data gives no connection to the fabric is held at
+    // the block's own default
+    let device = config.device;
+    let Some(wire) = device.bel_wire(x, y, &format!("LRAM_{pin}")) else {
+        log::debug!("large RAM pin {pin} at ({x}, {y}) has no fabric connection");
+        return Ok(());
+    };
+    // Which pins come from a tile's clock-enable or set/reset lines differs
+    // between sites and devices (CertusPro-NX's output clock enables do, the
+    // CrossLink-NX's scan reset does): such a line reads high while nothing
+    // drives it.
+    let control_line = device.wire_pips(wire).into_iter().find_map(|p| {
+        let src = device.pip(p)?.src_wire;
+        let name = device.wire(src)?.name.rsplit('_').next()?.to_string();
+        let index = name
+            .strip_prefix("JCE")
+            .or_else(|| name.strip_prefix("JLSR"))?;
+        (!index.is_empty() && index.chars().all(|c| c.is_ascii_digit())).then_some((src, name))
+    });
+    if let Some((line, name)) = control_line {
+        if used_wires.contains(&line) {
+            return Err(emit_err(format!(
+                "Large RAM pin {pin} at ({x}, {y}) must read high, but its control line \
+                 {name} carries a routed net"
+            )));
+        }
+        return Ok(());
+    }
+    float_high(config, wire, used_wires)
 }
 
 /// Let a block RAM pin read high, if it has a CIB mux to set.

@@ -359,6 +359,21 @@ pub struct HirConnection {
     pub expr: HirExpression,
 }
 
+/// Implicit request input of every `async` entity: a clocked parent raises it
+/// once the instance's data inputs are stable and lowers it after
+/// [`NCL_ACK_PORT`] has risen (four-phase handshake). Only used when the
+/// async instance sits under a clocked parent; elsewhere it is ignored.
+pub const NCL_REQ_PORT: &str = "ncl_req";
+/// Implicit acknowledge output of every `async` entity: high once the
+/// outputs hold the result for the current request, low after the request
+/// is withdrawn. A clocked parent reads it synchronised to its own clock.
+pub const NCL_ACK_PORT: &str = "ncl_ack";
+
+/// Whether `name` is one of the implicit handshake ports of an `async` entity
+pub fn is_ncl_handshake_port(name: &str) -> bool {
+    name == NCL_REQ_PORT || name == NCL_ACK_PORT
+}
+
 /// Port in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirPort {

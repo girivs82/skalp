@@ -521,6 +521,79 @@ fault_type = "delay"
 mechanism = "sense_amplifier_degradation"
 
 # =============================================================================
+# PDPSC512K - 512Kbit pseudo dual-port Large RAM (LRAM)
+# The Nexus large RAM block: 16K words of 32 bits, one clock, writes through
+# port A and reads through port B. 7 blocks on LFCPNX-100, 2 on LIFCL-40.
+# A memory goes here rather than into block RAM when that takes fewer bits of
+# silicon (the tech mapper compares blocks x block bits).
+# =============================================================================
+
+[[cells]]
+name = "PDPSC512K"
+function = "ram"
+fit = 2.00
+nominal_voltage_mv = 900
+min_voltage_mv = 810
+setup_ps = 300
+hold_ps = 80
+clk_to_q_ps = 1000
+
+[cells.ram_info]
+block_bits = 524288
+aspect_ratios = [[16384, 32]]
+true_dual_port = false
+has_write_mask = false
+has_output_register = true
+
+[cells.ram_info.pin_map]
+read_data = "DOB"
+read_addr = "ADB"
+read_clk = "CLK"
+read_en = "CSB"
+read_clk_en = "CEB"
+write_data = "DIA"
+write_addr = "ADA"
+write_clk = "CLK"
+write_en = "WEA"
+write_clk_en = "CEA"
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.60
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.50
+fault_type = "data_retention"
+mechanism = "nbti_degradation"
+
+[[cells.failure_modes]]
+name = "stuck_row"
+fit = 0.30
+fault_type = "stuck_at_0"
+mechanism = "address_decoder_failure"
+
+[[cells.failure_modes]]
+name = "stuck_column"
+fit = 0.24
+fault_type = "stuck_at_1"
+mechanism = "bitline_failure"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.20
+fault_type = "transient"
+mechanism = "single_event_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.16
+fault_type = "delay"
+mechanism = "sense_amplifier_degradation"
+
+# =============================================================================
 # MULT18X18 - 18x18 Signed/Unsigned Multiplier (DSP Block)
 # 56 slices on LFCPNX-100 (in 28 MULT36X36 blocks).
 # Each slice: 18x18 → 36-bit product, optional pipeline registers.
