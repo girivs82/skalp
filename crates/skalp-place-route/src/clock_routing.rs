@@ -397,10 +397,51 @@ mod tests {
         assert!(checked > 40);
     }
 
-    /// A clock pad with no dedicated path of its own (on the LFCPNX-100, the
-    /// 125 MHz board clock's pad reaches the clock network only through a
-    /// delay cell the database doesn't describe) enters the network after a
-    /// few fabric hops, and the rest of the way is dedicated.
+    /// The LFCPNX-100's 125 MHz board clock pad (P24, a PCLK pin) reaches the
+    /// clock network on dedicated wires, through its pin's delay cell
+    /// (DLLDEL), which the routing turns on.
+    #[test]
+    fn a_clock_pin_pad_reaches_the_clock_network_through_its_delay_cell() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let device = NexusDevice::from_prjoxide_bbox(NexusVariant::Lfcpnx100, &db, (0, 0, 80, 60))
+            .expect("build device");
+        let wire = |x, y, name: &str| {
+            device
+                .wire_by_name(&node_name(&resolve_wire(x, y, name).unwrap()))
+                .unwrap()
+        };
+        let pad = wire(0, 42, "JPADDI_SEIO33_CORE_IOA");
+        let reached = reach_from(&device, pad, &HashMap::new());
+        for sink in [wire(40, 20, "JCLK_SLICEA"), wire(60, 50, "JCLK_SLICEB")] {
+            let path = path_to(&device, sink, &HashSet::from_iter([pad]), &reached)
+                .expect("a dedicated path from the pad");
+            let names: Vec<&str> = path
+                .iter()
+                .map(|&p| {
+                    device
+                        .wire(device.pip(p).unwrap().dst_wire)
+                        .unwrap()
+                        .name
+                        .as_str()
+                })
+                .collect();
+            assert!(
+                names.iter().any(|n| n.contains("CLKOUT_DLLDEL")),
+                "the path skips the delay cell: {names:?}"
+            );
+            assert!(
+                names.iter().all(|n| !is_general(&device, n)),
+                "general wire on the path: {names:?}"
+            );
+        }
+    }
+
+    /// A pad with no dedicated path of its own (an ordinary I/O pin, not a
+    /// clock pin) enters the network after a few fabric hops, and the rest
+    /// of the way is dedicated.
     #[test]
     fn a_pad_without_a_dedicated_path_enters_the_clock_network() {
         let Some(db) = find_database() else {
@@ -414,14 +455,18 @@ mod tests {
                 .wire_by_name(&node_name(&resolve_wire(x, y, name).unwrap()))
                 .unwrap()
         };
-        let pad = wire(0, 42, "JPADDI_SEIO33_CORE_IOA");
         let sinks = [wire(40, 20, "JCLK_SLICEA"), wire(60, 50, "JCLK_SLICEB")];
-        assert!(
-            !sinks
-                .iter()
-                .all(|s| reach_from(&device, pad, &HashMap::new()).contains_key(s)),
-            "the pad has a dedicated path after all"
-        );
+        // The first left-edge pad that cannot reach the sinks on dedicated wires
+        let pad = (1..60u32)
+            .filter_map(|y| {
+                let key = resolve_wire(0, y, "JPADDI_SEIO33_CORE_IOA")?;
+                device.wire_by_name(&node_name(&key))
+            })
+            .find(|&pad| {
+                let reached = reach_from(&device, pad, &HashMap::new());
+                !sinks.iter().all(|s| reached.contains_key(s))
+            })
+            .expect("a left-edge pad with no dedicated clock path");
 
         let (path, entry, reached) =
             enter_network(&device, pad, &sinks, &HashMap::new()).expect("an entry point");

@@ -455,7 +455,7 @@ fn emit_bits(
     let mut ram_write_tiles: HashSet<(u32, u32)> = HashSet::new();
     let mut next_ram_id = FIRST_RAM_ID;
     let mut used_multipliers: HashSet<(u32, u32, usize)> = HashSet::new();
-    let mut vref_banks: HashMap<u32, VrefBank> = HashMap::new();
+    let mut banks = BankUse::default();
 
     for cell in &netlist.cells {
         if constant_value(cell).is_some() {
@@ -475,7 +475,7 @@ fn emit_bits(
                 y,
                 loc.bel_index,
                 &used_wires,
-                &mut vref_banks,
+                &mut banks,
             )?;
             continue;
         }
@@ -635,8 +635,9 @@ fn emit_bits(
     }
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
-    emit_vref_drivers(&mut config, netlist, placement, &vref_banks)?;
-    release_unused_pads(&mut config, netlist, placement, &vref_banks)?;
+    emit_vref_drivers(&mut config, netlist, placement, &banks.vref)?;
+    release_unused_pads(&mut config, netlist, placement, &banks.vref)?;
+    release_unused_banks(&mut config, &banks.vcc)?;
 
     for (&(x, y, slice), &(set, path)) in &slices_with_ff {
         if matches!(slice, 'C' | 'D') && ram_write_tiles.contains(&(x, y)) {
@@ -1298,6 +1299,24 @@ struct VrefBank {
     user: String,
 }
 
+/// What the design's pads have set in each bank.
+#[derive(Debug, Default)]
+struct BankUse {
+    /// Banks whose inputs compare against their first reference voltage
+    vref: HashMap<u32, VrefBank>,
+    /// Banks whose voltage a pad has set
+    vcc: HashMap<u32, BankVcc>,
+}
+
+/// The voltage a bank's pads have set it to.
+#[derive(Debug, Clone)]
+struct BankVcc {
+    voltage: &'static str,
+    standard: String,
+    /// A pad that uses it, for messages
+    user: String,
+}
+
 /// Where a pad's settings are: the tiles holding them, the prefix of their
 /// names, the pad's bank, and whether the bank is high-performance.
 struct PadSettings {
@@ -1364,7 +1383,7 @@ fn emit_pad(
     y: u32,
     bel_index: usize,
     used_wires: &HashSet<crate::device::WireId>,
-    vref_banks: &mut HashMap<u32, VrefBank>,
+    banks: &mut BankUse,
 ) -> Result<()> {
     if cell.parameters.get("LOC").map(String::as_str) == Some(super::OSC_PIN) {
         return emit_oscillator(config, x, y, used_wires);
@@ -1444,7 +1463,7 @@ fn emit_pad(
             level,
             user: cell.path.clone(),
         };
-        let first = vref_banks.entry(bank).or_insert_with(|| user.clone());
+        let first = banks.vref.entry(bank).or_insert_with(|| user.clone());
         if first.level != level {
             return Err(emit_err(format!(
                 "Pads '{}' ({}) and '{}' ({standard}) need different reference \
@@ -1473,15 +1492,73 @@ fn emit_pad(
 
     // High-performance banks have no VCC setting to make.
     if !high_performance {
-        let bank_ref = format!("BANKREF{bank}");
-        let bank_tile = config
-            .device
-            .prjoxide_tiles()
-            .iter()
-            .find(|t| t.tiletype.starts_with(&bank_ref))
-            .cloned()
-            .ok_or_else(|| emit_err(format!("No {bank_ref} tile on this device")))?;
+        let user = BankVcc {
+            voltage,
+            standard: standard.to_string(),
+            user: cell.path.clone(),
+        };
+        if let Some(first) = banks.vcc.get(&bank) {
+            if first.voltage != voltage {
+                return Err(emit_err(format!(
+                    "Pads '{}' ({}) and '{}' ({standard}) need different bank \
+                     voltages, but bank {bank} has one",
+                    first.user, first.standard, cell.path
+                )));
+            }
+            return Ok(());
+        }
+        let bank_tile = bank_reference_tile(config.device, bank)
+            .ok_or_else(|| emit_err(format!("No BANKREF{bank} tile on this device")))?;
         config.set_enum(&bank_tile, &format!("BANK{bank}.VCC"), voltage)?;
+        banks.vcc.insert(bank, user);
+    }
+    Ok(())
+}
+
+/// The bank a bank reference tile (`BANKREF<n>`, with any suffix such as
+/// `BANKREF3_DDR42`) belongs to.
+fn bank_of_reference_tile(tiletype: &str) -> Option<u32> {
+    let rest = tiletype.strip_prefix("BANKREF")?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 || !(rest.len() == digits || rest[digits..].starts_with('_')) {
+        return None;
+    }
+    rest[..digits].parse().ok()
+}
+
+/// A bank's reference tile, which holds its settings such as its voltage.
+fn bank_reference_tile(device: &NexusDevice, bank: u32) -> Option<PrjoxideTile> {
+    device
+        .prjoxide_tiles()
+        .iter()
+        .find(|t| bank_of_reference_tile(&t.tiletype) == Some(bank))
+        .cloned()
+}
+
+/// Set every bank no pad uses to `VCC = NONE`, as Radiant does, where the
+/// device's data has that setting (banks with a selectable voltage).
+fn release_unused_banks(
+    config: &mut ConfigDb<'_>,
+    vcc_banks: &HashMap<u32, BankVcc>,
+) -> Result<()> {
+    let mut tiles: Vec<(u32, PrjoxideTile)> = config
+        .device
+        .prjoxide_tiles()
+        .iter()
+        .filter_map(|t| Some((bank_of_reference_tile(&t.tiletype)?, t.clone())))
+        .filter(|(bank, _)| !vcc_banks.contains_key(bank))
+        .collect();
+    tiles.sort_by_key(|(bank, _)| *bank);
+    tiles.dedup_by_key(|(bank, _)| *bank);
+    for (bank, tile) in tiles {
+        let name = format!("BANK{bank}.VCC");
+        let has_none = config
+            .db(&tile.tiletype)?
+            .enum_option(&name, "NONE")
+            .is_some();
+        if has_none {
+            config.set_enum(&tile, &name, "NONE")?;
+        }
     }
     Ok(())
 }
@@ -1681,6 +1758,18 @@ fn emit_oscillator(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bank_reference_tiles_name_their_bank() {
+        assert_eq!(bank_of_reference_tile("BANKREF0"), Some(0));
+        assert_eq!(bank_of_reference_tile("BANKREF3_DDR42"), Some(3));
+        assert_eq!(bank_of_reference_tile("BANKREF7_RBB_2"), Some(7));
+        assert_eq!(bank_of_reference_tile("BANKREF12"), Some(12));
+        assert_eq!(bank_of_reference_tile("BANKREF"), None);
+        assert_eq!(bank_of_reference_tile("BANKREFX"), None);
+        assert_eq!(bank_of_reference_tile("BANKREF4X"), None);
+        assert_eq!(bank_of_reference_tile("SYSIO_B0_0"), None);
+    }
 
     #[test]
     fn folding_reads_tied_low_inputs_as_zero() {

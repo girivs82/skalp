@@ -1,0 +1,18 @@
+// Two outputs in one bank asking for different bank voltages (3.3 V and
+// 2.5 V); a bank has one VCCIO, so the build must refuse it.
+entity MixedBankVoltages {
+    in clk: clock @ { pin: "OSC" }
+    out high: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+    out low: bit @ { pin: "R9", io_standard: "LVCMOS25" }
+}
+
+impl MixedBankVoltages {
+    signal count: nat[24] = 0
+
+    on(clk.rise) {
+        count = count + 1
+    }
+
+    high = count[23]
+    low = count[22]
+}
