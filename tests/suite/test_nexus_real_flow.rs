@@ -399,3 +399,91 @@ fn mixed_reference_levels_in_one_bank_are_refused() {
     .to_string();
     assert!(error.contains("bank 4"), "{error}");
 }
+
+/// Every bank with a selectable voltage gets one: the voltage its pads ask
+/// for, or `NONE` when no pad uses it, as Radiant writes.
+#[test]
+fn every_bank_gets_its_voltage_or_none() {
+    use skalp_place_route::device::nexus::prjoxide_graph::load_tiletype;
+    use skalp_place_route::device::nexus::prjoxide_load::load_tilegrid;
+
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_bus_pins.sk", "Bus");
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the LED counter should place and route");
+
+    // The LEDs' bank holds 3V3; every other bank with a voltage setting
+    // must hold NONE, which Radiant writes and the all-zero state is not
+    let variant = NexusVariant::Lfcpnx100;
+    let tiles = load_tilegrid(&db, variant).unwrap();
+    let mut checked = 0;
+    for tile in &tiles {
+        let Some(rest) = tile.tiletype.strip_prefix("BANKREF") else {
+            continue;
+        };
+        let bank: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Some(data) = load_tiletype(&db, variant.prjoxide_family(), &tile.tiletype).unwrap()
+        else {
+            continue;
+        };
+        let setting = format!("BANK{bank}.VCC");
+        let Some(none) = data.enum_option(&setting, "NONE") else {
+            continue;
+        };
+        let state = |option: &str| -> bool {
+            let bits: Vec<_> = data
+                .enum_option(&setting, option)
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    (
+                        tile.start_frame + b.frame as u32,
+                        tile.start_bit + b.bit as u32,
+                    )
+                })
+                .collect();
+            let values = skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(
+                &db,
+                &result.bitstream.data,
+                &bits,
+            )
+            .unwrap();
+            !bits.is_empty() && values.iter().all(|&v| v)
+        };
+        assert!(!none.is_empty(), "{setting}.NONE has bits of its own");
+        assert!(
+            state("NONE") || state("3V3"),
+            "bank {bank} has neither its LED voltage nor NONE"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 5, "banks 0, 1, 2, 6 and 7 have a voltage setting");
+}
+
+/// A bank has one VCCIO: pads in it that need different voltages are
+/// refused, naming the bank.
+#[test]
+fn mixed_bank_voltages_are_refused() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_mixed_bank_voltages.sk", "MixedBankVoltages");
+    let error = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect_err("LVCMOS33 and LVCMOS25 need different bank voltages")
+    .to_string();
+    assert!(error.contains("different bank voltages"), "{error}");
+}

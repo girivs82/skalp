@@ -83,6 +83,28 @@ pub fn read_bus_config(db_root: &Path, bitstream: &[u8]) -> Result<Vec<(u32, u8)
     Ok(chip.ipconfig.iter().map(|(&a, &v)| (a, v)).collect())
 }
 
+/// Read configuration frame bits back from a Nexus bitstream: the value of
+/// each global `(frame, bit)` asked for, in order.
+#[cfg(feature = "nexus-bitstream")]
+pub fn read_frame_bits(
+    db_root: &Path,
+    bitstream: &[u8],
+    bits: &[(u32, u32)],
+) -> Result<Vec<bool>, String> {
+    use prjoxide::bitstream::BitstreamParser;
+    use prjoxide::database::Database;
+
+    let root = db_root
+        .to_str()
+        .ok_or_else(|| "db_root is not valid UTF-8".to_string())?;
+    let mut db = Database::new(root);
+    let chip = BitstreamParser::new(bitstream).parse(&mut db)?;
+    Ok(bits
+        .iter()
+        .map(|&(frame, bit)| chip.cram.get(frame as usize, bit as usize))
+        .collect())
+}
+
 /// Writes Lattice `.bit` files for Nexus devices.
 #[cfg(feature = "nexus-bitstream")]
 pub struct NexusBitWriter<'a> {

@@ -244,9 +244,6 @@ pub fn load_tiletype(
         return Ok(own);
     }
     let mut lifcl = parse_tiletype(db_root, "LIFCL", tiletype)?;
-    if lifcl.is_none() && tiletype.starts_with("BANKREF") {
-        lifcl = load_bank_reference_variant(db_root, tiletype)?;
-    }
     // CrossLink-NX has no upper right PLL; the lower right one sits on the
     // same (right) edge, so its tile, flipped top to bottom, stands in
     if lifcl.is_none() && tiletype == "GPLL_URC" {
@@ -281,29 +278,6 @@ pub fn load_iptype(
     match load(family)? {
         Some(db) => Ok(Some(db)),
         None if family == "LFCPNX" => load("LIFCL"),
-        None => Ok(None),
-    }
-}
-
-/// CrossLink-NX bank reference tiles carry a suffix (such as `BANKREF7_RBB_2`)
-/// that CertusPro-NX's do not; the bank settings are the same.
-fn load_bank_reference_variant(
-    db_root: &Path,
-    tiletype: &str,
-) -> Result<Option<TileBitsDb>, String> {
-    let directory = db_root.join("LIFCL").join("tiletypes");
-    let Ok(entries) = std::fs::read_dir(&directory) else {
-        return Ok(None);
-    };
-    let prefix = format!("{tiletype}_");
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter_map(|name| name.strip_suffix(".ron").map(String::from))
-        .filter(|name| name.starts_with(&prefix))
-        .collect();
-    names.sort_unstable();
-    match names.first() {
-        Some(name) => parse_tiletype(db_root, "LIFCL", name),
         None => Ok(None),
     }
 }
