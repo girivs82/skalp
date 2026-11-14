@@ -8,7 +8,9 @@
 //! * the registers of the block clocked by it: their data inputs, computed
 //!   from the block's inputs, must settle before the clock edge reaches them;
 //! * the block's acknowledge output: every other output of the block must
-//!   settle before the acknowledge rises.
+//!   settle before the acknowledge rises, and so must the next state the
+//!   block's registers compute from their own outputs (the next control
+//!   edge only comes after the parent has seen the acknowledge).
 //!
 //! [`check_matched_delays`] measures both against a delay model: library
 //! estimates before placement ([`LibraryDelays`]), routed delays after (the
@@ -59,7 +61,7 @@ pub struct BundleCheck {
     pub prefix: String,
     /// Path of the matched delay's AND cell
     pub delay_path: String,
-    /// What the control times: "registers" or "acknowledge"
+    /// What the control times: "registers", "acknowledge" or "next state"
     pub times: &'static str,
     /// Latest data arrival plus setup, in picoseconds
     pub data_ps: i64,
@@ -270,17 +272,47 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                 data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
             }
         }
-        let (Some(data_ps), Some(control_ps)) = (data_ps, full.at(ack)) else {
+        let Some(control_ps) = full.at(ack) else {
             continue;
         };
-        checks.push(BundleCheck {
-            prefix: md.prefix.clone(),
-            delay_path: and_cell.path.clone(),
-            times: "acknowledge",
-            data_ps,
-            control_ps,
-            chain_len: md.chain.len(),
-        });
+        if let Some(data_ps) = data_ps {
+            checks.push(BundleCheck {
+                prefix: md.prefix.clone(),
+                delay_path: and_cell.path.clone(),
+                times: "acknowledge",
+                data_ps,
+                control_ps,
+                chain_len: md.chain.len(),
+            });
+        }
+
+        // The next state: registers of the block launch new values when
+        // their control rises, and those values feed the logic in front of
+        // registers again. The next control edge comes only after the
+        // parent has seen the acknowledge, dropped the request and raised it
+        // again, so every such path must settle (with setup) before the
+        // acknowledge rises.
+        let mut next_ps: Option<i64> = None;
+        for cell in netlist.cells.iter().filter(|c| {
+            c.path.starts_with(&md.prefix) && c.clock.is_some_and(|k| controls.contains(&k))
+        }) {
+            for (i, &input) in cell.inputs.iter().enumerate() {
+                if let Some(t) = full.at(input) {
+                    let t = t + delays.wire_ps(netlist, input, cell, i) + delays.setup_ps(cell, i);
+                    next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
+                }
+            }
+        }
+        if let Some(data_ps) = next_ps {
+            checks.push(BundleCheck {
+                prefix: md.prefix.clone(),
+                delay_path: and_cell.path.clone(),
+                times: "next state",
+                data_ps,
+                control_ps,
+                chain_len: md.chain.len(),
+            });
+        }
     }
     checks
 }
@@ -495,4 +527,138 @@ pub fn size_matched_delays(
         report.checks = check_matched_delays(netlist, delays);
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every cell 100 ps, connections free, setup free
+    struct UnitDelays;
+
+    impl BundleDelays for UnitDelays {
+        fn wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell, _: usize) -> i64 {
+            0
+        }
+        fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell) -> i64 {
+            0
+        }
+        fn arc_ps(&self, _: &Cell, _: usize, _: usize) -> Option<i64> {
+            Some(100)
+        }
+        fn clock_to_out_ps(&self, _: &Cell) -> i64 {
+            100
+        }
+        fn setup_ps(&self, _: &Cell, _: usize) -> i64 {
+            0
+        }
+    }
+
+    fn comb(
+        netlist: &mut GateNetlist,
+        path: &str,
+        inputs: Vec<GateNetId>,
+        output: GateNetId,
+        kept: bool,
+    ) {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            path.into(),
+            inputs,
+            vec![output],
+        );
+        if kept {
+            cell.source_op = Some(MATCHED_DELAY_OP.to_string());
+        }
+        netlist.add_cell(cell);
+    }
+
+    /// A matched delay `out = from & buf(from)` named `name` in block `top.u.`
+    fn matched_delay(netlist: &mut GateNetlist, name: &str, from: GateNetId, out: GateNetId) {
+        let chained = netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.{name}_d0")));
+        comb(
+            netlist,
+            &format!("top.u.ncl_bundle.{name}_0"),
+            vec![from],
+            chained,
+            true,
+        );
+        comb(
+            netlist,
+            &format!("top.u.ncl_bundle.{name}_and"),
+            vec![from, chained],
+            out,
+            true,
+        );
+    }
+
+    /// An async block whose register feeds itself through five gates: the
+    /// next state settles 500 ps after the register launches, so the
+    /// acknowledge must wait for it.
+    fn block_with_feedback() -> GateNetlist {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let req = netlist.add_input("req".into());
+        let ack = netlist.add_output("ack".into());
+        let go = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_go".into()));
+        matched_delay(&mut netlist, "go", req, go);
+        matched_delay(&mut netlist, "done", go, ack);
+
+        let q = netlist.add_net(GateNet::new(GateNetId(0), "top.u.q".into()));
+        let mut net = q;
+        for k in 0..5 {
+            let next = netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.n{k}")));
+            comb(
+                &mut netlist,
+                &format!("top.u.inc{k}"),
+                vec![net],
+                next,
+                false,
+            );
+            net = next;
+        }
+        netlist.add_cell(Cell::new_seq(
+            CellId(0),
+            "FD1P3IX".into(),
+            "test".into(),
+            0.0,
+            "top.u.state".into(),
+            vec![net],
+            vec![q],
+            go,
+            None,
+        ));
+        netlist.rebuild_net_connectivity();
+        netlist
+    }
+
+    #[test]
+    fn next_state_is_timed_against_the_acknowledge() {
+        let netlist = block_with_feedback();
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let next = checks
+            .iter()
+            .find(|c| c.times == "next state")
+            .expect("a next-state check");
+        // go at 200, done at 400; the register launches at 300 and its next
+        // value settles five gates later
+        assert_eq!(next.control_ps, 400);
+        assert_eq!(next.data_ps, 800);
+        assert_eq!(next.slack_ps(), -400);
+        assert!(next.delay_path.ends_with("done_and"));
+    }
+
+    #[test]
+    fn sizing_lengthens_the_acknowledge_for_the_next_state() {
+        let mut netlist = block_with_feedback();
+        let report = size_matched_delays(&mut netlist, &UnitDelays, 0);
+        assert_eq!(report.buffers_added, 4);
+        assert!(
+            report.checks.iter().all(|c| c.slack_ps() >= 0),
+            "{:?}",
+            report.checks
+        );
+    }
 }

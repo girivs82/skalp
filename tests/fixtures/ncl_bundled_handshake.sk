@@ -56,3 +56,56 @@ impl HsTop {
     total = total_r
     done = add.ncl_ack & acc.ncl_ack
 }
+
+// An async register file: one write per request, combinational read. Its
+// storage is a memory clocked by the request strobe like any register.
+async entity HsRf {
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[8]
+    in ra: bit[3]
+    out rd: bit[8]
+}
+
+impl HsRf {
+    signal mem: bit[8][8]
+    on() {
+        if we {
+            mem[wa] = wd
+        }
+    }
+    rd = mem[ra]
+}
+
+entity HsRfTop {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[8]
+    in ra: bit[3]
+    in go: bit
+    out rd: bit[8]
+    out done: bit
+}
+
+impl HsRfTop {
+    signal we_r: bit = 0
+    signal wa_r: bit[3] = 0
+    signal wd_r: bit[8] = 0
+    signal ra_r: bit[3] = 0
+    signal req: bit = 0
+    signal rd_r: bit[8] = 0
+
+    inst rf = HsRf { we: we_r, wa: wa_r, wd: wd_r, ra: ra_r, ncl_req: req }
+
+    on(clk.rise) {
+        we_r = we
+        wa_r = wa
+        wd_r = wd
+        ra_r = ra
+        req = go
+        rd_r = rf.rd
+    }
+    rd = rd_r
+    done = rf.ncl_ack
+}

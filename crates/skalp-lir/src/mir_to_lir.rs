@@ -923,7 +923,22 @@ impl MirToLirTransform {
             ProcessKind::Async => {
                 // NCL async process
                 // Check if this has non-blocking assignments (from on() sequential blocks)
-                if Self::block_has_nonblocking(&process.body) {
+                if let Some(go) = self
+                    .ncl_go_signal()
+                    .filter(|_| Self::block_has_nonblocking(&process.body))
+                {
+                    // An async entity with the ncl_req/ncl_ack handshake: its
+                    // `on()` block is a clocked process on the strobe `__ncl_go`
+                    // that the NCL expansion derives from the request (see
+                    // skalp_lir::ncl_expand). Lowering it like any clocked
+                    // process keeps everything a clocked process supports
+                    // (memories, partial writes, resets in the body).
+                    self.async_reset = None;
+                    self.sequential_clock = Some(go);
+                    let body = self.split_partially_written_registers(&process.body);
+                    self.transform_sequential_block(&body, Some(go));
+                    self.sequential_clock = None;
+                } else if Self::block_has_nonblocking(&process.body) {
                     // NCL sequential: on() with non-blocking assignments
                     // Create NclReg nodes — completion detection wiring added by ncl_expand
                     self.transform_ncl_sequential_block(&process.body);
@@ -1354,6 +1369,25 @@ impl MirToLirTransform {
             }
         }
         false
+    }
+
+    /// The strobe that clocks an async entity's `on()` registers: the signal
+    /// `__ncl_go`, created on first use, in a module with the `ncl_req`
+    /// handshake input; `None` in any other module
+    fn ncl_go_signal(&mut self) -> Option<LirSignalId> {
+        use skalp_frontend::hir::NCL_REQ_PORT;
+        let has_req = self
+            .lir
+            .inputs
+            .iter()
+            .any(|id| self.lir.signals[id.0 as usize].name == NCL_REQ_PORT);
+        if !has_req {
+            return None;
+        }
+        if let Some(signal) = self.lir.get_signal(NCL_GO_SIGNAL) {
+            return Some(signal.id);
+        }
+        Some(self.lir.add_signal(NCL_GO_SIGNAL.to_string(), 1))
     }
 
     /// Transform an NCL sequential block (from on() in async entity)
@@ -6138,6 +6172,11 @@ pub fn lower_mir_module_to_lir_with_bram(module: &Module) -> MirToLirResult {
 /// When `is_async_context` is true, the module is treated as async (NCL)
 /// even if it wasn't declared with `async entity`. This is used when a
 /// sync module is instantiated within an async parent module.
+/// The signal that clocks the `on()` registers of an async entity with the
+/// `ncl_req`/`ncl_ack` handshake. Lowering leaves it undriven; the NCL
+/// expansion drives it (bundled data: a matched delay after `ncl_req`).
+pub const NCL_GO_SIGNAL: &str = "__ncl_go";
+
 pub fn lower_mir_module_to_lir_with_context(
     module: &Module,
     is_async_context: bool,

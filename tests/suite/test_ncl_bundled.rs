@@ -65,3 +65,67 @@ async fn bundled_handshake_gate_level() {
         .expect("build gate-level testbench");
     run(tb).await;
 }
+
+/// Run one four-phase handshake on the register file; returns the read data
+async fn rf_handshake(tb: &mut Testbench, write: Option<(u8, u8)>, ra: u8) -> u32 {
+    let (we, wa, wd) = write.map_or((0u8, 0u8, 0u8), |(a, d)| (1, a, d));
+    tb.set("we", we).set("wa", wa).set("wd", wd).set("ra", ra);
+    tb.set("go", 1u8);
+    let mut cycles = 0;
+    while tb.get_u32("done").await == 0 {
+        tb.clock(1).await;
+        cycles += 1;
+        assert!(cycles < PHASE_LIMIT, "no acknowledge for {write:?}");
+    }
+    tb.clock(1).await;
+    let rd = tb.get_u32("rd").await;
+    tb.set("go", 0u8).set("we", 0u8);
+    cycles = 0;
+    while tb.get_u32("done").await != 0 {
+        tb.clock(1).await;
+        cycles += 1;
+        assert!(cycles < PHASE_LIMIT, "acknowledge never fell for {write:?}");
+    }
+    rd
+}
+
+async fn run_rf(mut tb: Testbench) {
+    tb.set("we", 0u8)
+        .set("wa", 0u8)
+        .set("wd", 0u8)
+        .set("ra", 0u8)
+        .set("go", 0u8);
+    tb.clock(4).await;
+    let mut model = [None::<u8>; 8];
+    for (k, (a, d)) in [(0u8, 0x11u8), (5, 0xA5), (7, 0xFF), (5, 0x3C), (2, 0x80)]
+        .into_iter()
+        .enumerate()
+    {
+        // Each write lands once, in the addressed word only
+        let rd = rf_handshake(&mut tb, Some((a, d)), a).await;
+        model[a as usize] = Some(d);
+        assert_eq!(rd, d as u32, "write {k}: read back word {a}");
+        for (w, value) in model.iter().enumerate() {
+            if let Some(v) = value {
+                let rd = rf_handshake(&mut tb, None, w as u8).await;
+                assert_eq!(rd, *v as u32, "after write {k}: word {w}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn bundled_register_file_behavioural() {
+    let tb = Testbench::behavioral_with_top(FIXTURE, "HsRfTop")
+        .await
+        .expect("build behavioural testbench");
+    run_rf(tb).await;
+}
+
+#[tokio::test]
+async fn bundled_register_file_gate_level() {
+    let tb = Testbench::gate_level_with_top(FIXTURE, "HsRfTop")
+        .await
+        .expect("build gate-level testbench");
+    run_rf(tb).await;
+}

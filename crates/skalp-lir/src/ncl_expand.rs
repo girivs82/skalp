@@ -2693,10 +2693,17 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     // Step 3.5: If there are NclReg nodes, create input completion detection
     // The completion signal fires when all inputs have arrived (DATA phase)
     // and acts as the clock for internal NCL registers.
-    let has_ncl_regs = lir
-        .nodes
-        .iter()
-        .any(|n| matches!(n.op, LirOp::NclReg { .. }));
+    // The `on()` block's strobe, when lowering clocked its registers with it
+    let orig_go = lir
+        .get_signal(crate::mir_to_lir::NCL_GO_SIGNAL)
+        .filter(|s| s.driver.is_none())
+        .map(|s| s.id)
+        .filter(|go| lir.nodes.iter().any(|n| n.clock == Some(*go)));
+    let has_ncl_regs = orig_go.is_some()
+        || lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, LirOp::NclReg { .. }));
     let input_completion_id = if has_ncl_regs && !dual_rail_map.is_empty() {
         let completion_id = new_lir.add_signal("__ncl_input_complete".to_string(), 1);
         let mut completion_inputs: Vec<LirSignalId> = Vec::new();
@@ -2758,6 +2765,18 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
                     orig_node.path.clone(),
                 );
             }
+        } else if let Some(clock) = orig_node.clock {
+            // A clocked node keeps its clock (and reset)
+            let clock = *signal_map.get(&clock).unwrap_or(&clock);
+            let reset = orig_node.reset.map(|r| *signal_map.get(&r).unwrap_or(&r));
+            new_lir.add_seq_node(
+                orig_node.op.clone(),
+                new_inputs,
+                new_output,
+                orig_node.path.clone(),
+                clock,
+                reset,
+            );
         } else {
             new_lir.add_node(
                 orig_node.op.clone(),
@@ -2766,6 +2785,17 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
                 orig_node.path.clone(),
             );
         }
+    }
+
+    // The `on()` block's strobe is the input completion here
+    if let (Some(go), Some(completion)) = (orig_go, input_completion_id) {
+        let go = *signal_map.get(&go).unwrap_or(&go);
+        new_lir.add_node(
+            LirOp::Buffer { width: 1 },
+            vec![completion],
+            go,
+            "ncl_go_from_completion".to_string(),
+        );
     }
 
     // Step 5: Encode outputs to dual-rail and add completion detection
@@ -2896,8 +2926,12 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
         };
     };
 
-    // go = req & delay(req)
-    let go = new_lir.add_signal("__ncl_go".to_string(), 1);
+    // go = req & delay(req). Lowering made `__ncl_go` the clock of the
+    // `on()` block's registers and memories.
+    let go = match new_lir.get_signal(crate::mir_to_lir::NCL_GO_SIGNAL) {
+        Some(signal) if signal.driver.is_none() => signal.id,
+        _ => new_lir.add_signal(crate::mir_to_lir::NCL_GO_SIGNAL.to_string(), 1),
+    };
     new_lir.add_node(
         LirOp::NclMatchedDelay { width: 1 },
         vec![req],
@@ -2906,7 +2940,7 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
     );
 
     // `on()` registers update when `go` rises
-    let mut has_regs = false;
+    let mut has_regs = new_lir.nodes.iter().any(|n| n.clock == Some(go));
     for node in new_lir.nodes.iter_mut() {
         if let LirOp::NclReg { width } = node.op {
             has_regs = true;
