@@ -854,7 +854,9 @@ Rules:
 
 - N is the total latency, not the number of registers added. N below the
   body's latency is an error.
-- The entity needs exactly one clock, and no `inout` ports.
+- The entity needs exactly one clock, and no `inout` ports. On an `async
+  entity` (no clock) `#[pipeline]` and `#[retime]` are ignored, with a note
+  in the log, so one source can serve a clocked and an async build.
 - Retiming never adds registers beyond the N − L the wrapper added; it only
   moves them, and every loop keeps its register count.
 - Registers keep their initial values, so a register can't move back
@@ -900,7 +902,10 @@ name the entity.
 Only paths the entity's stages can shorten decide its latency. A too-long
 path that starts or ends outside the entity's retimable logic (say, from
 an arbiter in front of it into a register behind it) is printed as a
-warning naming the instances it runs through. If no latency up to the
+warning naming the instances it runs through. So is one through the
+entity's own logic between registers that stay put (registers with a reset
+or enable, or on a loop such as a state machine's): no stages reach it, and
+the warning says to split that logic. If no latency up to the
 limit meets the clock, the error names the path, says whether it enters
 from outside, and suggests `#[retime]` or `#[pipeline]` for the entities it
 runs through.

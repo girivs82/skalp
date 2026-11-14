@@ -348,6 +348,10 @@ impl Departures {
 const ENDS_AT_FIXED_REGISTERS: &str =
     "it ends at registers that are already as far back as they can go";
 
+/// Why a path between registers held by loops stays too long
+const ON_A_LOOP: &str =
+    "the registers at its ends are held by loops (or kept in place), so none can move into it";
+
 /// How a path ending at registers in front of a cell names that cell
 const REGISTERS_IN_FRONT: &str = "registers in front of";
 
@@ -375,6 +379,12 @@ pub struct BlockedPath {
     /// Whether it starts at something that stays put (outside the regions,
     /// or a register that cannot move) rather than at a movable register
     pub from_outside: bool,
+    /// Whether it runs through the logic of the `#[pipeline]` entity whose
+    /// stages were being chosen, between things that stay put (registers
+    /// with a reset or enable, or on a loop): stages can't reach it, and
+    /// only splitting that logic shortens it. Set by
+    /// [`extra_stages_for_period`].
+    pub through_region: bool,
     /// Where it starts, then the cells along it
     pub steps: Vec<String>,
     /// Why retiming stopped there
@@ -1704,6 +1714,7 @@ impl<'a> Graph<'a> {
         BlockedPath {
             delay_ps,
             from_outside: true,
+            through_region: false,
             steps,
             why: why.to_string(),
         }
@@ -1976,6 +1987,7 @@ impl<'a> Graph<'a> {
         BlockedPath {
             delay_ps: path.delay_ps,
             from_outside: matches!(path.start, TraceStart::Fixed(_)),
+            through_region: false,
             steps,
             why: why.to_string(),
         }
@@ -2007,6 +2019,9 @@ impl<'a> Graph<'a> {
         // logic behind them is still timed.
         let mut skip = vec![false; self.edges.len()];
         let mut end_here = vec![false; self.edges.len()];
+        // The longest path accepted into each edge's end: the period, or
+        // a path's delay that no lags shorten
+        let mut accept = vec![period; self.edges.len()];
         let mut lags = vec![0i64; zero];
         // Paths with no node to place a register on: from something that
         // stays put to registers on its first edge, and from registers on
@@ -2039,6 +2054,7 @@ impl<'a> Graph<'a> {
                         frozen.push(BlockedPath {
                             delay_ps: t,
                             from_outside: false,
+                            through_region: false,
                             steps: vec![
                                 format!("{REGISTER_AFTER} {} {}", from.cell_type, from.path),
                                 format!(
@@ -2070,6 +2086,7 @@ impl<'a> Graph<'a> {
                 return Err(BlockedPath {
                     delay_ps: 0,
                     from_outside: false,
+                    through_region: false,
                     steps: Vec::new(),
                     why: "the registers' loops leave no legal retiming".to_string(),
                 })
@@ -2084,6 +2101,29 @@ impl<'a> Graph<'a> {
             lags = match solve_lags(zero + 1, zero, &bounds) {
                 Ok(lags) => lags[..zero].to_vec(),
                 Err(cycle) => {
+                    let mine: Vec<usize> = cycle
+                        .iter()
+                        .copied()
+                        .filter(|&b| b >= legal && paths[b - legal].is_some())
+                        .collect();
+                    // One too-long path against only the constraints every
+                    // retiming must keep (loops' register counts, registers
+                    // kept in place): no lags shorten it, as with a path
+                    // between registers that stay put. Report it, drop its
+                    // constraint, accept its delay where it ends, and go on
+                    // with the rest.
+                    if let [b] = mine[..] {
+                        let path = paths[b - legal].take().expect("filtered on some");
+                        let end = path.end_edge;
+                        if accept[end] == period {
+                            frozen.push(self.report(&path, &path.lags, delays, ON_A_LOOP));
+                        }
+                        accept[end] = accept[end].max(path.delay_ps);
+                        let (first, last, _) = bounds[b];
+                        known.remove(&(first, last));
+                        bounds[b] = (first, first, 0);
+                        continue;
+                    }
                     // The too-long paths on the cycle compete for the same
                     // registers; name the slowest
                     let on_cycle: Vec<&TooLong> = cycle
@@ -2105,6 +2145,7 @@ impl<'a> Graph<'a> {
                         None => BlockedPath {
                             delay_ps: 0,
                             from_outside: false,
+                            through_region: false,
                             steps: Vec::new(),
                             why,
                         },
@@ -2132,7 +2173,7 @@ impl<'a> Graph<'a> {
                     Sink::Cell(..) => (arrival + self.wire_direct(edge) + edge.exit_ps, true),
                     Sink::Node(..) => continue,
                 };
-                if delay_ps <= period {
+                if delay_ps <= accept[index] {
                     continue;
                 }
                 too_long = true;
@@ -2225,6 +2266,7 @@ impl<'a> Graph<'a> {
             None => BlockedPath {
                 delay_ps: 0,
                 from_outside: false,
+                through_region: false,
                 steps: Vec::new(),
                 why: "the search did not settle".to_string(),
             },
@@ -2772,20 +2814,18 @@ pub fn extra_stages_for_period(
         graph.feasible(target_period_ps, delays)
     };
     // The paths no number of stages shortens: those still too long with the
-    // most stages
+    // most stages. Each runs between things that stay put, so it limits the
+    // clock whatever the latency; it is reported, and the latency is chosen
+    // for the paths stages can shorten. One through the region's own logic
+    // (between its registers with a reset or enable, say) is marked so the
+    // report says to split that logic.
     let most = try_extra(max_extra).map_err(Some)?;
-    // One through the region's own logic is the region's to fix, and
-    // stages can't. (One that only starts or ends at a cell of the region
-    // that stays put, such as a register with a reset, is a limit of the
-    // logic around it.)
-    if let Some(path) = most.frozen.iter().find(|p| {
+    let through_region = |p: &BlockedPath| {
         p.steps
             .iter()
             .filter(|s| s.ends_with(')') && s.contains(" (lag "))
             .any(|s| s.split_whitespace().any(|w| is_inside(w, region)))
-    }) {
-        return Err(Some(path.clone()));
-    }
+    };
     let irreducible = most.frozen.len();
     // The fewest stages that leave only those (more stages never hurt)
     let (mut lo, mut hi) = (0u32, max_extra);
@@ -2799,6 +2839,9 @@ pub fn extra_stages_for_period(
             }
             _ => lo = mid + 1,
         }
+    }
+    for path in &mut best.frozen {
+        path.through_region = through_region(path);
     }
     Ok((lo, best.frozen))
 }
