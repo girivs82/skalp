@@ -25,6 +25,7 @@ use crate::mir::{
     ProcessKind, SensitivityList, Signal, SignalId, Statement, Value,
 };
 use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
+use skalp_frontend::ncl_streams::{NCL_READY_SIGNAL, NCL_TICK_PORT};
 use std::collections::HashMap;
 
 /// Signal name suffixes of the bridge registers added to a clocked parent
@@ -60,9 +61,17 @@ pub fn apply_ncl_bridges(
         share_parent_request(module, &async_modules);
     }
 
+    // Self-timed async modules and the name of their behavioural tick input
+    let tick_ports: HashMap<ModuleId, String> = mir
+        .modules
+        .iter()
+        .filter(|m| m.is_async && m.ports.iter().any(|p| p.name == NCL_TICK_PORT))
+        .map(|m| (m.id, NCL_TICK_PORT.to_string()))
+        .collect();
+
     for module in mir.modules.iter_mut().filter(|m| !m.is_async) {
         let check = reachable.is_empty() || reachable.contains(&module.name);
-        if let Err(e) = bridge_module(module, &async_modules) {
+        if let Err(e) = bridge_module(module, &async_modules, &tick_ports) {
             if check {
                 errors.extend(e);
             }
@@ -148,6 +157,41 @@ pub fn handshake_clocked_process(module: &Module, process: &Process) -> Option<P
         .ports
         .iter()
         .find(|p| p.name == NCL_REQ_PORT && p.direction == PortDirection::Input)?;
+    // A self-timed block (stream ports) takes one step per rising edge of its
+    // tick (the parent's clock) while it runs and its channels are ready
+    let tick = module
+        .ports
+        .iter()
+        .find(|p| p.name == NCL_TICK_PORT && p.direction == PortDirection::Input);
+    let ready = module.signals.iter().find(|s| s.name == NCL_READY_SIGNAL);
+    if let (Some(tick), Some(ready)) = (tick, ready) {
+        let enabled = Expression::with_unknown_type(ExpressionKind::Binary {
+            op: crate::mir::BinaryOp::LogicalAnd,
+            left: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                LValue::Port(req.id),
+            ))),
+            right: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                LValue::Signal(ready.id),
+            ))),
+        });
+        return Some(Process {
+            id: process.id,
+            kind: ProcessKind::Sequential,
+            sensitivity: SensitivityList::Edge(vec![EdgeSensitivity {
+                signal: LValue::Port(tick.id),
+                edge: EdgeType::Rising,
+            }]),
+            body: Block {
+                statements: vec![Statement::If(crate::mir::IfStatement {
+                    condition: enabled,
+                    then_block: process.body.clone(),
+                    else_block: None,
+                    span: None,
+                })],
+            },
+            span: process.span.clone(),
+        });
+    }
     Some(Process {
         id: process.id,
         kind: ProcessKind::Sequential,
@@ -219,6 +263,7 @@ fn single_clock(module: &Module) -> Result<Option<LValue>, Vec<LValue>> {
 fn bridge_module(
     module: &mut Module,
     async_modules: &HashMap<ModuleId, String>,
+    tick_ports: &HashMap<ModuleId, String>,
 ) -> Result<(), Vec<String>> {
     let async_instances: Vec<usize> = module
         .instances
@@ -306,6 +351,17 @@ fn bridge_module(
             });
             id
         };
+
+        // A self-timed block (stream ports) steps on the parent's clock in
+        // behavioural simulation
+        if let Some(tick) = tick_ports.get(&module.instances[idx].module) {
+            module.instances[idx]
+                .connections
+                .entry(tick.clone())
+                .or_insert_with(|| {
+                    Expression::with_unknown_type(ExpressionKind::Ref(clock.clone()))
+                });
+        }
 
         // Request: one more register stage in the parent's domain
         let req_q = new_signal(module, REQ_REG_SUFFIX);

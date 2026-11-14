@@ -87,6 +87,25 @@ impl MirCompiler {
         hir: &Hir,
         module_hirs: &IndexMap<PathBuf, Hir>,
     ) -> Result<Mir, String> {
+        // Stream ports of async entities become plain data and phase ports
+        // (self-timed channels, see `skalp_frontend::ncl_streams`)
+        let streams_lowered;
+        let hir = if skalp_frontend::ncl_streams::has_async_streams(hir) {
+            let mut lowered = hir.clone();
+            let others: Vec<&Hir> = module_hirs.values().collect();
+            let errors = skalp_frontend::ncl_streams::lower_async_streams(&mut lowered, &others);
+            if !errors.is_empty() {
+                return Err(format!(
+                    "stream check failed with {} error(s):\n  {}",
+                    errors.len(),
+                    errors.join("\n  ")
+                ));
+            }
+            streams_lowered = lowered;
+            &streams_lowered
+        } else {
+            hir
+        };
         // Step 1: Transform HIR to MIR.
         //
         // Trait-method inlining happens during this transform — AFTER frontend
@@ -252,6 +271,7 @@ impl MirCompiler {
                         ) && !instance.connections.iter().any(|c| c.port == port.name)
                             // checked by the NCL bridge (only a clocked parent needs it)
                             && port.name != skalp_frontend::hir::NCL_REQ_PORT
+                            && port.name != skalp_frontend::ncl_streams::NCL_TICK_PORT
                         {
                             inst_errors.push(format!(
                                 "input port `{p}` of `{t}` is not connected in `inst {n}` (in entity `{o}`)",

@@ -22,6 +22,7 @@ pub mod macros;
 pub mod memory_init;
 pub mod module_resolver;
 pub mod monomorphization;
+pub mod ncl_streams;
 pub mod parse;
 pub mod parser;
 pub mod pipeline_lock;

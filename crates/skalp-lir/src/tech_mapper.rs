@@ -22,6 +22,7 @@ use indexmap::IndexMap;
 use skalp_frontend::hir::PhysicalConstraints;
 
 /// Information extracted from a library cell for tech mapping
+#[derive(Clone)]
 struct LibraryCellInfo {
     name: String,
     function: CellFunction,
@@ -3238,6 +3239,118 @@ fn merge_physical_nodes_into_netlist(
                 }
             }
 
+            LirOp::NclStepControl => {
+                // out = req & !done & (ready | go), as kept gates: each input
+                // is read once, so no single input change can glitch it
+                let net = |k: usize| {
+                    input_nets
+                        .get(k)
+                        .and_then(|v| v.first())
+                        .copied()
+                        .unwrap_or(GateNetId(0))
+                };
+                let (req, done, ready, go) = (net(0), net(1), net(2), net(3));
+                let out = output_nets.first().copied().unwrap_or(GateNetId(0));
+                let inv_cell = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
+                let not_done =
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_not_done", path)));
+                let hold = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_hold", path)));
+                let enabled =
+                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_enabled", path)));
+                for (cell_info, name, inputs, output) in [
+                    (&inv_cell, "st_inv", vec![done], not_done),
+                    (&or2_cell, "st_or", vec![ready, go], hold),
+                    (&and2_cell, "st_and0", vec![not_done, hold], enabled),
+                    (&and2_cell, "st_and", vec![req, enabled], out),
+                ] {
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        cell_info.name.clone(),
+                        library.name.clone(),
+                        cell_info.fit,
+                        format!("{}.{}", path, name),
+                        inputs,
+                        vec![output],
+                    );
+                    cell_info.apply_to_cell(&mut cell);
+                    cell.source_op = Some(crate::gate_netlist::STEP_CONTROL_OP.to_string());
+                    netlist.add_cell(cell);
+                }
+            }
+
+            LirOp::NclArbiter { width } => {
+                let requests: Vec<GateNetId> = (0..*width as usize)
+                    .map(|i| {
+                        input_nets
+                            .first()
+                            .and_then(|v| v.get(i))
+                            .copied()
+                            .unwrap_or(GateNetId(0))
+                    })
+                    .collect();
+                let grants: Vec<GateNetId> = (0..*width as usize)
+                    .map(|i| output_nets.get(i).copied().unwrap_or(GateNetId(0)))
+                    .collect();
+                let cells = ArbiterCells {
+                    inv: lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1),
+                    and2: and2_cell.clone(),
+                    or2: or2_cell.clone(),
+                    nand2: lookup_cell(library, CellFunction::Nand2, "NAND2", 0.1),
+                    buf: buf_cell.clone(),
+                    library: library.name.clone(),
+                };
+                let mut counter = 0usize;
+                // Released requests: `request & !release`
+                let release = input_nets.get(1).and_then(|v| v.first()).copied();
+                let requests: Vec<GateNetId> = match release {
+                    Some(release) => {
+                        let held = arbiter_net(netlist, path, "held", &mut counter);
+                        arbiter_gate(
+                            netlist,
+                            &cells.inv,
+                            &cells.library,
+                            path,
+                            "inv",
+                            &mut counter,
+                            vec![release],
+                            held,
+                        );
+                        requests
+                            .iter()
+                            .map(|&r| {
+                                let out = arbiter_net(netlist, path, "r", &mut counter);
+                                arbiter_gate(
+                                    netlist,
+                                    &cells.and2,
+                                    &cells.library,
+                                    path,
+                                    "and",
+                                    &mut counter,
+                                    vec![r, held],
+                                    out,
+                                );
+                                out
+                            })
+                            .collect()
+                    }
+                    None => requests,
+                };
+                let (_, local) = build_arbiter_tree(netlist, &cells, path, &requests, &mut counter);
+                for (local, &grant) in local.into_iter().zip(&grants) {
+                    // the grant nets are the op's outputs
+                    arbiter_gate(
+                        netlist,
+                        &cells.buf,
+                        &cells.library,
+                        path,
+                        "gnt",
+                        &mut counter,
+                        vec![local],
+                        grant,
+                    );
+                }
+            }
+
             LirOp::NclEncode { width } => {
                 // Boundary NCL: t-rail = value, f-rail = NOT(value).
                 // The AIG already produces y_f[i] = NOT(value) as a module output.
@@ -4493,6 +4606,173 @@ fn create_blackbox_netlist(
     }
 
     netlist
+}
+
+/// Library cells an arbiter is built from
+struct ArbiterCells {
+    inv: LibraryCellInfo,
+    and2: LibraryCellInfo,
+    or2: LibraryCellInfo,
+    nand2: LibraryCellInfo,
+    buf: LibraryCellInfo,
+    library: String,
+}
+
+/// Add one kept arbiter gate driving `output`
+#[allow(clippy::too_many_arguments)]
+fn arbiter_gate(
+    netlist: &mut GateNetlist,
+    cell_info: &LibraryCellInfo,
+    library: &str,
+    path: &str,
+    name: &str,
+    counter: &mut usize,
+    inputs: Vec<GateNetId>,
+    output: GateNetId,
+) {
+    let mut cell = Cell::new_comb(
+        CellId(0),
+        cell_info.name.clone(),
+        library.to_string(),
+        cell_info.fit,
+        format!("{}.arb_{}{}", path, name, counter),
+        inputs,
+        vec![output],
+    );
+    *counter += 1;
+    cell_info.apply_to_cell(&mut cell);
+    cell.source_op = Some(crate::gate_netlist::ARBITER_OP.to_string());
+    netlist.add_cell(cell);
+}
+
+/// A new net of an arbiter
+fn arbiter_net(
+    netlist: &mut GateNetlist,
+    path: &str,
+    name: &str,
+    counter: &mut usize,
+) -> GateNetId {
+    *counter += 1;
+    netlist.add_net(GateNet::new(
+        GateNetId(0),
+        format!("{}.arb_{}{}", path, name, counter),
+    ))
+}
+
+/// Mutual exclusion between two requests: cross-coupled NANDs
+/// (`x0 = !(r0 & x1)`, `x1 = !(r1 & x0)`) and a grant per side
+/// (`g0 = !x0 & x1`). Only one grant is ever high once the latch has
+/// resolved; the block's matched delay after `ready` gives it time to.
+fn arbiter_mutex(
+    netlist: &mut GateNetlist,
+    cells: &ArbiterCells,
+    path: &str,
+    r0: GateNetId,
+    r1: GateNetId,
+    counter: &mut usize,
+) -> (GateNetId, GateNetId) {
+    let x0 = arbiter_net(netlist, path, "x", counter);
+    let x1 = arbiter_net(netlist, path, "x", counter);
+    arbiter_gate(
+        netlist,
+        &cells.nand2,
+        &cells.library,
+        path,
+        "nand",
+        counter,
+        vec![r0, x1],
+        x0,
+    );
+    arbiter_gate(
+        netlist,
+        &cells.nand2,
+        &cells.library,
+        path,
+        "nand",
+        counter,
+        vec![r1, x0],
+        x1,
+    );
+    let mut grant = |x_own: GateNetId, x_other: GateNetId| {
+        let n = arbiter_net(netlist, path, "nx", counter);
+        arbiter_gate(
+            netlist,
+            &cells.inv,
+            &cells.library,
+            path,
+            "inv",
+            counter,
+            vec![x_own],
+            n,
+        );
+        let g = arbiter_net(netlist, path, "g", counter);
+        arbiter_gate(
+            netlist,
+            &cells.and2,
+            &cells.library,
+            path,
+            "and",
+            counter,
+            vec![n, x_other],
+            g,
+        );
+        g
+    };
+    let g0 = grant(x0, x1);
+    let g1 = grant(x1, x0);
+    (g0, g1)
+}
+
+/// Arbiter over `requests`: a tree of two-way mutual-exclusion elements.
+/// Returns (any request, grant per request).
+fn build_arbiter_tree(
+    netlist: &mut GateNetlist,
+    cells: &ArbiterCells,
+    path: &str,
+    requests: &[GateNetId],
+    counter: &mut usize,
+) -> (GateNetId, Vec<GateNetId>) {
+    match requests {
+        [] => (GateNetId(0), Vec::new()),
+        [r] => (*r, vec![*r]),
+        _ => {
+            let (left, right) = requests.split_at(requests.len().div_ceil(2));
+            let (any_l, grants_l) = build_arbiter_tree(netlist, cells, path, left, counter);
+            let (any_r, grants_r) = build_arbiter_tree(netlist, cells, path, right, counter);
+            let (t_l, t_r) = arbiter_mutex(netlist, cells, path, any_l, any_r, counter);
+            let mut grants = Vec::with_capacity(requests.len());
+            for (g, t) in grants_l
+                .into_iter()
+                .map(|g| (g, t_l))
+                .chain(grants_r.into_iter().map(|g| (g, t_r)))
+            {
+                let out = arbiter_net(netlist, path, "gt", counter);
+                arbiter_gate(
+                    netlist,
+                    &cells.and2,
+                    &cells.library,
+                    path,
+                    "and",
+                    counter,
+                    vec![g, t],
+                    out,
+                );
+                grants.push(out);
+            }
+            let any = arbiter_net(netlist, path, "any", counter);
+            arbiter_gate(
+                netlist,
+                &cells.or2,
+                &cells.library,
+                path,
+                "or",
+                counter,
+                vec![any_l, any_r],
+                any,
+            );
+            (any, grants)
+        }
+    }
 }
 
 // ============================================================================

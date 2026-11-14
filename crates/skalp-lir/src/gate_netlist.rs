@@ -87,6 +87,16 @@ pub const FF_INIT_PARAM: &str = "INIT";
 /// point of them, so no optimization may remove or merge them.
 pub const MATCHED_DELAY_OP: &str = "NclMatchedDelay";
 
+/// `source_op` of the gates of a self-timed async block's step control
+/// (`LirOp::NclStepControl`). Merging them could make the step request
+/// glitch, so no optimization may touch them.
+pub const STEP_CONTROL_OP: &str = "NclStepControl";
+
+/// `source_op` of the gates of an arbiter of a self-timed async block
+/// (`LirOp::NclArbiter`): mutual-exclusion elements, cross-coupled gates
+/// that optimization must not touch.
+pub const ARBITER_OP: &str = "NclArbiter";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -166,9 +176,13 @@ impl RamPorts {
 
 impl Cell {
     /// Whether optimization must leave this cell as it is (the buffers of a
-    /// matched delay: removing or merging them would shorten the delay)
+    /// matched delay: removing or merging them would shorten the delay; the
+    /// gates of a step control: merging them could make it glitch)
     pub fn is_kept(&self) -> bool {
-        self.source_op.as_deref() == Some(MATCHED_DELAY_OP)
+        matches!(
+            self.source_op.as_deref(),
+            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(ARBITER_OP)
+        )
     }
 
     /// Number of variables of this cell's truth table, if it is a LUT whose

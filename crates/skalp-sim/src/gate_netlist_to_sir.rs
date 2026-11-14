@@ -358,6 +358,30 @@ impl GateNetlistToSirConverter {
                 continue;
             }
 
+            // A matched delay of a bundled-data async block (`out = in &
+            // delay(in)`, see `skalp_lir::ncl_bundle`) simulates as one clock
+            // of the design's first clock in both directions: `out` follows
+            // `in` at the next rising edge. Every loop of a self-timed
+            // block's step control runs through its matched delays, so the
+            // zero-delay evaluation never sees a combinational loop, and the
+            // control logic is exercised with a real (if coarse) delay.
+            if cell.source_op.as_deref() == Some(skalp_lir::gate_netlist::MATCHED_DELAY_OP)
+                && cell.path.ends_with("_and")
+                && !inputs.is_empty()
+            {
+                seq_ops.push((
+                    None,
+                    SirOperation::Primitive {
+                        id: primitive_id,
+                        ptype: PrimitiveType::DffP,
+                        inputs: vec![inputs[0]],
+                        outputs,
+                        path: cell.path.clone(),
+                    },
+                ));
+                continue;
+            }
+
             let op = SirOperation::Primitive {
                 id: primitive_id,
                 ptype,

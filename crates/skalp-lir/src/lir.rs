@@ -1053,6 +1053,18 @@ pub enum LirOp {
     /// an AND that synthesis keeps; the chain is sized after mapping, and
     /// checked after routing, against the data paths the output times.
     NclMatchedDelay { width: u32 },
+    /// Step request of a self-timed bundled-data async block (stream ports):
+    /// `out = req & !done & (ready | go)`, inputs `[req, done, ready, go]`.
+    /// Physical: kept gates, each input read once, so a change of one input
+    /// at a time (as the step handshake makes them) cannot glitch the output.
+    NclStepControl,
+    /// Arbiter of a self-timed block: grants (one-hot, or none) at most one
+    /// of its requests, and keeps a grant while that request stays up.
+    /// Inputs: the requests, then a release bit (while it is high every
+    /// request counts as low); output: the grants, same width as the
+    /// requests. Physical: a tree of mutual-exclusion elements
+    /// (cross-coupled gates), kept.
+    NclArbiter { width: u32 },
 }
 
 impl LirOp {
@@ -1115,6 +1127,8 @@ impl LirOp {
             // NCL threshold gates - single-rail output
             LirOp::Th12 { width } | LirOp::Th22 { width } => *width,
             LirOp::NclMatchedDelay { width } => *width,
+            LirOp::NclStepControl => 1,
+            LirOp::NclArbiter { width } => *width,
             // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
@@ -1200,6 +1214,8 @@ impl LirOp {
             // NCL dual-rail operations
             LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
             LirOp::NclMatchedDelay { .. } => 1,
+            LirOp::NclStepControl => 4,
+            LirOp::NclArbiter { .. } => 2,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

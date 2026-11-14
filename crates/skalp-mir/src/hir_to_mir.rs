@@ -54,7 +54,7 @@ const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
 
 /// Maximum recursion depth for type inference and expression annotation
 /// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
-/// Increased to 32768 to support complex match expressions with nested function calls (e.g., exec_l4_l5)
+/// Increased to 32768 to support complex match expressions with nested function calls (e.g., exec_unit)
 /// Note: This extremely high depth is required for deeply nested vector operations in ray-triangle intersection
 const MAX_EXPRESSION_RECURSION_DEPTH: usize = 32768;
 
@@ -12084,7 +12084,12 @@ impl<'hir> HirToMir<'hir> {
     fn convert_literal(&mut self, lit: &hir::HirLiteral) -> Option<Value> {
         match lit {
             hir::HirLiteral::Integer(val) => Some(Value::Integer(*val as i64)),
-            hir::HirLiteral::Boolean(b) => Some(Value::Integer(if *b { 1 } else { 0 })),
+            // `true`/`false` are one bit wide, so `!true` is 0 and `true && x`
+            // stays one bit
+            hir::HirLiteral::Boolean(b) => Some(Value::BitVector {
+                width: 1,
+                value: *b as u64,
+            }),
             hir::HirLiteral::Float(f) => Some(Value::Float(*f)),
             hir::HirLiteral::String(s) => Some(Value::String(s.clone())),
             hir::HirLiteral::BitVector(bits) => {
@@ -22431,7 +22436,12 @@ impl<'hir> HirToMir<'hir> {
     fn convert_literal_immutable(&self, lit: &hir::HirLiteral) -> Option<Value> {
         match lit {
             hir::HirLiteral::Integer(val) => Some(Value::Integer(*val as i64)),
-            hir::HirLiteral::Boolean(b) => Some(Value::Integer(if *b { 1 } else { 0 })),
+            // `true`/`false` are one bit wide, so `!true` is 0 and `true && x`
+            // stays one bit
+            hir::HirLiteral::Boolean(b) => Some(Value::BitVector {
+                width: 1,
+                value: *b as u64,
+            }),
             hir::HirLiteral::Float(f) => Some(Value::Float(*f)),
             hir::HirLiteral::String(s) => Some(Value::String(s.clone())),
             hir::HirLiteral::BitVector(bits) => {
@@ -24621,7 +24631,7 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // BUG #204 FIX: Save and restore current_module_var_to_signal for nested module synthesis
-        // When synthesizing nested modules (e.g., exec_l4_l5 -> quadratic_solve -> fp_sqrt),
+        // When synthesizing nested modules (e.g., exec_unit -> quadratic_solve -> fp_sqrt),
         // each module synthesis overwrites current_module_var_to_signal with its own mappings.
         // Without save/restore, when we return to the parent module synthesis, the mapping
         // is lost (set to None by the child), causing Variable references to be incorrectly
@@ -24657,7 +24667,7 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Save the current pending instance count - we'll only drain instances added AFTER this point
-        // This is critical for nested module synthesis (e.g., exec_l4_l5 -> quadratic_solve)
+        // This is critical for nested module synthesis (e.g., exec_unit -> quadratic_solve)
         let pending_start_idx = self.pending_module_instances.len();
         let pending_entity_start_idx = self.pending_entity_instances.len();
         trace!(
@@ -24896,7 +24906,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // BUG FIX #85: If return expression is a Match, extract let bindings from match arms
-        // This handles functions like exec_l4_l5 that have: return match opcode { ... }
+        // This handles functions like exec_unit that have: return match opcode { ... }
         // where the let bindings are inside the match arms
         if let Some(ref ret_expr) = return_expr {
             let extracted = Self::extract_let_bindings_from_expression(ret_expr);

@@ -25,7 +25,7 @@ fn fixture_path(name: &str) -> String {
 fn compile_ncl_fixture(fixture_name: &str) -> GateNetlist {
     let unique_id = UNIQUE_ID.fetch_add(1, Ordering::SeqCst);
     let source_path = fixture_path(fixture_name);
-    let output_dir = format!("/tmp/ncl_cle_out_{}", unique_id);
+    let output_dir = format!("/tmp/ncl_datapath_out_{}", unique_id);
 
     let skalp_bin = env!("CARGO_BIN_EXE_skalp");
     let output = Command::new(skalp_bin)
@@ -109,7 +109,7 @@ fn run_ncl_test(
 }
 
 // ============================================================================
-// Completion Detection — XOR-tree pattern from CLE V2
+// Completion Detection — XOR-tree pattern
 // In boundary NCL, inputs are always valid DATA after NclEncode, so this
 // tests the XOR+AND reduction tree, not NULL detection per se.
 // ============================================================================
@@ -148,7 +148,7 @@ fn test_ncl_completion_detect() {
 }
 
 // ============================================================================
-// Dual-Rail Mux — Mode-selected operand routing from CLE V2
+// Dual-Rail Mux — Mode-selected operand routing
 // ============================================================================
 
 #[test]
@@ -183,7 +183,7 @@ fn test_ncl_dual_rail_mux() {
 }
 
 // ============================================================================
-// Multi-output Bitwise Ops — CLE function unit L0 pattern
+// Multi-output Bitwise Ops — function-unit pattern
 // ============================================================================
 
 #[test]
@@ -219,7 +219,7 @@ fn test_ncl_bitwise_ops_multi_output() {
 }
 
 // ============================================================================
-// 8-bit Subtraction — CLE arithmetic unit
+// 8-bit Subtraction — arithmetic unit
 // BUG: Borrow chain synthesis produces wrong results for all inputs.
 // ============================================================================
 
@@ -251,7 +251,7 @@ fn test_ncl_sub_8bit() {
 }
 
 // ============================================================================
-// 8-bit Comparator — CLE function unit L0
+// 8-bit Comparator — function unit
 // BUG: `lt` output is stuck-at-1 when a <= b (should only be 1 when a < b).
 // ============================================================================
 
@@ -284,7 +284,7 @@ fn test_ncl_comparator_8bit() {
 }
 
 // ============================================================================
-// Mux Chain — Cascaded mux selection from CLE operand routing
+// Mux Chain — Cascaded mux selection for operand routing
 // ============================================================================
 
 #[test]

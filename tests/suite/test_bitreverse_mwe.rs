@@ -297,7 +297,7 @@ pub fn popcount32(value: bit[32]) -> nat[6] {
     return x[5:0] as nat[6]
 }
 
-pub fn exec_l4_l5(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256] {
+pub fn exec_unit(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256] {
     return match opcode {
         L5Opcode::POPCOUNT => {
             let value = data1[31:0];
@@ -321,7 +321,7 @@ async entity CleLikeBitreverse {
 
 impl CleLikeBitreverse {
     signal l4_l5_result: bit[256]
-    l4_l5_result = exec_l4_l5(function_sel, data1, 0)
+    l4_l5_result = exec_unit(function_sel, data1, 0)
     debug_l4_l5 = l4_l5_result[31:0]
 }
 "#;
@@ -563,7 +563,7 @@ pub fn popcount32(value: bit[32]) -> nat[6] {
     return x[5:0] as nat[6]
 }
 
-pub fn exec_l4_l5(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256] {
+pub fn exec_unit(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256] {
     // SWAPPED ORDER: BITREVERSE first, then POPCOUNT
     return match opcode {
         L5Opcode::BITREVERSE => {
@@ -588,7 +588,7 @@ async entity CleLikeSwapped {
 
 impl CleLikeSwapped {
     signal l4_l5_result: bit[256]
-    l4_l5_result = exec_l4_l5(function_sel, data1, 0)
+    l4_l5_result = exec_unit(function_sel, data1, 0)
     debug_l4_l5 = l4_l5_result[31:0]
 }
 "#;
