@@ -567,9 +567,10 @@ fn test_extra_stages_reach_back_through_retime_logic() {
     );
 }
 
-/// An iterative unit: operands are decoded (multiplied) into registers that
-/// load on `start`, then one step runs between registers that load on a
-/// state bit. Stages added at its inputs can cut the decode, but not the
+/// An iterative unit: operands are decoded (one add) into registers that
+/// load on `start`, then one step (normalise and add, deeper than the
+/// decode) runs between registers that load on a state bit. No multiply:
+/// the logic must not depend on whether the standard library maps it. Stages added at its inputs can cut the decode, but not the
 /// step: those registers have enables and stay put.
 const ITERATIVE_UNIT: &str = "\
 entity IterUnit {
@@ -588,7 +589,7 @@ impl IterUnit {
     signal r_y: bit[32] = 0
     signal r_done: bit = 0
     signal p: bit[32]
-    p = (a * b) + {a, b}
+    p = {a, b} + {b, a}
     let z16: bit = if r_p[31:16] == 0 { 1'b1 } else { 1'b0 }
     let n16: bit[32] = if z16 == 1 { {r_p[15:0], 16'b0} } else { r_p }
     let z8: bit = if n16[31:24] == 0 { 1'b1 } else { 1'b0 }
