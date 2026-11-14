@@ -1531,6 +1531,15 @@ impl UnifiedSimulator {
         self.total_wavefronts
     }
 
+    /// Turn waveform capture on or off. Turning it off also drops what was
+    /// captured, so a long run (millions of cycles) keeps constant memory.
+    pub fn set_capture_waveforms(&mut self, capture: bool) {
+        self.config.capture_waveforms = capture;
+        if !capture {
+            self.waveforms = Vec::new();
+        }
+    }
+
     /// Get captured waveforms
     pub fn get_waveforms(&self) -> &[SimulationSnapshot] {
         &self.waveforms

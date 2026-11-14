@@ -2067,6 +2067,16 @@ impl Testbench {
     // Waveform export
     // ========================================================================
 
+    /// Turn waveform capture on or off (every constructor turns it on).
+    ///
+    /// Each cycle adds a snapshot of every signal, so a long run, such as a
+    /// processor self-test of hundreds of thousands of cycles, can use
+    /// gigabytes. Turning capture off drops what was captured and keeps
+    /// memory constant from then on.
+    pub fn set_capture_waveforms(&mut self, capture: bool) {
+        self.sim.set_capture_waveforms(capture);
+    }
+
     /// Export captured waveform data to an `.skw.gz` file.
     ///
     /// The testbench must have been created with `capture_waveforms: true`
