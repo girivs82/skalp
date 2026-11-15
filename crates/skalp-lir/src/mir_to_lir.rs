@@ -18,6 +18,7 @@ use crate::lir::{Lir, LirNodeId, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use crate::ncl_expand::{expand_to_ncl, NclConfig};
 use indexmap::IndexMap;
 use skalp_frontend::hir::MemoryStyle;
+use skalp_mir::bindings::{guarded_variable_bindings, merged_variable_bindings};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType, EdgeType,
     Expression, ExpressionKind, IfStatement, LValue, LoopStatement, Module, PortDirection, PortId,
@@ -915,6 +916,7 @@ impl MirToLirTransform {
                 // Transform sequential statements (create registers)
                 self.sequential_clock = clock_signal;
                 let body = self.split_partially_written_registers(&process.body);
+                self.lower_variable_bindings(&body);
                 self.transform_sequential_block(&body, clock_signal);
 
                 // Reset for next process
@@ -941,6 +943,7 @@ impl MirToLirTransform {
                     self.async_reset = None;
                     self.sequential_clock = Some(go);
                     let body = self.split_partially_written_registers(&process.body);
+                    self.lower_variable_bindings(&body);
                     self.transform_sequential_block(&body, Some(go));
                     self.sequential_clock = None;
                 } else if Self::block_has_nonblocking(&process.body) {
@@ -1834,8 +1837,11 @@ impl MirToLirTransform {
                         self.lir
                             .add_node(reg_op, vec![d_signal], target_signal, reg_path);
                     }
-                } else {
-                    // Blocking assignment in sequential - treat as combinational
+                } else if self
+                    .lowered_bindings
+                    .insert((assign.lhs.clone(), assign.rhs.clone()))
+                {
+                    // Blocking assignment in sequential - treat as combinational, once
                     self.transform_combinational_statement(stmt);
                 }
             }
@@ -2612,6 +2618,35 @@ impl MirToLirTransform {
             }
         }
         false
+    }
+
+    /// Drive the variables of a clocked block's `let` bindings, each once
+    /// (see skalp_mir::bindings), before its register logic reads them. The
+    /// bindings are recorded as lowered so the register logic does not drive
+    /// them again. Without this a binding inside a `match` arm was never
+    /// driven (read as 0), and a name bound in two places got two drivers.
+    fn lower_variable_bindings(&mut self, block: &Block) {
+        let merged = merged_variable_bindings(&block.statements, |id| {
+            self.variable_widths.get(&id).copied().unwrap_or(1) as usize
+        });
+        for (_, assign) in guarded_variable_bindings(&block.statements, None) {
+            if let LValue::Variable(id) = &assign.lhs {
+                if merged.iter().any(|(v, _)| v == id) {
+                    self.lowered_bindings
+                        .insert((assign.lhs.clone(), assign.rhs.clone()));
+                }
+            }
+        }
+        for (id, rhs) in merged {
+            self.transform_combinational_statement(&Statement::Assignment(
+                skalp_mir::mir::Assignment {
+                    lhs: LValue::Variable(id),
+                    rhs,
+                    kind: AssignmentKind::Blocking,
+                    span: None,
+                },
+            ));
+        }
     }
 
     /// BUG FIX: Transform all blocking assignments (let bindings) in a block recursively.

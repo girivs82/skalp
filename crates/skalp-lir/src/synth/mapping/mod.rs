@@ -339,6 +339,9 @@ impl CellMatcher {
                 (0x37, vec!["A", "C", "B"]), // C=i1: ~((i0|i2) & i1)
                 (0x57, vec!["C", "A", "B"]), // C=i0: ~((i1|i2) & i0)
             ]),
+            // AOI22(A,B,C,D) = ~((A&B) | (C&D)); OAI22 the same with | and &.
+            // Each list names the pin of input i0, i1, i2, i3, one entry per
+            // pairing of the inputs: (i0,i1)(i2,i3), (i0,i2)(i1,i3), (i0,i3)(i1,i2).
             CellFunction::Aoi22 => Some(vec![
                 (0x0777, vec!["A", "B", "C", "D"]),
                 (0x135F, vec!["A", "C", "B", "D"]),
@@ -447,7 +450,7 @@ impl CellMatcher {
         // !(a&d | b&c) = 0x153F - pairs are (0,3) and (1,2)
         self.add_cell_match(0x0777, "AOI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
         self.add_cell_match(0x135F, "AOI4_X1", 2.0, 22.0, vec!["A", "C", "B", "D"]);
-        self.add_cell_match(0x153F, "AOI4_X1", 2.0, 22.0, vec!["A", "D", "B", "C"]);
+        self.add_cell_match(0x153F, "AOI4_X1", 2.0, 22.0, vec!["A", "C", "D", "B"]);
 
         // OAI4: !((a|b) & (c|d)) - 4-input OR-AND-Invert with 2+2 structure
         // Truth tables for different pairings:
@@ -456,7 +459,7 @@ impl CellMatcher {
         // !((a|d) & (b|c)) = 0x0357 - pairs are (0,3) and (1,2)
         self.add_cell_match(0x111F, "OAI4_X1", 2.0, 22.0, vec!["A", "B", "C", "D"]);
         self.add_cell_match(0x0537, "OAI4_X1", 2.0, 22.0, vec!["A", "C", "B", "D"]);
-        self.add_cell_match(0x0357, "OAI4_X1", 2.0, 22.0, vec!["A", "D", "B", "C"]);
+        self.add_cell_match(0x0357, "OAI4_X1", 2.0, 22.0, vec!["A", "C", "D", "B"]);
 
         // Additional AOI21/OAI21 permutations for better matching
         // Standard AOI21: !(a&b | c) with c as the single input
@@ -624,13 +627,12 @@ impl Default for CellMatcher {
 mod tests {
     use super::*;
 
-    /// Every (truth table, pin mapping) entry must describe the cell as the
-    /// gate evaluator computes it once the netlist writer has put each cut
-    /// leaf on its pin (`eval_pin_order`): cut leaf i drives pin
-    /// `pins[i]`. A wrong entry maps logic onto a cell with its inputs
-    /// swapped (an AOI22 permutation once paired the wrong inputs).
+    /// Every truth table the matcher offers for a cell, with its pin list,
+    /// is what the cell computes with input i_k on the listed pin. A wrong
+    /// pin list wires a matched cut into the cell crosswise (an AOI22 once
+    /// paired (i0,i2)(i1,i3) where its table said (i0,i3)(i1,i2)).
     #[test]
-    fn test_truth_table_pin_mappings_match_gate_evaluation() {
+    fn truth_tables_match_the_cells_on_their_pins() {
         use crate::primitive_eval::{cell_function_to_primitive, evaluate_primitive};
         let functions = [
             CellFunction::And2,
@@ -655,31 +657,30 @@ mod tests {
             CellFunction::Oai22,
             CellFunction::Mux2,
         ];
-        for function in &functions {
-            let entries = CellMatcher::function_to_truth_tables(function)
-                .unwrap_or_else(|| panic!("{:?} has no truth tables", function));
-            let order = eval_pin_order(function)
-                .unwrap_or_else(|| panic!("{:?} has no pin order", function));
-            let primitive = cell_function_to_primitive(function);
-            for (tt, pins) in entries {
-                let n = pins.len();
-                assert_eq!(n, order.len(), "{:?} {:?}", function, pins);
-                let mut computed = 0u64;
-                for m in 0..(1u64 << n) {
-                    let mut inputs = vec![false; n];
-                    for (leaf, pin) in pins.iter().enumerate() {
-                        let pos = order.iter().position(|p| p == pin).unwrap();
-                        inputs[pos] = (m >> leaf) & 1 == 1;
-                    }
-                    if evaluate_primitive(&primitive, &inputs)[0] {
-                        computed |= 1 << m;
-                    }
+        for function in functions {
+            let tables = CellMatcher::function_to_truth_tables(&function)
+                .unwrap_or_else(|| panic!("{function:?}: no truth table"));
+            let eval_pins = eval_pin_order(&function)
+                .unwrap_or_else(|| panic!("{function:?}: no evaluation pin order"));
+            let primitive = cell_function_to_primitive(&function);
+            for (table, pins) in tables {
+                assert_eq!(pins.len(), eval_pins.len(), "{function:?} {pins:?}");
+                for row in 0..1u64 << pins.len() {
+                    // input i_k drives pin pins[k]
+                    let inputs: Vec<bool> = eval_pins
+                        .iter()
+                        .map(|pin| {
+                            let k = pins.iter().position(|p| p == pin).expect("pin listed");
+                            row >> k & 1 == 1
+                        })
+                        .collect();
+                    let out = evaluate_primitive(&primitive, &inputs)[0];
+                    assert_eq!(
+                        out,
+                        table >> row & 1 == 1,
+                        "{function:?} table {table:#x} pins {pins:?}, row {row:#b}"
+                    );
                 }
-                assert_eq!(
-                    computed, tt,
-                    "{:?} with leaves on pins {:?} computes {:#x}, not {:#x}",
-                    function, pins, computed, tt
-                );
             }
         }
     }

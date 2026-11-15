@@ -1,0 +1,58 @@
+// `send` takes any expression: a concatenation and an `if` expression
+async entity SeProducer {
+    out a: stream<bit[16]>
+    out b: stream<bit[8]>
+}
+
+impl SeProducer {
+    signal c: bit[8] = 1
+    on() {
+        a.send({c, 8'h5A})
+        b.send(if c[0] == 1 { c } else { 8'hEE })
+        c = c + 1
+    }
+}
+
+async entity SeConsumer {
+    in a: stream<bit[16]>
+    in b: stream<bit[8]>
+    out last_a: bit[16]
+    out last_b: bit[8]
+    out n: bit[8]
+}
+
+impl SeConsumer {
+    signal la: bit[16] = 0
+    signal lb: bit[8] = 0
+    signal k: bit[8] = 0
+    on() {
+        let va: bit[16] = a.recv()
+        let vb: bit[8] = b.recv()
+        la = va
+        lb = vb
+        k = k + 1
+    }
+    last_a = la
+    last_b = lb
+    n = k
+}
+
+entity SeTop {
+    in clk: clock
+    in run: bit
+    out last_a: bit[16]
+    out last_b: bit[8]
+    out n: bit[8]
+}
+
+impl SeTop {
+    signal req: bit = 0
+    inst p = SeProducer { ncl_req: req }
+    inst c = SeConsumer { a: p.a, b: p.b, ncl_req: req }
+    on(clk.rise) {
+        req = run
+    }
+    last_a = c.last_a
+    last_b = c.last_b
+    n = c.n
+}

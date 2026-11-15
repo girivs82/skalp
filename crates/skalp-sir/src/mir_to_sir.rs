@@ -1895,15 +1895,31 @@ impl<'a> MirToSirConverter<'a> {
             !is_output || is_state_element
         });
 
-        // Step 2: For each target, build a mux tree that handles all case arms and nested conditions
-        for target in &all_targets {
+        // Step 2: For each target, build a mux tree that handles all case arms and nested conditions.
+        // Sorted, so the generated nodes come out in the same order every run.
+        let mut sorted_targets: Vec<String> = all_targets.into_iter().collect();
+        sorted_targets.sort();
+        for target in &sorted_targets {
+            // `let` bindings in an arm are per-cycle temporaries, not state (as
+            // in convert_if_in_sequential, BUG #227): they connect
+            // combinationally, so the arm's own non-blocking writes read the
+            // value bound this cycle. Registering them made those reads see a
+            // flip-flop the combinational pass never evaluates, i.e. 0.
+            let internal_target = self.translate_to_internal_name(target);
+            let is_state = self.sir.state_elements.contains_key(&internal_target);
+
             // BUG #226 FIX: The value before the match is the default from an
             // unconditional assignment if present, otherwise the register itself.
             // An arm that matches but does not assign the target leaves it there.
+            // A temporary has nothing to hold: where no arm binds it, it is 0
+            // (holding its own value would be a combinational loop, BUG #117b).
             let hold = if let Some(&default_val) = self.sequential_defaults.get(target) {
                 default_val
-            } else {
+            } else if is_state {
                 self.get_or_create_signal_driver(target)
+            } else {
+                let width = self.get_signal_width(target);
+                self.create_constant_node(0, width)
             };
 
             // The default arm applies when no listed arm matches, so it is the
@@ -1950,9 +1966,13 @@ impl<'a> MirToSirConverter<'a> {
                 current_value = self.create_mux_node(case_guard, arm_value, current_value);
             }
 
-            // Create flip-flop with the final mux tree
-            let ff_node = self.create_flipflop_with_input(current_value, clock, edge.clone());
-            self.connect_node_to_signal(ff_node, target);
+            if is_state {
+                // Create flip-flop with the final mux tree
+                let ff_node = self.create_flipflop_with_input(current_value, clock, edge.clone());
+                self.connect_node_to_signal(ff_node, target);
+            } else {
+                self.connect_node_to_signal(current_value, target);
+            }
         }
     }
 
@@ -8429,28 +8449,24 @@ impl<'a> MirToSirConverter<'a> {
                     // variables) drive their `<inst>.<name>_<id>` signals, which
                     // the register logic below reads. Without this every
                     // reader of a `let` inside a child's clocked block saw 0.
-                    // A binding is visible only in its own scope, so it can
-                    // drive its signal unconditionally; a variable written
-                    // more than once (`let mut` reassigned) has no single
-                    // value and is left to the register logic.
-                    let mut bindings: Vec<&skalp_mir::Assignment> = Vec::new();
-                    collect_variable_bindings(&process.body.statements, &mut bindings);
-                    let mut writes: HashMap<skalp_mir::VariableId, usize> = HashMap::new();
-                    for b in &bindings {
-                        if let LValue::Variable(id) = &b.lhs {
-                            *writes.entry(*id).or_default() += 1;
-                        }
-                    }
-                    for b in bindings {
-                        let LValue::Variable(id) = &b.lhs else {
-                            continue;
-                        };
-                        if writes[id] != 1 {
-                            continue;
-                        }
+                    // A variable bound in several places (the same name in two
+                    // arms of a `match`, say) takes the binding on the path
+                    // taken; one that reads itself is left to the register
+                    // logic (see skalp_mir::bindings).
+                    for (id, rhs) in skalp_mir::bindings::merged_variable_bindings(
+                        &process.body.statements,
+                        |id| {
+                            child_module
+                                .variables
+                                .iter()
+                                .find(|v| v.id == id)
+                                .map(|v| Self::data_type_width(&v.var_type))
+                                .unwrap_or(1)
+                        },
+                    ) {
                         let assign = skalp_mir::ContinuousAssign {
-                            lhs: b.lhs.clone(),
-                            rhs: b.rhs.clone(),
+                            lhs: LValue::Variable(id),
+                            rhs,
                             span: None,
                         };
                         self.convert_child_assignment_with_context(
@@ -11655,37 +11671,4 @@ fn memory_initial_contents(signal: &skalp_mir::mir::Signal) -> Option<Vec<u64>> 
         return None;
     }
     signal.memory_config.as_ref()?.init.clone()
-}
-
-/// Blocking writes of process variables (`let` bindings) in `statements`,
-/// at any depth
-fn collect_variable_bindings<'a>(
-    statements: &'a [Statement],
-    out: &mut Vec<&'a skalp_mir::Assignment>,
-) {
-    for statement in statements {
-        match statement {
-            Statement::Assignment(a)
-                if a.kind == AssignmentKind::Blocking && matches!(a.lhs, LValue::Variable(_)) =>
-            {
-                out.push(a)
-            }
-            Statement::Block(b) => collect_variable_bindings(&b.statements, out),
-            Statement::If(i) => {
-                collect_variable_bindings(&i.then_block.statements, out);
-                if let Some(e) = &i.else_block {
-                    collect_variable_bindings(&e.statements, out);
-                }
-            }
-            Statement::Case(c) => {
-                for item in &c.items {
-                    collect_variable_bindings(&item.block.statements, out);
-                }
-                if let Some(d) = &c.default {
-                    collect_variable_bindings(&d.statements, out);
-                }
-            }
-            _ => {}
-        }
-    }
 }

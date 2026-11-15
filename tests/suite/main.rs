@@ -96,6 +96,7 @@ mod test_intent_and_numeric;
 mod test_l0_l5_ops;
 mod test_l0l1_match;
 mod test_language_features;
+mod test_let_in_match_arm;
 mod test_lir_synthesis;
 mod test_logic_analyzer;
 mod test_logic_analyzer_insertion;

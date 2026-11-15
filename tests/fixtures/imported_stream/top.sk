@@ -1,0 +1,52 @@
+mod relay;
+use relay::Relay;
+
+async entity Source {
+    out o: stream<bit[8]>
+}
+
+impl Source {
+    signal c: bit[8] = 0
+    on() {
+        o.send(c)
+        c = c + 1
+    }
+}
+
+// Counts the values received and keeps the last one
+async entity Sink {
+    in i: stream<bit[8]>
+    out count: bit[8]
+    out last: bit[8]
+}
+
+impl Sink {
+    signal n: bit[8] = 0
+    signal l: bit[8] = 0
+    on() {
+        let v: bit[8] = i.recv()
+        l = v
+        n = n + 1
+    }
+    count = n
+    last = l
+}
+
+entity ImportedStreamTop {
+    in clk: clock
+    in run: bit
+    out count: bit[8]
+    out last: bit[8]
+}
+
+impl ImportedStreamTop {
+    signal req: bit = 0
+    inst s = Source { ncl_req: req }
+    inst r = Relay { q: s.o, ncl_req: req }
+    inst k = Sink { i: r.r, ncl_req: req }
+    on(clk.rise) {
+        req = run
+    }
+    count = k.count
+    last = k.last
+}
