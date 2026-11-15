@@ -1362,6 +1362,12 @@ impl<'hir> HirToMir<'hir> {
                     // resulting in missing module.variables entries and undriven LIR signals.
                     self.variable_map.clear();
                     self.context_variable_map.clear();
+                    // Likewise the let bindings created while lowering the previous impl's
+                    // continuous assignments (inlined function locals): left here, they
+                    // were declared again in this module, and a `let` here with the same
+                    // HIR VariableId (ids restart in each imported file) was taken as a
+                    // collision and never declared, so it read as 0.
+                    self.dynamic_variables.clear();
 
                     // Elaborate generate blocks: evaluate conditions and collect body items
                     let (gen_signals, gen_event_blocks, gen_assignments) =

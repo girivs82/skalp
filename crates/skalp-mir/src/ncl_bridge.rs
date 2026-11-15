@@ -60,6 +60,7 @@ pub fn apply_ncl_bridges(
     for module in mir.modules.iter_mut().filter(|m| m.is_async) {
         share_parent_request(module, &async_modules);
     }
+    step_coalesced_children(mir);
 
     // Self-timed async modules and the name of their behavioural tick input
     let tick_ports: HashMap<ModuleId, String> = mir
@@ -104,6 +105,189 @@ fn share_parent_request(module: &mut Module, async_modules: &HashMap<ModuleId, S
             .or_insert_with(|| {
                 Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(req)))
             });
+    }
+}
+
+/// Behavioural step clock of an async module coalesced into a self-timed block
+pub const NCL_STEP_TICK_PORT: &str = "__ncl_step_tick";
+/// Behavioural step enable of an async module coalesced into a self-timed block
+pub const NCL_STEP_EN_PORT: &str = "__ncl_step_en";
+
+/// A self-timed block (stream ports) takes many steps while its request
+/// stays high, so an async child coalesced into it must step with it on every
+/// step, not on the request's rising edge. Give each such child (and its own
+/// async children, recursively) a behavioural step clock and enable, driven
+/// by the self-timed parent's tick and `ncl_req && __ncl_ready`. A module that
+/// is also instantiated where it steps by request is cloned. Synthesis leaves
+/// these ports unread: there the child's registers are clocked by the
+/// parent's `go` strobe (see `skalp_lir::ncl_expand`).
+fn step_coalesced_children(mir: &mut Mir) {
+    let self_timed = |m: &Module| {
+        m.is_async
+            && m.ports.iter().any(|p| p.name == NCL_TICK_PORT)
+            && m.signals.iter().any(|s| s.name == NCL_READY_SIGNAL)
+    };
+    let index: HashMap<ModuleId, usize> = mir
+        .modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id, i))
+        .collect();
+    // A child that would take the step ports: async, not itself self-timed
+    let candidate = |id: &ModuleId, mir: &Mir| {
+        index
+            .get(id)
+            .is_some_and(|&i| mir.modules[i].is_async && !self_timed(&mir.modules[i]))
+    };
+
+    // Which versions of each candidate are needed: stepped (under a
+    // self-timed block) and/or plain (stepped by its own request)
+    let mut stepped: std::collections::HashSet<ModuleId> = Default::default();
+    let mut plain: std::collections::HashSet<ModuleId> = Default::default();
+    let instantiated: std::collections::HashSet<ModuleId> = mir
+        .modules
+        .iter()
+        .flat_map(|m| m.instances.iter().map(|i| i.module))
+        .collect();
+    for m in &mir.modules {
+        if candidate(&m.id, mir) && !instantiated.contains(&m.id) {
+            plain.insert(m.id);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for m in &mir.modules {
+            let (gives_step, gives_plain) = if !m.is_async {
+                (false, true)
+            } else if self_timed(m) {
+                (true, false)
+            } else {
+                (stepped.contains(&m.id), plain.contains(&m.id))
+            };
+            for inst in m.instances.iter().filter(|i| candidate(&i.module, mir)) {
+                if gives_step {
+                    changed |= stepped.insert(inst.module);
+                }
+                if gives_plain {
+                    changed |= plain.insert(inst.module);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if stepped.is_empty() {
+        return;
+    }
+
+    // The stepped version of each module: converted in place, or a clone
+    // when the plain version is needed too
+    let mut next_module = mir.modules.iter().map(|m| m.id.0 + 1).max().unwrap_or(0);
+    let mut stepped_version: HashMap<ModuleId, ModuleId> = HashMap::new();
+    let mut ordered: Vec<ModuleId> = stepped.iter().copied().collect();
+    ordered.sort_by_key(|id| id.0);
+    for id in ordered {
+        if plain.contains(&id) {
+            let mut clone = mir.modules[index[&id]].clone();
+            clone.id = ModuleId(next_module);
+            next_module += 1;
+            clone.name = format!("{}__stepped", clone.name);
+            stepped_version.insert(id, clone.id);
+            mir.modules.push(clone);
+        } else {
+            stepped_version.insert(id, id);
+        }
+    }
+    let stepped_ids: std::collections::HashSet<ModuleId> =
+        stepped_version.values().copied().collect();
+    // Port ids are unique across the design (later passes look ports up by id)
+    let mut next_port = mir
+        .modules
+        .iter()
+        .flat_map(|m| m.ports.iter().map(|p| p.id.0 + 1))
+        .max()
+        .unwrap_or(0);
+
+    for module in mir.modules.iter_mut() {
+        let parent_stepped = stepped_ids.contains(&module.id);
+        if parent_stepped {
+            add_step_ports(module, &mut next_port);
+        } else if !self_timed(module) {
+            continue;
+        }
+        let tick = port_ref(
+            module,
+            if parent_stepped {
+                NCL_STEP_TICK_PORT
+            } else {
+                NCL_TICK_PORT
+            },
+        );
+        let en = if parent_stepped {
+            port_ref(module, NCL_STEP_EN_PORT)
+        } else {
+            let req = port_ref(module, NCL_REQ_PORT);
+            let ready = module
+                .signals
+                .iter()
+                .find(|s| s.name == NCL_READY_SIGNAL)
+                .map(|s| Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(s.id))));
+            match (req, ready) {
+                (Some(req), Some(ready)) => {
+                    Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                        op: crate::mir::BinaryOp::LogicalAnd,
+                        left: Box::new(req),
+                        right: Box::new(ready),
+                    }))
+                }
+                _ => None,
+            }
+        };
+        let (Some(tick), Some(en)) = (tick, en) else {
+            continue;
+        };
+        for inst in module.instances.iter_mut() {
+            let Some(&target) = stepped_version.get(&inst.module) else {
+                continue;
+            };
+            inst.module = target;
+            inst.connections
+                .insert(NCL_STEP_TICK_PORT.to_string(), tick.clone());
+            inst.connections
+                .insert(NCL_STEP_EN_PORT.to_string(), en.clone());
+        }
+    }
+}
+
+fn port_ref(module: &Module, name: &str) -> Option<Expression> {
+    module
+        .ports
+        .iter()
+        .find(|p| p.name == name && p.direction == PortDirection::Input)
+        .map(|p| Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(p.id))))
+}
+
+/// Add the behavioural step clock and enable inputs to a coalesced child
+fn add_step_ports(module: &mut Module, next_port: &mut u32) {
+    let Some(template) = module
+        .ports
+        .iter()
+        .find(|p| p.name == NCL_REQ_PORT && p.direction == PortDirection::Input)
+        .cloned()
+    else {
+        return;
+    };
+    for name in [NCL_STEP_TICK_PORT, NCL_STEP_EN_PORT] {
+        if module.ports.iter().any(|p| p.name == name) {
+            continue;
+        }
+        let mut port = template.clone();
+        port.id = crate::mir::PortId(*next_port);
+        *next_port += 1;
+        port.name = name.to_string();
+        port.port_type = DataType::Bit(1);
+        module.ports.push(port);
     }
 }
 
@@ -164,6 +348,36 @@ pub fn handshake_clocked_process(module: &Module, process: &Process) -> Option<P
         .iter()
         .find(|p| p.name == NCL_TICK_PORT && p.direction == PortDirection::Input);
     let ready = module.signals.iter().find(|s| s.name == NCL_READY_SIGNAL);
+    // An async child coalesced into a self-timed block steps with it
+    let step_tick = module
+        .ports
+        .iter()
+        .find(|p| p.name == NCL_STEP_TICK_PORT && p.direction == PortDirection::Input);
+    let step_en = module
+        .ports
+        .iter()
+        .find(|p| p.name == NCL_STEP_EN_PORT && p.direction == PortDirection::Input);
+    if let (Some(tick), Some(en)) = (step_tick, step_en) {
+        return Some(Process {
+            id: process.id,
+            kind: ProcessKind::Sequential,
+            sensitivity: SensitivityList::Edge(vec![EdgeSensitivity {
+                signal: LValue::Port(tick.id),
+                edge: EdgeType::Rising,
+            }]),
+            body: Block {
+                statements: vec![Statement::If(crate::mir::IfStatement {
+                    condition: Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(
+                        en.id,
+                    ))),
+                    then_block: process.body.clone(),
+                    else_block: None,
+                    span: None,
+                })],
+            },
+            span: process.span.clone(),
+        });
+    }
     if let (Some(tick), Some(ready)) = (tick, ready) {
         let enabled = Expression::with_unknown_type(ExpressionKind::Binary {
             op: crate::mir::BinaryOp::LogicalAnd,

@@ -8472,6 +8472,17 @@ impl HirBuilderContext {
                                     | SyntaxKind::TupleExpr
                                     | SyntaxKind::CastExpr
                                     | SyntaxKind::ParenExpr
+                                    // concatenations, conditionals and other
+                                    // compound expressions are arguments too
+                                    // (`o.send({a, b})`, `o.send(if c { a } else { b })`)
+                                    | SyntaxKind::ConcatExpr
+                                    | SyntaxKind::ReplicateExpr
+                                    | SyntaxKind::SizedCastExpr
+                                    | SyntaxKind::TernaryExpr
+                                    | SyntaxKind::IfExpr
+                                    | SyntaxKind::MatchExpr
+                                    | SyntaxKind::PathExpr
+                                    | SyntaxKind::BlockExpr
                             ) {
                                 // BUG FIX #71 Part 4e: Collect postfix operations (FieldExpr, IndexExpr)
                                 // INCLUDE FieldExpr+CallExpr pattern (nested method calls) in the argument

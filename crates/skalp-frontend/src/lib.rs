@@ -1362,6 +1362,7 @@ fn remap_statement_ports(
                 .iter()
                 .map(|arm| {
                     let mut new_arm = arm.clone();
+                    new_arm.guard = arm.guard.as_ref().map(|g| remap_expr_ports(g, port_id_map));
                     new_arm.statements = arm
                         .statements
                         .iter()
@@ -1432,6 +1433,36 @@ fn remap_statement_ports(
                 .map(|s| remap_statement_ports(s, port_id_map))
                 .collect();
             hir::HirStatement::For(new_for)
+        }
+        // A bare expression statement (`o.send(v)`, a call for its effect)
+        // and the other expression-carrying statements need their ports
+        // remapped too, or an imported entity's body keeps the port ids of
+        // the module it came from.
+        hir::HirStatement::Expression(expr) => {
+            hir::HirStatement::Expression(remap_expr_ports(expr, port_id_map))
+        }
+        hir::HirStatement::Return(expr) => {
+            hir::HirStatement::Return(expr.as_ref().map(|e| remap_expr_ports(e, port_id_map)))
+        }
+        hir::HirStatement::While(while_stmt) => {
+            let mut new_while = while_stmt.clone();
+            new_while.condition = remap_expr_ports(&while_stmt.condition, port_id_map);
+            new_while.body = while_stmt
+                .body
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            hir::HirStatement::While(new_while)
+        }
+        hir::HirStatement::Assert(assert_stmt) => {
+            let mut new_assert = assert_stmt.clone();
+            new_assert.condition = remap_expr_ports(&assert_stmt.condition, port_id_map);
+            hir::HirStatement::Assert(new_assert)
+        }
+        hir::HirStatement::Assume(assume_stmt) => {
+            let mut new_assume = assume_stmt.clone();
+            new_assume.condition = remap_expr_ports(&assume_stmt.condition, port_id_map);
+            hir::HirStatement::Assume(new_assume)
         }
         _ => stmt.clone(),
     }

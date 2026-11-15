@@ -125,3 +125,30 @@ fn test_imported_entity_signal_types_stay_in_their_module() {
         "cnt has type {ty:?} in its own increment"
     );
 }
+
+/// Variable ids are only unique within a file too. Lowering an imported
+/// module's continuous assignments inlines its functions, creating `let`
+/// variables; they used to stay registered when the next module was lowered,
+/// so a `let` there with the same id was taken for a collision, never
+/// declared, and read as 0.
+#[tokio::test]
+async fn a_let_after_an_imported_module_keeps_its_value() {
+    let path = format!(
+        "{}/tests/fixtures/imported_let/top.sk",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut tb = Testbench::behavioral_with_top(&path, "ImportedLetTop")
+        .await
+        .expect("build");
+    // d = 0x35: q = (d + 1) ^ 0x80 = 0xB6; rr_pick(1, 0b0011) = 1; sext8(0x35) = 0x0035
+    tb.set("d", 0x35u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u32("q").await, 0xB6);
+    assert_eq!(tb.get_u32("p").await, 1);
+    // and with the sign bit set: (0xC6 + 1) ^ 0x80 = 0x47; rr_pick(2, 0b1100) = 2
+    tb.set("d", 0xC6u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u32("q").await, 0x47);
+    assert_eq!(tb.get_u32("p").await, 2);
+    assert_eq!(tb.get_u32("w").await, 0xFFC6);
+}

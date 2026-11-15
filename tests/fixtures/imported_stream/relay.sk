@@ -1,0 +1,26 @@
+// A stream relay in its own module: its `send` sits inside a match arm and
+// an `if`, so importing it must remap the ports used there too.
+async entity Relay {
+    in q: stream<bit[8]>
+    out r: stream<bit[8]>
+}
+
+impl Relay {
+    signal pv: bit = 0
+    signal pk: bit[8] = 0
+    on() {
+        match arbitrate(q) {
+            0 => {
+                let p: bit[8] = q.recv()
+                pk = p
+                pv = 1
+            }
+            _ if pv == 1 => {
+            }
+        }
+        if pv == 1 {
+            r.send(pk)
+            pv = 0
+        }
+    }
+}

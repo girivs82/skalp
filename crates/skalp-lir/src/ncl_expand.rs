@@ -3121,13 +3121,31 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
 }
 
 /// Check the step conditions of every self-timed async block in `hier_lir`
-/// (see [`step_condition_errors`]); one message per offending signal
+/// (see [`step_condition_errors`]); one message per offending signal. The
+/// design is flattened first, so that a condition computed by an async
+/// child coalesced into the block is followed into it.
 pub fn check_step_conditions(hier_lir: &crate::HierarchicalMirToLirResult) -> Vec<String> {
-    hier_lir
+    use skalp_frontend::ncl_streams::NCL_READY_SIGNAL;
+    let blocks: Vec<(&String, &str)> = hier_lir
         .instances
         .iter()
-        .filter(|(_, inst)| inst.is_async)
-        .flat_map(|(path, inst)| step_condition_errors(&inst.lir_result.lir, path))
+        .filter(|(_, inst)| {
+            inst.is_async
+                && inst
+                    .lir_result
+                    .lir
+                    .get_signal(NCL_READY_SIGNAL)
+                    .is_some_and(|s| s.driver.is_some())
+        })
+        .map(|(path, inst)| (path, inst.module_name.as_str()))
+        .collect();
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let flat = hier_lir.flatten();
+    blocks
+        .into_iter()
+        .flat_map(|(path, module)| step_condition_errors(&flat, path, module))
         .collect()
 }
 
@@ -3135,37 +3153,46 @@ pub fn check_step_conditions(hier_lir: &crate::HierarchicalMirToLirResult) -> Ve
 /// the conditions around its `send`/`recv` calls (`__ncl_ready`,
 /// `skalp_frontend::ncl_streams`). The step latch reads that signal at any
 /// moment, not at a clock edge, so it must only change when the block's own
-/// strobe or a channel's phase bit does: the conditions may read the block's
-/// registers and memories, constants and the phase-bit ports of its
-/// streams, nothing else. A data port, the parent's run request or another
-/// input can change at any time (a stream's value even changes while the
-/// sender writes it), and the step latch would see a glitch as a ready
-/// channel. Returns one message per input the conditions read that breaks
-/// the rule; `path` names the instance.
-pub fn step_condition_errors(lir: &Lir, path: &str) -> Vec<String> {
+/// strobe or a channel's phase bit does: the conditions may read the
+/// registers and memories of the block (and of async children coalesced
+/// into it), constants and the phase bits of its streams, nothing else. A
+/// data port, the parent's run request or anything else from outside can
+/// change at any time (a stream's value even changes while the sender
+/// writes it), and the step latch would see a glitch as a ready channel.
+///
+/// `flat` is the flattened design, `path` the block's instance path and
+/// `module` its entity. Returns one message per signal from outside the
+/// block that the conditions read.
+pub fn step_condition_errors(flat: &Lir, path: &str, module: &str) -> Vec<String> {
     use skalp_frontend::ncl_streams::{
         NCL_ARBITER_PREFIX, NCL_READY_SIGNAL, STREAM_ACK_SUFFIX, STREAM_REQ_SUFFIX,
     };
-    let Some(ready) = lir
-        .get_signal(NCL_READY_SIGNAL)
-        .filter(|s| s.driver.is_some())
-        .map(|s| s.id)
-    else {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let prefix = format!("{path}.");
+    let Some(ready) = flat.get_signal(&format!("{prefix}{NCL_READY_SIGNAL}")) else {
         return Vec::new();
     };
-    use std::collections::HashSet;
-    let is_input: HashSet<LirSignalId> = lir.inputs.iter().copied().collect();
-    let mut errors = Vec::new();
+    let phase = |name: &str| name.ends_with(STREAM_REQ_SUFFIX) || name.ends_with(STREAM_ACK_SUFFIX);
+    // Flattening does not keep `LirSignal::driver`: index the drivers here
+    let drivers: HashMap<LirSignalId, &LirNode> =
+        flat.nodes.iter().map(|n| (n.output, n)).collect();
+    let mut outside: BTreeSet<String> = BTreeSet::new();
     let mut seen: HashSet<LirSignalId> = HashSet::new();
-    let mut stack = vec![ready];
+    let mut stack = vec![ready.id];
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
             continue;
         }
-        let signal = &lir.signals[id.0 as usize];
-        match signal.driver {
-            Some(driver) => {
-                let node = &lir.nodes[driver.0 as usize];
+        let signal = &flat.signals[id.0 as usize];
+        match drivers.get(&id) {
+            Some(node) => {
+                if !node.path.starts_with(&prefix) {
+                    // Crossing into the block: only a stream's phase bit
+                    if !phase(&signal.name) {
+                        outside.insert(signal.name.clone());
+                    }
+                    continue;
+                }
                 // State of the block: changes only when its strobe rises
                 if node.clock.is_some() {
                     continue;
@@ -3174,28 +3201,28 @@ pub fn step_condition_errors(lir: &Lir, path: &str) -> Vec<String> {
             }
             // An arbiter's grant, before synthesis gives it its
             // mutual-exclusion element: decided from its requests
-            None if signal.name.starts_with(NCL_ARBITER_PREFIX) && signal.name.ends_with("_gnt") => {
+            None if signal
+                .name
+                .starts_with(&format!("{prefix}{NCL_ARBITER_PREFIX}"))
+                && signal.name.ends_with("_gnt") =>
+            {
                 let req = format!("{}_req", signal.name.trim_end_matches("_gnt"));
-                stack.extend(lir.get_signal(&req).map(|s| s.id));
+                stack.extend(flat.get_signal(&req).map(|s| s.id));
             }
-            None if is_input.contains(&id) => {
-                let phase = signal.name.ends_with(STREAM_REQ_SUFFIX)
-                    || signal.name.ends_with(STREAM_ACK_SUFFIX);
-                if !phase {
-                    errors.push(format!(
-                        "async block `{}` ({}): whether its next step sends or receives depends on input `{}`; send/recv conditions may only read the block's own registers (an input can change at any time, and the block would see the change as a ready channel)",
-                        lir.name, path, signal.name
-                    ));
-                }
+            None if phase(&signal.name) => {}
+            None => {
+                outside.insert(signal.name.clone());
             }
-            None => errors.push(format!(
-                "async block `{}` ({}): whether its next step sends or receives depends on `{}`, which nothing in the block drives (a child instance's output?); send/recv conditions may only read the block's own registers",
-                lir.name, path, signal.name
-            )),
         }
     }
-    errors.sort();
-    errors
+    outside
+        .into_iter()
+        .map(|name| {
+            format!(
+                "async block `{module}` ({path}): whether its next step sends or receives depends on `{name}`, from outside the block; send/recv conditions may only read the block's own registers (anything else can change at any time, and the block would see the change as a ready channel)"
+            )
+        })
+        .collect()
 }
 
 /// Apply boundary-only NCL to async modules in a hierarchical LIR result.
