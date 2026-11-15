@@ -136,6 +136,66 @@ async fn streams_merge_same_let_name_gate_level() {
     run_merge(tb, 60).await;
 }
 
+const SHARED_SERVER: &str = "tests/fixtures/ncl_streams_shared_server.sk";
+
+/// Values each client of the shared server sends
+const SHARED_SERVER_VALUES: u32 = 32;
+
+/// Four clients take turns at one server (a four-way `match arbitrate` with
+/// a `_ if` arm for the server's own steps): every client gets all its
+/// replies, and everything stops once the parent stops it
+async fn run_shared_server(mut tb: Testbench) {
+    tb.set("run", 1u8);
+    let mut clocks = 0;
+    loop {
+        tb.clock(100).await;
+        clocks += 100;
+        let mut done = true;
+        for c in 0..4 {
+            done &= tb.get_u32(&format!("n{c}")).await == SHARED_SERVER_VALUES;
+        }
+        if done {
+            break;
+        }
+        assert!(
+            clocks < 20_000,
+            "clients still waiting after {clocks} clocks"
+        );
+    }
+    tb.set("run", 0u8);
+    let mut waited = 0;
+    while tb.get_u32("busy").await != 0 {
+        tb.clock(1).await;
+        waited += 1;
+        assert!(waited < STOP_LIMIT, "blocks never stopped");
+    }
+    // replies are the values 0, 1, ... plus one
+    let expected: u32 = (1..=SHARED_SERVER_VALUES).sum();
+    for c in 0..4 {
+        assert_eq!(
+            tb.get_u32(&format!("sum{c}")).await,
+            expected,
+            "sum of client {c}'s replies"
+        );
+    }
+}
+
+#[tokio::test]
+async fn streams_shared_server_behavioural() {
+    let tb = Testbench::behavioral_with_top(SHARED_SERVER, "SsTop")
+        .await
+        .expect("build behavioural testbench");
+    run_shared_server(tb).await;
+}
+
+#[tokio::test]
+async fn streams_shared_server_gate_level() {
+    let tb = Testbench::gate_level_with_top(SHARED_SERVER, "SsTop")
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
 /// With a LUT library each block's step request is a single LUT latch
 /// (its output fed back into it); the blocks must step and stop through it
 /// just as through the gate-built latch

@@ -2452,6 +2452,75 @@ mod tests {
         assert!(sim.reported_unsettled);
     }
 
+    /// One unit of an arbiter's request deferral (`tap = prev_tap & chain`,
+    /// the chain ANDing every stage with the request) rises one clock after
+    /// its previous tap and falls in the same step as the request, as in
+    /// silicon. Two units: the second tap rises two clocks after the request.
+    #[test]
+    fn arbiter_defer_rises_a_clock_late_and_falls_at_once() {
+        use skalp_lir::gate_netlist::ARBITER_OP;
+        let mut netlist = GateNetlist::new("t".into(), "generic_asic".into());
+        netlist.add_clock("clk".into());
+        let r = netlist.add_input("r".into());
+        let tap1 = netlist.add_output("tap1".into());
+        let tap2 = netlist.add_output("tap2".into());
+        let mut prev_tap = r;
+        for (k, tap) in [tap1, tap2].into_iter().enumerate() {
+            let buf = netlist.add_net(GateNet::new(GateNetId(0), format!("buf{k}")));
+            let chain = netlist.add_net(GateNet::new(GateNetId(0), format!("chain{k}")));
+            for (cell, path, ins, out) in [
+                ("BUF_X1", "arb_dly", vec![prev_tap], buf),
+                ("AND2_X1", "arb_dly", vec![r, buf], chain),
+                ("AND2_X1", "arb_defer", vec![prev_tap, chain], tap),
+            ] {
+                let mut c = Cell::new_comb(
+                    CellId(0),
+                    cell.to_string(),
+                    "generic_asic".to_string(),
+                    0.1,
+                    format!("top.m.{path}{k}"),
+                    ins,
+                    vec![out],
+                );
+                c.source_op = Some(ARBITER_OP.to_string());
+                netlist.add_cell(c);
+            }
+            prev_tap = tap;
+        }
+        let mut sim = simulator(&netlist);
+        // one clock: a rising edge, then the clock back low
+        let clock = |sim: &mut GateLevelSimulator| {
+            sim.set_input("clk", &[true]);
+            sim.step();
+            sim.set_input("clk", &[false]);
+            sim.step();
+        };
+        let taps = |sim: &GateLevelSimulator| (bit(sim, "tap1"), bit(sim, "tap2"));
+        sim.set_input("clk", &[false]);
+        sim.set_input("r", &[true]);
+        sim.step();
+        assert_eq!(taps(&sim), (false, false), "request just raised");
+        clock(&mut sim);
+        assert_eq!(taps(&sim), (true, false), "one clock later");
+        clock(&mut sim);
+        assert_eq!(taps(&sim), (true, true), "two clocks later");
+        // the request falls between clock edges: every tap falls with it
+        sim.set_input("r", &[false]);
+        sim.step();
+        assert_eq!(taps(&sim), (false, false), "request dropped");
+        // low over a clock edge (the delay's resolution), then raised again:
+        // it waits its full deferral again
+        clock(&mut sim);
+        assert_eq!(taps(&sim), (false, false), "request still low");
+        sim.set_input("r", &[true]);
+        sim.step();
+        assert_eq!(taps(&sim), (false, false), "request raised again");
+        clock(&mut sim);
+        assert_eq!(taps(&sim), (true, false), "one clock after raising again");
+        clock(&mut sim);
+        assert_eq!(taps(&sim), (true, true), "two clocks after raising again");
+    }
+
     /// Only gates whose inputs changed are evaluated again, and a fault
     /// injected and then cleared still shows and then goes away, with no
     /// input changing

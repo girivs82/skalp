@@ -4906,8 +4906,8 @@ const ARBITER_DEFER_STAGES: usize = 4;
 /// Unit `j` of the delay is `t_j = t_{j-1} & chain(t_{j-1})`, with `t_0`
 /// the request and each chain stage an AND with the request, so every tap
 /// falls at once with the request. The last gate of each unit is named
-/// `defer`; the gate-level simulator models it as one clock of delay of its
-/// first input. The result, `r & OR_l(last_l & t_d(k, l))`, only changes
+/// `defer`; the gate-level simulator models it as `DFF(t_{j-1}) & chain`,
+/// one clock late as `t_{j-1}` rises and at once as the request falls. The result, `r & OR_l(last_l & t_d(k, l))`, only changes
 /// while `last` is stable (it changes on the block's strobe, while every
 /// request is held), so it rises late but never glitches.
 fn arbiter_defer(

@@ -69,7 +69,8 @@ impl GateNetlistToSirConverter {
 
         // Phase 2: Convert cells to primitives
         // Pass netlist to resolve net aliases created by buffer removal
-        let (mut comb_ops, seq_ops) = self.convert_cells(&netlist.cells, netlist);
+        let (mut comb_ops, seq_ops) =
+            self.convert_cells(&netlist.cells, netlist, &mut sir.top_module);
 
         // Phase 2.5: Create buffer primitives for output ports that have drivers
         // This ensures output ports are connected to their driving nets
@@ -191,6 +192,7 @@ impl GateNetlistToSirConverter {
         &mut self,
         cells: &[Cell],
         netlist: &GateNetlist,
+        module: &mut SirModule,
     ) -> (Vec<SirOperation>, Vec<(Option<GateNetId>, SirOperation)>) {
         let mut comb_ops = Vec::new();
         // Each sequential operation with the net that clocks it
@@ -364,15 +366,10 @@ impl GateNetlistToSirConverter {
             // block's step control runs through its matched delays, so the
             // zero-delay evaluation never sees a combinational loop, and the
             // control logic is exercised with a real (if coarse) delay.
-            // The arbiter's deferred request (see `skalp_lir::tech_mapper`'s
-            // `arbiter_defer`) likewise rises one clock late.
             let matched_delay = cell.source_op.as_deref()
                 == Some(skalp_lir::gate_netlist::MATCHED_DELAY_OP)
                 && cell.path.ends_with("_and");
-            let arbiter_defer = cell.source_op.as_deref()
-                == Some(skalp_lir::gate_netlist::ARBITER_OP)
-                && cell.path.contains(".arb_defer");
-            if (matched_delay || arbiter_defer) && !inputs.is_empty() {
+            if matched_delay && !inputs.is_empty() {
                 seq_ops.push((
                     None,
                     SirOperation::Primitive {
@@ -383,6 +380,53 @@ impl GateNetlistToSirConverter {
                         path: cell.path.clone(),
                     },
                 ));
+                continue;
+            }
+
+            // One unit of the arbiter's deferred request (see
+            // `skalp_lir::tech_mapper`'s `arbiter_defer`): `tap = prev_tap &
+            // chain`, where the chain ANDs every stage with the request. In
+            // silicon the tap rises a few gate delays after `prev_tap` and
+            // falls as soon as the request falls. It simulates as `tap =
+            // DFF(prev_tap) & chain`: one clock late on the rising edge, at
+            // once on the falling edge. Delaying both edges would keep a
+            // dropped request alive in the later taps for a few clocks, and
+            // a request re-raised meanwhile would then look already waited
+            // for: the deferral (and so the round-robin order) breaks.
+            let arbiter_defer = cell.source_op.as_deref()
+                == Some(skalp_lir::gate_netlist::ARBITER_OP)
+                && cell.path.contains(".arb_defer");
+            if arbiter_defer && inputs.len() == 2 && outputs.len() == 1 {
+                let delayed = SirSignalId(self.next_signal_id);
+                self.next_signal_id += 1;
+                module.signals.push(SirSignal {
+                    id: delayed,
+                    name: format!("{}.delayed", cell.path),
+                    width: 1,
+                    signal_type: SirSignalType::Wire,
+                    initial_value: None,
+                    is_detection: false,
+                    detection_mode: SirDetectionMode::Continuous,
+                });
+                seq_ops.push((
+                    None,
+                    SirOperation::Primitive {
+                        id: primitive_id,
+                        ptype: PrimitiveType::DffP,
+                        inputs: vec![inputs[0]],
+                        outputs: vec![delayed],
+                        path: format!("{}.delay", cell.path),
+                    },
+                ));
+                let and_id = PrimitiveId(self.next_primitive_id);
+                self.next_primitive_id += 1;
+                comb_ops.push(SirOperation::Primitive {
+                    id: and_id,
+                    ptype: PrimitiveType::And { inputs: 2 },
+                    inputs: vec![delayed, inputs[1]],
+                    outputs,
+                    path: cell.path.clone(),
+                });
                 continue;
             }
 
