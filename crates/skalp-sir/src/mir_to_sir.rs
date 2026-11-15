@@ -6410,7 +6410,7 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Get the signal's declared type (NOT the driver's type)
-        let sir_type = if let Some(signal) = self.find_signal(&signal_name) {
+        let sir_type = if let Some(signal) = self.find_signal(signal_name) {
             signal.sir_type.clone()
         } else {
             SirType::Bits(16) // Default fallback
@@ -6789,7 +6789,7 @@ impl<'a> MirToSirConverter<'a> {
 
     fn get_signal_width(&self, signal_name: &str) -> usize {
         // Check if it's a signal
-        if let Some(signal) = self.find_signal(&signal_name) {
+        if let Some(signal) = self.find_signal(signal_name) {
             return signal.width;
         }
 
@@ -6824,7 +6824,7 @@ impl<'a> MirToSirConverter<'a> {
 
     fn get_signal_type(&self, signal_name: &str) -> SirType {
         // Check if it's a signal
-        if let Some(signal) = self.find_signal(&signal_name) {
+        if let Some(signal) = self.find_signal(signal_name) {
             return signal.sir_type.clone();
         }
 
@@ -7421,7 +7421,7 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Helper: Update a signal's driver_node
     fn update_signal_driver(&mut self, signal_name: &str, node_id: usize) {
-        if let Some(sig) = self.find_signal_mut(&signal_name) {
+        if let Some(sig) = self.find_signal_mut(signal_name) {
             sig.driver_node = Some(node_id);
         }
     }
