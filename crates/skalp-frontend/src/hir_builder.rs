@@ -1863,6 +1863,8 @@ impl HirBuilderContext {
             ldo_config: None,
             drive_override: None,
             board_pin: Some(crate::hir::BoardPinRef { board, pin, bits }),
+            vref_level: None,
+            odt_ohms: None,
         })
     }
 
@@ -14284,7 +14286,7 @@ impl HirBuilderContext {
     }
 
     /// Extract physical constraints from constraint block
-    fn extract_physical_constraints(&self, node: &SyntaxNode) -> Option<PhysicalConstraints> {
+    fn extract_physical_constraints(&mut self, node: &SyntaxNode) -> Option<PhysicalConstraints> {
         let mut constraints = PhysicalConstraints {
             pin_location: None,
             io_standard: None,
@@ -14299,6 +14301,8 @@ impl HirBuilderContext {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
+            odt_ohms: None,
         };
 
         for pair in node
@@ -14367,6 +14371,33 @@ impl HirBuilderContext {
                 "io_standard" => {
                     constraints.io_standard = Some(value_text.trim_matches('"').to_string());
                 }
+                "vref" => {
+                    match crate::hir::VrefSetting::parse_measured(value_text.trim_matches('"')) {
+                        Ok(level) => constraints.vref_level = Some(level),
+                        Err(message) => self.errors.push(HirError {
+                            message,
+                            span: self.make_span(&pair),
+                        }),
+                    }
+                }
+                "odt" => match crate::hir::parse_ohms(value_text.trim_matches('"')) {
+                    Ok(ohms) => constraints.odt_ohms = Some(ohms),
+                    Err(message) => self.errors.push(HirError {
+                        message,
+                        span: self.make_span(&pair),
+                    }),
+                },
+                "vref_code" => match value_text.trim_matches('"').parse() {
+                    Ok(code) => {
+                        constraints.vref_level = Some(crate::hir::VrefSetting::DeviceCode(code))
+                    }
+                    Err(_) => self.errors.push(HirError {
+                        message: format!(
+                            "vref_code \"{value_text}\" is not a reference generator code"
+                        ),
+                        span: self.make_span(&pair),
+                    }),
+                },
                 "slew" => {
                     // Look for SlewRate child node or direct keyword
                     if let Some(slew_node) = pair.first_child_of_kind(SyntaxKind::SlewRate) {

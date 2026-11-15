@@ -803,9 +803,9 @@ pub trait Device: Send + Sync {
         None
     }
 
-    /// Extra inputs of a multiplier or RAM cell the device needs held low
-    /// with a real signal, added after the cell's own (from the index in its
-    /// [`EXTRA_INPUTS_PARAM`] parameter).
+    /// Extra inputs of a multiplier, RAM or hard block cell the device needs
+    /// held low with a real signal, added after the cell's own (from the
+    /// index in its [`EXTRA_INPUTS_PARAM`] parameter).
     fn low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
         0
     }
@@ -994,6 +994,9 @@ pub enum BelType {
     /// bank's referenced inputs compare against (Lattice Nexus IVREF_CORE,
     /// which the LVSTL inputs of a high-performance bank use)
     VrefGen,
+    /// Analog-to-digital converter block (Lattice Nexus ADC_CORE: two
+    /// converters, their channel selects and comparators)
+    Adc,
 }
 
 impl BelType {

@@ -144,12 +144,39 @@ impl PnrResult {
 /// the placer and router will respect proximity and matched-delay constraints.
 /// After routing, per-net wire delays are written back to `netlist.ncl_wire_delays`
 /// for the iterative timing closure loop.
+/// Refuse a design that asks for I/O features a device's flow does not
+/// have, rather than build it without them: an I/O bank input reference (a
+/// pad's `vref` level or an `INPUT_REFERENCE` primitive), on-die
+/// termination (a pad's `odt`) or the ADC.
+fn refuse_unsupported_io(netlist: &GateNetlist, device: &str) -> Result<()> {
+    use skalp_lir::gate_netlist::{ODT_OHMS_PARAM, VREF_LEVEL_PARAM};
+    for cell in &netlist.cells {
+        let feature = if crate::device::nexus::ivref::is_vref_generator(cell)
+            || cell.parameters.contains_key(VREF_LEVEL_PARAM)
+        {
+            "an input reference level"
+        } else if cell.parameters.contains_key(ODT_OHMS_PARAM) {
+            "on-die termination"
+        } else if crate::device::nexus::adc::is_adc(cell) {
+            "an ADC"
+        } else {
+            continue;
+        };
+        return Err(crate::PlaceRouteError::PlacementFailed(format!(
+            "'{}' asks for {feature}, which {device} cannot provide",
+            cell.path
+        )));
+    }
+    Ok(())
+}
+
 pub fn place_and_route(
     netlist: &GateNetlist,
     variant: Ice40Variant,
     config: PnrConfig,
 ) -> Result<PnrResult> {
     // Create device
+    refuse_unsupported_io(netlist, "this iCE40 device")?;
     let device = Ice40Device::new(variant);
 
     // Run packing to detect carry chains
@@ -442,6 +469,10 @@ pub fn place_and_route_nexus(
 ) -> Result<PnrResult> {
     use crate::device::nexus::NexusDevice;
 
+    refuse_unsupported_io(
+        netlist,
+        "a Nexus device without its real device data (build with the nexus-real feature)",
+    )?;
     let device = NexusDevice::new(variant);
     let t0 = std::time::Instant::now();
 
@@ -538,6 +569,8 @@ pub fn place_and_route_nexus_real(
     use crate::device::nexus::NexusDevice;
     use crate::error::PlaceRouteError;
 
+    let bypassed = prepare::bypass_pll_output_buffers(netlist);
+    let netlist = bypassed.as_ref().unwrap_or(netlist);
     let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
     let packages =
         sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
@@ -558,28 +591,48 @@ pub fn place_and_route_nexus_real(
     // design's pins; the region loaded must reach it
     let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
         .map_err(PlaceRouteError::PlacementFailed)?;
-    // Each bank input reference generator goes to the bank its LOC names,
-    // or a bank whose LVSTL inputs need one
-    let pad_bank = |cell: &skalp_lir::gate_netlist::Cell| {
+    // A fixed reference level on a bank's pads (`vref` / `vref_code`) becomes a
+    // generator on the bank. Each generator goes to the bank its LOC or PIN
+    // names, or a bank whose LVSTL inputs need one.
+    let pin_bank = |pin: &str| {
         let package = variant
             .default_package()
             .and_then(|name| packages.get(name))
             .or_else(|| packages.values().next())?;
-        let &(x, y, _) = package.pins.get(cell.parameters.get("LOC")?)?;
+        let &(x, y, _) = package.pins.get(pin)?;
         tiles
             .iter()
             .filter(|t| t.x == x && t.y == y)
             .find_map(|t| crate::device::nexus::sites::bank_of_io_tile(&t.tiletype))
     };
+    let level_scale =
+        crate::device::nexus::ivref::LevelScale::load(db_root, variant.prjoxide_family())
+            .map_err(PlaceRouteError::PlacementFailed)?;
+    let with_pad_levels = crate::device::nexus::ivref::add_pad_level_generators(
+        netlist,
+        &pin_bank,
+        level_scale.as_ref(),
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
+    let netlist = with_pad_levels.as_ref().unwrap_or(netlist);
     let vref_generator_sites = crate::device::nexus::ivref::choose_sites(
         &crate::device::nexus::ivref::sites(db_root, variant.prjoxide_family(), &tiles),
         netlist,
-        &pad_bank,
+        &pin_bank,
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
+    let adc_site = adc_site(
+        netlist,
+        &tiles,
+        &pll_sites,
+        db_root,
+        variant.prjoxide_family(),
     )
     .map_err(PlaceRouteError::PlacementFailed)?;
     let mut pad_sites = pad_sites;
     pad_sites.extend(pll_sites.values().copied());
     pad_sites.extend(vref_generator_sites.values().map(|s| (s.x, s.y)));
+    pad_sites.extend(adc_site.map(|(_, site)| site));
     let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
         db_root,
         variant.prjoxide_family(),
@@ -659,7 +712,10 @@ pub fn place_and_route_nexus_real(
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
     let mut logic = prepare::logic_only_netlist(netlist);
     for cell in &mut logic.cells {
-        if pll_sites.contains_key(&cell.id) || vref_generator_sites.contains_key(&cell.id) {
+        if pll_sites.contains_key(&cell.id)
+            || vref_generator_sites.contains_key(&cell.id)
+            || adc_site.is_some_and(|(id, _)| id == cell.id)
+        {
             cell.cell_type = "TIE_HARD_BLOCK".to_string();
             cell.function = None;
             cell.parameters.clear();
@@ -710,6 +766,23 @@ pub fn place_and_route_nexus_real(
         placement.placements.insert(
             cell,
             crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::VrefGen),
+        );
+    }
+    if let Some((cell, (x, y))) = adc_site {
+        let bel = crate::device::Device::tile_at(&device, x, y)
+            .and_then(|t| {
+                t.bels()
+                    .iter()
+                    .position(|b| b.bel_type == crate::device::BelType::Adc)
+            })
+            .ok_or_else(|| {
+                PlaceRouteError::PlacementFailed(format!(
+                    "The ADC at ({x}, {y}) has no routing data in the device database"
+                ))
+            })?;
+        placement.placements.insert(
+            cell,
+            crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::Adc),
         );
     }
     log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());
@@ -1026,6 +1099,7 @@ pub fn place_and_route_ecp5(
 ) -> Result<PnrResult> {
     use crate::device::ecp5::Ecp5Device;
 
+    refuse_unsupported_io(netlist, "this ECP5 device")?;
     let device = Ecp5Device::new(variant);
 
     // Pack
@@ -1100,6 +1174,7 @@ pub fn place_and_route_xc7(
 ) -> Result<PnrResult> {
     use crate::device::xc7::Xc7Device;
 
+    refuse_unsupported_io(netlist, "this 7-series device")?;
     let device = Xc7Device::new(variant);
 
     // Pack
@@ -1158,8 +1233,181 @@ pub fn place_and_route_xc7(
     })
 }
 
+/// An ADC cell and its tile.
+#[cfg(feature = "nexus-bitstream")]
+type AdcSite = (skalp_lir::gate_netlist::CellId, (u32, u32));
+
+/// The ADC of a design and its site (the device's `ADC` tile), checked:
+/// one ADC at most, with known ports and settings, whose converter clock
+/// (`CLKDCLK`), if connected, comes from the `CLKOS4` output of a PLL in the
+/// corner whose output reaches it.
+#[cfg(feature = "nexus-bitstream")]
+fn adc_site(
+    netlist: &GateNetlist,
+    tiles: &[crate::device::nexus::prjoxide_load::PrjoxideTile],
+    pll_sites: &crate::collections::HashMap<skalp_lir::gate_netlist::CellId, (u32, u32)>,
+    db_root: &std::path::Path,
+    family: &str,
+) -> std::result::Result<Option<AdcSite>, String> {
+    use crate::device::nexus::{adc, pll};
+    let Some(id) = adc::the_adc(netlist)? else {
+        return Ok(None);
+    };
+    let cell = netlist.get_cell(id).ok_or("the ADC cell is missing")?;
+    let site = tiles
+        .iter()
+        .find(|t| t.tiletype == adc::TILETYPE)
+        .map(|t| (t.x, t.y))
+        .ok_or_else(|| format!("ADC '{}': this device has no ADC", cell.path))?;
+    let clock = (0..cell.inputs.len())
+        .find(|&i| adc::input_pin_name(cell, i) == Some(adc::CONVERTER_CLOCK_PIN))
+        .map(|i| cell.inputs[i]);
+    if let Some(net) = clock {
+        // The source, through the buffers synthesis may put on the net
+        let mut net = netlist
+            .nets
+            .get(net.0 as usize)
+            .ok_or("the ADC's clock net is missing")?;
+        let mut driver = net.driver.and_then(|d| netlist.get_cell(d));
+        while let Some(buffer) = driver.filter(|d| {
+            matches!(
+                d.function,
+                Some(skalp_lir::tech_library::CellFunction::Buf)
+                    | Some(skalp_lir::tech_library::CellFunction::ClkBuf)
+            ) && d.inputs.len() == 1
+        }) {
+            net = netlist
+                .nets
+                .get(buffer.inputs[0].0 as usize)
+                .ok_or("the ADC's clock net is missing")?;
+            driver = net.driver.and_then(|d| netlist.get_cell(d));
+        }
+        let from_clkos4 = driver.is_some_and(|d| {
+            pll::is_pll(d)
+                && pll::output_pins()
+                    .get(
+                        pll::output_router_pin(d, net.driver_pin.unwrap_or(0))
+                            .unwrap_or(usize::MAX),
+                    )
+                    .is_some_and(|&p| p == "CLKOS4")
+        });
+        let Some(driver) = driver.filter(|_| from_clkos4) else {
+            return Err(format!(
+                "ADC '{}': its converter clock CLKDCLK must come from a PLL's CLKOS4 output, \
+                 the only source that reaches it",
+                cell.path
+            ));
+        };
+        // The PLL's corner must be the one whose CLKOS4 reaches the ADC
+        let wire = format!("J{}_ADC_CORE_ADC0", adc::CONVERTER_CLOCK_PIN);
+        let reaches = pll_sites.get(&driver.id).is_some_and(|&(x, y)| {
+            tiles
+                .iter()
+                .filter(|t| t.x == x && t.y == y && pll::corner_of_tile(&t.tiletype).is_some())
+                .any(|t| {
+                    std::fs::read_to_string(
+                        db_root
+                            .join(family)
+                            .join("tiletypes")
+                            .join(format!("{}.ron", t.tiletype)),
+                    )
+                    .is_ok_and(|text| text.contains(&wire))
+                })
+        });
+        if !reaches {
+            let corners: Vec<&str> = tiles
+                .iter()
+                .filter_map(|t| {
+                    let corner = pll::corner_of_tile(&t.tiletype)?;
+                    std::fs::read_to_string(
+                        db_root
+                            .join(family)
+                            .join("tiletypes")
+                            .join(format!("{}.ron", t.tiletype)),
+                    )
+                    .ok()?
+                    .contains(&wire)
+                    .then_some(corner)
+                })
+                .collect();
+            return Err(format!(
+                "ADC '{}': PLL '{}' cannot clock it; only the CLKOS4 of the PLL in corner {} \
+                 reaches the ADC (set the PLL's LOC)",
+                cell.path,
+                driver.path,
+                if corners.is_empty() {
+                    "(none in the device data)".to_string()
+                } else {
+                    corners.join(" or ")
+                }
+            ));
+        }
+    }
+    Ok(Some((id, site)))
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A pad's reference level, or a reference primitive, on a device
+    /// without input reference generators is refused, naming the cell.
+    #[test]
+    fn input_references_are_refused_where_there_are_none() {
+        use skalp_lir::gate_netlist::{Cell, CellId, VREF_LEVEL_PARAM};
+        let mut netlist = GateNetlist::new("top".into(), "ice40".into());
+        let mut pad = Cell::new_comb(
+            CellId(0),
+            "SB_IO".into(),
+            "ice40".into(),
+            0.0,
+            "top.dq_ibuf".into(),
+            vec![],
+            vec![],
+        );
+        assert!(refuse_unsupported_io(&netlist, "this device").is_ok());
+        pad.parameters
+            .insert(VREF_LEVEL_PARAM.into(), "code 49".into());
+        netlist.add_cell(pad);
+        let error = refuse_unsupported_io(&netlist, "this iCE40 device")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("top.dq_ibuf"), "{error}");
+        assert!(error.contains("this iCE40 device"), "{error}");
+
+        let mut netlist = GateNetlist::new("top".into(), "ice40".into());
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "BLACKBOX_INPUT_REFERENCE".into(),
+            "blackbox".into(),
+            0.0,
+            "top.vref".into(),
+            vec![],
+            vec![],
+        ));
+        assert!(refuse_unsupported_io(&netlist, "this device").is_err());
+
+        // On-die termination and the ADC are refused the same way
+        for (cell_type, param) in [
+            ("SB_IO", Some(skalp_lir::gate_netlist::ODT_OHMS_PARAM)),
+            ("BLACKBOX_ADC", None),
+        ] {
+            let mut netlist = GateNetlist::new("top".into(), "ice40".into());
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                cell_type.into(),
+                "ice40".into(),
+                0.0,
+                "top.x".into(),
+                vec![],
+                vec![],
+            );
+            if let Some(param) = param {
+                cell.parameters.insert(param.into(), "60".into());
+            }
+            netlist.add_cell(cell);
+            assert!(refuse_unsupported_io(&netlist, "this device").is_err());
+        }
+    }
     use super::*;
     use skalp_lir::gate_netlist::{Cell, GateNet};
 

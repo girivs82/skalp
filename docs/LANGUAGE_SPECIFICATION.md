@@ -1236,11 +1236,82 @@ impl Blink {
 
 Recognized constraint keys include `pin`, `pins` (array form for buses),
 `pin_p`/`pin_n` (differential pairs), `io_standard`, `pull`, `slew`,
-`drive`, `schmitt`, `diff_term`, and `bank`. Constraints flow into the
+`drive`, `schmitt`, `diff_term`, `bank`, `odt`, and `vref`/`vref_code` (below). Constraints flow into the
 iCE40 synthesis and place-and-route flow (`skalp synth`).
 
 A global `constraint physical { ... }` block (device selection, bank
 voltages, `io_defaults`, floorplan regions) is parsed at top level.
+
+#### Input reference levels
+
+Some I/O standards compare an input against an internal reference rather
+than a fixed threshold: LVSTL (LPDDR4) inputs compare against a level the
+I/O bank generates. One generator serves a whole bank, and an input with
+no generator in use reads 1 whatever its pin does, so the backend refuses
+such a design on devices that have one. There are two vendor-neutral ways
+to set the level:
+
+- **A fixed level**, as a port constraint: `vref: "<value>"`, a share of
+  the bank's I/O supply (`"22%"`, the unit JEDEC gives DRAM reference
+  levels in) or a voltage (`"245mV"`, `"0.245V"`). A bare number is
+  refused, since it has no unit. The backend converts the value to the
+  nearest level the generator of the pin's bank has, using the device
+  data's scale for that family, and puts the generator in use. Ports of
+  one bank must come to the same level. On a family whose scale is not
+  known, a measured value is refused; one whose scale is not yet verified
+  on silicon builds with a warning.
+
+  ```skalp
+  inout dq: bit[16] @ { pins: [...], io_standard: "LVSTL_I", vref: "22%" }
+  ```
+
+  `vref_code: <code>` gives the device's own generator code instead (0 to
+  127 on Lattice Nexus). It does not carry over to another device, so it
+  is for bring-up and for devices without a known scale.
+
+- **A level the design drives** (to train it, as a DRAM controller's read
+  reference training does): SKALP's `INPUT_REFERENCE` primitive, whose
+  `LEVEL` input is the generator's code (the device data's scale gives
+  its level in mV, so training can report what it chose). It is placed on the bank of the pin
+  its `PIN` names (any pin of the bank), or on the bank its `LOC` names
+  (`BANK<n>`); with neither, on a bank whose inputs need one.
+
+  ```skalp
+  #[vendor_ip(name = "INPUT_REFERENCE", PIN = "AA6")]
+  entity InputReference {
+      in LEVEL: bit[7]
+  }
+  ```
+
+A bank takes its level from one of these, not both. The width and meaning
+of the level code are the device's; each backend maps the primitive to
+its own block (on Lattice Nexus, the bank's IVREF_CORE, which Lattice's
+own `DQSBUF_IVREF` primitive also reaches) and refuses it on a device
+that has none.
+
+#### On-die termination
+
+`odt: "<ohms>ohm"` terminates a pad's input on the die, for I/O standards
+that do (LVSTL terminates to ground). The backend picks the device's setting
+of that value and refuses one it does not have, an output-only pad, or a
+standard without on-die termination (only LVSTL inputs so far on Lattice
+Nexus, which has 40, 48, 60, 80 and 120 ohm).
+
+```skalp
+in dq: bit @ { pin: "Y6", io_standard: "LVSTL_I", vref: "22%", odt: "60ohm" }
+```
+
+#### ADC (Lattice Nexus)
+
+The `ADC` primitive places the device's ADC block (two 12-bit converters, A
+and B, each with a 4-bit channel select). Its analog inputs are not logic
+ports: the instance names the pins it measures in its `ADC_PINS` parameter
+(comma-separated), and the backend switches those pads onto the converters'
+inputs. `CLKDCLK` (the converters' clock) must come from the `CLKOS4` output
+of the PLL whose output reaches the ADC (the lower right one on
+CertusPro-NX), and `CLKFAB` (which times the control and status pins) from
+any clock. The settings are Lattice's (`CLK_DIV`, `VREFASEL`/`VREFBSEL`,
+`VREFACFG`/`VREFBCFG`, `OMA`/`OMB`, `DF`, ...), with Lattice's defaults.
 
 There is no CLI flag for merging external constraint files (PCF/XDC);
 inline constraints are the mechanism.

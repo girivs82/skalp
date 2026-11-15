@@ -115,6 +115,15 @@ pub const ARBITER_OP: &str = "NclArbiter";
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
 
+/// Pad cell parameter: the level of the internal input reference the pad
+/// compares against (a port's `vref` or `vref_code` setting, written by
+/// `VrefSetting::to_param`), for the backend to set up on the pad's bank.
+pub const VREF_LEVEL_PARAM: &str = "VREF_LEVEL";
+
+/// Pad cell parameter: the on-die termination of the pad's input, in ohms
+/// (a port's `odt` setting).
+pub const ODT_OHMS_PARAM: &str = "ODT_OHMS";
+
 /// Parameter naming a blackbox cell's output pins, as
 /// [`BLACKBOX_INPUTS_PARAM`] does its inputs.
 pub const BLACKBOX_OUTPUTS_PARAM: &str = "BLACKBOX_OUTPUTS";

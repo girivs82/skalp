@@ -1,0 +1,45 @@
+// An LVSTL_I bidirectional pad in bank 3 whose input reference level the
+// design drives, as read training would: SKALP's vendor-neutral
+// INPUT_REFERENCE primitive, placed on the bank of the pin it names.
+
+#[lattice_ip(name = "BB")]
+entity BB {
+    in I: bit
+    in T: bit
+    out O: bit
+    inout B: bit
+}
+
+#[vendor_ip(name = "INPUT_REFERENCE", PIN = "AA6")]
+entity InputReference {
+    in LEVEL: bit[7]
+}
+
+entity LvstlTrainedVref {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    inout dq: bit @ { pin: "AA6", io_standard: "LVSTL_I" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl LvstlTrainedVref {
+    signal n: bit[16] = 0
+    signal level: bit[7] = 40
+    signal seen: bit = 0
+    inst vref = InputReference {
+        LEVEL: level
+    }
+    inst pad = BB {
+        I: n[0],
+        T: n[7],
+        B: dq
+    }
+    on(clk.rise) {
+        n = n + 1
+        seen = pad.O
+        // sweep the level, as a training loop would
+        if n == 0 {
+            level = if level == 60 { 40 } else { level + 1 }
+        }
+    }
+    led = seen
+}

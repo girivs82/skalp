@@ -511,6 +511,8 @@ mod tests {
                 ldo_config: None,
                 drive_override: None,
                 board_pin: None,
+                vref_level: None,
+                odt_ohms: None,
             }),
         };
         module_ports.push(clk_port);
@@ -539,6 +541,8 @@ mod tests {
                 ldo_config: None,
                 drive_override: None,
                 board_pin: None,
+                vref_level: None,
+                odt_ohms: None,
             }),
         };
         module_ports.push(data_port);
@@ -565,6 +569,8 @@ mod tests {
                 ldo_config: None,
                 drive_override: None,
                 board_pin: None,
+                vref_level: None,
+                odt_ohms: None,
             }),
         };
         module_ports.push(diff_port);
