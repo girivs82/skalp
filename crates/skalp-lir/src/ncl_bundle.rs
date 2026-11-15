@@ -38,6 +38,12 @@
 //! block without arbiters) makes it at least the wait a target mean time
 //! between failures needs ([`ArbiterTiming`]).
 //!
+//! Channels between self-timed blocks are checked both ways: the value
+//! must settle before the receiver's strobe takes it ("channel"), and the
+//! sender's next value, which it only launches after the receiver's phase
+//! bit has told it the value was taken, must not reach the receiver's
+//! registers before that strobe has ("channel hold").
+//!
 //! All times are measured from the block's inputs, which the clocked parent
 //! holds stable from before it raises the request; the request itself is
 //! one of those inputs.
@@ -84,6 +90,10 @@ pub trait BundleDelays {
     }
     /// Setup time of a register's data input `input`
     fn setup_ps(&self, cell: &Cell, input: usize) -> i64;
+    /// Hold time of a register's data input `input`
+    fn hold_ps(&self, _cell: &Cell, _input: usize) -> i64 {
+        0
+    }
     /// Metastability of the arbiters' mutual-exclusion elements, and the
     /// failure rate they must meet
     fn arbiter_timing(&self) -> ArbiterTiming {
@@ -157,19 +167,24 @@ pub struct BundleCheck {
     /// Path of the matched delay's AND cell
     pub delay_path: String,
     /// What the control times: "registers", "acknowledge", "next state",
-    /// "channel", "arbiter" or "step decision"
+    /// "channel", "channel hold", "arbiter" or "step decision"
     pub times: &'static str,
     /// Latest data arrival plus setup, in picoseconds. For an "arbiter" or
-    /// "step decision" check, the resolution wait the decision needs.
+    /// "step decision" check, the resolution wait the decision needs; for a
+    /// "channel hold" check, until when the receiver's registers must hold
+    /// (their strobe's arrival plus hold).
     pub data_ps: i64,
     /// Arrival of the control signal, in picoseconds. For an "arbiter" or
     /// "step decision" check, how long the step request stays high before
-    /// `go`.
+    /// `go`; for a "channel hold" check, the earliest the sender's next
+    /// value reaches the receiver's registers.
     pub control_ps: i64,
     /// Buffers in the chain
     pub chain_len: usize,
-    /// For a "channel" check, the block that sends (its prefix): data and
-    /// phase bit from it are timed from its own strobe
+    /// For a "channel" or "channel hold" check, the block that sends (its
+    /// prefix). A "channel" check times data and phase bit from the
+    /// sender's own strobe; a "channel hold" check is reported against the
+    /// sender's `go` delay.
     pub sender: Option<String>,
 }
 
@@ -265,6 +280,10 @@ struct Arrivals<'a> {
     /// path from one into the block's logic (the arbiter's release from
     /// `done`, the `busy` acknowledge of a self-timed block) is not timed.
     controls: HashSet<GateNetId>,
+    /// Earliest instead of latest arrivals, for hold checks. A matched
+    /// delay still takes its latest input: it times a rising edge, which
+    /// needs both the source and the end of its chain.
+    early: bool,
 }
 
 impl<'a> Arrivals<'a> {
@@ -288,7 +307,14 @@ impl<'a> Arrivals<'a> {
                 .into_iter()
                 .map(|m| m.control)
                 .collect(),
+            early: false,
         }
+    }
+
+    /// Earliest arrivals (see [`Arrivals::early`])
+    fn earliest(mut self) -> Self {
+        self.early = true;
+        self
     }
 
     /// Time only from `sources` (see [`Arrivals::sources`])
@@ -375,6 +401,7 @@ impl<'a> Arrivals<'a> {
                         cell.source_op.as_deref(),
                         Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
                     );
+                    let latest = !self.early || cell.source_op.as_deref() == Some(MATCHED_DELAY_OP);
                     let mut best: Option<i64> = None;
                     for (i, &input) in cell.inputs.iter().enumerate() {
                         if !timing_cell && self.controls.contains(&input) {
@@ -385,10 +412,15 @@ impl<'a> Arrivals<'a> {
                         };
                         if let Some(t) = self.at(input) {
                             let t = t + self.delays.wire_ps(netlist, input, cell, i) + arc;
-                            if best.is_none_or(|b| t > b) {
+                            let better = if latest {
+                                best.is_none_or(|b| t > b)
+                            } else {
+                                best.is_none_or(|b| t < b)
+                            };
+                            if better {
                                 self.from.insert(net, input);
+                                best = Some(t);
                             }
-                            best = Some(best.map_or(t, |b| b.max(t)));
                         }
                     }
                     best
@@ -561,6 +593,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
         }
     }
     checks.extend(check_channels(netlist, delays, &matched));
+    checks.extend(check_channel_holds(netlist, delays, &matched));
     checks.extend(check_arbiters(netlist, delays, &matched));
     checks
 }
@@ -584,11 +617,8 @@ fn check_arbiters(
     let arbiter = delays.arbiter_timing();
     let mut checks = Vec::new();
     for md in matched {
-        // `go`'s delay: its source is the step request, driven by the step
-        // control gates
-        let from_step = netlist.nets[md.source.0 as usize].driver.is_some_and(|d| {
-            netlist.cells[d.0 as usize].source_op.as_deref() == Some(STEP_CONTROL_OP)
-        });
+        // `go`'s delay: its source is the step request
+        let from_step = fed_by_step(netlist, md);
         let arbitrates = netlist
             .cells
             .iter()
@@ -652,11 +682,8 @@ fn check_channels(
         .map(|m| (m.control, m.prefix.as_str()))
         .collect();
     for md in matched {
-        // The `go` delay of a self-timed block: fed by its step control
-        let fed_by_step = netlist.nets[md.source.0 as usize].driver.is_some_and(|d| {
-            netlist.cells[d.0 as usize].source_op.as_deref() == Some(STEP_CONTROL_OP)
-        });
-        if !fed_by_step {
+        // The `go` delay of a self-timed block
+        if !fed_by_step(netlist, md) {
             continue;
         }
         let inside = |cell: &Cell| cell.path.starts_with(&md.prefix);
@@ -726,6 +753,134 @@ fn check_channels(
         }
     }
     checks
+}
+
+/// Hold of channels into self-timed blocks. The step that takes a value
+/// toggles the receiver's phase bit with the same strobe that captures the
+/// value; the sender may then send the next one, and its registers change.
+/// That must not reach the receiver's registers before the strobe that
+/// captured the old value has (plus their hold time): the path runs from
+/// the receiver's strobe, through its phase bit, the sender's `ready`, step
+/// latch and `go` delay, to the sender's registers and back. It is short
+/// only when the receiver's strobe reaches some of its registers much later
+/// than others, but that strobe comes from fabric logic, so its skew is not
+/// bounded by a clock network.
+///
+/// Times are earliest arrivals from the receiver's strobe (time 0). The
+/// check's `data_ps` is when the captured value may first change at the
+/// worst register (its strobe arrival plus hold), `control_ps` the earliest
+/// the sender's next value gets there; it is reported against the sender's
+/// `go` delay, the one that lengthening fixes.
+fn check_channel_holds(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    matched: &[MatchedDelay],
+) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    let by_control: HashMap<GateNetId, &MatchedDelay> =
+        matched.iter().map(|m| (m.control, m)).collect();
+    // Launching outputs of registers on `clock` inside `prefix` that feed
+    // cells inside `into`, each at its launch time after `at` (the strobe's
+    // arrival at its own net)
+    let launches = |clock: GateNetId, prefix: &str, into: &str, at: i64| {
+        let mut out: HashMap<GateNetId, i64> = HashMap::new();
+        for (id, net) in netlist.nets.iter().enumerate() {
+            let Some(driver) = net.driver else { continue };
+            let cell = &netlist.cells[driver.0 as usize];
+            if cell.clock != Some(clock)
+                || !cell.path.starts_with(prefix)
+                || !delays.launches(cell, net.driver_pin.unwrap_or(0))
+                || !net
+                    .fanout
+                    .iter()
+                    .any(|&(c, _)| netlist.cells[c.0 as usize].path.starts_with(into))
+            {
+                continue;
+            }
+            let t = at + delays.clock_wire_ps(netlist, clock, cell) + delays.clock_to_out_ps(cell);
+            out.insert(GateNetId(id as u32), t);
+        }
+        out
+    };
+    for rx in matched.iter().filter(|m| fed_by_step(netlist, m)) {
+        let inside = |cell: &Cell| cell.path.starts_with(&rx.prefix);
+        // Strobes of other blocks whose registers feed this one
+        let mut senders: Vec<&MatchedDelay> = Vec::new();
+        for net in &netlist.nets {
+            let Some(driver) = net.driver else { continue };
+            let cell = &netlist.cells[driver.0 as usize];
+            let Some(tx) = cell.clock.and_then(|k| by_control.get(&k)) else {
+                continue;
+            };
+            if tx.prefix == rx.prefix
+                || inside(cell)
+                || !net
+                    .fanout
+                    .iter()
+                    .any(|&(c, _)| inside(&netlist.cells[c.0 as usize]))
+                || senders.iter().any(|s| s.control == tx.control)
+            {
+                continue;
+            }
+            senders.push(tx);
+        }
+        for tx in senders {
+            // The receiver's registers that the sender reads (its phase bit)
+            let back = launches(rx.control, &rx.prefix, &tx.prefix, 0);
+            if back.is_empty() {
+                continue;
+            }
+            let Some(tx_go) = Arrivals::new(netlist, delays, &tx.prefix, true)
+                .earliest()
+                .with_sources(back)
+                .at(tx.control)
+            else {
+                // The sender does not wait for this block: no channel
+                // back-pressured by it
+                continue;
+            };
+            let forward = launches(tx.control, &tx.prefix, &rx.prefix, tx_go);
+            let mut data = Arrivals::new(netlist, delays, &rx.prefix, false)
+                .earliest()
+                .with_sources(forward);
+            let mut worst: Option<(i64, i64)> = None;
+            for cell in netlist
+                .cells
+                .iter()
+                .filter(|c| c.clock == Some(rx.control) && inside(c))
+            {
+                let held = delays.clock_wire_ps(netlist, rx.control, cell);
+                for (i, &input) in cell.inputs.iter().enumerate() {
+                    let Some(t) = data.at(input) else { continue };
+                    let changes = t + delays.wire_ps(netlist, input, cell, i);
+                    let until = held + delays.hold_ps(cell, i);
+                    if worst.is_none_or(|(u, c)| changes - until < c - u) {
+                        worst = Some((until, changes));
+                    }
+                }
+            }
+            if let Some((until, changes)) = worst {
+                checks.push(BundleCheck {
+                    prefix: rx.prefix.clone(),
+                    delay_path: netlist.cells[tx.and_cell.0 as usize].path.clone(),
+                    times: "channel hold",
+                    data_ps: until,
+                    control_ps: changes,
+                    chain_len: tx.chain.len(),
+                    sender: Some(tx.prefix.clone()),
+                });
+            }
+        }
+    }
+    checks
+}
+
+/// Whether `md` is the `go` delay of a self-timed block: its source is the
+/// step request, driven by the step control
+fn fed_by_step(netlist: &GateNetlist, md: &MatchedDelay) -> bool {
+    netlist.nets[md.source.0 as usize]
+        .driver
+        .is_some_and(|d| netlist.cells[d.0 as usize].source_op.as_deref() == Some(STEP_CONTROL_OP))
 }
 
 /// The step control cell of the self-timed block `prefix` that reads its
@@ -876,6 +1031,12 @@ impl BundleDelays for LibraryDelays<'_> {
             .get_cell(&cell.cell_type)
             .and_then(|c| c.setup_ps)
             .map_or(200, i64::from)
+    }
+    fn hold_ps(&self, cell: &Cell, _input: usize) -> i64 {
+        self.library
+            .get_cell(&cell.cell_type)
+            .and_then(|c| c.hold_ps)
+            .map_or(0, i64::from)
     }
 }
 
@@ -1055,17 +1216,28 @@ mod tests {
 
     /// A matched delay `out = from & buf(from)` named `name` in block `top.u.`
     fn matched_delay(netlist: &mut GateNetlist, name: &str, from: GateNetId, out: GateNetId) {
-        let chained = netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.{name}_d0")));
+        matched_delay_in(netlist, "top.u.", name, from, out);
+    }
+
+    /// A matched delay `out = from & buf(from)` named `name` in block `prefix`
+    fn matched_delay_in(
+        netlist: &mut GateNetlist,
+        prefix: &str,
+        name: &str,
+        from: GateNetId,
+        out: GateNetId,
+    ) {
+        let chained = netlist.add_net(GateNet::new(GateNetId(0), format!("{prefix}{name}_d0")));
         comb(
             netlist,
-            &format!("top.u.ncl_bundle.{name}_0"),
+            &format!("{prefix}ncl_bundle.{name}_0"),
             vec![from],
             chained,
             true,
         );
         comb(
             netlist,
-            &format!("top.u.ncl_bundle.{name}_and"),
+            &format!("{prefix}ncl_bundle.{name}_and"),
             vec![from, chained],
             out,
             true,
@@ -1426,5 +1598,151 @@ mod tests {
             .find(|c| c.times == "arbiter")
             .expect("arbiter");
         assert_eq!(arb.data_ps, ArbiterTiming::default().resolution_ps());
+    }
+
+    /// The step control and `go` delay of a self-timed block `prefix`
+    /// whose `ready` is `ready`; returns `go`
+    fn step_and_go(netlist: &mut GateNetlist, prefix: &str, ready: GateNetId) -> GateNetId {
+        let step = netlist.add_net(GateNet::new(
+            GateNetId(0),
+            format!("{prefix}__ncl_step_req"),
+        ));
+        let go = netlist.add_net(GateNet::new(GateNetId(0), format!("{prefix}__ncl_go")));
+        let mut st = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            format!("{prefix}ncl_bundle.step.st_latch"),
+            vec![ready, go],
+            vec![step],
+        );
+        st.source_op = Some(STEP_CONTROL_OP.to_string());
+        netlist.add_cell(st);
+        matched_delay_in(netlist, prefix, "go", step, go);
+        go
+    }
+
+    fn register(
+        netlist: &mut GateNetlist,
+        path: &str,
+        d: GateNetId,
+        q: GateNetId,
+        clock: GateNetId,
+    ) {
+        netlist.add_cell(Cell::new_seq(
+            CellId(0),
+            "FD1P3IX".into(),
+            "test".into(),
+            0.0,
+            path.into(),
+            vec![d],
+            vec![q],
+            clock,
+            None,
+        ));
+    }
+
+    /// A channel from self-timed block `top.a.` to `top.b.`: `a` sends its
+    /// register `data` once `b`'s phase register `ack` (stepped by `b`'s
+    /// `go`) has toggled; `b` captures `data` in its register `take`.
+    fn channel() -> GateNetlist {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let run = netlist.add_input("run".into());
+        let ack_q = netlist.add_net(GateNet::new(GateNetId(0), "top.b.ack".into()));
+        let ready_a = netlist.add_net(GateNet::new(GateNetId(0), "top.a.__ncl_ready".into()));
+        comb(&mut netlist, "top.a.ready", vec![ack_q], ready_a, false);
+        let go_a = step_and_go(&mut netlist, "top.a.", ready_a);
+        let data_q = netlist.add_net(GateNet::new(GateNetId(0), "top.a.data".into()));
+        let data_d = netlist.add_net(GateNet::new(GateNetId(0), "top.a.data_d".into()));
+        comb(&mut netlist, "top.a.next", vec![data_q], data_d, false);
+        register(&mut netlist, "top.a.data_reg", data_d, data_q, go_a);
+
+        let go_b = step_and_go(&mut netlist, "top.b.", run);
+        let ack_d = netlist.add_net(GateNet::new(GateNetId(0), "top.b.ack_d".into()));
+        comb(&mut netlist, "top.b.toggle", vec![ack_q], ack_d, false);
+        register(&mut netlist, "top.b.ack_reg", ack_d, ack_q, go_b);
+        let take_q = netlist.add_net(GateNet::new(GateNetId(0), "top.b.take".into()));
+        register(&mut netlist, "top.b.take_reg", data_q, take_q, go_b);
+        netlist.rebuild_net_connectivity();
+        netlist
+    }
+
+    /// Unit delays, with the receiver's strobe reaching its data register
+    /// `late_ps` late and a hold time of `hold_ps`
+    struct SkewedDelays {
+        late_ps: i64,
+        hold_ps: i64,
+    }
+
+    impl BundleDelays for SkewedDelays {
+        fn wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell, _: usize) -> i64 {
+            0
+        }
+        fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, c: &Cell) -> i64 {
+            if c.path == "top.b.take_reg" {
+                self.late_ps
+            } else {
+                0
+            }
+        }
+        fn arc_ps(&self, _: &Cell, _: usize, _: usize) -> Option<i64> {
+            Some(100)
+        }
+        fn clock_to_out_ps(&self, _: &Cell) -> i64 {
+            100
+        }
+        fn setup_ps(&self, _: &Cell, _: usize) -> i64 {
+            0
+        }
+        fn hold_ps(&self, _: &Cell, _: usize) -> i64 {
+            self.hold_ps
+        }
+    }
+
+    #[test]
+    fn channel_hold_is_timed_round_the_handshake() {
+        let netlist = channel();
+        let delays = SkewedDelays {
+            late_ps: 0,
+            hold_ps: 50,
+        };
+        let checks = check_matched_delays(&netlist, &delays);
+        let hold: Vec<_> = checks
+            .iter()
+            .filter(|c| c.times == "channel hold")
+            .collect();
+        assert_eq!(hold.len(), 1, "{checks:?}");
+        let hold = hold[0];
+        assert_eq!(hold.prefix, "top.b.");
+        assert_eq!(hold.sender.as_deref(), Some("top.a."));
+        assert!(hold.delay_path.starts_with("top.a."));
+        // b's ack launches at 100, a's ready at 200, its step request at
+        // 300, `go` (both inputs of the matched delay's AND) at 500, `data`
+        // at 600; b's register holds until 50
+        assert_eq!(hold.control_ps, 600);
+        assert_eq!(hold.data_ps, 50);
+    }
+
+    #[test]
+    fn channel_hold_with_a_late_strobe_lengthens_the_sender() {
+        let mut netlist = channel();
+        let delays = SkewedDelays {
+            late_ps: 1000,
+            hold_ps: 50,
+        };
+        let hold = |netlist: &GateNetlist| {
+            check_matched_delays(netlist, &delays)
+                .into_iter()
+                .find(|c| c.times == "channel hold")
+                .expect("a channel hold check")
+        };
+        let before = hold(&netlist);
+        assert_eq!(before.slack_ps(), 600 - 1050);
+        let report = size_matched_delays(&mut netlist, &delays, 0);
+        assert!(report.buffers_added > 0);
+        let after = hold(&netlist);
+        assert!(after.slack_ps() >= 0, "{after:?}");
+        assert!(after.chain_len > before.chain_len);
     }
 }

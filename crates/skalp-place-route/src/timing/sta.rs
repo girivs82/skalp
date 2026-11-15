@@ -618,6 +618,14 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
             .map_or(0, |e| e.setup_ps)
     }
 
+    fn hold_ps(&self, cell: &Cell, input: usize) -> i64 {
+        self.model
+            .endpoints(cell)
+            .iter()
+            .find(|e| e.input == input)
+            .map_or(0, |e| e.hold_ps)
+    }
+
     fn step_latch_timing(&self) -> skalp_lir::ncl_bundle::ArbiterTiming {
         let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
         match self.model.metastability(STEP_LATCH_ELEMENT) {
