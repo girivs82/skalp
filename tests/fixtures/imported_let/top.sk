@@ -1,0 +1,41 @@
+// A `let` in a clocked block, in a module lowered after an imported one whose
+// inlined function locals have the same HIR variable ids (ids restart in each
+// file): the let must still be declared and carry its value
+mod lib;
+use lib::Picker;
+
+entity LetStage {
+    in clk: clock
+    in d: bit[8]
+    out q: bit[8]
+}
+
+impl LetStage {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        let t: bit[8] = d + 8'h01
+        let u: bit[8] = t ^ 8'h80
+        r = u
+    }
+    q = r
+}
+
+entity ImportedLetTop {
+    in clk: clock
+    in d: bit[8]
+    out q: bit[8]
+    out p: bit[2]
+    out w: bit[16]
+}
+
+impl ImportedLetTop {
+    signal sel: bit[2]
+    sel = d[1:0]
+    signal bits: bit[4]
+    bits = d[7:4]
+    inst pk = Picker { rr: sel, v: bits, x: d }
+    inst st = LetStage { clk: clk, d: d }
+    q = st.q
+    p = pk.o
+    w = pk.w
+}
