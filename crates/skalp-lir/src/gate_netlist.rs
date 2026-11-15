@@ -87,6 +87,25 @@ pub const FF_INIT_PARAM: &str = "INIT";
 /// point of them, so no optimization may remove or merge them.
 pub const MATCHED_DELAY_OP: &str = "NclMatchedDelay";
 
+/// `source_op` of the gates of a self-timed async block's step control
+/// (`LirOp::NclStepControl`). Merging them could make the step request
+/// glitch, so no optimization may touch them.
+pub const STEP_CONTROL_OP: &str = "NclStepControl";
+
+/// Inputs of the single-LUT step latch (`<block>.st_latch`, built where the
+/// library has a 4-input LUT): `[req, done, ready, out]`, input `k` being
+/// bit `k` of the LUT address. `out` is the latch's own output, fed back.
+pub const STEP_LATCH_READY_PIN: usize = 2;
+
+/// Truth table of the single-LUT step latch, `out = !done & ((req & ready) |
+/// out)` over the inputs `[req, done, ready, out]`
+pub const STEP_LATCH_INIT: u64 = 0x3320;
+
+/// `source_op` of the gates of an arbiter of a self-timed async block
+/// (`LirOp::NclArbiter`): mutual-exclusion elements, cross-coupled gates
+/// that optimization must not touch.
+pub const ARBITER_OP: &str = "NclArbiter";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -166,9 +185,13 @@ impl RamPorts {
 
 impl Cell {
     /// Whether optimization must leave this cell as it is (the buffers of a
-    /// matched delay: removing or merging them would shorten the delay)
+    /// matched delay: removing or merging them would shorten the delay; the
+    /// gates of a step control: merging them could make it glitch)
     pub fn is_kept(&self) -> bool {
-        self.source_op.as_deref() == Some(MATCHED_DELAY_OP)
+        matches!(
+            self.source_op.as_deref(),
+            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(ARBITER_OP)
+        )
     }
 
     /// Number of variables of this cell's truth table, if it is a LUT whose
@@ -2663,6 +2686,19 @@ pub fn truth_table_mask(variables: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The step latch's truth table is `!done & ((req & ready) | out)` over
+    /// the inputs `[req, done, ready, out]`
+    #[test]
+    fn step_latch_init_is_the_latch() {
+        for a in 0..16u64 {
+            let bit = |k: u32| (a >> k) & 1 == 1;
+            let (req, done, ready, out) = (bit(0), bit(1), bit(2), bit(3));
+            let want = !done && ((req && ready) || out);
+            assert_eq!((STEP_LATCH_INIT >> a) & 1 == 1, want, "address {a:04b}");
+        }
+        assert_eq!(STEP_LATCH_READY_PIN, 2);
+    }
 
     fn inverter_chain() -> (GateNetlist, Vec<GateNetId>) {
         let mut netlist = GateNetlist::new("chain".to_string(), "generic_asic".to_string());

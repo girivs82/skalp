@@ -1,0 +1,144 @@
+// Self-timed async blocks talking over `stream<T>` channels.
+//
+// StProducer sends 0, 1, 2, ... one value per step; StConsumer receives one
+// value per step and keeps a running count and sum. Neither has a clock: each
+// steps as soon as its channel lets it (the producer once the previous value
+// has been taken, the consumer once a new value is there). The clocked parent
+// only starts and stops them through `ncl_req` and reads the results once
+// both have stopped (`ncl_ack` low).
+
+async entity StProducer {
+    out o: stream<bit[8]>
+    out sent: bit[16]
+}
+
+impl StProducer {
+    signal count: bit[16] = 0
+    on() {
+        o.send(count[7:0])
+        count = count + 1
+    }
+    sent = count
+}
+
+async entity StConsumer {
+    in i: stream<bit[8]>
+    out received: bit[16]
+    out sum: bit[16]
+}
+
+impl StConsumer {
+    signal n: bit[16] = 0
+    signal total: bit[16] = 0
+    on() {
+        let v: bit[8] = i.recv()
+        total = total + {8'h00, v}
+        n = n + 1
+    }
+    received = n
+    sum = total
+}
+
+entity StTop {
+    in clk: clock
+    in run: bit
+    out sent: bit[16]
+    out received: bit[16]
+    out sum: bit[16]
+    out busy: bit
+}
+
+impl StTop {
+    signal req: bit = 0
+
+    inst p = StProducer { ncl_req: req }
+    inst c = StConsumer { i: p.o, ncl_req: req }
+
+    on(clk.rise) {
+        req = run
+    }
+    sent = p.sent
+    received = c.received
+    sum = c.sum
+    busy = p.ncl_ack | c.ncl_ack
+}
+
+// Two producers into one consumer that takes whichever value arrives first
+// (an arbiter decides when both are there), plus a step of its own after
+// each value (the `_ if` arm).
+async entity StMerge {
+    in a: stream<bit[8]>
+    in b: stream<bit[8]>
+    out na: bit[16]
+    out nb: bit[16]
+    out suma: bit[16]
+    out sumb: bit[16]
+    out extra: bit[16]
+}
+
+impl StMerge {
+    signal ca: bit[16] = 0
+    signal cb: bit[16] = 0
+    signal sa: bit[16] = 0
+    signal sb: bit[16] = 0
+    signal flag: bit = 0
+    signal ex: bit[16] = 0
+    on() {
+        match arbitrate(a, b) {
+            0 => {
+                let v: bit[8] = a.recv()
+                sa = sa + {8'h00, v}
+                ca = ca + 1
+                flag = 1
+            }
+            1 => {
+                let w: bit[8] = b.recv()
+                sb = sb + {8'h00, w}
+                cb = cb + 1
+                flag = 1
+            }
+            _ if flag == 1 => {
+                flag = 0
+                ex = ex + 1
+            }
+        }
+    }
+    na = ca
+    nb = cb
+    suma = sa
+    sumb = sb
+    extra = ex
+}
+
+entity StMergeTop {
+    in clk: clock
+    in run: bit
+    out sent_a: bit[16]
+    out sent_b: bit[16]
+    out na: bit[16]
+    out nb: bit[16]
+    out suma: bit[16]
+    out sumb: bit[16]
+    out extra: bit[16]
+    out busy: bit
+}
+
+impl StMergeTop {
+    signal req: bit = 0
+
+    inst pa = StProducer { ncl_req: req }
+    inst pb = StProducer { ncl_req: req }
+    inst m = StMerge { a: pa.o, b: pb.o, ncl_req: req }
+
+    on(clk.rise) {
+        req = run
+    }
+    sent_a = pa.sent
+    sent_b = pb.sent
+    na = m.na
+    nb = m.nb
+    suma = m.suma
+    sumb = m.sumb
+    extra = m.extra
+    busy = pa.ncl_ack | pb.ncl_ack | m.ncl_ack
+}

@@ -75,6 +75,77 @@ fn blinker_builds_a_bitstream_for_the_real_device() {
     assert!(!hold.paths.is_empty());
 }
 
+/// The registers of an async block are clocked by the block's step signal,
+/// which fabric logic generates rather than a clock pin. Hold between them
+/// is checked on that signal's own routed skew.
+#[test]
+fn async_block_registers_are_hold_checked() {
+    let Some(db) = find_database() else {
+        eprintln!("prjoxide database not found; skipping");
+        return;
+    };
+    let path = std::path::PathBuf::from(format!(
+        "{}/tests/fixtures/nexus_ncl_hold.sk",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let ctx = skalp_frontend::parse_and_build_compilation_context(&path).unwrap();
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .unwrap();
+    let (hier, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    assert!(has_async);
+    let hier = skalp_lir::apply_boundary_ncl_to_hierarchy(
+        &hier,
+        &skalp_lir::NclConfig {
+            boundary_only: true,
+            use_weak_completion: true,
+            completion_tree_depth: None,
+            generate_null_wavefront: true,
+            use_opaque_arithmetic: true,
+        },
+    );
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let mut netlist =
+        skalp_lir::synthesize_hierarchical(&hier, &library, skalp_lir::synth::SynthPreset::Quick)
+            .flatten_for_library(&library);
+    let delays = skalp_lir::ncl_bundle::LibraryDelays::new(&library);
+    skalp_lir::ncl_bundle::size_matched_delays(&mut netlist, &delays, 50);
+    let top = mir.modules.iter().find(|m| m.name == "HoldTop").unwrap();
+    let constraints: indexmap::IndexMap<_, _> = top
+        .ports
+        .iter()
+        .filter_map(|p| Some((format!("top.{}", p.name), p.physical_constraints.clone()?)))
+        .collect();
+    skalp_lir::insert_io_buffers(&mut netlist, &library, &constraints);
+
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the design should place and route");
+    let hold = result
+        .timing
+        .expect("the real flow reports timing")
+        .hold
+        .expect("hold is checked");
+    // The block's register-to-register shifts are the shortest paths in
+    // the design, so they lead the report
+    assert!(
+        hold.paths
+            .iter()
+            .any(|p| p.destination.starts_with("top.sh.")),
+        "{:?}",
+        hold.paths
+            .iter()
+            .map(|p| (&p.source, &p.destination))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(hold.violations, 0, "{:?}", hold.paths.first());
+}
+
 #[test]
 fn distributed_ram_places_and_routes_on_the_real_device() {
     let Some(db) = find_database() else {

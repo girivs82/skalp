@@ -36,8 +36,8 @@
 
 use crate::gate_eval::{evaluate_primitive, evaluate_primitive_with_fault};
 use crate::sir::{
-    CombinationalBlock, EdgeType, FaultInjectionConfig, PrimitiveId, PrimitiveType, Sir,
-    SirOperation, SirPortDirection, SirSignalId, SirSignalType,
+    EdgeType, FaultInjectionConfig, PrimitiveId, PrimitiveType, Sir, SirOperation,
+    SirPortDirection, SirSignalId, SirSignalType,
 };
 use indexmap::IndexMap;
 
@@ -45,13 +45,100 @@ use indexmap::IndexMap;
 /// follows (a clock that keeps toggling itself never settles)
 const MAX_INTERNAL_CLOCK_ROUNDS: usize = 64;
 
+/// Signal values by SIR signal id, stored densely (ids are small and
+/// contiguous), so reading or writing one is an index, not a hash lookup
+#[derive(Debug, Clone, Default)]
+pub struct SignalValues {
+    values: Vec<Option<Vec<bool>>>,
+    count: usize,
+    /// Signals whose value changed since the simulator last looked
+    changed: Vec<u32>,
+}
+
+impl SignalValues {
+    /// The value of signal `id`, if it has one
+    pub fn get(&self, id: &u32) -> Option<&Vec<bool>> {
+        self.values.get(*id as usize).and_then(Option::as_ref)
+    }
+
+    /// Set the value of signal `id`, returning the old one
+    pub fn insert(&mut self, id: u32, value: Vec<bool>) -> Option<Vec<bool>> {
+        let index = id as usize;
+        if index >= self.values.len() {
+            self.values.resize(index + 1, None);
+        }
+        if self.values[index].as_ref() != Some(&value) {
+            self.changed.push(id);
+        }
+        let old = self.values[index].replace(value);
+        if old.is_none() {
+            self.count += 1;
+        }
+        old
+    }
+
+    /// Bit 0 of signal `id` (false if it has no value)
+    #[inline]
+    pub fn bit(&self, id: u32) -> bool {
+        match self.values.get(id as usize) {
+            Some(Some(v)) => v.first().copied().unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Set signal `id` to `value` in bit 0 and zero in its other bits,
+    /// `width` bits wide if it has no value yet; returns whether bit 0
+    /// changed
+    #[inline]
+    pub fn set_bit(&mut self, id: u32, value: bool, width: usize) -> bool {
+        if let Some(Some(v)) = self.values.get_mut(id as usize) {
+            if v.is_empty() {
+                v.push(value);
+                self.changed.push(id);
+                return true;
+            }
+            let changed = v[0] != value || v.iter().skip(1).any(|&b| b);
+            if changed {
+                v[0] = value;
+                for b in v.iter_mut().skip(1) {
+                    *b = false;
+                }
+                self.changed.push(id);
+            }
+            return changed;
+        }
+        let mut bits = vec![false; width.max(1)];
+        bits[0] = value;
+        self.insert(id, bits);
+        true
+    }
+
+    /// Number of signals with a value
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Whether no signal has a value
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Every signal with a value, by id
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &Vec<bool>)> {
+        self.values
+            .iter()
+            .enumerate()
+            .filter_map(|(id, v)| v.as_ref().map(|v| (id as u32, v)))
+    }
+}
+
 /// Gate-level simulation state
 #[derive(Debug, Clone)]
 pub struct GateSimulationState {
     /// Current simulation cycle
     pub cycle: u64,
     /// Signal values (signal_id -> value as bool vector)
-    pub signals: IndexMap<u32, Vec<bool>>,
+    pub signals: SignalValues,
     /// Previous clock values for edge detection
     pub prev_clocks: IndexMap<u32, bool>,
     /// Last seen values of clocks the design's own logic makes (a strobe
@@ -65,7 +152,7 @@ impl GateSimulationState {
     pub fn new() -> Self {
         Self {
             cycle: 0,
-            signals: IndexMap::new(),
+            signals: SignalValues::default(),
             prev_clocks: IndexMap::new(),
             prev_internal_clocks: IndexMap::new(),
         }
@@ -334,8 +421,23 @@ pub struct FaultCategoryMetrics {
 
 /// Gate-level simulator with fault injection support
 pub struct GateLevelSimulator {
-    /// The SIR being simulated
-    sir: Sir,
+    /// The SIR being simulated (shared, so evaluation can walk it while
+    /// updating the state)
+    sir: std::sync::Arc<Sir>,
+    /// Order in which to evaluate the combinational operations
+    comb_plan: std::sync::Arc<CombPlan>,
+    /// EC_DEBUG tracing, read once
+    debug: bool,
+    /// A combinational loop that did not settle has been reported
+    reported_unsettled: bool,
+    /// Reused buffer for an operation's input values
+    input_scratch: Vec<bool>,
+    /// dirty[position in the plan]: an input of that operation changed
+    /// since it was last evaluated
+    dirty: Vec<bool>,
+    /// Every operation must be evaluated (at the start, after a reset, and
+    /// while a fault is injected or was in the last evaluation)
+    all_dirty: bool,
     /// Current simulation state
     state: GateSimulationState,
     /// Signal name to ID mapping
@@ -378,7 +480,13 @@ impl GateLevelSimulator {
     /// Create a new gate-level simulator from SIR
     pub fn new(sir: &Sir) -> Self {
         let mut sim = Self {
-            sir: sir.clone(),
+            sir: std::sync::Arc::new(sir.clone()),
+            comb_plan: std::sync::Arc::new(CombPlan::new(sir)),
+            debug: std::env::var("EC_DEBUG").is_ok(),
+            reported_unsettled: false,
+            input_scratch: Vec::new(),
+            dirty: Vec::new(),
+            all_dirty: true,
             state: GateSimulationState::new(),
             signal_name_to_id: IndexMap::new(),
             signal_id_to_name: IndexMap::new(),
@@ -564,11 +672,7 @@ impl GateLevelSimulator {
 
     /// Current boolean value of a signal (bit 0)
     fn signal_bit(&self, id: SirSignalId) -> bool {
-        self.state
-            .signals
-            .get(&id.0)
-            .and_then(|v| v.first().copied())
-            .unwrap_or(false)
+        self.state.signals.bit(id.0)
     }
 
     /// Unsigned value of `bits` (LSB first)
@@ -586,19 +690,20 @@ impl GateLevelSimulator {
         data_width: u8,
         inputs: &[SirSignalId],
         outputs: &[SirSignalId],
-    ) {
+    ) -> bool {
         let addr = self.signals_to_index(inputs);
         let word = self
             .distram_state
             .get(&ram)
             .and_then(|mem| mem.get(addr).cloned())
             .unwrap_or_else(|| vec![false; data_width as usize]);
+        let mut changed = false;
         for (i, out) in outputs.iter().enumerate() {
             let width = self.signal_widths.get(&out.0).copied().unwrap_or(1);
-            let mut bits = vec![false; width];
-            bits[0] = word.get(i).copied().unwrap_or(false);
-            self.state.signals.insert(out.0, bits);
+            let value = word.get(i).copied().unwrap_or(false);
+            changed |= self.state.signals.set_bit(out.0, value, width);
         }
+        changed
     }
 
     /// Write port of a distributed RAM, on its clock edge:
@@ -684,7 +789,7 @@ impl GateLevelSimulator {
     #[allow(dead_code)]
     pub fn debug_dump_state(&self) {
         println!("=== Signal State ===");
-        for (&id, value) in &self.state.signals {
+        for (id, value) in self.state.signals.iter() {
             let name = self
                 .signal_id_to_name
                 .get(&id)
@@ -845,6 +950,7 @@ impl GateLevelSimulator {
     pub fn reset(&mut self) {
         self.state = GateSimulationState::new();
         self.active_fault = None;
+        self.all_dirty = true;
 
         // Re-initialize signal values
         for signal in &self.sir.top_module.signals {
@@ -871,8 +977,8 @@ impl GateLevelSimulator {
     }
 
     /// Step simulation by one cycle
-    pub fn step(&mut self) -> GateSimulationState {
-        if std::env::var("EC_DEBUG").is_ok() && self.state.cycle < 3 {
+    pub fn step(&mut self) -> &GateSimulationState {
+        if self.debug && self.state.cycle < 3 {
             eprintln!(
                 "[STEP_DEBUG] step() called at cycle {}, comb_blocks={} seq_blocks={} signals={}",
                 self.state.cycle,
@@ -924,7 +1030,7 @@ impl GateLevelSimulator {
             }
         }
 
-        self.state.clone()
+        &self.state
     }
 
     /// Detect clock edges
@@ -955,93 +1061,90 @@ impl GateLevelSimulator {
         edges
     }
 
-    /// Evaluate all combinational logic
-    /// Runs multiple passes to handle out-of-order dependencies.
-    /// Gate-level netlists may have operations in arbitrary order
-    /// (not topologically sorted), so a single pass can read stale values.
+    /// Evaluate the combinational logic, in the order of [`CombPlan`]: each
+    /// operation after those it reads, and feedback loops until they
+    /// settle. Only operations with an input that changed are evaluated.
     fn evaluate_combinational(&mut self) {
-        if std::env::var("EC_DEBUG").is_ok() && self.state.cycle == 0 {
-            eprintln!(
-                "[BLOCK_DEBUG] comb_blocks={} seq_blocks={}",
-                self.sir.top_module.comb_blocks.len(),
-                self.sir.top_module.seq_blocks.len()
-            );
-            for (i, block) in self.sir.top_module.comb_blocks.iter().enumerate() {
-                eprintln!(
-                    "[BLOCK_DEBUG] comb_block[{}]: {} ops, {} inputs, {} outputs",
-                    i,
-                    block.operations.len(),
-                    block.inputs.len(),
-                    block.outputs.len()
-                );
-                if let Some(info) = &block.structural_info {
-                    eprintln!(
-                        "[BLOCK_DEBUG]   structural={} eval_order={}",
-                        info.is_structural,
-                        info.eval_order.as_ref().map_or(0, |o| o.len())
-                    );
+        let sir = std::sync::Arc::clone(&self.sir);
+        let plan = std::sync::Arc::clone(&self.comb_plan);
+        let blocks = &sir.top_module.comb_blocks;
+        let op = |&(b, o): &(usize, usize)| &blocks[b].operations[o];
+        let faulty = self.active_fault.is_some() || self.active_domain_kill.is_some();
+        let mut dirty = std::mem::take(&mut self.dirty);
+        dirty.resize(plan.ops.len(), false);
+        if self.all_dirty || faulty {
+            dirty.iter_mut().for_each(|d| *d = true);
+            self.state.signals.changed.clear();
+        }
+        // A fault's effect must be undone by evaluating everything once more
+        self.all_dirty = faulty;
+        for &p in &plan.always {
+            dirty[p as usize] = true;
+        }
+        let mark = |signals: &mut SignalValues, dirty: &mut Vec<bool>| {
+            for id in signals.changed.drain(..) {
+                if let Some(readers) = plan.readers.get(id as usize) {
+                    for &p in readers {
+                        dirty[p as usize] = true;
+                    }
                 }
-                // Print first few ops
-                for (j, op) in block.operations.iter().take(3).enumerate() {
-                    if let SirOperation::Primitive {
-                        ptype,
-                        inputs,
-                        outputs,
-                        path,
-                        ..
-                    } = op
-                    {
+            }
+        };
+        mark(&mut self.state.signals, &mut dirty);
+        for segment in &plan.segments {
+            match *segment {
+                CombSegment::Ordered { start, end } => {
+                    for p in start..end {
+                        if dirty[p] {
+                            dirty[p] = false;
+                            self.evaluate_operation(op(&plan.ops[p]));
+                            mark(&mut self.state.signals, &mut dirty);
+                        }
+                    }
+                }
+                CombSegment::Loop { start, end } => {
+                    if !dirty[start..end].iter().any(|&d| d) {
+                        continue;
+                    }
+                    // Each pass settles at least one more operation unless
+                    // the loop oscillates (a ring with no stable state)
+                    let limit = 2 * (end - start) + 8;
+                    let mut settled = false;
+                    for _ in 0..limit {
+                        let mut changed = false;
+                        for entry in &plan.ops[start..end] {
+                            changed |= self.evaluate_operation(op(entry));
+                            mark(&mut self.state.signals, &mut dirty);
+                        }
+                        if !changed {
+                            settled = true;
+                            break;
+                        }
+                    }
+                    dirty[start..end].iter_mut().for_each(|d| *d = false);
+                    if !settled && !self.reported_unsettled {
+                        self.reported_unsettled = true;
+                        let path = match op(&plan.ops[start]) {
+                            SirOperation::Primitive { path, .. } => path.as_str(),
+                            _ => "",
+                        };
                         eprintln!(
-                            "[BLOCK_DEBUG]   op[{}]: {:?} path={} inputs={:?} outputs={:?}",
-                            j,
-                            ptype,
-                            path,
-                            inputs.iter().map(|s| s.0).collect::<Vec<_>>(),
-                            outputs.iter().map(|s| s.0).collect::<Vec<_>>()
+                            "warning: gate-level cycle {}: a combinational loop of {} gates (at {}) \
+                             did not settle; it oscillates",
+                            self.state.cycle,
+                            end - start,
+                            path
                         );
                     }
                 }
             }
-            for (i, block) in self.sir.top_module.seq_blocks.iter().enumerate() {
-                eprintln!(
-                    "[BLOCK_DEBUG] seq_block[{}]: {} ops, clock={}, regs={}",
-                    i,
-                    block.operations.len(),
-                    block.clock.0,
-                    block.registers.len()
-                );
-            }
         }
-        // Multiple passes for convergence (handles non-topological operation order)
-        for _ in 0..3 {
-            for block in &self.sir.top_module.comb_blocks.clone() {
-                self.evaluate_comb_block(block);
-            }
-        }
+        self.dirty = dirty;
     }
 
-    /// Evaluate a single combinational block
-    fn evaluate_comb_block(&mut self, block: &CombinationalBlock) {
-        // If block has structural info with eval_order, use it
-        if let Some(info) = &block.structural_info {
-            if let Some(order) = &info.eval_order {
-                for &idx in order {
-                    if idx < block.operations.len() {
-                        self.evaluate_operation(&block.operations[idx]);
-                    }
-                }
-                return;
-            }
-        }
-
-        // Otherwise evaluate in order
-        for op in &block.operations {
-            self.evaluate_operation(op);
-        }
-    }
-
-    /// Evaluate a single operation
-    fn evaluate_operation(&mut self, op: &SirOperation) {
+    /// Evaluate one combinational operation; returns whether any output
+    /// changed
+    fn evaluate_operation(&mut self, op: &SirOperation) -> bool {
         match op {
             SirOperation::Primitive {
                 id,
@@ -1054,26 +1157,17 @@ impl GateLevelSimulator {
                     ram, data_width, ..
                 } = ptype
                 {
-                    self.evaluate_distram_read(*ram, *data_width, inputs, outputs);
-                    return;
+                    return self.evaluate_distram_read(*ram, *data_width, inputs, outputs);
                 }
 
                 // A RAM block is sequential and only updates on its clock edge.
                 if matches!(ptype, PrimitiveType::RamBlock { .. }) {
-                    return;
+                    return false;
                 }
 
-                // Gather input values
-                let input_values: Vec<bool> = inputs
-                    .iter()
-                    .map(|sig_id| {
-                        self.state
-                            .signals
-                            .get(&sig_id.0)
-                            .and_then(|v: &Vec<bool>| v.first().copied())
-                            .unwrap_or(false)
-                    })
-                    .collect();
+                let mut input_values = std::mem::take(&mut self.input_scratch);
+                input_values.clear();
+                input_values.extend(inputs.iter().map(|sig| self.state.signals.bit(sig.0)));
 
                 // Evaluate primitive with potential fault injection
                 let domain_killed = self
@@ -1082,48 +1176,42 @@ impl GateLevelSimulator {
                     .is_some_and(|kill| kill.contains(&(id.0 as usize)));
                 let output_values = if domain_killed {
                     vec![false; outputs.len()]
-                } else if let Some(fault) = &self.active_fault {
-                    if fault.target_primitive == *id {
-                        evaluate_primitive_with_fault(
-                            ptype,
-                            &input_values,
-                            Some(fault),
-                            self.state.cycle,
-                        )
-                    } else {
-                        evaluate_primitive(ptype, &input_values)
-                    }
+                } else if let Some(fault) = self
+                    .active_fault
+                    .as_ref()
+                    .filter(|f| f.target_primitive == *id)
+                {
+                    evaluate_primitive_with_fault(
+                        ptype,
+                        &input_values,
+                        Some(fault),
+                        self.state.cycle,
+                    )
                 } else {
                     evaluate_primitive(ptype, &input_values)
                 };
 
-                // Store output values
-                for (i, out_id) in outputs.iter().enumerate() {
-                    if let Some(&value) = output_values.get(i) {
-                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                        let mut bits = vec![false; width];
-                        bits[0] = value;
-                        if std::env::var("EC_DEBUG").is_ok()
-                            && ((46..=53).contains(&out_id.0)
-                                || [230, 237, 244, 251, 258, 265, 272, 279, 223]
-                                    .contains(&out_id.0))
-                        {
-                            eprintln!("[COMB_DEBUG] cycle={} cell {} ({:?}) writes sig {} = {} (inputs={:?} vals={:?})",
-                                self.state.cycle, path, ptype, out_id.0, value,
-                                inputs.iter().map(|s| s.0).collect::<Vec<_>>(), input_values);
-                        }
-                        self.state.signals.insert(out_id.0, bits);
-                    }
+                let mut changed = false;
+                for (out_id, &value) in outputs.iter().zip(&output_values) {
+                    let width = if self.state.signals.get(&out_id.0).is_some() {
+                        1
+                    } else {
+                        self.signal_widths.get(&out_id.0).copied().unwrap_or(1)
+                    };
+                    changed |= self.state.signals.set_bit(out_id.0, value, width);
                 }
+                self.input_scratch = input_values;
+                changed
             }
             SirOperation::Assign { target, source } => {
                 // For behavioral operations (shouldn't happen in structural mode)
                 // but handle for completeness
                 let value = self.evaluate_expression(source);
-                self.state.signals.insert(target.0, value);
+                self.state.signals.insert(target.0, value.clone()).as_ref() != Some(&value)
             }
             _ => {
                 // Other behavioral operations - skip in structural mode
+                false
             }
         }
     }
@@ -1263,7 +1351,8 @@ impl GateLevelSimulator {
         // Collect all pending DFF updates: (signal_id, new_value)
         let mut pending_updates: Vec<(u32, Vec<bool>)> = Vec::new();
 
-        for block in &self.sir.top_module.seq_blocks.clone() {
+        let sir = std::sync::Arc::clone(&self.sir);
+        for block in &sir.top_module.seq_blocks {
             // Check if this block uses this clock with matching edge.
             // Also match buffered clocks: if block.clock is a ClkBuf output
             // driven by clock_id, treat it as the same clock domain.
@@ -1324,14 +1413,14 @@ impl GateLevelSimulator {
                                         .signals
                                         .get(&sig_id.0)
                                         .and_then(|v: &Vec<bool>| v.first().copied());
-                                    if val.is_none() && std::env::var("EC_DEBUG").is_ok() {
+                                    if val.is_none() && self.debug {
                                         eprintln!("[SEQ_DEBUG] cycle={} DFF {} input sig {} NOT FOUND in state",
                                             self.state.cycle, cell_path, sig_id.0);
                                     }
                                     val
                                 })
                                 .collect();
-                            if std::env::var("EC_DEBUG").is_ok() && cell_path.contains("latch") {
+                            if self.debug && cell_path.contains("latch") {
                                 let current_q: Vec<bool> = outputs
                                     .iter()
                                     .filter_map(|o| {
@@ -1413,7 +1502,7 @@ impl GateLevelSimulator {
     pub fn run(&mut self, cycles: u64) -> Vec<GateSimulationState> {
         let mut states = Vec::with_capacity(cycles as usize);
         for _ in 0..cycles {
-            states.push(self.step());
+            states.push(self.step().clone());
         }
         states
     }
@@ -1424,10 +1513,10 @@ impl GateLevelSimulator {
         for _ in 0..cycles {
             // Low phase
             self.set_input(clock_name, &[false]);
-            states.push(self.step());
+            states.push(self.step().clone());
             // High phase
             self.set_input(clock_name, &[true]);
-            states.push(self.step());
+            states.push(self.step().clone());
         }
         states
     }
@@ -2027,6 +2116,208 @@ impl GateLevelSimulator {
 
 /// A memory of `depth` words of `width` bits holding `words` from address 0,
 /// zero elsewhere.
+/// One run of combinational operations in evaluation order
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CombSegment {
+    /// Operations `start..end` of the plan, each after everything it reads
+    Ordered { start: usize, end: usize },
+    /// Operations `start..end` read each other's outputs (a feedback loop,
+    /// such as a latch or a mutual-exclusion element): evaluated again in
+    /// order, each seeing the others' newest values, until none changes
+    Loop { start: usize, end: usize },
+}
+
+/// Evaluation order of every combinational operation of a SIR module:
+/// the strongly connected components of the graph of operations (an edge
+/// from the operation driving a signal to each one reading it), in
+/// dependency order. Acyclic logic is evaluated once per pass; only real
+/// feedback loops are iterated.
+#[derive(Debug, Clone, Default)]
+struct CombPlan {
+    /// (comb block, operation) in evaluation order
+    ops: Vec<(usize, usize)>,
+    segments: Vec<CombSegment>,
+    /// readers[signal id]: positions in `ops` of the operations reading it
+    readers: Vec<Vec<u32>>,
+    /// Positions of operations that read state other than signals (a
+    /// distributed RAM's contents), evaluated every time
+    always: Vec<u32>,
+}
+
+impl CombPlan {
+    fn new(sir: &Sir) -> Self {
+        let blocks = &sir.top_module.comb_blocks;
+        let mut ops = Vec::new();
+        let mut reads: Vec<Vec<u32>> = Vec::new();
+        let mut writes: Vec<Vec<u32>> = Vec::new();
+        for (b, block) in blocks.iter().enumerate() {
+            for (o, op) in block.operations.iter().enumerate() {
+                let (ins, outs) = match op {
+                    SirOperation::Primitive {
+                        inputs, outputs, ..
+                    } => (
+                        inputs.iter().map(|s| s.0).collect(),
+                        outputs.iter().map(|s| s.0).collect(),
+                    ),
+                    SirOperation::Assign { target, source } => {
+                        let ins = match source {
+                            crate::sir::SirExpression::Signal(id) => vec![id.0],
+                            _ => Vec::new(),
+                        };
+                        (ins, vec![target.0])
+                    }
+                    _ => continue,
+                };
+                ops.push((b, o));
+                reads.push(ins);
+                writes.push(outs);
+            }
+        }
+        let n = ops.len();
+        let mut driver: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for (i, outs) in writes.iter().enumerate() {
+            for &s in outs {
+                driver.insert(s, i);
+            }
+        }
+        // readers[i]: the operations that read an output of operation i
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut self_loop = vec![false; n];
+        for (i, ins) in reads.iter().enumerate() {
+            for s in ins {
+                if let Some(&d) = driver.get(s) {
+                    if d == i {
+                        self_loop[i] = true;
+                    } else {
+                        readers[d].push(i);
+                    }
+                }
+            }
+        }
+        for r in &mut readers {
+            r.sort_unstable();
+            r.dedup();
+        }
+        let components = strongly_connected(&readers);
+        // Tarjan finds components readers-first; evaluate drivers first
+        let mut plan = CombPlan::default();
+        let mut ordered_start: Option<usize> = None;
+        for mut component in components.into_iter().rev() {
+            let cyclic = component.len() > 1 || self_loop[component[0]];
+            if !cyclic {
+                ordered_start.get_or_insert(plan.ops.len());
+                plan.ops.push(ops[component[0]]);
+                continue;
+            }
+            if let Some(start) = ordered_start.take() {
+                plan.segments.push(CombSegment::Ordered {
+                    start,
+                    end: plan.ops.len(),
+                });
+            }
+            component.sort_unstable();
+            let start = plan.ops.len();
+            plan.ops.extend(component.iter().map(|&i| ops[i]));
+            plan.segments.push(CombSegment::Loop {
+                start,
+                end: plan.ops.len(),
+            });
+        }
+        if let Some(start) = ordered_start {
+            plan.segments.push(CombSegment::Ordered {
+                start,
+                end: plan.ops.len(),
+            });
+        }
+        let position: std::collections::HashMap<(usize, usize), u32> = plan
+            .ops
+            .iter()
+            .enumerate()
+            .map(|(p, &entry)| (entry, p as u32))
+            .collect();
+        for (i, ins) in reads.iter().enumerate() {
+            let p = position[&ops[i]];
+            for &s in ins {
+                let s = s as usize;
+                if s >= plan.readers.len() {
+                    plan.readers.resize(s + 1, Vec::new());
+                }
+                plan.readers[s].push(p);
+            }
+            let (b, o) = ops[i];
+            match &blocks[b].operations[o] {
+                SirOperation::Primitive {
+                    ptype: PrimitiveType::DistRamRead { .. },
+                    ..
+                } => plan.always.push(p),
+                SirOperation::Assign { .. } if ins.is_empty() => plan.always.push(p),
+                _ => {}
+            }
+        }
+        plan
+    }
+}
+
+/// Strongly connected components of a graph given as successor lists
+/// (iterative Tarjan), each component listed before any component that
+/// reaches it
+pub(crate) fn strongly_connected(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNSEEN: usize = usize::MAX;
+    let n = successors.len();
+    let mut index = vec![UNSEEN; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next = 0;
+    // (node, position in its successor list)
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        work.push((root, 0));
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&mut (v, ref mut pos)) = work.last_mut() {
+            if let Some(&w) = successors[v].get(*pos) {
+                *pos += 1;
+                if index[w] == UNSEEN {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut component = Vec::new();
+                loop {
+                    let w = stack.pop().expect("v is on the stack");
+                    on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                components.push(component);
+            }
+        }
+    }
+    components
+}
+
 fn initial_memory(words: Option<&Vec<u64>>, depth: usize, width: usize) -> Vec<Vec<bool>> {
     (0..depth)
         .map(|address| {
@@ -2051,6 +2342,155 @@ mod tests {
     // - Run gate-level simulation
     #![allow(dead_code, unused_imports)]
     use super::*;
+
+    use crate::gate_netlist_to_sir::convert_gate_netlist_to_sir;
+    use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+
+    fn gate(
+        netlist: &mut GateNetlist,
+        cell: &str,
+        path: &str,
+        ins: Vec<GateNetId>,
+        out: GateNetId,
+    ) {
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            cell.to_string(),
+            "generic_asic".to_string(),
+            0.1,
+            path.to_string(),
+            ins,
+            vec![out],
+        ));
+    }
+
+    fn simulator(netlist: &GateNetlist) -> GateLevelSimulator {
+        GateLevelSimulator::new(&convert_gate_netlist_to_sir(netlist).sir)
+    }
+
+    fn bit(sim: &GateLevelSimulator, name: &str) -> bool {
+        sim.get_output(name).expect(name)[0]
+    }
+
+    /// Gates listed in the opposite order to the signal flow still settle
+    /// in one step: evaluation follows the dependencies, not the listing
+    #[test]
+    fn deep_logic_listed_backwards_settles_in_one_step() {
+        let mut netlist = GateNetlist::new("t".into(), "generic_asic".into());
+        let a = netlist.add_input("a".into());
+        let y = netlist.add_output("y".into());
+        let mut nets = vec![y];
+        for k in 0..7 {
+            nets.push(netlist.add_net(GateNet::new(GateNetId(0), format!("n{k}"))));
+        }
+        nets.push(a);
+        // y = !n0, n0 = !n1, ..., n6 = !a: eight inverters, listed from y back
+        for k in 0..8 {
+            gate(
+                &mut netlist,
+                "INV_X1",
+                &format!("top.inv{k}"),
+                vec![nets[k + 1]],
+                nets[k],
+            );
+        }
+        let mut sim = simulator(&netlist);
+        for value in [true, false, true] {
+            sim.set_input("a", &[value]);
+            sim.step();
+            assert_eq!(bit(&sim, "y"), value, "eight inversions of {value}");
+        }
+    }
+
+    /// A latch of cross-coupled gates (a feedback loop) settles and holds
+    #[test]
+    fn cross_coupled_latch_settles_and_holds() {
+        let mut netlist = GateNetlist::new("t".into(), "generic_asic".into());
+        let set_n = netlist.add_input("set_n".into());
+        let reset_n = netlist.add_input("reset_n".into());
+        let q = netlist.add_output("q".into());
+        let q_n = netlist.add_net(GateNet::new(GateNetId(0), "q_n".into()));
+        gate(&mut netlist, "NAND2_X1", "top.nand_q", vec![set_n, q_n], q);
+        gate(
+            &mut netlist,
+            "NAND2_X1",
+            "top.nand_qn",
+            vec![reset_n, q],
+            q_n,
+        );
+        let mut sim = simulator(&netlist);
+        let drive = |sim: &mut GateLevelSimulator, s: bool, r: bool| {
+            sim.set_input("set_n", &[s]);
+            sim.set_input("reset_n", &[r]);
+            sim.step();
+            bit(sim, "q")
+        };
+        assert!(drive(&mut sim, false, true), "set");
+        assert!(drive(&mut sim, true, true), "holds 1");
+        assert!(!drive(&mut sim, true, false), "reset");
+        assert!(!drive(&mut sim, true, true), "holds 0");
+        assert!(!sim.reported_unsettled);
+    }
+
+    /// A ring with no stable state (an inverter driving itself) is reported
+    /// once instead of hanging the simulation
+    #[test]
+    fn oscillating_loop_is_reported() {
+        let mut netlist = GateNetlist::new("t".into(), "generic_asic".into());
+        let a = netlist.add_input("a".into());
+        let y = netlist.add_output("y".into());
+        let ring = netlist.add_net(GateNet::new(GateNetId(0), "ring".into()));
+        gate(&mut netlist, "NAND2_X1", "top.ring", vec![a, ring], ring);
+        gate(&mut netlist, "INV_X1", "top.out", vec![ring], y);
+        let mut sim = simulator(&netlist);
+        sim.set_input("a", &[false]);
+        sim.step();
+        assert!(!sim.reported_unsettled, "NAND with a low input is stable");
+        sim.set_input("a", &[true]);
+        sim.step();
+        sim.step();
+        assert!(sim.reported_unsettled);
+    }
+
+    /// Only gates whose inputs changed are evaluated again, and a fault
+    /// injected and then cleared still shows and then goes away, with no
+    /// input changing
+    #[test]
+    fn faults_take_effect_and_clear_without_input_changes() {
+        let mut netlist = GateNetlist::new("t".into(), "generic_asic".into());
+        let a = netlist.add_input("a".into());
+        let b = netlist.add_input("b".into());
+        let n = netlist.add_net(GateNet::new(GateNetId(0), "n".into()));
+        let y = netlist.add_output("y".into());
+        gate(&mut netlist, "NAND2_X1", "top.nand", vec![a, b], n);
+        gate(&mut netlist, "INV_X1", "top.inv", vec![n], y);
+        let result = convert_gate_netlist_to_sir(&netlist);
+        let mut sim = GateLevelSimulator::new(&result.sir);
+        sim.set_input("a", &[true]);
+        sim.set_input("b", &[true]);
+        sim.step();
+        assert!(bit(&sim, "y"));
+        let prim = result
+            .sir
+            .top_module
+            .comb_blocks
+            .iter()
+            .flat_map(|b| &b.operations)
+            .find_map(|op| match op {
+                SirOperation::Primitive { id, path, .. } if path.ends_with("inv") => Some(*id),
+                _ => None,
+            })
+            .expect("the inverter");
+        sim.inject_fault(FaultInjectionConfig::stuck_at_0(prim, 0));
+        sim.step();
+        assert!(!bit(&sim, "y"), "stuck at 0");
+        sim.clear_fault();
+        sim.step();
+        assert!(bit(&sim, "y"), "fault cleared");
+        sim.set_input("b", &[false]);
+        sim.step();
+        assert!(!bit(&sim, "y"));
+    }
 
     // Legacy test code commented out:
     /*

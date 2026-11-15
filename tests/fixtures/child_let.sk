@@ -1,0 +1,37 @@
+// `let` bindings inside the clocked block of a child instance, plain and
+// under an `if`
+
+entity ClAcc {
+    in clk: clock
+    in a: bit[8]
+    out s: bit[8]
+    out t: bit[8]
+}
+
+impl ClAcc {
+    signal acc: bit[8] = 0
+    signal odd: bit[8] = 0
+    on(clk.rise) {
+        let v: bit[8] = a + 1
+        acc = acc + v
+        if a[0] == 1 {
+            let w: bit[8] = a
+            odd = odd + w
+        }
+    }
+    s = acc
+    t = odd
+}
+
+entity ClTop {
+    in clk: clock
+    in x: bit[8]
+    out total: bit[8]
+    out odd_total: bit[8]
+}
+
+impl ClTop {
+    inst acc = ClAcc { clk: clk, a: x }
+    total = acc.s
+    odd_total = acc.t
+}

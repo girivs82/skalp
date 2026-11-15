@@ -1,4 +1,4 @@
-// NCL mux chain — tests cascaded mux selection (from CLE operand routing)
+// NCL mux chain — tests cascaded mux selection (operand routing)
 
 async entity NclMuxChain {
     in sel0: bit

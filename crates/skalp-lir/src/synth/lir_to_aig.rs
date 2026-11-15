@@ -503,6 +503,8 @@ impl<'a> LirToSynthAig<'a> {
             | LirOp::NclComplete { .. }
             | LirOp::NclNull { .. }
             | LirOp::NclMatchedDelay { .. }
+            | LirOp::NclStepControl
+            | LirOp::NclArbiter { .. }
             | LirOp::Tristate { .. } => true,
             _ => false,
         }

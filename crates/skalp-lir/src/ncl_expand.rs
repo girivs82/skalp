@@ -2933,15 +2933,72 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         };
     };
 
-    // go = req & delay(req). Lowering made `__ncl_go` the clock of the
-    // `on()` block's registers and memories.
+    // A block with stream ports is self-timed (`skalp_frontend::ncl_streams`):
+    // it steps whenever `__ncl_ready` says the channels of its next step are
+    // ready, while `ncl_req` (the run enable) is high.
+    let ready = new_lir
+        .get_signal(skalp_frontend::ncl_streams::NCL_READY_SIGNAL)
+        .filter(|s| s.driver.is_some())
+        .map(|s| s.id);
+    // Arbiters (`match arbitrate(..)` in the block): the behavioural
+    // fixed-priority grant becomes a mutual-exclusion element. Its requests
+    // are released while each step finishes (see below), so it decides
+    // afresh for every step.
+    let mut arbiters: Vec<(LirNodeId, Option<LirSignalId>)> = Vec::new();
+    if ready.is_some() {
+        use skalp_frontend::ncl_streams::NCL_ARBITER_PREFIX;
+        for k in 0.. {
+            let req_name = format!("{NCL_ARBITER_PREFIX}{k}_req");
+            let gnt_name = format!("{NCL_ARBITER_PREFIX}{k}_gnt");
+            let (Some(req_sig), Some(gnt_sig)) =
+                (new_lir.get_signal(&req_name), new_lir.get_signal(&gnt_name))
+            else {
+                break;
+            };
+            let (req_id, gnt_id, width) = (req_sig.id, gnt_sig.id, gnt_sig.width);
+            // the arm granted last (see `NclArbiter`)
+            let last = new_lir
+                .get_signal(&format!("{NCL_ARBITER_PREFIX}{k}_last"))
+                .filter(|s| s.width == width)
+                .map(|s| s.id);
+            match gnt_sig.driver {
+                Some(driver) => {
+                    let node = &mut new_lir.nodes[driver.0 as usize];
+                    node.op = LirOp::NclArbiter { width };
+                    node.inputs = vec![req_id];
+                    node.clock = None;
+                    node.reset = None;
+                    arbiters.push((driver, last));
+                }
+                None => {
+                    let node = new_lir.add_node(
+                        LirOp::NclArbiter { width },
+                        vec![req_id],
+                        gnt_id,
+                        format!("ncl_bundle.arbiter{k}"),
+                    );
+                    arbiters.push((node, last));
+                }
+            }
+        }
+    }
+
+    // The request that starts a step: `ncl_req` itself, or the block's own
+    // step request
+    let step_req = match ready {
+        Some(_) => new_lir.add_signal("__ncl_step_req".to_string(), 1),
+        None => req,
+    };
+
+    // go = step_req & delay(step_req). Lowering made `__ncl_go` the clock of
+    // the `on()` block's registers and memories.
     let go = match new_lir.get_signal(crate::mir_to_lir::NCL_GO_SIGNAL) {
         Some(signal) if signal.driver.is_none() => signal.id,
         _ => new_lir.add_signal(crate::mir_to_lir::NCL_GO_SIGNAL.to_string(), 1),
     };
     new_lir.add_node(
         LirOp::NclMatchedDelay { width: 1 },
-        vec![req],
+        vec![step_req],
         go,
         "ncl_bundle.go".to_string(),
     );
@@ -2963,7 +3020,7 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
     }
 
     // done = go & delay(go): the registers' new outputs have settled
-    let done = if has_regs {
+    let done = if has_regs || ready.is_some() {
         let done = new_lir.add_signal("__ncl_done".to_string(), 1);
         new_lir.add_node(
             LirOp::NclMatchedDelay { width: 1 },
@@ -2974,6 +3031,67 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         done
     } else {
         go
+    };
+
+    // Self-timed step loop:
+    //
+    //   step_req = !done & ((ncl_req & ready) | step_req)   (a latch)
+    //   ncl_ack  = ncl_req | step_req | go | done
+    //
+    // While the block waits (step_req, go and done low), `ready` can only
+    // rise: the channel phases it reads change only at the other end, and
+    // what the next step uses comes from registers that do not change until
+    // `go`. Once set, the step request holds itself until `done`, whatever
+    // the new state does to `ready` and whenever the parent drops `ncl_req`:
+    // a step that has begun always runs its full length, so `go` is never
+    // a runt. `ncl_req` falling just as `ready` rises can leave the latch
+    // undecided for a while; the matched delay to `go` covers that like an
+    // arbiter's wait (see `ncl_bundle`). `done` ends the step and the
+    // request falls. The next step starts when `done` has fallen and
+    // `ready` is up again (the next-state check times `ready` against
+    // `done`). The acknowledge stays up from the moment a step is decided
+    // until it has finished, so a parent that drops `ncl_req` sees it fall
+    // once the block has stopped.
+    let done = if let Some(ready) = ready {
+        // Arbiter requests drop while `done` is up: the step has latched
+        // what its grant chose, and the next step arbitrates again. A tree
+        // of mutual-exclusion elements whose side keeps some request up
+        // would otherwise never let the other side in.
+        for &(node, last) in &arbiters {
+            let inputs = &mut new_lir.nodes[node.0 as usize].inputs;
+            inputs.push(done);
+            inputs.extend(last);
+        }
+        new_lir.add_node(
+            LirOp::NclStepControl,
+            vec![req, done, ready],
+            step_req,
+            "ncl_bundle.step".to_string(),
+        );
+        let started = new_lir.add_signal("__ncl_started".to_string(), 1);
+        new_lir.add_node(
+            LirOp::Or { width: 1 },
+            vec![step_req, go],
+            started,
+            "ncl_bundle.started".to_string(),
+        );
+        let stepping = new_lir.add_signal("__ncl_stepping".to_string(), 1);
+        new_lir.add_node(
+            LirOp::Or { width: 1 },
+            vec![started, done],
+            stepping,
+            "ncl_bundle.stepping".to_string(),
+        );
+        let busy = new_lir.add_signal("__ncl_busy".to_string(), 1);
+        new_lir.add_node(
+            LirOp::Or { width: 1 },
+            vec![req, stepping],
+            busy,
+            "ncl_bundle.busy".to_string(),
+        );
+        busy
+    } else {
+        done
     };
 
     // ncl_ack follows `done` instead of the behavioural `ncl_ack = ncl_req`

@@ -382,6 +382,10 @@ impl TimingDb {
     }
 }
 
+/// A wire name split into its tile column, row and base name. The clock
+/// tree's wires carry the type of the tile that owns them before the base
+/// name (`R56C109_HROW:HPRX0200`, `R41C91_BRANCH:HPBX0200`); the PIP classes
+/// know them by the base name alone, so the tile type is dropped.
 fn wire_parts(name: &str) -> (i32, i32, String) {
     if let Some(global) = name.strip_prefix("G:") {
         return (0, 0, global.to_string());
@@ -389,6 +393,7 @@ fn wire_parts(name: &str) -> (i32, i32, String) {
     let parsed = name.strip_prefix('R').and_then(|rest| {
         let (row, rest) = rest.split_once('C')?;
         let (column, base) = rest.split_once('_')?;
+        let base = base.rsplit_once(':').map_or(base, |(_, b)| b);
         Some((column.parse().ok()?, row.parse().ok()?, base.to_string()))
     });
     parsed.unwrap_or((0, 0, name.to_string()))
@@ -605,6 +610,30 @@ mod tests {
             (97, 2, "H01W0300".to_string())
         );
         assert_eq!(wire_parts("G:VCC"), (0, 0, "VCC".to_string()));
+        assert_eq!(
+            wire_parts("R56C85_SPINE:VPSX1100"),
+            (85, 56, "VPSX1100".to_string())
+        );
+    }
+
+    /// The clock tree's row and spine hops have delays (they used to be
+    /// timed as 0 ps). The last hop, branch to clock pin, solves to about 0.
+    #[test]
+    fn clock_tree_hops_have_delays() {
+        let Some(db) = super::super::prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let timing = TimingDb::load(&db, NexusVariant::Lifcl40).unwrap();
+        for (from, to) in [
+            ("R56C109_HROW:HPRX1100", "R56C85_SPINE:VPSX1100"),
+            ("R56C85_SPINE:VPSX1100", "R41C91_BRANCH:HPBX0200"),
+        ] {
+            assert!(
+                timing.pip_delay_ps(from, to) > 0,
+                "{from} -> {to} has no delay"
+            );
+        }
     }
 
     #[test]

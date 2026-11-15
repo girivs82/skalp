@@ -43,7 +43,7 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
     // CRITICAL: Flatten hierarchical instances BEFORE converting top-level logic
     // This ensures that instance output signals are driven before the top-level
     // logic tries to read from them. Without this order, instance result signals
-    // (like exec_l4_l5_result_109) won't have drivers when top-level logic
+    // (like exec_unit_result_109) won't have drivers when top-level logic
     // tries to use them.
     converter.flatten_instances("");
 
@@ -4568,13 +4568,13 @@ impl<'a> MirToSirConverter<'a> {
 
                 // BUG #209 FIX: Signal not found in top-level module - search in child modules
                 // This happens when trait method inlining creates entity instances that are
-                // drained into child modules (e.g., func_exec_l2), but the expressions
+                // drained into child modules (e.g., func_exec), but the expressions
                 // referencing their outputs remain in the top-level module.
                 //
                 // For each child module, find:
                 // 1. The signal by ID
                 // 2. Which instance(s) of that module exist in the current module
-                // 3. Construct the prefixed signal name (e.g., "exec_l2_inst.signal_name")
+                // 3. Construct the prefixed signal name (e.g., "exec_inst.signal_name")
                 for child_module in &self.mir_design.modules {
                     if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
                         // Found the signal in a child module
@@ -4757,6 +4757,18 @@ impl<'a> MirToSirConverter<'a> {
         right: usize,
         is_signed_from_mir: bool,
     ) -> usize {
+        // `&&` and `||` act on truth values: a wider operand counts as true
+        // when it is not zero, and the result is one bit. (Taken bitwise at
+        // the wider width, `true && x` would come out as wide as the widest
+        // operand, which shifts every later part of a concatenation.)
+        let (left, right) = if matches!(
+            op,
+            skalp_mir::BinaryOp::LogicalAnd | skalp_mir::BinaryOp::LogicalOr
+        ) {
+            (self.truth_value_node(left), self.truth_value_node(right))
+        } else {
+            (left, right)
+        };
         let node_id = self.next_node_id();
 
         let left_signal = self.node_to_signal_ref(left);
@@ -4872,6 +4884,18 @@ impl<'a> MirToSirConverter<'a> {
 
         self.sir.combinational_nodes.push(node);
         node_id
+    }
+
+    /// One-bit truth value of a node's output: the output itself when it is
+    /// one bit wide, otherwise whether it is not zero
+    fn truth_value_node(&mut self, node: usize) -> usize {
+        let signal = self.node_to_signal_ref(node);
+        let width = self.get_signal_width(&signal.signal_id);
+        if width <= 1 {
+            return node;
+        }
+        let zero = self.create_constant_node(0, width);
+        self.create_binary_op_node(&skalp_mir::BinaryOp::NotEqual, node, zero)
     }
 
     fn create_unary_op_node(&mut self, op: &skalp_mir::UnaryOp, operand: usize) -> usize {
@@ -7550,8 +7574,8 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Step 1c: Create signals for INPUT ports of the child module
-        // BUG #124 FIX: Nested instances (e.g., quadratic_solve inside exec_l4_l5) may reference
-        // parent module ports (e.g., exec_l4_l5.param_1). These need to exist as actual SIR signals
+        // BUG #124 FIX: Nested instances (e.g., quadratic_solve inside exec_unit) may reference
+        // parent module ports (e.g., exec_unit.param_1). These need to exist as actual SIR signals
         // so nested instances can read them. Without this, the signal lookup fails and returns 0.
         for port in &child_module.ports {
             if matches!(port.direction, skalp_mir::PortDirection::Input) {
@@ -8054,7 +8078,7 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // BUG FIX #124: Store the port_mapping for this instance so nested instances can look it up
-        // This enables recursive port resolution for 3-level nesting (e.g., CLE → exec_l4_l5 → quadratic_solve)
+        // This enables recursive port resolution for 3-level nesting (e.g., top → unit → function)
         self.instance_port_mappings
             .insert(inst_prefix.to_string(), port_mapping.clone());
 
@@ -8300,6 +8324,44 @@ impl<'a> MirToSirConverter<'a> {
                     };
                     // Translate MIR clock name to internal name for SIR
                     let clock_signal = self.translate_to_internal_name(&clock_signal_mir);
+
+                    // `let` bindings in the block (blocking writes of process
+                    // variables) drive their `<inst>.<name>_<id>` signals, which
+                    // the register logic below reads. Without this every
+                    // reader of a `let` inside a child's clocked block saw 0.
+                    // A binding is visible only in its own scope, so it can
+                    // drive its signal unconditionally; a variable written
+                    // more than once (`let mut` reassigned) has no single
+                    // value and is left to the register logic.
+                    let mut bindings: Vec<&skalp_mir::Assignment> = Vec::new();
+                    collect_variable_bindings(&process.body.statements, &mut bindings);
+                    let mut writes: HashMap<skalp_mir::VariableId, usize> = HashMap::new();
+                    for b in &bindings {
+                        if let LValue::Variable(id) = &b.lhs {
+                            *writes.entry(*id).or_default() += 1;
+                        }
+                    }
+                    for b in bindings {
+                        let LValue::Variable(id) = &b.lhs else {
+                            continue;
+                        };
+                        if writes[id] != 1 {
+                            continue;
+                        }
+                        let assign = skalp_mir::ContinuousAssign {
+                            lhs: b.lhs.clone(),
+                            rhs: b.rhs.clone(),
+                            span: None,
+                        };
+                        self.convert_child_assignment_with_context(
+                            &assign,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            parent_module_for_signals,
+                            parent_prefix,
+                        );
+                    }
 
                     // Process sequential block: collect targets, build MUX trees, create FlipFlops
                     // This mirrors how the regular (non-hierarchical) conversion works
@@ -9807,9 +9869,9 @@ impl<'a> MirToSirConverter<'a> {
                                 // CRITICAL: Pass parent_module_for_signals as child_module since the
                                 // expression contains Port references from the PARENT module, not the child.
                                 // BUG #124 FIX: Look up the PARENT's port_mapping from instance_port_mappings
-                                // so we can resolve parent ports (like exec_l4_l5.param_1) to grandparent signals (like CLE.data1).
-                                // Handle key format: parent_prefix may have trailing dot (e.g., "exec_l4_l5_inst_233.")
-                                // but we store without trailing dot (e.g., "exec_l4_l5_inst_233")
+                                // so we can resolve parent ports (like unit.param_1) to grandparent signals (like top.data1).
+                                // Handle key format: parent_prefix may have trailing dot (e.g., "exec_unit_inst_233.")
+                                // but we store without trailing dot (e.g., "exec_unit_inst_233")
                                 let parent_key = parent_prefix.trim_end_matches('.');
                                 let parent_port_mapping = self
                                     .instance_port_mappings
@@ -9949,7 +10011,7 @@ impl<'a> MirToSirConverter<'a> {
                             // BUG #113 FIX: DO NOT try child_module with inst_prefix here!
                             // After recursion, inst_prefix is from the PARENT context, not current
                             // child_module. Using child_module.ports with inst_prefix creates
-                            // wrong signal names like "exec_l4_l5_inst_233.param_1".
+                            // wrong signal names like "exec_unit_inst_233.param_1".
                             // Let it fall through to the fallback lookup below instead.
                         }
 
@@ -11154,4 +11216,37 @@ fn memory_initial_contents(signal: &skalp_mir::mir::Signal) -> Option<Vec<u64>> 
         return None;
     }
     signal.memory_config.as_ref()?.init.clone()
+}
+
+/// Blocking writes of process variables (`let` bindings) in `statements`,
+/// at any depth
+fn collect_variable_bindings<'a>(
+    statements: &'a [Statement],
+    out: &mut Vec<&'a skalp_mir::Assignment>,
+) {
+    for statement in statements {
+        match statement {
+            Statement::Assignment(a)
+                if a.kind == AssignmentKind::Blocking && matches!(a.lhs, LValue::Variable(_)) =>
+            {
+                out.push(a)
+            }
+            Statement::Block(b) => collect_variable_bindings(&b.statements, out),
+            Statement::If(i) => {
+                collect_variable_bindings(&i.then_block.statements, out);
+                if let Some(e) = &i.else_block {
+                    collect_variable_bindings(&e.statements, out);
+                }
+            }
+            Statement::Case(c) => {
+                for item in &c.items {
+                    collect_variable_bindings(&item.block.statements, out);
+                }
+                if let Some(d) = &c.default {
+                    collect_variable_bindings(&d.statements, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }

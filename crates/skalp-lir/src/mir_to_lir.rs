@@ -174,6 +174,10 @@ pub struct MirToLirTransform {
     /// Expression memoization cache for CSE: (expression, expected_width) -> LirSignalId
     /// Shared conditions across registers (e.g., FSM state comparisons) are computed once
     expression_cache: HashMap<(Expression, u32), LirSignalId>,
+    /// Blocking writes (`let` bindings) of clocked blocks already lowered:
+    /// several paths of the clocked-`if` lowering reach the same binding,
+    /// and each must drive its variable once
+    lowered_bindings: HashSet<(LValue, Expression)>,
     /// Registers written in parts (`flags[5] <= x`), each lowered as one
     /// register per segment; the whole signal is the concatenation.
     register_segments: Vec<RegisterSegment>,
@@ -228,6 +232,7 @@ impl MirToLirTransform {
             memory_signals: IndexMap::new(),
             target_has_bram: false,
             expression_cache: HashMap::new(),
+            lowered_bindings: HashSet::new(),
             register_segments: Vec::new(),
         }
     }
@@ -1835,6 +1840,15 @@ impl MirToLirTransform {
                 }
             }
             Statement::If(if_stmt) => {
+                // `let` bindings in either branch drive their variables
+                // before any register logic reads them. (The per-target
+                // paths below only did this for nested branches, so a `let`
+                // directly inside a branch read 0.)
+                self.transform_blocking_assignments_recursive(&if_stmt.then_block);
+                if let Some(ref else_block) = if_stmt.else_block {
+                    self.transform_blocking_assignments_recursive(else_block);
+                }
+
                 // Check for SDFF pattern: if (reset) { reg = const } else { reg = value }
                 // When detected, skip the mux and use integrated synchronous reset
                 let reset_condition = self.reset_condition(&if_stmt.condition);
@@ -2617,8 +2631,13 @@ impl MirToLirTransform {
                 Statement::Assignment(assign)
                     if matches!(assign.kind, AssignmentKind::Blocking) =>
                 {
-                    // Transform blocking assignment as combinational
-                    self.transform_combinational_statement(stmt);
+                    // Transform blocking assignment as combinational, once
+                    if self
+                        .lowered_bindings
+                        .insert((assign.lhs.clone(), assign.rhs.clone()))
+                    {
+                        self.transform_combinational_statement(stmt);
+                    }
                 }
                 Statement::Block(inner_block) => {
                     self.transform_blocking_assignments_recursive(inner_block);
