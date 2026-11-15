@@ -237,17 +237,17 @@ enum SimulatorBackend {
     CompiledCpu(CompiledCpuRuntime),
     /// Behavioral GPU simulation (macOS only, uses SirModule with Metal)
     #[cfg(target_os = "macos")]
-    BehavioralGpu(GpuRuntime),
+    BehavioralGpu(Box<GpuRuntime>),
     /// Gate-level CPU simulation (synchronous)
     GateLevelCpu(crate::gate_simulator::GateLevelSimulator),
     /// Gate-level GPU simulation (macOS only, synchronous)
     #[cfg(target_os = "macos")]
-    GateLevelGpu(crate::gpu_gate_runtime::GpuGateRuntime),
+    GateLevelGpu(Box<crate::gpu_gate_runtime::GpuGateRuntime>),
     /// NCL gate-level CPU simulation (asynchronous)
     NclCpu(Box<NclSimulator>),
     /// NCL gate-level GPU simulation (macOS only, asynchronous)
     #[cfg(target_os = "macos")]
-    NclGpu(crate::gpu_ncl_runtime::GpuNclRuntime),
+    NclGpu(Box<crate::gpu_ncl_runtime::GpuNclRuntime>),
 }
 
 impl UnifiedSimulator {
@@ -480,7 +480,7 @@ impl UnifiedSimulator {
             {
                 match crate::gpu_gate_runtime::GpuGateRuntime::new(sir) {
                     Ok(runtime) => {
-                        self.backend = SimulatorBackend::GateLevelGpu(runtime);
+                        self.backend = SimulatorBackend::GateLevelGpu(Box::new(runtime));
                         return Ok(());
                     }
                     Err(e) => {
@@ -539,7 +539,7 @@ impl UnifiedSimulator {
             {
                 match crate::gpu_ncl_runtime::GpuNclRuntime::new(netlist.clone()) {
                     Ok(runtime) => {
-                        self.backend = SimulatorBackend::NclGpu(runtime);
+                        self.backend = SimulatorBackend::NclGpu(Box::new(runtime));
                         return Ok(());
                     }
                     Err(e) => {
@@ -611,7 +611,7 @@ impl UnifiedSimulator {
                                 // Fall through to CPU
                             }
                             Ok(()) => {
-                                self.backend = SimulatorBackend::BehavioralGpu(runtime);
+                                self.backend = SimulatorBackend::BehavioralGpu(Box::new(runtime));
                                 return Ok(());
                             }
                         }
