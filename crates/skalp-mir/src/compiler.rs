@@ -93,7 +93,11 @@ impl MirCompiler {
         let hir = if skalp_frontend::ncl_streams::has_async_streams(hir) {
             let mut lowered = hir.clone();
             let others: Vec<&Hir> = module_hirs.values().collect();
-            let errors = skalp_frontend::ncl_streams::lower_async_streams(&mut lowered, &others);
+            let skalp_frontend::ncl_streams::StreamLowering { errors, warnings } =
+                skalp_frontend::ncl_streams::lower_async_streams(&mut lowered, &others);
+            for w in &warnings {
+                eprintln!("Stream warning: {}", w);
+            }
             if !errors.is_empty() {
                 return Err(format!(
                     "stream check failed with {} error(s):\n  {}",

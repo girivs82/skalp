@@ -136,3 +136,126 @@ async fn streams_merge_gate_level_lut_latch() {
         .expect("build gate-level testbench");
     run_merge(tb, 60).await;
 }
+
+const BAD_CONDITION: &str = "tests/fixtures/ncl_streams_bad_condition.sk";
+
+/// The error building `top` from the bad-condition fixture at gate level
+async fn condition_error(top: &str) -> String {
+    match Testbench::gate_level_with_top(BAD_CONDITION, top).await {
+        Ok(_) => panic!("{top}: built, but its send/recv conditions read an input"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+#[tokio::test]
+async fn step_condition_on_a_parent_input_is_refused() {
+    let error = condition_error("BcGatedTop").await;
+    assert!(error.contains("BcGated"), "{error}");
+    assert!(error.contains("input `enable`"), "{error}");
+}
+
+#[tokio::test]
+async fn step_condition_on_received_data_is_refused() {
+    let error = condition_error("BcFilterTop").await;
+    assert!(error.contains("BcFilter"), "{error}");
+    assert!(error.contains("input `i`"), "{error}");
+    // the blocks whose conditions are their own registers are fine
+    assert!(!error.contains("BcSink"), "{error}");
+    assert!(!error.contains("BcProducer"), "{error}");
+}
+
+/// Stream warnings for `source` (the deadlock check)
+fn stream_warnings(source: &str) -> Vec<String> {
+    let mut hir = skalp_frontend::parse_and_build_hir(source).expect("parse");
+    let lowering = skalp_frontend::ncl_streams::lower_async_streams(&mut hir, &[]);
+    assert!(lowering.errors.is_empty(), "{:?}", lowering.errors);
+    lowering.warnings
+}
+
+/// A relay that receives, then sends what it received, in every step
+const RELAY: &str = "
+async entity Relay {
+    in i: stream<bit[8]>
+    out o: stream<bit[8]>
+}
+impl Relay {
+    on() {
+        let v: bit[8] = i.recv()
+        o.send(v + 1)
+    }
+}
+";
+
+#[test]
+fn a_ring_of_relays_warns_of_deadlock() {
+    let source = format!(
+        "{RELAY}
+entity Ring {{
+    in clk: clock
+    in run: bit
+}}
+impl Ring {{
+    signal req: bit = 0
+    inst a = Relay {{ i: c.o, ncl_req: req }}
+    inst b = Relay {{ i: a.o, ncl_req: req }}
+    inst c = Relay {{ i: b.o, ncl_req: req }}
+    on(clk.rise) {{
+        req = run
+    }}
+}}
+"
+    );
+    let warnings = stream_warnings(&source);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let w = &warnings[0];
+    assert!(w.contains("deadlock"), "{w}");
+    for channel in ["a.o -> b.i", "b.o -> c.i", "c.o -> a.i"] {
+        assert!(w.contains(channel), "{w}");
+    }
+}
+
+#[test]
+fn a_ring_with_a_block_that_sends_first_does_not_warn() {
+    // The starter sends on its own steps (when `primed` is clear) without
+    // receiving, then receives what comes back round
+    let source = format!(
+        "{RELAY}
+async entity Starter {{
+    in i: stream<bit[8]>
+    out o: stream<bit[8]>
+}}
+impl Starter {{
+    signal primed: bit = 0
+    on() {{
+        if primed == 0 {{
+            o.send(8'h01)
+            primed = 1
+        }} else {{
+            let v: bit[8] = i.recv()
+            primed = 0
+        }}
+    }}
+}}
+entity Ring {{
+    in clk: clock
+    in run: bit
+}}
+impl Ring {{
+    signal req: bit = 0
+    inst a = Starter {{ i: b.o, ncl_req: req }}
+    inst b = Relay {{ i: a.o, ncl_req: req }}
+    on(clk.rise) {{
+        req = run
+    }}
+}}
+"
+    );
+    assert!(stream_warnings(&source).is_empty());
+}
+
+#[test]
+fn a_pipeline_does_not_warn() {
+    // Producer to consumer (the fixture's design): no cycle
+    let source = std::fs::read_to_string(FIXTURE).expect("fixture");
+    assert!(stream_warnings(&source).is_empty());
+}
