@@ -3457,6 +3457,9 @@ fn merge_physical_nodes_into_netlist(
                     .map(|i| output_nets.get(i).copied().unwrap_or(GateNetId(0)))
                     .collect();
                 let cells = ArbiterCells {
+                    lut4: library
+                        .find_best_cell(&CellFunction::Lut4)
+                        .map(LibraryCellInfo::from_library_cell),
                     inv: lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1),
                     and2: and2_cell.clone(),
                     or2: or2_cell.clone(),
@@ -4442,9 +4445,23 @@ pub fn synthesize_hierarchical(
     library: &TechLibrary,
     preset: crate::synth::SynthPreset,
 ) -> crate::hierarchical_netlist::HierarchicalNetlist {
+    synthesize_hierarchical_cached(hier_lir, library, preset, None)
+}
+
+/// [`synthesize_hierarchical`], taking each module's netlist from `cache`
+/// when it holds one and storing the ones it synthesizes
+pub fn synthesize_hierarchical_cached(
+    hier_lir: &crate::mir_to_lir::HierarchicalMirToLirResult,
+    library: &TechLibrary,
+    preset: crate::synth::SynthPreset,
+    cache: Option<&crate::synth_cache::SynthCache>,
+) -> crate::hierarchical_netlist::HierarchicalNetlist {
     use crate::compiled_ip::CompiledIp;
     use crate::hierarchical_netlist::{HierarchicalNetlist, InstanceNetlist, PortConnection};
     use crate::mir_to_lir::PortConnectionInfo;
+    use rayon::prelude::*;
+    use std::borrow::Cow;
+    use std::collections::HashMap;
 
     let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
     result.retime_regions = hier_lir.retime_regions.clone();
@@ -4494,6 +4511,21 @@ pub fn synthesize_hierarchical(
     let mut sorted_paths: Vec<_> = hier_lir.instances.keys().collect();
     sorted_paths.sort();
 
+    // Where each instance's netlist comes from. Synthesis of a module depends
+    // only on its LIR, the library and the preset, so instances with the same
+    // LIR (copies of one module) are synthesized once, and the distinct ones
+    // run in parallel.
+    enum Source<'a> {
+        Ready(Box<GateNetlist>),
+        Lir(Box<Cow<'a, Lir>>),
+    }
+    enum Job {
+        Ready(Box<GateNetlist>),
+        Synth(usize),
+    }
+    let mut jobs: Vec<Cow<'_, Lir>> = Vec::new();
+    let mut job_of_key: HashMap<blake3::Hash, usize> = HashMap::new();
+    let mut planned = Vec::with_capacity(sorted_paths.len());
     for path in sorted_paths {
         let inst_lir = hier_lir.instances.get(path).unwrap();
 
@@ -4501,13 +4533,16 @@ pub fn synthesize_hierarchical(
         let needs_promotion = signals_needed_by_children.get(path.as_str());
         let mut internal_outputs = std::collections::HashSet::new();
 
-        let netlist = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
+        let source = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
-                Ok(compiled_ip) => compiled_ip.netlist.clone(),
-                Err(_e) => synthesize(&inst_lir.lir_result.lir, library, preset).netlist,
+                Ok(compiled_ip) => Source::Ready(Box::new(compiled_ip.netlist.clone())),
+                Err(_e) => Source::Lir(Box::new(Cow::Borrowed(&inst_lir.lir_result.lir))),
             }
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
-            create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
+            Source::Ready(Box::new(create_blackbox_netlist(
+                blackbox_info,
+                &inst_lir.module_name,
+            )))
         } else if let Some(signal_names) = needs_promotion {
             // Promote internal signals so synthesis preserves them.
             // Signals driven by children (instance outputs like "core_y")
@@ -4516,7 +4551,12 @@ pub fn synthesize_hierarchical(
             // Signals consumed by children (internal computed values like "t0")
             // must be outputs.
             let mut lir = inst_lir.lir_result.lir.clone();
-            for sig_name in signal_names {
+            // In name order: the promoted ports are appended to the module's
+            // inputs and outputs, and a set's order changes from run to run,
+            // which would change the synthesized netlist (and its cache key)
+            let mut signal_names: Vec<&String> = signal_names.iter().collect();
+            signal_names.sort();
+            for sig_name in signal_names.into_iter().cloned() {
                 if let Some(sig_id) = lir.signals.iter().position(|s| s.name == *sig_name) {
                     let sid = crate::lir::LirSignalId(sig_id as u32);
                     let sig = &lir.signals[sig_id];
@@ -4547,9 +4587,68 @@ pub fn synthesize_hierarchical(
                     }
                 }
             }
-            synthesize(&lir, library, preset).netlist
+            Source::Lir(Box::new(Cow::Owned(lir)))
         } else {
-            synthesize(&inst_lir.lir_result.lir, library, preset).netlist
+            Source::Lir(Box::new(Cow::Borrowed(&inst_lir.lir_result.lir)))
+        };
+        let job = match source {
+            Source::Ready(netlist) => Job::Ready(netlist),
+            Source::Lir(lir) => {
+                let bytes = bincode::serialize(&*lir).expect("LIR serializes");
+                let key = blake3::hash(&bytes);
+                let next = jobs.len();
+                Job::Synth(*job_of_key.entry(key).or_insert_with(|| {
+                    jobs.push(*lir);
+                    next
+                }))
+            }
+        };
+        planned.push((path, job, internal_outputs));
+    }
+
+    let distinct = jobs.len();
+    let copies = planned
+        .iter()
+        .filter(|(_, job, _)| matches!(job, Job::Synth(_)))
+        .count();
+    tracing::info!(
+        "[SYNTH_HIER] synthesizing {} distinct module(s) for {} instance(s)",
+        distinct,
+        copies
+    );
+    let library_hash = cache.and_then(|_| crate::synth_cache::SynthCache::library_hash(library));
+    let hits = std::sync::atomic::AtomicUsize::new(0);
+    let synthesized: Vec<GateNetlist> = jobs
+        .par_iter()
+        .map(|lir| {
+            let key = cache
+                .zip(library_hash.as_ref())
+                .and_then(|(cache, lib)| Some((cache, cache.key(lir, lib, preset)?)));
+            if let Some(netlist) = key.as_ref().and_then(|(cache, key)| cache.get(key)) {
+                hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return netlist;
+            }
+            let netlist = synthesize(lir, library, preset).netlist;
+            if let Some((cache, key)) = &key {
+                cache.put(key, &netlist);
+            }
+            netlist
+        })
+        .collect();
+    if let Some(cache) = cache {
+        tracing::info!(
+            "[SYNTH_HIER] {} of {} module(s) from the synthesis cache in {:?}",
+            hits.into_inner(),
+            distinct,
+            cache.dir()
+        );
+    }
+
+    for (path, job, internal_outputs) in planned {
+        let inst_lir = hier_lir.instances.get(path).unwrap();
+        let netlist = match job {
+            Job::Ready(netlist) => *netlist,
+            Job::Synth(index) => synthesized[index].clone(),
         };
 
         let mut inst_netlist = InstanceNetlist::new(inst_lir.module_name.clone(), netlist);
@@ -4789,6 +4888,9 @@ fn create_blackbox_netlist(
 
 /// Library cells an arbiter is built from
 struct ArbiterCells {
+    /// A 4-input LUT, where the library has one: the mutual exclusion's
+    /// state is then one LUT with its own feedback
+    lut4: Option<LibraryCellInfo>,
     inv: LibraryCellInfo,
     and2: LibraryCellInfo,
     or2: LibraryCellInfo,
@@ -4838,10 +4940,23 @@ fn arbiter_net(
     ))
 }
 
-/// Mutual exclusion between two requests: cross-coupled NANDs
-/// (`x0 = !(r0 & x1)`, `x1 = !(r1 & x0)`) and a grant per side
-/// (`g0 = !x0 & x1`). Only one grant is ever high once the latch has
-/// resolved; the block's matched delay after `ready` gives it time to.
+/// Mutual exclusion between two requests.
+///
+/// Where the library has a 4-input LUT, the state is one LUT whose output
+/// `w` feeds back into it ([`crate::gate_netlist::ARBITER_MUTEX_INIT`]): `w`
+/// turns to the side that requests alone and holds while both request, and
+/// the grants are `g0 = r0 & !w`, `g1 = r1 & w`. A grant only rises once `w`
+/// has settled on its side, and a request arriving later cannot take it
+/// away. When the requests arrive together, the decision is the settling of
+/// that one-LUT loop, which resolves far faster than a loop through two
+/// LUTs and the routing between them (whose two halves can also chase each
+/// other round the loop); the block's matched delay after `ready` waits for
+/// it.
+///
+/// Without LUTs: cross-coupled NANDs (`x0 = !(r0 & x1)`, `x1 = !(r1 & x0)`)
+/// and a grant per side (`g0 = !x0 & x1`). Only one grant is ever high once
+/// the latch has resolved; the block's matched delay after `ready` gives it
+/// time to.
 fn arbiter_mutex(
     netlist: &mut GateNetlist,
     cells: &ArbiterCells,
@@ -4850,6 +4965,57 @@ fn arbiter_mutex(
     r1: GateNetId,
     counter: &mut usize,
 ) -> (GateNetId, GateNetId) {
+    if let Some(lut) = &cells.lut4 {
+        let w = arbiter_net(netlist, path, "w", counter);
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            lut.name.clone(),
+            cells.library.clone(),
+            lut.fit,
+            format!("{}.arb_mutex{}", path, counter),
+            vec![r0, r1, w, w],
+            vec![w],
+        );
+        *counter += 1;
+        lut.apply_to_cell(&mut cell);
+        cell.lut_init = Some(crate::gate_netlist::ARBITER_MUTEX_INIT);
+        cell.source_op = Some(crate::gate_netlist::ARBITER_OP.to_string());
+        netlist.add_cell(cell);
+        let not_w = arbiter_net(netlist, path, "nw", counter);
+        arbiter_gate(
+            netlist,
+            &cells.inv,
+            &cells.library,
+            path,
+            "inv",
+            counter,
+            vec![w],
+            not_w,
+        );
+        let g0 = arbiter_net(netlist, path, "g", counter);
+        arbiter_gate(
+            netlist,
+            &cells.and2,
+            &cells.library,
+            path,
+            "and",
+            counter,
+            vec![r0, not_w],
+            g0,
+        );
+        let g1 = arbiter_net(netlist, path, "g", counter);
+        arbiter_gate(
+            netlist,
+            &cells.and2,
+            &cells.library,
+            path,
+            "and",
+            counter,
+            vec![r1, w],
+            g1,
+        );
+        return (g0, g1);
+    }
     let x0 = arbiter_net(netlist, path, "x", counter);
     let x1 = arbiter_net(netlist, path, "x", counter);
     arbiter_gate(

@@ -155,6 +155,7 @@ mod test_struct_cast_patterns;
 mod test_struct_field_cast;
 mod test_submodule_mult;
 mod test_sv_width_and_generic_regressions;
+mod test_synth_hierarchical_parallel;
 mod test_synthesis_optimization;
 mod test_tech_mapping_flow;
 mod test_technology_mapping;
