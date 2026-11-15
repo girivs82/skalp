@@ -225,10 +225,27 @@ pub fn parse_and_build_compilation_context_from_source(
     monomorphized_hir.main_entity_names = main_entity_names;
 
     // Extract all loaded module HIRs from the resolver
-    let module_hirs: IndexMap<PathBuf, Hir> = resolver
+    let mut module_hirs: IndexMap<PathBuf, Hir> = resolver
         .loaded_modules()
         .map(|(path, hir)| (path.clone(), hir.clone()))
         .collect();
+
+    // An async entity has no clock: each step takes as long as its own
+    // logic, so there are no stages to add or registers to retime.
+    // #[pipeline] and #[retime] on one are ignored, which lets one source
+    // serve both a clocked and an async build of a design.
+    let mut ignored = strip_async_pipelining(&mut monomorphized_hir);
+    for module in module_hirs.values_mut() {
+        ignored.extend(strip_async_pipelining(module));
+    }
+    ignored.sort();
+    ignored.dedup();
+    for name in ignored {
+        tracing::info!(
+            "`{name}` is async: its #[pipeline] / #[retime] is ignored (an async entity has \
+             no clock to pipeline against)"
+        );
+    }
 
     // Latencies synthesis chose for bare #[pipeline] entities: the design's
     // own lock file, then the lock files beside the files defining them
@@ -256,6 +273,16 @@ pub fn parse_and_build_compilation_context_from_source(
         main_hir: monomorphized_hir,
         module_hirs,
     })
+}
+
+/// Drop `#[pipeline]` / `#[retime]` from the async entities of `hir`,
+/// returning their names
+fn strip_async_pipelining(hir: &mut Hir) -> Vec<String> {
+    hir.entities
+        .iter_mut()
+        .filter(|e| e.is_async)
+        .filter_map(|e| e.pipeline_config.take().map(|_| e.name.clone()))
+        .collect()
 }
 
 /// Parse and build HIR from a file with full module resolution (backward compatibility)

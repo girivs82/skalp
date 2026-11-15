@@ -33,7 +33,8 @@ libftd2xx = { version = "0.32", optional = true }
 
 # Lattice Nexus bitstream packer (frame container + CRC16/ECC14), ISC-licensed.
 # Git dep pinned to the girivs82 fork (LFCPNX linear frame write, LRAM
-# unpack fix; upstream lacks both); only compiled when `nexus-bitstream` is enabled.
+# unpack fix, PCS lane IP regions; upstream lacks these); only compiled when
+# `nexus-bitstream` is enabled.
 # (The fuzzed device database is NOT part of the crate — set PRJOXIDE_DB or
 # clone prjoxide to ~/src/prjoxide; tests skip gracefully when absent.)
 prjoxide = { git = "https://github.com/girivs82/prjoxide", rev = "50a462a7e609ab3ea94670cc9d01e921c6c2f7a9", optional = true }
