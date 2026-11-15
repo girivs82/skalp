@@ -3240,9 +3240,8 @@ fn merge_physical_nodes_into_netlist(
             }
 
             LirOp::NclStepControl => {
-                // out = !done & ((req & ready) | out), a latch of kept gates
-                // (see `LirOp::NclStepControl`): each input is read once, so
-                // no single input change can glitch it
+                // out = !done & ((req & ready) | out), a latch (see
+                // `LirOp::NclStepControl`)
                 let net = |k: usize| {
                     input_nets
                         .get(k)
@@ -3252,30 +3251,56 @@ fn merge_physical_nodes_into_netlist(
                 };
                 let (req, done, ready) = (net(0), net(1), net(2));
                 let out = output_nets.first().copied().unwrap_or(GateNetId(0));
-                let inv_cell = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
-                let not_done =
-                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_not_done", path)));
-                let start =
-                    netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_start", path)));
-                let hold = netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_hold", path)));
-                for (cell_info, name, inputs, output) in [
-                    (&inv_cell, "st_inv", vec![done], not_done),
-                    (&and2_cell, "st_start", vec![ready, req], start),
-                    (&or2_cell, "st_or", vec![start, out], hold),
-                    (&and2_cell, "st_and", vec![not_done, hold], out),
-                ] {
+                if let Some(lut) = library.find_best_cell(&CellFunction::Lut4) {
+                    // One LUT whose output feeds back into it: the loop
+                    // that decides when `req` falls just as `ready` rises
+                    // is then a single LUT and its own feedback wire, so it
+                    // settles far faster than a loop through several gates
+                    // and the routing between them. A LUT reads each input
+                    // once, so no single input change glitches it.
+                    let lut = LibraryCellInfo::from_library_cell(lut);
                     let mut cell = Cell::new_comb(
                         CellId(0),
-                        cell_info.name.clone(),
+                        lut.name.clone(),
                         library.name.clone(),
-                        cell_info.fit,
-                        format!("{}.{}", path, name),
-                        inputs,
-                        vec![output],
+                        lut.fit,
+                        format!("{}.st_latch", path),
+                        vec![req, done, ready, out],
+                        vec![out],
                     );
-                    cell_info.apply_to_cell(&mut cell);
+                    lut.apply_to_cell(&mut cell);
+                    cell.lut_init = Some(crate::gate_netlist::STEP_LATCH_INIT);
                     cell.source_op = Some(crate::gate_netlist::STEP_CONTROL_OP.to_string());
                     netlist.add_cell(cell);
+                } else {
+                    // No LUTs: kept gates, each input read once, so no single
+                    // input change can glitch it
+                    let inv_cell = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
+                    let not_done = netlist
+                        .add_net(GateNet::new(GateNetId(0), format!("{}.st_not_done", path)));
+                    let start =
+                        netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_start", path)));
+                    let hold =
+                        netlist.add_net(GateNet::new(GateNetId(0), format!("{}.st_hold", path)));
+                    for (cell_info, name, inputs, output) in [
+                        (&inv_cell, "st_inv", vec![done], not_done),
+                        (&and2_cell, "st_start", vec![ready, req], start),
+                        (&or2_cell, "st_or", vec![start, out], hold),
+                        (&and2_cell, "st_and", vec![not_done, hold], out),
+                    ] {
+                        let mut cell = Cell::new_comb(
+                            CellId(0),
+                            cell_info.name.clone(),
+                            library.name.clone(),
+                            cell_info.fit,
+                            format!("{}.{}", path, name),
+                            inputs,
+                            vec![output],
+                        );
+                        cell_info.apply_to_cell(&mut cell);
+                        cell.source_op = Some(crate::gate_netlist::STEP_CONTROL_OP.to_string());
+                        netlist.add_cell(cell);
+                    }
                 }
             }
 

@@ -92,6 +92,15 @@ pub const MATCHED_DELAY_OP: &str = "NclMatchedDelay";
 /// glitch, so no optimization may touch them.
 pub const STEP_CONTROL_OP: &str = "NclStepControl";
 
+/// Inputs of the single-LUT step latch (`<block>.st_latch`, built where the
+/// library has a 4-input LUT): `[req, done, ready, out]`, input `k` being
+/// bit `k` of the LUT address. `out` is the latch's own output, fed back.
+pub const STEP_LATCH_READY_PIN: usize = 2;
+
+/// Truth table of the single-LUT step latch, `out = !done & ((req & ready) |
+/// out)` over the inputs `[req, done, ready, out]`
+pub const STEP_LATCH_INIT: u64 = 0x3320;
+
 /// `source_op` of the gates of an arbiter of a self-timed async block
 /// (`LirOp::NclArbiter`): mutual-exclusion elements, cross-coupled gates
 /// that optimization must not touch.
@@ -2677,6 +2686,19 @@ pub fn truth_table_mask(variables: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The step latch's truth table is `!done & ((req & ready) | out)` over
+    /// the inputs `[req, done, ready, out]`
+    #[test]
+    fn step_latch_init_is_the_latch() {
+        for a in 0..16u64 {
+            let bit = |k: u32| (a >> k) & 1 == 1;
+            let (req, done, ready, out) = (bit(0), bit(1), bit(2), bit(3));
+            let want = !done && ((req && ready) || out);
+            assert_eq!((STEP_LATCH_INIT >> a) & 1 == 1, want, "address {a:04b}");
+        }
+        assert_eq!(STEP_LATCH_READY_PIN, 2);
+    }
 
     fn inverter_chain() -> (GateNetlist, Vec<GateNetId>) {
         let mut netlist = GateNetlist::new("chain".to_string(), "generic_asic".to_string());

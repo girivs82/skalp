@@ -44,6 +44,7 @@
 
 use crate::gate_netlist::{
     Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, MATCHED_DELAY_OP, STEP_CONTROL_OP,
+    STEP_LATCH_READY_PIN,
 };
 use crate::tech_library::{CellFunction, TechLibrary};
 use std::collections::{HashMap, HashSet};
@@ -502,9 +503,9 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
         // as `done` has ended this one: `ready`, computed from the new
         // state, must have settled by then
         if self_timed_done {
-            if let Some((cell, input)) = step_control_ready(netlist, &md.prefix) {
+            if let Some((cell, pin, input)) = step_control_ready(netlist, &md.prefix) {
                 if let Some(t) = full.at(input) {
-                    let t = t + delays.wire_ps(netlist, input, cell, 0);
+                    let t = t + delays.wire_ps(netlist, input, cell, pin);
                     if next_ps.is_none_or(|d| t > d) {
                         worst = Some((cell, input));
                     }
@@ -713,18 +714,28 @@ fn check_channels(
     checks
 }
 
-/// The step control gate of the self-timed block `prefix` that reads its
-/// `ready` signal, with that input's net (see `LirOp::NclStepControl`)
-fn step_control_ready<'a>(netlist: &'a GateNetlist, prefix: &str) -> Option<(&'a Cell, GateNetId)> {
+/// The step control cell of the self-timed block `prefix` that reads its
+/// `ready` signal, with the input pin and net (see `LirOp::NclStepControl`):
+/// the single-LUT latch `st_latch` (ready on pin 2), or the `st_start` gate
+/// of the gate-built latch (ready on pin 0)
+fn step_control_ready<'a>(
+    netlist: &'a GateNetlist,
+    prefix: &str,
+) -> Option<(&'a Cell, usize, GateNetId)> {
     netlist
         .cells
         .iter()
-        .find(|c| {
-            c.source_op.as_deref() == Some(STEP_CONTROL_OP)
-                && c.path.starts_with(prefix)
-                && c.path.ends_with(".st_start")
+        .filter(|c| c.source_op.as_deref() == Some(STEP_CONTROL_OP) && c.path.starts_with(prefix))
+        .find_map(|c| {
+            let pin = if c.path.ends_with(".st_latch") {
+                STEP_LATCH_READY_PIN
+            } else if c.path.ends_with(".st_start") {
+                0
+            } else {
+                return None;
+            };
+            c.inputs.get(pin).map(|&n| (c, pin, n))
         })
-        .and_then(|c| c.inputs.first().map(|&n| (c, n)))
 }
 
 /// Whether `net` is driven inside the block and read outside it (or is a

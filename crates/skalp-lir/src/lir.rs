@@ -1059,8 +1059,10 @@ pub enum LirOp {
     /// `req` never cuts a step short (a cut step would clock the block's
     /// registers with a runt pulse). Where `req` falls just as `ready` rises
     /// the latch may take a while to decide; the matched delay to `go`
-    /// covers that (see `skalp_lir::ncl_bundle`). Physical: kept gates, each
-    /// input read once.
+    /// covers that (see `skalp_lir::ncl_bundle`). Physical: one kept 4-input
+    /// LUT with its output fed back (`st_latch`) where the library has LUTs,
+    /// so the deciding loop is as short as it can be; otherwise kept gates,
+    /// each input read once.
     NclStepControl,
     /// Arbiter of a self-timed block: grants (one-hot, or none) at most one
     /// of its requests, and keeps a grant while that request stays up.

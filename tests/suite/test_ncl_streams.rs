@@ -117,3 +117,22 @@ async fn streams_merge_gate_level() {
         .expect("build gate-level testbench");
     run_merge(tb, 60).await;
 }
+
+/// With a LUT library each block's step request is a single LUT latch
+/// (its output fed back into it); the blocks must step and stop through it
+/// just as through the gate-built latch
+#[tokio::test]
+async fn streams_gate_level_lut_latch() {
+    let tb = Testbench::gate_level_with_top_and_library(FIXTURE, "StTop", "nexus")
+        .await
+        .expect("build gate-level testbench");
+    run(tb, 40).await;
+}
+
+#[tokio::test]
+async fn streams_merge_gate_level_lut_latch() {
+    let tb = Testbench::gate_level_with_top_and_library(FIXTURE, "StMergeTop", "nexus")
+        .await
+        .expect("build gate-level testbench");
+    run_merge(tb, 60).await;
+}
