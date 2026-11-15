@@ -8,6 +8,7 @@
 //! - Optimization passes
 //! - Preparation for code generation
 
+pub mod bindings;
 pub mod cdc_analysis;
 pub mod compiler;
 pub mod fpga_power;

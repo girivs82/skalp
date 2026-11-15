@@ -1,0 +1,49 @@
+// `let` bindings inside the arms of a `match` in a clocked block: arms 0 and
+// 1 bind the same name, arm 2 a name of its own. Each binding is a per-cycle
+// temporary, read by the same arm's register write.
+
+entity ArmLet {
+    in clk: clock
+    in sel: bit[2]
+    in a: bit[8]
+    in b: bit[8]
+    out y: bit[8]
+}
+
+impl ArmLet {
+    signal r: bit[8] = 0
+    on(clk.rise) {
+        match sel {
+            0 => {
+                let m: bit[8] = a + 1
+                r = m
+            }
+            1 => {
+                let m: bit[8] = b + 2
+                r = m ^ 8'h0F
+            }
+            2 => {
+                let n: bit[8] = a + b
+                r = n
+            }
+            _ => {
+                r = 8'hFF
+            }
+        }
+    }
+    y = r
+}
+
+// The same block as a child instance
+entity ArmLetTop {
+    in clk: clock
+    in sel: bit[2]
+    in a: bit[8]
+    in b: bit[8]
+    out y: bit[8]
+}
+
+impl ArmLetTop {
+    inst core = ArmLet { clk: clk, sel: sel, a: a, b: b }
+    y = core.y
+}

@@ -118,6 +118,24 @@ async fn streams_merge_gate_level() {
     run_merge(tb, 60).await;
 }
 
+/// The same name bound in both arms of the `match arbitrate`: the binding
+/// was driven by nothing (no single binding), so both sums read 0
+#[tokio::test]
+async fn streams_merge_same_let_name_behavioural() {
+    let tb = Testbench::behavioral_with_top(FIXTURE, "StMergeSameTop")
+        .await
+        .expect("build behavioural testbench");
+    run_merge(tb, 60).await;
+}
+
+#[tokio::test]
+async fn streams_merge_same_let_name_gate_level() {
+    let tb = Testbench::gate_level_with_top(FIXTURE, "StMergeSameTop")
+        .await
+        .expect("build gate-level testbench");
+    run_merge(tb, 60).await;
+}
+
 /// With a LUT library each block's step request is a single LUT latch
 /// (its output fed back into it); the blocks must step and stop through it
 /// just as through the gate-built latch
