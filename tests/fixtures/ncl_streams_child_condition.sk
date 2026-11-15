@@ -1,5 +1,7 @@
 // A self-timed block whose send condition is a register of an async child
 // coalesced into it: allowed (the child steps with the block's strobe).
+// The child must take every step of the block, so exactly every other
+// step sends.
 
 async entity CcToggle {
     out q: bit
@@ -16,6 +18,7 @@ impl CcToggle {
 // Sends its count on every other step
 async entity CcProducer {
     out o: stream<bit[8]>
+    out steps: bit[8]
 }
 
 impl CcProducer {
@@ -29,6 +32,7 @@ impl CcProducer {
         }
         count = count + 1
     }
+    steps = count
 }
 
 async entity CcConsumer {
@@ -49,6 +53,7 @@ entity CcTop {
     in clk: clock
     in run: bit
     out received: bit[16]
+    out steps: bit[8]
 }
 
 impl CcTop {
@@ -59,4 +64,5 @@ impl CcTop {
         req = run
     }
     received = c.received
+    steps = p.steps
 }

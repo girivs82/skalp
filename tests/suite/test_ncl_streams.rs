@@ -260,13 +260,52 @@ fn a_pipeline_does_not_warn() {
     assert!(stream_warnings(&source).is_empty());
 }
 
+/// The fixture's producer sends on every other step, as told by an async
+/// child that toggles once per step: received must be half the steps
+async fn check_child_steps_with_the_block(mut tb: Testbench) {
+    tb.set("run", 1u8);
+    tb.clock(80).await;
+    let received = tb.get_u32("received").await;
+    let steps = tb.get_u32("steps").await;
+    assert!(steps > 8, "only {steps} steps");
+    assert!(
+        (2 * received).abs_diff(steps) <= 2,
+        "{received} values received in {steps} steps: the child did not step with the block"
+    );
+}
+
 #[tokio::test]
 async fn step_condition_on_a_coalesced_child_register_is_allowed() {
-    let mut tb =
+    let tb =
         Testbench::gate_level_with_top("tests/fixtures/ncl_streams_child_condition.sk", "CcTop")
             .await
             .expect("a condition on a coalesced child's register builds");
+    check_child_steps_with_the_block(tb).await;
+}
+
+#[tokio::test]
+async fn a_coalesced_child_steps_with_the_block_in_behavioural_sim() {
+    let tb = Testbench::behavioral_with_top("tests/fixtures/ncl_streams_child_condition.sk", "CcTop")
+        .await
+        .expect("build");
+    check_child_steps_with_the_block(tb).await;
+}
+
+/// A stream entity imported from another module keeps its sends and
+/// receives (they used to keep the module's own port ids and read as "never
+/// sent to"): every value arrives, in order
+#[tokio::test]
+async fn an_imported_stream_entity_relays_every_value() {
+    let mut tb = Testbench::behavioral_with_top(
+        "tests/fixtures/imported_stream/top.sk",
+        "ImportedStreamTop",
+    )
+    .await
+    .expect("an imported stream entity builds");
     tb.set("run", 1u8);
-    tb.clock(40).await;
-    assert!(tb.get_u32("received").await > 0, "nothing received");
+    tb.clock(60).await;
+    let count = tb.get_u32("count").await;
+    let last = tb.get_u32("last").await;
+    assert!(count > 4, "only {count} values received");
+    assert_eq!(last + 1, count, "values lost or out of order");
 }
