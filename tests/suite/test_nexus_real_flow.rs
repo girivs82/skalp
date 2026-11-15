@@ -633,6 +633,44 @@ fn lvstl_output_and_bidirectional_pads_get_radiants_settings() {
     );
     assert_eq!(tiles_with_option(&db, data, "BANK3.DIFF_IO", "ON"), 1);
     assert_eq!(tiles_with_option(&db, data, "BANK3.LVSTL", "LVSTL_I"), 1);
+
+    // The bank's input reference generator is placed in bank 3 and turned
+    // on; its seven level pins are routed (a pin left unrouted would fail
+    // the routing)
+    let generator = netlist
+        .cells
+        .iter()
+        .find(|c| skalp_place_route::device::nexus::ivref::is_vref_generator(c))
+        .expect("the DQSBUF_IVREF instance reaches the netlist");
+    assert_eq!(
+        result.placement.placements[&generator.id].bel_type,
+        skalp_place_route::device::BelType::VrefGen
+    );
+    assert_eq!(tiles_with_option(&db, data, "BANK3.IVREF", "ON"), 1);
+    assert_eq!(tiles_with_option(&db, data, "BANK4.IVREF", "ON"), 0);
+}
+
+/// An LVSTL input in a bank whose input reference generator is unused
+/// would read 1 whatever its pin does, so the build is refused.
+#[test]
+fn lvstl_inputs_without_a_reference_generator_are_refused() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_lvstl_no_reference.sk", "LvstlNoReference");
+    let error = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect_err("an LVSTL input with no reference")
+    .to_string();
+    assert!(
+        error.contains("nothing sets the bank's input reference"),
+        "{error}"
+    );
 }
 
 /// A bank has one VCCIO: pads in it that need different voltages are

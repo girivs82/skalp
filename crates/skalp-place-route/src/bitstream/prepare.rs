@@ -199,7 +199,7 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
         }
     }
     drive_constant_flip_flop_data(&mut driven, &constants);
-    drive_constant_pll_inputs(&mut driven, &constants, device);
+    drive_constant_hard_block_inputs(&mut driven, &constants, device);
     drive_constant_pad_outputs(&mut driven, &constants);
     driven
 }
@@ -240,9 +240,10 @@ fn drive_constant_pad_outputs(netlist: &mut GateNetlist, constants: &HashMap<Gat
     }
 }
 
-/// Replace each constant input of a PLL with a LUT that outputs it: a PLL's
-/// pins come through the fabric, whose input muxes cannot hold a constant.
-fn drive_constant_pll_inputs(
+/// Replace each constant input of a hard block (a PLL, an input reference
+/// generator) with a LUT that outputs it: such a block's pins come through
+/// the fabric, whose input muxes cannot hold a constant.
+fn drive_constant_hard_block_inputs(
     netlist: &mut GateNetlist,
     constants: &HashMap<GateNetId, bool>,
     device: &dyn Device,
@@ -251,7 +252,7 @@ fn drive_constant_pll_inputs(
     for index in 0..netlist.cells.len() {
         let cell = &netlist.cells[index];
         let tied: Vec<(usize, bool)> = (0..cell.inputs.len())
-            .filter(|&i| device.pll_input_pin(cell, i).is_some())
+            .filter(|&i| device.hard_block_input_pin(cell, i).is_some())
             .filter_map(|i| Some((i, *constants.get(&cell.inputs[i])?)))
             .collect();
         if tied.is_empty() {
@@ -260,7 +261,7 @@ fn drive_constant_pll_inputs(
         let library = cell.library.clone();
         for (input, value) in tied {
             let net = *drivers.entry(value).or_insert_with(|| {
-                let name = format!("constant_pll_input_{}", u8::from(value));
+                let name = format!("constant_hard_block_input_{}", u8::from(value));
                 let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
                 let mut driver = Cell::new_comb(
                     CellId(0),
@@ -353,18 +354,19 @@ pub fn prepare_for_routing(
             }
             continue;
         }
-        let pll_pins = (0..cell.outputs.len().max(cell.inputs.len())).any(|i| {
-            device.pll_input_pin(cell, i).is_some() || device.pll_output_pin(cell, i).is_some()
+        let hard_block_pins = (0..cell.outputs.len().max(cell.inputs.len())).any(|i| {
+            device.hard_block_input_pin(cell, i).is_some()
+                || device.hard_block_output_pin(cell, i).is_some()
         });
-        if pll_pins {
+        if hard_block_pins {
             // Constant inputs were given drivers ([`drive_constant_inputs`])
             for (index, &net) in cell.inputs.iter().enumerate() {
-                if let Some(pin) = device.pll_input_pin(cell, index) {
+                if let Some(pin) = device.hard_block_input_pin(cell, index) {
                     connect(&mut prepared.nets, net, cell.id, pin);
                 }
             }
             for (index, &net) in cell.outputs.iter().enumerate() {
-                if let Some(pin) = device.pll_output_pin(cell, index) {
+                if let Some(pin) = device.hard_block_output_pin(cell, index) {
                     prepared.nets[net.0 as usize].driver_pin = Some(pin);
                 }
             }

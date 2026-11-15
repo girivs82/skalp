@@ -1,5 +1,7 @@
 // An LVSTL_I output and an LVSTL_I bidirectional pad (a vendor BB buffer on
-// an inout port) in bank 3, with the read-back shown on an LED.
+// an inout port) in bank 3, with the read-back shown on an LED. The bank's
+// input reference generator (DQSBUF_IVREF) sets the level the input
+// compares against.
 
 #[lattice_ip(name = "BB")]
 entity BB {
@@ -7,6 +9,11 @@ entity BB {
     in T: bit
     out O: bit
     inout B: bit
+}
+
+#[lattice_ip(name = "DQSBUF_IVREF")]
+entity DQSBUF_IVREF {
+    in IVREFI: bit[7]
 }
 
 entity LvstlBidir {
@@ -19,6 +26,11 @@ entity LvstlBidir {
 impl LvstlBidir {
     signal n: bit[8] = 0
     signal seen: bit = 0
+    signal level: bit[7]
+    level = 49
+    inst vref = DQSBUF_IVREF {
+        IVREFI: level
+    }
     inst pad = BB {
         I: n[0],
         T: n[7],

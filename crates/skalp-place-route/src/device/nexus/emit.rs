@@ -564,6 +564,10 @@ fn emit_bits(
             emit_pll(&mut config, cell, x, y, &used_wires)?;
             continue;
         }
+        if loc.bel_type == BelType::VrefGen {
+            emit_vref_generator(&mut config, cell, x, y, &mut banks)?;
+            continue;
+        }
         if loc.bel_type == BelType::LargeRam {
             emit_large_ram(&mut config, cell, x, y, tied, &used_wires)?;
             continue;
@@ -711,6 +715,7 @@ fn emit_bits(
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
     emit_vref_drivers(&mut config, netlist, placement, &banks.vref)?;
     emit_lvstl_banks(&mut config, &banks)?;
+    check_lvstl_references(config.device, &banks)?;
     release_unused_pads(&mut config, netlist, placement, &banks.vref)?;
     release_unused_banks(&mut config, &banks.vcc)?;
 
@@ -1611,6 +1616,52 @@ pub(crate) fn vref_level(standard: &str) -> Option<u32> {
     }
 }
 
+/// Turn on a bank's input reference generator (`BANK<n>.IVREF`); the
+/// router has already connected its level pins.
+fn emit_vref_generator(
+    config: &mut ConfigDb<'_>,
+    cell: &Cell,
+    x: u32,
+    y: u32,
+    banks: &mut BankUse,
+) -> Result<()> {
+    let site = config
+        .device
+        .vref_generators()
+        .iter()
+        .find(|s| s.x == x && s.y == y)
+        .cloned()
+        .ok_or_else(|| {
+            emit_err(format!(
+                "Reference generator '{}' is not on a generator site",
+                cell.path
+            ))
+        })?;
+    let tile = config.tile(x, y, &site.tiletype)?;
+    config.set_enum(&tile, &format!("BANK{}.IVREF", site.bank), "ON")?;
+    banks.vref_generators.insert(site.bank);
+    Ok(())
+}
+
+/// Every bank with LVSTL inputs must use its input reference generator,
+/// where the device has one: the internal reference those inputs compare
+/// against has no level without it, and they read 1 whatever the pin does.
+fn check_lvstl_references(device: &NexusDevice, banks: &BankUse) -> Result<()> {
+    let mut inputs: Vec<_> = banks.lvstl_inputs.iter().collect();
+    inputs.sort_by_key(|(bank, _)| **bank);
+    for (&bank, pad) in inputs {
+        if banks.vref_generators.contains(&bank) || device.vref_generator(bank).is_none() {
+            continue;
+        }
+        return Err(emit_err(format!(
+            "Pad '{pad}' is an LVSTL input in bank {bank}, but nothing sets the bank's \
+             input reference, so it would read 1 whatever its pin does: add a \
+             DQSBUF_IVREF and drive its level, IVREFI[6:0] (49 is the usual start)"
+        )));
+    }
+    Ok(())
+}
+
 /// The class (`LVSTL_I` or `LVSTL_II`) of an LVSTL standard (VCCIO 1.1 V,
 /// as LPDDR4 uses), whose single-ended and differential forms share it.
 fn lvstl_class(standard: &str) -> Option<&'static str> {
@@ -1649,6 +1700,10 @@ struct BankUse {
     vcc: HashMap<u32, BankVcc>,
     /// Banks with LVSTL pads, and the class and a pad of each
     lvstl: HashMap<u32, BankVcc>,
+    /// Banks with LVSTL inputs, and one of them, for messages
+    lvstl_inputs: HashMap<u32, String>,
+    /// Banks whose input reference generator the design uses
+    vref_generators: HashSet<u32>,
 }
 
 /// The voltage a bank's pads have set it to.
@@ -1681,11 +1736,7 @@ fn pad_settings(
         .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
         .cloned()
         .ok_or_else(|| emit_err(format!("Pad '{path}' has no IO tile")))?;
-    let bank = tile
-        .tiletype
-        .strip_prefix("SYSIO_B")
-        .and_then(|rest| rest.chars().next())
-        .and_then(|c| c.to_digit(10))
+    let bank = super::sites::bank_of_io_tile(&tile.tiletype)
         .ok_or_else(|| emit_err(format!("Unrecognized IO tile {}", tile.tiletype)))?;
     let high_performance = super::sites::is_high_performance_io(&tile.tiletype);
     // In a high-performance bank the B pad's settings sit in the next tile.
@@ -1844,6 +1895,10 @@ fn emit_pad(
         if !is_output {
             set_ram_enum(config, tiles, &format!("{prefix}.TERMINATION_1V1"), "OFF")?;
             set_ram_enum(config, tiles, &format!("{prefix}.VREF_LVSTL"), "VREF_INT")?;
+            banks
+                .lvstl_inputs
+                .entry(bank)
+                .or_insert_with(|| cell.path.clone());
         }
         let user = BankVcc {
             voltage,

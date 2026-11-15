@@ -776,16 +776,21 @@ pub trait Device: Send + Sync {
         None
     }
 
-    /// Router pin a multiplier input connects to, or `None` if it has no pin.
-    /// Router pin number of a PLL cell's `input`-th input, where the device
-    /// names PLL pins (`None`: the input's index).
-    fn pll_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
+    /// Router pin number of the `input`-th input of a hard block the device
+    /// sites itself, such as a PLL or a bank's input reference generator,
+    /// whose pins the device names (`None`: not such a block, or not one of
+    /// its pins).
+    fn hard_block_input_pin(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _input: usize,
+    ) -> Option<usize> {
         None
     }
 
-    /// Router pin number of a PLL cell's `output`-th output, as
-    /// [`Self::pll_input_pin`].
-    fn pll_output_pin(
+    /// Router pin number of a hard block's `output`-th output, as
+    /// [`Self::hard_block_input_pin`].
+    fn hard_block_output_pin(
         &self,
         _cell: &skalp_lir::gate_netlist::Cell,
         _output: usize,
@@ -793,6 +798,7 @@ pub trait Device: Send + Sync {
         None
     }
 
+    /// Router pin a multiplier input connects to, or `None` if it has no pin.
     fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
         None
     }
@@ -984,6 +990,10 @@ pub enum BelType {
     Pll,
     /// DSP slice
     DspSlice,
+    /// An I/O bank's input reference generator: sets the level that the
+    /// bank's referenced inputs compare against (Lattice Nexus IVREF_CORE,
+    /// which the LVSTL inputs of a high-performance bank use)
+    VrefGen,
 }
 
 impl BelType {

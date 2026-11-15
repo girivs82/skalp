@@ -1010,6 +1010,7 @@ impl<D: Device + Clone> Placer<D> {
             BelType::GlobalBuf => TileType::GlobalBuf,
             BelType::Pll => TileType::Pll,
             BelType::DspSlice => TileType::Dsp,
+            BelType::VrefGen => TileType::IpCon,
         }
     }
 
