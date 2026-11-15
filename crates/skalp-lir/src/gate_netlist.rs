@@ -115,6 +115,11 @@ pub const ARBITER_OP: &str = "NclArbiter";
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
 
+/// Pad cell parameter: the level code of the internal input reference the
+/// pad compares against (a port's `vref: <level>` setting), for the backend
+/// to set up on the pad's bank.
+pub const VREF_LEVEL_PARAM: &str = "VREF_LEVEL";
+
 /// Parameter naming a blackbox cell's output pins, as
 /// [`BLACKBOX_INPUTS_PARAM`] does its inputs.
 pub const BLACKBOX_OUTPUTS_PARAM: &str = "BLACKBOX_OUTPUTS";

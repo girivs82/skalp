@@ -1655,8 +1655,9 @@ fn check_lvstl_references(device: &NexusDevice, banks: &BankUse) -> Result<()> {
         }
         return Err(emit_err(format!(
             "Pad '{pad}' is an LVSTL input in bank {bank}, but nothing sets the bank's \
-             input reference, so it would read 1 whatever its pin does: add a \
-             DQSBUF_IVREF and drive its level, IVREFI[6:0] (49 is the usual start)"
+             input reference, so it would read 1 whatever its pin does: set its level \
+             on the pads (`vref: 49` beside the I/O standard; 49 is the usual start), \
+             or drive the LEVEL of an INPUT_REFERENCE primitive to train it"
         )));
     }
     Ok(())

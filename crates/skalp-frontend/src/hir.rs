@@ -3269,6 +3269,14 @@ pub struct PhysicalConstraints {
     /// I/O settings above
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_pin: Option<BoardPinRef>,
+    /// Level of the internal reference this input compares against, for
+    /// I/O standards that compare against one (LVSTL): the device's
+    /// reference generator code (`vref: 49`). The backend sets up the
+    /// generator of the pin's bank; pins of a bank share it, so they must
+    /// agree. A design that trains the level instead drives an
+    /// `INPUT_REFERENCE` primitive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vref_level: Option<u32>,
 }
 
 /// A port's binding to a board pin group, or part of one.

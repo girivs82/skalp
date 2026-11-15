@@ -1236,11 +1236,48 @@ impl Blink {
 
 Recognized constraint keys include `pin`, `pins` (array form for buses),
 `pin_p`/`pin_n` (differential pairs), `io_standard`, `pull`, `slew`,
-`drive`, `schmitt`, `diff_term`, and `bank`. Constraints flow into the
+`drive`, `schmitt`, `diff_term`, `bank`, and `vref` (below). Constraints flow into the
 iCE40 synthesis and place-and-route flow (`skalp synth`).
 
 A global `constraint physical { ... }` block (device selection, bank
 voltages, `io_defaults`, floorplan regions) is parsed at top level.
+
+#### Input reference levels
+
+Some I/O standards compare an input against an internal reference rather
+than a fixed threshold: LVSTL (LPDDR4) inputs compare against a level the
+I/O bank generates. One generator serves a whole bank, and an input with
+no generator in use reads 1 whatever its pin does, so the backend refuses
+such a design on devices that have one. There are two vendor-neutral ways
+to set the level:
+
+- **A fixed level**, as a port constraint: `vref: <level>`, the level code
+  of the device's generator (0 to 127 on Lattice Nexus, where 49 is the
+  usual starting value). The backend puts the generator of the pin's bank
+  in use with that level. Ports of one bank must agree on it.
+
+  ```skalp
+  inout dq: bit[16] @ { pins: [...], io_standard: "LVSTL_I", vref: 49 }
+  ```
+
+- **A level the design drives** (to train it, as a DRAM controller's read
+  reference training does): SKALP's `INPUT_REFERENCE` primitive, whose
+  `LEVEL` input is the level code. It is placed on the bank of the pin
+  its `PIN` names (any pin of the bank), or on the bank its `LOC` names
+  (`BANK<n>`); with neither, on a bank whose inputs need one.
+
+  ```skalp
+  #[vendor_ip(name = "INPUT_REFERENCE", PIN = "AA6")]
+  entity InputReference {
+      in LEVEL: bit[7]
+  }
+  ```
+
+A bank takes its level from one of these, not both. The width and meaning
+of the level code are the device's; each backend maps the primitive to
+its own block (on Lattice Nexus, the bank's IVREF_CORE, which Lattice's
+own `DQSBUF_IVREF` primitive also reaches) and refuses it on a device
+that has none.
 
 There is no CLI flag for merging external constraint files (PCF/XDC);
 inline constraints are the mechanism.

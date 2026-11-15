@@ -1863,6 +1863,7 @@ impl HirBuilderContext {
             ldo_config: None,
             drive_override: None,
             board_pin: Some(crate::hir::BoardPinRef { board, pin, bits }),
+            vref_level: None,
         })
     }
 
@@ -14288,6 +14289,7 @@ impl HirBuilderContext {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         for pair in node
@@ -14355,6 +14357,9 @@ impl HirBuilderContext {
                 }
                 "io_standard" => {
                     constraints.io_standard = Some(value_text.trim_matches('"').to_string());
+                }
+                "vref" => {
+                    constraints.vref_level = value_text.trim_matches('"').parse().ok();
                 }
                 "slew" => {
                     // Look for SlewRate child node or direct keyword

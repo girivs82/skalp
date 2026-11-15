@@ -650,6 +650,50 @@ fn lvstl_output_and_bidirectional_pads_get_radiants_settings() {
     assert_eq!(tiles_with_option(&db, data, "BANK4.IVREF", "ON"), 0);
 }
 
+/// The vendor-neutral ways to set an LVSTL input's reference: a fixed
+/// level on the pad (`vref: 49`), and the INPUT_REFERENCE primitive whose
+/// level the design drives. Each puts the bank's generator in use, with its
+/// level routed.
+#[test]
+fn vendor_neutral_input_references_build() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    for (fixture, top) in [
+        ("nexus_lvstl_pad_vref.sk", "LvstlPadVref"),
+        ("nexus_input_reference.sk", "LvstlTrainedVref"),
+    ] {
+        let netlist = netlist_with_pads(fixture, top);
+        let result = skalp_place_route::pnr::place_and_route_nexus_real(
+            &netlist,
+            NexusVariant::Lfcpnx100,
+            PnrConfig::default(),
+            &db,
+        )
+        .unwrap_or_else(|e| panic!("{fixture}: {e}"));
+        assert!(result.routing.success, "{fixture}: routing");
+        let generators = result
+            .placement
+            .placements
+            .values()
+            .filter(|loc| loc.bel_type == skalp_place_route::device::BelType::VrefGen)
+            .count();
+        assert_eq!(generators, 1, "{fixture}: one generator placed");
+        let data = &result.bitstream.data;
+        assert_eq!(
+            tiles_with_option(&db, data, "BANK3.IVREF", "ON"),
+            1,
+            "{fixture}"
+        );
+        assert_eq!(
+            tiles_with_option(&db, data, "SEIO18.VREF_LVSTL", "VREF_INT"),
+            1,
+            "{fixture}"
+        );
+    }
+}
+
 /// An LVSTL input in a bank whose input reference generator is unused
 /// would read 1 whatever its pin does, so the build is refused.
 #[test]

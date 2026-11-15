@@ -1,0 +1,32 @@
+// An LVSTL_I bidirectional pad in bank 3 whose input reference level is set
+// on the pad itself (`vref: 49`), the vendor-neutral way: the backend adds
+// the bank's reference generator.
+
+#[lattice_ip(name = "BB")]
+entity BB {
+    in I: bit
+    in T: bit
+    out O: bit
+    inout B: bit
+}
+
+entity LvstlPadVref {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    inout dq: bit @ { pin: "AA6", io_standard: "LVSTL_I", vref: 49 }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl LvstlPadVref {
+    signal n: bit[8] = 0
+    signal seen: bit = 0
+    inst pad = BB {
+        I: n[0],
+        T: n[7],
+        B: dq
+    }
+    on(clk.rise) {
+        n = n + 1
+        seen = pad.O
+    }
+    led = seen
+}

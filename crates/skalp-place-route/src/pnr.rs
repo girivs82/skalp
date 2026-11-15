@@ -144,12 +144,32 @@ impl PnrResult {
 /// the placer and router will respect proximity and matched-delay constraints.
 /// After routing, per-net wire delays are written back to `netlist.ncl_wire_delays`
 /// for the iterative timing closure loop.
+/// Refuse a design that asks for an I/O bank input reference (a pad's
+/// `vref` level or an `INPUT_REFERENCE` primitive) on a device whose flow
+/// has none, rather than leave the inputs without one.
+fn refuse_input_references(netlist: &GateNetlist, device: &str) -> Result<()> {
+    for cell in &netlist.cells {
+        let asks = crate::device::nexus::ivref::is_vref_generator(cell)
+            || cell
+                .parameters
+                .contains_key(skalp_lir::gate_netlist::VREF_LEVEL_PARAM);
+        if asks {
+            return Err(crate::PlaceRouteError::PlacementFailed(format!(
+                "'{}' asks for an input reference level, which {device} cannot provide",
+                cell.path
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn place_and_route(
     netlist: &GateNetlist,
     variant: Ice40Variant,
     config: PnrConfig,
 ) -> Result<PnrResult> {
     // Create device
+    refuse_input_references(netlist, "this iCE40 device")?;
     let device = Ice40Device::new(variant);
 
     // Run packing to detect carry chains
@@ -442,6 +462,10 @@ pub fn place_and_route_nexus(
 ) -> Result<PnrResult> {
     use crate::device::nexus::NexusDevice;
 
+    refuse_input_references(
+        netlist,
+        "a Nexus device without its real device data (build with the nexus-real feature)",
+    )?;
     let device = NexusDevice::new(variant);
     let t0 = std::time::Instant::now();
 
@@ -558,23 +582,27 @@ pub fn place_and_route_nexus_real(
     // design's pins; the region loaded must reach it
     let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
         .map_err(PlaceRouteError::PlacementFailed)?;
-    // Each bank input reference generator goes to the bank its LOC names,
-    // or a bank whose LVSTL inputs need one
-    let pad_bank = |cell: &skalp_lir::gate_netlist::Cell| {
+    // A fixed reference level on a bank's pads (`vref: <level>`) becomes a
+    // generator on the bank. Each generator goes to the bank its LOC or PIN
+    // names, or a bank whose LVSTL inputs need one.
+    let pin_bank = |pin: &str| {
         let package = variant
             .default_package()
             .and_then(|name| packages.get(name))
             .or_else(|| packages.values().next())?;
-        let &(x, y, _) = package.pins.get(cell.parameters.get("LOC")?)?;
+        let &(x, y, _) = package.pins.get(pin)?;
         tiles
             .iter()
             .filter(|t| t.x == x && t.y == y)
             .find_map(|t| crate::device::nexus::sites::bank_of_io_tile(&t.tiletype))
     };
+    let with_pad_levels = crate::device::nexus::ivref::add_pad_level_generators(netlist, &pin_bank)
+        .map_err(PlaceRouteError::PlacementFailed)?;
+    let netlist = with_pad_levels.as_ref().unwrap_or(netlist);
     let vref_generator_sites = crate::device::nexus::ivref::choose_sites(
         &crate::device::nexus::ivref::sites(db_root, variant.prjoxide_family(), &tiles),
         netlist,
-        &pad_bank,
+        &pin_bank,
     )
     .map_err(PlaceRouteError::PlacementFailed)?;
     let mut pad_sites = pad_sites;
@@ -1026,6 +1054,7 @@ pub fn place_and_route_ecp5(
 ) -> Result<PnrResult> {
     use crate::device::ecp5::Ecp5Device;
 
+    refuse_input_references(netlist, "this ECP5 device")?;
     let device = Ecp5Device::new(variant);
 
     // Pack
@@ -1100,6 +1129,7 @@ pub fn place_and_route_xc7(
 ) -> Result<PnrResult> {
     use crate::device::xc7::Xc7Device;
 
+    refuse_input_references(netlist, "this 7-series device")?;
     let device = Xc7Device::new(variant);
 
     // Pack
@@ -1160,6 +1190,43 @@ pub fn place_and_route_xc7(
 
 #[cfg(test)]
 mod tests {
+
+    /// A pad's reference level, or a reference primitive, on a device
+    /// without input reference generators is refused, naming the cell.
+    #[test]
+    fn input_references_are_refused_where_there_are_none() {
+        use skalp_lir::gate_netlist::{Cell, CellId, VREF_LEVEL_PARAM};
+        let mut netlist = GateNetlist::new("top".into(), "ice40".into());
+        let mut pad = Cell::new_comb(
+            CellId(0),
+            "SB_IO".into(),
+            "ice40".into(),
+            0.0,
+            "top.dq_ibuf".into(),
+            vec![],
+            vec![],
+        );
+        assert!(refuse_input_references(&netlist, "this device").is_ok());
+        pad.parameters.insert(VREF_LEVEL_PARAM.into(), "49".into());
+        netlist.add_cell(pad);
+        let error = refuse_input_references(&netlist, "this iCE40 device")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("top.dq_ibuf"), "{error}");
+        assert!(error.contains("this iCE40 device"), "{error}");
+
+        let mut netlist = GateNetlist::new("top".into(), "ice40".into());
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "BLACKBOX_INPUT_REFERENCE".into(),
+            "blackbox".into(),
+            0.0,
+            "top.vref".into(),
+            vec![],
+            vec![],
+        ));
+        assert!(refuse_input_references(&netlist, "this device").is_err());
+    }
     use super::*;
     use skalp_lir::gate_netlist::{Cell, GateNet};
 

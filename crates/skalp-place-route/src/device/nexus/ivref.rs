@@ -14,17 +14,37 @@
 //! `BANK<n>.IVREF` setting in the tile that holds its level pins
 //! (`JIVREFI<k>_IVREF_CORE`, fed by the fabric through a CIB mux next to
 //! that tile).
+//!
+//! A design asks for a generator in one of three ways:
+//! - a fixed level on the pads that use it (`vref: 49` beside the I/O
+//!   standard), the vendor-neutral way for a level that never changes;
+//! - SKALP's vendor-neutral `INPUT_REFERENCE` primitive, whose `LEVEL`
+//!   input the design drives (to train it), placed by its `PIN` (a pin of
+//!   the bank) or `LOC` (`BANK<n>`);
+//! - Lattice's own `DQSBUF_IVREF` (`IVREFI` input), for designs written
+//!   against the vendor library.
 
 use super::prjoxide_load::PrjoxideTile;
 use crate::collections::{HashMap, HashMapExt};
-use skalp_lir::gate_netlist::{Cell, CellId, GateNetlist};
+use skalp_lir::gate_netlist::{
+    Cell, CellId, GateNet, GateNetId, GateNetlist, BLACKBOX_INPUTS_PARAM, BLACKBOX_OUTPUTS_PARAM,
+    VREF_LEVEL_PARAM,
+};
 use skalp_lir::tech_library::CellFunction;
 use std::path::Path;
 
-/// Cell types that place a bank's reference generator: Lattice's
-/// `DQSBUF_IVREF` primitive (only its level input so far) and the bare
-/// block, as blackboxes or not.
-const CELL_TYPES: [&str; 2] = ["DQSBUF_IVREF", "IVREF_CORE"];
+/// Cell types that place a bank's reference generator: SKALP's
+/// vendor-neutral primitive, Lattice's `DQSBUF_IVREF` (only its level
+/// input so far) and the bare block, as blackboxes or not.
+const CELL_TYPES: [&str; 3] = [NEUTRAL_CELL_TYPE, "DQSBUF_IVREF", "IVREF_CORE"];
+
+/// SKALP's vendor-neutral input reference primitive: input `LEVEL`, the
+/// level code, and a `PIN` (any pin of the bank) or `LOC` (`BANK<n>`).
+pub const NEUTRAL_CELL_TYPE: &str = "INPUT_REFERENCE";
+
+/// Names the primitives give the level input: the vendor-neutral one, then
+/// Lattice's.
+const LEVEL_PORTS: [&str; 2] = ["LEVEL", "IVREFI"];
 
 /// The generator's level pins as the device names them, in router pin
 /// order (`IVREFI0` is the least significant bit).
@@ -41,10 +61,14 @@ pub fn is_vref_generator(cell: &Cell) -> bool {
     CELL_TYPES.contains(&name)
 }
 
-/// The device pin a primitive port names: a bit of the `IVREFI` bus
-/// (`IVREFI[3]`) or the pin itself (`IVREFI3`).
+/// The device pin a primitive port names: a bit of the level bus
+/// (`LEVEL[3]`, `IVREFI[3]`, any case) or a pin itself (`IVREFI3`).
 fn device_pin(port: &str) -> Option<&'static str> {
-    let bit = match port.strip_prefix("IVREFI")? {
+    let upper = port.to_ascii_uppercase();
+    let rest = LEVEL_PORTS
+        .iter()
+        .find_map(|name| upper.strip_prefix(name))?;
+    let bit = match rest {
         "" => "0",
         rest => rest
             .strip_prefix('[')
@@ -92,8 +116,9 @@ pub fn port_problems(cell: &Cell) -> Option<String> {
     }
     if !unknown.is_empty() {
         return Some(format!(
-            "has ports the bank reference generator does not (only IVREFI[6:0], its \
-             level, is supported so far): {}",
+            "has ports the bank reference generator does not (only its {}-bit level \
+             input, LEVEL or IVREFI, is supported so far): {}",
+            INPUT_PINS.len(),
             unknown.join(", ")
         ));
     }
@@ -105,9 +130,10 @@ pub fn port_problems(cell: &Cell) -> Option<String> {
         .collect();
     (!missing.is_empty()).then(|| {
         format!(
-            "leaves level bits {} unconnected; drive all of IVREFI[6:0] (49 is the usual \
-             starting level)",
-            missing.join(", ")
+            "leaves level bits {} unconnected; drive all {} bits of its level (49 is the \
+             usual starting level)",
+            missing.join(", "),
+            INPUT_PINS.len()
         )
     })
 }
@@ -185,46 +211,67 @@ fn located_bank(loc: &str) -> Option<u32> {
     loc.strip_prefix("BANK").unwrap_or(loc).parse().ok()
 }
 
+/// The bank a pad cell is in, from its pin (`LOC`).
+fn pad_bank(cell: &Cell, pin_bank: &dyn Fn(&str) -> Option<u32>) -> Option<u32> {
+    pin_bank(cell.parameters.get("LOC")?)
+}
+
+/// The bank a generator cell names: its `LOC` (`BANK<n>`) or its `PIN` (a
+/// pin of the bank); `None` if it names neither.
+fn named_bank(cell: &Cell, pin_bank: &dyn Fn(&str) -> Option<u32>) -> Result<Option<u32>, String> {
+    if let Some(loc) = cell.parameters.get("LOC") {
+        return located_bank(loc).map(Some).ok_or_else(|| {
+            format!(
+                "Reference generator '{}': LOC '{loc}' names no bank (use BANK<n>)",
+                cell.path
+            )
+        });
+    }
+    if let Some(pin) = cell.parameters.get("PIN") {
+        return pin_bank(pin).map(Some).ok_or_else(|| {
+            format!(
+                "Reference generator '{}': pin '{pin}' is not a pin of an I/O bank",
+                cell.path
+            )
+        });
+    }
+    Ok(None)
+}
+
 /// The site of every reference generator of a design: the bank its `LOC`
-/// names, or else a bank whose inputs need one and that has none yet, in
-/// bank order. `pad_bank` gives the bank of a pad cell.
+/// or `PIN` names, or else a bank whose inputs need one and that has none
+/// yet, in bank order. `pin_bank` gives the bank of a package pin.
 pub fn choose_sites(
     sites: &[Site],
     netlist: &GateNetlist,
-    pad_bank: &dyn Fn(&Cell) -> Option<u32>,
+    pin_bank: &dyn Fn(&str) -> Option<u32>,
 ) -> Result<HashMap<CellId, Site>, String> {
     let mut needing: Vec<u32> = netlist
         .cells
         .iter()
         .filter(|c| is_referenced_input(c))
-        .filter_map(pad_bank)
+        .filter_map(|c| pad_bank(c, pin_bank))
         .collect();
     needing.sort_unstable();
     needing.dedup();
-    let mut generators: Vec<&Cell> = netlist
-        .cells
-        .iter()
-        .filter(|c| is_vref_generator(c))
-        .collect();
-    // Generators with a bank named take theirs first
-    generators.sort_by_key(|c| (c.parameters.get("LOC").is_none(), c.id.0));
-    let mut chosen = HashMap::new();
-    let mut taken: Vec<u32> = Vec::new();
-    for cell in generators {
+    let mut generators: Vec<(&Cell, Option<u32>)> = Vec::new();
+    for cell in netlist.cells.iter().filter(|c| is_vref_generator(c)) {
         if let Some(problem) = port_problems(cell) {
             return Err(format!("Reference generator '{}' {problem}", cell.path));
         }
-        let bank = match cell.parameters.get("LOC") {
-            Some(loc) => located_bank(loc).ok_or_else(|| {
-                format!(
-                    "Reference generator '{}': LOC '{loc}' names no bank (use BANK<n>)",
-                    cell.path
-                )
-            })?,
+        generators.push((cell, named_bank(cell, pin_bank)?));
+    }
+    // Generators with a bank named take theirs first
+    generators.sort_by_key(|(c, bank)| (bank.is_none(), c.id.0));
+    let mut chosen = HashMap::new();
+    let mut taken: Vec<u32> = Vec::new();
+    for (cell, named) in generators {
+        let bank = match named {
+            Some(bank) => bank,
             None => *needing.iter().find(|b| !taken.contains(b)).ok_or_else(|| {
                 format!(
                     "Reference generator '{}': no bank with LVSTL inputs is left \
-                         for it; give it a LOC (BANK<n>)",
+                     for it; give it a PIN (a pin of its bank) or a LOC (BANK<n>)",
                     cell.path
                 )
             })?,
@@ -255,10 +302,124 @@ pub fn choose_sites(
     Ok(chosen)
 }
 
+/// Add a generator for each bank whose pads set a fixed reference level
+/// (`vref: <level>`, [`VREF_LEVEL_PARAM`]): a vendor-neutral
+/// [`NEUTRAL_CELL_TYPE`] cell on the bank, its level driven by constant
+/// LUTs. The pads of a bank must agree on the level; a bank whose level a
+/// generator instance already sets cannot also take one from its pads.
+pub fn add_pad_level_generators(
+    netlist: &GateNetlist,
+    pin_bank: &dyn Fn(&str) -> Option<u32>,
+) -> Result<Option<GateNetlist>, String> {
+    // bank -> (level, a pad that sets it)
+    let mut levels: std::collections::BTreeMap<u32, (u32, &str)> =
+        std::collections::BTreeMap::new();
+    for cell in &netlist.cells {
+        let Some(level) = cell.parameters.get(VREF_LEVEL_PARAM) else {
+            continue;
+        };
+        let standard = cell
+            .parameters
+            .get("IO_STANDARD")
+            .map(String::as_str)
+            .unwrap_or("its default");
+        if !uses_generator(standard) {
+            return Err(format!(
+                "Pad '{}' sets a reference level (vref), but {standard} does not compare \
+                 against an internal reference",
+                cell.path
+            ));
+        }
+        let max = (1u32 << INPUT_PINS.len()) - 1;
+        let level: u32 = level.parse().ok().filter(|&l| l <= max).ok_or_else(|| {
+            format!(
+                "Pad '{}': reference level {level} is not a level code from 0 to {max}",
+                cell.path
+            )
+        })?;
+        let bank = pad_bank(cell, pin_bank).ok_or_else(|| {
+            format!(
+                "Pad '{}' sets a reference level (vref) but has no pin in an I/O bank",
+                cell.path
+            )
+        })?;
+        let (first, user) = *levels.entry(bank).or_insert((level, &cell.path));
+        if first != level {
+            return Err(format!(
+                "Pads '{user}' (vref {first}) and '{}' (vref {level}) set different \
+                 reference levels, but bank {bank} has one",
+                cell.path
+            ));
+        }
+    }
+    if levels.is_empty() {
+        return Ok(None);
+    }
+    for cell in netlist.cells.iter().filter(|c| is_vref_generator(c)) {
+        if let Some(bank) = named_bank(cell, pin_bank)? {
+            if let Some((_, pad)) = levels.get(&bank) {
+                return Err(format!(
+                    "Bank {bank} takes its reference level both from pad '{pad}' (vref) \
+                     and from generator '{}'; use one",
+                    cell.path
+                ));
+            }
+        }
+    }
+    let mut netlist = netlist.clone();
+    let constant = |netlist: &mut GateNetlist, value: bool| {
+        let name = format!("vref_level_constant_{}", u8::from(value));
+        if let Some(net) = netlist.nets.iter().find(|n| n.name == name) {
+            return net.id;
+        }
+        let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
+        let mut driver = Cell::new_comb(
+            CellId(0),
+            "LUT4".to_string(),
+            "nexus".to_string(),
+            0.0,
+            format!("{name}_driver"),
+            Vec::new(),
+            vec![net],
+        );
+        driver.function = Some(CellFunction::Lut4);
+        driver.lut_init = Some(if value { 0xFFFF } else { 0 });
+        netlist.add_cell(driver);
+        net
+    };
+    for (bank, (level, _)) in levels {
+        let inputs: Vec<GateNetId> = (0..INPUT_PINS.len())
+            .map(|bit| constant(&mut netlist, (level >> bit) & 1 == 1))
+            .collect();
+        let mut generator = Cell::new_comb(
+            CellId(0),
+            NEUTRAL_CELL_TYPE.to_string(),
+            "blackbox".to_string(),
+            0.0,
+            format!("top.vref_bank{bank}"),
+            inputs,
+            Vec::new(),
+        );
+        let ports: Vec<String> = (0..INPUT_PINS.len())
+            .map(|bit| format!("LEVEL[{bit}]"))
+            .collect();
+        generator
+            .parameters
+            .insert(BLACKBOX_INPUTS_PARAM.into(), ports.join(","));
+        generator
+            .parameters
+            .insert(BLACKBOX_OUTPUTS_PARAM.into(), String::new());
+        generator
+            .parameters
+            .insert("LOC".into(), format!("BANK{bank}"));
+        netlist.add_cell(generator);
+    }
+    Ok(Some(netlist))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_lir::gate_netlist::{BLACKBOX_INPUTS_PARAM, BLACKBOX_OUTPUTS_PARAM};
 
     fn generator(inputs: &str, loc: Option<&str>) -> Cell {
         let mut cell = Cell::new_comb(
@@ -314,6 +475,109 @@ mod tests {
     }
 
     #[test]
+    fn the_neutral_primitive_names_its_bank_by_a_pin() {
+        let mut cell = generator(
+            "LEVEL[0],LEVEL[1],LEVEL[2],LEVEL[3],LEVEL[4],LEVEL[5],LEVEL[6]",
+            None,
+        );
+        cell.cell_type = NEUTRAL_CELL_TYPE.into();
+        cell.parameters.insert("PIN".into(), "AA6".into());
+        assert!(is_vref_generator(&cell));
+        assert_eq!(port_problems(&cell), None);
+        let bank = |pin: &str| (pin == "AA6").then_some(3);
+        assert_eq!(named_bank(&cell, &bank), Ok(Some(3)));
+        cell.parameters.insert("PIN".into(), "P24".into());
+        assert!(named_bank(&cell, &bank).is_err());
+    }
+
+    fn lvstl_input(path: &str, level: Option<&str>) -> Cell {
+        let mut pad = Cell::new_comb(
+            CellId(0),
+            "IB".into(),
+            "nexus".into(),
+            0.0,
+            path.into(),
+            vec![],
+            vec![],
+        );
+        pad.function = Some(CellFunction::InputPad);
+        pad.parameters
+            .insert("IO_STANDARD".into(), "LVSTL_I".into());
+        pad.parameters.insert("LOC".into(), "AA6".into());
+        if let Some(level) = level {
+            pad.parameters.insert(VREF_LEVEL_PARAM.into(), level.into());
+        }
+        pad
+    }
+
+    #[test]
+    fn a_pad_level_becomes_a_generator_with_that_level() {
+        let bank = |_: &str| Some(3);
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
+        netlist.add_cell(lvstl_input("top.dq1", Some("49")));
+        netlist.add_cell(lvstl_input("top.dq2", None));
+        let added = add_pad_level_generators(&netlist, &bank).unwrap().unwrap();
+        let generators: Vec<&Cell> = added
+            .cells
+            .iter()
+            .filter(|c| is_vref_generator(c))
+            .collect();
+        assert_eq!(generators.len(), 1, "one per bank");
+        let generator = generators[0];
+        assert_eq!(generator.parameters["LOC"], "BANK3");
+        assert_eq!(port_problems(generator), None);
+        // Level 49 = 0b0110001, bit 0 first
+        let level: Vec<bool> = generator
+            .inputs
+            .iter()
+            .map(|&net| {
+                let driver = added
+                    .cells
+                    .iter()
+                    .find(|c| c.outputs.contains(&net))
+                    .expect("each level bit has a driver");
+                driver.lut_init == Some(0xFFFF)
+            })
+            .collect();
+        assert_eq!(level, [true, false, false, false, true, true, false]);
+
+        // No pad level, nothing added
+        let plain = GateNetlist::new("top".into(), "nexus".into());
+        assert!(add_pad_level_generators(&plain, &bank).unwrap().is_none());
+    }
+
+    #[test]
+    fn pad_levels_must_agree_and_fit() {
+        let bank = |_: &str| Some(3);
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
+        netlist.add_cell(lvstl_input("top.dq1", Some("50")));
+        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        assert!(err.contains("different reference levels"), "{err}");
+
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        netlist.add_cell(lvstl_input("top.dq0", Some("128")));
+        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        assert!(err.contains("0 to 127"), "{err}");
+
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        let mut cmos = lvstl_input("top.dq0", Some("49"));
+        cmos.parameters
+            .insert("IO_STANDARD".into(), "LVCMOS12H".into());
+        netlist.add_cell(cmos);
+        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        assert!(err.contains("does not compare"), "{err}");
+
+        // A generator instance on the same bank as a pad level is refused
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
+        netlist.add_cell(generator(BUS, Some("BANK3")));
+        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        assert!(err.contains("use one"), "{err}");
+    }
+
+    #[test]
     fn generators_go_to_the_banks_that_need_them() {
         let sites = vec![
             Site {
@@ -342,9 +606,10 @@ mod tests {
         pad.function = Some(CellFunction::InputPad);
         pad.parameters
             .insert("IO_STANDARD".into(), "LVSTL_I".into());
+        pad.parameters.insert("LOC".into(), "AA6".into());
         netlist.add_cell(pad);
         let id = netlist.add_cell(generator(BUS, None));
-        let bank = |_: &Cell| Some(4);
+        let bank = |_: &str| Some(4);
         let chosen = choose_sites(&sites, &netlist, &bank).unwrap();
         assert_eq!(chosen[&id].bank, 4);
 

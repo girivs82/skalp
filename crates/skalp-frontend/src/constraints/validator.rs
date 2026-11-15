@@ -186,6 +186,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -214,6 +215,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -245,6 +247,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Bit(1);
@@ -287,6 +290,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -318,6 +322,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Array(Box::new(HirType::Bit(1)), 4);
@@ -349,6 +354,7 @@ mod tests {
             ldo_config: None,
             drive_override: None,
             board_pin: None,
+            vref_level: None,
         };
 
         let port_type = HirType::Bit(1);
