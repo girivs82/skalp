@@ -539,6 +539,98 @@ fn every_bank_gets_its_voltage_or_none() {
     assert_eq!(checked, 5, "banks 0, 1, 2, 6 and 7 have a voltage setting");
 }
 
+/// How many tiles of the device have `option` of the enum `setting` (a
+/// setting name ending, such as `SEIO18.VREF_LVSTL`, matched on every PIO of
+/// every tile) fully set in `bitstream`
+fn tiles_with_option(
+    db: &std::path::Path,
+    bitstream: &[u8],
+    setting_suffix: &str,
+    option: &str,
+) -> usize {
+    use skalp_place_route::device::nexus::prjoxide_graph::load_tiletype;
+    use skalp_place_route::device::nexus::prjoxide_load::load_tilegrid;
+    let variant = NexusVariant::Lfcpnx100;
+    let tiles = load_tilegrid(db, variant).unwrap();
+    let mut types = std::collections::HashMap::new();
+    let mut count = 0;
+    for tile in &tiles {
+        let data = types.entry(tile.tiletype.clone()).or_insert_with(|| {
+            load_tiletype(db, variant.prjoxide_family(), &tile.tiletype).unwrap()
+        });
+        let Some(data) = data.as_ref() else {
+            continue;
+        };
+        for (setting, _) in data.enums() {
+            if !setting.ends_with(setting_suffix) {
+                continue;
+            }
+            let Some(option_bits) = data.enum_option(setting, option) else {
+                continue;
+            };
+            if option_bits.is_empty() {
+                continue;
+            }
+            let bits: Vec<_> = option_bits
+                .iter()
+                .map(|b| {
+                    (
+                        tile.start_frame + b.frame as u32,
+                        tile.start_bit + b.bit as u32,
+                    )
+                })
+                .collect();
+            let values =
+                skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(db, bitstream, &bits)
+                    .unwrap();
+            // an inverted bit is part of the option when it is clear
+            if values.iter().zip(option_bits).all(|(&v, b)| v != b.invert) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// An LVSTL_I output and a bidirectional pad made from a vendor `BB` buffer
+/// get Radiant's LVSTL settings: the 10 mA LVSTL_I drive on both, the
+/// internal reference on the pad that reads, and the bank's DIFF_IO.
+#[test]
+fn lvstl_output_and_bidirectional_pads_get_radiants_settings() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_lvstl_bidir.sk", "LvstlBidir");
+    let bidir: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.path == "top.dq_iobuf")
+        .collect();
+    assert_eq!(bidir.len(), 1, "the BB becomes the port's pad");
+    assert_eq!(
+        bidir[0]
+            .parameters
+            .get(skalp_lir::gate_netlist::OE_ACTIVE_LOW_PARAM)
+            .map(String::as_str),
+        Some("1"),
+        "the BB's T input is a tristate control"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("LVSTL pads should build");
+    assert!(result.routing.success);
+    let data = &result.bitstream.data;
+    assert_eq!(tiles_with_option(&db, data, "SEIO18.DRIVE_LVSTL", "10"), 2);
+    assert_eq!(tiles_with_option(&db, data, "SEIO18.VREF_LVSTL", "VREF_INT"), 1);
+    assert_eq!(tiles_with_option(&db, data, "BANK3.DIFF_IO", "ON"), 1);
+    assert_eq!(tiles_with_option(&db, data, "BANK3.LVSTL", "LVSTL_I"), 1);
+}
+
 /// A bank has one VCCIO: pads in it that need different voltages are
 /// refused, naming the bank.
 #[test]

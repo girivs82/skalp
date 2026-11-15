@@ -555,8 +555,20 @@ pub fn insert_io_buffers(
         return;
     }
 
-    let input_nets: Vec<GateNetId> = netlist.inputs.clone();
-    let output_nets: Vec<GateNetId> = netlist.outputs.clone();
+    // Ports a vendor IO buffer already drives become that buffer's pad.
+    let bidir_ports = absorb_bidir_buffers(netlist, library, port_constraints);
+    let input_nets: Vec<GateNetId> = netlist
+        .inputs
+        .iter()
+        .copied()
+        .filter(|net| !bidir_ports.contains(net))
+        .collect();
+    let output_nets: Vec<GateNetId> = netlist
+        .outputs
+        .iter()
+        .copied()
+        .filter(|net| !bidir_ports.contains(net))
+        .collect();
     let clock_nets: std::collections::HashSet<GateNetId> = netlist.clocks.iter().copied().collect();
 
     // Insert input IO buffers
@@ -642,6 +654,125 @@ pub fn insert_io_buffers(
         apply_io_constraints_standalone(&mut cell, &port_name, port_constraints);
         netlist.add_cell(cell);
     }
+}
+
+/// A vendor bidirectional IO buffer primitive, instantiated as a blackbox:
+/// its pins, by name.
+struct BidirBufferPrimitive {
+    /// Cell name (`BB` for Lattice ECP5 / Nexus, `IOBUF` for Xilinx)
+    name: &'static str,
+    /// Data to drive onto the pin
+    data_out: &'static str,
+    /// Tristate control: high leaves the pin undriven
+    tristate: &'static str,
+    /// Data read from the pin
+    data_in: &'static str,
+    /// The pin itself, an `inout` connected to a top-level port
+    pad: &'static str,
+}
+
+const BIDIR_BUFFER_PRIMITIVES: &[BidirBufferPrimitive] = &[
+    BidirBufferPrimitive {
+        name: "BB",
+        data_out: "I",
+        tristate: "T",
+        data_in: "O",
+        pad: "B",
+    },
+    BidirBufferPrimitive {
+        name: "IOBUF",
+        data_out: "I",
+        tristate: "T",
+        data_in: "O",
+        pad: "IO",
+    },
+];
+
+/// Turn each vendor bidirectional IO buffer whose pad pin is a top-level
+/// port into that port's bidirectional pad cell, and return those ports.
+///
+/// The pad cell takes `[data_out, tristate]` and drives `data_in`'s net; it
+/// carries [`crate::gate_netlist::OE_ACTIVE_LOW_PARAM`], as its second input
+/// is a tristate control, and the port's constraints. The port net itself
+/// keeps no connection inside the design.
+fn absorb_bidir_buffers(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    port_constraints: &IndexMap<String, PhysicalConstraints>,
+) -> std::collections::HashSet<GateNetId> {
+    let mut ports = std::collections::HashSet::new();
+    let Some(pad_cell) = library.find_best_cell(&CellFunction::BidirPad) else {
+        return ports;
+    };
+    let top_ports: std::collections::HashSet<GateNetId> = netlist
+        .inputs
+        .iter()
+        .chain(&netlist.outputs)
+        .copied()
+        .collect();
+    let mut changed = false;
+    for index in 0..netlist.cells.len() {
+        let cell = &netlist.cells[index];
+        let name = cell
+            .cell_type
+            .strip_prefix("BLACKBOX_")
+            .unwrap_or(&cell.cell_type);
+        let Some(primitive) = BIDIR_BUFFER_PRIMITIVES.iter().find(|p| p.name == name) else {
+            continue;
+        };
+        let pin = |output: bool, wanted: &str| -> Option<GateNetId> {
+            let nets = if output { &cell.outputs } else { &cell.inputs };
+            (0..nets.len())
+                .find(|&i| cell.blackbox_pin(output, i) == Some(wanted))
+                .map(|i| nets[i])
+        };
+        let (Some(data_out), Some(tristate), Some(pad)) = (
+            pin(false, primitive.data_out),
+            pin(false, primitive.tristate),
+            pin(false, primitive.pad),
+        ) else {
+            continue;
+        };
+        if !top_ports.contains(&pad) {
+            continue;
+        }
+        let data_in = pin(true, primitive.data_in);
+        let port_name = netlist
+            .nets
+            .get(pad.0 as usize)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| format!("io_{}", pad.0));
+        let data_in = data_in.unwrap_or_else(|| {
+            let id = GateNetId(netlist.nets.len() as u32);
+            netlist.add_net(GateNet::new(id, format!("{port_name}_in")));
+            id
+        });
+
+        let cell_info = LibraryCellInfo::from_library_cell(pad_cell);
+        let mut cell = Cell::new_comb(
+            netlist.cells[index].id,
+            pad_cell.name.clone(),
+            library.name.clone(),
+            pad_cell.fit,
+            format!("{port_name}_iobuf"),
+            vec![data_out, tristate],
+            vec![data_in],
+        );
+        cell.source_op = Some("IOBuffer".to_string());
+        cell_info.apply_to_cell(&mut cell);
+        cell.parameters.insert(
+            crate::gate_netlist::OE_ACTIVE_LOW_PARAM.into(),
+            "1".into(),
+        );
+        apply_io_constraints_standalone(&mut cell, &port_name, port_constraints);
+        netlist.cells[index] = cell;
+        ports.insert(pad);
+        changed = true;
+    }
+    if changed {
+        netlist.rebuild_net_connectivity();
+    }
+    ports
 }
 
 /// Get or create a tie-high net in the netlist.
