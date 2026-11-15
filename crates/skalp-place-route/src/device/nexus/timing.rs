@@ -10,7 +10,7 @@ use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::HashMap;
 use crate::device::{Device, PipId, DIST_RAM_PIN_RAD, FF_PIN_CE, FF_PIN_LSR, WIDE_LUT_PIN_SEL};
 use crate::error::{PlaceRouteError, Result};
-use crate::timing::sta::{TimingEndpoint, TimingModel};
+use crate::timing::sta::{Metastability, TimingEndpoint, TimingModel};
 use serde::Deserialize;
 use skalp_lir::gate_netlist::Cell;
 use skalp_lir::tech_library::CellFunction;
@@ -93,6 +93,68 @@ pub struct TimingDb {
     large_ram_hold: HashMap<String, i64>,
     /// Hold time of each register pin
     hold: HashMap<String, i64>,
+    /// Metastability of fabric elements, by name, from the family's
+    /// `metastability.json` (measured on boards; absent for most families)
+    metastability: HashMap<String, Metastability>,
+}
+
+/// `<family>/timing/metastability.json`: hand-maintained board measurements
+/// of how fast fabric storage elements resolve, kept apart from the tables
+/// generated from vendor timing data
+#[derive(Deserialize)]
+struct MetastabilityFile {
+    elements: HashMap<String, MetastabilityEntry>,
+}
+
+#[derive(Deserialize)]
+struct MetastabilityEntry {
+    /// Resolution time constant (an upper bound where measured as one), in
+    /// the units of the fast-corner tables, which a wait built from LUTs and
+    /// routing scales with
+    tau_ps: f64,
+    /// Factor on `tau_ps` for what tracking gate delay leaves out across
+    /// process, voltage and temperature
+    #[serde(default = "unit_margin")]
+    pvt_margin: f64,
+    /// Metastability window
+    t0_ps: f64,
+}
+
+fn unit_margin() -> f64 {
+    1.0
+}
+
+/// Read the family's metastability figures, if its database has them
+fn load_metastability(
+    db_root: &Path,
+    variant: NexusVariant,
+) -> Result<HashMap<String, Metastability>> {
+    let path = db_root
+        .join(variant.prjoxide_family())
+        .join("timing")
+        .join("metastability.json");
+    if !path.is_file() {
+        return Ok(HashMap::default());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        PlaceRouteError::BitstreamFailed(format!("reading metastability.json: {e}"))
+    })?;
+    let file: MetastabilityFile = serde_json::from_str(&text).map_err(|e| {
+        PlaceRouteError::BitstreamFailed(format!("parsing metastability.json: {e}"))
+    })?;
+    Ok(file
+        .elements
+        .into_iter()
+        .map(|(name, e)| {
+            (
+                name,
+                Metastability {
+                    tau_ps: e.tau_ps * e.pvt_margin,
+                    t0_ps: e.t0_ps,
+                },
+            )
+        })
+        .collect())
 }
 
 impl TimingDb {
@@ -262,6 +324,7 @@ impl TimingDb {
             large_ram_setup,
             large_ram_hold,
             hold,
+            metastability: load_metastability(db_root, variant)?,
         })
     }
 }
@@ -461,6 +524,10 @@ impl NexusTiming<'_> {
 }
 
 impl TimingModel for NexusTiming<'_> {
+    fn metastability(&self, element: &str) -> Option<Metastability> {
+        self.db.metastability.get(element).copied()
+    }
+
     fn interconnect_ps(&self, pip: PipId) -> i64 {
         let Some(info) = self.device.pip(pip) else {
             return 0;
@@ -726,5 +793,32 @@ mod tests {
         }
         // Neighbour, span-2, span-6 and in-tile PIPs differ
         assert!(distinct.len() > 5, "{distinct:?}");
+    }
+
+    /// A family's `metastability.json` gives each element's time constant
+    /// with its PVT margin applied; a family without the file has none
+    #[test]
+    fn metastability_figures_load_with_their_margin() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let variant = NexusVariant::Lfcpnx100;
+        assert!(load_metastability(root.path(), variant)
+            .expect("no file is fine")
+            .is_empty());
+        let dir = root.path().join(variant.prjoxide_family()).join("timing");
+        std::fs::create_dir_all(&dir).expect("timing dir");
+        std::fs::write(
+            dir.join("metastability.json"),
+            r#"{"elements": {
+                "lut4_feedback_latch": {"tau_ps": 30.0, "pvt_margin": 3.0, "t0_ps": 1000.0, "kind": "upper_bound"},
+                "other": {"tau_ps": 50.0, "t0_ps": 500.0}
+            }}"#,
+        )
+        .expect("write");
+        let figures = load_metastability(root.path(), variant).expect("parses");
+        let latch = figures[crate::timing::sta::STEP_LATCH_ELEMENT];
+        assert_eq!(latch.tau_ps, 90.0);
+        assert_eq!(latch.t0_ps, 1000.0);
+        // no margin given: none applied
+        assert_eq!(figures["other"].tau_ps, 50.0);
     }
 }

@@ -38,6 +38,21 @@ pub struct TimingEndpoint {
     pub hold_ps: i64,
 }
 
+/// How fast a storage element built in the fabric leaves a metastable state
+/// (see `skalp_lir::ncl_bundle::ArbiterTiming`), from the device database
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Metastability {
+    /// Resolution time constant, in picoseconds, margins included
+    pub tau_ps: f64,
+    /// Metastability window, in picoseconds
+    pub t0_ps: f64,
+}
+
+/// Device-database name of the element a self-timed block's step latch is
+/// built as where the library has LUTs: one 4-input LUT with its output fed
+/// back (`skalp_lir::gate_netlist::STEP_LATCH_INIT`)
+pub const STEP_LATCH_ELEMENT: &str = "lut4_feedback_latch";
+
 /// One FPGA family's delays.
 pub trait TimingModel {
     /// Delay through a routing switch, in picoseconds.
@@ -63,6 +78,13 @@ pub trait TimingModel {
     /// Whether an input arrives on dedicated wiring the router doesn't handle.
     fn is_dedicated(&self, _cell: &Cell, _input: usize) -> bool {
         false
+    }
+
+    /// Measured metastability of a fabric element, by its device-database
+    /// name (such as [`STEP_LATCH_ELEMENT`]); `None` where the device data
+    /// has none
+    fn metastability(&self, _element: &str) -> Option<Metastability> {
+        None
     }
 }
 
@@ -594,6 +616,18 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
             .iter()
             .find(|e| e.input == input)
             .map_or(0, |e| e.setup_ps)
+    }
+
+    fn step_latch_timing(&self) -> skalp_lir::ncl_bundle::ArbiterTiming {
+        let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
+        match self.model.metastability(STEP_LATCH_ELEMENT) {
+            Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
+                tau_ps: m.tau_ps,
+                t0_ps: m.t0_ps,
+                ..default
+            },
+            None => default,
+        }
     }
 }
 

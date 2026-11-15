@@ -89,6 +89,11 @@ pub trait BundleDelays {
     fn arbiter_timing(&self) -> ArbiterTiming {
         ArbiterTiming::default()
     }
+    /// Metastability figures for a self-timed block's step latch, where the
+    /// device data has them; otherwise those of an arbiter
+    fn step_latch_timing(&self) -> ArbiterTiming {
+        self.arbiter_timing()
+    }
 }
 
 /// Seconds in a (Julian) year
@@ -572,8 +577,11 @@ fn check_arbiters(
     delays: &dyn BundleDelays,
     matched: &[MatchedDelay],
 ) -> Vec<BundleCheck> {
-    let timing = delays.arbiter_timing();
-    let required = timing.resolution_ps();
+    // Every step decision goes through the step latch; a block with
+    // arbiters also waits for its mutual-exclusion elements, so it needs
+    // whichever of the two is longer
+    let latch = delays.step_latch_timing();
+    let arbiter = delays.arbiter_timing();
     let mut checks = Vec::new();
     for md in matched {
         // `go`'s delay: its source is the step request, driven by the step
@@ -596,6 +604,12 @@ fn check_arbiters(
             continue;
         };
         let wait = go - request;
+        let timing = if arbitrates && arbiter.resolution_ps() > latch.resolution_ps() {
+            arbiter
+        } else {
+            latch
+        };
+        let required = timing.resolution_ps();
         tracing::debug!(
             "NCL step decision {}: resolution wait {} ps (needs {} ps), MTBF {:.3e} years",
             md.prefix.trim_end_matches('.'),
@@ -1353,5 +1367,64 @@ mod tests {
 
         let parent_stepped = check_matched_delays(&block_with_feedback(), &UnitDelays);
         assert!(parent_stepped.iter().all(|c| c.times != "step decision"));
+    }
+
+    /// Unit delays with device figures for the step latch: a slower latch
+    /// (`tau_ps`) than the arbiter default
+    struct LatchDelays(f64);
+
+    impl BundleDelays for LatchDelays {
+        fn wire_ps(&self, n: &GateNetlist, net: GateNetId, c: &Cell, i: usize) -> i64 {
+            UnitDelays.wire_ps(n, net, c, i)
+        }
+        fn clock_wire_ps(&self, n: &GateNetlist, net: GateNetId, c: &Cell) -> i64 {
+            UnitDelays.clock_wire_ps(n, net, c)
+        }
+        fn arc_ps(&self, c: &Cell, i: usize, o: usize) -> Option<i64> {
+            UnitDelays.arc_ps(c, i, o)
+        }
+        fn clock_to_out_ps(&self, c: &Cell) -> i64 {
+            UnitDelays.clock_to_out_ps(c)
+        }
+        fn setup_ps(&self, c: &Cell, i: usize) -> i64 {
+            UnitDelays.setup_ps(c, i)
+        }
+        fn step_latch_timing(&self) -> ArbiterTiming {
+            ArbiterTiming {
+                tau_ps: self.0,
+                ..ArbiterTiming::default()
+            }
+        }
+    }
+
+    /// The step decision waits for the step latch's own figures; a block
+    /// with arbiters waits for the slower of its latch and its arbiters
+    #[test]
+    fn step_decision_uses_the_step_latch_timing() {
+        let latch = ArbiterTiming {
+            tau_ps: 90.0,
+            ..ArbiterTiming::default()
+        };
+        let checks = check_matched_delays(&self_timed_block(false), &LatchDelays(90.0));
+        let decision = checks
+            .iter()
+            .find(|c| c.times == "step decision")
+            .expect("a step decision check");
+        assert_eq!(decision.data_ps, latch.resolution_ps());
+
+        // slower latch than arbiter: the latch sets the wait
+        let checks = check_matched_delays(&arbitrating_block(), &LatchDelays(90.0));
+        let arb = checks
+            .iter()
+            .find(|c| c.times == "arbiter")
+            .expect("arbiter");
+        assert_eq!(arb.data_ps, latch.resolution_ps());
+        // faster latch: the arbiter sets it
+        let checks = check_matched_delays(&arbitrating_block(), &LatchDelays(30.0));
+        let arb = checks
+            .iter()
+            .find(|c| c.times == "arbiter")
+            .expect("arbiter");
+        assert_eq!(arb.data_ps, ArbiterTiming::default().resolution_ps());
     }
 }
