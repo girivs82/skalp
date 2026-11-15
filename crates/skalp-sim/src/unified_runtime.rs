@@ -1125,7 +1125,7 @@ impl UnifiedSimulator {
                 eprintln!("Warning: step called before loading design");
             }
             SimulatorBackend::CompiledCpu(runtime) => {
-                let _ = runtime.step().await;
+                runtime.advance();
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(runtime) => {
@@ -1330,6 +1330,18 @@ impl UnifiedSimulator {
     ///
     /// Falls back to regular step-by-step execution for non-GPU backends.
     pub async fn run_batched(&mut self, cycles: u64) -> UnifiedSimResult {
+        // The compiled C++ kernel's batched loop, when the design's
+        // flip-flops all take its one input clock and no output is read
+        // through a latency delay (those buffers fill once per step)
+        if self.latency_adjustments.is_empty() {
+            if let SimulatorBackend::CompiledCpu(runtime) = &mut self.backend {
+                if runtime.run_batched_cycles(cycles) {
+                    runtime.current_cycle += 2 * cycles;
+                    self.current_cycle += 2 * cycles;
+                    return self.build_result().await;
+                }
+            }
+        }
         match &mut self.backend {
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(gpu_runtime) => {

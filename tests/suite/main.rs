@@ -36,6 +36,7 @@ mod test_cdc_attribute;
 mod test_cdc_verification;
 mod test_chained_operator_specialization;
 mod test_child_let;
+mod test_child_memory_sim;
 mod test_clock_enable;
 mod test_complete_hardware_flow;
 mod test_cone_extraction;

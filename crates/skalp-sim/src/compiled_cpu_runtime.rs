@@ -142,7 +142,7 @@ pub struct CompiledCpuRuntime {
     /// Output port mappings (output name -> signal field name)
     output_mappings: HashMap<String, String>,
     /// Current simulation cycle
-    current_cycle: u64,
+    pub(crate) current_cycle: u64,
     /// Reference to the SIR module for metadata
     module: SirModule,
     /// Clock signal names for edge detection (all clock domains)
@@ -727,46 +727,11 @@ impl CompiledCpuRuntime {
         result
     }
 
-    /// Extract current state as SimulationState
-    fn extract_state(&self) -> SimulationState {
-        let mut signals = IndexMap::new();
-        let mut registers = IndexMap::new();
-
-        // Extract signals
-        for (name, info) in &self.signal_fields.fields {
-            let value = self.signals.read(info.offset, info.size).to_vec();
-            signals.insert(name.clone(), value);
-        }
-
-        // Extract registers
-        for (name, info) in &self.register_fields.fields {
-            let value = self.registers.read(info.offset, info.size).to_vec();
-            registers.insert(name.clone(), value);
-        }
-
-        SimulationState {
-            cycle: self.current_cycle,
-            signals,
-            registers,
-        }
-    }
-}
-
-#[async_trait]
-impl SimulationRuntime for CompiledCpuRuntime {
-    async fn initialize(&mut self, _module: &SirModule) -> SimulationResult<()> {
-        // Already initialized in constructor
-        self.inputs.clear();
-        self.registers.clear();
-        self.signals.clear();
-        self.load_initial_values();
-        self.current_cycle = 0;
-        self.prev_clocks.iter_mut().for_each(|c| *c = 0);
-        self.reset_kernel_clocks();
-        Ok(())
-    }
-
-    async fn step(&mut self) -> SimulationResult<SimulationState> {
+    /// One simulation step (a half clock period): combinational logic, then
+    /// the flip-flops of every clock with an edge, then combinational logic
+    /// again. Builds no snapshot of the state, which for a large design
+    /// costs far more than the step itself; `step` adds one.
+    pub fn advance(&mut self) {
         // Phase 1: Combinational evaluation
         self.eval_combinational();
 
@@ -834,30 +799,94 @@ impl SimulationRuntime for CompiledCpuRuntime {
         }
 
         self.current_cycle += 1;
-        Ok(self.extract_state())
     }
 
-    async fn run(&mut self, cycles: u64) -> SimulationResult<Vec<SimulationState>> {
-        let mut states = Vec::with_capacity(cycles as usize);
-
-        // Use batched simulation for efficiency if more than a few cycles.
-        // It updates every flip-flop each cycle, so only a design whose
-        // flip-flops all take one input clock can use it.
+    /// Run `cycles` clock cycles of the design's one input clock in the
+    /// compiled batched kernel (combinational logic, then every flip-flop,
+    /// once per cycle), when that is the same as stepping each half period:
+    /// every flip-flop takes one input clock. Returns false, having done
+    /// nothing, when the design has flip-flops on several clocks or on a
+    /// clock its own logic makes. Leaves the cycle count to the caller.
+    pub fn run_batched_cycles(&mut self, cycles: u64) -> bool {
+        if cycles == 0 {
+            return true;
+        }
         let one_input_clock = self.kernel_clocks.len() <= 1
             && self
                 .kernel_clocks
                 .iter()
                 .all(|c| matches!(c.source, ClockSource::Input(_) | ClockSource::Unknown));
-        if cycles > 10 && one_input_clock {
+        if !one_input_clock {
+            return false;
+        }
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let chunk = remaining.min(u32::MAX as u64);
             unsafe {
                 let kernel = &*self.kernel;
                 (kernel.batched_simulation)(
                     self.inputs.as_mut_ptr(),
                     self.registers.as_mut_ptr(),
                     self.signals.as_mut_ptr(),
-                    cycles as u32,
+                    chunk as u32,
                 );
             }
+            remaining -= chunk;
+        }
+        // The clocks end high, as after the high half of a stepped cycle
+        for c in self.prev_clocks.iter_mut() {
+            *c = 1;
+        }
+        true
+    }
+
+    /// Extract current state as SimulationState
+    fn extract_state(&self) -> SimulationState {
+        let mut signals = IndexMap::new();
+        let mut registers = IndexMap::new();
+
+        // Extract signals
+        for (name, info) in &self.signal_fields.fields {
+            let value = self.signals.read(info.offset, info.size).to_vec();
+            signals.insert(name.clone(), value);
+        }
+
+        // Extract registers
+        for (name, info) in &self.register_fields.fields {
+            let value = self.registers.read(info.offset, info.size).to_vec();
+            registers.insert(name.clone(), value);
+        }
+
+        SimulationState {
+            cycle: self.current_cycle,
+            signals,
+            registers,
+        }
+    }
+}
+
+#[async_trait]
+impl SimulationRuntime for CompiledCpuRuntime {
+    async fn initialize(&mut self, _module: &SirModule) -> SimulationResult<()> {
+        // Already initialized in constructor
+        self.inputs.clear();
+        self.registers.clear();
+        self.signals.clear();
+        self.load_initial_values();
+        self.current_cycle = 0;
+        self.prev_clocks.iter_mut().for_each(|c| *c = 0);
+        self.reset_kernel_clocks();
+        Ok(())
+    }
+
+    async fn step(&mut self) -> SimulationResult<SimulationState> {
+        self.advance();
+        Ok(self.extract_state())
+    }
+
+    async fn run(&mut self, cycles: u64) -> SimulationResult<Vec<SimulationState>> {
+        let mut states = Vec::with_capacity(cycles as usize);
+        if cycles > 10 && self.run_batched_cycles(cycles) {
             self.current_cycle += cycles;
             states.push(self.extract_state());
         } else {
@@ -865,9 +894,9 @@ impl SimulationRuntime for CompiledCpuRuntime {
                 states.push(self.step().await?);
             }
         }
-
         Ok(states)
     }
+
 
     async fn reset(&mut self) -> SimulationResult<()> {
         self.registers.clear();
