@@ -258,6 +258,7 @@ fn drive_constant_hard_block_inputs(
         let tied: Vec<(usize, bool)> = (0..cell.inputs.len())
             .filter(|&i| device.hard_block_input_pin(cell, i).is_some())
             .filter_map(|i| Some((i, *constants.get(&cell.inputs[i])?)))
+            .filter(|&(i, value)| device.hard_block_input_unrouted_value(cell, i) != Some(value))
             .collect();
         if tied.is_empty() {
             continue;
@@ -358,10 +359,11 @@ pub fn prepare_for_routing(
             }
             continue;
         }
-        let hard_block_pins = (0..cell.outputs.len().max(cell.inputs.len())).any(|i| {
-            device.hard_block_input_pin(cell, i).is_some()
-                || device.hard_block_output_pin(cell, i).is_some()
-        });
+        let hard_block_pins = device.is_hard_block(cell)
+            || (0..cell.outputs.len().max(cell.inputs.len())).any(|i| {
+                device.hard_block_input_pin(cell, i).is_some()
+                    || device.hard_block_output_pin(cell, i).is_some()
+            });
         if hard_block_pins {
             // Constant inputs were given drivers ([`drive_constant_inputs`])
             for (index, &net) in cell.inputs.iter().enumerate() {

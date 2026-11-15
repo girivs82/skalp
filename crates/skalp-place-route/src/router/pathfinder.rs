@@ -1257,10 +1257,14 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     if !reached {
                         let name = |w: WireId| self.device.wire(w).map(|wire| wire.name.clone());
                         log::debug!(
-                            "pathfinder: net {} has no path from {:?} to {:?}",
+                            "pathfinder: net {} has no path from {:?} to {:?} (sink cell {:?})",
                             net.name,
                             name(source_wire),
-                            name(sink_wire)
+                            name(sink_wire),
+                            netlist
+                                .cells
+                                .get(sink_id.0 as usize)
+                                .map(|c| (&c.cell_type, &c.path))
                         );
                         route.unrouted_sinks += 1;
                     }
@@ -1635,6 +1639,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     self.fallback_source_wire(loc, iob_idx)
                 }
             }
+            // A hard block's pins are the device's pin model or nothing
+            BelType::DdrBlock => None,
             _ => self.fallback_source_wire(loc, lc_idx),
         }
     }
@@ -1694,6 +1700,8 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
                     self.fallback_sink_wire(loc, iob_idx)
                 }
             }
+            // A hard block's pins are the device's pin model or nothing
+            BelType::DdrBlock => None,
             _ => self.fallback_sink_wire(loc, lc_idx),
         }
     }

@@ -293,9 +293,16 @@ pub fn route_clock_nets<D: Device + ?Sized>(
             let Some((entry_path, entry, entry_reached)) =
                 enter_network(device, source, &sinks, &owners)
             else {
+                let unreached: Vec<&str> = sinks
+                    .iter()
+                    .filter(|s| !reached.contains_key(s))
+                    .take(5)
+                    .filter_map(|&s| device.wire(s).map(|w| w.name.as_str()))
+                    .collect();
                 eprintln!(
-                    "warning: clock net '{}' has no way onto the dedicated clock network, so it uses general routing and may have high skew",
-                    net.name
+                    "warning: clock net '{}' has no way onto the dedicated clock network, so it uses general routing and may have high skew (dedicated wires from its source miss {})",
+                    net.name,
+                    unreached.join(", ")
                 );
                 routing.general.insert(net.id);
                 continue;

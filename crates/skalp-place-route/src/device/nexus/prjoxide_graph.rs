@@ -604,7 +604,7 @@ impl ClockRegions {
 }
 
 /// [`resolve_wire`], placing clock-network wires with the device's layout.
-fn resolve_with_clocks(
+pub(crate) fn resolve_with_clocks(
     clocks: Option<&ClockRegions>,
     x: u32,
     y: u32,

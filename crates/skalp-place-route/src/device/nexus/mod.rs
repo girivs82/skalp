@@ -14,6 +14,7 @@
 
 pub mod adc;
 pub mod data;
+pub mod ddr;
 pub mod dsp;
 pub mod ebr;
 pub mod emit;
@@ -216,6 +217,13 @@ pub struct NexusDevice {
     /// reach the fabric), in the order a cell's added inputs take them; their
     /// router pins follow [`adc::input_pins`]
     adc_low_pins: Arc<Vec<String>>,
+    /// The family's DDR primitives, from the device data
+    ddr_primitives: Arc<ddr::Primitives>,
+    /// Every DDR block of the device
+    ddr_sites: Arc<Vec<ddr::Site>>,
+    /// DDR blocks with a BEL in the window, by (tile, BEL name): their index
+    /// in `ddr_sites`
+    ddr_bels: Arc<HashMap<(u32, u32, String), usize>>,
     /// DSP tiles
     pub dsp_tiles: Vec<DspTile>,
 }
@@ -352,6 +360,21 @@ impl NexusDevice {
             .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
             .filter_map(|t| Some(((t.x, t.y), pll::corner_of_tile(&t.tiletype)?.to_string())))
             .collect();
+
+        // DDR blocks of the device, and those with their BEL in the window
+        let ddr_primitives = ddr::Primitives::load(db_root, family)?;
+        let ddr_sites = if ddr_primitives.pins().is_empty() {
+            Vec::new()
+        } else {
+            ddr::sites(db_root, family, &all_tiles)
+        };
+        let mut ddr_by_tile: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (index, site) in ddr_sites.iter().enumerate() {
+            if site.x >= x0 && site.x <= x1 && site.y >= y0 && site.y <= y1 {
+                ddr_by_tile.entry((site.x, site.y)).or_default().push(index);
+            }
+        }
+        let mut ddr_bels: HashMap<(u32, u32, String), usize> = HashMap::new();
 
         // Tile order sets BEL ids and placement order, so keep it stable.
         let mut ordered: Vec<_> = primary.iter().collect();
@@ -648,6 +671,30 @@ impl NexusDevice {
                 });
                 bel_id_counter += 1;
             }
+            for &index in ddr_by_tile.get(&(x, y)).into_iter().flatten() {
+                let site = &ddr_sites[index];
+                for (pin, (tx, ty, name)) in &site.pins {
+                    let wire = prjoxide_graph::resolve_with_clocks(Some(&clocks), *tx, *ty, name)
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied());
+                    if let Some(w) = wire {
+                        log::trace!(
+                            "ddr pin {}.{pin} = {} at R{ty}C{tx} -> {:?}",
+                            site.name,
+                            name,
+                            graph.wires.get(w.0 as usize).map(|w| &w.name)
+                        );
+                        bel_wires.insert((x, y, format!("{}.{pin}", site.name)), w);
+                    }
+                }
+                ddr_bels.insert((x, y, site.name.clone()), index);
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::DdrBlock,
+                    name: site.name.clone(),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
@@ -696,6 +743,9 @@ impl NexusDevice {
             large_ram_pins: Arc::new(large_ram_pins),
             large_ram_low_pins: Arc::new(large_ram_low_pins),
             adc_low_pins: Arc::new(adc_low_pins),
+            ddr_primitives: Arc::new(ddr_primitives),
+            ddr_sites: Arc::new(ddr_sites),
+            ddr_bels: Arc::new(ddr_bels),
             dsp_tiles: Vec::new(),
         })
     }
@@ -810,6 +860,33 @@ impl NexusDevice {
         &self.vref_generators
     }
 
+    /// The family's DDR primitives, from the device data.
+    pub fn ddr_primitives(&self) -> &ddr::Primitives {
+        &self.ddr_primitives
+    }
+
+    /// Every DDR block of the device.
+    pub fn ddr_sites(&self) -> &[ddr::Site] {
+        &self.ddr_sites
+    }
+
+    /// The DDR block of BEL `bel_index` of the tile at (x, y), if it is one.
+    pub fn ddr_site_at(&self, x: u32, y: u32, bel_index: usize) -> Option<&ddr::Site> {
+        let bel = Device::tile_at(self, x, y)?.bels().get(bel_index)?;
+        let &index = self.ddr_bels.get(&(x, y, bel.name.clone()))?;
+        self.ddr_sites.get(index)
+    }
+
+    /// The index of the BEL of DDR block `site` (an index into
+    /// [`Self::ddr_sites`]) in its tile, if the window holds it.
+    pub fn ddr_bel_index(&self, site: usize) -> Option<usize> {
+        let s = self.ddr_sites.get(site)?;
+        Device::tile_at(self, s.x, s.y)?
+            .bels()
+            .iter()
+            .position(|b| b.bel_type == BelType::DdrBlock && b.name == s.name)
+    }
+
     /// A BEL pin's wire, by its conventional key.
     /// Location of the pins of the large RAM site whose tile is at (x, y).
     pub fn large_ram_pin_location(&self, x: u32, y: u32) -> Option<(u32, u32)> {
@@ -918,6 +995,9 @@ impl NexusDevice {
             large_ram_pins: Arc::new(HashMap::new()),
             large_ram_low_pins: Arc::new(Vec::new()),
             adc_low_pins: Arc::new(Vec::new()),
+            ddr_primitives: Arc::new(ddr::Primitives::default()),
+            ddr_sites: Arc::new(Vec::new()),
+            ddr_bels: Arc::new(HashMap::new()),
             dsp_tiles: Vec::new(),
         };
 
@@ -2502,11 +2582,22 @@ impl Device for NexusDevice {
         self.variant.default_package()
     }
 
+    fn hard_block_input_unrouted_value(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+    ) -> Option<bool> {
+        self.ddr_primitives.input_unrouted_value(cell, input)
+    }
+
     fn hard_block_input_pin(
         &self,
         cell: &skalp_lir::gate_netlist::Cell,
         input: usize,
     ) -> Option<usize> {
+        if self.ddr_primitives.of(cell).is_some() {
+            return self.ddr_primitives.input_router_pin(cell, input);
+        }
         if ivref::is_vref_generator(cell) {
             return ivref::input_router_pin(cell, input);
         }
@@ -2529,10 +2620,17 @@ impl Device for NexusDevice {
         cell: &skalp_lir::gate_netlist::Cell,
         output: usize,
     ) -> Option<usize> {
+        if self.ddr_primitives.of(cell).is_some() {
+            return self.ddr_primitives.output_router_pin(cell, output);
+        }
         if adc::is_adc(cell) {
             return adc::output_router_pin(cell, output);
         }
         pll::output_router_pin(cell, output).filter(|_| pll::is_pll(cell))
+    }
+
+    fn is_hard_block(&self, cell: &skalp_lir::gate_netlist::Cell) -> bool {
+        self.ddr_primitives.of(cell).is_some()
     }
 
     fn dsp_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
@@ -2650,6 +2748,18 @@ impl Device for NexusDevice {
                 CellPin::Input(n) => lram::pin_of_router_pin(n)?.to_string(),
             };
             return self.bel_wires.get(&(x, y, format!("LRAM_{name}"))).copied();
+        }
+        if let Some(bel) = self
+            .tile_at(x, y)
+            .and_then(|t| t.bels().get(bel_index))
+            .filter(|b| b.bel_type == BelType::DdrBlock)
+        {
+            let (CellPin::Input(n) | CellPin::Output(n)) = pin;
+            let name = self.ddr_primitives.pin_of_router_pin(n)?;
+            return self
+                .bel_wires
+                .get(&(x, y, format!("{}.{name}", bel.name)))
+                .copied();
         }
         let is_vref_generator = !self.prjoxide_tiles.is_empty()
             && self
