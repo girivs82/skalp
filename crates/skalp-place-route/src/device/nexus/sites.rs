@@ -74,6 +74,15 @@ pub struct VrefDriver {
     pub site: (u32, u32, u8),
 }
 
+/// The bank of an I/O tile (`SYSIO_B<n>...`).
+pub fn bank_of_io_tile(tiletype: &str) -> Option<u32> {
+    tiletype
+        .strip_prefix("SYSIO_B")?
+        .chars()
+        .next()?
+        .to_digit(10)
+}
+
 /// Whether an IO tile belongs to a high-performance (1.8 V and below) bank.
 pub fn is_high_performance_io(tiletype: &str) -> bool {
     matches!(tiletype.as_bytes().get(7), Some(b'3'..=b'5')) && tiletype.starts_with("SYSIO_B")

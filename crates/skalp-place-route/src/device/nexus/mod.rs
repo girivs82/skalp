@@ -16,6 +16,7 @@ pub mod data;
 pub mod dsp;
 pub mod ebr;
 pub mod emit;
+pub mod ivref;
 pub mod lram;
 pub mod pll;
 pub mod prjoxide_bels;
@@ -188,6 +189,8 @@ pub struct NexusDevice {
     packages: HashMap<String, PackagePins>,
     /// Pad driving each bank's input reference voltage, by bank
     vref_drivers: Arc<HashMap<u32, sites::VrefDriver>>,
+    /// Every bank input reference generator of the device, by bank
+    vref_generators: Arc<Vec<ivref::Site>>,
     /// Routing architecture
     routing: RoutingArchitecture,
     /// Clock resources
@@ -314,6 +317,14 @@ impl NexusDevice {
             .filter_map(|t| Some(((t.x, t.y), lram::site_of_tile(&t.tiletype)?)))
             .collect();
         let mut large_ram_pins: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+
+        // Bank input reference generators of the device, and those in the window
+        let vref_generators = ivref::sites(db_root, family, &all_tiles);
+        let vref_generator_sites: HashMap<(u32, u32), u32> = vref_generators
+            .iter()
+            .filter(|s| s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1)
+            .map(|s| ((s.x, s.y), s.bank))
+            .collect();
 
         // PLL sites: the GPLL tile of each corner in the window
         let pll_sites: HashMap<(u32, u32), String> = all_tiles
@@ -577,6 +588,29 @@ impl NexusDevice {
                     bel_id_counter += 1;
                 }
             }
+            if let Some(&bank) = vref_generator_sites.get(&(x, y)) {
+                let wires: Vec<(&str, WireId)> = ivref::input_pins()
+                    .iter()
+                    .filter_map(|&pin| {
+                        let wire = resolve_wire(x, y, &ivref::site_wire(pin))
+                            .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())?;
+                        Some((pin, wire))
+                    })
+                    .collect();
+                // Only a generator whose level pins all reach the fabric
+                if wires.len() == ivref::input_pins().len() {
+                    for (pin, wire) in wires {
+                        bel_wires.insert((x, y, format!("IVREF_{pin}")), wire);
+                    }
+                    bels.push(Bel {
+                        id: BelId(bel_id_counter),
+                        bel_type: BelType::VrefGen,
+                        name: format!("IVREF_BANK{bank}"),
+                        pins: Vec::new(),
+                    });
+                    bel_id_counter += 1;
+                }
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
@@ -608,6 +642,7 @@ impl NexusDevice {
             hop_costs: Vec::new(),
             packages: sites::package_pins(db_root, variant, &all_tiles_for_pins)?,
             vref_drivers: Arc::new(sites::vref_drivers(db_root, variant)?),
+            vref_generators: Arc::new(vref_generators),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles,
@@ -719,6 +754,16 @@ impl NexusDevice {
         self.vref_drivers.get(&bank)
     }
 
+    /// `bank`'s input reference generator, if it has one.
+    pub fn vref_generator(&self, bank: u32) -> Option<&ivref::Site> {
+        self.vref_generators.iter().find(|s| s.bank == bank)
+    }
+
+    /// Every bank input reference generator of the device.
+    pub fn vref_generators(&self) -> &[ivref::Site] {
+        &self.vref_generators
+    }
+
     /// A BEL pin's wire, by its conventional key.
     /// Location of the pins of the large RAM site whose tile is at (x, y).
     pub fn large_ram_pin_location(&self, x: u32, y: u32) -> Option<(u32, u32)> {
@@ -812,6 +857,7 @@ impl NexusDevice {
             hop_costs: Vec::new(),
             packages: HashMap::new(),
             vref_drivers: Arc::default(),
+            vref_generators: Arc::default(),
             routing: Self::default_routing(variant),
             clock_resources: Self::default_clock_resources(variant),
             logic_tiles: Vec::new(),
@@ -2403,11 +2449,22 @@ impl Device for NexusDevice {
         self.variant.default_package()
     }
 
-    fn pll_input_pin(&self, cell: &skalp_lir::gate_netlist::Cell, input: usize) -> Option<usize> {
+    fn hard_block_input_pin(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        input: usize,
+    ) -> Option<usize> {
+        if ivref::is_vref_generator(cell) {
+            return ivref::input_router_pin(cell, input);
+        }
         pll::input_router_pin(cell, input).filter(|_| pll::is_pll(cell))
     }
 
-    fn pll_output_pin(&self, cell: &skalp_lir::gate_netlist::Cell, output: usize) -> Option<usize> {
+    fn hard_block_output_pin(
+        &self,
+        cell: &skalp_lir::gate_netlist::Cell,
+        output: usize,
+    ) -> Option<usize> {
         pll::output_router_pin(cell, output).filter(|_| pll::is_pll(cell))
     }
 
@@ -2524,6 +2581,21 @@ impl Device for NexusDevice {
                 CellPin::Input(n) => lram::pin_of_router_pin(n)?.to_string(),
             };
             return self.bel_wires.get(&(x, y, format!("LRAM_{name}"))).copied();
+        }
+        let is_vref_generator = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::VrefGen);
+        if is_vref_generator {
+            let CellPin::Input(n) = pin else {
+                return None;
+            };
+            let name = ivref::input_pins().get(n)?;
+            return self
+                .bel_wires
+                .get(&(x, y, format!("IVREF_{name}")))
+                .copied();
         }
         let is_pll = !self.prjoxide_tiles.is_empty()
             && self
