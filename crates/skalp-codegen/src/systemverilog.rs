@@ -266,7 +266,12 @@ fn is_generic_type(data_type: &DataType) -> bool {
 fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -> Option<usize> {
     match &expr.kind {
         skalp_mir::ExpressionKind::Literal(value) => match value {
-            skalp_mir::Value::Integer(_) => Some(32),
+            // An unsized integer literal takes its width from its context
+            // (the variable it is assigned to, or the other operand), so it
+            // has no width of its own to widen a variable to. Treating it as
+            // 32 bits declared `let x: bit[4] = 0` as `logic [31:0]`, which
+            // then shifted its neighbours out of any concatenation.
+            skalp_mir::Value::Integer(_) => None,
             skalp_mir::Value::Float(_) => Some(32), // Single-precision float
             skalp_mir::Value::BitVector { width, .. } => Some(*width),
             _ => None,
@@ -336,10 +341,25 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             else_expr,
             ..
         } => {
-            // Use the wider of the two branches
-            let then_width = compute_expression_width(then_expr, mir_module)?;
-            let else_width = compute_expression_width(else_expr, mir_module)?;
-            Some(then_width.max(else_width))
+            // Use the wider of the two branches. An unsized literal arm is
+            // context-determined, so `if c { 0 } else { y[3:0] }` is 4 bits
+            // wide; if both arms are unsized literals there is no width.
+            let is_int_literal = |e: &skalp_mir::Expression| {
+                matches!(
+                    e.kind,
+                    skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(_))
+                )
+            };
+            match (is_int_literal(then_expr), is_int_literal(else_expr)) {
+                (true, true) => None,
+                (true, false) => compute_expression_width(else_expr, mir_module),
+                (false, true) => compute_expression_width(then_expr, mir_module),
+                (false, false) => {
+                    let then_width = compute_expression_width(then_expr, mir_module)?;
+                    let else_width = compute_expression_width(else_expr, mir_module)?;
+                    Some(then_width.max(else_width))
+                }
+            }
         }
         skalp_mir::ExpressionKind::Cast { target_type, .. } => {
             // Cast specifies the target type width
@@ -848,6 +868,14 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     // Generate internal variable declarations. Names are already unique in
     // the module (`with_unique_variable_names`).
     let mut declared_any_variable = false;
+    let continuously_assigned_variables: HashSet<skalp_mir::VariableId> = mir_module
+        .assignments
+        .iter()
+        .filter_map(|assign| match &assign.lhs {
+            skalp_mir::LValue::Variable(var_id) => Some(*var_id),
+            _ => None,
+        })
+        .collect();
 
     for variable in &mir_module.variables {
         // BUG FIX #8: Check if we have an inferred width override for this variable
@@ -887,9 +915,15 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             element_width, variable.name, array_dim
         ));
 
-        // Add initial value if present
+        // Add initial value if present. A variable that a continuous
+        // assignment drives must not also get a declaration initializer:
+        // `logic [7:0] g = 255; assign g = 255;` drives `g` twice, which
+        // SystemVerilog forbids (iverilog rejects it). The assignment
+        // already gives it the value.
         if let Some(init) = &variable.initial {
-            sv.push_str(&format!(" = {}", format_value(init)));
+            if !continuously_assigned_variables.contains(&variable.id) {
+                sv.push_str(&format!(" = {}", format_value(init)));
+            }
         }
 
         sv.push_str(";\n");
