@@ -2327,17 +2327,13 @@ impl MirToLirTransform {
             case_arms_data.push((item.values.clone(), &item.block));
         }
 
-        let default_assigns = if let Some(ref default_block) = case_stmt.default {
-            let assigns = Self::collect_assignments(default_block);
-            for (lv, _) in &assigns {
-                if !all_targets.contains(lv) {
-                    all_targets.push(lv.clone());
+        if let Some(ref default_block) = case_stmt.default {
+            for (lv, _) in Self::collect_assignments(default_block) {
+                if !all_targets.contains(&lv) {
+                    all_targets.push(lv);
                 }
             }
-            assigns
-        } else {
-            Vec::new()
-        };
+        }
 
         // A target assigned only before the match is not driven here: its own
         // assignment gives it a register, and a second one would be a
@@ -2349,25 +2345,24 @@ impl MirToLirTransform {
             let target_signal = self.get_lvalue_signal(target);
             let target_width = self.get_lvalue_width(target);
 
-            // BUG #237 FIX: Determine default value with priority:
-            // 1. Explicit default block assignment
-            // 2. Sequential default (assignment before the case)
-            // 3. Feedback (keep current value)
-            let default_signal =
-                if let Some(expr) = Self::find_assignment_expr(&default_assigns, target) {
-                    self.transform_expression(expr, target_width)
-                } else if let Some(expr) = Self::find_assignment_expr(sequential_defaults, target) {
-                    self.transform_expression(expr, target_width)
-                } else {
-                    target_signal // Feedback: keep current value
-                };
-
             // An arm that matches but does not assign the target leaves it at
-            // its value before the match, never at the default arm's value.
+            // its value before the match (a sequential default, else the
+            // register's own value), never at the default arm's value.
             let hold = if let Some(expr) = Self::find_assignment_expr(sequential_defaults, target) {
                 self.transform_expression(expr, target_width)
             } else {
                 target_signal
+            };
+
+            // The default arm (`_`) is synthesized like any other arm, through
+            // its if/else and nested matches: its value is the last assignment
+            // that applies, else `hold`. Taking its last assignment as an
+            // unconditional value would drop every condition inside it.
+            let default_signal = match &case_stmt.default {
+                Some(block) if Self::block_assigns_to_target(block, target) => {
+                    self.synthesize_case_arm_for_target(block, target, target_width, hold)
+                }
+                _ => hold,
             };
 
             // Every arm on constants: a table lookup rather than a priority
