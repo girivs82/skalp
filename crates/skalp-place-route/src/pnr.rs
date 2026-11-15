@@ -558,8 +558,28 @@ pub fn place_and_route_nexus_real(
     // design's pins; the region loaded must reach it
     let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
         .map_err(PlaceRouteError::PlacementFailed)?;
+    // Each bank input reference generator goes to the bank its LOC names,
+    // or a bank whose LVSTL inputs need one
+    let pad_bank = |cell: &skalp_lir::gate_netlist::Cell| {
+        let package = variant
+            .default_package()
+            .and_then(|name| packages.get(name))
+            .or_else(|| packages.values().next())?;
+        let &(x, y, _) = package.pins.get(cell.parameters.get("LOC")?)?;
+        tiles
+            .iter()
+            .filter(|t| t.x == x && t.y == y)
+            .find_map(|t| crate::device::nexus::sites::bank_of_io_tile(&t.tiletype))
+    };
+    let vref_generator_sites = crate::device::nexus::ivref::choose_sites(
+        &crate::device::nexus::ivref::sites(db_root, variant.prjoxide_family(), &tiles),
+        netlist,
+        &pad_bank,
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
     let mut pad_sites = pad_sites;
     pad_sites.extend(pll_sites.values().copied());
+    pad_sites.extend(vref_generator_sites.values().map(|s| (s.x, s.y)));
     let clocks = crate::device::nexus::prjoxide_graph::ClockRegions::load(
         db_root,
         variant.prjoxide_family(),
@@ -639,8 +659,8 @@ pub fn place_and_route_nexus_real(
     let netlist = &prepare::drive_constant_inputs(netlist, &device);
     let mut logic = prepare::logic_only_netlist(netlist);
     for cell in &mut logic.cells {
-        if pll_sites.contains_key(&cell.id) {
-            cell.cell_type = "TIE_PLL".to_string();
+        if pll_sites.contains_key(&cell.id) || vref_generator_sites.contains_key(&cell.id) {
+            cell.cell_type = "TIE_HARD_BLOCK".to_string();
             cell.function = None;
             cell.parameters.clear();
         }
@@ -670,6 +690,26 @@ pub fn place_and_route_nexus_real(
         placement.placements.insert(
             cell,
             crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::Pll),
+        );
+    }
+    for (&cell, site) in &vref_generator_sites {
+        let (x, y) = (site.x, site.y);
+        let bel = crate::device::Device::tile_at(&device, x, y)
+            .and_then(|t| {
+                t.bels()
+                    .iter()
+                    .position(|b| b.bel_type == crate::device::BelType::VrefGen)
+            })
+            .ok_or_else(|| {
+                PlaceRouteError::PlacementFailed(format!(
+                    "The bank {} reference generator at ({x}, {y}) has no routing data in \
+                     the device database",
+                    site.bank
+                ))
+            })?;
+        placement.placements.insert(
+            cell,
+            crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::VrefGen),
         );
     }
     log::info!("placement took {:.1} s", t_place.elapsed().as_secs_f64());

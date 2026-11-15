@@ -1,0 +1,33 @@
+// An LVSTL_I bidirectional pad in bank 3 with nothing setting the bank's
+// input reference: the build is refused, since the input would read 1.
+
+#[lattice_ip(name = "BB")]
+entity BB {
+    in I: bit
+    in T: bit
+    out O: bit
+    inout B: bit
+}
+
+entity LvstlNoReference {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out ca: bit @ { pin: "AE23", io_standard: "LVSTL_I" }
+    inout dq: bit @ { pin: "AA6", io_standard: "LVSTL_I" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+
+impl LvstlNoReference {
+    signal n: bit[8] = 0
+    signal seen: bit = 0
+    inst pad = BB {
+        I: n[0],
+        T: n[7],
+        B: dq
+    }
+    on(clk.rise) {
+        n = n + 1
+        seen = pad.O
+    }
+    ca = n[1]
+    led = seen
+}
