@@ -582,7 +582,7 @@ pub fn place_and_route_nexus_real(
     // design's pins; the region loaded must reach it
     let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
         .map_err(PlaceRouteError::PlacementFailed)?;
-    // A fixed reference level on a bank's pads (`vref: <level>`) becomes a
+    // A fixed reference level on a bank's pads (`vref` / `vref_code`) becomes a
     // generator on the bank. Each generator goes to the bank its LOC or PIN
     // names, or a bank whose LVSTL inputs need one.
     let pin_bank = |pin: &str| {
@@ -596,8 +596,15 @@ pub fn place_and_route_nexus_real(
             .filter(|t| t.x == x && t.y == y)
             .find_map(|t| crate::device::nexus::sites::bank_of_io_tile(&t.tiletype))
     };
-    let with_pad_levels = crate::device::nexus::ivref::add_pad_level_generators(netlist, &pin_bank)
-        .map_err(PlaceRouteError::PlacementFailed)?;
+    let level_scale =
+        crate::device::nexus::ivref::LevelScale::load(db_root, variant.prjoxide_family())
+            .map_err(PlaceRouteError::PlacementFailed)?;
+    let with_pad_levels = crate::device::nexus::ivref::add_pad_level_generators(
+        netlist,
+        &pin_bank,
+        level_scale.as_ref(),
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
     let netlist = with_pad_levels.as_ref().unwrap_or(netlist);
     let vref_generator_sites = crate::device::nexus::ivref::choose_sites(
         &crate::device::nexus::ivref::sites(db_root, variant.prjoxide_family(), &tiles),
@@ -1207,7 +1214,8 @@ mod tests {
             vec![],
         );
         assert!(refuse_input_references(&netlist, "this device").is_ok());
-        pad.parameters.insert(VREF_LEVEL_PARAM.into(), "49".into());
+        pad.parameters
+            .insert(VREF_LEVEL_PARAM.into(), "code 49".into());
         netlist.add_cell(pad);
         let error = refuse_input_references(&netlist, "this iCE40 device")
             .unwrap_err()

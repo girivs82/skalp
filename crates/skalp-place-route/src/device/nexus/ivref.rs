@@ -15,9 +15,14 @@
 //! (`JIVREFI<k>_IVREF_CORE`, fed by the fabric through a CIB mux next to
 //! that tile).
 //!
+//! The device data says what the codes mean (`<family>/input_reference.json`,
+//! [`LevelScale`]): the reference is `offset_mv + code * step_mv`.
+//!
 //! A design asks for a generator in one of three ways:
-//! - a fixed level on the pads that use it (`vref: 49` beside the I/O
-//!   standard), the vendor-neutral way for a level that never changes;
+//! - a fixed level on the pads that use it, beside the I/O standard: a
+//!   measurable one (`vref: "22%"` of the bank's I/O supply, or
+//!   `vref: "245mV"`), converted to the nearest code by the device's
+//!   scale, or the device's own code (`vref_code: 49`);
 //! - SKALP's vendor-neutral `INPUT_REFERENCE` primitive, whose `LEVEL`
 //!   input the design drives (to train it), placed by its `PIN` (a pin of
 //!   the bank) or `LOC` (`BANK<n>`);
@@ -26,6 +31,7 @@
 
 use super::prjoxide_load::PrjoxideTile;
 use crate::collections::{HashMap, HashMapExt};
+use skalp_frontend::hir::VrefSetting;
 use skalp_lir::gate_netlist::{
     Cell, CellId, GateNet, GateNetId, GateNetlist, BLACKBOX_INPUTS_PARAM, BLACKBOX_OUTPUTS_PARAM,
     VREF_LEVEL_PARAM,
@@ -302,22 +308,125 @@ pub fn choose_sites(
     Ok(chosen)
 }
 
+/// What a family's generator codes mean: the reference is
+/// `offset_mv + code * step_mv`. Read from the device data
+/// (`<family>/input_reference.json`).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct LevelScale {
+    /// Reference at code 0, in mV
+    pub offset_mv: f64,
+    /// Rise per code, in mV
+    pub step_mv: f64,
+    /// Whether the scale was measured on silicon; until it is, levels set
+    /// by voltage or share of the supply are only as good as its sources
+    #[serde(default)]
+    pub verified: bool,
+    /// Where the numbers come from
+    #[serde(default)]
+    pub source: String,
+}
+
+impl LevelScale {
+    /// The family's scale, if its device data has one.
+    pub fn load(db_root: &Path, family: &str) -> Result<Option<Self>, String> {
+        let path = db_root.join(family).join("input_reference.json");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let scale: Self =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !(scale.step_mv.is_finite() && scale.step_mv > 0.0 && scale.offset_mv.is_finite()) {
+            return Err(format!(
+                "{}: the step must be a positive number of mV",
+                path.display()
+            ));
+        }
+        Ok(Some(scale))
+    }
+
+    /// The reference, in mV, a code gives.
+    pub fn millivolts(&self, code: u32) -> f64 {
+        self.offset_mv + f64::from(code) * self.step_mv
+    }
+
+    /// The code nearest a reference in mV, if the generator reaches it
+    /// (within half a step of its range).
+    pub fn code_for(&self, millivolts: f64) -> Option<u32> {
+        let code = ((millivolts - self.offset_mv) / self.step_mv).round();
+        (0.0..=f64::from(MAX_CODE))
+            .contains(&code)
+            .then_some(code as u32)
+    }
+}
+
+/// The largest generator code.
+const MAX_CODE: u32 = (1 << INPUT_PINS.len()) - 1;
+
+/// The generator code a pad's reference setting asks for, with the
+/// reference it gives in mV when the family's scale is known.
+fn level_code(
+    setting: VrefSetting,
+    standard: &str,
+    scale: Option<&LevelScale>,
+    pad: &str,
+) -> Result<(u32, Option<f64>), String> {
+    let target_mv = match setting {
+        VrefSetting::DeviceCode(code) => {
+            if code > MAX_CODE {
+                return Err(format!(
+                    "Pad '{pad}': reference generator code {code} is not a code from 0 \
+                     to {MAX_CODE}"
+                ));
+            }
+            return Ok((code, scale.map(|s| s.millivolts(code))));
+        }
+        VrefSetting::Millivolts(mv) => f64::from(mv),
+        VrefSetting::SupplyHundredthsPercent(hundredths) => {
+            let supply = super::emit::supply_mv(standard)
+                .ok_or_else(|| format!("Pad '{pad}': no known I/O supply for {standard}"))?;
+            f64::from(supply) * f64::from(hundredths) / 10_000.0
+        }
+    };
+    let scale = scale.ok_or_else(|| {
+        format!(
+            "Pad '{pad}' sets its reference to {setting}, but the device data has no scale \
+             for this family's reference generator (input_reference.json), so it cannot be \
+             converted; give the device's own generator code with `vref_code`"
+        )
+    })?;
+    let code = scale.code_for(target_mv).ok_or_else(|| {
+        format!(
+            "Pad '{pad}' sets its reference to {setting} ({target_mv:.0} mV), outside the \
+             generator's {:.0} to {:.0} mV",
+            scale.millivolts(0),
+            scale.millivolts(MAX_CODE)
+        )
+    })?;
+    Ok((code, Some(scale.millivolts(code))))
+}
+
 /// Add a generator for each bank whose pads set a fixed reference level
-/// (`vref: <level>`, [`VREF_LEVEL_PARAM`]): a vendor-neutral
+/// (`vref` / `vref_code`, [`VREF_LEVEL_PARAM`]): a vendor-neutral
 /// [`NEUTRAL_CELL_TYPE`] cell on the bank, its level driven by constant
-/// LUTs. The pads of a bank must agree on the level; a bank whose level a
+/// LUTs. A measured level becomes the nearest code of the family's
+/// `scale`. The pads of a bank must agree on the code; a bank whose level a
 /// generator instance already sets cannot also take one from its pads.
 pub fn add_pad_level_generators(
     netlist: &GateNetlist,
     pin_bank: &dyn Fn(&str) -> Option<u32>,
+    scale: Option<&LevelScale>,
 ) -> Result<Option<GateNetlist>, String> {
-    // bank -> (level, a pad that sets it)
-    let mut levels: std::collections::BTreeMap<u32, (u32, &str)> =
+    // bank -> (code, a pad that sets it, its setting)
+    let mut levels: std::collections::BTreeMap<u32, (u32, &str, VrefSetting)> =
         std::collections::BTreeMap::new();
     for cell in &netlist.cells {
-        let Some(level) = cell.parameters.get(VREF_LEVEL_PARAM) else {
+        let Some(setting) = cell.parameters.get(VREF_LEVEL_PARAM) else {
             continue;
         };
+        let setting =
+            VrefSetting::from_param(setting).map_err(|e| format!("Pad '{}': {e}", cell.path))?;
         let standard = cell
             .parameters
             .get("IO_STANDARD")
@@ -330,26 +439,39 @@ pub fn add_pad_level_generators(
                 cell.path
             ));
         }
-        let max = (1u32 << INPUT_PINS.len()) - 1;
-        let level: u32 = level.parse().ok().filter(|&l| l <= max).ok_or_else(|| {
-            format!(
-                "Pad '{}': reference level {level} is not a level code from 0 to {max}",
-                cell.path
-            )
-        })?;
+        let (level, millivolts) = level_code(setting, standard, scale, &cell.path)?;
         let bank = pad_bank(cell, pin_bank).ok_or_else(|| {
             format!(
                 "Pad '{}' sets a reference level (vref) but has no pin in an I/O bank",
                 cell.path
             )
         })?;
-        let (first, user) = *levels.entry(bank).or_insert((level, &cell.path));
+        let (first, user, first_setting) =
+            *levels.entry(bank).or_insert((level, &cell.path, setting));
         if first != level {
             return Err(format!(
-                "Pads '{user}' (vref {first}) and '{}' (vref {level}) set different \
-                 reference levels, but bank {bank} has one",
+                "Pads '{user}' ({first_setting}, code {first}) and '{}' ({setting}, code \
+                 {level}) set different reference levels, but bank {bank} has one",
                 cell.path
             ));
+        }
+        if user == cell.path {
+            match (millivolts, scale) {
+                (Some(mv), Some(scale)) => {
+                    log::info!(
+                        "Bank {bank} input reference: {setting} -> generator code {level} \
+                         ({mv:.0} mV)"
+                    );
+                    if !scale.verified && !matches!(setting, VrefSetting::DeviceCode(_)) {
+                        log::warn!(
+                            "Bank {bank}: the reference generator's scale is not verified \
+                             on silicon ({}); {setting} may not be the level you get",
+                            scale.source
+                        );
+                    }
+                }
+                _ => log::info!("Bank {bank} input reference: {setting}"),
+            }
         }
     }
     if levels.is_empty() {
@@ -357,7 +479,7 @@ pub fn add_pad_level_generators(
     }
     for cell in netlist.cells.iter().filter(|c| is_vref_generator(c)) {
         if let Some(bank) = named_bank(cell, pin_bank)? {
-            if let Some((_, pad)) = levels.get(&bank) {
+            if let Some((_, pad, _)) = levels.get(&bank) {
                 return Err(format!(
                     "Bank {bank} takes its reference level both from pad '{pad}' (vref) \
                      and from generator '{}'; use one",
@@ -387,7 +509,7 @@ pub fn add_pad_level_generators(
         netlist.add_cell(driver);
         net
     };
-    for (bank, (level, _)) in levels {
+    for (bank, (level, _, _)) in levels {
         let inputs: Vec<GateNetId> = (0..INPUT_PINS.len())
             .map(|bit| constant(&mut netlist, (level >> bit) & 1 == 1))
             .collect();
@@ -510,14 +632,82 @@ mod tests {
         pad
     }
 
+    /// The documented LFCPNX step on an assumed 0 mV base.
+    const SCALE: LevelScale = LevelScale {
+        offset_mv: 0.0,
+        step_mv: 5.0,
+        verified: false,
+        source: String::new(),
+    };
+
+    /// The code a generator's level inputs are tied to.
+    fn tied_code(netlist: &GateNetlist, generator: &Cell) -> u32 {
+        generator
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(bit, &net)| {
+                let driver = netlist
+                    .cells
+                    .iter()
+                    .find(|c| c.outputs.contains(&net))
+                    .expect("each level bit has a driver");
+                u32::from(driver.lut_init == Some(0xFFFF)) << bit
+            })
+            .sum()
+    }
+
+    #[test]
+    fn measured_levels_become_the_nearest_code() {
+        assert_eq!(SCALE.code_for(245.0), Some(49));
+        assert_eq!(SCALE.code_for(247.0), Some(49));
+        assert_eq!(SCALE.code_for(636.0), Some(127));
+        assert_eq!(SCALE.code_for(640.0), None);
+        // 22.27% of LVSTL's 1.1 V supply is 245 mV
+        let pct = VrefSetting::parse_measured("22.27%").unwrap();
+        assert_eq!(level_code(pct, "LVSTL_I", Some(&SCALE), "p").unwrap().0, 49);
+        let mv = VrefSetting::parse_measured("0.245V").unwrap();
+        assert_eq!(level_code(mv, "LVSTL_I", Some(&SCALE), "p").unwrap().0, 49);
+        // A measured level needs the family's scale; a device code does not
+        let err = level_code(pct, "LVSTL_I", None, "p").unwrap_err();
+        assert!(err.contains("vref_code"), "{err}");
+        let code = VrefSetting::DeviceCode(49);
+        assert_eq!(level_code(code, "LVSTL_I", None, "p").unwrap(), (49, None));
+        assert!(level_code(VrefSetting::Millivolts(700), "LVSTL_I", Some(&SCALE), "p").is_err());
+    }
+
+    #[test]
+    fn the_scale_comes_from_the_device_data() {
+        let dir = std::env::temp_dir().join(format!("ivref_scale_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("FAM")).unwrap();
+        assert_eq!(LevelScale::load(&dir, "FAM"), Ok(None));
+        std::fs::write(
+            dir.join("FAM/input_reference.json"),
+            r#"{"offset_mv": 10, "step_mv": 5, "source": "test"}"#,
+        )
+        .unwrap();
+        let scale = LevelScale::load(&dir, "FAM").unwrap().unwrap();
+        assert_eq!(scale.millivolts(2), 20.0);
+        assert!(!scale.verified);
+        std::fs::write(
+            dir.join("FAM/input_reference.json"),
+            r#"{"offset_mv": 10, "step_mv": 0}"#,
+        )
+        .unwrap();
+        assert!(LevelScale::load(&dir, "FAM").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_pad_level_becomes_a_generator_with_that_level() {
         let bank = |_: &str| Some(3);
         let mut netlist = GateNetlist::new("top".into(), "nexus".into());
-        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
-        netlist.add_cell(lvstl_input("top.dq1", Some("49")));
+        netlist.add_cell(lvstl_input("top.dq0", Some("code 49")));
+        netlist.add_cell(lvstl_input("top.dq1", Some("245mV")));
         netlist.add_cell(lvstl_input("top.dq2", None));
-        let added = add_pad_level_generators(&netlist, &bank).unwrap().unwrap();
+        let added = add_pad_level_generators(&netlist, &bank, Some(&SCALE))
+            .unwrap()
+            .unwrap();
         let generators: Vec<&Cell> = added
             .cells
             .iter()
@@ -527,53 +717,42 @@ mod tests {
         let generator = generators[0];
         assert_eq!(generator.parameters["LOC"], "BANK3");
         assert_eq!(port_problems(generator), None);
-        // Level 49 = 0b0110001, bit 0 first
-        let level: Vec<bool> = generator
-            .inputs
-            .iter()
-            .map(|&net| {
-                let driver = added
-                    .cells
-                    .iter()
-                    .find(|c| c.outputs.contains(&net))
-                    .expect("each level bit has a driver");
-                driver.lut_init == Some(0xFFFF)
-            })
-            .collect();
-        assert_eq!(level, [true, false, false, false, true, true, false]);
+        assert_eq!(tied_code(&added, generator), 49);
 
         // No pad level, nothing added
         let plain = GateNetlist::new("top".into(), "nexus".into());
-        assert!(add_pad_level_generators(&plain, &bank).unwrap().is_none());
+        assert!(add_pad_level_generators(&plain, &bank, Some(&SCALE))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn pad_levels_must_agree_and_fit() {
         let bank = |_: &str| Some(3);
         let mut netlist = GateNetlist::new("top".into(), "nexus".into());
-        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
-        netlist.add_cell(lvstl_input("top.dq1", Some("50")));
-        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        netlist.add_cell(lvstl_input("top.dq0", Some("code 49")));
+        netlist.add_cell(lvstl_input("top.dq1", Some("250mV")));
+        let err = add_pad_level_generators(&netlist, &bank, Some(&SCALE)).unwrap_err();
         assert!(err.contains("different reference levels"), "{err}");
 
         let mut netlist = GateNetlist::new("top".into(), "nexus".into());
-        netlist.add_cell(lvstl_input("top.dq0", Some("128")));
-        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        netlist.add_cell(lvstl_input("top.dq0", Some("code 128")));
+        let err = add_pad_level_generators(&netlist, &bank, Some(&SCALE)).unwrap_err();
         assert!(err.contains("0 to 127"), "{err}");
 
         let mut netlist = GateNetlist::new("top".into(), "nexus".into());
-        let mut cmos = lvstl_input("top.dq0", Some("49"));
+        let mut cmos = lvstl_input("top.dq0", Some("code 49"));
         cmos.parameters
             .insert("IO_STANDARD".into(), "LVCMOS12H".into());
         netlist.add_cell(cmos);
-        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        let err = add_pad_level_generators(&netlist, &bank, Some(&SCALE)).unwrap_err();
         assert!(err.contains("does not compare"), "{err}");
 
         // A generator instance on the same bank as a pad level is refused
         let mut netlist = GateNetlist::new("top".into(), "nexus".into());
-        netlist.add_cell(lvstl_input("top.dq0", Some("49")));
+        netlist.add_cell(lvstl_input("top.dq0", Some("code 49")));
         netlist.add_cell(generator(BUS, Some("BANK3")));
-        let err = add_pad_level_generators(&netlist, &bank).unwrap_err();
+        let err = add_pad_level_generators(&netlist, &bank, Some(&SCALE)).unwrap_err();
         assert!(err.contains("use one"), "{err}");
     }
 

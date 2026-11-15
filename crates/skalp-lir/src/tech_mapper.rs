@@ -876,7 +876,7 @@ fn apply_io_constraints_standalone(
     if let Some(level) = constraints.vref_level {
         cell.parameters.insert(
             crate::gate_netlist::VREF_LEVEL_PARAM.into(),
-            level.to_string(),
+            level.to_param(),
         );
     }
     if let Some(ref reason) = constraints.drive_override {

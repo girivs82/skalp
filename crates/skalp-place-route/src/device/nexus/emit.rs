@@ -1605,6 +1605,13 @@ fn bank_voltage(standard: &str) -> Result<&'static str> {
     }
 }
 
+/// The I/O supply, in mV, of the banks a standard runs in.
+pub(crate) fn supply_mv(standard: &str) -> Option<u32> {
+    let voltage = bank_voltage(standard).ok()?;
+    let (volts, tenths) = voltage.split_once('V')?;
+    Some(volts.parse::<u32>().ok()? * 1000 + tenths.parse::<u32>().ok()? * 100)
+}
+
 /// The input reference level, in mV, of a standard that compares against
 /// its bank's reference voltage; `None` for one that does not.
 pub(crate) fn vref_level(standard: &str) -> Option<u32> {

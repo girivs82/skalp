@@ -3270,13 +3270,92 @@ pub struct PhysicalConstraints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board_pin: Option<BoardPinRef>,
     /// Level of the internal reference this input compares against, for
-    /// I/O standards that compare against one (LVSTL): the device's
-    /// reference generator code (`vref: 49`). The backend sets up the
-    /// generator of the pin's bank; pins of a bank share it, so they must
-    /// agree. A design that trains the level instead drives an
-    /// `INPUT_REFERENCE` primitive.
+    /// I/O standards that compare against one (LVSTL): a measurable value
+    /// (`vref: "30%"` of the bank's I/O supply, or `vref: "330mV"`), or
+    /// the device's own generator code (`vref_code: 49`), which does not
+    /// carry over to another device. The backend sets up the generator of
+    /// the pin's bank; pins of a bank share it, so they must agree. A
+    /// design that trains the level instead drives an `INPUT_REFERENCE`
+    /// primitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vref_level: Option<u32>,
+    pub vref_level: Option<VrefSetting>,
+}
+
+/// An input reference level (`vref` / `vref_code` pin settings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VrefSetting {
+    /// A fraction of the bank's I/O supply, in hundredths of a percent
+    /// (`"30%"` is 3000), the unit JEDEC gives DRAM reference levels in
+    SupplyHundredthsPercent(u32),
+    /// An absolute level, in millivolts (`"330mV"`, `"0.33V"`)
+    Millivolts(u32),
+    /// A device's own reference generator code (`vref_code: 49`)
+    DeviceCode(u32),
+}
+
+impl VrefSetting {
+    /// Parse a `vref` value: a number with a unit, `%` (of the bank's I/O
+    /// supply), `mV` or `V`.
+    pub fn parse_measured(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        let number = |digits: &str, scale: f64| -> Result<u32, String> {
+            let value: f64 = digits
+                .trim()
+                .parse()
+                .map_err(|_| format!("vref \"{text}\" is not a number with a unit"))?;
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(format!("vref \"{text}\" must not be negative"));
+            }
+            Ok((value * scale).round() as u32)
+        };
+        if let Some(digits) = text.strip_suffix('%') {
+            let hundredths = number(digits, 100.0)?;
+            if hundredths > 10_000 {
+                return Err(format!("vref \"{text}\" is more than the whole supply"));
+            }
+            Ok(Self::SupplyHundredthsPercent(hundredths))
+        } else if let Some(digits) = text.strip_suffix("mV") {
+            Ok(Self::Millivolts(number(digits, 1.0)?))
+        } else if let Some(digits) = text.strip_suffix('V') {
+            Ok(Self::Millivolts(number(digits, 1000.0)?))
+        } else {
+            Err(format!(
+                "vref \"{text}\" needs a unit: a share of the bank's I/O supply (\"30%\") \
+                 or a voltage (\"330mV\"); a device's own generator code goes in `vref_code`"
+            ))
+        }
+    }
+
+    /// The setting as a netlist parameter value, read back by
+    /// [`VrefSetting::from_param`].
+    pub fn to_param(self) -> String {
+        match self {
+            Self::SupplyHundredthsPercent(h) => format!("{}.{:02}%", h / 100, h % 100),
+            Self::Millivolts(mv) => format!("{mv}mV"),
+            Self::DeviceCode(code) => format!("code {code}"),
+        }
+    }
+
+    /// Read a setting written by [`VrefSetting::to_param`].
+    pub fn from_param(text: &str) -> Result<Self, String> {
+        match text.trim().strip_prefix("code ") {
+            Some(code) => code
+                .trim()
+                .parse()
+                .map(Self::DeviceCode)
+                .map_err(|_| format!("reference generator code \"{code}\" is not a number")),
+            None => Self::parse_measured(text),
+        }
+    }
+}
+
+impl std::fmt::Display for VrefSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceCode(code) => write!(f, "generator code {code}"),
+            other => f.write_str(&other.to_param()),
+        }
+    }
 }
 
 /// A port's binding to a board pin group, or part of one.
@@ -3553,3 +3632,30 @@ pub struct ModuleId(pub u32);
 /// Import identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ImportId(pub u32);
+
+#[cfg(test)]
+mod vref_setting_tests {
+    use super::VrefSetting;
+
+    #[test]
+    fn levels_need_a_unit_and_round_trip() {
+        let parse = VrefSetting::parse_measured;
+        assert_eq!(parse("22%"), Ok(VrefSetting::SupplyHundredthsPercent(2200)));
+        assert_eq!(
+            parse("22.27%"),
+            Ok(VrefSetting::SupplyHundredthsPercent(2227))
+        );
+        assert_eq!(parse("245mV"), Ok(VrefSetting::Millivolts(245)));
+        assert_eq!(parse("0.245V"), Ok(VrefSetting::Millivolts(245)));
+        assert!(parse("49").unwrap_err().contains("vref_code"));
+        assert!(parse("101%").is_err());
+        assert!(parse("-5mV").is_err());
+        for setting in [
+            VrefSetting::SupplyHundredthsPercent(2227),
+            VrefSetting::Millivolts(245),
+            VrefSetting::DeviceCode(49),
+        ] {
+            assert_eq!(VrefSetting::from_param(&setting.to_param()), Ok(setting));
+        }
+    }
+}
