@@ -458,10 +458,17 @@ pub fn add_pad_level_generators(
         if user == cell.path {
             match (millivolts, scale) {
                 (Some(mv), Some(scale)) => {
-                    log::info!(
-                        "Bank {bank} input reference: {setting} -> generator code {level} \
-                         ({mv:.0} mV)"
-                    );
+                    if matches!(setting, VrefSetting::DeviceCode(_)) {
+                        log::info!(
+                            "Bank {bank} input reference: {setting} ({mv:.0} mV on the \
+                             device data's scale)"
+                        );
+                    } else {
+                        log::info!(
+                            "Bank {bank} input reference: {setting} -> generator code {level} \
+                             ({mv:.0} mV)"
+                        );
+                    }
                     if !scale.verified && !matches!(setting, VrefSetting::DeviceCode(_)) {
                         log::warn!(
                             "Bank {bank}: the reference generator's scale is not verified \
