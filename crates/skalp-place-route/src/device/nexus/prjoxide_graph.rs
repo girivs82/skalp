@@ -485,6 +485,11 @@ pub struct ClockRegions {
     spines: Vec<ClockSpine>,
     #[serde(default)]
     hrows: Vec<ClockHrow>,
+    /// The DQS group of each IO tile, as the tile of the group's strobe pad
+    /// ([`super::sites::dqs_groups`]): a group's strobe clocks (`DQSG:`
+    /// wires) are one node per group, at that tile
+    #[serde(skip)]
+    dqs_groups: crate::collections::HashMap<(u32, u32), (u32, u32)>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -514,6 +519,15 @@ impl ClockRegions {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {}", path.display(), e))?;
         serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))
+    }
+
+    /// Add the DQS group of each IO tile (see [`super::sites::dqs_groups`]).
+    pub fn with_dqs_groups(
+        mut self,
+        groups: crate::collections::HashMap<(u32, u32), (u32, u32)>,
+    ) -> Self {
+        self.dqs_groups = groups;
+        self
     }
 
     fn branch_col(&self, col: i64) -> Option<u32> {
@@ -563,6 +577,10 @@ impl ClockRegions {
             name: format!("{kind}:{base}"),
         };
         match prefix {
+            "DQSG" => {
+                let &(gx, gy) = self.dqs_groups.get(&(x, y))?;
+                Some(local(gx, gy, "DQSG"))
+            }
             "BRANCH" => Some(local(self.branch_col(x as i64)?, y, "BRANCH")),
             "BRANCH_L" => Some(local(self.branch_col(x as i64 - 2)?, y, "BRANCH")),
             "BRANCH_R" => Some(local(self.branch_col(x as i64 + 2)?, y, "BRANCH")),
@@ -592,9 +610,16 @@ fn resolve_with_clocks(
     y: u32,
     wire: &str,
 ) -> Option<NodeKey> {
-    let is_clock_wire = ["BRANCH_L:", "BRANCH_R:", "BRANCH:", "SPINE:", "HROW:"]
-        .iter()
-        .any(|p| wire.starts_with(p));
+    let is_clock_wire = [
+        "BRANCH_L:",
+        "BRANCH_R:",
+        "BRANCH:",
+        "SPINE:",
+        "HROW:",
+        "DQSG:",
+    ]
+    .iter()
+    .any(|p| wire.starts_with(p));
     match clocks {
         Some(regions) if is_clock_wire => regions.resolve(x, y, wire),
         _ => resolve_wire(x, y, wire),

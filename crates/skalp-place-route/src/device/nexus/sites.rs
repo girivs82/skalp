@@ -1,7 +1,6 @@
 //! Where a Nexus device's pins and hard blocks are.
 //!
-//! Locations come from the device database wherever it has them. prjoxide has
-//! pin data for CrossLink-NX; CertusPro-NX's comes from Lattice's own pinout.
+//! Locations come from the device database (`<family>/<device>/iodb.json`).
 
 use super::prjoxide_graph::ClockRegions;
 use super::{NexusVariant, PrjoxideTile};
@@ -12,10 +11,6 @@ use std::path::Path;
 
 /// Pin name that assigns a clock input to the on-chip oscillator.
 pub const OSC_PIN: &str = "OSC";
-
-/// IO data generated from Lattice's pinout and BSDL, for devices prjoxide has
-/// none for (see scripts/gen_nexus_iodb.py).
-const LFCPNX_100_IODB: &str = include_str!("../../../data/lfcpnx-100-iodb.json");
 
 #[derive(Debug, Deserialize)]
 struct IoDatabase {
@@ -47,6 +42,11 @@ struct IoPad {
     /// Special functions the pad can take, such as `VREF3_1`
     #[serde(default)]
     func: Vec<String>,
+    /// The pad's DQS group, as prjoxide gives it: `[role, group]`, role 0
+    /// for a data pad, 1 for the group's strobe (DQS), 2 for its complement;
+    /// empty for a pad in no group
+    #[serde(default)]
+    dqs: Vec<i64>,
 }
 
 impl IoPad {
@@ -124,8 +124,7 @@ pub fn package_pins(
     Ok(packages)
 }
 
-/// The device's IO data: prjoxide's, or the bundled data for devices it has
-/// none for.
+/// The device's IO data, from the device database.
 fn load_io_database(db_root: &Path, variant: NexusVariant) -> Result<IoDatabase, String> {
     let path = db_root
         .join(variant.prjoxide_family())
@@ -135,11 +134,47 @@ fn load_io_database(db_root: &Path, variant: NexusVariant) -> Result<IoDatabase,
         std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {}", path.display(), e))?;
     let io: IoDatabase =
         serde_json::from_str(&text).map_err(|e| format!("parsing {}: {}", path.display(), e))?;
-    if io.pads.is_empty() && variant == NexusVariant::Lfcpnx100 {
-        return serde_json::from_str(LFCPNX_100_IODB)
-            .map_err(|e| format!("parsing the bundled LFCPNX-100 pins: {e}"));
+    if io.pads.is_empty() {
+        return Err(format!(
+            "{} lists no pads; this build needs device data with the device's pins",
+            path.display()
+        ));
     }
     Ok(io)
+}
+
+/// The DQS group of each IO tile: for every tile holding a pad of a group,
+/// or that pad's second I/O logic (the next tile along the edge), the tile
+/// of the group's strobe pad. A group's strobe clocks (`DQSG:` wires) are
+/// one node per group.
+pub fn dqs_groups(
+    db_root: &Path,
+    variant: NexusVariant,
+) -> Result<HashMap<(u32, u32), (u32, u32)>, String> {
+    let io = load_io_database(db_root, variant)?;
+    let (width, height) = variant.grid_size();
+    let mut strobe_tile: HashMap<i64, (u32, u32)> = HashMap::new();
+    for pad in &io.pads {
+        if let ([1, group], Some((x, y, _))) = (pad.dqs.as_slice(), pad.site(width, height)) {
+            strobe_tile.insert(*group, (x, y));
+        }
+    }
+    let mut groups = HashMap::new();
+    for pad in &io.pads {
+        let (Some(group), Some((x, y, _))) = (pad.dqs.get(1), pad.site(width, height)) else {
+            continue;
+        };
+        let strobe = *strobe_tile.get(group).ok_or_else(|| {
+            format!("DQS group {group} of the device's pad data has no strobe pad")
+        })?;
+        let next = match pad.side.as_str() {
+            "L" | "R" => (x, y + 1),
+            _ => (x + 1, y),
+        };
+        groups.insert((x, y), strobe);
+        groups.insert(next, strobe);
+    }
+    Ok(groups)
 }
 
 /// The pad that drives each bank's first reference voltage (VREF1), by bank.
@@ -343,10 +378,17 @@ pub fn design_region(
     .unwrap_or_else(|| build(all_spines, 0, last_col))
 }
 
-/// Name of the pad a boundary-scan bit reads, with its ball on `package`.
-/// The boundary-scan bit of each package ball that has one.
+/// The CertusPro-NX 100K pad data, with its boundary-scan cells, from the
+/// device database the build would use; `None` if there is none.
+fn lfcpnx_100_io() -> Option<IoDatabase> {
+    let db = super::prjoxide_load::find_database()?;
+    load_io_database(&db, NexusVariant::Lfcpnx100).ok()
+}
+
+/// The boundary-scan bit of each package ball that has one (CertusPro-NX
+/// 100K; empty without device data).
 pub fn boundary_bits_by_ball(package: &str) -> HashMap<String, usize> {
-    let Ok(io) = serde_json::from_str::<IoDatabase>(LFCPNX_100_IODB) else {
+    let Some(io) = lfcpnx_100_io() else {
         return HashMap::new();
     };
     let Some(index) = io.packages.iter().position(|p| p == package) else {
@@ -365,8 +407,10 @@ pub fn boundary_bits_by_ball(package: &str) -> HashMap<String, usize> {
         .collect()
 }
 
+/// Name of the pad each boundary-scan bit reads, with its ball on `package`
+/// (CertusPro-NX 100K; empty without device data).
 pub fn boundary_pad_names(package: &str) -> HashMap<usize, String> {
-    let Ok(io) = serde_json::from_str::<IoDatabase>(LFCPNX_100_IODB) else {
+    let Some(io) = lfcpnx_100_io() else {
         return HashMap::new();
     };
     let Some(index) = io.packages.iter().position(|p| p == package) else {
@@ -440,6 +484,25 @@ mod tests {
         assert_eq!(pins["P24"], (0, 42, 0), "the 125 MHz clock, pad PL42A");
         assert_eq!(boundary_pad_names("LFG672")[&533], "PR31A (ball R8)");
         assert_eq!(pins[OSC_PIN], (137, 0, 0));
+    }
+
+    #[test]
+    fn dqs_groups_come_from_the_pad_data() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let groups = dqs_groups(&db, NexusVariant::Lfcpnx100).unwrap();
+        // Versa LPDDR4 channel A low byte: DQ pads PB146..PB156, strobe PB150
+        for x in [146, 147, 152, 156, 157] {
+            assert_eq!(groups[&(x, 74)], (150, 74), "tile {x}");
+        }
+        // The pads of group 66 are not contiguous (PB62..66 and PB80..84)
+        assert_eq!(groups[&(80, 74)], (66, 74));
+        assert!(!groups.contains_key(&(70, 74)));
+        // 11 groups of 12 pads, two tiles per pad pair
+        let strobes: crate::collections::HashSet<_> = groups.values().collect();
+        assert_eq!(strobes.len(), 11);
     }
 
     #[test]

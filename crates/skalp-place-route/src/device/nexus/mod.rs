@@ -274,7 +274,8 @@ impl NexusDevice {
         // M1a: real tile grid. M1b: real routing graph for the window.
         let all_tiles = prjoxide_load::load_tilegrid(db_root, variant)?;
         let clocks =
-            prjoxide_graph::ClockRegions::load(db_root, family, variant.prjoxide_device())?;
+            prjoxide_graph::ClockRegions::load(db_root, family, variant.prjoxide_device())?
+                .with_dqs_groups(sites::dqs_groups(db_root, variant)?);
         let all_tiles_for_pins = all_tiles.clone();
         let graph = prjoxide_graph::build_routing_graph_with_clocks(
             db_root,
