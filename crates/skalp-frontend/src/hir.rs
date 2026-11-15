@@ -3279,6 +3279,27 @@ pub struct PhysicalConstraints {
     /// primitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vref_level: Option<VrefSetting>,
+    /// On-die termination of the pad's input, in ohms (`odt: "60ohm"`),
+    /// for I/O standards that terminate on the die (LVSTL terminates to
+    /// ground). The backend picks the device's setting of that value and
+    /// refuses one it does not have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub odt_ohms: Option<u32>,
+}
+
+/// Parse an on-die termination value: a whole number of ohms with its
+/// unit (`"60ohm"`, `"60 ohm"`, `"60Ω"`).
+pub fn parse_ohms(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    let digits = text
+        .strip_suffix("ohm")
+        .or_else(|| text.strip_suffix("ohms"))
+        .or_else(|| text.strip_suffix('Ω'))
+        .ok_or_else(|| format!("odt \"{text}\" needs a unit: ohms, as \"60ohm\""))?;
+    digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("odt \"{text}\" is not a whole number of ohms"))
 }
 
 /// An input reference level (`vref` / `vref_code` pin settings).
@@ -3657,5 +3678,14 @@ mod vref_setting_tests {
         ] {
             assert_eq!(VrefSetting::from_param(&setting.to_param()), Ok(setting));
         }
+    }
+
+    #[test]
+    fn termination_needs_ohms() {
+        assert_eq!(super::parse_ohms("60ohm"), Ok(60));
+        assert_eq!(super::parse_ohms("48 ohms"), Ok(48));
+        assert_eq!(super::parse_ohms("40Ω"), Ok(40));
+        assert!(super::parse_ohms("60").is_err());
+        assert!(super::parse_ohms("6.5ohm").is_err());
     }
 }

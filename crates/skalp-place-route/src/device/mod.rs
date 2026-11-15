@@ -994,6 +994,9 @@ pub enum BelType {
     /// bank's referenced inputs compare against (Lattice Nexus IVREF_CORE,
     /// which the LVSTL inputs of a high-performance bank use)
     VrefGen,
+    /// Analog-to-digital converter block (Lattice Nexus ADC_CORE: two
+    /// converters, their channel selects and comparators)
+    Adc,
 }
 
 impl BelType {

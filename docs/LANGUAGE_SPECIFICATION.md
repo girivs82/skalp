@@ -1236,7 +1236,7 @@ impl Blink {
 
 Recognized constraint keys include `pin`, `pins` (array form for buses),
 `pin_p`/`pin_n` (differential pairs), `io_standard`, `pull`, `slew`,
-`drive`, `schmitt`, `diff_term`, `bank`, and `vref`/`vref_code` (below). Constraints flow into the
+`drive`, `schmitt`, `diff_term`, `bank`, `odt`, and `vref`/`vref_code` (below). Constraints flow into the
 iCE40 synthesis and place-and-route flow (`skalp synth`).
 
 A global `constraint physical { ... }` block (device selection, bank
@@ -1288,6 +1288,30 @@ of the level code are the device's; each backend maps the primitive to
 its own block (on Lattice Nexus, the bank's IVREF_CORE, which Lattice's
 own `DQSBUF_IVREF` primitive also reaches) and refuses it on a device
 that has none.
+
+#### On-die termination
+
+`odt: "<ohms>ohm"` terminates a pad's input on the die, for I/O standards
+that do (LVSTL terminates to ground). The backend picks the device's setting
+of that value and refuses one it does not have, an output-only pad, or a
+standard without on-die termination (only LVSTL inputs so far on Lattice
+Nexus, which has 40, 48, 60, 80 and 120 ohm).
+
+```skalp
+in dq: bit @ { pin: "Y6", io_standard: "LVSTL_I", vref: "22%", odt: "60ohm" }
+```
+
+#### ADC (Lattice Nexus)
+
+The `ADC` primitive places the device's ADC block (two 12-bit converters, A
+and B, each with a 4-bit channel select). Its analog inputs are not logic
+ports: the instance names the pins it measures in its `ADC_PINS` parameter
+(comma-separated), and the backend switches those pads onto the converters'
+inputs. `CLKDCLK` (the converters' clock) must come from the `CLKOS4` output
+of the PLL whose output reaches the ADC (the lower right one on
+CertusPro-NX), and `CLKFAB` (which times the control and status pins) from
+any clock. The settings are Lattice's (`CLK_DIV`, `VREFASEL`/`VREFBSEL`,
+`VREFACFG`/`VREFBCFG`, `OMA`/`OMB`, `DF`, ...), with Lattice's defaults.
 
 There is no CLI flag for merging external constraint files (PCF/XDC);
 inline constraints are the mechanism.

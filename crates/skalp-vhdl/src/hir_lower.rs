@@ -408,6 +408,7 @@ fn extract_skalp_constraint_from_comment(comment_text: &str) -> Option<PhysicalC
         drive_override: None,
         board_pin: None,
         vref_level: None,
+        odt_ohms: None,
     })
 }
 

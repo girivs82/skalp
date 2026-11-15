@@ -694,6 +694,83 @@ fn vendor_neutral_input_references_build() {
     }
 }
 
+/// The ADC: placed on its site with its settings, its converter clock from
+/// the lower right PLL's CLKOS4, its fabric clock on the clock network, and
+/// the ADC input switch of each pad it measures turned on.
+#[test]
+fn the_adc_builds_with_its_clocks_and_inputs() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let mut netlist = netlist_with_pads("nexus_adc.sk", "NexusAdc");
+    // The CLI drops ports hierarchical synthesis promotes for child instances
+    let names: Vec<String> = netlist.nets.iter().map(|n| n.name.clone()).collect();
+    let real_port = |net: &skalp_lir::GateNetId| {
+        let name = &names[net.0 as usize];
+        name.starts_with("top.clk") || name.starts_with("top.led")
+    };
+    netlist.inputs.retain(real_port);
+    netlist.outputs.retain(real_port);
+    netlist.cells.retain(|c| {
+        !(c.cell_type.ends_with("_OB") || c.cell_type.ends_with("_IB"))
+            || c.parameters.contains_key("LOC")
+    });
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the ADC design should place, route and emit");
+    assert!(result.routing.success);
+    let adcs = result
+        .placement
+        .placements
+        .values()
+        .filter(|loc| loc.bel_type == skalp_place_route::device::BelType::Adc)
+        .count();
+    assert_eq!(adcs, 1, "the ADC is placed on its site");
+    let data = &result.bitstream.data;
+    assert_eq!(tiles_with_option(&db, data, "ADC.OMB", "UNIPOLAR"), 1);
+    assert_eq!(tiles_with_option(&db, data, "ADC.VREFBSEL", "EXTERNAL"), 1);
+    assert_eq!(
+        tiles_with_option(&db, data, "ADC.VREFBCFG", "1P6_TO_1P8"),
+        1
+    );
+    assert_eq!(tiles_with_option(&db, data, "ADC.ADC_ENP", "ENABLED"), 1);
+    // Y6 and AA6, the two pads of channel 6
+    assert_eq!(
+        tiles_with_option(&db, data, "SEIO18.ENADC_IN", "ENABLED"),
+        2
+    );
+}
+
+/// An ADC clocked from a PLL whose CLKOS4 does not reach it is refused.
+#[test]
+fn an_adc_clocked_from_the_wrong_pll_is_refused() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let mut netlist = netlist_with_pads("nexus_adc.sk", "NexusAdc");
+    for cell in &mut netlist.cells {
+        if cell.cell_type == "BLACKBOX_PLL_CORE" {
+            cell.parameters.insert("LOC".into(), "LLC".into());
+        }
+    }
+    let error = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .map(|_| ())
+    .expect_err("only the lower right PLL reaches the ADC")
+    .to_string();
+    assert!(error.contains("LRC"), "{error}");
+}
+
 /// An LVSTL input in a bank whose input reference generator is unused
 /// would read 1 whatever its pin does, so the build is refused.
 #[test]

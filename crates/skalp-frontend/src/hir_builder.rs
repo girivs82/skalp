@@ -1864,6 +1864,7 @@ impl HirBuilderContext {
             drive_override: None,
             board_pin: Some(crate::hir::BoardPinRef { board, pin, bits }),
             vref_level: None,
+            odt_ohms: None,
         })
     }
 
@@ -14290,6 +14291,7 @@ impl HirBuilderContext {
             drive_override: None,
             board_pin: None,
             vref_level: None,
+            odt_ohms: None,
         };
 
         for pair in node
@@ -14367,6 +14369,13 @@ impl HirBuilderContext {
                         }),
                     }
                 }
+                "odt" => match crate::hir::parse_ohms(value_text.trim_matches('"')) {
+                    Ok(ohms) => constraints.odt_ohms = Some(ohms),
+                    Err(message) => self.errors.push(HirError {
+                        message,
+                        span: self.make_span(&pair),
+                    }),
+                },
                 "vref_code" => match value_text.trim_matches('"').parse() {
                     Ok(code) => {
                         constraints.vref_level = Some(crate::hir::VrefSetting::DeviceCode(code))

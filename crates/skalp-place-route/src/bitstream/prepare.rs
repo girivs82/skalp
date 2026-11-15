@@ -431,6 +431,65 @@ pub fn prepare_for_routing(
 }
 
 /// Copy a netlist for the placer, hiding pads so only logic gets placed.
+/// Take out the buffers synthesis leaves on the outputs of PLLs (it keeps
+/// a named copy of a signal that is passed to an instance), connecting
+/// their loads to the PLL output itself. A PLL output reaches its loads on
+/// dedicated wires (the clock network, or a hard block's own clock input),
+/// which a buffer placed in a logic tile would cut it off from. A buffer
+/// that drives a primary output stays.
+pub fn bypass_pll_output_buffers(netlist: &GateNetlist) -> Option<GateNetlist> {
+    let is_buffer = |cell: &Cell| {
+        matches!(
+            cell.function,
+            Some(CellFunction::Buf) | Some(CellFunction::ClkBuf)
+        ) && cell.inputs.len() == 1
+            && cell.outputs.len() == 1
+            && cell.clock.is_none()
+    };
+    let from_pll = |net: GateNetId| {
+        netlist
+            .nets
+            .get(net.0 as usize)
+            .and_then(|n| n.driver)
+            .and_then(|d| netlist.get_cell(d))
+            .is_some_and(crate::device::nexus::pll::is_pll)
+    };
+    let outputs: std::collections::HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    // buffer output net -> the PLL output it copies
+    let bypass: HashMap<GateNetId, GateNetId> = netlist
+        .cells
+        .iter()
+        .filter(|c| is_buffer(c) && from_pll(c.inputs[0]) && !outputs.contains(&c.outputs[0]))
+        .map(|c| (c.outputs[0], c.inputs[0]))
+        .collect();
+    if bypass.is_empty() {
+        return None;
+    }
+    let mut out = netlist.clone();
+    let through = |net: &mut GateNetId| {
+        if let Some(&source) = bypass.get(net) {
+            *net = source;
+        }
+    };
+    for cell in &mut out.cells {
+        if bypass.contains_key(&cell.outputs.first().copied().unwrap_or(GateNetId(u32::MAX)))
+            && is_buffer(cell)
+        {
+            continue;
+        }
+        cell.inputs.iter_mut().for_each(through);
+        if let Some(clock) = cell.clock.as_mut() {
+            through(clock);
+        }
+        if let Some(reset) = cell.reset.as_mut() {
+            through(reset);
+        }
+    }
+    out.rebuild_net_connectivity();
+    out.remove_dead_cells();
+    Some(out)
+}
+
 pub fn logic_only_netlist(netlist: &GateNetlist) -> GateNetlist {
     let mut logic = netlist.clone();
     for cell in &mut logic.cells {

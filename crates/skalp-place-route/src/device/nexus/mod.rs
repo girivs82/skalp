@@ -12,6 +12,7 @@
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid (LFCPNX-VERSA-EVN board)
 
+pub mod adc;
 pub mod data;
 pub mod dsp;
 pub mod ebr;
@@ -326,6 +327,14 @@ impl NexusDevice {
             .map(|s| ((s.x, s.y), s.bank))
             .collect();
 
+        // The ADC's tile, if the window holds it
+        let adc_sites: crate::collections::HashSet<(u32, u32)> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter(|t| t.tiletype == adc::TILETYPE)
+            .map(|t| (t.x, t.y))
+            .collect();
+
         // PLL sites: the GPLL tile of each corner in the window
         let pll_sites: HashMap<(u32, u32), String> = all_tiles
             .iter()
@@ -610,6 +619,22 @@ impl NexusDevice {
                     });
                     bel_id_counter += 1;
                 }
+            }
+            if adc_sites.contains(&(x, y)) {
+                for pin in adc::input_pins().iter().chain(adc::output_pins()) {
+                    if let Some(wire) = resolve_wire(x, y, &adc::site_wire(pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                    {
+                        bel_wires.insert((x, y, format!("ADC_{pin}")), wire);
+                    }
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::Adc,
+                    name: "ADC".to_string(),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
             }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
@@ -2457,6 +2482,9 @@ impl Device for NexusDevice {
         if ivref::is_vref_generator(cell) {
             return ivref::input_router_pin(cell, input);
         }
+        if adc::is_adc(cell) {
+            return adc::input_router_pin(cell, input);
+        }
         pll::input_router_pin(cell, input).filter(|_| pll::is_pll(cell))
     }
 
@@ -2465,6 +2493,9 @@ impl Device for NexusDevice {
         cell: &skalp_lir::gate_netlist::Cell,
         output: usize,
     ) -> Option<usize> {
+        if adc::is_adc(cell) {
+            return adc::output_router_pin(cell, output);
+        }
         pll::output_router_pin(cell, output).filter(|_| pll::is_pll(cell))
     }
 
@@ -2596,6 +2627,18 @@ impl Device for NexusDevice {
                 .bel_wires
                 .get(&(x, y, format!("IVREF_{name}")))
                 .copied();
+        }
+        let is_adc = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::Adc);
+        if is_adc {
+            let name = match pin {
+                CellPin::Output(n) => adc::output_pins().get(n)?,
+                CellPin::Input(n) => adc::input_pin_of_router_pin(n)?,
+            };
+            return self.bel_wires.get(&(x, y, format!("ADC_{name}"))).copied();
         }
         let is_pll = !self.prjoxide_tiles.is_empty()
             && self

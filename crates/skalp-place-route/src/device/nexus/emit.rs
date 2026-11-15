@@ -568,6 +568,10 @@ fn emit_bits(
             emit_vref_generator(&mut config, cell, x, y, &mut banks)?;
             continue;
         }
+        if loc.bel_type == BelType::Adc {
+            emit_adc(&mut config, cell, x, y)?;
+            continue;
+        }
         if loc.bel_type == BelType::LargeRam {
             emit_large_ram(&mut config, cell, x, y, tied, &used_wires)?;
             continue;
@@ -1574,6 +1578,50 @@ fn emit_multiplier(
     Ok(())
 }
 
+/// The on-die termination setting of an LVSTL pad that reads: `OFF`, or
+/// the value in ohms its port asks for (`odt`), when the device has a
+/// setting of that value (an option with bits of its own).
+fn lvstl_termination(
+    config: &mut ConfigDb<'_>,
+    tiles: &[PrjoxideTile],
+    prefix: &str,
+    cell: &Cell,
+) -> Result<String> {
+    let Some(ohms) = cell.parameters.get(skalp_lir::gate_netlist::ODT_OHMS_PARAM) else {
+        return Ok("OFF".to_string());
+    };
+    let name = format!("{prefix}.TERMINATION_1V1");
+    let mut values: Vec<u32> = Vec::new();
+    for tile in tiles {
+        if let Some((_, options)) = config.db(&tile.tiletype)?.enums().find(|(n, _)| *n == name) {
+            values.extend(
+                options
+                    .iter()
+                    .filter(|(_, bits)| !bits.is_empty())
+                    .filter_map(|(option, _)| option.parse::<u32>().ok()),
+            );
+        }
+    }
+    values.sort_unstable();
+    values.dedup();
+    if values.iter().any(|v| v.to_string() == *ohms) {
+        return Ok(ohms.clone());
+    }
+    Err(emit_err(format!(
+        "Pad '{}' asks for {ohms} ohm on-die termination; its pad has {}",
+        cell.path,
+        if values.is_empty() {
+            "none".to_string()
+        } else {
+            values
+                .iter()
+                .map(|v| format!("{v} ohm"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    )))
+}
+
 /// Pad bias from the port's `pull` constraint (none when it has none).
 fn pull_mode(cell: &Cell) -> Result<&'static str> {
     match cell.parameters.get("TERMINATION").map(String::as_str) {
@@ -1647,6 +1695,48 @@ fn emit_vref_generator(
     let tile = config.tile(x, y, &site.tiletype)?;
     config.set_enum(&tile, &format!("BANK{}.IVREF", site.bank), "ON")?;
     banks.vref_generators.insert(site.bank);
+    Ok(())
+}
+
+/// The ADC: its settings in its tile (every one, defaults included, as
+/// Lattice's tools write them) and the ADC input switch of each pad it
+/// measures.
+fn emit_adc(config: &mut ConfigDb<'_>, cell: &Cell, x: u32, y: u32) -> Result<()> {
+    use super::adc;
+    let tile = config.tile(x, y, adc::TILETYPE)?;
+    for &(name, _, _) in adc::ENUM_SETTINGS {
+        let value = adc::enum_value(cell, name).unwrap_or_default();
+        config.set_enum(&tile, &format!("ADC.{name}"), &value)?;
+    }
+    config.set_word(
+        &tile,
+        &format!("ADC.{}", adc::CLK_DIV.0),
+        u64::from(adc::clock_divider(cell)),
+    )?;
+    let packages = crate::device::Device::packages(config.device);
+    let package = config
+        .variant
+        .default_package()
+        .and_then(|name| packages.get(name))
+        .or_else(|| packages.values().next())
+        .ok_or_else(|| emit_err("The device has no package pins".to_string()))?;
+    for pin in adc::measured_pins(cell) {
+        let &(px, py, index) = package.pins.get(&pin).ok_or_else(|| {
+            emit_err(format!(
+                "ADC '{}' measures pin {pin}, which the package does not have",
+                cell.path
+            ))
+        })?;
+        let side = ['A', 'B'][usize::from(index).min(1)];
+        let settings = pad_settings(config, px, py, side, &pin)?;
+        let name = format!("{}.ENADC_IN", settings.prefix);
+        set_ram_enum(config, &settings.tiles, &name, "ENABLED").map_err(|_| {
+            emit_err(format!(
+                "ADC '{}' measures pin {pin}, which has no ADC input switch",
+                cell.path
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -1817,6 +1907,17 @@ fn emit_pad(
     };
     let vref = vref_level(standard);
     let lvstl = lvstl_class(standard);
+    if cell
+        .parameters
+        .contains_key(skalp_lir::gate_netlist::ODT_OHMS_PARAM)
+        && (lvstl.is_none() || is_output)
+    {
+        return Err(emit_err(format!(
+            "Pad '{}' asks for on-die termination (odt), which only LVSTL pads that read \
+             have so far",
+            cell.path
+        )));
+    }
     if lvstl.is_some() && !high_performance {
         return Err(emit_err(format!(
             "Pad '{}' is on a wide-range I/O, which has no {standard}; use a \
@@ -1897,11 +1998,18 @@ fn emit_pad(
     }
     if let Some(class) = lvstl {
         // Radiant's LVSTL defaults for a pad that reads: no on-die
-        // termination, and the input compared against the device's internal
-        // LVSTL reference (without it the input has no reference at all).
-        // No bank reference pad is involved, so those pads stay free.
+        // termination unless the port asks for one (`odt`), and the input
+        // compared against the device's internal LVSTL reference (without
+        // it the input has no reference at all). No bank reference pad is
+        // involved, so those pads stay free.
         if !is_output {
-            set_ram_enum(config, tiles, &format!("{prefix}.TERMINATION_1V1"), "OFF")?;
+            let termination = lvstl_termination(config, tiles, &prefix, cell)?;
+            set_ram_enum(
+                config,
+                tiles,
+                &format!("{prefix}.TERMINATION_1V1"),
+                &termination,
+            )?;
             set_ram_enum(config, tiles, &format!("{prefix}.VREF_LVSTL"), "VREF_INT")?;
             banks
                 .lvstl_inputs

@@ -879,6 +879,10 @@ fn apply_io_constraints_standalone(
             level.to_param(),
         );
     }
+    if let Some(ohms) = constraints.odt_ohms {
+        cell.parameters
+            .insert(crate::gate_netlist::ODT_OHMS_PARAM.into(), ohms.to_string());
+    }
     if let Some(ref reason) = constraints.drive_override {
         cell.parameters.insert(
             crate::gate_netlist::DRIVE_OVERRIDE_PARAM.into(),
