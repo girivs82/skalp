@@ -14,9 +14,21 @@ async fn check(mut tb: Testbench, level: &str) {
     // 0 -> 1 -> 2, then waits in the default arm while `go` is low
     tb.set("go", 0u64);
     tb.clock(10).await;
-    assert_eq!(tb.get_u64("phase").await, 2, "{level}: must wait in phase 2");
-    assert_eq!(tb.get_u64("done").await, 0, "{level}: nothing done without go");
-    assert_eq!(tb.get_u64("waited").await, 8, "{level}: 8 clocks in phase 2");
+    assert_eq!(
+        tb.get_u64("phase").await,
+        2,
+        "{level}: must wait in phase 2"
+    );
+    assert_eq!(
+        tb.get_u64("done").await,
+        0,
+        "{level}: nothing done without go"
+    );
+    assert_eq!(
+        tb.get_u64("waited").await,
+        8,
+        "{level}: 8 clocks in phase 2"
+    );
 
     // go: one completion, back to phase 0
     tb.set("go", 1u64);
@@ -27,10 +39,18 @@ async fn check(mut tb: Testbench, level: &str) {
     // the else branch's nested if: give up after 200 clocks without go
     tb.set("go", 0u64);
     tb.clock(2 + 200).await;
-    assert_eq!(tb.get_u64("phase").await, 2, "{level}: still waiting at 199");
+    assert_eq!(
+        tb.get_u64("phase").await,
+        2,
+        "{level}: still waiting at 199"
+    );
     tb.clock(1).await;
     assert_eq!(tb.get_u64("phase").await, 0, "{level}: gives up at 200");
-    assert_eq!(tb.get_u64("done").await, 1, "{level}: a timeout is not a completion");
+    assert_eq!(
+        tb.get_u64("done").await,
+        1,
+        "{level}: a timeout is not a completion"
+    );
 }
 
 #[tokio::test]

@@ -342,12 +342,12 @@ impl CellMatcher {
             CellFunction::Aoi22 => Some(vec![
                 (0x0777, vec!["A", "B", "C", "D"]),
                 (0x135F, vec!["A", "C", "B", "D"]),
-                (0x153F, vec!["A", "D", "B", "C"]),
+                (0x153F, vec!["A", "C", "D", "B"]),
             ]),
             CellFunction::Oai22 => Some(vec![
                 (0x111F, vec!["A", "B", "C", "D"]),
                 (0x0537, vec!["A", "C", "B", "D"]),
-                (0x0357, vec!["A", "D", "B", "C"]),
+                (0x0357, vec!["A", "C", "D", "B"]),
             ]),
 
             // MUX: s ? b : a
@@ -623,6 +623,66 @@ impl Default for CellMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every (truth table, pin mapping) entry must describe the cell as the
+    /// gate evaluator computes it once the netlist writer has put each cut
+    /// leaf on its pin (`eval_pin_order`): cut leaf i drives pin
+    /// `pins[i]`. A wrong entry maps logic onto a cell with its inputs
+    /// swapped (an AOI22 permutation once paired the wrong inputs).
+    #[test]
+    fn test_truth_table_pin_mappings_match_gate_evaluation() {
+        use crate::primitive_eval::{cell_function_to_primitive, evaluate_primitive};
+        let functions = [
+            CellFunction::And2,
+            CellFunction::Or2,
+            CellFunction::Nand2,
+            CellFunction::Nor2,
+            CellFunction::Xor2,
+            CellFunction::Xnor2,
+            CellFunction::AndNot,
+            CellFunction::OrNot,
+            CellFunction::And3,
+            CellFunction::Or3,
+            CellFunction::Nand3,
+            CellFunction::Nor3,
+            CellFunction::And4,
+            CellFunction::Or4,
+            CellFunction::Nand4,
+            CellFunction::Nor4,
+            CellFunction::Aoi21,
+            CellFunction::Oai21,
+            CellFunction::Aoi22,
+            CellFunction::Oai22,
+            CellFunction::Mux2,
+        ];
+        for function in &functions {
+            let entries = CellMatcher::function_to_truth_tables(function)
+                .unwrap_or_else(|| panic!("{:?} has no truth tables", function));
+            let order = eval_pin_order(function)
+                .unwrap_or_else(|| panic!("{:?} has no pin order", function));
+            let primitive = cell_function_to_primitive(function);
+            for (tt, pins) in entries {
+                let n = pins.len();
+                assert_eq!(n, order.len(), "{:?} {:?}", function, pins);
+                let mut computed = 0u64;
+                for m in 0..(1u64 << n) {
+                    let mut inputs = vec![false; n];
+                    for (leaf, pin) in pins.iter().enumerate() {
+                        let pos = order.iter().position(|p| p == pin).unwrap();
+                        inputs[pos] = (m >> leaf) & 1 == 1;
+                    }
+                    if evaluate_primitive(&primitive, &inputs)[0] {
+                        computed |= 1 << m;
+                    }
+                }
+                assert_eq!(
+                    computed, tt,
+                    "{:?} with leaves on pins {:?} computes {:#x}, not {:#x}",
+                    function, pins, computed, tt
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_mapping_stats() {
