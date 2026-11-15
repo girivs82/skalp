@@ -91,7 +91,9 @@ impl<'a> SharedCodegen<'a> {
             }
         }
         for signal in &module.signals {
-            self.signal_by_name.entry(signal.name.as_str()).or_insert(signal);
+            self.signal_by_name
+                .entry(signal.name.as_str())
+                .or_insert(signal);
         }
     }
 

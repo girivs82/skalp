@@ -125,7 +125,11 @@ fn child_memory_stays_one_array() {
         .values()
         .filter(|s| matches!(s.sir_type, Some(SirType::Array(_, 64))))
         .collect();
-    assert_eq!(arrays.len(), 1, "the child's memory is one array state element");
+    assert_eq!(
+        arrays.len(),
+        1,
+        "the child's memory is one array state element"
+    );
     // flags + mem; flattened, the memory alone would be 64 registers
     assert!(
         sir.state_elements.len() < 10,

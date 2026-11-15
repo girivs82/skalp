@@ -897,7 +897,6 @@ impl SimulationRuntime for CompiledCpuRuntime {
         Ok(states)
     }
 
-
     async fn reset(&mut self) -> SimulationResult<()> {
         self.registers.clear();
         self.signals.clear();

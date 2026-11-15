@@ -580,9 +580,10 @@ fn tiles_with_option(
                     )
                 })
                 .collect();
-            let values =
-                skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(db, bitstream, &bits)
-                    .unwrap();
+            let values = skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(
+                db, bitstream, &bits,
+            )
+            .unwrap();
             // an inverted bit is part of the option when it is clear
             if values.iter().zip(option_bits).all(|(&v, b)| v != b.invert) {
                 count += 1;
@@ -626,7 +627,10 @@ fn lvstl_output_and_bidirectional_pads_get_radiants_settings() {
     assert!(result.routing.success);
     let data = &result.bitstream.data;
     assert_eq!(tiles_with_option(&db, data, "SEIO18.DRIVE_LVSTL", "10"), 2);
-    assert_eq!(tiles_with_option(&db, data, "SEIO18.VREF_LVSTL", "VREF_INT"), 1);
+    assert_eq!(
+        tiles_with_option(&db, data, "SEIO18.VREF_LVSTL", "VREF_INT"),
+        1
+    );
     assert_eq!(tiles_with_option(&db, data, "BANK3.DIFF_IO", "ON"), 1);
     assert_eq!(tiles_with_option(&db, data, "BANK3.LVSTL", "LVSTL_I"), 1);
 }

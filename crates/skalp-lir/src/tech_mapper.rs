@@ -760,10 +760,8 @@ fn absorb_bidir_buffers(
         );
         cell.source_op = Some("IOBuffer".to_string());
         cell_info.apply_to_cell(&mut cell);
-        cell.parameters.insert(
-            crate::gate_netlist::OE_ACTIVE_LOW_PARAM.into(),
-            "1".into(),
-        );
+        cell.parameters
+            .insert(crate::gate_netlist::OE_ACTIVE_LOW_PARAM.into(), "1".into());
         apply_io_constraints_standalone(&mut cell, &port_name, port_constraints);
         netlist.cells[index] = cell;
         ports.insert(pad);

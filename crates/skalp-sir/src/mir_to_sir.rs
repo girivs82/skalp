@@ -133,9 +133,7 @@ impl<K: std::hash::Hash + Eq + Clone> LookupIndex<K> {
             self.indexed = 0;
         }
         for (i, item) in items.iter().enumerate().skip(self.indexed) {
-            self.positions
-                .entry(key_of(item).to_owned())
-                .or_insert(i);
+            self.positions.entry(key_of(item).to_owned()).or_insert(i);
         }
         self.indexed = items.len();
         let found = self.positions.get(key).copied();
@@ -181,9 +179,11 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Position of the first SIR signal with this name
     fn signal_position(&self, name: &str) -> Option<usize> {
-        self.signal_index
-            .borrow_mut()
-            .position(&self.sir.signals, |s: &SirSignal| s.name.as_str(), name)
+        self.signal_index.borrow_mut().position(
+            &self.sir.signals,
+            |s: &SirSignal| s.name.as_str(),
+            name,
+        )
     }
 
     /// The first SIR signal with this name
@@ -6112,8 +6112,7 @@ impl<'a> MirToSirConverter<'a> {
                 // Only create slice for combinational nodes, not FlipFlops
                 let slice_node = self.create_slice_node(node_id, declared_width - 1, 0);
                 // Set the signal's driver to the slice node
-                if let Some(signal) = self.find_signal_mut(&internal_name)
-                {
+                if let Some(signal) = self.find_signal_mut(&internal_name) {
                     signal.driver_node = Some(slice_node);
                 }
                 // Add the signal name to the slice node's outputs
@@ -6145,8 +6144,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             // For FlipFlops, fall through to update the FlipFlop output directly
             // The codegen will apply the appropriate width mask
-            if let Some(signal) = self.find_signal_mut(&internal_name)
-            {
+            if let Some(signal) = self.find_signal_mut(&internal_name) {
                 signal.driver_node = Some(node_id);
             }
         }
@@ -6266,35 +6264,34 @@ impl<'a> MirToSirConverter<'a> {
         if is_float || width == 0 || width > 128 {
             return driver;
         }
-        let may_overflow = self.find_combinational_node(driver)
-            .is_some_and(|n| {
-                match &n.kind {
-                    // Comparisons produce exactly one bit.
-                    SirNodeKind::BinaryOp(op) => !matches!(
-                        op,
-                        BinaryOperation::Eq
-                            | BinaryOperation::Neq
-                            | BinaryOperation::Lt
-                            | BinaryOperation::Lte
-                            | BinaryOperation::Gt
-                            | BinaryOperation::Gte
-                            | BinaryOperation::Slt
-                            | BinaryOperation::Slte
-                            | BinaryOperation::Sgt
-                            | BinaryOperation::Sgte
-                            | BinaryOperation::FEq
-                            | BinaryOperation::FNeq
-                            | BinaryOperation::FLt
-                            | BinaryOperation::FLte
-                            | BinaryOperation::FGt
-                            | BinaryOperation::FGte
-                    ),
-                    SirNodeKind::UnaryOp(_)
-                    | SirNodeKind::Mux
-                    | SirNodeKind::ParallelMux { .. } => true,
-                    _ => false,
+        let may_overflow = self.find_combinational_node(driver).is_some_and(|n| {
+            match &n.kind {
+                // Comparisons produce exactly one bit.
+                SirNodeKind::BinaryOp(op) => !matches!(
+                    op,
+                    BinaryOperation::Eq
+                        | BinaryOperation::Neq
+                        | BinaryOperation::Lt
+                        | BinaryOperation::Lte
+                        | BinaryOperation::Gt
+                        | BinaryOperation::Gte
+                        | BinaryOperation::Slt
+                        | BinaryOperation::Slte
+                        | BinaryOperation::Sgt
+                        | BinaryOperation::Sgte
+                        | BinaryOperation::FEq
+                        | BinaryOperation::FNeq
+                        | BinaryOperation::FLt
+                        | BinaryOperation::FLte
+                        | BinaryOperation::FGt
+                        | BinaryOperation::FGte
+                ),
+                SirNodeKind::UnaryOp(_) | SirNodeKind::Mux | SirNodeKind::ParallelMux { .. } => {
+                    true
                 }
-            });
+                _ => false,
+            }
+        });
         if !may_overflow {
             return driver;
         }
@@ -6337,27 +6334,26 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Check if this is a state element or signal to get type (using internal name)
-        let sir_type =
-            if let Some(signal) = self.find_signal(&internal_name) {
-                signal.sir_type.clone()
-            } else if let Some(state) = self.sir.state_elements.get(&internal_name) {
-                state.sir_type.clone().unwrap_or(SirType::Bits(state.width))
-            } else {
-                // BUG #278 FIX: Try to resolve width from MIR port types by parsing
-                // the hierarchical name (e.g., "inner.current_magnitude" → instance "inner", port "current_magnitude")
-                let mut resolved_type = None;
-                if let Some(dot_pos) = name.rfind('.') {
-                    let port_name = &name[dot_pos + 1..];
-                    // Search all MIR modules for a port with this name
-                    for module in &self.mir_design.modules {
-                        if let Some(port) = module.ports.iter().find(|p| p.name == port_name) {
-                            resolved_type = Some(self.convert_type(&port.port_type));
-                            break;
-                        }
+        let sir_type = if let Some(signal) = self.find_signal(&internal_name) {
+            signal.sir_type.clone()
+        } else if let Some(state) = self.sir.state_elements.get(&internal_name) {
+            state.sir_type.clone().unwrap_or(SirType::Bits(state.width))
+        } else {
+            // BUG #278 FIX: Try to resolve width from MIR port types by parsing
+            // the hierarchical name (e.g., "inner.current_magnitude" → instance "inner", port "current_magnitude")
+            let mut resolved_type = None;
+            if let Some(dot_pos) = name.rfind('.') {
+                let port_name = &name[dot_pos + 1..];
+                // Search all MIR modules for a port with this name
+                for module in &self.mir_design.modules {
+                    if let Some(port) = module.ports.iter().find(|p| p.name == port_name) {
+                        resolved_type = Some(self.convert_type(&port.port_type));
+                        break;
                     }
                 }
-                resolved_type.unwrap_or(SirType::Bits(32)) // Default to 32 bits (safer than 8)
-            };
+            }
+            resolved_type.unwrap_or(SirType::Bits(32)) // Default to 32 bits (safer than 8)
+        };
         let width = sir_type.width();
 
         self.sir.signals.push(SirSignal {
@@ -6414,8 +6410,7 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Get the signal's declared type (NOT the driver's type)
-        let sir_type = if let Some(signal) = self.find_signal(&signal_name)
-        {
+        let sir_type = if let Some(signal) = self.find_signal(&signal_name) {
             signal.sir_type.clone()
         } else {
             SirType::Bits(16) // Default fallback
@@ -7632,8 +7627,7 @@ impl<'a> MirToSirConverter<'a> {
                         span: None,
                     };
 
-                    if let Some(sig) = self.find_signal_mut(&internal_name)
-                    {
+                    if let Some(sig) = self.find_signal_mut(&internal_name) {
                         sig.driver_node = Some(node_id);
                     }
 
@@ -8599,8 +8593,7 @@ impl<'a> MirToSirConverter<'a> {
 
                             if signal_exists_in_signals {
                                 // Mark the signal as having this driver (use internal name)
-                                if let Some(sig) = self.find_signal_mut(&internal_target)
-                                {
+                                if let Some(sig) = self.find_signal_mut(&internal_target) {
                                     sig.driver_node = Some(node_id);
                                     sig.is_state = true;
                                 }
@@ -9057,8 +9050,12 @@ impl<'a> MirToSirConverter<'a> {
                                             parent_module_for_signals,
                                             parent_prefix,
                                         };
-                                        result =
-                                            Some(self.write_bit_for_instance(current, index, &assign.rhs, &ctx));
+                                        result = Some(self.write_bit_for_instance(
+                                            current,
+                                            index,
+                                            &assign.rhs,
+                                            &ctx,
+                                        ));
                                         continue;
                                     }
                                 }
@@ -9207,14 +9204,13 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::If(if_stmt) => {
                     self.memory_writes_in_if_for_instance(if_stmt, target, guard, current, ctx)
                 }
-                Statement::ResolvedConditional(resolved) => self
-                    .memory_writes_in_if_for_instance(
-                        &resolved.original,
-                        target,
-                        guard,
-                        current,
-                        ctx,
-                    ),
+                Statement::ResolvedConditional(resolved) => self.memory_writes_in_if_for_instance(
+                    &resolved.original,
+                    target,
+                    guard,
+                    current,
+                    ctx,
+                ),
                 Statement::Block(block) => self.synthesize_memory_writes_for_instance(
                     &block.statements,
                     target,
@@ -10238,8 +10234,11 @@ impl<'a> MirToSirConverter<'a> {
                             parent_module_for_signals,
                             parent_prefix,
                         );
-                        let shifted =
-                            self.create_binary_op_node(&BinaryOp::RightShift, base_node, index_node);
+                        let shifted = self.create_binary_op_node(
+                            &BinaryOp::RightShift,
+                            base_node,
+                            index_node,
+                        );
                         self.create_slice_node(shifted, 0, 0)
                     }
                     // BUG FIX #113: Handle Port specially to preserve RangeSelect in port_mapping
