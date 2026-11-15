@@ -127,10 +127,12 @@ pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
 }
 
 /// Give block RAM and multiplier inputs tied low a real driver where the device
-/// needs one.
+/// needs one, and add the inputs a device needs held low that a cell does not
+/// have ([`Device::low_driven_input_count`]: a large RAM's, a multiplier's,
+/// the unexposed inputs of a Nexus ADC).
 ///
 /// A device may be able to hold some RAM inputs high or low with configuration
-/// alone; the others must be driven. This adds a constant-zero LUT per RAM that
+/// alone; the others must be driven. This adds a constant-zero LUT per cell that
 /// needs one, so those inputs are routed like any signal.
 pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
     let constants = constant_nets(netlist);
@@ -153,7 +155,10 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
     let mut driven = netlist.clone();
     for ram in netlist.cells.iter() {
         let ports = ram.ram_ports();
-        if ports.is_none() && !is_multiplier(ram) {
+        let extra_low_inputs = device.low_driven_input_count(ram);
+        // Besides RAMs and multipliers, a hard block (the ADC) may have
+        // inputs its primitive does not expose that must be held low
+        if ports.is_none() && !is_multiplier(ram) && extra_low_inputs == 0 {
             continue;
         }
         let inputs: Vec<usize> = (0..ram.inputs.len())
@@ -165,7 +170,6 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
                     }
             })
             .collect();
-        let extra_low_inputs = device.low_driven_input_count(ram);
         if inputs.is_empty() && extra_low_inputs == 0 {
             continue;
         }
@@ -431,6 +435,65 @@ pub fn prepare_for_routing(
 }
 
 /// Copy a netlist for the placer, hiding pads so only logic gets placed.
+/// Take out the buffers synthesis leaves on the outputs of PLLs (it keeps
+/// a named copy of a signal that is passed to an instance), connecting
+/// their loads to the PLL output itself. A PLL output reaches its loads on
+/// dedicated wires (the clock network, or a hard block's own clock input),
+/// which a buffer placed in a logic tile would cut it off from. A buffer
+/// that drives a primary output stays.
+pub fn bypass_pll_output_buffers(netlist: &GateNetlist) -> Option<GateNetlist> {
+    let is_buffer = |cell: &Cell| {
+        matches!(
+            cell.function,
+            Some(CellFunction::Buf) | Some(CellFunction::ClkBuf)
+        ) && cell.inputs.len() == 1
+            && cell.outputs.len() == 1
+            && cell.clock.is_none()
+    };
+    let from_pll = |net: GateNetId| {
+        netlist
+            .nets
+            .get(net.0 as usize)
+            .and_then(|n| n.driver)
+            .and_then(|d| netlist.get_cell(d))
+            .is_some_and(crate::device::nexus::pll::is_pll)
+    };
+    let outputs: std::collections::HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    // buffer output net -> the PLL output it copies
+    let bypass: HashMap<GateNetId, GateNetId> = netlist
+        .cells
+        .iter()
+        .filter(|c| is_buffer(c) && from_pll(c.inputs[0]) && !outputs.contains(&c.outputs[0]))
+        .map(|c| (c.outputs[0], c.inputs[0]))
+        .collect();
+    if bypass.is_empty() {
+        return None;
+    }
+    let mut out = netlist.clone();
+    let through = |net: &mut GateNetId| {
+        if let Some(&source) = bypass.get(net) {
+            *net = source;
+        }
+    };
+    for cell in &mut out.cells {
+        if bypass.contains_key(&cell.outputs.first().copied().unwrap_or(GateNetId(u32::MAX)))
+            && is_buffer(cell)
+        {
+            continue;
+        }
+        cell.inputs.iter_mut().for_each(through);
+        if let Some(clock) = cell.clock.as_mut() {
+            through(clock);
+        }
+        if let Some(reset) = cell.reset.as_mut() {
+            through(reset);
+        }
+    }
+    out.rebuild_net_connectivity();
+    out.remove_dead_cells();
+    Some(out)
+}
+
 pub fn logic_only_netlist(netlist: &GateNetlist) -> GateNetlist {
     let mut logic = netlist.clone();
     for cell in &mut logic.cells {

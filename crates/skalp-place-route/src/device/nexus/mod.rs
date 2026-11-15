@@ -12,6 +12,7 @@
 //! - LIFCL-40 — 32,256 LUT4, 88x57 grid, packages QFN72/csfBGA289/caBGA400
 //! - LFCPNX-100 — 79,872 LUT4, 160x75 grid (LFCPNX-VERSA-EVN board)
 
+pub mod adc;
 pub mod data;
 pub mod dsp;
 pub mod ebr;
@@ -209,6 +210,10 @@ pub struct NexusDevice {
     /// reach the fabric at every site), in the order a cell's added inputs
     /// take them
     large_ram_low_pins: Arc<Vec<String>>,
+    /// ADC inputs Lattice's primitive does not expose that must be driven
+    /// low ([`adc::tied_low_pins`] that reach the fabric), in the order a
+    /// cell's added inputs take them
+    adc_low_pins: Arc<Vec<String>>,
     /// DSP tiles
     pub dsp_tiles: Vec<DspTile>,
 }
@@ -324,6 +329,14 @@ impl NexusDevice {
             .iter()
             .filter(|s| s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1)
             .map(|s| ((s.x, s.y), s.bank))
+            .collect();
+
+        // The ADC's tile, if the window holds it
+        let adc_sites: crate::collections::HashSet<(u32, u32)> = all_tiles
+            .iter()
+            .filter(|t| t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1)
+            .filter(|t| t.tiletype == adc::TILETYPE)
+            .map(|t| (t.x, t.y))
             .collect();
 
         // PLL sites: the GPLL tile of each corner in the window
@@ -611,6 +624,22 @@ impl NexusDevice {
                     bel_id_counter += 1;
                 }
             }
+            if adc_sites.contains(&(x, y)) {
+                for pin in adc::input_pins().iter().chain(adc::output_pins()) {
+                    if let Some(wire) = resolve_wire(x, y, &adc::site_wire(pin))
+                        .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
+                    {
+                        bel_wires.insert((x, y, format!("ADC_{pin}")), wire);
+                    }
+                }
+                bels.push(Bel {
+                    id: BelId(bel_id_counter),
+                    bel_type: BelType::Adc,
+                    name: "ADC".to_string(),
+                    pins: Vec::new(),
+                });
+                bel_id_counter += 1;
+            }
             tiles[y as usize][x as usize] = Some(NexusTile::new(t.skalp_type, x, y, bels));
         }
 
@@ -623,6 +652,14 @@ impl NexusDevice {
                         .all(|&(x, y)| bel_wires.contains_key(&(x, y, format!("LRAM_{pin}"))))
             })
             .map(|pin| pin.to_string())
+            .collect();
+        let adc_low_pins: Vec<String> = adc::tied_low_pins(db_root, family)?
+            .into_iter()
+            .filter(|pin| {
+                adc_sites
+                    .iter()
+                    .all(|&(x, y)| bel_wires.contains_key(&(x, y, format!("ADC_{pin}"))))
+            })
             .collect();
         Ok(Self {
             variant,
@@ -650,6 +687,7 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             large_ram_pins: Arc::new(large_ram_pins),
             large_ram_low_pins: Arc::new(large_ram_low_pins),
+            adc_low_pins: Arc::new(adc_low_pins),
             dsp_tiles: Vec::new(),
         })
     }
@@ -795,6 +833,15 @@ impl NexusDevice {
         lram::input_pin(ports, input, single_port, extra_from, &extra)
     }
 
+    /// The unexposed ADC inputs a cell leaves unconnected that must be
+    /// driven low, in the order its added inputs take them.
+    pub fn adc_low_pins_of(&self, cell: &skalp_lir::gate_netlist::Cell) -> Vec<&String> {
+        self.adc_low_pins
+            .iter()
+            .filter(|pin| !adc::connects(cell, pin))
+            .collect()
+    }
+
     pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
         self.bel_wires.get(&(x, y, key.to_string())).copied()
     }
@@ -865,6 +912,7 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             large_ram_pins: Arc::new(HashMap::new()),
             large_ram_low_pins: Arc::new(Vec::new()),
+            adc_low_pins: Arc::new(Vec::new()),
             dsp_tiles: Vec::new(),
         };
 
@@ -2457,6 +2505,17 @@ impl Device for NexusDevice {
         if ivref::is_vref_generator(cell) {
             return ivref::input_router_pin(cell, input);
         }
+        if adc::is_adc(cell) {
+            let first = cell
+                .parameters
+                .get(EXTRA_INPUTS_PARAM)
+                .and_then(|v| v.parse::<usize>().ok());
+            if let Some(first) = first.filter(|&first| input >= first) {
+                let pin = self.adc_low_pins_of(cell).get(input - first).copied()?;
+                return adc::input_pins().iter().position(|p| p == pin);
+            }
+            return adc::input_router_pin(cell, input);
+        }
         pll::input_router_pin(cell, input).filter(|_| pll::is_pll(cell))
     }
 
@@ -2465,6 +2524,9 @@ impl Device for NexusDevice {
         cell: &skalp_lir::gate_netlist::Cell,
         output: usize,
     ) -> Option<usize> {
+        if adc::is_adc(cell) {
+            return adc::output_router_pin(cell, output);
+        }
         pll::output_router_pin(cell, output).filter(|_| pll::is_pll(cell))
     }
 
@@ -2485,6 +2547,8 @@ impl Device for NexusDevice {
             dsp::low_driven_pins().len()
         } else if lram::is_large_ram(cell) {
             lram::low_pins_of(lram::is_single_port(cell), &self.large_ram_low_pins).len()
+        } else if adc::is_adc(cell) {
+            self.adc_low_pins_of(cell).len()
         } else {
             0
         }
@@ -2596,6 +2660,18 @@ impl Device for NexusDevice {
                 .bel_wires
                 .get(&(x, y, format!("IVREF_{name}")))
                 .copied();
+        }
+        let is_adc = !self.prjoxide_tiles.is_empty()
+            && self
+                .tile_at(x, y)
+                .and_then(|t| t.bels().get(bel_index))
+                .is_some_and(|b| b.bel_type == BelType::Adc);
+        if is_adc {
+            let name = match pin {
+                CellPin::Output(n) => adc::output_pins().get(n)?,
+                CellPin::Input(n) => adc::input_pin_of_router_pin(n)?,
+            };
+            return self.bel_wires.get(&(x, y, format!("ADC_{name}"))).copied();
         }
         let is_pll = !self.prjoxide_tiles.is_empty()
             && self

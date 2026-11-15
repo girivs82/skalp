@@ -1,0 +1,35 @@
+// A sequential match whose default arm (`_`) holds if/else: the arm waits in
+// phase 2 until `go`, or gives up when the counter reaches its limit.
+entity MatchDefaultArmIf {
+    in clk: clock
+    in go: bit
+    out phase: bit[2]
+    out done: bit[8]
+    out waited: bit[8]
+}
+impl MatchDefaultArmIf {
+    signal ph: bit[2] = 0
+    signal n_done: bit[8] = 0
+    signal wd: bit[8] = 0
+    on(clk.rise) {
+        match ph {
+            0 => { ph = 1 },
+            1 => {
+                wd = 0
+                ph = 2
+            },
+            _ => {
+                wd = wd + 1
+                if go == 1 {
+                    n_done = n_done + 1
+                    ph = 0
+                } else {
+                    if wd == 200 { ph = 0 }
+                }
+            }
+        }
+    }
+    phase = ph
+    done = n_done
+    waited = wd
+}

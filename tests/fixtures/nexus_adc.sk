@@ -1,0 +1,74 @@
+// The ADC on the CertusPro-NX Versa board. The lower right PLL makes the
+// converter clock (CLKOS4, 50 MHz, divided by 2 in the ADC) and the fabric
+// clock (CLKOS, 25 MHz) from the 125 MHz oscillator (VCO 1600 MHz).
+// Converter B measures pins Y6 - AA6 (channel 6) against an external
+// reference, and its result's top bits light the LEDs.
+#[lattice_ip(name = "PLL_CORE", LOC = "LRC", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIVB = "63", DELB = "63", DIVE = "31", DELE = "31", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED", ENCLK_CLKOS = "ENABLED", ENCLK_CLKOS4 = "ENABLED")]
+entity PllCore {
+    in REFCK: clock
+    in RST: bit
+    out CLKOP: clock
+    out CLKOS: clock
+    out CLKOS4: clock
+    out LOCK: bit
+}
+
+#[lattice_ip(name = "ADC", ADC_PINS = "Y6,AA6", VREFBSEL = "EXTERNAL", VREFBCFG = "1P6_TO_1P8", OMB = "UNIPOLAR", CLK_DIV = "2")]
+entity Adc {
+    in CLKDCLK: clock
+    in CLKFAB: clock
+    in ADCEN: bit
+    in RSTN: bit
+    in RESETN: bit
+    in CAL: bit
+    in CHBEN: bit
+    in CHBSEL: bit[4]
+    in SOC: bit
+    in CONVSTOP: bit
+    out CALRDY: bit
+    out COG: bit
+    out EOC: bit
+    out DB: bit[12]
+}
+
+entity NexusAdc {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out led: bit[4] @ { pins: ["R5", "R4", "R8", "R9"], io_standard: "LVCMOS33" }
+}
+
+impl NexusAdc {
+    signal fab: clock
+    signal conv: clock
+    signal t: nat[16] = 0
+    signal soc: bit = 0
+    signal result: bit[12] = 0
+
+    inst pll = PllCore {
+        REFCK: clk,
+        RST: 0
+    }
+    fab = pll.CLKOS
+    conv = pll.CLKOS4
+
+    inst adc = Adc {
+        CLKDCLK: conv,
+        CLKFAB: fab,
+        ADCEN: 1,
+        RSTN: if t > 100 { 1 } else { 0 },
+        RESETN: if t > 100 { 1 } else { 0 },
+        CAL: if t > 200 && t < 210 { 1 } else { 0 },
+        CHBEN: 1,
+        CHBSEL: 6,
+        SOC: soc,
+        CONVSTOP: 0
+    }
+
+    on(fab.rise) {
+        if t != 65535 { t = t + 1 }
+        if adc.CALRDY == 1 && adc.COG == 0 && adc.EOC == 0 { soc = 1 }
+        if adc.COG == 1 { soc = 0 }
+        if adc.EOC == 1 { result = adc.DB }
+    }
+
+    led = result[11:8]
+}
