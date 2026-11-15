@@ -151,14 +151,14 @@ async fn condition_error(top: &str) -> String {
 async fn step_condition_on_a_parent_input_is_refused() {
     let error = condition_error("BcGatedTop").await;
     assert!(error.contains("BcGated"), "{error}");
-    assert!(error.contains("input `enable`"), "{error}");
+    assert!(error.contains("`enable`"), "{error}");
 }
 
 #[tokio::test]
 async fn step_condition_on_received_data_is_refused() {
     let error = condition_error("BcFilterTop").await;
     assert!(error.contains("BcFilter"), "{error}");
-    assert!(error.contains("input `i`"), "{error}");
+    assert!(error.contains("from outside the block"), "{error}");
     // the blocks whose conditions are their own registers are fine
     assert!(!error.contains("BcSink"), "{error}");
     assert!(!error.contains("BcProducer"), "{error}");
@@ -258,4 +258,15 @@ fn a_pipeline_does_not_warn() {
     // Producer to consumer (the fixture's design): no cycle
     let source = std::fs::read_to_string(FIXTURE).expect("fixture");
     assert!(stream_warnings(&source).is_empty());
+}
+
+#[tokio::test]
+async fn step_condition_on_a_coalesced_child_register_is_allowed() {
+    let mut tb =
+        Testbench::gate_level_with_top("tests/fixtures/ncl_streams_child_condition.sk", "CcTop")
+            .await
+            .expect("a condition on a coalesced child's register builds");
+    tb.set("run", 1u8);
+    tb.clock(40).await;
+    assert!(tb.get_u32("received").await > 0, "nothing received");
 }

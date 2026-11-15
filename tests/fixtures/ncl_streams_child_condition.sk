@@ -1,0 +1,62 @@
+// A self-timed block whose send condition is a register of an async child
+// coalesced into it: allowed (the child steps with the block's strobe).
+
+async entity CcToggle {
+    out q: bit
+}
+
+impl CcToggle {
+    signal t: bit = 0
+    on() {
+        t = ~t
+    }
+    q = t
+}
+
+// Sends its count on every other step
+async entity CcProducer {
+    out o: stream<bit[8]>
+}
+
+impl CcProducer {
+    signal count: bit[8] = 0
+    inst tg = CcToggle {}
+    signal half: bit
+    half = tg.q
+    on() {
+        if half == 1 {
+            o.send(count)
+        }
+        count = count + 1
+    }
+}
+
+async entity CcConsumer {
+    in i: stream<bit[8]>
+    out received: bit[16]
+}
+
+impl CcConsumer {
+    signal n: bit[16] = 0
+    on() {
+        let v: bit[8] = i.recv()
+        n = n + 1
+    }
+    received = n
+}
+
+entity CcTop {
+    in clk: clock
+    in run: bit
+    out received: bit[16]
+}
+
+impl CcTop {
+    signal req: bit = 0
+    inst p = CcProducer { ncl_req: req }
+    inst c = CcConsumer { i: p.o, ncl_req: req }
+    on(clk.rise) {
+        req = run
+    }
+    received = c.received
+}
