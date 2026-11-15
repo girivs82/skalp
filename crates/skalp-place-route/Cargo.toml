@@ -36,7 +36,7 @@ libftd2xx = { version = "0.32", optional = true }
 # unpack fix; upstream lacks both); only compiled when `nexus-bitstream` is enabled.
 # (The fuzzed device database is NOT part of the crate — set PRJOXIDE_DB or
 # clone prjoxide to ~/src/prjoxide; tests skip gracefully when absent.)
-prjoxide = { git = "https://github.com/girivs82/prjoxide", rev = "d734fc3cba1fc161020e7a6a64a88818bf4304ec", optional = true }
+prjoxide = { git = "https://github.com/girivs82/prjoxide", rev = "50a462a7e609ab3ea94670cc9d01e921c6c2f7a9", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
