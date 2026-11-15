@@ -94,6 +94,60 @@ struct MirToSirConverter<'a> {
     /// Width-truncated read of a combinational signal, per internal signal name
     /// (see get_or_create_signal_driver).
     truncated_signal_reads: HashMap<String, usize>,
+    /// Position of each SIR signal by name, and of each combinational node by
+    /// id, so lookups do not scan the whole SIR (see [`LookupIndex`])
+    signal_index: std::cell::RefCell<LookupIndex<String>>,
+    node_index: std::cell::RefCell<LookupIndex<usize>>,
+    /// Hierarchical paths (`<inst>.<name>`) of child-instance memories kept
+    /// whole as one SIR array, read with ArrayRead and written with
+    /// ArrayWrite instead of being flattened into one register per entry
+    instance_memories: std::collections::HashSet<String>,
+}
+
+/// Position of the first element with each key in a vector that is only ever
+/// appended to (the SIR's signals and combinational nodes while lowering).
+/// The index catches up with appends on each lookup, and rebuilds itself if
+/// the vector got shorter or an entry no longer has the key it was indexed
+/// under, so it never returns a wrong position: it gives the same answer as a
+/// linear search for the first match, in constant time.
+struct LookupIndex<K> {
+    positions: HashMap<K, usize>,
+    indexed: usize,
+}
+
+impl<K: std::hash::Hash + Eq + Clone> LookupIndex<K> {
+    fn new() -> Self {
+        LookupIndex {
+            positions: HashMap::new(),
+            indexed: 0,
+        }
+    }
+
+    fn position<T, Q>(&mut self, items: &[T], key_of: impl Fn(&T) -> &Q, key: &Q) -> Option<usize>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        if items.len() < self.indexed {
+            self.positions.clear();
+            self.indexed = 0;
+        }
+        for (i, item) in items.iter().enumerate().skip(self.indexed) {
+            self.positions.entry(key_of(item).to_owned()).or_insert(i);
+        }
+        self.indexed = items.len();
+        let found = self.positions.get(key).copied();
+        match found {
+            Some(i) if key_of(&items[i]) == key => Some(i),
+            None => None,
+            Some(_) => {
+                // an entry changed its key: index everything again
+                self.positions.clear();
+                self.indexed = 0;
+                self.position(items, key_of, key)
+            }
+        }
+    }
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -117,7 +171,37 @@ impl<'a> MirToSirConverter<'a> {
             pending_array_writes: Vec::new(),
             sequential_depth: 0,
             truncated_signal_reads: HashMap::new(),
+            signal_index: std::cell::RefCell::new(LookupIndex::new()),
+            node_index: std::cell::RefCell::new(LookupIndex::new()),
+            instance_memories: std::collections::HashSet::new(),
         }
+    }
+
+    /// Position of the first SIR signal with this name
+    fn signal_position(&self, name: &str) -> Option<usize> {
+        self.signal_index.borrow_mut().position(
+            &self.sir.signals,
+            |s: &SirSignal| s.name.as_str(),
+            name,
+        )
+    }
+
+    /// The first SIR signal with this name
+    fn find_signal(&self, name: &str) -> Option<&SirSignal> {
+        self.signal_position(name).map(|i| &self.sir.signals[i])
+    }
+
+    /// The first SIR signal with this name, to change
+    fn find_signal_mut(&mut self, name: &str) -> Option<&mut SirSignal> {
+        self.signal_position(name).map(|i| &mut self.sir.signals[i])
+    }
+
+    /// The first combinational node with this id
+    fn find_combinational_node(&self, id: usize) -> Option<&SirNode> {
+        self.node_index
+            .borrow_mut()
+            .position(&self.sir.combinational_nodes, |n: &SirNode| &n.id, &id)
+            .map(|i| &self.sir.combinational_nodes[i])
     }
 
     /// BUG FIX #85: Build a mapping of signal IDs to their module instance source
@@ -348,7 +432,7 @@ impl<'a> MirToSirConverter<'a> {
             };
 
             // Set the driver_node on the signal
-            if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+            if let Some(sig) = self.find_signal_mut(&signal_name) {
                 sig.driver_node = Some(node_id);
             }
 
@@ -679,7 +763,7 @@ impl<'a> MirToSirConverter<'a> {
                     let implicit_clk = "__ncl_implicit_clk".to_string();
 
                     // Ensure the implicit clock signal exists
-                    if !self.sir.signals.iter().any(|s| s.name == implicit_clk) {
+                    if !self.find_signal(&implicit_clk).is_some() {
                         self.sir.signals.push(SirSignal {
                             name: implicit_clk.clone(),
                             width: 1,
@@ -5523,12 +5607,7 @@ impl<'a> MirToSirConverter<'a> {
         // BUG FIX (GitHub #12): If the node already has a defined output (e.g., constant
         // driver nodes output to the actual signal name like `_s1`), return that output
         // instead of creating a phantom `node_{id}_out` signal that would never be written.
-        if let Some(node) = self
-            .sir
-            .combinational_nodes
-            .iter()
-            .find(|n| n.id == node_id)
-        {
+        if let Some(node) = self.find_combinational_node(node_id) {
             if let Some(output) = node.outputs.first() {
                 return output.clone();
             }
@@ -5538,7 +5617,7 @@ impl<'a> MirToSirConverter<'a> {
         let signal_name = format!("node_{}_out", node_id);
 
         // Add signal if it doesn't exist
-        if !self.sir.signals.iter().any(|s| s.name == signal_name) {
+        if !self.find_signal(&signal_name).is_some() {
             self.sir.signals.push(SirSignal {
                 name: signal_name.clone(),
                 width: 8, // Default to 8 bits for counter example
@@ -5976,12 +6055,8 @@ impl<'a> MirToSirConverter<'a> {
         // This must be done after releasing the mutable borrow on self.sir.signals.
         let mut needs_truncation: Option<(usize, usize)> = None; // (declared_width, output_width)
 
-        if let Some(signal) = self
-            .sir
-            .signals
-            .iter_mut()
-            .find(|s| s.name == internal_name)
-        {
+        if let Some(signal_pos) = self.signal_position(&internal_name) {
+            let signal = &mut self.sir.signals[signal_pos];
             if let Some(existing_driver) = signal.driver_node {
                 // BUG FIX #117r: Allow flip-flops to overwrite continuous assignment drivers for state elements
                 // This happens when a signal has an initialization value (continuous assign) but is also
@@ -6037,12 +6112,7 @@ impl<'a> MirToSirConverter<'a> {
                 // Only create slice for combinational nodes, not FlipFlops
                 let slice_node = self.create_slice_node(node_id, declared_width - 1, 0);
                 // Set the signal's driver to the slice node
-                if let Some(signal) = self
-                    .sir
-                    .signals
-                    .iter_mut()
-                    .find(|s| s.name == internal_name)
-                {
+                if let Some(signal) = self.find_signal_mut(&internal_name) {
                     signal.driver_node = Some(slice_node);
                 }
                 // Add the signal name to the slice node's outputs
@@ -6074,12 +6144,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             // For FlipFlops, fall through to update the FlipFlop output directly
             // The codegen will apply the appropriate width mask
-            if let Some(signal) = self
-                .sir
-                .signals
-                .iter_mut()
-                .find(|s| s.name == internal_name)
-            {
+            if let Some(signal) = self.find_signal_mut(&internal_name) {
                 signal.driver_node = Some(node_id);
             }
         }
@@ -6199,39 +6264,34 @@ impl<'a> MirToSirConverter<'a> {
         if is_float || width == 0 || width > 128 {
             return driver;
         }
-        let may_overflow = self
-            .sir
-            .combinational_nodes
-            .iter()
-            .find(|n| n.id == driver)
-            .is_some_and(|n| {
-                match &n.kind {
-                    // Comparisons produce exactly one bit.
-                    SirNodeKind::BinaryOp(op) => !matches!(
-                        op,
-                        BinaryOperation::Eq
-                            | BinaryOperation::Neq
-                            | BinaryOperation::Lt
-                            | BinaryOperation::Lte
-                            | BinaryOperation::Gt
-                            | BinaryOperation::Gte
-                            | BinaryOperation::Slt
-                            | BinaryOperation::Slte
-                            | BinaryOperation::Sgt
-                            | BinaryOperation::Sgte
-                            | BinaryOperation::FEq
-                            | BinaryOperation::FNeq
-                            | BinaryOperation::FLt
-                            | BinaryOperation::FLte
-                            | BinaryOperation::FGt
-                            | BinaryOperation::FGte
-                    ),
-                    SirNodeKind::UnaryOp(_)
-                    | SirNodeKind::Mux
-                    | SirNodeKind::ParallelMux { .. } => true,
-                    _ => false,
+        let may_overflow = self.find_combinational_node(driver).is_some_and(|n| {
+            match &n.kind {
+                // Comparisons produce exactly one bit.
+                SirNodeKind::BinaryOp(op) => !matches!(
+                    op,
+                    BinaryOperation::Eq
+                        | BinaryOperation::Neq
+                        | BinaryOperation::Lt
+                        | BinaryOperation::Lte
+                        | BinaryOperation::Gt
+                        | BinaryOperation::Gte
+                        | BinaryOperation::Slt
+                        | BinaryOperation::Slte
+                        | BinaryOperation::Sgt
+                        | BinaryOperation::Sgte
+                        | BinaryOperation::FEq
+                        | BinaryOperation::FNeq
+                        | BinaryOperation::FLt
+                        | BinaryOperation::FLte
+                        | BinaryOperation::FGt
+                        | BinaryOperation::FGte
+                ),
+                SirNodeKind::UnaryOp(_) | SirNodeKind::Mux | SirNodeKind::ParallelMux { .. } => {
+                    true
                 }
-            });
+                _ => false,
+            }
+        });
         if !may_overflow {
             return driver;
         }
@@ -6255,7 +6315,7 @@ impl<'a> MirToSirConverter<'a> {
 
         if !is_state_element {
             // For non-state signals, return existing driver if available
-            if let Some(signal) = self.sir.signals.iter().find(|s| s.name == internal_name) {
+            if let Some(signal) = self.find_signal(&internal_name) {
                 if let Some(driver) = signal.driver_node {
                     let (width, is_float) = (signal.width, signal.sir_type.is_float());
                     return self.truncated_signal_read(&internal_name, driver, width, is_float);
@@ -6274,27 +6334,26 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Check if this is a state element or signal to get type (using internal name)
-        let sir_type =
-            if let Some(signal) = self.sir.signals.iter().find(|s| s.name == internal_name) {
-                signal.sir_type.clone()
-            } else if let Some(state) = self.sir.state_elements.get(&internal_name) {
-                state.sir_type.clone().unwrap_or(SirType::Bits(state.width))
-            } else {
-                // BUG #278 FIX: Try to resolve width from MIR port types by parsing
-                // the hierarchical name (e.g., "inner.current_magnitude" → instance "inner", port "current_magnitude")
-                let mut resolved_type = None;
-                if let Some(dot_pos) = name.rfind('.') {
-                    let port_name = &name[dot_pos + 1..];
-                    // Search all MIR modules for a port with this name
-                    for module in &self.mir_design.modules {
-                        if let Some(port) = module.ports.iter().find(|p| p.name == port_name) {
-                            resolved_type = Some(self.convert_type(&port.port_type));
-                            break;
-                        }
+        let sir_type = if let Some(signal) = self.find_signal(&internal_name) {
+            signal.sir_type.clone()
+        } else if let Some(state) = self.sir.state_elements.get(&internal_name) {
+            state.sir_type.clone().unwrap_or(SirType::Bits(state.width))
+        } else {
+            // BUG #278 FIX: Try to resolve width from MIR port types by parsing
+            // the hierarchical name (e.g., "inner.current_magnitude" → instance "inner", port "current_magnitude")
+            let mut resolved_type = None;
+            if let Some(dot_pos) = name.rfind('.') {
+                let port_name = &name[dot_pos + 1..];
+                // Search all MIR modules for a port with this name
+                for module in &self.mir_design.modules {
+                    if let Some(port) = module.ports.iter().find(|p| p.name == port_name) {
+                        resolved_type = Some(self.convert_type(&port.port_type));
+                        break;
                     }
                 }
-                resolved_type.unwrap_or(SirType::Bits(32)) // Default to 32 bits (safer than 8)
-            };
+            }
+            resolved_type.unwrap_or(SirType::Bits(32)) // Default to 32 bits (safer than 8)
+        };
         let width = sir_type.width();
 
         self.sir.signals.push(SirSignal {
@@ -6351,8 +6410,7 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Get the signal's declared type (NOT the driver's type)
-        let sir_type = if let Some(signal) = self.sir.signals.iter().find(|s| s.name == signal_name)
-        {
+        let sir_type = if let Some(signal) = self.find_signal(signal_name) {
             signal.sir_type.clone()
         } else {
             SirType::Bits(16) // Default fallback
@@ -6731,7 +6789,7 @@ impl<'a> MirToSirConverter<'a> {
 
     fn get_signal_width(&self, signal_name: &str) -> usize {
         // Check if it's a signal
-        if let Some(signal) = self.sir.signals.iter().find(|s| s.name == signal_name) {
+        if let Some(signal) = self.find_signal(signal_name) {
             return signal.width;
         }
 
@@ -6747,11 +6805,9 @@ impl<'a> MirToSirConverter<'a> {
     /// Get the output width of a node by looking at its output signal
     fn get_node_output_width(&self, node_id: usize) -> usize {
         // First check combinational nodes
-        for node in &self.sir.combinational_nodes {
-            if node.id == node_id {
-                if let Some(output) = node.outputs.first() {
-                    return self.get_signal_width(&output.signal_id);
-                }
+        if let Some(node) = self.find_combinational_node(node_id) {
+            if let Some(output) = node.outputs.first() {
+                return self.get_signal_width(&output.signal_id);
             }
         }
         // Check sequential nodes
@@ -6768,7 +6824,7 @@ impl<'a> MirToSirConverter<'a> {
 
     fn get_signal_type(&self, signal_name: &str) -> SirType {
         // Check if it's a signal
-        if let Some(signal) = self.sir.signals.iter().find(|s| s.name == signal_name) {
+        if let Some(signal) = self.find_signal(signal_name) {
             return signal.sir_type.clone();
         }
 
@@ -7348,7 +7404,7 @@ impl<'a> MirToSirConverter<'a> {
         sir_type: &SirType,
     ) -> String {
         let name = format!("{}.{}", inst_prefix, port_name);
-        if !self.sir.signals.iter().any(|s| s.name == name) {
+        if !self.find_signal(&name).is_some() {
             self.sir.signals.push(SirSignal {
                 name: name.clone(),
                 width,
@@ -7365,7 +7421,7 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Helper: Update a signal's driver_node
     fn update_signal_driver(&mut self, signal_name: &str, node_id: usize) {
-        if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+        if let Some(sig) = self.find_signal_mut(signal_name) {
             sig.driver_node = Some(node_id);
         }
     }
@@ -7432,6 +7488,55 @@ impl<'a> MirToSirConverter<'a> {
             let initial_contents = memory_initial_contents(signal);
             let is_register = self.is_signal_sequential_in_module(signal.id, child_module)
                 || initial_contents.is_some();
+
+            // A memory (an array MIR kept whole because it has one write port)
+            // stays one array signal, as at the top level: flattening it gives
+            // one register per entry and a mux over every entry for each read.
+            if is_instance_memory(signal) {
+                let hierarchical_path = format!("{}.{}", inst_prefix, signal.name);
+                let sir_type = self.convert_type(&signal.signal_type);
+                let width = sir_type.width();
+                let name_kind = if is_register {
+                    NameKind::StateElement
+                } else {
+                    NameKind::Signal
+                };
+                let internal_name = self.sir.name_registry.register(
+                    &hierarchical_path,
+                    &signal.name,
+                    name_kind,
+                    width,
+                );
+                self.mir_to_internal_name
+                    .insert(hierarchical_path.clone(), internal_name.clone());
+                self.sir.signals.push(SirSignal {
+                    name: internal_name.clone(),
+                    width,
+                    sir_type: sir_type.clone(),
+                    driver_node: None,
+                    fanout_nodes: Vec::new(),
+                    is_state: is_register,
+                    span: None,
+                    trace_config: None,
+                });
+                if is_register {
+                    self.sir.state_elements.insert(
+                        internal_name.clone(),
+                        StateElement {
+                            name: internal_name,
+                            width,
+                            sir_type: Some(sir_type),
+                            reset_value: None,
+                            initial_contents: initial_contents.clone(),
+                            clock: String::new(),
+                            reset: None,
+                            span: None,
+                        },
+                    );
+                }
+                self.instance_memories.insert(hierarchical_path);
+                continue;
+            }
 
             // Use TypeFlattener to handle composite types (structs, arrays, etc.)
             let mut flattener = skalp_mir::type_flattening::TypeFlattener::default();
@@ -7522,12 +7627,7 @@ impl<'a> MirToSirConverter<'a> {
                         span: None,
                     };
 
-                    if let Some(sig) = self
-                        .sir
-                        .signals
-                        .iter_mut()
-                        .find(|s| s.name == internal_name)
-                    {
+                    if let Some(sig) = self.find_signal_mut(&internal_name) {
                         sig.driver_node = Some(node_id);
                     }
 
@@ -8394,15 +8494,39 @@ impl<'a> MirToSirConverter<'a> {
 
                         for actual_target in expanded_targets {
                             // Build combinational logic (including MUXes for conditionals)
-                            let data_node = self.synthesize_sequential_logic_for_instance(
-                                &process.body.statements,
-                                inst_prefix,
-                                port_mapping,
-                                child_module,
-                                &actual_target,
-                                parent_module_for_signals,
-                                parent_prefix,
-                            );
+                            let data_node = if self.instance_memories.contains(&actual_target) {
+                                let current = self.create_signal_ref_for_instance(
+                                    &actual_target,
+                                    inst_prefix,
+                                    port_mapping,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                );
+                                let ctx = InstanceContext {
+                                    inst_prefix,
+                                    port_mapping,
+                                    child_module,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                };
+                                self.synthesize_memory_writes_for_instance(
+                                    &process.body.statements,
+                                    &actual_target,
+                                    None,
+                                    current,
+                                    &ctx,
+                                )
+                            } else {
+                                self.synthesize_sequential_logic_for_instance(
+                                    &process.body.statements,
+                                    inst_prefix,
+                                    port_mapping,
+                                    child_module,
+                                    &actual_target,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                )
+                            };
 
                             let node_id = self.node_counter;
                             self.node_counter += 1;
@@ -8463,18 +8587,13 @@ impl<'a> MirToSirConverter<'a> {
                             // as a state element so it can be found during simulation.
                             // Sequential outputs from elaborated instances need to be in state_elements.
                             let signal_exists_in_signals =
-                                self.sir.signals.iter().any(|s| s.name == internal_target);
+                                self.find_signal(&internal_target).is_some();
                             let signal_exists_in_state =
                                 self.sir.state_elements.contains_key(&internal_target);
 
                             if signal_exists_in_signals {
                                 // Mark the signal as having this driver (use internal name)
-                                if let Some(sig) = self
-                                    .sir
-                                    .signals
-                                    .iter_mut()
-                                    .find(|s| s.name == internal_target)
-                                {
+                                if let Some(sig) = self.find_signal_mut(&internal_target) {
                                     sig.driver_node = Some(node_id);
                                     sig.is_state = true;
                                 }
@@ -8911,6 +9030,34 @@ impl<'a> MirToSirConverter<'a> {
                                         ));
                                         continue;
                                     }
+                                    if base_name == target {
+                                        // A bit of a bit vector: `v[i] = b` sets or
+                                        // clears bit i and keeps the others
+                                        let current = match result {
+                                            Some(node) => node,
+                                            None => self.create_signal_ref_for_instance(
+                                                target,
+                                                inst_prefix,
+                                                port_mapping,
+                                                parent_module_for_signals,
+                                                parent_prefix,
+                                            ),
+                                        };
+                                        let ctx = InstanceContext {
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        };
+                                        result = Some(self.write_bit_for_instance(
+                                            current,
+                                            index,
+                                            &assign.rhs,
+                                            &ctx,
+                                        ));
+                                        continue;
+                                    }
                                 }
                             }
                             continue;
@@ -9011,6 +9158,207 @@ impl<'a> MirToSirConverter<'a> {
                 parent_prefix,
             )
         })
+    }
+
+    /// The next value of a child-instance memory kept whole, after the writes
+    /// in `statements` to it: each write `mem[i] = v` reached under the path
+    /// condition `guard` becomes `ArrayWrite(cur, i, guard ? v : cur[i])`,
+    /// chained in source order so a later write to the same entry wins. Arms
+    /// of a `match` exclude each other in order, as the match does.
+    fn synthesize_memory_writes_for_instance(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+        guard: Option<usize>,
+        mut current: usize,
+        ctx: &InstanceContext<'_>,
+    ) -> usize {
+        for statement in statements {
+            current = match statement {
+                Statement::Assignment(assign) => {
+                    let LValue::BitSelect { base, index } = &assign.lhs else {
+                        continue;
+                    };
+                    if !matches!(base.as_ref(), LValue::Signal(_)) {
+                        continue;
+                    }
+                    let base_name = self.extract_base_signal_for_instance(
+                        base,
+                        ctx.inst_prefix,
+                        ctx.child_module,
+                    );
+                    if base_name.as_deref() != Some(target) {
+                        continue;
+                    }
+                    let index_node = self.instance_expression(index, ctx);
+                    let value_node = self.instance_expression(&assign.rhs, ctx);
+                    let written = match guard {
+                        Some(guard) => {
+                            let old = self.create_array_read_node(current, index_node);
+                            self.create_mux_node(guard, value_node, old)
+                        }
+                        None => value_node,
+                    };
+                    self.create_array_write_node(current, index_node, written)
+                }
+                Statement::If(if_stmt) => {
+                    self.memory_writes_in_if_for_instance(if_stmt, target, guard, current, ctx)
+                }
+                Statement::ResolvedConditional(resolved) => self.memory_writes_in_if_for_instance(
+                    &resolved.original,
+                    target,
+                    guard,
+                    current,
+                    ctx,
+                ),
+                Statement::Block(block) => self.synthesize_memory_writes_for_instance(
+                    &block.statements,
+                    target,
+                    guard,
+                    current,
+                    ctx,
+                ),
+                Statement::Case(case_stmt) => {
+                    let selector = self.instance_expression(&case_stmt.expr, ctx);
+                    // Whether an earlier arm matched
+                    let mut taken: Option<usize> = None;
+                    for item in &case_stmt.items {
+                        let mut matched: Option<usize> = None;
+                        for value in &item.values {
+                            let value_node = self.instance_expression(value, ctx);
+                            let eq =
+                                self.create_binary_op_node(&BinaryOp::Equal, selector, value_node);
+                            matched = Some(match matched {
+                                Some(m) => self.create_binary_op_node(&BinaryOp::LogicalOr, m, eq),
+                                None => eq,
+                            });
+                        }
+                        let Some(matched) = matched else {
+                            continue;
+                        };
+                        let arm = self.and_not(matched, taken);
+                        let arm_guard = self.and_guard(guard, arm);
+                        current = self.synthesize_memory_writes_for_instance(
+                            &item.block.statements,
+                            target,
+                            Some(arm_guard),
+                            current,
+                            ctx,
+                        );
+                        taken = Some(match taken {
+                            Some(t) => self.create_binary_op_node(&BinaryOp::LogicalOr, t, matched),
+                            None => matched,
+                        });
+                    }
+                    if let Some(default) = &case_stmt.default {
+                        let default_guard = match taken {
+                            Some(t) => {
+                                let none = self.create_unary_op_node(&skalp_mir::UnaryOp::Not, t);
+                                self.and_guard(guard, none)
+                            }
+                            None => match guard {
+                                Some(g) => g,
+                                None => self.create_constant_node(1, 1),
+                            },
+                        };
+                        current = self.synthesize_memory_writes_for_instance(
+                            &default.statements,
+                            target,
+                            Some(default_guard),
+                            current,
+                            ctx,
+                        );
+                    }
+                    current
+                }
+                _ => current,
+            };
+        }
+        current
+    }
+
+    fn memory_writes_in_if_for_instance(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+        guard: Option<usize>,
+        current: usize,
+        ctx: &InstanceContext<'_>,
+    ) -> usize {
+        let condition = self.instance_expression(&if_stmt.condition, ctx);
+        let then_guard = self.and_guard(guard, condition);
+        let current = self.synthesize_memory_writes_for_instance(
+            &if_stmt.then_block.statements,
+            target,
+            Some(then_guard),
+            current,
+            ctx,
+        );
+        match &if_stmt.else_block {
+            Some(else_block) => {
+                let not_condition = self.create_unary_op_node(&skalp_mir::UnaryOp::Not, condition);
+                let else_guard = self.and_guard(guard, not_condition);
+                self.synthesize_memory_writes_for_instance(
+                    &else_block.statements,
+                    target,
+                    Some(else_guard),
+                    current,
+                    ctx,
+                )
+            }
+            None => current,
+        }
+    }
+
+    /// `current` with bit `index` set to the low bit of `value`
+    fn write_bit_for_instance(
+        &mut self,
+        current: usize,
+        index: &Expression,
+        value: &Expression,
+        ctx: &InstanceContext<'_>,
+    ) -> usize {
+        let width = self.get_node_output_width(current).max(1);
+        let index_node = self.instance_expression(index, ctx);
+        let value_node = self.instance_expression(value, ctx);
+        let bit = self.truth_value_node(value_node);
+        let one = self.create_constant_node(1, width);
+        let shifted = self.create_binary_op_node(&BinaryOp::LeftShift, one, index_node);
+        let mask = self.create_slice_node(shifted, width - 1, 0);
+        let set = self.create_binary_op_node(&BinaryOp::BitwiseOr, current, mask);
+        let not_mask = self.create_unary_op_node(&skalp_mir::UnaryOp::BitwiseNot, mask);
+        let cleared = self.create_binary_op_node(&BinaryOp::BitwiseAnd, current, not_mask);
+        self.create_mux_node(bit, set, cleared)
+    }
+
+    /// `guard && condition`, or `condition` when there is no guard
+    fn and_guard(&mut self, guard: Option<usize>, condition: usize) -> usize {
+        match guard {
+            Some(guard) => self.create_binary_op_node(&BinaryOp::LogicalAnd, guard, condition),
+            None => condition,
+        }
+    }
+
+    /// `condition && !excluded`, or `condition` when nothing is excluded
+    fn and_not(&mut self, condition: usize, excluded: Option<usize>) -> usize {
+        match excluded {
+            Some(excluded) => {
+                let not_excluded = self.create_unary_op_node(&skalp_mir::UnaryOp::Not, excluded);
+                self.create_binary_op_node(&BinaryOp::LogicalAnd, condition, not_excluded)
+            }
+            None => condition,
+        }
+    }
+
+    fn instance_expression(&mut self, expr: &Expression, ctx: &InstanceContext<'_>) -> usize {
+        self.create_expression_node_for_instance_with_context(
+            expr,
+            ctx.inst_prefix,
+            ctx.port_mapping,
+            ctx.child_module,
+            ctx.parent_module_for_signals,
+            ctx.parent_prefix,
+        )
     }
 
     /// Synthesize conditional with explicit default value
@@ -9188,6 +9536,31 @@ impl<'a> MirToSirConverter<'a> {
                                         cond_node,
                                         value_node,
                                         current_node,
+                                    ));
+                                } else if base_name == target {
+                                    // A bit of a bit vector: `v[i] = b`
+                                    let current = match result {
+                                        Some(node) => node,
+                                        None => self.create_signal_ref_for_instance(
+                                            target,
+                                            inst_prefix,
+                                            port_mapping,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        ),
+                                    };
+                                    let ctx = InstanceContext {
+                                        inst_prefix,
+                                        port_mapping,
+                                        child_module,
+                                        parent_module_for_signals,
+                                        parent_prefix,
+                                    };
+                                    result = Some(self.write_bit_for_instance(
+                                        current,
+                                        index,
+                                        &assign.rhs,
+                                        &ctx,
                                     ));
                                 }
                             }
@@ -9530,7 +9903,7 @@ impl<'a> MirToSirConverter<'a> {
                     );
 
                     // Mark the signal as having sequential driver
-                    if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == lhs_signal) {
+                    if let Some(sig) = self.find_signal_mut(&lhs_signal) {
                         sig.driver_node = Some(node_id);
                     }
                 } else {
@@ -9708,6 +10081,29 @@ impl<'a> MirToSirConverter<'a> {
                         let base_name =
                             self.extract_base_signal_for_instance(base, inst_prefix, child_module);
 
+                        // A memory kept whole: one ArrayRead
+                        if let Some(ref base_name) = base_name {
+                            if self.instance_memories.contains(base_name) {
+                                let array_node = self.create_signal_ref_for_instance(
+                                    base_name,
+                                    inst_prefix,
+                                    port_mapping,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                );
+                                let index_node = self
+                                    .create_expression_node_for_instance_with_context(
+                                        index,
+                                        inst_prefix,
+                                        port_mapping,
+                                        child_module,
+                                        parent_module_for_signals,
+                                        parent_prefix,
+                                    );
+                                return self.create_array_read_node(array_node, index_node);
+                            }
+                        }
+
                         if let Some(ref base_name) = base_name {
                             let elements = self.expand_flattened_target(base_name);
 
@@ -9824,8 +10220,26 @@ impl<'a> MirToSirConverter<'a> {
                             parent_module_for_signals,
                             parent_prefix,
                         );
-                        let index_val = self.evaluate_const_expr(index);
-                        self.create_bit_select_node_on_base(base_node, index_val)
+                        if self.evaluate_constant_expression(index).is_some() {
+                            let index_val = self.evaluate_const_expr(index);
+                            return self.create_bit_select_node_on_base(base_node, index_val);
+                        }
+                        // A bit picked by a value known only at run time:
+                        // bit 0 of `base >> index`
+                        let index_node = self.create_expression_node_for_instance_with_context(
+                            index,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            parent_module_for_signals,
+                            parent_prefix,
+                        );
+                        let shifted = self.create_binary_op_node(
+                            &BinaryOp::RightShift,
+                            base_node,
+                            index_node,
+                        );
+                        self.create_slice_node(shifted, 0, 0)
                     }
                     // BUG FIX #113: Handle Port specially to preserve RangeSelect in port_mapping
                     // When a port maps to a RangeSelect expression (e.g., param_0 -> data1[31:0]),
@@ -11218,6 +11632,21 @@ impl<'a> MirToSirConverter<'a> {
             _ => None,
         }
     }
+}
+
+/// Where a child instance's expressions are lowered
+struct InstanceContext<'c> {
+    inst_prefix: &'c str,
+    port_mapping: &'c HashMap<String, Expression>,
+    child_module: &'c Module,
+    parent_module_for_signals: Option<&'c Module>,
+    parent_prefix: &'c str,
+}
+
+/// Whether a child module's signal is a memory kept whole in the SIR: an
+/// array MIR lowered with a memory config (one write port per clock edge).
+fn is_instance_memory(signal: &skalp_mir::mir::Signal) -> bool {
+    signal.memory_config.is_some() && matches!(signal.signal_type, DataType::Array(..))
 }
 
 /// A memory's initial contents, when the signal is a memory given them.

@@ -74,6 +74,11 @@ pub struct Cell {
 /// Parameter on an output pad: why it may drive a pin the board does not list as safe.
 pub const DRIVE_OVERRIDE_PARAM: &str = "DRIVE_OVERRIDE";
 
+/// Parameter set to "1" on a bidirectional pad whose second input is a
+/// tristate control (high = the pad does not drive, as a vendor IO buffer's
+/// `T` pin) rather than an output enable (high = the pad drives).
+pub const OE_ACTIVE_LOW_PARAM: &str = "OE_ACTIVE_LOW";
+
 /// Cell parameter holding a memory cell's initial contents: one hexadecimal
 /// word per address, in address order, separated by spaces. Addresses past
 /// the last word start as zero.

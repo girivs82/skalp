@@ -36,6 +36,13 @@ pub struct SharedCodegen<'a> {
     pub input_field_names: Vec<String>,
     pub register_field_names: Vec<String>,
     pub signal_field_names: Vec<String>,
+    /// The combinational nodes that drive each signal, in node order, so a
+    /// lookup of a signal's driver does not scan every node
+    producers: HashMap<&'a str, Vec<&'a SirNode>>,
+    /// Signals read as the array of an `ArrayRead`
+    array_read_sources: HashSet<&'a str>,
+    /// The first declared signal with each name
+    signal_by_name: HashMap<&'a str, &'a SirSignal>,
 }
 
 impl<'a> SharedCodegen<'a> {
@@ -53,9 +60,46 @@ impl<'a> SharedCodegen<'a> {
             input_field_names: Vec::new(),
             register_field_names: Vec::new(),
             signal_field_names: Vec::new(),
+            producers: HashMap::new(),
+            array_read_sources: HashSet::new(),
+            signal_by_name: HashMap::new(),
         };
+        codegen.build_lookup_indexes();
         codegen.build_signal_width_cache();
         codegen
+    }
+
+    /// Index the module's nodes by the signals they drive and read, and its
+    /// signals by name. Lookups through these give the same answer as a scan
+    /// of the module in order.
+    fn build_lookup_indexes(&mut self) {
+        let module = self.module;
+        for node in &module.combinational_nodes {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for output in &node.outputs {
+                if seen.insert(output.signal_id.as_str()) {
+                    self.producers
+                        .entry(output.signal_id.as_str())
+                        .or_default()
+                        .push(node);
+                }
+            }
+            if matches!(node.kind, SirNodeKind::ArrayRead) {
+                if let Some(array) = node.inputs.first() {
+                    self.array_read_sources.insert(array.signal_id.as_str());
+                }
+            }
+        }
+        for signal in &module.signals {
+            self.signal_by_name
+                .entry(signal.name.as_str())
+                .or_insert(signal);
+        }
+    }
+
+    /// The combinational nodes driving `signal`, in node order
+    fn producers_of(&self, signal: &str) -> &[&'a SirNode] {
+        self.producers.get(signal).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Build the signal width cache by collecting widths from all sources
@@ -450,14 +494,12 @@ impl<'a> SharedCodegen<'a> {
     /// Returns the source signal name if found, otherwise the original signal name.
     pub fn resolve_to_array_source(&self, signal: &str) -> Option<String> {
         // Look for a SignalRef node that outputs this signal
-        for node in &self.module.combinational_nodes {
+        for node in self.producers_of(signal) {
             if let SirNodeKind::SignalRef { signal: source } = &node.kind {
-                if node.outputs.iter().any(|o| o.signal_id == signal) {
-                    // Check if source is an array state element
-                    if let Some(state_elem) = self.module.state_elements.get(source) {
-                        if let Some(SirType::Array(_, _)) = &state_elem.sir_type {
-                            return Some(source.clone());
-                        }
+                // Check if source is an array state element
+                if let Some(state_elem) = self.module.state_elements.get(source) {
+                    if let Some(SirType::Array(_, _)) = &state_elem.sir_type {
+                        return Some(source.clone());
                     }
                 }
             }
@@ -507,16 +549,13 @@ impl<'a> SharedCodegen<'a> {
     /// If a signal comes from a SignalRef to an array state element, return the state element name
     fn resolve_array_source(&self, signal: &str) -> String {
         // Check if this signal is produced by a SignalRef node pointing to an array state element
-        for node in &self.module.combinational_nodes {
+        for node in self.producers_of(signal) {
             if let SirNodeKind::SignalRef { signal: source } = &node.kind {
-                // Check if this node outputs to our signal
-                if node.outputs.iter().any(|o| o.signal_id == signal) {
-                    // Check if source is an array-type state element
-                    if let Some(state_elem) = self.module.state_elements.get(source) {
-                        if let Some(ref sir_type) = state_elem.sir_type {
-                            if matches!(sir_type, SirType::Array(_, _)) {
-                                return source.clone();
-                            }
+                // Check if source is an array-type state element
+                if let Some(state_elem) = self.module.state_elements.get(source) {
+                    if let Some(ref sir_type) = state_elem.sir_type {
+                        if matches!(sir_type, SirType::Array(_, _)) {
+                            return source.clone();
                         }
                     }
                 }
@@ -538,14 +577,12 @@ impl<'a> SharedCodegen<'a> {
         }
 
         // Check if signal comes from a SignalRef to an array state element
-        for node in &self.module.combinational_nodes {
+        for node in self.producers_of(signal) {
             if let SirNodeKind::SignalRef { signal: source } = &node.kind {
-                if node.outputs.iter().any(|o| o.signal_id == signal) {
-                    if let Some(state_elem) = self.module.state_elements.get(source) {
-                        if let Some(ref sir_type) = state_elem.sir_type {
-                            if matches!(sir_type, SirType::Array(_, _)) {
-                                return Some(sir_type.clone());
-                            }
+                if let Some(state_elem) = self.module.state_elements.get(source) {
+                    if let Some(ref sir_type) = state_elem.sir_type {
+                        if matches!(sir_type, SirType::Array(_, _)) {
+                            return Some(sir_type.clone());
                         }
                     }
                 }
@@ -555,20 +592,15 @@ impl<'a> SharedCodegen<'a> {
         // A chained ArrayWrite (several writes to one array in a clocked
         // block) has the type of the array it updates; follow the chain back
         // to the array it started from.
-        for node in &self.module.combinational_nodes {
-            if matches!(node.kind, SirNodeKind::ArrayWrite)
-                && !node.inputs.is_empty()
-                && node.outputs.iter().any(|o| o.signal_id == signal)
-            {
+        for node in self.producers_of(signal) {
+            if matches!(node.kind, SirNodeKind::ArrayWrite) && !node.inputs.is_empty() {
                 return self.get_array_type_for_signal(&node.inputs[0].signal_id);
             }
         }
 
         // Otherwise use the signal's own declared type when it is an array.
-        self.module
-            .signals
-            .iter()
-            .find(|s| s.name == signal)
+        self.signal_by_name
+            .get(signal)
             .and_then(|s| match &s.sir_type {
                 t @ SirType::Array(_, _) => Some(t.clone()),
                 _ => None,
@@ -579,28 +611,24 @@ impl<'a> SharedCodegen<'a> {
     /// Returns Some(array_type) if it's from SignalRef to array or ArrayWrite
     fn get_array_type_for_signal_output(&self, output_name: &str) -> Option<SirType> {
         // Find the node that produces this output
-        for node in &self.module.combinational_nodes {
-            for output in &node.outputs {
-                if output.signal_id == output_name {
-                    match &node.kind {
-                        // SignalRef to array state element
-                        SirNodeKind::SignalRef { signal } => {
-                            if let Some(state_elem) = self.module.state_elements.get(signal) {
-                                if let Some(ref sir_type) = state_elem.sir_type {
-                                    if matches!(sir_type, SirType::Array(_, _)) {
-                                        return Some(sir_type.clone());
-                                    }
-                                }
+        for node in self.producers_of(output_name) {
+            match &node.kind {
+                // SignalRef to array state element
+                SirNodeKind::SignalRef { signal } => {
+                    if let Some(state_elem) = self.module.state_elements.get(signal) {
+                        if let Some(ref sir_type) = state_elem.sir_type {
+                            if matches!(sir_type, SirType::Array(_, _)) {
+                                return Some(sir_type.clone());
                             }
                         }
-                        // ArrayWrite outputs same type as input array
-                        SirNodeKind::ArrayWrite if !node.inputs.is_empty() => {
-                            let array_signal = &node.inputs[0].signal_id;
-                            return self.get_array_type_for_signal(array_signal);
-                        }
-                        _ => {}
                     }
                 }
+                // ArrayWrite outputs same type as input array
+                SirNodeKind::ArrayWrite if !node.inputs.is_empty() => {
+                    let array_signal = &node.inputs[0].signal_id;
+                    return self.get_array_type_for_signal(array_signal);
+                }
+                _ => {}
             }
         }
         None
@@ -618,37 +646,25 @@ impl<'a> SharedCodegen<'a> {
         if width <= 32 {
             return false;
         }
-        for node in &self.module.combinational_nodes {
-            if matches!(node.kind, SirNodeKind::ArrayRead)
-                && !node.inputs.is_empty()
-                && node.inputs[0].signal_id == signal
-            {
-                return true;
-            }
-        }
-        false
+        self.array_read_sources.contains(signal)
     }
 
     /// Get the array size for a signal that is used as ArrayRead source
     /// Returns the array size from the ArrayRead operation's context, or None if not found
     fn get_array_read_source_size(&self, signal: &str) -> Option<usize> {
-        for node in &self.module.combinational_nodes {
-            if matches!(node.kind, SirNodeKind::ArrayRead)
-                && !node.inputs.is_empty()
-                && node.inputs[0].signal_id == signal
-            {
-                // Try to get array size from the source signal's type
-                if let Some(SirType::Array(_, size)) = self.get_array_type_for_signal(signal) {
-                    return Some(size);
-                }
-                // Fall back to checking the source of this signal
-                // via SignalRef chain
-                let resolved = self.resolve_array_source(signal);
-                if let Some(state_elem) = self.module.state_elements.get(&resolved) {
-                    if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
-                        return Some(*size);
-                    }
-                }
+        if !self.array_read_sources.contains(signal) {
+            return None;
+        }
+        // Try to get array size from the source signal's type
+        if let Some(SirType::Array(_, size)) = self.get_array_type_for_signal(signal) {
+            return Some(size);
+        }
+        // Fall back to checking the source of this signal
+        // via SignalRef chain
+        let resolved = self.resolve_array_source(signal);
+        if let Some(state_elem) = self.module.state_elements.get(&resolved) {
+            if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
+                return Some(*size);
             }
         }
         None
@@ -715,7 +731,7 @@ impl<'a> SharedCodegen<'a> {
             let sir_type = if let Some(ref t) = elem.sir_type {
                 t
             } else {
-                let found_signal = self.module.signals.iter().find(|s| &s.name == *name);
+                let found_signal = self.signal_by_name.get(name.as_str());
                 found_signal.map(|s| &s.sir_type).unwrap_or(&default_type)
             };
 
@@ -4158,14 +4174,14 @@ impl<'a> SharedCodegen<'a> {
 
     /// Generate combinational evaluation body
     pub fn generate_combinational_body(&mut self) {
-        // Use pre-computed topological order
-        for node_id in &self.module.sorted_combinational_node_ids.clone() {
-            if let Some(node) = self
-                .module
-                .combinational_nodes
-                .iter()
-                .find(|n| n.id == *node_id)
-            {
+        // Use pre-computed topological order; each id names its first node
+        let module = self.module;
+        let mut node_by_id: HashMap<usize, &SirNode> = HashMap::new();
+        for node in &module.combinational_nodes {
+            node_by_id.entry(node.id).or_insert(node);
+        }
+        for node_id in &module.sorted_combinational_node_ids {
+            if let Some(node) = node_by_id.get(node_id) {
                 self.generate_node(node);
             }
         }
