@@ -1538,6 +1538,10 @@ fn build_design(
                     info!("Async modules detected - using boundary-only NCL synthesis");
                 }
 
+                let step_errors = skalp_lir::check_step_conditions(&hier_lir);
+                if !step_errors.is_empty() {
+                    anyhow::bail!("{}", step_errors.join("\n"));
+                }
                 // Apply boundary-only NCL to async modules at LIR level
                 // This keeps internal logic single-rail (optimizable) with NCL at I/O boundaries
                 let hier_lir = if has_async {
@@ -4447,6 +4451,10 @@ fn synthesize_design(
         println!("NCL: async modules detected, applying boundary NCL");
     }
 
+    let step_errors = skalp_lir::check_step_conditions(&hier_lir);
+    if !step_errors.is_empty() {
+        anyhow::bail!("{}", step_errors.join("\n"));
+    }
     // Apply boundary-only NCL to async modules at LIR level
     let hier_lir = if has_async {
         let ncl_config = skalp_lir::NclConfig {

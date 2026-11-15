@@ -1,0 +1,96 @@
+// Self-timed blocks whose send/recv conditions read something other than
+// their own registers: synthesis must refuse them (see
+// `skalp_lir::step_condition_errors`).
+
+async entity BcProducer {
+    out o: stream<bit[8]>
+}
+
+impl BcProducer {
+    signal count: bit[8] = 0
+    on() {
+        o.send(count)
+        count = count + 1
+    }
+}
+
+// Sends only while an input from the clocked parent is high: the input can
+// change at any time
+async entity BcGated {
+    in enable: bit
+    in i: stream<bit[8]>
+    out o: stream<bit[8]>
+}
+
+impl BcGated {
+    on() {
+        if enable == 1 {
+            let v: bit[8] = i.recv()
+            o.send(v)
+        }
+    }
+}
+
+// Whether it sends depends on the value it receives in the same step
+async entity BcFilter {
+    in i: stream<bit[8]>
+    out o: stream<bit[8]>
+}
+
+impl BcFilter {
+    on() {
+        let v: bit[8] = i.recv()
+        if v[0] == 1 {
+            o.send(v)
+        }
+    }
+}
+
+async entity BcSink {
+    in i: stream<bit[8]>
+    out total: bit[8]
+}
+
+impl BcSink {
+    signal t: bit[8] = 0
+    on() {
+        let v: bit[8] = i.recv()
+        t = t + v
+    }
+    total = t
+}
+
+entity BcGatedTop {
+    in clk: clock
+    in run: bit
+    in enable: bit
+    out total: bit[8]
+}
+
+impl BcGatedTop {
+    signal req: bit = 0
+    inst p = BcProducer { ncl_req: req }
+    inst g = BcGated { i: p.o, enable: enable, ncl_req: req }
+    inst s = BcSink { i: g.o, ncl_req: req }
+    on(clk.rise) {
+        req = run
+    }
+    total = s.total
+}
+
+entity BcFilterTop {
+    in clk: clock
+    in run: bit
+    out total: bit[8]
+}
+
+impl BcFilterTop {
+    signal req: bit = 0
+    inst p = BcProducer { ncl_req: req }
+    inst f = BcFilter { i: p.o, ncl_req: req }
+    inst s = BcSink { i: f.o, ncl_req: req }
+    on(clk.rise) {
+        req = run
+    }
+    total = s.total
+}

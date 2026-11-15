@@ -366,6 +366,10 @@ impl Testbench {
 
         // Hierarchical LIR with NCL expansion
         let (hier_lir, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+        let step_errors = skalp_lir::check_step_conditions(&hier_lir);
+        if !step_errors.is_empty() {
+            anyhow::bail!("{}", step_errors.join("\n"));
+        }
         let hier_lir = if has_async {
             let ncl_config = skalp_lir::NclConfig {
                 boundary_only: true,
@@ -846,6 +850,11 @@ impl Testbench {
         let netlist = if has_hierarchy || top_module_name.is_some() {
             let (hier_lir, detected_async) =
                 skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+
+            let step_errors = skalp_lir::check_step_conditions(&hier_lir);
+            if !step_errors.is_empty() {
+                anyhow::bail!("{}", step_errors.join("\n"));
+            }
 
             let hier_lir = if detected_async || has_async {
                 let ncl_config = skalp_lir::NclConfig {
