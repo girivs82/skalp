@@ -25,6 +25,7 @@ pub mod prjoxide_graph;
 pub mod prjoxide_load;
 pub mod prjoxide_pack;
 pub mod sites;
+pub mod tied_inputs;
 mod tiles;
 #[cfg(feature = "nexus-bitstream")]
 pub mod timing;
@@ -211,8 +212,9 @@ pub struct NexusDevice {
     /// take them
     large_ram_low_pins: Arc<Vec<String>>,
     /// ADC inputs Lattice's primitive does not expose that must be driven
-    /// low ([`adc::tied_low_pins`] that reach the fabric), in the order a
-    /// cell's added inputs take them
+    /// low (the device data's [`tied_inputs`] of [`adc::BLOCK_TYPE`] that
+    /// reach the fabric), in the order a cell's added inputs take them; their
+    /// router pins follow [`adc::input_pins`]
     adc_low_pins: Arc<Vec<String>>,
     /// DSP tiles
     pub dsp_tiles: Vec<DspTile>,
@@ -330,6 +332,10 @@ impl NexusDevice {
             .filter(|s| s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1)
             .map(|s| ((s.x, s.y), s.bank))
             .collect();
+
+        // Hard-block inputs the device data says must be tied low
+        let tied_low = tied_inputs::low_pins(db_root, family)?;
+        let adc_tied: Vec<String> = tied_low.get(adc::BLOCK_TYPE).cloned().unwrap_or_default();
 
         // The ADC's tile, if the window holds it
         let adc_sites: crate::collections::HashSet<(u32, u32)> = all_tiles
@@ -625,7 +631,8 @@ impl NexusDevice {
                 }
             }
             if adc_sites.contains(&(x, y)) {
-                for pin in adc::input_pins().iter().chain(adc::output_pins()) {
+                let pins = adc::input_pins().iter().chain(adc::output_pins()).copied();
+                for pin in pins.chain(adc_tied.iter().map(String::as_str)) {
                     if let Some(wire) = resolve_wire(x, y, &adc::site_wire(pin))
                         .and_then(|n| graph.wire_names.get(&node_name(&n)).copied())
                     {
@@ -653,7 +660,7 @@ impl NexusDevice {
             })
             .map(|pin| pin.to_string())
             .collect();
-        let adc_low_pins: Vec<String> = adc::tied_low_pins(db_root, family)?
+        let adc_low_pins: Vec<String> = adc_tied
             .into_iter()
             .filter(|pin| {
                 adc_sites
@@ -833,13 +840,10 @@ impl NexusDevice {
         lram::input_pin(ports, input, single_port, extra_from, &extra)
     }
 
-    /// The unexposed ADC inputs a cell leaves unconnected that must be
-    /// driven low, in the order its added inputs take them.
-    pub fn adc_low_pins_of(&self, cell: &skalp_lir::gate_netlist::Cell) -> Vec<&String> {
-        self.adc_low_pins
-            .iter()
-            .filter(|pin| !adc::connects(cell, pin))
-            .collect()
+    /// The unexposed ADC inputs that must be driven low, in the order a
+    /// cell's added inputs take them.
+    pub fn adc_low_pins(&self) -> &[String] {
+        &self.adc_low_pins
     }
 
     pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
@@ -2511,8 +2515,8 @@ impl Device for NexusDevice {
                 .get(EXTRA_INPUTS_PARAM)
                 .and_then(|v| v.parse::<usize>().ok());
             if let Some(first) = first.filter(|&first| input >= first) {
-                let pin = self.adc_low_pins_of(cell).get(input - first).copied()?;
-                return adc::input_pins().iter().position(|p| p == pin);
+                let tied = input - first;
+                return (tied < self.adc_low_pins.len()).then(|| adc::input_pins().len() + tied);
             }
             return adc::input_router_pin(cell, input);
         }
@@ -2548,7 +2552,7 @@ impl Device for NexusDevice {
         } else if lram::is_large_ram(cell) {
             lram::low_pins_of(lram::is_single_port(cell), &self.large_ram_low_pins).len()
         } else if adc::is_adc(cell) {
-            self.adc_low_pins_of(cell).len()
+            self.adc_low_pins.len()
         } else {
             0
         }
@@ -2669,7 +2673,12 @@ impl Device for NexusDevice {
         if is_adc {
             let name = match pin {
                 CellPin::Output(n) => adc::output_pins().get(n)?,
-                CellPin::Input(n) => adc::input_pin_of_router_pin(n)?,
+                CellPin::Input(n) => match n.checked_sub(adc::input_pins().len()) {
+                    Some(tied) if n != crate::device::FF_PIN_CLK => {
+                        self.adc_low_pins.get(tied)?.as_str()
+                    }
+                    _ => adc::input_pin_of_router_pin(n)?,
+                },
             };
             return self.bel_wires.get(&(x, y, format!("ADC_{name}"))).copied();
         }
