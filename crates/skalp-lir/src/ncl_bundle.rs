@@ -346,6 +346,10 @@ impl<'a> Arrivals<'a> {
         if let Some(&a) = self.memo.get(&net) {
             return a;
         }
+        if let Some(&t) = self.sources.as_ref().and_then(|s| s.get(&net)) {
+            // A timed source, inside the block or not
+            return Some(t);
+        }
         if !self.visiting.insert(net) {
             // A loop (state-holding gate): the path through it is not a
             // data path. A self-timed block's own step loop (through its
@@ -595,6 +599,108 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     checks.extend(check_channels(netlist, delays, &matched));
     checks.extend(check_channel_holds(netlist, delays, &matched));
     checks.extend(check_arbiters(netlist, delays, &matched));
+    checks.extend(check_releases(netlist, delays, &matched));
+    checks
+}
+
+/// Name of the matched delay that holds a self-timed block's arbiter
+/// release up after `done` (see `ncl_expand::expand_to_ncl_bridged_with`)
+pub const RELEASE_DELAY_PATH: &str = "ncl_bundle.release";
+
+/// The release of a self-timed block that arbitrates: `release = !(!done &
+/// delay(!done))` drops the arbiter's requests and holds the step latch
+/// off. It must stay up until the dropped requests have cleared the
+/// arbiter's grants and `ready` at the step latch; otherwise the latch
+/// starts the next step from the grant the arbiter is withdrawing, and the
+/// grant changes under that step. Data: from `release` rising to the last
+/// of `ready` at the step latch and the arbiters' inputs. Control: how much
+/// longer the release stays up than `done`, the rise through the delay's
+/// chain (the time `done` itself stays up is left out, which only adds
+/// margin).
+fn check_releases(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    matched: &[MatchedDelay],
+) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    for md in matched {
+        let inside = |cell: &Cell| cell.path.starts_with(&md.prefix);
+        // `release`: an inverter of this delay's control that the block's
+        // step control reads
+        let release = netlist.nets[md.control.0 as usize]
+            .fanout
+            .iter()
+            .map(|&(c, _)| &netlist.cells[c.0 as usize])
+            .filter(|c| inside(c) && c.inputs.len() == 1 && c.outputs.len() == 1)
+            .map(|c| c.outputs[0])
+            .find(|&out| {
+                netlist.nets[out.0 as usize].fanout.iter().any(|&(c, _)| {
+                    let cell = &netlist.cells[c.0 as usize];
+                    inside(cell) && cell.source_op.as_deref() == Some(STEP_CONTROL_OP)
+                })
+            });
+        let Some(release) = release else {
+            continue;
+        };
+        let mut from_release = Arrivals::new(netlist, delays, &md.prefix, false)
+            .with_sources(HashMap::from([(release, 0)]));
+        let mut data_ps: Option<i64> = None;
+        let mut endpoint = |t: Option<i64>| {
+            if let Some(t) = t {
+                data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
+            }
+        };
+        if let Some((cell, pin, input)) = step_control_ready(netlist, &md.prefix) {
+            endpoint(
+                from_release
+                    .at(input)
+                    .map(|t| t + delays.wire_ps(netlist, input, cell, pin)),
+            );
+        }
+        for cell in netlist
+            .cells
+            .iter()
+            .filter(|c| inside(c) && c.source_op.as_deref() == Some(ARBITER_OP))
+        {
+            for (i, &input) in cell.inputs.iter().enumerate() {
+                endpoint(
+                    from_release
+                        .at(input)
+                        .map(|t| t + delays.wire_ps(netlist, input, cell, i)),
+                );
+            }
+        }
+        let Some(data_ps) = data_ps else {
+            continue;
+        };
+        // The chain's rise, beyond the direct path through the AND
+        let and_cell = &netlist.cells[md.and_cell.0 as usize];
+        let Some(at_control) = Arrivals::new(netlist, delays, &md.prefix, false)
+            .with_sources(HashMap::from([(md.source, 0)]))
+            .at(md.control)
+        else {
+            continue;
+        };
+        let direct = and_cell
+            .inputs
+            .iter()
+            .position(|&n| n == md.source)
+            .and_then(|pin| {
+                delays
+                    .arc_ps(and_cell, pin, 0)
+                    .map(|arc| arc + delays.wire_ps(netlist, md.source, and_cell, pin))
+            })
+            .unwrap_or(0);
+        checks.push(BundleCheck {
+            prefix: md.prefix.clone(),
+            delay_path: and_cell.path.clone(),
+            times: "release",
+            data_ps,
+            control_ps: at_control - direct,
+            chain_len: md.chain.len(),
+            sender: None,
+        });
+    }
     checks
 }
 

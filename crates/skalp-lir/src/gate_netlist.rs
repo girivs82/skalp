@@ -106,6 +106,14 @@ pub const STEP_LATCH_READY_PIN: usize = 2;
 /// out)` over the inputs `[req, done, ready, out]`
 pub const STEP_LATCH_INIT: u64 = 0x3320;
 
+/// Truth table of the single-LUT state of a two-way mutual exclusion
+/// (`<block>.arb_mutex<n>`, built where the library has a 4-input LUT), over
+/// the inputs `[r0, r1, w, w]`: `w` is the latch's own output, fed back to
+/// both upper inputs. `w` turns to the side that requests alone (0 for `r0`,
+/// 1 for `r1`) and holds while both or neither request; the grants are
+/// `r0 & !w` and `r1 & w`.
+pub const ARBITER_MUTEX_INIT: u64 = 0xd4d4;
+
 /// `source_op` of the gates of an arbiter of a self-timed async block
 /// (`LirOp::NclArbiter`): mutual-exclusion elements, cross-coupled gates
 /// that optimization must not touch.
@@ -2700,6 +2708,34 @@ pub fn truth_table_mask(variables: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mutual exclusion's state `w` turns to the side that requests
+    /// alone and holds otherwise, over the inputs `[r0, r1, w, w]`; with the
+    /// grants `r0 & !w` and `r1 & w` at most one side is ever granted
+    #[test]
+    fn arbiter_mutex_init_is_the_mutex() {
+        for a in 0..16u64 {
+            let bit = |k: u32| (a >> k) & 1 == 1;
+            let (r0, r1, w, w2) = (bit(0), bit(1), bit(2), bit(3));
+            let next = (ARBITER_MUTEX_INIT >> a) & 1 == 1;
+            let want = if r0 && !r1 {
+                false
+            } else if r1 && !r0 {
+                true
+            } else {
+                w
+            };
+            if w == w2 {
+                assert_eq!(next, want, "address {a:04b}");
+            }
+            // the two feedback inputs carry the same net; the other half of
+            // the table is filled the same way, so a stray read of it is
+            // harmless
+            assert_eq!(next, want, "address {a:04b} (unused half)");
+            let (g0, g1) = (r0 && !next, r1 && next);
+            assert!(!(g0 && g1), "both granted at {a:04b}");
+        }
+    }
 
     /// The step latch's truth table is `!done & ((req & ready) | out)` over
     /// the inputs `[req, done, ready, out]`

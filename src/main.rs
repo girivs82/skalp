@@ -4303,6 +4303,18 @@ fn nexus_retime_delays(_variant: &str) -> Result<Box<dyn skalp_lir::retime::Reti
     )
 }
 
+/// The on-disk cache of synthesized modules: `SKALP_SYNTH_CACHE` names its
+/// directory (`off` or `0` turns it off); by default it lives in the user's
+/// cache directory
+fn synthesis_cache() -> Option<skalp_lir::synth_cache::SynthCache> {
+    let dir = match std::env::var_os("SKALP_SYNTH_CACHE") {
+        Some(v) if v == "off" || v == "0" => return None,
+        Some(v) => PathBuf::from(v),
+        None => dirs::cache_dir()?.join("skalp").join("synth"),
+    };
+    skalp_lir::synth_cache::SynthCache::new(dir)
+}
+
 /// Synthesize design for FPGA target
 #[allow(clippy::too_many_arguments)]
 fn synthesize_design(
@@ -4501,8 +4513,15 @@ fn synthesize_design(
 
     println!("Optimize: {}", optimize);
 
-    // Hierarchical synthesis: each module independently, then flatten
-    let hier_netlist = skalp_lir::synthesize_hierarchical(&hier_lir, &library, preset);
+    // Hierarchical synthesis: each module independently, then flatten.
+    // Modules synthesized by an earlier build come from the cache.
+    let synth_cache = synthesis_cache();
+    let hier_netlist = skalp_lir::synthesize_hierarchical_cached(
+        &hier_lir,
+        &library,
+        preset,
+        synth_cache.as_ref(),
+    );
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
     size_ncl_matched_delays(&mut gate_netlist, &library);
     if family == "nexus" {

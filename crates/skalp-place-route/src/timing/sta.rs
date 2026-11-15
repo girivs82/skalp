@@ -48,9 +48,11 @@ pub struct Metastability {
     pub t0_ps: f64,
 }
 
-/// Device-database name of the element a self-timed block's step latch is
-/// built as where the library has LUTs: one 4-input LUT with its output fed
-/// back (`skalp_lir::gate_netlist::STEP_LATCH_INIT`)
+/// Device-database name of the element a self-timed block's step latch and
+/// its arbiters' mutual exclusions are built as where the library has LUTs:
+/// one 4-input LUT with its output fed back
+/// (`skalp_lir::gate_netlist::STEP_LATCH_INIT`,
+/// `skalp_lir::gate_netlist::ARBITER_MUTEX_INIT`)
 pub const STEP_LATCH_ELEMENT: &str = "lut4_feedback_latch";
 
 /// One FPGA family's delays.
@@ -567,6 +569,22 @@ struct RoutedBundleDelays<'e, 'a, D: Device + ?Sized> {
     model: &'a dyn TimingModel,
 }
 
+impl<D: Device + ?Sized> RoutedBundleDelays<'_, '_, D> {
+    /// Metastability figures of a latch in one LUT with its own feedback,
+    /// from the device data where it has them
+    fn lut_latch_timing(&self) -> skalp_lir::ncl_bundle::ArbiterTiming {
+        let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
+        match self.model.metastability(STEP_LATCH_ELEMENT) {
+            Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
+                tau_ps: m.tau_ps,
+                t0_ps: m.t0_ps,
+                ..default
+            },
+            None => default,
+        }
+    }
+}
+
 impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDelays<'_, '_, D> {
     fn wire_ps(
         &self,
@@ -627,15 +645,14 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
     }
 
     fn step_latch_timing(&self) -> skalp_lir::ncl_bundle::ArbiterTiming {
-        let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
-        match self.model.metastability(STEP_LATCH_ELEMENT) {
-            Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
-                tau_ps: m.tau_ps,
-                t0_ps: m.t0_ps,
-                ..default
-            },
-            None => default,
-        }
+        self.lut_latch_timing()
+    }
+
+    /// An arbiter's mutual exclusion is also one LUT with its own feedback
+    /// (`skalp_lir::gate_netlist::ARBITER_MUTEX_INIT`), the same element as
+    /// the step latch
+    fn arbiter_timing(&self) -> skalp_lir::ncl_bundle::ArbiterTiming {
+        self.lut_latch_timing()
     }
 }
 

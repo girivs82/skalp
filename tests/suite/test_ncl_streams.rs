@@ -136,6 +136,182 @@ async fn streams_merge_same_let_name_gate_level() {
     run_merge(tb, 60).await;
 }
 
+const SHARED_SERVER: &str = "tests/fixtures/ncl_streams_shared_server.sk";
+
+/// Values each client of the shared server sends
+const SHARED_SERVER_VALUES: u32 = 32;
+
+/// Four clients take turns at one server (a four-way `match arbitrate` with
+/// a `_ if` arm for the server's own steps): every client gets all its
+/// replies, and everything stops once the parent stops it
+async fn run_shared_server(mut tb: Testbench) {
+    tb.set("run", 1u8);
+    let mut clocks = 0;
+    loop {
+        tb.clock(100).await;
+        clocks += 100;
+        let mut done = true;
+        for c in 0..4 {
+            done &= tb.get_u32(&format!("n{c}")).await == SHARED_SERVER_VALUES;
+        }
+        if done {
+            break;
+        }
+        assert!(
+            clocks < 20_000,
+            "clients still waiting after {clocks} clocks"
+        );
+    }
+    tb.set("run", 0u8);
+    let mut waited = 0;
+    while tb.get_u32("busy").await != 0 {
+        tb.clock(1).await;
+        waited += 1;
+        assert!(waited < STOP_LIMIT, "blocks never stopped");
+    }
+    // replies are the values 0, 1, ... plus one
+    let expected: u32 = (1..=SHARED_SERVER_VALUES).sum();
+    for c in 0..4 {
+        assert_eq!(
+            tb.get_u32(&format!("sum{c}")).await,
+            expected,
+            "sum of client {c}'s replies"
+        );
+    }
+}
+
+#[tokio::test]
+async fn streams_shared_server_behavioural() {
+    let tb = Testbench::behavioral_with_top(SHARED_SERVER, "SsTop")
+        .await
+        .expect("build behavioural testbench");
+    run_shared_server(tb).await;
+}
+
+#[tokio::test]
+async fn streams_shared_server_gate_level() {
+    let tb = Testbench::gate_level_with_top(SHARED_SERVER, "SsTop")
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
+/// With a LUT library each two-way mutual exclusion of the server's
+/// arbiter is one LUT with its own feedback
+/// (no cross-coupled gates left), and four clients contending for the
+/// server must all be served, round-robin, through it
+#[tokio::test]
+async fn streams_shared_server_gate_level_lut_mutex() {
+    use skalp_lir::gate_netlist::{GateNetlist, ARBITER_MUTEX_INIT, ARBITER_OP};
+    let check = |netlist: GateNetlist| {
+        let arbiter =
+            |c: &&skalp_lir::gate_netlist::Cell| c.source_op.as_deref() == Some(ARBITER_OP);
+        let mutexes: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(arbiter)
+            .filter(|c| c.path.contains(".arb_mutex"))
+            .collect();
+        // five requests (four clients and the server's own busy arm): a
+        // tree of four two-way mutual exclusions
+        assert_eq!(mutexes.len(), 4, "mutual exclusions");
+        for m in &mutexes {
+            assert_eq!(m.lut_init, Some(ARBITER_MUTEX_INIT), "{}", m.path);
+            // its own output is its state, fed back
+            assert_eq!(m.inputs[2], m.outputs[0], "{}", m.path);
+            assert_eq!(m.inputs[3], m.outputs[0], "{}", m.path);
+        }
+        assert!(
+            !netlist
+                .cells
+                .iter()
+                .filter(arbiter)
+                .any(|c| c.path.contains(".arb_nand")),
+            "no cross-coupled gates"
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(SHARED_SERVER, "SsTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
+/// A block that arbitrates holds its arbiter released, and its step latch
+/// off, for a matched delay after `done` falls: long enough for the dropped
+/// requests to clear the grants and `ready`. Otherwise its next step could
+/// start from the grant being withdrawn, and the grant change under it.
+#[tokio::test]
+async fn streams_shared_server_release_outlasts_the_arbiter() {
+    use skalp_lir::gate_netlist::{GateNetlist, ARBITER_OP, MATCHED_DELAY_OP, STEP_CONTROL_OP};
+    use skalp_lir::ncl_bundle::{
+        check_matched_delays, size_matched_delays, LibraryDelays, RELEASE_DELAY_PATH,
+    };
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let check = |mut netlist: GateNetlist| {
+        let delays = LibraryDelays::new(&library);
+        size_matched_delays(&mut netlist, &delays, 0);
+        let driver = |net: skalp_lir::gate_netlist::GateNetId| {
+            netlist.nets[net.0 as usize]
+                .driver
+                .map(|d| &netlist.cells[d.0 as usize])
+        };
+        let latches: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(|c| c.source_op.as_deref() == Some(STEP_CONTROL_OP))
+            .collect();
+        let arbiters: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(|c| c.source_op.as_deref() == Some(ARBITER_OP))
+            .collect();
+        assert!(!arbiters.is_empty(), "the server arbitrates");
+        // The server's step latch reads `release` (pin 1): an inverter of
+        // the release delay
+        let server: Vec<_> = latches
+            .iter()
+            .filter(|c| {
+                driver(c.inputs[1])
+                    .and_then(|inv| inv.inputs.first().copied())
+                    .and_then(driver)
+                    .is_some_and(|d| {
+                        d.source_op.as_deref() == Some(MATCHED_DELAY_OP)
+                            && d.path.contains(RELEASE_DELAY_PATH)
+                    })
+            })
+            .collect();
+        assert_eq!(
+            server.len(),
+            1,
+            "only the arbitrating block has a release delay"
+        );
+        // and the arbiter is released by the same net
+        let release = server[0].inputs[1];
+        assert!(
+            arbiters.iter().any(|c| c.inputs.contains(&release)),
+            "the arbiter's requests are dropped by the release"
+        );
+        // the release check is made, and met once the delays are sized
+        let checks = check_matched_delays(&netlist, &delays);
+        let release_checks: Vec<_> = checks.iter().filter(|c| c.times == "release").collect();
+        assert_eq!(release_checks.len(), 1, "one release check");
+        let c = release_checks[0];
+        assert!(c.data_ps > 0, "the release reaches `ready`");
+        assert!(
+            c.control_ps >= c.data_ps,
+            "release held {} ps, arbiter needs {} ps",
+            c.control_ps,
+            c.data_ps
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(SHARED_SERVER, "SsTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
 /// With a LUT library each block's step request is a single LUT latch
 /// (its output fed back into it); the blocks must step and stop through it
 /// just as through the gate-built latch

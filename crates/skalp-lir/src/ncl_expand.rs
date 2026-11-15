@@ -3035,8 +3035,11 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
 
     // Self-timed step loop:
     //
-    //   step_req = !done & ((ncl_req & ready) | step_req)   (a latch)
-    //   ncl_ack  = ncl_req | step_req | go | done
+    //   step_req = !release & ((ncl_req & ready) | step_req)   (a latch)
+    //   ncl_ack  = ncl_req | step_req | go | release
+    //
+    // where `release` is `done`, held up a while longer in a block that
+    // arbitrates (below).
     //
     // While the block waits (step_req, go and done low), `ready` can only
     // rise: the channel phases it reads change only at the other end, and
@@ -3049,22 +3052,62 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
     // arbiter's wait (see `ncl_bundle`). `done` ends the step and the
     // request falls. The next step starts when `done` has fallen and
     // `ready` is up again (the next-state check times `ready` against
-    // `done`). The acknowledge stays up from the moment a step is decided
+    // `done`; in a block that arbitrates, the release check times it
+    // against `release`). The acknowledge stays up from the moment a step is decided
     // until it has finished, so a parent that drops `ncl_req` sees it fall
     // once the block has stopped.
     let done = if let Some(ready) = ready {
-        // Arbiter requests drop while `done` is up: the step has latched
-        // what its grant chose, and the next step arbitrates again. A tree
-        // of mutual-exclusion elements whose side keeps some request up
-        // would otherwise never let the other side in.
+        // Arbiter requests drop between steps: the step has latched what
+        // its grant chose, and the next step arbitrates again. A tree of
+        // mutual-exclusion elements whose side keeps some request up would
+        // otherwise never let the other side in.
+        //
+        // `done` itself is far too short for that: it falls three gates
+        // after it rises (the step request, `go` and `done` fall in turn),
+        // while dropping the requests takes the whole arbiter, its grants
+        // and `ready` to reach the step latch. A step latch freed by `done`
+        // alone would start the next step from the stale `ready` of the
+        // grant the arbiter is about to withdraw, and the grant could then
+        // change under that step, after its matched delay had begun. So a
+        // block that arbitrates holds the release up for a matched delay
+        // after `done` falls, `release = !(!done & delay(!done))`: it rises
+        // with `done` and falls once the dropped requests have cleared
+        // `ready` (the "release" check, see `ncl_bundle`). The next step
+        // then only starts from a fresh decision.
+        let release = if arbiters.is_empty() {
+            done
+        } else {
+            let not_done = new_lir.add_signal("__ncl_not_done".to_string(), 1);
+            new_lir.add_node(
+                LirOp::Not { width: 1 },
+                vec![done],
+                not_done,
+                "ncl_bundle.release_n".to_string(),
+            );
+            let rearmed = new_lir.add_signal("__ncl_rearmed".to_string(), 1);
+            new_lir.add_node(
+                LirOp::NclMatchedDelay { width: 1 },
+                vec![not_done],
+                rearmed,
+                crate::ncl_bundle::RELEASE_DELAY_PATH.to_string(),
+            );
+            let release = new_lir.add_signal("__ncl_release".to_string(), 1);
+            new_lir.add_node(
+                LirOp::Not { width: 1 },
+                vec![rearmed],
+                release,
+                "ncl_bundle.release_out".to_string(),
+            );
+            release
+        };
         for &(node, last) in &arbiters {
             let inputs = &mut new_lir.nodes[node.0 as usize].inputs;
-            inputs.push(done);
+            inputs.push(release);
             inputs.extend(last);
         }
         new_lir.add_node(
             LirOp::NclStepControl,
-            vec![req, done, ready],
+            vec![req, release, ready],
             step_req,
             "ncl_bundle.step".to_string(),
         );
@@ -3078,7 +3121,7 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         let stepping = new_lir.add_signal("__ncl_stepping".to_string(), 1);
         new_lir.add_node(
             LirOp::Or { width: 1 },
-            vec![started, done],
+            vec![started, release],
             stepping,
             "ncl_bundle.stepping".to_string(),
         );

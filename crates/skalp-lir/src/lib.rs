@@ -51,6 +51,7 @@ pub mod primitives;
 pub mod retime;
 pub mod signal_trace;
 pub mod synth;
+pub mod synth_cache;
 pub mod tech_library;
 pub mod tech_mapper;
 pub mod technology;
@@ -99,7 +100,7 @@ pub use tech_library::{
 // Synthesis
 pub use tech_mapper::{
     insert_clock_buffers, insert_io_buffers, synthesize, synthesize_balanced, synthesize_for_area,
-    synthesize_for_timing, synthesize_hierarchical,
+    synthesize_for_timing, synthesize_hierarchical, synthesize_hierarchical_cached,
 };
 
 // Structural pattern detection for safety mechanisms
