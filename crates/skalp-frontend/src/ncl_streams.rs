@@ -40,6 +40,10 @@
 //! * a stream input is connected to exactly one stream output of a sibling
 //!   instance, and each stream output feeds exactly one input.
 //!
+//! A cycle of channels in which every block only sends after receiving in
+//! the same step can never move a value (they all start empty): that is a
+//! warning.
+//!
 //! That the conditions depend only on the block's registers is checked on the
 //! netlist after synthesis, where the whole cone is visible.
 
@@ -279,6 +283,10 @@ struct Lowering<'a> {
     data: HashMap<PortId, SignalId>,
     /// Condition under which the next step uses each stream
     used: HashMap<PortId, HirExpression>,
+    /// The conditions around each stream's site, each printed (for the
+    /// deadlock check: a site whose conditions include all of another's
+    /// is only reached in steps that also reach the other)
+    site_conds: HashMap<PortId, HashSet<String>>,
     errors: Vec<String>,
     ids: &'a mut Ids,
     /// Arbiters made by `match arbitrate(..)`
@@ -329,6 +337,8 @@ impl Lowering<'_> {
             return;
         }
         self.used.insert(port, all(conds));
+        self.site_conds
+            .insert(port, conds.iter().map(|c| format!("{c:?}")).collect());
     }
 
     /// Replace `recv` calls in `expr` with the stream's data, recording each
@@ -835,11 +845,13 @@ fn block_uses_streams(statements: &[HirStatement], streams: &HashMap<PortId, Str
 
 /// Lower every stream port of the async entities of `hir` (see the module
 /// documentation). `others` are further design files whose ids must not be
-/// reused. Returns one message per problem.
-pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
+/// reused. Returns one message per problem, and a warning for each cycle
+/// of channels that can never move a value (see [`receive_cycles`]).
+pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
     if !has_async_streams(hir) {
-        return errors;
+        return StreamLowering { errors, warnings };
     }
     let mut all_hirs: Vec<&Hir> = vec![hir];
     all_hirs.extend_from_slice(others);
@@ -926,6 +938,7 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
 
     // 2. Implementations of self-timed entities: phase registers, `on()`
     //    rewrite, the ready signal and the phase ports
+    let mut entity_waits: HashMap<crate::hir::EntityId, HashSet<(String, String)>> = HashMap::new();
     for implementation in &mut hir.implementations {
         let Some(streams) = entity_streams.get(&implementation.entity) else {
             continue;
@@ -969,6 +982,7 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
             phase,
             data,
             used: HashMap::new(),
+            site_conds: HashMap::new(),
             errors: Vec::new(),
             ids: &mut ids,
             arbiters: Vec::new(),
@@ -1002,6 +1016,20 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
             ));
         }
         let used = std::mem::take(&mut lowering.used);
+        // Which outputs this block only sends in steps that also receive
+        // from an input: (input, output)
+        let sites = std::mem::take(&mut lowering.site_conds);
+        let mut waits = HashSet::new();
+        for i in ordered.iter().filter(|s| !s.output) {
+            for o in ordered.iter().filter(|s| s.output) {
+                if let (Some(ci), Some(co)) = (sites.get(&i.data), sites.get(&o.data)) {
+                    if ci.is_subset(co) {
+                        waits.insert((i.name.clone(), o.name.clone()));
+                    }
+                }
+            }
+        }
+        entity_waits.insert(implementation.entity, waits);
         let phase = std::mem::take(&mut lowering.phase);
         let arbiters = std::mem::take(&mut lowering.arbiters);
         errors.append(&mut lowering.errors);
@@ -1217,6 +1245,24 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
                 links.push((k, s.clone(), src, out));
             }
         }
+        warnings.extend(receive_cycles(
+            &parent,
+            &links
+                .iter()
+                .map(|(k, s, src, out)| Link {
+                    sender: *src,
+                    output: out.name.clone(),
+                    receiver: *k,
+                    input: s.name.clone(),
+                })
+                .collect::<Vec<_>>(),
+            |inst, input, output| {
+                entity_waits
+                    .get(&instances[inst].1)
+                    .is_some_and(|w| w.contains(&(input.to_string(), output.to_string())))
+            },
+            |inst| instances[inst].0.as_str(),
+        ));
         for (k, s, src, out) in links {
             let field = |inst: usize, port: String| HirExpression::FieldAccess {
                 base: Box::new(match implementation.instances[inst].variable_id {
@@ -1256,7 +1302,95 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> Vec<String> {
             }
         }
     }
-    errors
+    StreamLowering { errors, warnings }
+}
+
+/// What [`lower_async_streams`] found: errors stop the build, warnings do
+/// not
+#[derive(Debug, Default)]
+pub struct StreamLowering {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Most deadlock cycles reported per parent
+const MAX_CYCLE_WARNINGS: usize = 16;
+
+/// One channel between two instances of a parent
+struct Link {
+    sender: usize,
+    output: String,
+    receiver: usize,
+    input: String,
+}
+
+/// Cycles of channels in which every block only sends on the next channel
+/// in steps that also receive from the one before (`waits(instance, input,
+/// output)`). Every channel starts empty, so no value ever goes round such a
+/// cycle: the blocks on it wait for each other for ever. A warning, not an
+/// error: the blocks may do other useful work, and a design may mean a
+/// cycle that is never used. One message per cycle, naming its channels.
+fn receive_cycles<'a>(
+    parent: &str,
+    links: &[Link],
+    waits: impl Fn(usize, &str, &str) -> bool,
+    name: impl Fn(usize) -> &'a str,
+) -> Vec<String> {
+    // Channel graph: link a -> link b when b leaves the block a enters, and
+    // that block waits on a before it sends on b
+    let next: Vec<Vec<usize>> = links
+        .iter()
+        .map(|a| {
+            links
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.sender == a.receiver && waits(a.receiver, &a.input, &b.output))
+                .map(|(j, _)| j)
+                .collect()
+        })
+        .collect();
+    // Each cycle once: found from its lowest-numbered channel, through
+    // higher-numbered channels only
+    let mut warnings = Vec::new();
+    for start in 0..links.len() {
+        if warnings.len() >= MAX_CYCLE_WARNINGS {
+            break;
+        }
+        let mut path = vec![start];
+        let mut iters = vec![0usize];
+        while let Some(&at) = path.last() {
+            let k = iters.last_mut().expect("parallel stacks");
+            let Some(&to) = next[at].get(*k) else {
+                path.pop();
+                iters.pop();
+                continue;
+            };
+            *k += 1;
+            if to == start {
+                let channels: Vec<String> = path
+                    .iter()
+                    .map(|&l| {
+                        let l = &links[l];
+                        format!(
+                            "{}.{} -> {}.{}",
+                            name(l.sender),
+                            l.output,
+                            name(l.receiver),
+                            l.input
+                        )
+                    })
+                    .collect();
+                warnings.push(format!(
+                    "possible deadlock in entity `{parent}`: streams {} form a cycle in which each block only sends after it receives; the channels start empty, so no value can go round it",
+                    channels.join(", ")
+                ));
+            } else if to > start && !path.contains(&to) {
+                path.push(to);
+                iters.push(0);
+            }
+        }
+    }
+    warnings
 }
 
 fn lower_on_block(lowering: &mut Lowering<'_>, block: &mut HirEventBlock) {
