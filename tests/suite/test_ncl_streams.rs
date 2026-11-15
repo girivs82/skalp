@@ -285,9 +285,10 @@ async fn step_condition_on_a_coalesced_child_register_is_allowed() {
 
 #[tokio::test]
 async fn a_coalesced_child_steps_with_the_block_in_behavioural_sim() {
-    let tb = Testbench::behavioral_with_top("tests/fixtures/ncl_streams_child_condition.sk", "CcTop")
-        .await
-        .expect("build");
+    let tb =
+        Testbench::behavioral_with_top("tests/fixtures/ncl_streams_child_condition.sk", "CcTop")
+            .await
+            .expect("build");
     check_child_steps_with_the_block(tb).await;
 }
 
@@ -308,4 +309,22 @@ async fn an_imported_stream_entity_relays_every_value() {
     let last = tb.get_u32("last").await;
     assert!(count > 4, "only {count} values received");
     assert_eq!(last + 1, count, "values lost or out of order");
+}
+
+/// `send` takes any expression (a concatenation, an `if`): the value used to
+/// be dropped and the stream reported as never sent to
+#[tokio::test]
+async fn send_takes_compound_expressions() {
+    let mut tb = Testbench::behavioral_with_top("tests/fixtures/ncl_streams_send_expr.sk", "SeTop")
+        .await
+        .expect("send with a compound value builds");
+    tb.set("run", 1u8);
+    tb.clock(40).await;
+    let n = tb.get_u32("n").await;
+    assert!(n > 4, "only {n} values received");
+    // value k (1-based) carries c = k
+    let a = tb.get_u32("last_a").await;
+    let b = tb.get_u32("last_b").await;
+    assert_eq!(a, (n << 8) | 0x5A);
+    assert_eq!(b, if n % 2 == 1 { n } else { 0xEE });
 }
