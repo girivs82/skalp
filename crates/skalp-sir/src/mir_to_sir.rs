@@ -9058,6 +9058,16 @@ impl<'a> MirToSirConverter<'a> {
             None
         };
 
+        // A branch that does not assign the target hands back the default it
+        // was given: count it as not assigning. Otherwise, once one `if`
+        // has assigned the target, every later `if` that leaves it alone
+        // still built `mux(cond, default, default)`. A flattened array write
+        // `mem[a] = d` is one `if a == i { mem_i = d }` per element, so each
+        // of N elements gathered N such muxes: N² nodes, and elaboration of
+        // an 8192-entry array that never finished.
+        let then_value = then_value.filter(|&v| Some(v) != default_result);
+        let else_value = else_value.filter(|&v| Some(v) != default_result);
+
         // If neither branch assigns to the target, return None to indicate
         // that this if-statement doesn't affect this signal at all.
         if then_value.is_none() && else_value.is_none() {

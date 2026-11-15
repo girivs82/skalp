@@ -2163,9 +2163,19 @@ impl W2 {
     #[test]
     fn chain_target_is_widened_to_the_widest_arm() {
         let sv = sv_of(SRC);
+        // The chain target is the SSA version that receives the concat mux.
+        // (The `let` initializer's own version, `v = 0`, keeps its declared
+        // 8 bits: an unsized literal has no width to widen it to.)
+        let target = sv
+            .lines()
+            .map(str::trim)
+            .find(|l| l.contains("<=") && l.contains("{x, y, x, y}"))
+            .and_then(|l| l.split("<=").next())
+            .map(|lhs| lhs.trim().to_string())
+            .unwrap_or_else(|| panic!("no chain assignment in:\n{sv}"));
         assert!(
-            !sv.contains("logic [7:0] v_ssa"),
-            "the chain target must be widened to hold a 32-bit concat:\n{sv}"
+            sv.contains(&format!("logic [31:0] {target};")),
+            "the chain target `{target}` must be widened to hold a 32-bit concat:\n{sv}"
         );
     }
 }
