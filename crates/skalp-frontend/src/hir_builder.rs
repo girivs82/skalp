@@ -8180,7 +8180,14 @@ impl HirBuilderContext {
                         )
                     });
 
-                    if let (true, Some(expr_node)) = (has_cast, non_cast_expr) {
+                    if !has_cast && Self::is_postfix_sibling_chain(&children) {
+                        // A postfix operand in parentheses: the parser emits
+                        // `(x[i])` as ParenExpr [IdentExpr(x), IndexExpr(i)]
+                        // and `(p.b)` as [IdentExpr(p), FieldExpr(.b)].
+                        // Picking the first child dropped the postfix part,
+                        // so `(x[i]) ^ z` became `x ^ z`. Rebuild the chain.
+                        self.build_chained_rhs_expression(&children)
+                    } else if let (true, Some(expr_node)) = (has_cast, non_cast_expr) {
                         let cast_node = children.iter().find(|n| n.kind() == SyntaxKind::CastExpr);
                         if let Some(cast) = cast_node {
                             if let Some(built_cast) = self.build_expression(cast) {

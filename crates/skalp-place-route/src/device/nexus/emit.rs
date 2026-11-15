@@ -710,6 +710,7 @@ fn emit_bits(
 
     set_unused_multiplier_defaults(&mut config, &used_multipliers)?;
     emit_vref_drivers(&mut config, netlist, placement, &banks.vref)?;
+    emit_lvstl_banks(&mut config, &banks)?;
     release_unused_pads(&mut config, netlist, placement, &banks.vref)?;
     release_unused_banks(&mut config, &banks.vcc)?;
 
@@ -1584,6 +1585,9 @@ fn pull_mode(cell: &Cell) -> Result<&'static str> {
 
 /// Bank voltage a standard runs at.
 fn bank_voltage(standard: &str) -> Result<&'static str> {
+    if lvstl_class(standard).is_some() {
+        return Ok("1V1");
+    }
     let voltage = standard.trim_matches(|c: char| c.is_alphabetic());
     match voltage {
         "33" => Ok("3V3"),
@@ -1607,6 +1611,22 @@ pub(crate) fn vref_level(standard: &str) -> Option<u32> {
     }
 }
 
+/// The class (`LVSTL_I` or `LVSTL_II`) of an LVSTL standard (VCCIO 1.1 V,
+/// as LPDDR4 uses), whose single-ended and differential forms share it.
+fn lvstl_class(standard: &str) -> Option<&'static str> {
+    match standard {
+        "LVSTL_I" | "LVSTLD_I" => Some("LVSTL_I"),
+        "LVSTL_II" | "LVSTLD_II" => Some("LVSTL_II"),
+        _ => None,
+    }
+}
+
+/// Whether a standard compares its input against a reference level, so
+/// that its outputs set the slew rate the referenced standards share.
+fn is_referenced(standard: &str) -> bool {
+    vref_level(standard).is_some() || lvstl_class(standard).is_some()
+}
+
 /// Base type of a bank's reference voltage pad: Radiant's bits for it,
 /// which are the same whatever standard the bank's inputs use.
 const VREF_DRIVER_BASE_TYPE: &str = "INPUT_SSTL15_II";
@@ -1627,6 +1647,8 @@ struct BankUse {
     vref: HashMap<u32, VrefBank>,
     /// Banks whose voltage a pad has set
     vcc: HashMap<u32, BankVcc>,
+    /// Banks with LVSTL pads, and the class and a pad of each
+    lvstl: HashMap<u32, BankVcc>,
 }
 
 /// The voltage a bank's pads have set it to.
@@ -1718,6 +1740,8 @@ fn emit_pad(
         high_performance,
     } = pad_settings(config, x, y, side, &cell.path)?;
     let is_output = cell.function == Some(CellFunction::OutputPad);
+    let is_bidir = cell.function == Some(CellFunction::BidirPad);
+    let drives = is_output || is_bidir;
     let standard = cell
         .parameters
         .get("IO_STANDARD")
@@ -1727,13 +1751,26 @@ fn emit_pad(
         } else {
             "LVCMOS33"
         });
-    let direction = if is_output { "OUTPUT" } else { "INPUT" };
+    let direction = match (is_output, is_bidir) {
+        (true, _) => "OUTPUT",
+        (_, true) => "BIDIR",
+        _ => "INPUT",
+    };
     let vref = vref_level(standard);
+    let lvstl = lvstl_class(standard);
+    if lvstl.is_some() && !high_performance {
+        return Err(emit_err(format!(
+            "Pad '{}' is on a wide-range I/O, which has no {standard}; use a \
+             high-performance bank",
+            cell.path
+        )));
+    }
     if vref.is_some() {
-        if is_output {
+        if drives {
             return Err(emit_err(format!(
-                "Pad '{}' is an {standard} output; only {standard} inputs are supported so far",
-                cell.path
+                "Pad '{}' is an {standard} {}; only {standard} inputs are supported so far",
+                cell.path,
+                direction.to_lowercase()
             )));
         }
         if pull_mode(cell)? != "NONE" {
@@ -1799,9 +1836,45 @@ fn emit_pad(
     if !high_performance {
         set_ram_enum(config, tiles, &format!("{prefix}.GLITCHFILTER"), "OFF")?;
     }
+    if let Some(class) = lvstl {
+        // Radiant's LVSTL defaults for a pad that reads: no on-die
+        // termination, and the input compared against the device's internal
+        // LVSTL reference (without it the input has no reference at all).
+        // No bank reference pad is involved, so those pads stay free.
+        if !is_output {
+            set_ram_enum(config, tiles, &format!("{prefix}.TERMINATION_1V1"), "OFF")?;
+            set_ram_enum(config, tiles, &format!("{prefix}.VREF_LVSTL"), "VREF_INT")?;
+        }
+        let user = BankVcc {
+            voltage,
+            standard: class.to_string(),
+            user: cell.path.clone(),
+        };
+        let first = banks.lvstl.entry(bank).or_insert_with(|| user.clone());
+        if first.standard != class {
+            return Err(emit_err(format!(
+                "Pads '{}' ({}) and '{}' ({standard}) are different LVSTL classes, but \
+                 bank {bank} runs one",
+                first.user, first.standard, cell.path
+            )));
+        }
+    }
+    if drives {
+        // Radiant's default drive: 8 mA, and 10 mA (the LVSTL_I setting) for LVSTL
+        let (drive, strength) = if lvstl.is_some() {
+            ("LVSTL", "10")
+        } else {
+            (voltage, "8")
+        };
+        set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{drive}"), strength)?;
+        let slew = if is_referenced(standard) {
+            "SLEWRATE_REF"
+        } else {
+            "SLEWRATE"
+        };
+        set_ram_enum(config, tiles, &format!("{prefix}.{slew}"), "MED")?;
+    }
     if is_output {
-        set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{voltage}"), "8")?;
-        set_ram_enum(config, tiles, &format!("{prefix}.SLEWRATE"), "MED")?;
         set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), "INV")?;
         let enable = config
             .device
@@ -1809,6 +1882,16 @@ fn emit_pad(
             .ok_or_else(|| emit_err(format!("Pad '{}' has no output enable wire", cell.path)))?;
         drive_output_enable(config, enable, used_wires)
             .map_err(|e| emit_err(format!("Pad '{}': {e}", cell.path)))?;
+    }
+    if is_bidir {
+        // The pad's driver is on while its tristate input (after TMUX) is
+        // low: pass a tristate control through, invert an output enable.
+        let active_low = cell
+            .parameters
+            .get(skalp_lir::gate_netlist::OE_ACTIVE_LOW_PARAM)
+            .is_some_and(|v| v == "1");
+        let tmux = if active_low { "T" } else { "INV" };
+        set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), tmux)?;
     }
 
     // High-performance banks have no VCC setting to make.
@@ -1832,6 +1915,50 @@ fn emit_pad(
             .ok_or_else(|| emit_err(format!("No BANKREF{bank} tile on this device")))?;
         config.set_enum(&bank_tile, &format!("BANK{bank}.VCC"), voltage)?;
         banks.vcc.insert(bank, user);
+    }
+    Ok(())
+}
+
+/// The bank and chip settings of the banks with LVSTL pads, as Radiant
+/// writes them: the bank's `LVSTL` class, `REF_IO` and `DIFF_IO`, and the
+/// device-wide `LVSTL` class (in the `DOSCL_P18` tile). LVSTL inputs use the
+/// internal reference (set per pad), so no bank reference pad is used.
+fn emit_lvstl_banks(config: &mut ConfigDb<'_>, banks: &BankUse) -> Result<()> {
+    let mut lvstl: Vec<_> = banks.lvstl.iter().collect();
+    lvstl.sort_by_key(|(bank, _)| **bank);
+    let mut chip_class: Option<&BankVcc> = None;
+    for (&bank, user) in lvstl {
+        let bank_tile = bank_reference_tile(config.device, bank)
+            .ok_or_else(|| emit_err(format!("No BANKREF{bank} tile on this device")))?;
+        config.set_enum(&bank_tile, &format!("BANK{bank}.LVSTL"), &user.standard)?;
+        config.set_enum(&bank_tile, &format!("BANK{bank}.REF_IO"), "ON")?;
+        config.set_enum(&bank_tile, &format!("BANK{bank}.DIFF_IO"), "ON")?;
+        if let Some(first) = chip_class {
+            if first.standard != user.standard {
+                return Err(emit_err(format!(
+                    "Pads '{}' ({}) and '{}' ({}) are different LVSTL classes, but the \
+                     device runs one",
+                    first.user, first.standard, user.user, user.standard
+                )));
+            }
+        }
+        chip_class.get_or_insert(user);
+    }
+    if let Some(class) = chip_class {
+        let tile = config
+            .device
+            .prjoxide_tiles()
+            .iter()
+            .find(|t| t.tiletype == "DOSCL_P18")
+            .cloned()
+            .ok_or_else(|| {
+                emit_err(format!(
+                    "Pad '{}' is LVSTL, but this device has no DOSCL_P18 tile for its \
+                     setting",
+                    class.user
+                ))
+            })?;
+        config.set_enum(&tile, "LVSTL", &class.standard)?;
     }
     Ok(())
 }

@@ -563,9 +563,15 @@ impl SirModule {
         // Build a map from output signal_id to node_id (which node produces each signal)
         let mut signal_to_producer: BTreeMap<String, usize> = BTreeMap::new();
         let node_id_set: BTreeSet<usize> = node_ids.iter().copied().collect();
+        // Each node by id (the first with that id, as a linear search would
+        // find), looked up once instead of scanning all nodes per cone node
+        let mut node_by_id: HashMap<usize, &SirNode> = HashMap::new();
+        for node in &self.combinational_nodes {
+            node_by_id.entry(node.id).or_insert(node);
+        }
 
         for &node_id in node_ids {
-            if let Some(node) = self.combinational_nodes.iter().find(|n| n.id == node_id) {
+            if let Some(node) = node_by_id.get(&node_id).copied() {
                 for output in &node.outputs {
                     signal_to_producer.insert(output.signal_id.clone(), node_id);
                 }
@@ -585,7 +591,7 @@ impl SirModule {
 
         // Build dependency relationships
         for &node_id in node_ids {
-            if let Some(node) = self.combinational_nodes.iter().find(|n| n.id == node_id) {
+            if let Some(node) = node_by_id.get(&node_id).copied() {
                 for input in &node.inputs {
                     // Find which node produces this input signal
                     if let Some(&producer_id) = signal_to_producer.get(&input.signal_id) {

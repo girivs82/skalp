@@ -340,8 +340,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         // Previously only instances with explicit generic_args were matched,
                         // but instances using default generic values (empty generic_args) were
                         // left pointing to the unspecialized entity template (which has 0 signals).
-                        let instantiation_opt = if !instance.generic_args.is_empty() {
-                            // Explicit generic args - use normal matching
+                        let instantiation_opt = if !instance.generic_args.is_empty()
+                            || !instance.named_generic_args.is_empty()
+                        {
+                            // Explicit generic args (positional or named) - use normal matching
                             self.find_matching_instantiation(entity, instance, &instantiations)
                         } else {
                             // No explicit args - try to find instantiation using default values
@@ -354,6 +356,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                                 instance.entity = specialized_id;
                                 // Clear generic args since specialized entity doesn't have generics
                                 instance.generic_args.clear();
+                                instance.named_generic_args.clear();
                             }
                         }
                     }
@@ -2017,6 +2020,26 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .collect();
                 HirExpression::Call(new_call)
             }
+            // A match arm's value can be a const parameter (`5 => MR5,`).
+            // Without this arm the match fell to the catch-all, so the
+            // specialised module kept `MR5`, which then read as an undefined
+            // identifier in MIR.
+            HirExpression::Match(match_expr) => HirExpression::Match(crate::hir::HirMatchExpr {
+                expr: Box::new(self.substitute_expr(&match_expr.expr, const_args)),
+                arms: match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| crate::hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| self.substitute_expr(g, const_args)),
+                        expr: self.substitute_expr(&arm.expr, const_args),
+                    })
+                    .collect(),
+                mux_style: match_expr.mux_style,
+            }),
 
             // Other expressions pass through
             _ => expr.clone(),
@@ -2239,6 +2262,35 @@ impl<'hir> MonomorphizationEngine<'hir> {
             if let crate::hir::HirGenericType::Const(_) = generic.param_type {
                 if let Ok(value) = evaluator.eval(arg) {
                     const_args.insert(generic.name.clone(), value);
+                }
+            }
+        }
+
+        // Named arguments (`M<P: 1>`) and defaults for every parameter not
+        // given, as the collector does when it records the instantiation.
+        // Without them `M<P: 1>` matched as if it had no arguments and was
+        // pointed at the all-defaults specialization `M_0`, and a partial
+        // positional list (`M<1>` on `M<A, B = 4>`) matched nothing and stayed
+        // on the unspecialised template.
+        for (name, arg) in &instance.named_generic_args {
+            let is_const = entity.generics.iter().any(|g| {
+                &g.name == name && matches!(g.param_type, crate::hir::HirGenericType::Const(_))
+            });
+            if is_const {
+                if let Ok(value) = evaluator.eval(arg) {
+                    const_args.insert(name.clone(), value);
+                }
+            }
+        }
+        for generic in &entity.generics {
+            if let crate::hir::HirGenericType::Const(_) = generic.param_type {
+                if const_args.contains_key(&generic.name) {
+                    continue;
+                }
+                if let Some(ref default_expr) = generic.default_value {
+                    if let Ok(value) = evaluator.eval(default_expr) {
+                        const_args.insert(generic.name.clone(), value);
+                    }
                 }
             }
         }

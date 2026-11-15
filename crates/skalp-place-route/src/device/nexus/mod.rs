@@ -2477,8 +2477,10 @@ impl Device for NexusDevice {
             .and_then(|t| t.bels().get(bel_index))
             .is_some_and(|b| b.bel_type == BelType::IoCell);
         if is_io {
+            // A bidirectional pad's second input is its tristate control.
             let suffix = match pin {
                 CellPin::Input(0) => "O",
+                CellPin::Input(1) => "T",
                 CellPin::Output(0) => "I",
                 _ => return None,
             };
