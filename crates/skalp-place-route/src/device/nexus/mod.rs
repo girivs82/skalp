@@ -210,6 +210,10 @@ pub struct NexusDevice {
     /// reach the fabric at every site), in the order a cell's added inputs
     /// take them
     large_ram_low_pins: Arc<Vec<String>>,
+    /// ADC inputs Lattice's primitive does not expose that must be driven
+    /// low ([`adc::tied_low_pins`] that reach the fabric), in the order a
+    /// cell's added inputs take them
+    adc_low_pins: Arc<Vec<String>>,
     /// DSP tiles
     pub dsp_tiles: Vec<DspTile>,
 }
@@ -649,6 +653,14 @@ impl NexusDevice {
             })
             .map(|pin| pin.to_string())
             .collect();
+        let adc_low_pins: Vec<String> = adc::tied_low_pins(db_root, family)?
+            .into_iter()
+            .filter(|pin| {
+                adc_sites
+                    .iter()
+                    .all(|&(x, y)| bel_wires.contains_key(&(x, y, format!("ADC_{pin}"))))
+            })
+            .collect();
         Ok(Self {
             variant,
             grid_size: (width, height),
@@ -675,6 +687,7 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             large_ram_pins: Arc::new(large_ram_pins),
             large_ram_low_pins: Arc::new(large_ram_low_pins),
+            adc_low_pins: Arc::new(adc_low_pins),
             dsp_tiles: Vec::new(),
         })
     }
@@ -820,6 +833,15 @@ impl NexusDevice {
         lram::input_pin(ports, input, single_port, extra_from, &extra)
     }
 
+    /// The unexposed ADC inputs a cell leaves unconnected that must be
+    /// driven low, in the order its added inputs take them.
+    pub fn adc_low_pins_of(&self, cell: &skalp_lir::gate_netlist::Cell) -> Vec<&String> {
+        self.adc_low_pins
+            .iter()
+            .filter(|pin| !adc::connects(cell, pin))
+            .collect()
+    }
+
     pub fn bel_wire(&self, x: u32, y: u32, key: &str) -> Option<WireId> {
         self.bel_wires.get(&(x, y, key.to_string())).copied()
     }
@@ -890,6 +912,7 @@ impl NexusDevice {
             memory_blocks: Vec::new(),
             large_ram_pins: Arc::new(HashMap::new()),
             large_ram_low_pins: Arc::new(Vec::new()),
+            adc_low_pins: Arc::new(Vec::new()),
             dsp_tiles: Vec::new(),
         };
 
@@ -2483,6 +2506,14 @@ impl Device for NexusDevice {
             return ivref::input_router_pin(cell, input);
         }
         if adc::is_adc(cell) {
+            let first = cell
+                .parameters
+                .get(EXTRA_INPUTS_PARAM)
+                .and_then(|v| v.parse::<usize>().ok());
+            if let Some(first) = first.filter(|&first| input >= first) {
+                let pin = self.adc_low_pins_of(cell).get(input - first).copied()?;
+                return adc::input_pins().iter().position(|p| p == pin);
+            }
             return adc::input_router_pin(cell, input);
         }
         pll::input_router_pin(cell, input).filter(|_| pll::is_pll(cell))
@@ -2516,6 +2547,8 @@ impl Device for NexusDevice {
             dsp::low_driven_pins().len()
         } else if lram::is_large_ram(cell) {
             lram::low_pins_of(lram::is_single_port(cell), &self.large_ram_low_pins).len()
+        } else if adc::is_adc(cell) {
+            self.adc_low_pins_of(cell).len()
         } else {
             0
         }

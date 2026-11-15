@@ -803,9 +803,9 @@ pub trait Device: Send + Sync {
         None
     }
 
-    /// Extra inputs of a multiplier or RAM cell the device needs held low
-    /// with a real signal, added after the cell's own (from the index in its
-    /// [`EXTRA_INPUTS_PARAM`] parameter).
+    /// Extra inputs of a multiplier, RAM or hard block cell the device needs
+    /// held low with a real signal, added after the cell's own (from the
+    /// index in its [`EXTRA_INPUTS_PARAM`] parameter).
     fn low_driven_input_count(&self, _cell: &skalp_lir::gate_netlist::Cell) -> usize {
         0
     }

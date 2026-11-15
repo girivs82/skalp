@@ -127,10 +127,12 @@ pub fn map_ram_pins(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
 }
 
 /// Give block RAM and multiplier inputs tied low a real driver where the device
-/// needs one.
+/// needs one, and add the inputs a device needs held low that a cell does not
+/// have ([`Device::low_driven_input_count`]: a large RAM's, a multiplier's,
+/// the unexposed inputs of a Nexus ADC).
 ///
 /// A device may be able to hold some RAM inputs high or low with configuration
-/// alone; the others must be driven. This adds a constant-zero LUT per RAM that
+/// alone; the others must be driven. This adds a constant-zero LUT per cell that
 /// needs one, so those inputs are routed like any signal.
 pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> GateNetlist {
     let constants = constant_nets(netlist);
@@ -153,7 +155,10 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
     let mut driven = netlist.clone();
     for ram in netlist.cells.iter() {
         let ports = ram.ram_ports();
-        if ports.is_none() && !is_multiplier(ram) {
+        let extra_low_inputs = device.low_driven_input_count(ram);
+        // Besides RAMs and multipliers, a hard block (the ADC) may have
+        // inputs its primitive does not expose that must be held low
+        if ports.is_none() && !is_multiplier(ram) && extra_low_inputs == 0 {
             continue;
         }
         let inputs: Vec<usize> = (0..ram.inputs.len())
@@ -165,7 +170,6 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
                     }
             })
             .collect();
-        let extra_low_inputs = device.low_driven_input_count(ram);
         if inputs.is_empty() && extra_low_inputs == 0 {
             continue;
         }

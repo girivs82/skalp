@@ -17,6 +17,14 @@
 //! A design names the pads it measures in the instance's `ADC_PINS`
 //! parameter (comma-separated pins), and the backend turns their switches
 //! on.
+//!
+//! The block also has fabric inputs that Lattice's primitive does not
+//! expose (on the LFCPNX, `RSVDH` and `RSVDL`). Lattice's tools tie them to
+//! a constant; left unconnected, a fabric input reads 1, and with these high
+//! the converters read mid-scale whatever they measure. The device data
+//! lists them with their values (`<family>/adc_tied_inputs.json`), and the
+//! backend adds the inputs that must be low to the cell, driven from a
+//! constant-zero LUT ([`tied_low_pins`]).
 
 use crate::device::FF_PIN_CLK;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetlist};
@@ -29,6 +37,7 @@ const CELL_TYPES: [&str; 2] = ["ADC", "ADC_CORE"];
 const INPUT_PINS: &[&str] = &[
     "ADCEN", "CAL", "CHAEN", "CHASEL0", "CHASEL1", "CHASEL2", "CHASEL3", "CHBEN", "CHBSEL0",
     "CHBSEL1", "CHBSEL2", "CHBSEL3", "CLKDCLK", "CLKFAB", "CONVSTOP", "RESETN", "RSTN", "SOC",
+    "RSVDH", "RSVDL",
 ];
 
 /// The ADC's fabric output pins, in router pin order.
@@ -254,6 +263,66 @@ pub fn clock_divider(cell: &Cell) -> u32 {
         .unwrap_or(CLK_DIV.1)
 }
 
+/// One fabric input of the ADC block that Lattice's primitive does not
+/// expose, as the device data describes it.
+#[derive(serde::Deserialize)]
+struct TiedInput {
+    /// The constant Lattice's tools tie it to
+    value: u8,
+}
+
+/// The ADC's unexposed fabric inputs that must be driven low, from the
+/// device data (`<family>/adc_tied_inputs.json`), in name order. Inputs
+/// tied high need nothing: an unconnected fabric input reads 1. A family
+/// without the file has none.
+pub fn tied_low_pins(db_root: &std::path::Path, family: &str) -> Result<Vec<String>, String> {
+    let path = db_root.join(family).join("adc_tied_inputs.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let file: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(block) = file.get("ADC_CORE") else {
+        return Ok(Vec::new());
+    };
+    let inputs: std::collections::BTreeMap<String, TiedInput> =
+        serde_json::from_value(block.clone()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut low = Vec::new();
+    for (pin, input) in inputs {
+        if !INPUT_PINS.contains(&pin.as_str()) {
+            return Err(format!(
+                "{}: ADC input {pin} is not a pin this backend knows",
+                path.display()
+            ));
+        }
+        match input.value {
+            0 => low.push(pin),
+            1 => {}
+            v => {
+                return Err(format!(
+                    "{}: ADC input {pin} is tied to {v}, not 0 or 1",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(low)
+}
+
+/// Whether a cell connects an input to a device pin itself.
+pub fn connects(cell: &Cell, pin: &str) -> bool {
+    let mut index = 0;
+    while let Some(port) = cell.blackbox_pin(false, index) {
+        if device_pin(port) == pin {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 /// The ADC cell of a design, checked: at most one, with known ports and
 /// settings. A device has one ADC block (with both converters).
 pub fn the_adc(netlist: &GateNetlist) -> Result<Option<CellId>, String> {
@@ -300,6 +369,41 @@ mod tests {
         cell.parameters
             .insert(BLACKBOX_OUTPUTS_PARAM.into(), outputs.into());
         cell
+    }
+
+    #[test]
+    fn tied_inputs_come_from_the_device_data() {
+        let dir = std::env::temp_dir().join(format!("skalp_adc_tied_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("FAM")).unwrap();
+        std::fs::write(
+            dir.join("FAM/adc_tied_inputs.json"),
+            r#"{"_comment": "x", "ADC_CORE": {"RSVDL": {"value": 0, "pin_wire": "w"},
+                "RSVDH": {"value": 0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(tied_low_pins(&dir, "FAM").unwrap(), ["RSVDH", "RSVDL"]);
+        assert!(tied_low_pins(&dir, "OTHER").unwrap().is_empty());
+        std::fs::write(
+            dir.join("FAM/adc_tied_inputs.json"),
+            r#"{"ADC_CORE": {"RSVDH": {"value": 1}, "RSVDL": {"value": 0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(tied_low_pins(&dir, "FAM").unwrap(), ["RSVDL"]);
+        std::fs::write(
+            dir.join("FAM/adc_tied_inputs.json"),
+            r#"{"ADC_CORE": {"NOPE": {"value": 0}}}"#,
+        )
+        .unwrap();
+        assert!(tied_low_pins(&dir, "FAM").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_design_may_connect_a_tied_input_itself() {
+        let cell = adc("SOC,RSVDH", "EOC");
+        assert!(connects(&cell, "RSVDH"));
+        assert!(!connects(&cell, "RSVDL"));
+        assert!(problems(&cell).is_empty(), "{:?}", problems(&cell));
     }
 
     #[test]
