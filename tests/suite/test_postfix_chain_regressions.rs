@@ -11,6 +11,8 @@
 //!    `let`, `return` or assignment.
 //! 3. `mem[s.a[3:0]]` (indexing by a slice of an instance output) indexed
 //!    `mem` with the instance itself and failed to lower.
+//! 4. A postfix operand in parentheses lost its postfix part: `(x[i]) ^ z`
+//!    compiled to `x ^ z`, and `(p.b) ^ p.a` to `p.a ^ p.a`.
 //!
 //! Each case is checked both on the generated SystemVerilog and, where it
 //! computes a value, in behavioral simulation.
@@ -387,4 +389,143 @@ async fn test_array_index_by_instance_output_slice_simulates() {
     sim.set_input("x", 0x0013).await;
     sim.step().await;
     assert_eq!(sim.get_output("rd").await.unwrap_or(0), 0xCD);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Postfix operand in parentheses
+// ---------------------------------------------------------------------------
+
+const PAREN_POSTFIX: &str = r#"
+struct P { a: bit[8], b: bit[8] }
+entity Paren {
+    in clk: clock
+    in x: bit[16]
+    in z: bit
+    in i: nat[4]
+    in p: P
+    out o_bit: bit
+    out o_dyn: bit
+    out o_slice: bit[4]
+    out o_nested: bit
+    out o_field: bit[8]
+    out o_field_bit: bit
+    out o_not: bit
+    out o_both: bit
+    out o_reg: bit
+}
+impl Paren {
+    signal r: bit = 0
+    on(clk.rise) {
+        r = (x[i]) ^ z
+    }
+    o_bit = (x[3]) ^ z
+    o_dyn = (x[i]) ^ z
+    o_slice = (x[7:4]) ^ 4'b0001
+    o_nested = ((x[3])) ^ z
+    o_field = (p.b) ^ p.a
+    o_field_bit = (p.b[2]) ^ z
+    o_not = !(x[5])
+    o_both = (x[3]) & (x[4])
+    o_reg = r
+}
+"#;
+
+#[test]
+fn test_parenthesized_postfix_operand_keeps_its_postfix() {
+    let sv = squash(&compile_to_sv(PAREN_POSTFIX));
+    for expected in [
+        "assigno_bit=(x[3]^z);",
+        "assigno_dyn=(x[i]^z);",
+        "assigno_slice=(x[7:4]^4'b0001);",
+        "assigno_nested=(x[3]^z);",
+        "assigno_field=(p__b^p__a);",
+        "assigno_field_bit=(p__b[2]^z);",
+        "assigno_not=!x[5];",
+        "assigno_both=(x[3]&x[4]);",
+        "r<=(x[i]^z);",
+    ] {
+        assert!(
+            sv.contains(expected),
+            "missing `{}` in generated SystemVerilog:\n{}",
+            expected,
+            sv
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_parenthesized_postfix_operand_simulates() {
+    let mut sim = simulator(PAREN_POSTFIX).await;
+    // The simulator addresses struct port fields by their source path.
+    for (x, z, i, a, b) in [
+        (0x0000u64, 0u64, 0u64, 0x00u64, 0x00u64),
+        (0x0008, 0, 3, 0x0F, 0xF0),
+        (0x0008, 1, 3, 0x55, 0x04),
+        (0xA5A5, 1, 13, 0x3C, 0xC3),
+        (0x0030, 0, 15, 0xFF, 0x00),
+        (0xFFFF, 0, 9, 0x12, 0x34),
+    ] {
+        sim.set_input("x", x).await;
+        sim.set_input("z", z).await;
+        sim.set_input("i", i).await;
+        sim.set_input("p.a", a).await;
+        sim.set_input("p.b", b).await;
+        rising_edge(&mut sim).await;
+        let bit = |n: u64| (x >> n) & 1;
+        let ctx = format!("x={:#x} z={} i={} a={:#x} b={:#x}", x, z, i, a, b);
+        assert_eq!(
+            sim.get_output("o_bit").await.unwrap_or(9),
+            bit(3) ^ z,
+            "o_bit {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_dyn").await.unwrap_or(9),
+            bit(i) ^ z,
+            "o_dyn {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_slice").await.unwrap_or(99),
+            ((x >> 4) & 0xF) ^ 1,
+            "o_slice {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_nested").await.unwrap_or(9),
+            bit(3) ^ z,
+            "o_nested {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_field").await.unwrap_or(999),
+            b ^ a,
+            "o_field {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_field_bit").await.unwrap_or(9),
+            ((b >> 2) & 1) ^ z,
+            "o_field_bit {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_not").await.unwrap_or(9),
+            bit(5) ^ 1,
+            "o_not {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_both").await.unwrap_or(9),
+            bit(3) & bit(4),
+            "o_both {}",
+            ctx
+        );
+        assert_eq!(
+            sim.get_output("o_reg").await.unwrap_or(9),
+            bit(i) ^ z,
+            "o_reg {}",
+            ctx
+        );
+    }
 }
