@@ -603,6 +603,157 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     checks
 }
 
+/// Settle times of a self-timed block's logic after its arbiter release
+/// rises. Unlike [`Arrivals`], which takes the latest input of every gate
+/// (right for a rising edge rippling through a chain), this follows the
+/// values the release forces: with the release high and every other input
+/// of the block unknown, a gate's output is final as soon as the inputs
+/// that have already changed determine it whatever the others do (an AND
+/// whose input has fallen, a deferral stage whose request has dropped). A
+/// gate whose final value the release does not determine counts from its
+/// latest changing input. Registers, matched delays, the step control and
+/// anything outside the block do not change in that time.
+struct ReleaseArrivals<'a> {
+    netlist: &'a GateNetlist,
+    delays: &'a dyn BundleDelays,
+    prefix: &'a str,
+    release: GateNetId,
+    /// net -> (settle time, final value: None if not determined)
+    memo: HashMap<GateNetId, Option<(i64, Option<bool>)>>,
+    visiting: HashSet<GateNetId>,
+}
+
+impl<'a> ReleaseArrivals<'a> {
+    fn new(
+        netlist: &'a GateNetlist,
+        delays: &'a dyn BundleDelays,
+        prefix: &'a str,
+        release: GateNetId,
+    ) -> Self {
+        Self {
+            netlist,
+            delays,
+            prefix,
+            release,
+            memo: HashMap::new(),
+            visiting: HashSet::new(),
+        }
+    }
+
+    /// When `net` settles after the release rises, and its final value;
+    /// `None` if the release does not reach it
+    fn at(&mut self, net: GateNetId) -> Option<(i64, Option<bool>)> {
+        if net == self.release {
+            return Some((0, Some(true)));
+        }
+        if let Some(&r) = self.memo.get(&net) {
+            return r;
+        }
+        if !self.visiting.insert(net) {
+            // a loop (a gate's own state): it holds while the release acts
+            return None;
+        }
+        let result = self.compute(net);
+        self.visiting.remove(&net);
+        self.memo.insert(net, result);
+        result
+    }
+
+    fn compute(&mut self, net: GateNetId) -> Option<(i64, Option<bool>)> {
+        let netlist = self.netlist;
+        let n = &netlist.nets[net.0 as usize];
+        let cell = &netlist.cells[n.driver?.0 as usize];
+        if !cell.path.starts_with(self.prefix)
+            || cell.clock.is_some()
+            || matches!(
+                cell.source_op.as_deref(),
+                Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
+            )
+        {
+            return None;
+        }
+        let output = n.driver_pin.unwrap_or(0);
+        // (arrival at the output through this input, final input value)
+        let mut changing: Vec<(usize, i64, Option<bool>)> = Vec::new();
+        for (i, &input) in cell.inputs.iter().enumerate() {
+            let Some(arc) = self.delays.arc_ps(cell, i, output) else {
+                continue;
+            };
+            if let Some((t, v)) = self.at(input) {
+                changing.push((i, t + self.delays.wire_ps(netlist, input, cell, i) + arc, v));
+            }
+        }
+        if changing.is_empty() {
+            return None;
+        }
+        let latest = changing.iter().map(|c| c.1).max().unwrap_or(0);
+        let mut known: Vec<Option<bool>> = vec![None; cell.inputs.len()];
+        for &(i, _, v) in &changing {
+            known[i] = v;
+        }
+        let Some(final_value) = settled_output(cell, output, &known) else {
+            return Some((latest, None));
+        };
+        // the earliest set of changed inputs that already forces it
+        changing.sort_by_key(|c| c.1);
+        let mut partial: Vec<Option<bool>> = vec![None; cell.inputs.len()];
+        for &(i, t, v) in &changing {
+            partial[i] = v;
+            if settled_output(cell, output, &partial) == Some(final_value) {
+                return Some((t, Some(final_value)));
+            }
+        }
+        Some((latest, Some(final_value)))
+    }
+}
+
+/// The output of `cell` when the inputs marked `Some` hold those values and
+/// the rest may be anything: `Some` if every completion gives the same
+/// value. LUTs are evaluated from their truth table and plain gates from
+/// their function; anything else is not determined.
+fn settled_output(cell: &Cell, output: usize, inputs: &[Option<bool>]) -> Option<bool> {
+    use crate::tech_library::CellFunction as F;
+    if output != 0 || inputs.len() > 6 {
+        return None;
+    }
+    let eval = |b: &[bool]| -> Option<bool> {
+        if let Some(init) = cell.lut_init {
+            let index = b
+                .iter()
+                .enumerate()
+                .fold(0usize, |acc, (i, &x)| acc | ((x as usize) << i));
+            return Some((init >> index) & 1 == 1);
+        }
+        let all = |f: &dyn Fn(bool, bool) -> bool, unit: bool| b.iter().fold(unit, |a, &x| f(a, x));
+        Some(match cell.function.as_ref()? {
+            F::Inv => !*b.first()?,
+            F::Buf => *b.first()?,
+            F::And2 | F::And3 | F::And4 => all(&|a, x| a && x, true),
+            F::Or2 | F::Or3 | F::Or4 => all(&|a, x| a || x, false),
+            F::Nand2 | F::Nand3 | F::Nand4 => !all(&|a, x| a && x, true),
+            F::Nor2 | F::Nor3 | F::Nor4 => !all(&|a, x| a || x, false),
+            F::AndNot => *b.first()? && !*b.get(1)?,
+            F::OrNot => *b.first()? || !*b.get(1)?,
+            _ => return None,
+        })
+    };
+    let unknown: Vec<usize> = (0..inputs.len()).filter(|&i| inputs[i].is_none()).collect();
+    let mut value: Option<bool> = None;
+    for combo in 0..(1usize << unknown.len()) {
+        let mut b: Vec<bool> = inputs.iter().map(|v| v.unwrap_or(false)).collect();
+        for (k, &i) in unknown.iter().enumerate() {
+            b[i] = (combo >> k) & 1 == 1;
+        }
+        let v = eval(&b)?;
+        match value {
+            None => value = Some(v),
+            Some(prev) if prev != v => return None,
+            _ => {}
+        }
+    }
+    value
+}
+
 /// Name of the matched delay that holds a self-timed block's arbiter
 /// release up after `done` (see `ncl_expand::expand_to_ncl_bridged_with`)
 pub const RELEASE_DELAY_PATH: &str = "ncl_bundle.release";
@@ -612,8 +763,11 @@ pub const RELEASE_DELAY_PATH: &str = "ncl_bundle.release";
 /// off. It must stay up until the dropped requests have cleared the
 /// arbiter's grants and `ready` at the step latch; otherwise the latch
 /// starts the next step from the grant the arbiter is withdrawing, and the
-/// grant changes under that step. Data: from `release` rising to the last
-/// of `ready` at the step latch and the arbiters' inputs. Control: how much
+/// grant changes under that step. Data: from `release` rising until
+/// `ready` at the step latch and the arbiters' inputs have settled
+/// ([`ReleaseArrivals`]: a gate settles as soon as the inputs that have
+/// already changed force its output, so a request that falls clears the
+/// arbiter's deferral chains at once rather than through their ripple). Control: how much
 /// longer the release stays up than `done`, the rise through the delay's
 /// chain (the time `done` itself stays up is left out, which only adds
 /// margin).
@@ -642,8 +796,7 @@ fn check_releases(
         let Some(release) = release else {
             continue;
         };
-        let mut from_release = Arrivals::new(netlist, delays, &md.prefix, false)
-            .with_sources(HashMap::from([(release, 0)]));
+        let mut from_release = ReleaseArrivals::new(netlist, delays, &md.prefix, release);
         let mut data_ps: Option<i64> = None;
         let mut endpoint = |t: Option<i64>| {
             if let Some(t) = t {
@@ -654,7 +807,7 @@ fn check_releases(
             endpoint(
                 from_release
                     .at(input)
-                    .map(|t| t + delays.wire_ps(netlist, input, cell, pin)),
+                    .map(|(t, _)| t + delays.wire_ps(netlist, input, cell, pin)),
             );
         }
         for cell in netlist
@@ -666,7 +819,7 @@ fn check_releases(
                 endpoint(
                     from_release
                         .at(input)
-                        .map(|t| t + delays.wire_ps(netlist, input, cell, i)),
+                        .map(|(t, _)| t + delays.wire_ps(netlist, input, cell, i)),
                 );
             }
         }
@@ -1278,6 +1431,87 @@ mod tests {
     use super::*;
 
     /// Every cell 100 ps, connections free, setup free
+    /// After the release rises, a request it drops clears a deferral chain
+    /// of ANDs at once (each stage's own request input forces it low), not
+    /// through the chain's ripple; an OR with an input the release does not
+    /// decide settles with its latest changing input
+    #[test]
+    fn release_settles_a_chain_through_its_forcing_input() {
+        let mut netlist = GateNetlist::new("t".into(), "test".into());
+        let mut net =
+            |name: &str| netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.{name}")));
+        let (release, req, other) = (net("release"), net("req"), net("other"));
+        let (held, h, d0, d1, d2, d3, o) = (
+            net("held"),
+            net("h"),
+            net("d0"),
+            net("d1"),
+            net("d2"),
+            net("d3"),
+            net("o"),
+        );
+        let lut = |netlist: &mut GateNetlist, name: &str, inputs: Vec<GateNetId>, out, init| {
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                "LUT4".into(),
+                "test".into(),
+                0.0,
+                format!("top.u.{name}"),
+                inputs,
+                vec![out],
+            );
+            cell.lut_init = Some(init);
+            netlist.add_cell(cell);
+        };
+        // inverter, AND, buffer
+        lut(&mut netlist, "inv", vec![release], held, 0x1);
+        lut(&mut netlist, "h", vec![req, held], h, 0x8);
+        lut(&mut netlist, "d0", vec![h], d0, 0x2);
+        lut(&mut netlist, "d1", vec![h, d0], d1, 0x8);
+        lut(&mut netlist, "d2", vec![h, d1], d2, 0x8);
+        lut(&mut netlist, "d3", vec![h, d2], d3, 0x8);
+        // OR
+        lut(&mut netlist, "o", vec![d3, other], o, 0xE);
+        let mut at = ReleaseArrivals::new(&netlist, &UnitDelays, "top.u.", release);
+        assert_eq!(at.at(held), Some((100, Some(false))));
+        assert_eq!(at.at(h), Some((200, Some(false))));
+        // every stage falls one gate after `h`, not a gate after the stage before
+        assert_eq!(at.at(d1), Some((300, Some(false))));
+        assert_eq!(at.at(d3), Some((300, Some(false))));
+        assert_eq!(at.at(o), Some((400, None)));
+        // nothing the release reaches
+        assert_eq!(at.at(other), None);
+        // the plain walk takes the ripple
+        let mut ripple = Arrivals::new(&netlist, &UnitDelays, "top.u.", false)
+            .with_sources(HashMap::from([(release, 0)]));
+        assert_eq!(ripple.at(d3), Some(600));
+    }
+
+    #[test]
+    fn settled_output_needs_every_completion_to_agree() {
+        let mut and = Cell::new_comb(
+            CellId(0),
+            "AND2".into(),
+            "test".into(),
+            0.0,
+            "a".into(),
+            vec![GateNetId(1), GateNetId(2)],
+            vec![GateNetId(3)],
+        );
+        and.function = Some(crate::tech_library::CellFunction::And2);
+        assert_eq!(settled_output(&and, 0, &[Some(false), None]), Some(false));
+        assert_eq!(settled_output(&and, 0, &[Some(true), None]), None);
+        assert_eq!(
+            settled_output(&and, 0, &[Some(true), Some(true)]),
+            Some(true)
+        );
+        // the same AND as a LUT
+        and.function = None;
+        and.lut_init = Some(0x8);
+        assert_eq!(settled_output(&and, 0, &[None, Some(false)]), Some(false));
+        assert_eq!(settled_output(&and, 0, &[None, None]), None);
+    }
+
     struct UnitDelays;
 
     impl BundleDelays for UnitDelays {
