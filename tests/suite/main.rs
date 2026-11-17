@@ -162,6 +162,7 @@ mod test_synthesis_optimization;
 mod test_tech_mapping_flow;
 mod test_technology_mapping;
 mod test_temporal_logic;
+mod test_timed_sim_crosscheck;
 mod test_timing_analysis_fix;
 mod test_trace_attribute;
 mod test_trait_bounds;

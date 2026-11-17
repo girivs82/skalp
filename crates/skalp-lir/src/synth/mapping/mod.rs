@@ -498,7 +498,12 @@ impl CellMatcher {
         let mut matches = Vec::new();
 
         // Mask truth table to the actual number of inputs
-        let mask = (1u64 << (1 << num_inputs)) - 1;
+        // (six inputs fill the whole word)
+        let mask = if num_inputs >= 6 {
+            u64::MAX
+        } else {
+            (1u64 << (1 << num_inputs)) - 1
+        };
         let tt = truth_table & mask;
 
         // Direct match FIRST (non-inverted) — preferred when costs are equal.
@@ -626,6 +631,15 @@ impl Default for CellMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A six-input cut fills the whole truth-table word (a 6-LUT library
+    /// once overflowed building its mask)
+    #[test]
+    fn six_input_cuts_are_matched_without_overflow() {
+        let matcher = CellMatcher::new();
+        let _ = matcher.find_matches(0x8000_0000_0000_0001, 6);
+        assert_eq!(crate::synth::npn::truth_table_ones(u64::MAX, 6), 64);
+    }
 
     /// Every truth table the matcher offers for a cell, with its pin list,
     /// is what the cell computes with input i_k on the listed pin. A wrong
