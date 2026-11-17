@@ -4280,8 +4280,31 @@ impl<'a> MirToSirConverter<'a> {
                 let right_is_signed = self.is_expression_signed(right);
                 let is_signed = left_is_signed || right_is_signed;
 
-                let left_node = self.create_expression_node_with_width(left, operand_width);
-                let right_node = self.create_expression_node_with_width(right, operand_width);
+                // `+` and `-` keep their operands' width (width-preserving arithmetic;
+                // `+:` widens), also when the value goes into a wider target. An
+                // unsized integer literal takes the width of the other operand, so
+                // `cnt + 1` wraps at `cnt`'s width; only a sum of literals takes the
+                // target's width.
+                let is_int_literal =
+                    |e: &Expression| matches!(e.kind, ExpressionKind::Literal(Value::Integer(_)));
+                let (left_node, right_node) = if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && is_int_literal(left) != is_int_literal(right)
+                {
+                    if is_int_literal(right) {
+                        let l = self.create_expression_node_with_width(left, operand_width);
+                        let w = self.get_node_output_width(l);
+                        (l, self.create_expression_node_with_width(right, Some(w)))
+                    } else {
+                        let r = self.create_expression_node_with_width(right, operand_width);
+                        let w = self.get_node_output_width(r);
+                        (self.create_expression_node_with_width(left, Some(w)), r)
+                    }
+                } else {
+                    (
+                        self.create_expression_node_with_width(left, operand_width),
+                        self.create_expression_node_with_width(right, operand_width),
+                    )
+                };
 
                 self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }

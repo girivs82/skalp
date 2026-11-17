@@ -3751,10 +3751,17 @@ impl MirToLirTransform {
         let right_width = self.infer_expression_width(right);
         let operand_width = left_width.max(right_width);
 
-        // For arithmetic operations, use expected_width for operands to ensure
-        // proper width propagation from assignment target (e.g., bit[32] x = 5 + 3
-        // should compute 5 + 3 as 32-bit, not 3-bit which would overflow)
-        let arithmetic_operand_width = expected_width.max(operand_width);
+        // `+` and `-` keep their operands' width (width-preserving arithmetic;
+        // `+:` widens), also when the value goes into a wider target, and the
+        // result is zero-extended to the target. An unsized integer literal takes
+        // the other operand's width. Only when no operand has a width of its own
+        // (`bit[32] x = 5 + 3`) does the target's width apply.
+        let arithmetic_operand_width = match op {
+            BinaryOp::Add | BinaryOp::Sub => self
+                .self_determined_width(left, right)
+                .unwrap_or_else(|| expected_width.max(operand_width)),
+            _ => expected_width.max(operand_width),
+        };
 
         let (left_signal, right_signal, word_op, result_width) = match op {
             // Arithmetic - use expected_width for operands
@@ -3785,7 +3792,7 @@ impl MirToLirTransform {
                         has_carry: false,
                         const_b,
                     },
-                    expected_width,
+                    arithmetic_operand_width,
                 )
             }
             BinaryOp::WidenAdd => {
@@ -3816,7 +3823,7 @@ impl MirToLirTransform {
                         width: arithmetic_operand_width,
                         has_borrow: false,
                     },
-                    expected_width,
+                    arithmetic_operand_width,
                 )
             }
             BinaryOp::Mul => {
@@ -4414,7 +4421,89 @@ impl MirToLirTransform {
             out,
             format!("{}.{:?}_{}", self.hierarchy_path, op, node_id),
         );
+        if matches!(op, BinaryOp::Add | BinaryOp::Sub) && result_width < expected_width {
+            let wide = self.alloc_temp_signal(expected_width);
+            let signed =
+                self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+            let (ext, name) = if signed {
+                (
+                    LirOp::SignExtend {
+                        from: result_width,
+                        to: expected_width,
+                    },
+                    "arith_sext",
+                )
+            } else {
+                (
+                    LirOp::ZeroExtend {
+                        from: result_width,
+                        to: expected_width,
+                    },
+                    "arith_zext",
+                )
+            };
+            let path = self.unique_node_path(name);
+            self.lir.add_node(ext, vec![out], wide, path);
+            return wide;
+        }
         out
+    }
+
+    /// Width of `left op right` for width-preserving `+`/`-`: the wider of the
+    /// operands that have a width of their own (an unsized integer literal does
+    /// not). `None` when neither does, or when an operand's width cannot be
+    /// worked out here.
+    fn self_determined_width(&self, left: &Expression, right: &Expression) -> Option<u32> {
+        let l = self.own_width(left)?;
+        let r = self.own_width(right)?;
+        match (l, r) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    }
+
+    /// `Some(Some(w))`: the expression is `w` bits wide on its own.
+    /// `Some(None)`: an unsized integer literal, which takes its width from
+    /// context. `None`: the width cannot be worked out from the expression.
+    fn own_width(&self, e: &Expression) -> Option<Option<u32>> {
+        match &e.kind {
+            ExpressionKind::Literal(Value::Integer(_)) => Some(None),
+            ExpressionKind::Literal(Value::BitVector { width, .. }) => Some(Some(*width as u32)),
+            ExpressionKind::Ref(_) | ExpressionKind::Cast { .. } | ExpressionKind::Concat(_) => {
+                Some(Some(self.infer_expression_width(e)))
+            }
+            ExpressionKind::Binary { op, left, right } => match op {
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor => {
+                    let l = self.own_width(left)?;
+                    let r = self.own_width(right)?;
+                    Some(match (l, r) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) | (None, Some(a)) => Some(a),
+                        (None, None) => None,
+                    })
+                }
+                BinaryOp::WidenAdd => {
+                    let l = self.own_width(left)?;
+                    let r = self.own_width(right)?;
+                    match (l, r) {
+                        (Some(a), Some(b)) => Some(Some(a.max(b) + 1)),
+                        (Some(a), None) | (None, Some(a)) => Some(Some(a + 1)),
+                        (None, None) => None,
+                    }
+                }
+                _ => None,
+            },
+            ExpressionKind::Unary { op, operand } => match op {
+                UnaryOp::Reduce(_) => Some(Some(1)),
+                _ => self.own_width(operand),
+            },
+            _ => None,
+        }
     }
 
     /// Transform a unary operation
@@ -5059,7 +5148,7 @@ impl MirToLirTransform {
                     out
                 } else {
                     // Dynamic bit select
-                    let idx_signal = self.transform_expression(index, 32);
+                    let idx_signal = self.transform_index(index, 32);
                     let out = self.alloc_temp_signal(1);
                     let path = self.unique_node_path("dyn_bit_sel");
                     self.lir.add_node(
@@ -5191,7 +5280,7 @@ impl MirToLirTransform {
         let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index expression to get the address signal
-        let addr_signal = self.transform_expression(index, mem_info.addr_width);
+        let addr_signal = self.transform_index(index, mem_info.addr_width);
 
         // The same address read twice shares a port.
         if let Some(&(_, rdata, _)) = mem_info
@@ -5357,7 +5446,7 @@ impl MirToLirTransform {
                     }
                     if let LValue::BitSelect { base, index } = &assign.lhs {
                         if self.get_memory_signal_id(base) == Some(mem_signal_id) {
-                            let addr = self.transform_expression(index, mem_info.addr_width);
+                            let addr = self.transform_index(index, mem_info.addr_width);
                             let data =
                                 self.transform_expression(&assign.rhs, mem_info.element_width);
                             out.push((guard, addr, data));
@@ -5617,7 +5706,7 @@ impl MirToLirTransform {
         let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index → write address (combinational drive)
-        let addr_signal = self.transform_expression(index, mem_info.addr_width);
+        let addr_signal = self.transform_index(index, mem_info.addr_width);
         let path_waddr = self.unique_node_path("mem_waddr");
         self.lir.add_node(
             LirOp::Buf {
@@ -5674,6 +5763,72 @@ impl MirToLirTransform {
     }
 
     /// Infer the width of an expression
+    /// Self-determined width of an index expression built from `+`/`-` and
+    /// bitwise operators over signals and literals, or `None` when the
+    /// expression has no wrapping arithmetic or its width cannot be worked out.
+    ///
+    /// Arithmetic keeps the width of its operands, so `r[a - b]` with 5-bit
+    /// `a` and `b` wraps at 5 bits. Lowering the index at the width of the
+    /// port it feeds instead (32 bits for a bit select, the address width for
+    /// a memory) would carry the borrow into the upper bits and select a
+    /// different element than behavioural simulation does.
+    fn index_arith_width(&self, e: &Expression) -> Option<u32> {
+        fn leaf_or_arith(this: &MirToLirTransform, e: &Expression) -> Option<(u32, bool)> {
+            match &e.kind {
+                ExpressionKind::Literal(_) | ExpressionKind::Ref(_) => {
+                    Some((this.infer_expression_width(e), false))
+                }
+                ExpressionKind::Binary { op, left, right } => match op {
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::BitwiseAnd
+                    | BinaryOp::BitwiseOr
+                    | BinaryOp::BitwiseXor => {
+                        let (l, la) = leaf_or_arith(this, left)?;
+                        let (r, ra) = leaf_or_arith(this, right)?;
+                        let arith = la || ra || matches!(op, BinaryOp::Add | BinaryOp::Sub);
+                        Some((l.max(r), arith))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        match leaf_or_arith(self, e)? {
+            (w, true) if w > 0 => Some(w),
+            _ => None,
+        }
+    }
+
+    /// Lower an index expression that feeds a port of `port_width` bits,
+    /// keeping any arithmetic in it at its own width (see
+    /// [`Self::index_arith_width`]) and zero-extending the result to the port.
+    fn transform_index(&mut self, index: &Expression, port_width: u32) -> LirSignalId {
+        let Some(w) = self.index_arith_width(index) else {
+            return self.transform_expression(index, port_width);
+        };
+        if w >= port_width {
+            return self.transform_expression(index, port_width);
+        }
+        let narrow = self.transform_expression(index, w);
+        let have = self.lir.signals[narrow.0 as usize].width;
+        if have >= port_width {
+            return narrow;
+        }
+        let out = self.alloc_temp_signal(port_width);
+        let path = self.unique_node_path("idx_zext");
+        self.lir.add_node(
+            LirOp::ZeroExtend {
+                from: have,
+                to: port_width,
+            },
+            vec![narrow],
+            out,
+            path,
+        );
+        out
+    }
+
     fn infer_expression_width(&self, expr: &Expression) -> u32 {
         match &expr.kind {
             ExpressionKind::Literal(value) => match value {

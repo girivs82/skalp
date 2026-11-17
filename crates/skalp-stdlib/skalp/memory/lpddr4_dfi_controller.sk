@@ -8,10 +8,14 @@
 //
 // Sequence: DFI init (dfi_init_start until dfi_init_complete), RESET_N low T_INIT1_CYC cycles,
 // CKE low T_INIT3_CYC, CKE high T_INIT5_CYC, mode registers (MR13, MR1, MR2, MR3, MR11, MR12,
-// MR14, MR22 from the generics), ZQ calibration start and latch, read training through the PHY
-// (DFI PHY-evaluation mode: read gate, then read eye, each with Read DQ Calibration reads until
-// the PHY reports every byte lane done, or TRAIN_MAX_READS reads), MRR of MR5 and MR8, then
-// normal operation.
+// MR14, MR22 from the generics), ZQ calibration start and latch, then training through the PHY
+// (DFI PHY-evaluation mode, each step until the PHY reports every byte lane done):
+//   write leveling: MR2 with OP7 (WR-LEV) set, tWLMRD, dfi_wrlvl_en with a dfi_wrlvl_strobe
+//     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back;
+//   read gate, then read eye: Read DQ Calibration reads (at most TRAIN_MAX_READS);
+//   write DQ: dfi_wdqlvl_en with a write and a read-back of TRAIN_ADDR in turn (at most
+//     TRAIN_MAX_READS pairs; the bank is left open);
+// then MRR of MR5 and MR8, then normal operation. A step that runs out sets train_fail.
 //
 // Normal operation: one request at a time, in order, open-page per bank (row hit: CAS; other row
 // open: PRE then ACT; closed: ACT), all-bank refresh every tREFI (PREab, REF, then a DFI
@@ -28,8 +32,8 @@
 // data enables follow only write commands.
 //
 // PHY adjustments: the first write data slot is the write command's slot + WL + TPHY_WRLAT_ADJ,
-// the first read data slot the read command's slot + RL + TRDDATA_EN_ADJ (4 and 3 when commands
-// and data have the same latency through the PHY).
+// the first read data slot the read command's slot + RL + TRDDATA_EN_ADJ (3 and 3 for the
+// behavioural PHY, whose writes reach the pins one tCK after commands when not yet leveled).
 pub entity Lpddr4DfiController<
     const MR1: nat = 20,
     const MR2: nat = 9,
@@ -57,11 +61,15 @@ pub entity Lpddr4DfiController<
     const TZQLAT_NCK: nat = 16,
     const DQSCK_MAX_NCK: nat = 2,
     const RTW_GUARD_NCK: nat = 2,
-    const TPHY_WRLAT_ADJ: nat = 4,
+    const TPHY_WRLAT_ADJ: nat = 3,
     const TRDDATA_EN_ADJ: nat = 3,
     const TRAIN_GAP_CYC: nat = 16,
     const TRAIN_MAX_READS: nat = 64,
-    const CTRLUPD_CYC: nat = 4
+    const CTRLUPD_CYC: nat = 4,
+    const TWLMRD_NCK: nat = 40,
+    const WL_GAP_CYC: nat = 16,
+    const WL_MAX_STROBES: nat = 40,
+    const TRAIN_ADDR: nat = 63
 > {
     in clk: clock
     // ---------------------------------------------------------------- user port
@@ -128,6 +136,11 @@ pub entity Lpddr4DfiController<
     out dfi_rdlvl_en: bit
     in dfi_rdlvl_gate_resp: bit[2]
     in dfi_rdlvl_resp: bit[2]
+    out dfi_wrlvl_en: bit
+    out dfi_wrlvl_strobe: bit
+    in dfi_wrlvl_resp: bit[2]
+    out dfi_wdqlvl_en: bit
+    in dfi_wdqlvl_resp: bit[2]
 }
 
 // Timing state of one bank, in DFI cycles. Each count is the number of cycles after the event
@@ -236,7 +249,9 @@ fn ca_mpc(op: bit[7]) -> bit[24] {
 impl Lpddr4DfiController {
     // ------------------------------------------------------------ states
     // 0 PHY init, 1 reset low, 2 CKE low, 3 CKE high, 4 MRW, 5 ZQ start, 6 ZQ wait, 7 ZQ latch,
-    // 10 gate training, 11 read-eye training, 8 MRR, 9 wait for MRR data, 12 settle, 13 ready, 14 refresh precharge, 15 refresh, 16 PHY update, 17 controller update
+    // 18 write leveling, 10 gate training, 11 read-eye training, 19 write DQ training, 8 MRR,
+    // 9 wait for MRR data, 12 settle, 13 ready, 14 refresh precharge, 15 refresh, 16 PHY update,
+    // 17 controller update
     signal st: bit[5] = 0
     signal wait_c: bit[32] = 0
     signal mi: bit[4] = 0
@@ -248,6 +263,13 @@ impl Lpddr4DfiController {
     signal train_gap: bit[16] = 0
     signal gate_en_r: bit = 0
     signal rdlvl_en_r: bit = 0
+    signal wrlvl_en_r: bit = 0
+    signal wrlvl_strobe_r: bit = 0
+    signal wdqlvl_en_r: bit = 0
+    // write leveling step: 0 MRW in, 1 tWLMRD, 2 strobes, 3 MRW out
+    signal wl_ph: bit[2] = 0
+    // write DQ training: the next training request is a write
+    signal tw_w: bit = 0
     signal init_start_r: bit = 0
     signal ctrlupd_r: bit = 0
     signal phyupd_ack_r: bit = 0
@@ -409,6 +431,12 @@ impl Lpddr4DfiController {
     let tr_gap: bit[16] = TRAIN_GAP_CYC
     let tr_max: bit[16] = TRAIN_MAX_READS
     let cu_cyc: bit[32] = CTRLUPD_CYC
+    let n_wlmrd: bit[16] = TWLMRD_NCK
+    // tWLMRD from the MRW's last edge (p3) to the first DQS pulse (p1, two cycles later at the pins)
+    let wlmrd32: bit[32] = {16'h0000, (n_wlmrd + 3) >> 2}
+    let wl_gap: bit[16] = WL_GAP_CYC
+    let wl_max: bit[16] = WL_MAX_STROBES
+    let tr_addr: bit[26] = TRAIN_ADDR
 
     // ------------------------------------------------------------ banks
     let req_row: bit[17] = req_addr[25:9]
@@ -443,7 +471,9 @@ impl Lpddr4DfiController {
     let can_cmd: bit = if t_cmd == 0 { 1 } else { 0 }
     let upd_go: bit = if idle == 1 && dfi_phyupd_req == 1 && rq_v == 0 && quiet == 1 { 1 } else { 0 }
     let ref_go: bit = if idle == 1 && ref_due == 1 && upd_go == 0 { 1 } else { 0 }
-    let serve: bit = if idle == 1 && ref_due == 0 && upd_go == 0 && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
+    // write DQ training goes through the request path (refresh waits until it is over)
+    let wdq_st: bit = if st == 19 { 1 } else { 0 }
+    let serve: bit = if ((idle == 1 && ref_due == 0 && upd_go == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
     let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && t_wr == 0 && wq_n < 4) || (rq_w == 0 && t_rd == 0 && tq_n < 8)) { 1 } else { 0 }
     let do_pre: bit = if serve == 1 && q_open == 1 && q_hit == 0 && b_preok[rq_ba] == 1 { 1 } else { 0 }
     let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && t_actg == 0 && faw_now == 0 { 1 } else { 0 }
@@ -453,6 +483,12 @@ impl Lpddr4DfiController {
     let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
     let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
     let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
+    // MR2 with WR-LEV set (in) and clear (out)
+    let do_wlmrw: bit = if st == 18 && can_cmd == 1 && (wl_ph == 0 || wl_ph == 3) { 1 } else { 0 }
+    let wl_mr2: bit[8] = if wl_ph == 0 { mr2_c | 8'h80 } else { mr2_c }
+    let wl_done: bit = if dfi_wrlvl_resp == 2'b11 { 1 } else { 0 }
+    let do_strobe: bit = if st == 18 && wl_ph == 2 && wl_done == 0 && train_gap == 0 && train_reads < wl_max { 1 } else { 0 }
+    let wdq_done: bit = if dfi_wdqlvl_resp == 2'b11 { 1 } else { 0 }
     let do_zqs: bit = if st == 5 && can_cmd == 1 { 1 } else { 0 }
     let do_zql: bit = if st == 7 && wait_c == 0 { 1 } else { 0 }
     let do_mrr: bit = if st == 8 && can_cmd == 1 && mi < 2 { 1 } else { 0 }
@@ -483,7 +519,7 @@ impl Lpddr4DfiController {
         _ => mr22_c
     }
     let mrr_ma: bit[6] = if mi == 0 { 5 } else { 8 }
-    let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
+    let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_wlmrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
     let two: bit = if do_pre == 1 || do_preab == 1 || do_ref == 1 || train_ref == 1 || do_zqs == 1 || do_zql == 1 { 1 } else { 0 }
     let f_cs: bit[4] = if four == 1 { 4'b0101 } else { if two == 1 { 4'b0001 } else { 4'b0000 } }
     let f_ca: bit[24] =
@@ -491,6 +527,7 @@ impl Lpddr4DfiController {
         else { if do_wr == 1 { ca_cas(5'b00100, rq_ba, rq_col) }
         else { if do_rd == 1 { ca_cas(5'b00010, rq_ba, rq_col) }
         else { if do_mrw == 1 { ca_mrw(mrw_ma, mrw_op) }
+        else { if do_wlmrw == 1 { ca_mrw(6'd2, wl_mr2) }
         else { if do_mrr == 1 { ca_mrr(mrr_ma) }
         else { if do_rdc == 1 { ca_mpc(7'h43) }
         else { if do_pre == 1 { {18'h00000, 3'b000, rq_ba, 6'b010000} }
@@ -498,7 +535,7 @@ impl Lpddr4DfiController {
         else { if do_ref == 1 || train_ref == 1 { {18'h00000, 6'b000000, 6'b101000} }
         else { if do_zqs == 1 { {18'h00000, 6'd15, 6'b100000} }
         else { if do_zql == 1 { {18'h00000, 6'd17, 6'b100000} }
-        else { 24'h000000 } } } } } } } } } } }
+        else { 24'h000000 } } } } } } } } } } } }
 
     // ------------------------------------------------------------ data enables
     let rd_issue: bit = if do_rd == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
@@ -548,7 +585,8 @@ impl Lpddr4DfiController {
     let rn7: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 15 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 15 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 15 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 15 { dfi_rddata_w3 } else { re7 } } } } } else { re7 }
     let r_burst: bit[256] = {re7, re6, re5, re4, re3, re2, re1, re0}
     let r_tag: bit[2] = tq[tq_rp]
-    let tq_push: bit = if do_rd == 1 || do_mrr == 1 { 1 } else { 0 }
+    // write DQ training reads are checked by the PHY and return nothing
+    let tq_push: bit = if (do_rd == 1 && wdq_st == 0) || do_mrr == 1 { 1 } else { 0 }
 
     // ------------------------------------------------------------ banks
     inst b0 = Lpddr4BankState {
@@ -704,7 +742,7 @@ impl Lpddr4DfiController {
         tq_n = if tq_push == 1 && r_emit == 0 { tq_n + 1 } else { if tq_push == 0 && r_emit == 1 { tq_n - 1 } else { tq_n } }
 
         // ---------------------------------------------------------------- timers
-        t_cmd = if do_mrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
+        t_cmd = if do_mrw == 1 || do_wlmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
         t_actg = if do_act == 1 { max8(dec8(t_actg), m1_rrd) } else { if do_ref == 1 { max8(dec8(t_actg), m1_rfc) } else { dec8(t_actg) } }
         t_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_rd), m1_ccd) } else { if do_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
         t_wr = if do_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
@@ -740,8 +778,9 @@ impl Lpddr4DfiController {
 
         // ---------------------------------------------------------------- sequence
         wait_c = if wait_c == 0 { 0 } else { wait_c - 1 }
-        train_gap = if do_rdc == 1 { tr_gap } else { if train_gap == 0 { 0 } else { train_gap - 1 } }
-        if do_rdc == 1 { train_reads = train_reads + 1 }
+        train_gap = if do_rdc == 1 || (do_rd == 1 && wdq_st == 1) { tr_gap } else { if do_strobe == 1 { wl_gap } else { if train_gap == 0 { 0 } else { train_gap - 1 } } }
+        if do_rdc == 1 || do_strobe == 1 || (do_rd == 1 && wdq_st == 1) { train_reads = train_reads + 1 }
+        wrlvl_strobe_r = do_strobe
         match st {
             0 => {
                 init_start_r = 1
@@ -785,10 +824,9 @@ impl Lpddr4DfiController {
             },
             7 => {
                 if do_zql == 1 {
-                    st = 10
+                    st = 18
                     ref_on = 1
-                    gate_en_r = 1
-                    train_reads = 0
+                    wl_ph = 0
                 }
             },
             8 => {
@@ -816,9 +854,11 @@ impl Lpddr4DfiController {
                 if lvl_done == 1 || train_reads >= tr_max {
                     if lvl_done == 0 { train_fail_r = 1 }
                     if quiet == 1 && train_gap == 0 {
-                        st = 8
+                        st = 19
                         rdlvl_en_r = 0
-                        mi = 0
+                        wdqlvl_en_r = 1
+                        tw_w = 1
+                        train_reads = 0
                     }
                 }
             },
@@ -846,7 +886,6 @@ impl Lpddr4DfiController {
             15 => {
                 if do_ref == 1 {
                     st = 17
-                    wait_c = cu_cyc
                 }
             },
             16 => {
@@ -855,14 +894,70 @@ impl Lpddr4DfiController {
                     phyupd_ack_r = 0
                 }
             },
-            _ => {
-                // controller update after a refresh, once nothing is on the bus
-                if quiet == 1 && ctrlupd_r == 0 && wait_c != 0 {
-                    ctrlupd_r = 1
+            18 => {
+                match wl_ph {
+                    0 => {
+                        if do_wlmrw == 1 {
+                            wl_ph = 1
+                            wait_c = wlmrd32
+                        }
+                    },
+                    1 => {
+                        if wait_c == 0 {
+                            wl_ph = 2
+                            wrlvl_en_r = 1
+                            train_reads = 0
+                        }
+                    },
+                    2 => {
+                        if wl_done == 1 || train_reads >= wl_max {
+                            if wl_done == 0 { train_fail_r = 1 }
+                            if train_gap == 0 {
+                                wl_ph = 3
+                                wrlvl_en_r = 0
+                            }
+                        }
+                    },
+                    _ => {
+                        if do_wlmrw == 1 {
+                            st = 10
+                            gate_en_r = 1
+                            train_reads = 0
+                        }
+                    }
                 }
-                if ctrlupd_r == 1 && wait_c == 0 {
-                    ctrlupd_r = 0
-                    st = 13
+            },
+            19 => {
+                // a write and its read-back in turn until every lane is done
+                if rq_v == 0 && wdq_done == 0 && train_reads < tr_max {
+                    rq_v = 1
+                    rq_w = tw_w
+                    rq_row = tr_addr[25:9]
+                    rq_ba = tr_addr[8:6]
+                    rq_col = tr_addr[5:0]
+                    rq_data = 0
+                    tw_w = ~tw_w
+                }
+                if (wdq_done == 1 || train_reads >= tr_max) && rq_v == 0 && quiet == 1 && train_gap == 0 {
+                    if wdq_done == 0 { train_fail_r = 1 }
+                    st = 8
+                    wdqlvl_en_r = 0
+                    mi = 0
+                }
+            },
+            _ => {
+                // controller update after a refresh, once nothing is on the bus (reads
+                // issued before the refresh can still be in flight), held CTRLUPD_CYC cycles
+                if ctrlupd_r == 0 {
+                    if quiet == 1 {
+                        ctrlupd_r = 1
+                        wait_c = cu_cyc
+                    }
+                } else {
+                    if wait_c == 0 {
+                        ctrlupd_r = 0
+                        st = 13
+                    }
                 }
             }
         }
@@ -881,6 +976,9 @@ impl Lpddr4DfiController {
     dfi_phyupd_ack = phyupd_ack_r
     dfi_rdlvl_gate_en = gate_en_r
     dfi_rdlvl_en = rdlvl_en_r
+    dfi_wrlvl_en = wrlvl_en_r
+    dfi_wrlvl_strobe = wrlvl_strobe_r
+    dfi_wdqlvl_en = wdqlvl_en_r
     dfi_cs_p0 = o_cs[0]
     dfi_address_p0 = o_ca[5:0]
     dfi_cke_p0 = cke_r

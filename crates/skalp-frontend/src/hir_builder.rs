@@ -6872,6 +6872,18 @@ impl HirBuilderContext {
         if let Some(let_stmt) = self.build_let_statement(node) {
             vec![HirStatement::Let(let_stmt)]
         } else {
+            // A `let` that cannot be built would otherwise vanish, and every later use of its
+            // name reports an undefined identifier far from the cause.
+            let name = node
+                .descendants_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())
+                .unwrap_or_default();
+            self.errors.push(HirError {
+                message: format!("cannot build the value of `let {name}`"),
+                span: self.make_span(node),
+            });
             Vec::new()
         }
     }
@@ -10027,6 +10039,21 @@ impl HirBuilderContext {
             })
             .collect();
 
+        // An operand with a call in it, `~f(a)`, `~f(a)[3]` or `-a.m(1)`, arrives as a sibling
+        // chain ([IdentExpr(f), CallExpr((a)), ...] or [IdentExpr(a), FieldExpr(.m),
+        // CallExpr((1))]). Picking one child dropped the call: `~f(a)` failed to build and the
+        // `let` it was in vanished, `-a.m(1)` became `-a`. Build the whole chain.
+        let is_call_chain = expr_children.len() >= 2
+            && expr_children[1..]
+                .iter()
+                .any(|n| n.kind() == SyntaxKind::CallExpr)
+            && expr_children[1..].iter().all(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::CallExpr | SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                )
+            });
+
         // If we have both IdentExpr and IndexExpr/FieldExpr, use the last one (it's the complete expression)
         let operand_node = if expr_children.len() > 1 {
             // Check if last is IndexExpr and previous is IdentExpr/FieldExpr/PathExpr
@@ -10062,7 +10089,11 @@ impl HirBuilderContext {
             expr_children.first()?
         };
 
-        let operand = self.build_expression(operand_node)?;
+        let operand = if is_call_chain {
+            self.build_chained_rhs_expression(&expr_children)?
+        } else {
+            self.build_expression(operand_node)?
+        };
 
         // Get operator
         // BUG #188 FIX: Include Pipe for reduction OR operator (|expr)

@@ -1226,6 +1226,11 @@ impl<'hir> HirToMir<'hir> {
             self.entity_instance_outputs.clear();
             self.entity_instance_info.clear();
             self.tuple_call_results.clear();
+            // A cached call result names the function-module instance and result
+            // signal made in the module being converted: reused in another impl
+            // (a specialisation of the same entity, say) it referred to a signal
+            // that module does not have, which read as 0.
+            self.module_call_cache.clear();
             // Debug: Find entity name
             let impl_entity_name = hir
                 .entities
@@ -8131,8 +8136,12 @@ impl<'hir> HirToMir<'hir> {
             },
             // Build replicate: pop count, pop value, wrap
             BuildReplicate,
-            // Build index: pop index, pop base, wrap
-            BuildIndex,
+            // Build index: pop index, pop base, wrap. `bit_concat`: the base is a
+            // `{...}` bit concatenation in the source, so the index selects a bit
+            // of it, never one of its parts
+            BuildIndex {
+                bit_concat: bool,
+            },
             // Build range: pop low, pop high, pop base, wrap
             BuildRange,
         }
@@ -8240,7 +8249,12 @@ impl<'hir> HirToMir<'hir> {
                                 // Dynamic index into flattened array — balanced MUX tree
                                 result_stack.push(Some(expr));
                             } else {
-                                work_stack.push(ExprWork::BuildIndex);
+                                work_stack.push(ExprWork::BuildIndex {
+                                    bit_concat: matches!(
+                                        base.as_ref(),
+                                        hir::HirExpression::Concat(_)
+                                    ),
+                                });
                                 work_stack.push(ExprWork::Convert(index));
                                 work_stack.push(ExprWork::Convert(base));
                             }
@@ -8382,7 +8396,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                ExprWork::BuildIndex => {
+                ExprWork::BuildIndex { bit_concat } => {
                     let index = result_stack.pop().flatten();
                     let base = result_stack.pop().flatten();
                     if let (Some(base), Some(index)) = (base, index) {
@@ -8408,10 +8422,14 @@ impl<'hir> HirToMir<'hir> {
                                 _ => None,
                             };
 
-                            let is_bit_index = match const_index {
-                                Some(idx) => idx >= elements.len() as u64,
-                                None => false,
-                            };
+                            // A `{...}` written in the source is always bits (`{i, 1'b1}[0]`
+                            // passed into a function is bit 0, not part 0); only an array
+                            // value, which MIR also holds as a Concat, is indexed by part.
+                            let is_bit_index = bit_concat
+                                || match const_index {
+                                    Some(idx) => idx >= elements.len() as u64,
+                                    None => false,
+                                };
 
                             if elements.is_empty() {
                                 result_stack.push(None);
@@ -19759,6 +19777,13 @@ impl<'hir> HirToMir<'hir> {
             }
         };
 
+        // `a +: b` on bits is one bit wider than its operands. `Add::add`
+        // returns `Self`, so routing it through `impl Add for bit<N>` would
+        // drop the carry: the widening add stays primitive.
+        if matches!(op, hir::HirBinaryOp::WidenAdd) && type_name.starts_with("bit[") {
+            return None;
+        }
+
         // Float types now use trait-based resolution exclusively
         // The distinct fp16/fp32/fp64/bf16 types have trait implementations in stdlib
 
@@ -25875,6 +25900,7 @@ impl<'hir> HirToMir<'hir> {
         self.dynamic_variables.clear();
         self.payload_var_expressions.clear();
         self.tuple_call_results.clear();
+        self.module_call_cache.clear();
         self.entity_instance_outputs.clear();
         self.entity_instance_info.clear();
         self.placeholder_signal_to_entity_output.clear();

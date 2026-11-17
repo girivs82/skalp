@@ -1,7 +1,7 @@
 //! LPDDR4 DFI controller (`skalp::memory::lpddr4_dfi_controller`) with the
 //! behavioural DFI PHY and the LPDDR4 channel model, run end to end:
-//! init, mode registers, ZQ calibration, gate and read-eye training through
-//! DFI, refresh, PHY and controller updates, and two passes of 64 bursts
+//! init, mode registers, ZQ calibration, write leveling, gate and read-eye
+//! training and write DQ training through DFI, refresh, PHY and controller updates, and two passes of 64 bursts
 //! (writes, reads, write-to-read and read-to-write turnarounds) compared
 //! against their data. The channel model checks JEDEC command timing and
 //! reports any cycle where both ends drive DQ or DQS.
@@ -61,6 +61,10 @@ struct Variant {
     dqsck_clks: u64,
     dq_skew_clks: u64,
     phyupd_every: u64,
+    /// board delay of each byte lane's DQS and DQ behind CK, in clocks
+    wr_skew: [u64; 2],
+    /// further board delay of each byte lane's DQ behind its DQS
+    wr_dq_skew: [u64; 2],
 }
 
 async fn run(v: Variant) {
@@ -68,6 +72,10 @@ async fn run(v: Variant) {
         ("DQSCK_CLKS", v.dqsck_clks),
         ("DQ_SKEW_CLKS", v.dq_skew_clks),
         ("PHYUPD_EVERY", v.phyupd_every),
+        ("WR_SKEW0_CLKS", v.wr_skew[0]),
+        ("WR_SKEW1_CLKS", v.wr_skew[1]),
+        ("WR_DQ_SKEW0_CLKS", v.wr_dq_skew[0]),
+        ("WR_DQ_SKEW1_CLKS", v.wr_dq_skew[1]),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_dfi_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -82,11 +90,32 @@ async fn run(v: Variant) {
     // init + training take about 20k clocks, the traffic about 130k
     let mut cycles = 0;
     while tb.get_u64("done").await == 0 {
-        assert!(
-            cycles < 400_000,
-            "{}: not done after {cycles} clocks",
-            v.name
-        );
+        if cycles >= 400_000 {
+            let mut state = String::new();
+            for s in [
+                "ctrl_state",
+                "gen_state",
+                "init_done",
+                "train_fail",
+                "lvl_fail",
+                "wrlvl_fail",
+                "wdq_fail",
+                "wl0",
+                "wl1",
+                "wdq0",
+                "wdq1",
+                "m_errors",
+                "m_err_code",
+                "m_err_cycle",
+                "m_n_wr",
+                "m_n_rd",
+                "passes",
+                "reads_ok",
+            ] {
+                state += &format!(" {s}={}", tb.get_u64(s).await);
+            }
+            panic!("{}: not done after {cycles} clocks:{state}", v.name);
+        }
         tb.clock(10_000).await;
         cycles += 10_000;
     }
@@ -109,9 +138,10 @@ async fn run(v: Variant) {
     assert_eq!(get!("m_contention"), 0, "{n}: bus contention");
     assert_eq!(get!("m_t_ck"), CLK_PER_CK, "{n}: tCK");
 
-    // init: 8 mode-register writes, ZQ start + latch, MR5/MR8 read back
+    // init: 8 mode-register writes and 2 more for write leveling, ZQ start +
+    // latch, MR5/MR8 read back
     assert_eq!(get!("init_done"), 1, "{n}");
-    assert_eq!(get!("m_n_mrw"), 8, "{n}: MRW count");
+    assert_eq!(get!("m_n_mrw"), 10, "{n}: MRW count");
     assert_eq!(get!("m_n_zq"), 1, "{n}: ZQ calibrations");
     assert_eq!(get!("m_n_mrr"), 2, "{n}: MRR count");
     assert_eq!(get!("mr5"), 0xFF, "{n}: MR5 (manufacturer)");
@@ -131,13 +161,48 @@ async fn run(v: Variant) {
         assert_eq!(rdly, eye, "{n}: lane {lane} read sample delay");
     }
 
+    // write leveling: the lane's DQS is launched half a tCK early and delayed
+    // until its rise meets CK's at the DRAM, which takes out the board delay
+    assert_eq!(get!("wrlvl_fail"), 0, "{n}: write leveling");
+    assert_eq!(get!("wdq_fail"), 0, "{n}: write DQ training");
+    for lane in 0..2 {
+        let wl = get!(["wl0", "wl1"][lane]);
+        assert_eq!(
+            wl,
+            half - v.wr_skew[lane],
+            "{n}: lane {lane} write leveling delay"
+        );
+        // write DQ: the DRAM takes a beat when DQ changed neither in the
+        // clock of the DQS edge nor in the one after, so DQ may change 2 to
+        // half a tCK - 1 clocks after an edge; the board DQ delay counts too
+        let q = v.wr_dq_skew[lane];
+        let lo = 2u64.saturating_sub(q);
+        let hi = half - 1 - q;
+        let wdq = get!(["wdq0", "wdq1"][lane]);
+        assert_eq!(
+            wdq,
+            lo + ((hi - lo) >> 1),
+            "{n}: lane {lane} write DQ delay"
+        );
+    }
+    // the sweep went through failing delays, and nothing failed after it
+    let viol_init = get!("m_dq_viol_init");
+    assert!(viol_init > 0, "{n}: write DQ sweep saw no failing delay");
+    assert_eq!(
+        get!("m_dq_viol"),
+        viol_init,
+        "{n}: DQ timing after training"
+    );
+
     // traffic: every read returned the data written, nothing timed out
     let bursts = 64;
     assert_eq!(get!("passes"), 2, "{n}");
     assert_eq!(get!("mismatches"), 0, "{n}: data mismatches");
     assert_eq!(get!("reads_ok"), bursts * 2 * 2, "{n}: reads");
     assert_eq!(get!("gate_timeouts"), 0, "{n}: gate timeouts");
-    assert_eq!(get!("m_n_wr"), bursts * 2 * 2, "{n}: writes");
+    let train_writes = get!("m_n_wr_init");
+    assert!(train_writes >= half, "{n}: write DQ training writes");
+    assert_eq!(get!("m_n_wr") - train_writes, bursts * 2 * 2, "{n}: writes");
     assert_eq!(get!("m_aliased"), 0, "{n}: aliased lines");
     assert_eq!(get!("m_unwritten"), 0, "{n}: unwritten reads");
 
@@ -163,17 +228,21 @@ async fn lpddr4_dfi_nominal() {
         dqsck_clks: 0,
         dq_skew_clks: 0,
         phyupd_every: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
     })
     .await;
 }
 
 #[tokio::test]
-async fn lpddr4_dfi_dqsck_skew_and_phy_updates() {
+async fn lpddr4_dfi_dqsck_board_skew_and_phy_updates() {
     run(Variant {
         name: "skewed",
         dqsck_clks: 13,
         dq_skew_clks: 2,
         phyupd_every: 200,
+        wr_skew: [3, 1],
+        wr_dq_skew: [1, 0],
     })
     .await;
 }
