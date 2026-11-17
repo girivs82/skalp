@@ -1452,7 +1452,8 @@ impl UnifiedSimulator {
     }
 
     /// Build the result struct
-    async fn build_result(&self) -> UnifiedSimResult {
+    /// The result so far: cycles run, outputs, waveforms
+    pub async fn build_result(&self) -> UnifiedSimResult {
         let is_stable = match &self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.stats().is_stable,
             #[cfg(target_os = "macos")]
@@ -1611,6 +1612,29 @@ impl UnifiedSimulator {
                 widths
             }
         }
+    }
+
+    /// Input port names as the design's source names them (behavioural
+    /// simulation names its ports internally; these are the names
+    /// [`Self::set_input`] and [`Self::get_output`] accept)
+    pub fn input_port_names(&self) -> Vec<String> {
+        self.source_names(self.get_input_names())
+    }
+
+    /// Output port names as the design's source names them
+    pub fn output_port_names(&self) -> Vec<String> {
+        self.source_names(self.get_output_names())
+    }
+
+    fn source_names(&self, names: Vec<String>) -> Vec<String> {
+        names
+            .into_iter()
+            .map(|name| {
+                self.name_registry
+                    .reverse_resolve(&name)
+                    .map_or(name.clone(), str::to_string)
+            })
+            .collect()
     }
 
     /// Get input port names

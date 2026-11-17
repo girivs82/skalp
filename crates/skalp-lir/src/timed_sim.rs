@@ -722,6 +722,8 @@ pub struct TimedSim<'a> {
     /// Changes of watched nets are recorded from this time on
     record_from_ps: i64,
     changes: Vec<(i64, GateNetId, Logic)>,
+    /// Value of each watched net just before its first recorded change
+    recorded_before: HashMap<u32, Logic>,
 
     // Combinational nodes
     nodes: Vec<Node>,
@@ -1309,6 +1311,7 @@ impl<'a> TimedSim<'a> {
             watched_changed: false,
             record_from_ps: i64::MIN,
             changes: Vec::new(),
+            recorded_before: HashMap::new(),
             dirty_nodes: Vec::new(),
             nodes,
             node_outputs,
@@ -1523,6 +1526,53 @@ impl<'a> TimedSim<'a> {
     /// Changes of the watched nets so far: time, net, new value
     pub fn changes(&self) -> &[(i64, GateNetId, Logic)] {
         &self.changes
+    }
+
+    /// Changes of a watched bus (least significant bit first): time and
+    /// new value, `None` while any bit is unknown. Bits changing at the same
+    /// time give one change. The first value is the bus as recording began
+    pub fn bus_changes(&self, bits: &[GateNetId]) -> Vec<(i64, Option<u64>)> {
+        let bits: Vec<GateNetId> = bits
+            .iter()
+            .map(|&net| self.netlist.resolve_alias(net))
+            .collect();
+        let mut value: Vec<Logic> = bits
+            .iter()
+            .map(|&net| {
+                self.recorded_before
+                    .get(&net.0)
+                    .copied()
+                    .unwrap_or_else(|| self.value(net))
+            })
+            .collect();
+        let read = |value: &[Logic]| -> Option<u64> {
+            value.iter().enumerate().try_fold(0u64, |acc, (i, v)| {
+                Some(acc | (u64::from(v.to_bool()?) << i))
+            })
+        };
+        let mut last = read(&value);
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.changes.len() {
+            let time = self.changes[i].0;
+            let mut touched = false;
+            while i < self.changes.len() && self.changes[i].0 == time {
+                let (_, net, v) = self.changes[i];
+                if let Some(bit) = bits.iter().position(|&b| b == net) {
+                    value[bit] = v;
+                    touched = true;
+                }
+                i += 1;
+            }
+            if touched {
+                let now = read(&value);
+                if now != last {
+                    out.push((time, now));
+                    last = now;
+                }
+            }
+        }
+        out
     }
 
     /// Timing violations seen so far (the first ones, if there were many;
@@ -2202,10 +2252,11 @@ impl<'a> TimedSim<'a> {
             if self.net_val[net] == value {
                 continue;
             }
-            self.net_val[net] = value;
+            let before = std::mem::replace(&mut self.net_val[net], value);
             if self.watched[net] {
                 self.watched_changed = true;
                 if now >= self.record_from_ps {
+                    self.recorded_before.entry(net as u32).or_insert(before);
                     self.changes.push((now, GateNetId(net as u32), value));
                 }
             }
@@ -2944,5 +2995,39 @@ mod tests {
             };
             assert_eq!(changes_of(&sim, y), expected, "width {width}");
         }
+    }
+
+    /// A watched bus reports one value per moment its bits settle, starting
+    /// from the value it had when recording began
+    #[test]
+    fn bus_changes_combine_bits_that_change_together() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let a0 = nl.add_input("a0".into());
+        let a1 = nl.add_input("a1".into());
+        let y0 = nl.add_output("y[0]".into());
+        let y1 = nl.add_output("y[1]".into());
+        gate(&mut nl, "b0", CellFunction::Buf, vec![a0], y0);
+        gate(&mut nl, "b1", CellFunction::Buf, vec![a1], y1);
+        let mut delays = TestDelays::default();
+        delays.arcs.insert("b1", 200);
+        let mut sim = TimedSim::new(&nl, &delays).unwrap();
+        sim.set(a0, Logic::Zero);
+        sim.set(a1, Logic::One);
+        sim.run_until(1_000).unwrap();
+        sim.watch(y0);
+        sim.watch(y1);
+        // 0b10: y0 rises at 1100 (0b11), y1 falls at 1200 (0b01), then y0
+        // falls at 2100 (0b00)
+        sim.set(a0, Logic::One);
+        sim.set(a1, Logic::Zero);
+        sim.run_until(2_000).unwrap();
+        sim.set(a0, Logic::Zero);
+        sim.run_until(3_000).unwrap();
+        assert_eq!(
+            sim.bus_changes(&[y0, y1]),
+            vec![(1_100, Some(3)), (1_200, Some(1)), (2_100, Some(0))]
+        );
+        // A bit that never changed holds its value throughout
+        assert_eq!(sim.bus_changes(&[y1]), vec![(1_200, Some(0))]);
     }
 }

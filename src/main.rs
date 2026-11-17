@@ -187,12 +187,17 @@ enum Commands {
         emit: Option<String>,
     },
 
-    /// Simulate the design
+    /// Simulate the design: a source file cycle by cycle (behavioural or
+    /// gate level), or a place-and-route build directory in time with its
+    /// routed delays (as `timed-sim`)
     Sim {
-        /// Design file to simulate
+        /// Design file to simulate, or a build directory of a place and
+        /// route run for timed simulation
         design: PathBuf,
 
-        /// Simulation duration
+        /// How long to simulate: a bare number is cycles of the clock,
+        /// otherwise a time such as 2us (in timed simulation a bare number is
+        /// in ns)
         #[arg(short, long)]
         duration: Option<String>,
 
@@ -227,6 +232,12 @@ enum Commands {
         /// Select a specific VHDL architecture by name (default: last defined)
         #[arg(long, value_name = "NAME")]
         architecture: Option<String>,
+
+        #[command(flatten)]
+        stimulus: Stimulus,
+
+        #[command(flatten)]
+        timed: TimedOptions,
     },
 
     /// Synthesize for FPGA target
@@ -335,46 +346,15 @@ enum Commands {
     /// the clocks, and reports the watched nets, the outputs, and every
     /// setup or hold violation.
     TimedSim {
-        /// Build directory of a place-and-route run on a real device
+        /// Build directory of a place-and-route run
         dir: PathBuf,
-        /// Delay corner to simulate, such as slow or fast; by default the
-        /// first the build has (slow where there are several)
-        #[arg(long)]
-        corner: Option<String>,
-        /// A clock to drive, as NET=PERIOD_NS (repeatable). Without any,
-        /// each clock input of the design runs at the frequency place and
-        /// route timed it for.
-        #[arg(long = "clock", value_name = "NET=NS")]
-        clocks: Vec<String>,
-        /// An input to hold, as NET=0 or NET=1 (repeatable); other inputs
-        /// are held low
-        #[arg(long = "set", value_name = "NET=VALUE")]
-        sets: Vec<String>,
-        /// How long to simulate (such as 500ns, 100us, 2ms)
-        #[arg(short, long, default_value = "100us")]
-        duration: String,
-        /// A net to report the changes of (repeatable); a name ending in
-        /// `*` watches every net it starts
-        #[arg(long = "watch", value_name = "NET")]
-        watch: Vec<String>,
-        /// Record changes of watched nets, and violations, only from this time on (such as
-        /// 655us), to watch many nets around one moment of a long run
-        #[arg(long, value_name = "TIME")]
-        watch_from: Option<String>,
-        /// Stop once a net has a value, as NET=0 or NET=1
-        #[arg(long, value_name = "NET=VALUE")]
-        until: Option<String>,
-        /// What nets hold at power-up, before cells drive them: zero, one,
-        /// x (unknown), or random[:SEED] (a different pick per net). A loop
-        /// of gates keeps its power-up value until its inputs force it.
-        #[arg(long, default_value = "zero")]
-        power_up: String,
-        /// What a register or memory takes on a setup or hold violation,
-        /// or an unknown clock edge: x (unknown, pessimistic) or
-        /// resolve[:SEED] (the old or the new value, picked at random, as
-        /// a metastable flip-flop settles in hardware)
-        #[arg(long, default_value = "x")]
-        metastability: String,
+        /// How long to simulate (such as 500ns, 100us, 2ms); 100us if not given
+        #[arg(short, long)]
+        duration: Option<String>,
+        #[command(flatten)]
+        stimulus: Stimulus,
+        #[command(flatten)]
+        timed: TimedOptions,
     },
 
     /// Read a logic analyzer capture from a board running a `synth --debug` build
@@ -879,7 +859,24 @@ fn main() -> Result<()> {
             gate_opt_level,
             ncl,
             architecture,
+            stimulus,
+            timed,
         } => {
+            if design.is_dir() {
+                run_timed_sim(&TimedSimArgs {
+                    dir: &design,
+                    duration: duration.as_deref().unwrap_or("100us"),
+                    stimulus: &stimulus,
+                    timed: &timed,
+                })?;
+                return Ok(());
+            }
+            if timed.any() {
+                anyhow::bail!(
+                    "--corner, --power-up and --metastability are for timed simulation of a \
+                     place-and-route build directory"
+                );
+            }
             // Default output: <design_dir>/build/<name>.skw.gz
             let waveform_path = output.unwrap_or_else(|| {
                 let dir = design.parent().unwrap_or(Path::new("."));
@@ -895,6 +892,7 @@ fn main() -> Result<()> {
                 ncl,
                 &waveform_path,
                 architecture.as_deref(),
+                &stimulus,
             )?;
         }
 
@@ -936,26 +934,14 @@ fn main() -> Result<()> {
 
         Commands::TimedSim {
             dir,
-            corner,
-            clocks,
-            sets,
             duration,
-            watch,
-            watch_from,
-            until,
-            power_up,
-            metastability,
+            stimulus,
+            timed,
         } => run_timed_sim(&TimedSimArgs {
             dir: &dir,
-            corner: corner.as_deref(),
-            clocks: &clocks,
-            sets: &sets,
-            duration: &duration,
-            watch: &watch,
-            watch_from: watch_from.as_deref(),
-            until: until.as_deref(),
-            power_up: &power_up,
-            metastability: &metastability,
+            duration: duration.as_deref().unwrap_or("100us"),
+            stimulus: &stimulus,
+            timed: &timed,
         })?,
         Commands::Debug {
             dir,
@@ -2413,6 +2399,7 @@ fn simulate_design(
     ncl_mode: bool,
     waveform_path: &Path,
     architecture: Option<&str>,
+    stimulus: &Stimulus,
 ) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
@@ -2439,11 +2426,30 @@ fn simulate_design(
         Some("sk") | Some("skalp") | Some("vhd") | Some("vhdl") => {
             // Source file - compile it
             if ncl_mode {
+                if stimulus.any() {
+                    anyhow::bail!(
+                        "--clock, --set, --watch and --until are for clocked simulation, not --ncl"
+                    );
+                }
                 simulate_ncl(design_file, cycles, use_gpu, gate_opt_level)
             } else if gate_level {
-                simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level, waveform_path)
+                simulate_gate_level(
+                    design_file,
+                    duration,
+                    use_gpu,
+                    gate_opt_level,
+                    waveform_path,
+                    stimulus,
+                )
             } else {
-                simulate_behavioral(design_file, cycles, use_gpu, waveform_path, architecture)
+                simulate_behavioral(
+                    design_file,
+                    duration,
+                    use_gpu,
+                    waveform_path,
+                    architecture,
+                    stimulus,
+                )
             }
         }
         Some("mir") => {
@@ -2460,7 +2466,7 @@ fn simulate_design(
             } else {
                 // MIR → SIR
                 let sir = convert_mir_to_sir(&mir.modules[0]);
-                simulate_sir_behavioral(&sir, cycles, use_gpu, waveform_path)
+                simulate_sir_behavioral(&sir, duration, use_gpu, waveform_path, stimulus)
             }
         }
         Some("lir") => {
@@ -2476,10 +2482,11 @@ fn simulate_design(
 /// Behavioral simulation: HIR → MIR → SIR
 fn simulate_behavioral(
     source_file: &PathBuf,
-    cycles: u64,
+    duration: Option<&str>,
     use_gpu: bool,
     waveform_path: &Path,
     architecture: Option<&str>,
+    stimulus: &Stimulus,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::MirCompiler;
@@ -2488,7 +2495,6 @@ fn simulate_behavioral(
     println!("🔧 Behavioral Simulation (HIR → MIR → SIR)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source_file);
-    println!("Cycles: {}", cycles);
     println!("GPU: {}", use_gpu);
     println!();
 
@@ -2537,16 +2543,17 @@ fn simulate_behavioral(
     println!("   Sequential nodes: {}", sir.sequential_nodes.len());
     println!();
 
-    simulate_sir_behavioral(&sir, cycles, use_gpu, waveform_path)
+    simulate_sir_behavioral(&sir, duration, use_gpu, waveform_path, stimulus)
 }
 
 /// Gate-level simulation: HIR → MIR → LIR → GateNetlist → SIR → Simulation
 fn simulate_gate_level(
     source_file: &PathBuf,
-    cycles: u64,
+    duration: Option<&str>,
     use_gpu: bool,
     gate_opt_level: u8,
     waveform_path: &Path,
+    stimulus: &Stimulus,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::get_stdlib_library;
@@ -2682,7 +2689,6 @@ fn simulate_gate_level(
     let config = UnifiedSimConfig {
         level: skalp_sim::SimLevel::GateLevel,
         hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
-        max_cycles: cycles,
         capture_waveforms: true,
         ..Default::default()
     };
@@ -2700,24 +2706,9 @@ fn simulate_gate_level(
     println!("   Inputs: {:?}", simulator.get_input_names());
     println!("   Outputs: {:?}", simulator.get_output_names());
 
-    // Find clock signal if present
-    let input_names = simulator.get_input_names();
-    let clock_name = input_names
-        .iter()
-        .find(|n| n.contains("clk") || n.contains("clock"))
-        .cloned();
-
     // Run simulation (async methods require a runtime)
     let runtime = tokio::runtime::Runtime::new()?;
-    let result = runtime.block_on(async {
-        if let Some(clk) = clock_name {
-            println!("   Clock: {} (toggling)", clk);
-            simulator.run_clocked(cycles, &clk).await
-        } else {
-            println!("   No clock detected, running {} steps", cycles);
-            simulator.run(cycles).await
-        }
-    });
+    let result = runtime.block_on(drive_cycles(&mut simulator, stimulus, duration))?;
 
     println!("\n📊 Simulation Results:");
     println!("   Cycles: {}", result.cycles);
@@ -2738,6 +2729,244 @@ fn simulate_gate_level(
     println!("\n✅ Gate-level simulation complete!");
 
     Ok(())
+}
+
+/// A signal of a cycle simulation: a port, or the bits of a bus whose
+/// ports are `name[i]`
+enum CycleSignal {
+    Port(String),
+    Bits(Vec<String>),
+}
+
+impl CycleSignal {
+    /// `name` among the ports `names`, also without the design's instance
+    /// prefix where the ports have one
+    fn find(names: &[String], name: &str) -> Option<Self> {
+        let lookup = |want: &str| -> Option<Self> {
+            if names.iter().any(|n| n == want) {
+                return Some(CycleSignal::Port(want.to_string()));
+            }
+            let mut bits: Vec<(usize, &String)> = names
+                .iter()
+                .filter_map(|n| {
+                    let rest = n.strip_prefix(want)?.strip_prefix('[')?;
+                    Some((rest.strip_suffix(']')?.parse().ok()?, n))
+                })
+                .collect();
+            bits.sort_unstable_by_key(|(bit, _)| *bit);
+            (!bits.is_empty())
+                .then(|| CycleSignal::Bits(bits.into_iter().map(|(_, n)| n.clone()).collect()))
+        };
+        lookup(name).or_else(|| {
+            let prefix = names.iter().find_map(|n| {
+                let base = n.split('[').next()?;
+                base.ends_with(&format!(".{name}"))
+                    .then(|| base[..base.len() - name.len()].to_string())
+            })?;
+            lookup(&format!("{prefix}{name}"))
+        })
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            CycleSignal::Port(_) => 64,
+            CycleSignal::Bits(bits) => bits.len(),
+        }
+    }
+
+    async fn set(&self, sim: &mut skalp_sim::UnifiedSimulator, value: u64) {
+        match self {
+            CycleSignal::Port(name) => sim.set_input(name, value).await,
+            CycleSignal::Bits(bits) => {
+                for (bit, name) in bits.iter().enumerate() {
+                    sim.set_input(name, (value >> bit) & 1).await;
+                }
+            }
+        }
+    }
+
+    async fn value(&self, sim: &skalp_sim::UnifiedSimulator) -> Option<u64> {
+        match self {
+            CycleSignal::Port(name) => sim.get_output(name).await,
+            CycleSignal::Bits(bits) => {
+                let mut value = 0u64;
+                for (bit, name) in bits.iter().enumerate() {
+                    value |= (sim.get_output(name).await? & 1) << bit;
+                }
+                Some(value)
+            }
+        }
+    }
+}
+
+impl Stimulus {
+    fn any(&self) -> bool {
+        !self.clocks.is_empty()
+            || !self.sets.is_empty()
+            || !self.watch.is_empty()
+            || self.watch_from.is_some()
+            || self.until.is_some()
+    }
+}
+
+/// Run a cycle simulation as `stimulus` says: hold the inputs it sets,
+/// drive its clock (a step per half cycle), for `duration`
+/// (a time, or a bare number of cycles; 1000 cycles if not given) or
+/// until its condition holds, and report the watched signals' changes
+async fn drive_cycles(
+    sim: &mut skalp_sim::UnifiedSimulator,
+    stimulus: &Stimulus,
+    duration: Option<&str>,
+) -> Result<skalp_sim::UnifiedSimResult> {
+    const DEFAULT_PERIOD_PS: i64 = 10_000;
+    const DEFAULT_CYCLES: u64 = 1000;
+    let inputs = sim.input_port_names();
+    let outputs = sim.output_port_names();
+    let find = |names: &[String], name: &str, what: &str| -> Result<CycleSignal> {
+        CycleSignal::find(names, name)
+            .with_context(|| format!("no {what} named '{name}' (have {})", names.join(", ")))
+    };
+
+    // The clock: as given, or the input named like one
+    let (clock, period_ps) = match stimulus.clocks.as_slice() {
+        [] => (
+            inputs
+                .iter()
+                .find(|n| n.contains("clk") || n.contains("clock"))
+                .cloned(),
+            DEFAULT_PERIOD_PS,
+        ),
+        [spec] => {
+            let (name, period) = spec
+                .rsplit_once('=')
+                .with_context(|| format!("'{spec}' is not NET=PERIOD"))?;
+            let name = match find(&inputs, name.trim(), "input")? {
+                CycleSignal::Port(name) => name,
+                CycleSignal::Bits(_) => anyhow::bail!("the clock '{name}' is a bus"),
+            };
+            (Some(name), parse_time_ps(period)?.max(1))
+        }
+        _ => anyhow::bail!("cycle simulation drives one clock; give one --clock"),
+    };
+    let cycles = match duration {
+        None => DEFAULT_CYCLES,
+        Some(text) if text.trim().chars().all(|c| c.is_ascii_digit()) => text.trim().parse()?,
+        Some(text) => (parse_time_ps(text)? / period_ps).max(0) as u64,
+    };
+    match &clock {
+        Some(clock) => println!(
+            "   Clock: {} every {:.3} ns, {} cycles",
+            clock,
+            period_ps as f64 / 1e3,
+            cycles
+        ),
+        None => println!("   No clock, {} steps", cycles),
+    }
+
+    for spec in &stimulus.sets {
+        let (name, value) = parse_net_value(spec)?;
+        let signal = find(&inputs, name, "input")?;
+        check_fits(spec, value, signal.width())?;
+        signal.set(sim, value).await;
+    }
+    let mut watched: Vec<(String, CycleSignal)> = Vec::new();
+    for pattern in &stimulus.watch {
+        match pattern.strip_suffix('*') {
+            Some(prefix) => {
+                let before = watched.len();
+                for name in outputs.iter().filter(|n| {
+                    n.starts_with(prefix)
+                        || n.split('.')
+                            .next_back()
+                            .is_some_and(|b| b.starts_with(prefix))
+                }) {
+                    watched.push((name.clone(), CycleSignal::Port(name.clone())));
+                }
+                if watched.len() == before {
+                    anyhow::bail!("no output starts with '{prefix}'");
+                }
+            }
+            None => watched.push((pattern.clone(), find(&outputs, pattern, "output")?)),
+        }
+    }
+    let until = match stimulus.until.as_deref() {
+        Some(spec) => {
+            let (name, value) = parse_net_value(spec)?;
+            let signal = find(&outputs, name, "output")?;
+            check_fits(spec, value, signal.width())?;
+            Some((signal, value))
+        }
+        None => None,
+    };
+    let record_from = stimulus
+        .watch_from
+        .as_deref()
+        .map(parse_time_ps)
+        .transpose()?
+        .unwrap_or(i64::MIN);
+
+    let mut last: Vec<Option<u64>> = Vec::with_capacity(watched.len());
+    for (_, signal) in &watched {
+        last.push(signal.value(sim).await);
+    }
+    let mut changes: Vec<Vec<(i64, Option<u64>)>> = vec![Vec::new(); watched.len()];
+    let mut stopped_at = None;
+    for cycle in 0..cycles {
+        match &clock {
+            Some(clock) => {
+                sim.set_input(clock, 0).await;
+                sim.step().await;
+                sim.set_input(clock, 1).await;
+                sim.step().await;
+            }
+            None => sim.step().await,
+        }
+        // After the cycle's rising edge
+        let now_ps = cycle as i64 * period_ps + period_ps / 2;
+        for (k, (_, signal)) in watched.iter().enumerate() {
+            let value = signal.value(sim).await;
+            if value != last[k] {
+                last[k] = value;
+                if now_ps >= record_from {
+                    changes[k].push((now_ps, value));
+                }
+            }
+        }
+        if let Some((signal, value)) = &until {
+            if signal.value(sim).await == Some(*value) {
+                stopped_at = Some((cycle + 1, now_ps));
+                break;
+            }
+        }
+    }
+
+    if let Some(spec) = stimulus.until.as_deref() {
+        match stopped_at {
+            Some((cycle, now_ps)) => println!(
+                "   Stopped: {} in cycle {} ({:.3} ns)",
+                spec,
+                cycle,
+                now_ps as f64 / 1e3
+            ),
+            None => println!("   {} did not happen", spec),
+        }
+    }
+    const MAX_CHANGES_SHOWN: usize = 50;
+    for ((name, signal), changes) in watched.iter().zip(&changes) {
+        println!("   {} ({} changes):", name, changes.len());
+        for (t, v) in changes.iter().take(MAX_CHANGES_SHOWN) {
+            let shown = match (v, signal) {
+                (None, _) => "?".to_string(),
+                (Some(v), CycleSignal::Bits(bits)) if bits.len() == 1 => v.to_string(),
+                (Some(v), _) => format!("0x{v:x}"),
+            };
+            println!("     {:>14.3} ns  {}", *t as f64 / 1e3, shown);
+        }
+        if changes.len() > MAX_CHANGES_SHOWN {
+            println!("     ... and {} more", changes.len() - MAX_CHANGES_SHOWN);
+        }
+    }
+    Ok(sim.build_result().await)
 }
 
 /// NCL (Null Convention Logic) async simulation
@@ -2871,9 +3100,10 @@ fn simulate_ncl(
 /// Run behavioral SIR simulation
 fn simulate_sir_behavioral(
     sir: &skalp_sir::SirModule,
-    cycles: u64,
+    duration: Option<&str>,
     use_gpu: bool,
     waveform_path: &Path,
+    stimulus: &Stimulus,
 ) -> Result<()> {
     use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use tokio::runtime::Runtime;
@@ -2888,7 +3118,6 @@ fn simulate_sir_behavioral(
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
             hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
-            max_cycles: cycles,
             capture_waveforms: true,
             ..Default::default()
         };
@@ -2904,7 +3133,7 @@ fn simulate_sir_behavioral(
         println!("   Device: {}", simulator.device_info());
 
         // Run simulation
-        let result = simulator.run(cycles).await;
+        let result = drive_cycles(&mut simulator, stimulus, duration).await?;
 
         println!("   Completed {} cycles", result.cycles);
 
@@ -8477,18 +8706,68 @@ const ROUTED_NETLIST_FILE: &str = "design_routed.json";
 /// Its delays at each corner
 const ROUTED_DELAYS_FILE: &str = "design_delays.json";
 
-/// Options of `skalp timed-sim`
+/// What a simulation drives and reports, the same for every simulator
+/// (`sim` of a source file, cycle by cycle, and timed simulation of a
+/// routed build)
+#[derive(clap::Args, Debug, Clone, Default)]
+struct Stimulus {
+    /// A clock to drive, as NET=PERIOD (such as clk=10ns; a bare number
+    /// is in ns). Repeatable in timed simulation; the cycle simulators
+    /// drive one. Without any, timed simulation runs each clock input at
+    /// the frequency place and route timed it for, and the cycle
+    /// simulators the input named like a clock, every 10 ns.
+    #[arg(long = "clock", value_name = "NET=PERIOD")]
+    clocks: Vec<String>,
+    /// An input to hold, as NET=VALUE (repeatable; VALUE in decimal or
+    /// 0x hex, a whole bus at once); other inputs are held low
+    #[arg(long = "set", value_name = "NET=VALUE")]
+    sets: Vec<String>,
+    /// A signal to report the changes of (repeatable); a name ending in
+    /// `*` watches every signal it starts
+    #[arg(long = "watch", value_name = "NET")]
+    watch: Vec<String>,
+    /// Report changes of watched signals (and keep violations) only from
+    /// this time on (such as 655us)
+    #[arg(long, value_name = "TIME")]
+    watch_from: Option<String>,
+    /// Stop once a signal has a value, as NET=VALUE
+    #[arg(long, value_name = "NET=VALUE")]
+    until: Option<String>,
+}
+
+/// Options of timed simulation only
+#[derive(clap::Args, Debug, Clone, Default)]
+struct TimedOptions {
+    /// Delay corner to simulate, such as slow or fast; by default the
+    /// first the build has (slow where there are several)
+    #[arg(long)]
+    corner: Option<String>,
+    /// What nets hold at power-up, before cells drive them: zero (the
+    /// default), one, x (unknown), or random[:SEED] (a different pick per
+    /// net). A loop of gates keeps its power-up value until its inputs
+    /// force it.
+    #[arg(long)]
+    power_up: Option<String>,
+    /// What a register or memory takes on a setup or hold violation, or
+    /// an unknown clock edge: x (unknown, pessimistic, the default) or
+    /// resolve[:SEED] (the old or the new value, picked at random, as a
+    /// metastable flip-flop settles in hardware)
+    #[arg(long)]
+    metastability: Option<String>,
+}
+
+impl TimedOptions {
+    fn any(&self) -> bool {
+        self.corner.is_some() || self.power_up.is_some() || self.metastability.is_some()
+    }
+}
+
+/// Options of a timed simulation
 struct TimedSimArgs<'a> {
     dir: &'a std::path::Path,
-    corner: Option<&'a str>,
-    clocks: &'a [String],
-    sets: &'a [String],
     duration: &'a str,
-    watch: &'a [String],
-    watch_from: Option<&'a str>,
-    until: Option<&'a str>,
-    power_up: &'a str,
-    metastability: &'a str,
+    stimulus: &'a Stimulus,
+    timed: &'a TimedOptions,
 }
 
 /// A time such as `500ns`, `100us` or `2ms` (a bare number is in ns), in
@@ -8513,18 +8792,67 @@ fn parse_time_ps(text: &str) -> Result<i64> {
     Ok((value * scale).round() as i64)
 }
 
-/// `NET=VALUE` as a net name and a 0 or 1
-fn parse_net_value(text: &str) -> Result<(&str, skalp_lir::timed_sim::Logic)> {
-    use skalp_lir::timed_sim::Logic;
+/// `NET=VALUE` as a signal name and a value (decimal, or hex with 0x)
+fn parse_net_value(text: &str) -> Result<(&str, u64)> {
     let (name, value) = text
         .rsplit_once('=')
         .with_context(|| format!("'{text}' is not NET=VALUE"))?;
-    let value = match value.trim() {
-        "0" => Logic::Zero,
-        "1" => Logic::One,
-        other => anyhow::bail!("'{other}' in '{text}' is not 0 or 1"),
+    let value = value.trim();
+    let parsed = match value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        Some(hex) => u64::from_str_radix(&hex.replace('_', ""), 16),
+        None => value.replace('_', "").parse(),
     };
+    let value = parsed.with_context(|| format!("'{value}' in '{text}' is not a number"))?;
     Ok((name.trim(), value))
+}
+
+/// Refuse a value wider than the signal it is for
+fn check_fits(spec: &str, value: u64, width: usize) -> Result<()> {
+    if width < 64 && value >> width != 0 {
+        anyhow::bail!("'{spec}': the value does not fit in {width} bits");
+    }
+    Ok(())
+}
+
+/// The nets of a signal of a routed netlist: a net by name, or the bits of
+/// a bus `name[i]` by index; failing both, the same for a port named
+/// `<instance>.name`, so ports can be named as in the source
+fn routed_signal(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    name: &str,
+) -> Option<Vec<skalp_lir::gate_netlist::GateNetId>> {
+    let canonical = |n: &skalp_lir::gate_netlist::GateNet| n.alias_of.is_none();
+    let exact = |want: &str| -> Option<Vec<skalp_lir::gate_netlist::GateNetId>> {
+        if let Some(net) = netlist.nets.iter().find(|n| n.name == want) {
+            return Some(vec![netlist.resolve_alias(net.id)]);
+        }
+        let mut bits: Vec<(usize, skalp_lir::gate_netlist::GateNetId)> = netlist
+            .nets
+            .iter()
+            .filter(|n| canonical(n))
+            .filter_map(|n| {
+                let rest = n.name.strip_prefix(want)?.strip_prefix('[')?;
+                Some((rest.strip_suffix(']')?.parse().ok()?, n.id))
+            })
+            .collect();
+        bits.sort_unstable_by_key(|(bit, _)| *bit);
+        (!bits.is_empty()).then(|| bits.into_iter().map(|(_, id)| id).collect())
+    };
+    exact(name).or_else(|| exact(&format!("{}{name}", port_prefix(netlist)?)))
+}
+
+/// The instance prefix every port name of a netlist starts with (such as
+/// `top.`), if they share one
+fn port_prefix(netlist: &skalp_lir::gate_netlist::GateNetlist) -> Option<String> {
+    let mut ports = netlist.nets.iter().filter(|n| n.is_input || n.is_output);
+    let first = ports.next()?;
+    let prefix = &first.name[..first.name.split('[').next()?.rfind('.')? + 1];
+    ports
+        .all(|n| n.name.starts_with(prefix))
+        .then(|| prefix.to_string())
 }
 
 /// Simulate a routed design in time with its routed delays
@@ -8550,7 +8878,7 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         serde_json::from_reader(read(&netlist_path)?).context("reading the routed netlist")?;
     let corners: Vec<DelayAnnotation> =
         serde_json::from_reader(read(&delays_path)?).context("reading the routed delays")?;
-    let delays = match args.corner {
+    let delays = match args.timed.corner.as_deref() {
         Some(corner) => corners
             .iter()
             .find(|d| d.corner == corner)
@@ -8567,12 +8895,13 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             netlist.cells.len()
         );
     }
-    let power_up = match args.power_up.split_once(':') {
+    let power_up_text = args.timed.power_up.as_deref().unwrap_or("zero");
+    let power_up = match power_up_text.split_once(':') {
         Some(("random", seed)) => PowerUp::Random(
             seed.parse()
                 .context("--power-up random:SEED needs a number")?,
         ),
-        _ => match args.power_up {
+        _ => match power_up_text {
             "zero" | "0" => PowerUp::Zero,
             "one" | "1" => PowerUp::One,
             "x" | "unknown" => PowerUp::Unknown,
@@ -8580,12 +8909,13 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             other => anyhow::bail!("--power-up '{other}': use zero, one, x or random[:SEED]"),
         },
     };
-    let metastability = match args.metastability.split_once(':') {
+    let metastability_text = args.timed.metastability.as_deref().unwrap_or("x");
+    let metastability = match metastability_text.split_once(':') {
         Some(("resolve", seed)) => Metastability::Resolve(
             seed.parse()
                 .context("--metastability resolve:SEED needs a number")?,
         ),
-        _ => match args.metastability {
+        _ => match metastability_text {
             "x" | "unknown" => Metastability::Unknown,
             "resolve" => Metastability::Resolve(1),
             other => anyhow::bail!("--metastability '{other}': use x or resolve[:SEED]"),
@@ -8609,14 +8939,22 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             sim.missing_arcs
         );
     }
-    let find = |sim: &TimedSim, name: &str| {
-        sim.net(name)
-            .with_context(|| format!("no net named '{name}' in the routed netlist"))
+    // A signal by name: a net, or the bits of a bus, also by its port
+    // name without the design's instance prefix (`clk` for `top.clk`)
+    let signal = |name: &str| -> Result<Vec<skalp_lir::gate_netlist::GateNetId>> {
+        routed_signal(&netlist, name)
+            .with_context(|| format!("no net or bus named '{name}' in the routed netlist"))
+    };
+    let find = |_: &TimedSim, name: &str| -> Result<skalp_lir::gate_netlist::GateNetId> {
+        match signal(name)?.as_slice() {
+            [net] => Ok(*net),
+            bits => anyhow::bail!("'{name}' is a bus of {} bits: name one bit", bits.len()),
+        }
     };
 
     // Clocks: as given, or each clock input at the frequency it was timed for
     let mut clocked: Vec<skalp_lir::gate_netlist::GateNetId> = Vec::new();
-    for spec in args.clocks {
+    for spec in &args.stimulus.clocks {
         let (name, period) = spec
             .rsplit_once('=')
             .with_context(|| format!("'{spec}' is not NET=PERIOD_NS"))?;
@@ -8630,7 +8968,7 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             period_ps as f64 / 1e3
         );
     }
-    if args.clocks.is_empty() {
+    if args.stimulus.clocks.is_empty() {
         let report: Option<serde_json::Value> =
             fs::read_to_string(args.dir.join("timing_report.json"))
                 .ok()
@@ -8664,9 +9002,13 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     }
     // Inputs: as given, others low
     let mut held: Vec<(skalp_lir::gate_netlist::GateNetId, Logic)> = Vec::new();
-    for spec in args.sets {
+    for spec in &args.stimulus.sets {
         let (name, value) = parse_net_value(spec)?;
-        held.push((find(&sim, name)?, value));
+        let bits = signal(name)?;
+        check_fits(spec, value, bits.len())?;
+        for (bit, net) in bits.into_iter().enumerate() {
+            held.push((net, Logic::from_bool((value >> bit) & 1 == 1)));
+        }
     }
     for &input in &netlist.inputs {
         if clocked.contains(&input) || held.iter().any(|(n, _)| *n == input) {
@@ -8677,47 +9019,68 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     for &(net, value) in &held {
         sim.set(net, value);
     }
-    // Watched nets
-    let mut watched: Vec<skalp_lir::gate_netlist::GateNetId> = Vec::new();
-    for pattern in args.watch {
+    // Watched signals: a name (a net, or a bus shown as one value) and its
+    // bits, least significant first
+    let mut watched: Vec<(String, Vec<skalp_lir::gate_netlist::GateNetId>)> = Vec::new();
+    for pattern in &args.stimulus.watch {
         match pattern.strip_suffix('*') {
             Some(prefix) => {
                 let before = watched.len();
-                watched.extend(
+                let starting = |prefix: &str| -> Vec<skalp_lir::gate_netlist::GateNetId> {
                     netlist
                         .nets
                         .iter()
                         .filter(|n| n.name.starts_with(prefix) && n.alias_of.is_none())
-                        .map(|n| n.id),
+                        .map(|n| n.id)
+                        .collect()
+                };
+                let mut found = starting(prefix);
+                if found.is_empty() {
+                    if let Some(ports) = port_prefix(&netlist) {
+                        found = starting(&format!("{ports}{prefix}"));
+                    }
+                }
+                watched.extend(
+                    found
+                        .into_iter()
+                        .map(|net| (netlist.nets[net.0 as usize].name.clone(), vec![net])),
                 );
                 if watched.len() == before {
                     anyhow::bail!("no net starts with '{prefix}'");
                 }
             }
-            None => watched.push(find(&sim, pattern)?),
+            None => watched.push((pattern.clone(), signal(pattern)?)),
         }
     }
     let until = args
+        .stimulus
         .until
+        .as_deref()
         .map(|spec| -> Result<_> {
             let (name, value) = parse_net_value(spec)?;
-            Ok((find(&sim, name)?, value))
+            let bits = signal(name)?;
+            check_fits(spec, value, bits.len())?;
+            Ok((bits, value))
         })
         .transpose()?;
-    for &net in &watched {
-        sim.watch(net);
+    for (_, bits) in &watched {
+        for &net in bits {
+            sim.watch(net);
+        }
     }
-    if let Some((net, _)) = until {
-        sim.watch(net);
+    if let Some((bits, _)) = &until {
+        for &net in bits {
+            sim.watch(net);
+        }
     }
-    if let Some(from) = args.watch_from {
+    if let Some(from) = args.stimulus.watch_from.as_deref() {
         sim.record_from(parse_time_ps(from)?);
     }
 
     let end_ps = parse_time_ps(args.duration)?;
     let run_started = std::time::Instant::now();
     let reached = match until {
-        Some((net, value)) => sim.run_while(end_ps, |sim| sim.value(net) == value)?,
+        Some((bits, value)) => sim.run_while(end_ps, |sim| sim.bus_value(&bits) == Some(value))?,
         None => {
             sim.run_until(end_ps)?;
             false
@@ -8731,24 +9094,24 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         sim.events(),
         sim.events() as f64 / wall.max(1e-9) / 1e6
     );
-    if let (Some(spec), true) = (args.until, reached) {
+    if let (Some(spec), true) = (args.stimulus.until.as_deref(), reached) {
         println!("Stopped: {} at {:.3} ns", spec, sim.now() as f64 / 1e3);
-    } else if let Some(spec) = args.until {
+    } else if let Some(spec) = args.stimulus.until.as_deref() {
         println!("{} did not happen", spec);
     }
 
     // Watched changes
     const MAX_CHANGES_SHOWN: usize = 50;
-    for &net in &watched {
-        let name = &netlist.nets[net.0 as usize].name;
-        let changes: Vec<_> = sim
-            .changes()
-            .iter()
-            .filter(|(_, n, _)| *n == netlist.resolve_alias(net))
-            .collect();
+    for (name, bits) in &watched {
+        let changes = sim.bus_changes(bits);
         println!("{} ({} changes):", name, changes.len());
-        for (t, _, v) in changes.iter().take(MAX_CHANGES_SHOWN) {
-            println!("  {:>14.3} ns  {}", *t as f64 / 1e3, v);
+        for (t, v) in changes.iter().take(MAX_CHANGES_SHOWN) {
+            let shown = match v {
+                None => "X".to_string(),
+                Some(v) if bits.len() == 1 => v.to_string(),
+                Some(v) => format!("0x{v:x}"),
+            };
+            println!("  {:>14.3} ns  {}", *t as f64 / 1e3, shown);
         }
         if changes.len() > MAX_CHANGES_SHOWN {
             println!("  ... and {} more", changes.len() - MAX_CHANGES_SHOWN);
