@@ -4836,7 +4836,12 @@ fn lengthen_short_matched_delays(
     };
     let matched = skalp_lir::ncl_bundle::find_matched_delays(netlist);
     let mut changed = false;
-    for b in timing.bundles.iter().filter(|b| b.slack_ns < 0.0) {
+    // A longer delay cannot fix an in-block hold: that is reported only
+    for b in timing
+        .bundles
+        .iter()
+        .filter(|b| b.slack_ns < 0.0 && b.times != skalp_lir::ncl_bundle::REGISTER_HOLD)
+    {
         let Some(md) = matched
             .iter()
             .find(|m| netlist.cells[m.and_cell.0 as usize].path == b.delay)
