@@ -146,6 +146,7 @@ mod test_regression_bugs;
 mod test_safety_annotation_pipeline;
 mod test_safety_tech_mapping_flow;
 mod test_sequential_lowering;
+mod test_sim_front_end;
 mod test_simple_impl;
 mod test_simple_trait_bound;
 mod test_simulation_suite;
