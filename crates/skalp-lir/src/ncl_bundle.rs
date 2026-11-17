@@ -598,6 +598,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     }
     checks.extend(check_channels(netlist, delays, &matched));
     checks.extend(check_channel_holds(netlist, delays, &matched));
+    checks.extend(check_register_holds(netlist, delays, &matched));
     checks.extend(check_arbiters(netlist, delays, &matched));
     checks.extend(check_releases(netlist, delays, &matched));
     checks
@@ -1134,6 +1135,73 @@ fn check_channel_holds(
     checks
 }
 
+/// `times` of the in-block hold check (`check_register_holds`)
+pub const REGISTER_HOLD: &str = "register hold";
+
+/// Hold inside a block: a strobe reaches the block's registers at slightly
+/// different times, and a register it has already clocked launches its new
+/// value, which must not reach another register on the same strobe before
+/// the strobe itself has (plus that register's hold time). Times count from
+/// the strobe at its own net: data is the earliest arrival of a new value at
+/// each register input, the control the strobe's arrival at that register
+/// plus its hold time. A longer matched delay does not help a hold, so
+/// [`size_matched_delays`] leaves these checks alone; they are reported.
+fn check_register_holds(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    matched: &[MatchedDelay],
+) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    for md in matched {
+        let inside = |cell: &Cell| cell.path.starts_with(&md.prefix);
+        let clocked: Vec<&Cell> = netlist
+            .cells
+            .iter()
+            .filter(|c| c.clock == Some(md.control) && inside(c))
+            .collect();
+        if clocked.is_empty() {
+            continue;
+        }
+        // every launching output of the strobe's registers, at its launch
+        let mut launched: HashMap<GateNetId, i64> = HashMap::new();
+        for cell in &clocked {
+            let at = delays.clock_wire_ps(netlist, md.control, cell) + delays.clock_to_out_ps(cell);
+            for (pin, &out) in cell.outputs.iter().enumerate() {
+                if delays.launches(cell, pin) {
+                    launched.insert(out, at);
+                }
+            }
+        }
+        let mut data = Arrivals::new(netlist, delays, &md.prefix, false)
+            .earliest()
+            .with_sources(launched);
+        let mut worst: Option<(i64, i64)> = None;
+        for cell in &clocked {
+            let held = delays.clock_wire_ps(netlist, md.control, cell);
+            for (i, &input) in cell.inputs.iter().enumerate() {
+                let Some(t) = data.at(input) else { continue };
+                let changes = t + delays.wire_ps(netlist, input, cell, i);
+                let until = held + delays.hold_ps(cell, i);
+                if worst.is_none_or(|(u, c)| changes - until < c - u) {
+                    worst = Some((until, changes));
+                }
+            }
+        }
+        if let Some((until, changes)) = worst {
+            checks.push(BundleCheck {
+                prefix: md.prefix.clone(),
+                delay_path: netlist.cells[md.and_cell.0 as usize].path.clone(),
+                times: REGISTER_HOLD,
+                data_ps: until,
+                control_ps: changes,
+                chain_len: md.chain.len(),
+                sender: None,
+            });
+        }
+    }
+    checks
+}
+
 /// Whether `md` is the `go` delay of a self-timed block: its source is the
 /// step request, driven by the step control
 fn fed_by_step(netlist: &GateNetlist, md: &MatchedDelay) -> bool {
@@ -1367,7 +1435,7 @@ pub fn size_matched_delays(
             let path = &netlist.cells[md.and_cell.0 as usize].path;
             let worst = checks
                 .iter()
-                .filter(|c| &c.delay_path == path)
+                .filter(|c| &c.delay_path == path && c.times != REGISTER_HOLD)
                 .map(|c| {
                     let required = c.data_ps + c.data_ps.abs() * margin_percent / 100;
                     required - c.control_ps
@@ -1637,6 +1705,57 @@ mod tests {
         assert_eq!(next.data_ps, 800);
         assert_eq!(next.slack_ps(), -400);
         assert!(next.delay_path.ends_with("done_and"));
+    }
+
+    /// In-block hold: the register's new value comes back to its own input
+    /// five gates after it launches. With the strobe reaching the register
+    /// late (clock skew) the new value can arrive before the strobe has:
+    /// the check reports it, and sizing leaves the delays alone.
+    #[test]
+    fn register_hold_compares_the_new_value_with_the_strobe() {
+        struct Skewed(i64);
+        impl BundleDelays for Skewed {
+            fn wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell, _: usize) -> i64 {
+                0
+            }
+            fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell) -> i64 {
+                self.0
+            }
+            fn arc_ps(&self, _: &Cell, _: usize, _: usize) -> Option<i64> {
+                Some(100)
+            }
+            fn clock_to_out_ps(&self, _: &Cell) -> i64 {
+                100
+            }
+            fn setup_ps(&self, _: &Cell, _: usize) -> i64 {
+                0
+            }
+            fn hold_ps(&self, _: &Cell, _: usize) -> i64 {
+                50
+            }
+        }
+        let netlist = block_with_feedback();
+        let hold = |delays: &dyn BundleDelays| {
+            check_matched_delays(&netlist, delays)
+                .into_iter()
+                .find(|c| c.times == REGISTER_HOLD)
+                .expect("a register hold check")
+        };
+        // no skew: the new value (100 + 500) comes long after the strobe (0 + 50)
+        let ok = hold(&UnitDelays);
+        assert_eq!((ok.data_ps, ok.control_ps), (0, 600));
+        // the same strobe arrival everywhere cancels: skew only matters
+        // between registers, here launch and capture share it
+        let same = hold(&Skewed(1000));
+        assert_eq!((same.data_ps, same.control_ps), (1050, 1600));
+        assert!(same.slack_ps() > 0);
+        let mut copy = netlist.clone();
+        let report = size_matched_delays(&mut copy, &Skewed(1000), 0);
+        assert_eq!(
+            find_matched_delays(&copy).len(),
+            find_matched_delays(&netlist).len()
+        );
+        let _ = report;
     }
 
     /// A distributed RAM written by the strobe: its read port is
