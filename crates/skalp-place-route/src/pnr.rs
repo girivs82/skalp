@@ -120,6 +120,20 @@ pub struct PnrResult {
     /// Extracted from routing results. Feed back to `netlist.ncl_wire_delays`
     /// or pass to `post_pnr_iteration()` for the next closure iteration.
     pub wire_delays: IndexMap<GateNetId, f64>,
+    /// The netlist as placed and routed, with its delays at each corner,
+    /// for timed simulation (real-device flows)
+    pub routed: Option<RoutedNetlist>,
+}
+
+/// A routed netlist and its delays, for timed simulation
+/// (`skalp_lir::timed_sim`)
+#[derive(Debug, Clone)]
+pub struct RoutedNetlist {
+    /// The netlist place and route worked on (which may differ from its
+    /// input, for example in buffers it bypassed)
+    pub netlist: GateNetlist,
+    /// Its delays, one annotation per corner
+    pub delays: Vec<skalp_lir::timed_sim::DelayAnnotation>,
 }
 
 impl PnrResult {
@@ -268,6 +282,7 @@ pub fn place_and_route(
         timing,
         variant,
         wire_delays,
+        routed: None,
     })
 }
 
@@ -542,6 +557,7 @@ pub fn place_and_route_nexus(
         timing,
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
+        routed: None,
     })
 }
 
@@ -1076,6 +1092,14 @@ pub fn place_and_route_nexus_real(
         .iter()
         .map(|(&net_id, route)| (net_id, route.delay as f64))
         .collect();
+    // Every routed delay at both corners, for timed simulation
+    let routed = RoutedNetlist {
+        netlist: netlist.clone(),
+        delays: vec![
+            crate::timing::sta::annotate_delays(&device, &timing_model, &design, "slow"),
+            crate::timing::sta::annotate_delays(&device, &fast_model, &design, "fast"),
+        ],
+    };
 
     Ok(PnrResult {
         placement,
@@ -1084,6 +1108,7 @@ pub fn place_and_route_nexus_real(
         timing: Some(timing),
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
+        routed: Some(routed),
     })
 }
 
@@ -1229,6 +1254,7 @@ pub fn place_and_route_ecp5(
         timing,
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
+        routed: None,
     })
 }
 
@@ -1304,6 +1330,7 @@ pub fn place_and_route_xc7(
         timing,
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
+        routed: None,
     })
 }
 
