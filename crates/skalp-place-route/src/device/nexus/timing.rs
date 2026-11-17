@@ -615,7 +615,10 @@ impl TimingModel for NexusTiming<'_> {
                 })
                 .collect();
         }
-        (0..cell.inputs.len())
+        // A flip-flop's own reset, when not one of its inputs, is the pin
+        // after them
+        let pins = cell.inputs.len() + usize::from(cell.reset.is_some());
+        (0..pins)
             .map(|input| {
                 let (pin, name) = match (cell.cell_type.as_str(), input) {
                     (_, 0) => (0, "M"),
@@ -649,6 +652,13 @@ impl TimingModel for NexusTiming<'_> {
         if Self::is_dist_ram(cell) && (9..=12).contains(&input) {
             let base = DIST_RAM_PIN_RAD + 4 * (input - 9);
             return (0..4).map(|lut| base + lut).collect();
+        }
+        if cell.clock.is_some() && !Self::is_dist_ram(cell) && cell.ram_ports().is_none() {
+            // A flip-flop: its enable and reset have their own pins
+            if input == cell.inputs.len() && cell.reset.is_some() {
+                return vec![FF_PIN_LSR];
+            }
+            return vec![crate::bitstream::prepare::ff_pin(cell, input)];
         }
         if Self::is_wide_lut(cell) {
             // Data inputs feed both LUTs; the last input is the mux select.

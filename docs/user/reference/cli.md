@@ -254,7 +254,10 @@ Error: Type mismatch: expected bit[8], found bit[16]
 
 ## `skalp sim` - Simulate Design
 
-Simulate your design directly from source.
+Simulate a design from source, cycle by cycle (behavioural or gate level),
+or a place-and-route build directory in time, with its routed delays. All
+three simulators take the same stimulus options, so one command line runs on
+each and their reports can be compared.
 
 ### Usage
 ```bash
@@ -262,14 +265,29 @@ skalp sim [OPTIONS] <DESIGN>
 ```
 
 ### Arguments
-- `<DESIGN>` - Design file to simulate (a `.sk` source file)
+- `<DESIGN>` - A `.sk` source file, or the output directory of a place and
+  route run (`skalp synth -f`), which is simulated in time like `skalp timed-sim`
 
 ### Options
-- `-d, --duration <DURATION>` - Simulation duration (cycles)
+- `-d, --duration <DURATION>` - How long to simulate: a bare number is cycles
+  of the clock, otherwise a time such as `2us` (in timed simulation, which
+  may have no clock or several, a bare number is in ns)
 - `-o, --output <OUTPUT>` - Output waveform file (`.skw.gz`); defaults to `<name>.skw.gz` next to the source
 - `--gate-level` - Gate-level simulation (HIR→MIR→LIR→SIR) instead of behavioral
 - `--gpu` - Use GPU acceleration (Metal on macOS)
 - `--ncl` - Simulate as NCL (Null Convention Logic) async circuit
+- `--clock <NET=PERIOD>` - A clock to drive, such as `clk=10ns` (a bare number
+  is in ns). Without one, the cycle simulators drive the input named like a
+  clock every 10 ns, and timed simulation runs each clock at the frequency
+  place and route timed it for
+- `--set <NET=VALUE>` - Hold an input at a value (decimal or `0x` hex, a whole
+  bus at once); other inputs are held low
+- `--watch <NET>` - Report a signal's changes (a bus as one value); a name
+  ending in `*` watches every signal it starts
+- `--watch-from <TIME>` - Report changes only from this time on
+- `--until <NET=VALUE>` - Stop once a signal has a value
+- `--corner`, `--power-up`, `--metastability` - Timed simulation only (see
+  `skalp timed-sim --help`)
 - `-h, --help` - Print help
 
 ### Examples
@@ -287,6 +305,13 @@ skalp sim design.sk -d 1000 -o waves.skw.gz
 **Gate-level simulation:**
 ```bash
 skalp sim design.sk --gate-level -d 100
+```
+
+**The same stimulus on the source and on a routed build:**
+```bash
+skalp sim counter.sk --set rst=0 --set en=1 --watch count --until count=5
+skalp synth counter.sk -d ice40-hx8k -f -o out
+skalp sim out --clock clk=20ns --set rst=0 --set en=1 --watch count --until count=5 -d 2us
 ```
 
 ### Output

@@ -124,18 +124,20 @@ struct Engine<'a, D: Device + ?Sized> {
 
 impl<D: Device + ?Sized> Engine<'_, D> {
     /// Routing delay of a net from its source to one input pin of a cell.
+    /// Where the device cannot name the pin's wire, the router's delay for
+    /// the whole net stands in for it.
     fn route_delay(&mut self, net: GateNetId, cell: CellId, pin: usize) -> i64 {
         let Some(loc) = self.design.placement.placements.get(&cell) else {
+            return 0;
+        };
+        let Some(route) = self.design.routing.routes.get(&net) else {
             return 0;
         };
         let Some(mut wire) =
             self.device
                 .bel_pin_wire(loc.tile_x, loc.tile_y, loc.bel_index, CellPin::Input(pin))
         else {
-            return 0;
-        };
-        let Some(route) = self.design.routing.routes.get(&net) else {
-            return 0;
+            return i64::from(route.delay);
         };
         let device = self.device;
         let drivers = self.drivers.entry(net).or_insert_with(|| {
@@ -679,6 +681,32 @@ pub fn check_bundles<D: Device + ?Sized>(
         model,
     };
     skalp_lir::ncl_bundle::check_matched_delays(design.netlist, &delays)
+}
+
+/// Every delay of a routed design that a timed simulation needs, from
+/// `model` (one corner), keyed to the routed netlist
+pub fn annotate_delays<D: Device + ?Sized>(
+    device: &D,
+    model: &dyn TimingModel,
+    design: &PlacedDesign<'_>,
+    corner: &str,
+) -> skalp_lir::timed_sim::DelayAnnotation {
+    let mut engine = Engine {
+        device,
+        model,
+        design,
+        drivers: HashMap::new(),
+        arrivals: HashMap::new(),
+        visiting: HashSet::new(),
+        early: false,
+        async_cells: HashSet::new(),
+        launch_clock: None,
+    };
+    let delays = RoutedBundleDelays {
+        engine: std::cell::RefCell::new(&mut engine),
+        model,
+    };
+    skalp_lir::timed_sim::DelayAnnotation::capture(design.netlist, &delays, corner)
 }
 
 /// Worst-corner summary of bundle checks made at several named corners

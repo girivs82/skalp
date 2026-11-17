@@ -580,7 +580,11 @@ pub fn are_npn_equivalent(tt1: u64, tt2: u64, num_inputs: usize) -> bool {
 
 /// Count the number of 1s in a truth table (support size)
 pub fn truth_table_ones(tt: u64, num_inputs: usize) -> u32 {
-    let mask = (1u64 << (1 << num_inputs)) - 1;
+    let mask = if num_inputs >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1 << num_inputs)) - 1
+    };
     (tt & mask).count_ones()
 }
 
