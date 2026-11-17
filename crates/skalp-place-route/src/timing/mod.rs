@@ -6,6 +6,7 @@ pub mod clock_targets;
 pub mod sta;
 
 mod delays;
+pub mod fabric_model;
 pub mod retime_delays;
 pub mod route_delays;
 

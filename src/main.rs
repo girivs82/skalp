@@ -337,9 +337,10 @@ enum Commands {
     TimedSim {
         /// Build directory of a place-and-route run on a real device
         dir: PathBuf,
-        /// Delay corner to simulate: slow or fast
-        #[arg(long, default_value = "slow")]
-        corner: String,
+        /// Delay corner to simulate, such as slow or fast; by default the
+        /// first the build has (slow where there are several)
+        #[arg(long)]
+        corner: Option<String>,
         /// A clock to drive, as NET=PERIOD_NS (repeatable). Without any,
         /// each clock input of the design runs at the frequency place and
         /// route timed it for.
@@ -946,7 +947,7 @@ fn main() -> Result<()> {
             metastability,
         } => run_timed_sim(&TimedSimArgs {
             dir: &dir,
-            corner: &corner,
+            corner: corner.as_deref(),
             clocks: &clocks,
             sets: &sets,
             duration: &duration,
@@ -4879,19 +4880,7 @@ fn run_nexus_pnr_on_netlist(
         println!("Timing report: {:?}", timing_path);
     }
 
-    // The routed netlist and its delays, for `skalp timed-sim`
-    if let Some(routed) = &result.routed {
-        let netlist_path = output_dir.join(ROUTED_NETLIST_FILE);
-        let file = std::io::BufWriter::new(fs::File::create(&netlist_path)?);
-        serde_json::to_writer(file, &routed.netlist)?;
-        let delays_path = output_dir.join(ROUTED_DELAYS_FILE);
-        let file = std::io::BufWriter::new(fs::File::create(&delays_path)?);
-        serde_json::to_writer(file, &routed.delays)?;
-        println!(
-            "Routed netlist and delays: {:?}, {:?}",
-            netlist_path, delays_path
-        );
-    }
+    write_routed(output_dir, &result)?;
 
     let bit_path = output_dir.join("design.bit");
     result.bitstream.write_to_file(&bit_path)?;
@@ -5126,7 +5115,26 @@ fn run_pnr_on_netlist(
         fs::write(&timing_path, timing_json)?;
         println!("Timing report: {:?}", timing_path);
     }
+    write_routed(output_dir, &result)?;
 
+    Ok(())
+}
+
+/// Save the routed netlist and its delays, for `skalp timed-sim`
+fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrResult) -> Result<()> {
+    let Some(routed) = &result.routed else {
+        return Ok(());
+    };
+    let netlist_path = output_dir.join(ROUTED_NETLIST_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&netlist_path)?);
+    serde_json::to_writer(file, &routed.netlist)?;
+    let delays_path = output_dir.join(ROUTED_DELAYS_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&delays_path)?);
+    serde_json::to_writer(file, &routed.delays)?;
+    println!(
+        "Routed netlist and delays: {:?}, {:?}",
+        netlist_path, delays_path
+    );
     Ok(())
 }
 
@@ -8472,7 +8480,7 @@ const ROUTED_DELAYS_FILE: &str = "design_delays.json";
 /// Options of `skalp timed-sim`
 struct TimedSimArgs<'a> {
     dir: &'a std::path::Path,
-    corner: &'a str,
+    corner: Option<&'a str>,
     clocks: &'a [String],
     sets: &'a [String],
     duration: &'a str,
@@ -8542,13 +8550,16 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         serde_json::from_reader(read(&netlist_path)?).context("reading the routed netlist")?;
     let corners: Vec<DelayAnnotation> =
         serde_json::from_reader(read(&delays_path)?).context("reading the routed delays")?;
-    let delays = corners
-        .iter()
-        .find(|d| d.corner == args.corner)
-        .with_context(|| {
-            let names: Vec<&str> = corners.iter().map(|d| d.corner.as_str()).collect();
-            format!("no '{}' corner (have {})", args.corner, names.join(", "))
-        })?;
+    let delays = match args.corner {
+        Some(corner) => corners
+            .iter()
+            .find(|d| d.corner == corner)
+            .with_context(|| {
+                let names: Vec<&str> = corners.iter().map(|d| d.corner.as_str()).collect();
+                format!("no '{}' corner (have {})", corner, names.join(", "))
+            })?,
+        None => corners.first().context("the build has no delays")?,
+    };
     if delays.cells.len() != netlist.cells.len() {
         anyhow::bail!(
             "the delays are for {} cells but the netlist has {}: rebuild",
@@ -8587,7 +8598,7 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         netlist.name,
         netlist.cells.len(),
         netlist.nets.len(),
-        args.corner,
+        delays.corner,
         power_up,
         metastability,
         started.elapsed().as_secs_f64()
