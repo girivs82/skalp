@@ -55,6 +55,7 @@ pub mod synth_cache;
 pub mod tech_library;
 pub mod tech_mapper;
 pub mod technology;
+pub mod timed_sim;
 
 // Core primitive types (used by SIR for simulation)
 pub use lir::{FitOverrides, HierarchyNode, LirSafetyInfo, NetId, PrimitiveId, PrimitiveType};

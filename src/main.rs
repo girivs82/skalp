@@ -328,6 +328,54 @@ enum Commands {
         force: bool,
     },
 
+    /// Simulate a placed and routed design in time, with its routed delays
+    ///
+    /// Reads the routed netlist and delays that `synth -f` and `pnr` save
+    /// for real devices (design_routed.json, design_delays.json), drives
+    /// the clocks, and reports the watched nets, the outputs, and every
+    /// setup or hold violation.
+    TimedSim {
+        /// Build directory of a place-and-route run on a real device
+        dir: PathBuf,
+        /// Delay corner to simulate: slow or fast
+        #[arg(long, default_value = "slow")]
+        corner: String,
+        /// A clock to drive, as NET=PERIOD_NS (repeatable). Without any,
+        /// each clock input of the design runs at the frequency place and
+        /// route timed it for.
+        #[arg(long = "clock", value_name = "NET=NS")]
+        clocks: Vec<String>,
+        /// An input to hold, as NET=0 or NET=1 (repeatable); other inputs
+        /// are held low
+        #[arg(long = "set", value_name = "NET=VALUE")]
+        sets: Vec<String>,
+        /// How long to simulate (such as 500ns, 100us, 2ms)
+        #[arg(short, long, default_value = "100us")]
+        duration: String,
+        /// A net to report the changes of (repeatable); a name ending in
+        /// `*` watches every net it starts
+        #[arg(long = "watch", value_name = "NET")]
+        watch: Vec<String>,
+        /// Record changes of watched nets, and violations, only from this time on (such as
+        /// 655us), to watch many nets around one moment of a long run
+        #[arg(long, value_name = "TIME")]
+        watch_from: Option<String>,
+        /// Stop once a net has a value, as NET=0 or NET=1
+        #[arg(long, value_name = "NET=VALUE")]
+        until: Option<String>,
+        /// What nets hold at power-up, before cells drive them: zero, one,
+        /// x (unknown), or random[:SEED] (a different pick per net). A loop
+        /// of gates keeps its power-up value until its inputs force it.
+        #[arg(long, default_value = "zero")]
+        power_up: String,
+        /// What a register or memory takes on a setup or hold violation,
+        /// or an unknown clock edge: x (unknown, pessimistic) or
+        /// resolve[:SEED] (the old or the new value, picked at random, as
+        /// a metastable flip-flop settles in hardware)
+        #[arg(long, default_value = "x")]
+        metastability: String,
+    },
+
     /// Read a logic analyzer capture from a board running a `synth --debug` build
     Debug {
         /// Build directory of the `synth --debug` run
@@ -885,6 +933,29 @@ fn main() -> Result<()> {
             run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
         }
 
+        Commands::TimedSim {
+            dir,
+            corner,
+            clocks,
+            sets,
+            duration,
+            watch,
+            watch_from,
+            until,
+            power_up,
+            metastability,
+        } => run_timed_sim(&TimedSimArgs {
+            dir: &dir,
+            corner: &corner,
+            clocks: &clocks,
+            sets: &sets,
+            duration: &duration,
+            watch: &watch,
+            watch_from: watch_from.as_deref(),
+            until: until.as_deref(),
+            power_up: &power_up,
+            metastability: &metastability,
+        })?,
         Commands::Debug {
             dir,
             board,
@@ -4808,6 +4879,20 @@ fn run_nexus_pnr_on_netlist(
         println!("Timing report: {:?}", timing_path);
     }
 
+    // The routed netlist and its delays, for `skalp timed-sim`
+    if let Some(routed) = &result.routed {
+        let netlist_path = output_dir.join(ROUTED_NETLIST_FILE);
+        let file = std::io::BufWriter::new(fs::File::create(&netlist_path)?);
+        serde_json::to_writer(file, &routed.netlist)?;
+        let delays_path = output_dir.join(ROUTED_DELAYS_FILE);
+        let file = std::io::BufWriter::new(fs::File::create(&delays_path)?);
+        serde_json::to_writer(file, &routed.delays)?;
+        println!(
+            "Routed netlist and delays: {:?}, {:?}",
+            netlist_path, delays_path
+        );
+    }
+
     let bit_path = output_dir.join("design.bit");
     result.bitstream.write_to_file(&bit_path)?;
     println!();
@@ -8377,4 +8462,354 @@ fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
         undriven.len(),
         lines.join("\n  ")
     )
+}
+
+/// Routed netlist saved by place and route on a real device
+const ROUTED_NETLIST_FILE: &str = "design_routed.json";
+/// Its delays at each corner
+const ROUTED_DELAYS_FILE: &str = "design_delays.json";
+
+/// Options of `skalp timed-sim`
+struct TimedSimArgs<'a> {
+    dir: &'a std::path::Path,
+    corner: &'a str,
+    clocks: &'a [String],
+    sets: &'a [String],
+    duration: &'a str,
+    watch: &'a [String],
+    watch_from: Option<&'a str>,
+    until: Option<&'a str>,
+    power_up: &'a str,
+    metastability: &'a str,
+}
+
+/// A time such as `500ns`, `100us` or `2ms` (a bare number is in ns), in
+/// picoseconds
+fn parse_time_ps(text: &str) -> Result<i64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .with_context(|| format!("'{text}' is not a time (such as 500ns, 100us, 2ms)"))?;
+    let scale = match unit.trim() {
+        "ps" => 1.0,
+        "" | "ns" => 1e3,
+        "us" => 1e6,
+        "ms" => 1e9,
+        "s" => 1e12,
+        other => anyhow::bail!("unknown time unit '{other}' in '{text}' (use ps, ns, us, ms or s)"),
+    };
+    Ok((value * scale).round() as i64)
+}
+
+/// `NET=VALUE` as a net name and a 0 or 1
+fn parse_net_value(text: &str) -> Result<(&str, skalp_lir::timed_sim::Logic)> {
+    use skalp_lir::timed_sim::Logic;
+    let (name, value) = text
+        .rsplit_once('=')
+        .with_context(|| format!("'{text}' is not NET=VALUE"))?;
+    let value = match value.trim() {
+        "0" => Logic::Zero,
+        "1" => Logic::One,
+        other => anyhow::bail!("'{other}' in '{text}' is not 0 or 1"),
+    };
+    Ok((name.trim(), value))
+}
+
+/// Simulate a routed design in time with its routed delays
+fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
+    use skalp_lir::timed_sim::{
+        DelayAnnotation, Logic, Metastability, PowerUp, TimedSim, ViolationKind,
+    };
+
+    let netlist_path = args.dir.join(ROUTED_NETLIST_FILE);
+    let delays_path = args.dir.join(ROUTED_DELAYS_FILE);
+    let read = |path: &std::path::Path| -> Result<std::io::BufReader<fs::File>> {
+        Ok(std::io::BufReader::new(fs::File::open(path).with_context(
+            || {
+                format!(
+                    "{} not found: build with place and route on a real device first",
+                    path.display()
+                )
+            },
+        )?))
+    };
+    let started = std::time::Instant::now();
+    let netlist: skalp_lir::gate_netlist::GateNetlist =
+        serde_json::from_reader(read(&netlist_path)?).context("reading the routed netlist")?;
+    let corners: Vec<DelayAnnotation> =
+        serde_json::from_reader(read(&delays_path)?).context("reading the routed delays")?;
+    let delays = corners
+        .iter()
+        .find(|d| d.corner == args.corner)
+        .with_context(|| {
+            let names: Vec<&str> = corners.iter().map(|d| d.corner.as_str()).collect();
+            format!("no '{}' corner (have {})", args.corner, names.join(", "))
+        })?;
+    if delays.cells.len() != netlist.cells.len() {
+        anyhow::bail!(
+            "the delays are for {} cells but the netlist has {}: rebuild",
+            delays.cells.len(),
+            netlist.cells.len()
+        );
+    }
+    let power_up = match args.power_up.split_once(':') {
+        Some(("random", seed)) => PowerUp::Random(
+            seed.parse()
+                .context("--power-up random:SEED needs a number")?,
+        ),
+        _ => match args.power_up {
+            "zero" | "0" => PowerUp::Zero,
+            "one" | "1" => PowerUp::One,
+            "x" | "unknown" => PowerUp::Unknown,
+            "random" => PowerUp::Random(1),
+            other => anyhow::bail!("--power-up '{other}': use zero, one, x or random[:SEED]"),
+        },
+    };
+    let metastability = match args.metastability.split_once(':') {
+        Some(("resolve", seed)) => Metastability::Resolve(
+            seed.parse()
+                .context("--metastability resolve:SEED needs a number")?,
+        ),
+        _ => match args.metastability {
+            "x" | "unknown" => Metastability::Unknown,
+            "resolve" => Metastability::Resolve(1),
+            other => anyhow::bail!("--metastability '{other}': use x or resolve[:SEED]"),
+        },
+    };
+    let mut sim = TimedSim::with_power_up(&netlist, delays, power_up)?;
+    sim.set_metastability(metastability);
+    println!(
+        "Design: {} ({} cells, {} nets), {} corner, power-up {:?}, metastability {:?}, loaded in {:.1} s",
+        netlist.name,
+        netlist.cells.len(),
+        netlist.nets.len(),
+        args.corner,
+        power_up,
+        metastability,
+        started.elapsed().as_secs_f64()
+    );
+    if sim.missing_arcs > 0 {
+        println!(
+            "  {} cell arcs have no delay figure; timed with the slowest arc of their output",
+            sim.missing_arcs
+        );
+    }
+    let find = |sim: &TimedSim, name: &str| {
+        sim.net(name)
+            .with_context(|| format!("no net named '{name}' in the routed netlist"))
+    };
+
+    // Clocks: as given, or each clock input at the frequency it was timed for
+    let mut clocked: Vec<skalp_lir::gate_netlist::GateNetId> = Vec::new();
+    for spec in args.clocks {
+        let (name, period) = spec
+            .rsplit_once('=')
+            .with_context(|| format!("'{spec}' is not NET=PERIOD_NS"))?;
+        let net = find(&sim, name.trim())?;
+        let period_ps = parse_time_ps(period)?;
+        sim.add_clock(net, period_ps);
+        clocked.push(net);
+        println!(
+            "  clock {} every {:.3} ns",
+            name.trim(),
+            period_ps as f64 / 1e3
+        );
+    }
+    if args.clocks.is_empty() {
+        let report: Option<serde_json::Value> =
+            fs::read_to_string(args.dir.join("timing_report.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok());
+        let mhz = report
+            .as_ref()
+            .and_then(|r| r.get("target_frequency"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|f| *f > 0.0)
+            .context("no --clock given and no target frequency in timing_report.json")?;
+        let period_ps = (1e6 / mhz).round() as i64;
+        let clock_inputs: Vec<_> = netlist
+            .inputs
+            .iter()
+            .copied()
+            .filter(|&n| netlist.nets[n.0 as usize].is_clock)
+            .collect();
+        if clock_inputs.is_empty() {
+            anyhow::bail!("the design has no clock input: give one with --clock NET=PERIOD_NS");
+        }
+        for net in clock_inputs {
+            sim.add_clock(net, period_ps);
+            clocked.push(net);
+            println!(
+                "  clock {} every {:.3} ns ({:.1} MHz, the timing target)",
+                netlist.nets[net.0 as usize].name,
+                period_ps as f64 / 1e3,
+                mhz
+            );
+        }
+    }
+    // Inputs: as given, others low
+    let mut held: Vec<(skalp_lir::gate_netlist::GateNetId, Logic)> = Vec::new();
+    for spec in args.sets {
+        let (name, value) = parse_net_value(spec)?;
+        held.push((find(&sim, name)?, value));
+    }
+    for &input in &netlist.inputs {
+        if clocked.contains(&input) || held.iter().any(|(n, _)| *n == input) {
+            continue;
+        }
+        sim.set(input, Logic::Zero);
+    }
+    for &(net, value) in &held {
+        sim.set(net, value);
+    }
+    // Watched nets
+    let mut watched: Vec<skalp_lir::gate_netlist::GateNetId> = Vec::new();
+    for pattern in args.watch {
+        match pattern.strip_suffix('*') {
+            Some(prefix) => {
+                let before = watched.len();
+                watched.extend(
+                    netlist
+                        .nets
+                        .iter()
+                        .filter(|n| n.name.starts_with(prefix) && n.alias_of.is_none())
+                        .map(|n| n.id),
+                );
+                if watched.len() == before {
+                    anyhow::bail!("no net starts with '{prefix}'");
+                }
+            }
+            None => watched.push(find(&sim, pattern)?),
+        }
+    }
+    let until = args
+        .until
+        .map(|spec| -> Result<_> {
+            let (name, value) = parse_net_value(spec)?;
+            Ok((find(&sim, name)?, value))
+        })
+        .transpose()?;
+    for &net in &watched {
+        sim.watch(net);
+    }
+    if let Some((net, _)) = until {
+        sim.watch(net);
+    }
+    if let Some(from) = args.watch_from {
+        sim.record_from(parse_time_ps(from)?);
+    }
+
+    let end_ps = parse_time_ps(args.duration)?;
+    let run_started = std::time::Instant::now();
+    let reached = match until {
+        Some((net, value)) => sim.run_while(end_ps, |sim| sim.value(net) == value)?,
+        None => {
+            sim.run_until(end_ps)?;
+            false
+        }
+    };
+    let wall = run_started.elapsed().as_secs_f64();
+    println!(
+        "Simulated {:.3} us in {:.1} s: {} events ({:.1} M events/s)",
+        sim.now() as f64 / 1e6,
+        wall,
+        sim.events(),
+        sim.events() as f64 / wall.max(1e-9) / 1e6
+    );
+    if let (Some(spec), true) = (args.until, reached) {
+        println!("Stopped: {} at {:.3} ns", spec, sim.now() as f64 / 1e3);
+    } else if let Some(spec) = args.until {
+        println!("{} did not happen", spec);
+    }
+
+    // Watched changes
+    const MAX_CHANGES_SHOWN: usize = 50;
+    for &net in &watched {
+        let name = &netlist.nets[net.0 as usize].name;
+        let changes: Vec<_> = sim
+            .changes()
+            .iter()
+            .filter(|(_, n, _)| *n == netlist.resolve_alias(net))
+            .collect();
+        println!("{} ({} changes):", name, changes.len());
+        for (t, _, v) in changes.iter().take(MAX_CHANGES_SHOWN) {
+            println!("  {:>14.3} ns  {}", *t as f64 / 1e3, v);
+        }
+        if changes.len() > MAX_CHANGES_SHOWN {
+            println!("  ... and {} more", changes.len() - MAX_CHANGES_SHOWN);
+        }
+    }
+    // Where unknowns first appeared among the watched nets, with the
+    // cells that drove them
+    const FIRST_UNKNOWNS_SHOWN: usize = 20;
+    let first_unknowns: Vec<_> = sim
+        .changes()
+        .iter()
+        .filter(|(_, _, v)| *v == Logic::X)
+        .take(FIRST_UNKNOWNS_SHOWN)
+        .collect();
+    if !first_unknowns.is_empty() {
+        println!("First unknowns among the watched nets:");
+        for (t, net, _) in first_unknowns {
+            let net = &netlist.nets[net.0 as usize];
+            let driver = net
+                .driver
+                .map(|c| netlist.cells[c.0 as usize].path.as_str())
+                .unwrap_or("(input)");
+            println!(
+                "  {:>14.3} ns  {}  from {}",
+                *t as f64 / 1e3,
+                net.name,
+                driver
+            );
+        }
+    }
+    println!("Outputs:");
+    for &output in &netlist.outputs {
+        println!(
+            "  {:<24} {}",
+            netlist.nets[output.0 as usize].name,
+            sim.value(output)
+        );
+    }
+
+    // Violations
+    let count = sim.violation_count();
+    if count == 0 {
+        println!("Timing: ✅ no setup or hold violations");
+    } else {
+        let kinds = [
+            (ViolationKind::Setup, "setup"),
+            (ViolationKind::Hold, "hold"),
+            (ViolationKind::UnknownClock, "unknown clock"),
+        ];
+        let by_kind: Vec<String> = kinds
+            .iter()
+            .map(|(k, name)| {
+                let n = sim.violations().iter().filter(|v| v.kind == *k).count();
+                format!("{n} {name}")
+            })
+            .collect();
+        println!(
+            "Timing: ⚠️ {} violations (of the first {}: {})",
+            count,
+            sim.violations().len(),
+            by_kind.join(", ")
+        );
+        for v in sim.violations().iter().take(20) {
+            println!(
+                "  {:>14.3} ns  {:?} at {}{} by {:.3} ns",
+                v.time_ps as f64 / 1e3,
+                v.kind,
+                sim.cell_path(v.cell),
+                v.input.map(|i| format!(" input {i}")).unwrap_or_default(),
+                v.margin_ps as f64 / 1e3
+            );
+        }
+    }
+    Ok(())
 }
