@@ -1,0 +1,34 @@
+// A clock output made by a child (a divider) clocks another child
+entity GcDiv {
+    in clk: clock
+    out sclk: clock
+}
+impl GcDiv {
+    signal fc: bit[2] = 0
+    signal s: bit = 0
+    on(clk.rise) {
+        fc = fc + 1
+        s = if fc + 1 < 2 { 1 } else { 0 }
+    }
+    sclk = s
+}
+entity GcCount {
+    in clk: clock
+    out v: bit[8]
+}
+impl GcCount {
+    signal c: bit[8] = 0
+    on(clk.rise) { c = c + 1 }
+    v = c
+}
+entity GcTop {
+    in clk: clock
+    out n: bit[8]
+}
+impl GcTop {
+    inst d = GcDiv { clk: clk }
+    signal slow: clock
+    slow = d.sclk
+    inst c = GcCount { clk: slow }
+    n = c.v
+}

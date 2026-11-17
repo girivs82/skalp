@@ -1,0 +1,16 @@
+// An array element used as an operand when operators lower to library entities
+entity AiTop {
+    in clk: clock
+    in i: bit[2]
+    in d: bit[32]
+    out o: bit[32]
+}
+impl AiTop {
+    signal a: [bit[32]; 4]
+    signal w: bit[2] = 0
+    on(clk.rise) {
+        a[w] = d
+        w = w + 1
+    }
+    o = a[i] + 5
+}

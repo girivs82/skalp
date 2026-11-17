@@ -1,0 +1,23 @@
+// Two entities with a port of the same name, the second declared before the
+// first's impl: the first impl's `on(clk.rise)` must use its own `clk`.
+entity Outer {
+    in clk: clock
+    out count: bit[8]
+    out inner_count: bit[8]
+}
+entity Inner {
+    in clk: clock
+    out count: bit[8]
+}
+impl Inner {
+    signal c: bit[8] = 0
+    on(clk.rise) { c = c + 2 }
+    count = c
+}
+impl Outer {
+    signal c: bit[8] = 0
+    inst i = Inner { clk: clk }
+    on(clk.rise) { c = c + 1 }
+    count = c
+    inner_count = i.count
+}

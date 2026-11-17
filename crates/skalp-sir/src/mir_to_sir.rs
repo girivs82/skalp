@@ -10236,6 +10236,25 @@ impl<'a> MirToSirConverter<'a> {
                             parent_module_for_signals,
                             parent_prefix,
                         );
+                        // The base is an array kept whole that this instance's context
+                        // does not own (a parent's array reached through a port
+                        // connection, e.g. `a[i]` given to an operator's adder): its
+                        // element, not one bit of it.
+                        let base_signal = self.node_to_signal_ref(base_node);
+                        if matches!(
+                            self.get_signal_type(&base_signal.signal_id),
+                            SirType::Array(..)
+                        ) {
+                            let index_node = self.create_expression_node_for_instance_with_context(
+                                index,
+                                inst_prefix,
+                                port_mapping,
+                                child_module,
+                                parent_module_for_signals,
+                                parent_prefix,
+                            );
+                            return self.create_array_read_node(base_node, index_node);
+                        }
                         if self.evaluate_constant_expression(index).is_some() {
                             let index_val = self.evaluate_const_expr(index);
                             return self.create_bit_select_node_on_base(base_node, index_val);

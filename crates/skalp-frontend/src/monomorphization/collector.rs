@@ -648,6 +648,10 @@ impl<'hir> InstantiationCollector<'hir> {
         let mut const_args = IndexMap::new();
         let mut intent_args = IndexMap::new();
 
+        // A const argument that does not evaluate here (one of the enclosing
+        // entity's own generics, `Child<P, 7>` inside `Parent<P>`)
+        let mut unevaluated_const = false;
+
         // Extract generic arguments from instance
         // Match provided arguments with entity's generic parameters
         for (i, arg) in instance.generic_args.iter().enumerate() {
@@ -675,6 +679,8 @@ impl<'hir> InstantiationCollector<'hir> {
                     // Const parameter - evaluate the argument expression
                     if let Ok(value) = self.evaluator.eval(arg) {
                         const_args.insert(generic.name.clone(), value);
+                    } else {
+                        unevaluated_const = true;
                     }
                 }
                 HirGenericType::Intent => {
@@ -703,6 +709,8 @@ impl<'hir> InstantiationCollector<'hir> {
                     HirGenericType::Const(_const_type) => {
                         if let Ok(value) = self.evaluator.eval(arg) {
                             const_args.insert(param_name.clone(), value);
+                        } else {
+                            unevaluated_const = true;
                         }
                     }
                     HirGenericType::Intent => {
@@ -779,6 +787,13 @@ impl<'hir> InstantiationCollector<'hir> {
             .map(|g| g.name.as_str())
             .collect();
         if !unbound.is_empty() {
+            return;
+        }
+        // Likewise a const argument that names the enclosing entity's generic:
+        // recording the instantiation without it built a specialization in
+        // which that parameter was never bound (`Child_7` with `A` undefined).
+        // It is collected with its value once the enclosing entity specializes.
+        if unevaluated_const {
             return;
         }
 

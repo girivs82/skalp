@@ -1,0 +1,804 @@
+// Behavioural model of one LPDDR4 channel (x16) for simulation.
+//
+// Cycle-based: the model runs on a fast simulation clock `clk` (4 or more clocks per CK, an even
+// number) and sees CK, CA, DQ and DQS as levels sampled on it. It checks what a controller and
+// PHY can get wrong at the pins, and counts each error; it is not meant for synthesis.
+//
+// Commands (JESD209-4 SDR truth table, CA0 = LSB) are sampled on CK_t's rising edge; CS high
+// marks the first cycle of a 2-cycle command. WR-1, RD-1, MRR-1 and MPC-1 (Read DQ Calibration)
+// must be followed straight away by CAS-2, MRW-1 by MRW-2, ACT-1 by ACT-2. Timings are checked
+// in CK cycles between the second cycles of the commands involved.
+//
+// Writes: the first data DQS_t rising edge must land in WL + tDQSS (0.75 to 1.25 tCK) after the
+// CAS-2 edge, then 16 edges half a tCK (+-1 clock) apart, with DQ driven and stable one clock
+// either side of every edge and DQS_c the complement of DQS_t. Bursts may follow each other
+// seamlessly (CAS-to-CAS = 8 tCK); up to four writes may be in flight.
+//
+// Reads, MRR and Read DQ Calibration: DQS_t is driven low for a 2 tCK static preamble ending
+// RL x tCK + DQSCK_CLKS after the CAS-2 edge, then toggles 16 times half a tCK apart with DQ
+// edge-aligned (DQ lags DQS by DQ_SKEW_CLKS clocks), then half a tCK of postamble. A burst that
+// starts as the previous one ends follows it with no preamble. Up to four reads may be in
+// flight. Read DQ Calibration returns, per beat, a bit of MR32 (beats 0-7) or MR40 (beats 8-15)
+// on every DQ, inverted per DQ by MR15 (DQ0-7) and MR20 (DQ8-15). MRR returns the register on
+// DQ[7:0].
+//
+// RL and WL come from MR2 (write latency set A or B). MR5..MR8 read back the generics.
+//
+// Storage: one 16-beat burst per (bank, column[9:4]), tagged with the row that wrote it. A burst
+// counts as written once all 16 beats are captured. Reading a row other than the one stored
+// counts in `aliased` (a limitation of the model, not a design error); reading a location never
+// fully written counts in `unwritten` and returns 16'hDEAD on every beat.
+//
+// Bus contention: `dq_driven` and `dqs_driven` say when the other side drives DQ and DQS. Any
+// clock in which both sides drive the same lines is an error (code 26).
+//
+// `errors` counts design errors; `err_code` and `err_cycle` record the first one:
+//   1 CS high on a command's second cycle      2 ACT-2 without ACT-1
+//   3 MRW-2 without MRW-1                       4 CAS-2 without WR/RD/MRR/MPC
+//   5 RD/WR to a closed bank                    6 REF with a bank open
+//   7 unknown command                           8 write DQS missed the tDQSS window
+//   9 DQ changed in the clock before a DQS edge 10 DQ changed in the clock after a DQS edge
+//  11 write DQS edges not half a tCK apart      12 DQ not driven at a write DQS edge
+//  13 tRCD                                      14 tRP
+//  15 tRFCab                                    16 tMRW
+//  17 WR-1/RD-1/MRR-1/MPC-1 not followed by CAS-2
+//  18 MRW-1 not followed by MRW-2               19 ACT to an open bank
+//  20 DQS_c not the complement of DQS_t         21 refresh overdue (9 x tREFI)
+//  22 CA/CS changed in the clock before CK rose 23 CA/CS changed in the clock after CK rose
+//  24 write burst stopped early                 25 MPC opcode the model does not have
+//  26 both sides drive DQ or DQS                27 tZQCAL (ZQ latch too early)
+//  28 tZQLAT (command too soon after ZQ latch)  29 tRAS
+//  30 tRRD                                      31 tFAW
+//  32 tCCD                                      33 tWR (write recovery before PRE)
+//  34 tRTP                                      35 tWTR
+//  36 more than four reads or writes in flight  37 ACT-1 not followed by ACT-2
+pub entity Lpddr4ChannelModel<
+    const MR5: nat = 255,
+    const MR6: nat = 0,
+    const MR7: nat = 0,
+    const MR8: nat = 16,
+    const DQSCK_CLKS: nat = 0,
+    const DQ_SKEW_CLKS: nat = 0,
+    const TRCD_NCK: nat = 4,
+    const TRP_NCK: nat = 4,
+    const TRAS_NCK: nat = 3,
+    const TRRD_NCK: nat = 4,
+    const TFAW_NCK: nat = 8,
+    const TRFC_NCK: nat = 3,
+    const TMRW_NCK: nat = 10,
+    const TREFI_NCK: nat = 48,
+    const TWR_NCK: nat = 4,
+    const TWTR_NCK: nat = 8,
+    const TRTP_NCK: nat = 8,
+    const TCCD_NCK: nat = 8,
+    const TZQCAL_NCK: nat = 16,
+    const TZQLAT_NCK: nat = 8
+> {
+    in clk: clock
+    in reset_n: bit
+    in ck_t: bit
+    in cke: bit
+    in cs: bit
+    in ca: bit[6]
+    in dq_in: bit[16]
+    in dq_driven: bit
+    in dqs_t_in: bit
+    in dqs_c_in: bit
+    in dqs_driven: bit
+    out dq_out: bit[16]
+    out dq_oe: bit
+    out dqs_out: bit
+    out dqs_oe: bit
+    out errors: bit[16]
+    out err_code: bit[8]
+    out err_cycle: bit[32]
+    out contention: bit[16]
+    out aliased: bit[16]
+    out unwritten: bit[16]
+    out n_act: bit[32]
+    out n_wr: bit[32]
+    out n_rd: bit[32]
+    out n_mrw: bit[16]
+    out n_mrr: bit[16]
+    out n_ref: bit[32]
+    out n_zq: bit[16]
+    out t_ck_clks: bit[8]
+    out mr2_o: bit[8]
+    out mr13_o: bit[8]
+}
+
+impl Lpddr4ChannelModel {
+    // ------------------------------------------------------------ state
+    signal cyc: bit[32] = 0
+    signal nck: bit[32] = 0
+    signal ck_prev: bit = 0
+    signal last_rise: bit[32] = 0
+    signal t_ck: bit[8] = 8
+    signal ca_prev: bit[6] = 0
+    signal cs_prev: bit = 0
+    signal hold_chk: bit = 0
+    signal hold_ca: bit[6] = 0
+    signal hold_cs: bit = 0
+    signal have_first: bit = 0
+    signal first: bit[6] = 0
+    // 0 none, 1 WR-1, 2 RD-1, 3 MRW-1, 4 MRR-1, 5 ACT-1, 6 MPC-1 Read DQ Calibration
+    signal pending: bit[3] = 0
+    signal p_bank: bit[3] = 0
+    signal p_c9: bit = 0
+    signal p_ma: bit[6] = 0
+    signal p_op7: bit = 0
+    signal p_row: bit[17] = 0
+    signal mr1: bit[8] = 0
+    signal mr2: bit[8] = 0
+    signal mr3: bit[8] = 0
+    signal mr11: bit[8] = 0
+    signal mr12: bit[8] = 0
+    signal mr13: bit[8] = 0
+    signal mr14: bit[8] = 0
+    signal mr22: bit[8] = 0
+    // Read DQ Calibration: invert masks (MR15 DQ0-7, MR20 DQ8-15) and patterns (MR32, MR40),
+    // JEDEC defaults
+    signal mr15: bit[8] = 0
+    signal mr20: bit[8] = 0
+    signal mr32: bit[8] = 8'h5A
+    signal mr40: bit[8] = 8'h3C
+    signal last_mrw: bit[32] = 0
+    signal any_mrw: bit = 0
+    signal open_valid: bit[8] = 0
+    signal open_row: [bit[17]; 8]
+    signal act_at: [bit[32]; 8]
+    signal pre_at: [bit[32]; 8]
+    signal wr_end_at: [bit[32]; 8]
+    signal rd_cas_at: [bit[32]; 8]
+    signal wr_seen: bit[8] = 0
+    signal rd_seen: bit[8] = 0
+    signal wr_end_any: bit[32] = 0
+    signal wr_any: bit = 0
+    signal rd_cas_any: bit[32] = 0
+    signal rd_any: bit = 0
+    signal last_cas: bit[32] = 0
+    signal cas_seen: bit = 0
+    // the last four ACTs (h0 newest), for tRRD and tFAW
+    signal act_h0: bit[32] = 0
+    signal act_h1: bit[32] = 0
+    signal act_h2: bit[32] = 0
+    signal act_h3: bit[32] = 0
+    signal act_cnt: bit[3] = 0
+    signal ref_at: bit[32] = 0
+    signal ref_seen: bit = 0
+    signal zq_start_at: bit[32] = 0
+    signal zq_started: bit = 0
+    signal zq_lat_at: bit[32] = 0
+    signal zq_latched: bit = 0
+    signal errors_r: bit[16] = 0
+    signal err_code_r: bit[8] = 0
+    signal err_cycle_r: bit[32] = 0
+    signal cont_r: bit[16] = 0
+    signal aliased_r: bit[16] = 0
+    signal unwritten_r: bit[16] = 0
+    signal n_act_r: bit[32] = 0
+    signal n_wr_r: bit[32] = 0
+    signal n_rd_r: bit[32] = 0
+    signal n_mrw_r: bit[16] = 0
+    signal n_mrr_r: bit[16] = 0
+    signal n_ref_r: bit[32] = 0
+    signal n_zq_r: bit[16] = 0
+    // storage: {bank, col[9:4], beat}; tags {written, row} per {bank, col[9:4]}
+    signal mem: [bit[16]; 8192]
+    signal tag: [bit[18]; 512]
+    // writes in flight: window for the first DQS rise, and the burst's line and row
+    signal wq_lo: [bit[32]; 4]
+    signal wq_hi: [bit[32]; 4]
+    signal wq_line: [bit[9]; 4]
+    signal wq_row: [bit[17]; 4]
+    signal wq_head: bit[2] = 0
+    signal wq_n: bit[3] = 0
+    // write capture: 0 idle, 1 waiting for the first rise, 2 in the burst
+    signal wr_st: bit[2] = 0
+    signal wr_lo: bit[32] = 0
+    signal wr_hi: bit[32] = 0
+    signal wr_line: bit[9] = 0
+    signal wr_row: bit[17] = 0
+    signal wr_beat: bit[5] = 0
+    signal wr_last: bit[32] = 0
+    signal wr_hold: bit = 0
+    signal wr_hold_dq: bit[16] = 0
+    signal dq_prev: bit[16] = 0
+    signal dqs_prev: bit = 0
+    // reads in flight: clock of the first data DQS rise, line, kind (0 data, 1 MRR, 2 Read DQ
+    // Calibration), whether the stored row matches, and the MRR value
+    signal rq_t0: [bit[32]; 4]
+    signal rq_line: [bit[9]; 4]
+    signal rq_kind: [bit[2]; 4]
+    signal rq_ok: bit[4] = 0
+    signal rq_mrv: [bit[8]; 4]
+    signal rq_head: bit[2] = 0
+    signal rq_n: bit[3] = 0
+    // read drive: 0 idle, 1 preamble, 2 burst, 3 postamble
+    signal rd_st: bit[2] = 0
+    signal rd_sub: bit[8] = 0
+    signal rd_b: bit[5] = 0
+    signal rd_line: bit[9] = 0
+    signal rd_kind: bit[2] = 0
+    signal rd_ok: bit = 0
+    signal rd_mrv: bit[8] = 0
+    signal dq_out_r: bit[16] = 0
+    signal dq_oe_r: bit = 0
+    signal dqs_out_r: bit = 0
+    signal dqs_oe_r: bit = 0
+    // DQ_SKEW_CLKS delay line for the read DQ drive
+    signal skew_dq: [bit[16]; 8]
+    signal skew_oe: bit[8] = 0
+
+    // ------------------------------------------------------------ latencies and timing
+    let rl: bit[8] = match mr2[2:0] {
+        0 => 6,
+        1 => 10,
+        2 => 14,
+        3 => 20,
+        4 => 24,
+        5 => 28,
+        6 => 32,
+        _ => 36
+    }
+    let wl_a: bit[8] = match mr2[5:3] {
+        0 => 4,
+        1 => 6,
+        2 => 8,
+        3 => 10,
+        4 => 12,
+        5 => 14,
+        6 => 16,
+        _ => 18
+    }
+    let wl_b: bit[8] = match mr2[5:3] {
+        0 => 4,
+        1 => 8,
+        2 => 12,
+        3 => 18,
+        4 => 22,
+        5 => 26,
+        6 => 30,
+        _ => 34
+    }
+    let wl: bit[8] = if mr2[6] == 1 { wl_b } else { wl_a }
+    let tck32: bit[32] = {24'h000000, t_ck}
+    let half_ck: bit[32] = tck32 >> 1
+    let quarter_ck: bit[32] = tck32 >> 2
+    let wl_clks: bit[32] = {24'h000000, wl} * tck32
+    let rl_clks: bit[32] = {24'h000000, rl} * tck32
+    let dqsck32: bit[32] = DQSCK_CLKS
+    let skew3: bit[3] = DQ_SKEW_CLKS
+    // CK cycle (second-cycle edge numbering) at which a write burst ends: WL + BL/2 + 1
+    let wl32: bit[32] = {24'h000000, wl}
+
+    let ck_rise: bit = if ck_t == 1 && ck_prev == 0 { 1 } else { 0 }
+    let dev_on: bit = if reset_n == 1 && cke == 1 { 1 } else { 0 }
+    let dqs_edge: bit = if dqs_t_in != dqs_prev { 1 } else { 0 }
+    let dqs_rise: bit = if dqs_t_in == 1 && dqs_prev == 0 { 1 } else { 0 }
+    let since_edge: bit[32] = cyc - wr_last
+    let rise_gap: bit[32] = cyc - last_rise
+
+    // second-cycle decode helpers (valid when have_first == 1 and cs == 0 on a rise)
+    let a: bit[6] = first
+    let b: bit[6] = ca
+    let is_first: bit = if ck_rise == 1 && dev_on == 1 && cs == 1 && have_first == 0 { 1 } else { 0 }
+    let is_cmd: bit = if ck_rise == 1 && dev_on == 1 && cs == 0 && have_first == 1 { 1 } else { 0 }
+    let is_act1: bit = if is_cmd == 1 && a[1:0] == 1 { 1 } else { 0 }
+    let is_act2: bit = if is_cmd == 1 && a[1:0] == 3 { 1 } else { 0 }
+    let op5: bit[5] = a[4:0]
+    let is_other: bit = if is_cmd == 1 && a[0] == 0 { 1 } else { 0 }
+    let is_mpc: bit = if is_other == 1 && op5 == 0 { 1 } else { 0 }
+    // MPC opcodes (OP6 = first cycle CA5, OP5:0 = second cycle): 0x43 Read DQ Calibration,
+    // 0x4B/0x4D DQS oscillator start/stop, 0x4F/0x51 ZQ calibration start/latch. The FIFO
+    // opcodes (0x41, 0x47) are not modelled.
+    let mpc_rdc: bit = if is_mpc == 1 && a[5] == 1 && b == 3 { 1 } else { 0 }
+    let mpc_zqs: bit = if is_mpc == 1 && a[5] == 1 && b == 15 { 1 } else { 0 }
+    let mpc_zql: bit = if is_mpc == 1 && a[5] == 1 && b == 17 { 1 } else { 0 }
+    let mpc_known: bit = if is_mpc == 1 && (a[5] == 0 || b == 3 || b == 11 || b == 13 || b == 15 || b == 17) { 1 } else { 0 }
+    let is_pre: bit = if is_other == 1 && op5 == 16 { 1 } else { 0 }
+    let is_ref: bit = if is_other == 1 && op5 == 8 { 1 } else { 0 }
+    let is_wr1: bit = if is_other == 1 && op5 == 4 { 1 } else { 0 }
+    let is_rd1: bit = if is_other == 1 && op5 == 2 { 1 } else { 0 }
+    let is_mrw1: bit = if is_other == 1 && op5 == 6 { 1 } else { 0 }
+    let is_mrw2: bit = if is_other == 1 && op5 == 22 { 1 } else { 0 }
+    let is_mrr1: bit = if is_other == 1 && op5 == 14 { 1 } else { 0 }
+    let is_cas2: bit = if is_other == 1 && op5 == 18 { 1 } else { 0 }
+    let is_unknown: bit = if is_other == 1 && is_mpc == 0 && is_pre == 0 && is_ref == 0 && is_wr1 == 0 && is_rd1 == 0 && is_mrw1 == 0 && is_mrw2 == 0 && is_mrr1 == 0 && is_cas2 == 0 { 1 } else { 0 }
+
+    let ba: bit[3] = b[2:0]
+    let pre_all: bit = a[5]
+    let ba_open: bit = open_valid[ba]
+    let act_bank: bit[3] = p_bank
+    let since_act: bit[32] = nck - act_at[ba]
+    let since_pre: bit[32] = nck - pre_at[ba]
+    let since_ref: bit[32] = nck - ref_at
+    let since_mrw: bit[32] = nck - last_mrw
+    let cas_bank: bit[3] = p_bank
+    let cas_col: bit[10] = {p_c9, a[5], b, 2'b00}
+    let cas_line: bit[9] = {cas_bank, cas_col[9:4]}
+    let cas_row: bit[17] = open_row[cas_bank]
+    let cas_open: bit = open_valid[cas_bank]
+    let cas_tag: bit[18] = tag[cas_line]
+    // (generics read through lets: a generic used directly in a match arm is not substituted)
+    let mr5_c: bit[8] = MR5
+    let mr6_c: bit[8] = MR6
+    let mr7_c: bit[8] = MR7
+    let mr8_c: bit[8] = MR8
+    let mr_read: bit[8] = match p_ma {
+        1 => mr1,
+        2 => mr2,
+        3 => mr3,
+        5 => mr5_c,
+        6 => mr6_c,
+        7 => mr7_c,
+        8 => mr8_c,
+        11 => mr11,
+        12 => mr12,
+        13 => mr13,
+        14 => mr14,
+        15 => mr15,
+        20 => mr20,
+        22 => mr22,
+        32 => mr32,
+        40 => mr40,
+        _ => 0
+    }
+    let new_act_row: bit[17] = p_row | {7'b0000000, a[5:2], b[5:0]}
+
+    // ---------------------------------------------------------------- timing checks
+    // tRAS: a precharge of an open bank too soon after its ACT (all banks for PREab)
+    let ras_b0: bit = if open_valid[0] == 1 && nck - act_at[0] < TRAS_NCK { 1 } else { 0 }
+    let ras_b1: bit = if open_valid[1] == 1 && nck - act_at[1] < TRAS_NCK { 1 } else { 0 }
+    let ras_b2: bit = if open_valid[2] == 1 && nck - act_at[2] < TRAS_NCK { 1 } else { 0 }
+    let ras_b3: bit = if open_valid[3] == 1 && nck - act_at[3] < TRAS_NCK { 1 } else { 0 }
+    let ras_b4: bit = if open_valid[4] == 1 && nck - act_at[4] < TRAS_NCK { 1 } else { 0 }
+    let ras_b5: bit = if open_valid[5] == 1 && nck - act_at[5] < TRAS_NCK { 1 } else { 0 }
+    let ras_b6: bit = if open_valid[6] == 1 && nck - act_at[6] < TRAS_NCK { 1 } else { 0 }
+    let ras_b7: bit = if open_valid[7] == 1 && nck - act_at[7] < TRAS_NCK { 1 } else { 0 }
+    let ras_any: bit = ras_b0 | ras_b1 | ras_b2 | ras_b3 | ras_b4 | ras_b5 | ras_b6 | ras_b7
+    let ras_one: bit = if ba_open == 1 && since_act < TRAS_NCK { 1 } else { 0 }
+    let ras_err: bit = if is_pre == 1 && ((pre_all == 1 && ras_any == 1) || (pre_all == 0 && ras_one == 1)) { 1 } else { 0 }
+    // tWR: write recovery, from the end of the bank's last write burst to its precharge
+    let wr_one: bit = if wr_seen[ba] == 1 && nck < wr_end_at[ba] + TWR_NCK { 1 } else { 0 }
+    let wr_all: bit = if wr_any == 1 && nck < wr_end_any + TWR_NCK { 1 } else { 0 }
+    let twr_err: bit = if is_pre == 1 && ((pre_all == 1 && wr_all == 1) || (pre_all == 0 && wr_one == 1)) { 1 } else { 0 }
+    // tRTP: read CAS to precharge (BL16: BL/2 + max(8, tRTP) - 8 = tRTP)
+    let rtp_one: bit = if rd_seen[ba] == 1 && nck - rd_cas_at[ba] < TRTP_NCK { 1 } else { 0 }
+    let rtp_all: bit = if rd_any == 1 && nck - rd_cas_any < TRTP_NCK { 1 } else { 0 }
+    let rtp_err: bit = if is_pre == 1 && ((pre_all == 1 && rtp_all == 1) || (pre_all == 0 && rtp_one == 1)) { 1 } else { 0 }
+    // tRRD and tFAW, measured between ACT-2 edges
+    let rrd_err: bit = if is_act2 == 1 && act_cnt != 0 && nck - act_h0 < TRRD_NCK { 1 } else { 0 }
+    let faw_err: bit = if is_act2 == 1 && act_cnt == 4 && nck - act_h3 < TFAW_NCK { 1 } else { 0 }
+    // tCCD between CAS-2 commands; tWTR from the end of a write burst to a read CAS
+    let ccd_err: bit = if is_cas2 == 1 && cas_seen == 1 && nck - last_cas < TCCD_NCK { 1 } else { 0 }
+    let wtr_err: bit = if is_cas2 == 1 && (pending == 2 || pending == 4 || pending == 6) && wr_any == 1 && nck < wr_end_any + TWTR_NCK { 1 } else { 0 }
+    // ZQ calibration: latch no sooner than tZQCAL after start; nothing within tZQLAT of latch
+    let zqcal_err: bit = if mpc_zql == 1 && (zq_started == 0 || nck - zq_start_at < TZQCAL_NCK) { 1 } else { 0 }
+    let zqlat_err: bit = if is_first == 1 && zq_latched == 1 && nck - zq_lat_at < TZQLAT_NCK { 1 } else { 0 }
+
+    // errors found this clock, as one code (the lowest-listed wins if several)
+    let cmd_err: bit[8] =
+        if ck_rise == 1 && dev_on == 1 && cs == 1 && have_first == 1 { 1 }
+        else { if ck_rise == 1 && dev_on == 1 && (ca != ca_prev || cs != cs_prev) { 22 }
+        else { if is_act2 == 1 && pending != 5 { 2 }
+        else { if is_mrw2 == 1 && pending != 3 { 3 }
+        else { if is_cas2 == 1 && pending != 1 && pending != 2 && pending != 4 && pending != 6 { 4 }
+        else { if is_cas2 == 1 && (pending == 1 || pending == 2) && cas_open == 0 { 5 }
+        else { if is_ref == 1 && open_valid != 0 { 6 }
+        else { if is_unknown == 1 { 7 }
+        else { if is_mpc == 1 && mpc_known == 0 { 25 }
+        else { if is_cmd == 1 && is_cas2 == 0 && (pending == 1 || pending == 2 || pending == 4 || pending == 6) { 17 }
+        else { if is_cmd == 1 && is_mrw2 == 0 && pending == 3 { 18 }
+        else { if is_cmd == 1 && is_act2 == 0 && pending == 5 { 37 }
+        else { if (is_wr1 == 1 || is_rd1 == 1) && ba_open == 1 && since_act < TRCD_NCK { 13 }
+        else { if is_act1 == 1 && ba_open == 1 { 19 }
+        else { if is_act1 == 1 && since_pre < TRP_NCK { 14 }
+        else { if is_act1 == 1 && since_ref < TRFC_NCK && ref_seen == 1 { 15 }
+        else { if is_first == 1 && any_mrw == 1 && since_mrw < TMRW_NCK { 16 }
+        else { if zqcal_err == 1 { 27 }
+        else { if zqlat_err == 1 { 28 }
+        else { if ras_err == 1 { 29 }
+        else { if rrd_err == 1 { 30 }
+        else { if faw_err == 1 { 31 }
+        else { if ccd_err == 1 { 32 }
+        else { if twr_err == 1 { 33 }
+        else { if rtp_err == 1 { 34 }
+        else { if wtr_err == 1 { 35 }
+        else { 0 } } } } } } } } } } } } } } } } } } } } } } } } } }
+    // DQ as driven, after the DQ_SKEW_CLKS delay
+    let skew_at: bit[3] = cyc[2:0] - skew3
+    let dq_skewed: bit[16] = if skew3 == 0 { dq_out_r } else { skew_dq[skew_at] }
+    let oe_skewed: bit = if skew3 == 0 { dq_oe_r } else { skew_oe[skew_at] }
+    let hold_err: bit[8] = if hold_chk == 1 && (ca != hold_ca || cs != hold_cs) { 23 } else { 0 }
+    let ref_err: bit[8] = if ck_rise == 1 && ref_seen == 1 && since_ref == TREFI_NCK * 9 { 21 } else { 0 }
+    let both_drive: bit = if (oe_skewed == 1 && dq_driven == 1) || (dqs_oe_r == 1 && dqs_driven == 1) { 1 } else { 0 }
+    let cont_err: bit[8] = if both_drive == 1 { 26 } else { 0 }
+    let wq_full: bit = if wq_n == 4 { 1 } else { 0 }
+    let rq_full: bit = if rq_n == 4 { 1 } else { 0 }
+    let wr_cas: bit = if is_cas2 == 1 && pending == 1 { 1 } else { 0 }
+    let rd_cas: bit = if is_cas2 == 1 && (pending == 2 || pending == 4 || pending == 6) { 1 } else { 0 }
+    let q_err: bit[8] = if (wr_cas == 1 && wq_full == 1) || (rd_cas == 1 && rq_full == 1) { 36 } else { 0 }
+
+    // write capture checks
+    let wr_err: bit[8] =
+        if wr_st == 1 && cyc > wr_hi { 8 }
+        else { if wr_st == 2 && dqs_edge == 1 && dq_in != dq_prev { 9 }
+        else { if wr_st == 2 && dqs_edge == 1 && (since_edge + 1 < half_ck || since_edge > half_ck + 1) { 11 }
+        else { if wr_st == 2 && dqs_edge == 1 && dq_driven == 0 { 12 }
+        else { if wr_st == 2 && dqs_edge == 1 && dqs_c_in == dqs_t_in { 20 }
+        else { if wr_st == 2 && since_edge > tck32 { 24 }
+        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dq_in != dq_prev { 9 }
+        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dq_driven == 0 { 12 }
+        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dqs_c_in == dqs_t_in { 20 }
+        else { 0 } } } } } } } } }
+    let whold_err: bit[8] = if wr_hold == 1 && dq_in != wr_hold_dq { 10 } else { 0 }
+    let err_now: bit[8] =
+        if cmd_err != 0 { cmd_err }
+        else { if hold_err != 0 { hold_err }
+        else { if ref_err != 0 { ref_err }
+        else { if cont_err != 0 { cont_err }
+        else { if q_err != 0 { q_err }
+        else { if wr_err != 0 { wr_err }
+        else { whold_err } } } } } }
+
+    // write beat index for this edge
+    let wr_take: bit = if (wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo) || (wr_st == 2 && dqs_edge == 1) { 1 } else { 0 }
+    let wr_idx: bit[4] = if wr_st == 1 { 4'h0 } else { wr_beat[3:0] }
+    let wr_addr: bit[13] = {wr_line, wr_idx}
+    let wq_tail: bit[2] = wq_head + wq_n[1:0]
+    let rq_tail: bit[2] = rq_head + rq_n[1:0]
+
+    // read data for the current beat
+    let rd_b4: bit[4] = rd_b[3:0]
+    let rd_b4_next: bit[4] = rd_b4 + 1
+    let rd_addr_next: bit[13] = {rd_line, rd_b4_next}
+    let rdc_bit_next: bit = if rd_b4_next[3] == 0 { mr32[rd_b4_next[2:0]] } else { mr40[rd_b4_next[2:0]] }
+    let rdc_mask: bit[16] = {mr20, mr15}
+    let rdc_word_next: bit[16] = if rdc_bit_next == 1 { ~rdc_mask } else { rdc_mask }
+    let rd_word_next: bit[16] = if rd_ok == 1 { mem[rd_addr_next] } else { 16'hDEAD }
+    let rd_data_next: bit[16] = if rd_kind == 2 { rdc_word_next } else { if rd_kind == 1 { {8'h00, rd_mrv} } else { rd_word_next } }
+    // the head of the read queue, for starting its burst (beat 0)
+    let h_line: bit[9] = rq_line[rq_head]
+    let h_kind: bit[2] = rq_kind[rq_head]
+    let h_ok: bit = rq_ok[rq_head]
+    let h_mrv: bit[8] = rq_mrv[rq_head]
+    let h_t0: bit[32] = rq_t0[rq_head]
+    let h_rdc_bit: bit = mr32[0]
+    let h_rdc_word: bit[16] = if h_rdc_bit == 1 { ~rdc_mask } else { rdc_mask }
+    let h_word: bit[16] = if h_ok == 1 { mem[{h_line, 4'h0}] } else { 16'hDEAD }
+    let h_data: bit[16] = if h_kind == 2 { h_rdc_word } else { if h_kind == 1 { {8'h00, h_mrv} } else { h_word } }
+    let rq_due: bit = if rq_n != 0 && cyc + 1 == h_t0 { 1 } else { 0 }
+    let rq_pre_due: bit = if rq_n != 0 && cyc + 1 + tck32 + tck32 >= h_t0 { 1 } else { 0 }
+
+    on(clk.rise) {
+        cyc = cyc + 1
+        ck_prev = ck_t
+        ca_prev = ca
+        cs_prev = cs
+        dq_prev = dq_in
+        dqs_prev = dqs_t_in
+        skew_dq[cyc[2:0]] = dq_out_r
+        skew_oe[cyc[2:0]] = dq_oe_r
+
+        if err_now != 0 {
+            errors_r = if errors_r == 65535 { 65535 } else { errors_r + 1 }
+            if errors_r == 0 {
+                err_code_r = err_now
+                err_cycle_r = cyc
+            }
+        }
+        if both_drive == 1 {
+            cont_r = if cont_r == 65535 { 65535 } else { cont_r + 1 }
+        }
+
+        // CA/CS hold: checked on the clock after each CK rise
+        hold_chk = if ck_rise == 1 && dev_on == 1 { 1 } else { 0 }
+        hold_ca = ca
+        hold_cs = cs
+
+        // ---------------------------------------------------------------- commands
+        if ck_rise == 1 {
+            nck = nck + 1
+            if last_rise != 0 { t_ck = rise_gap[7:0] }
+            last_rise = cyc
+            if dev_on == 0 {
+                have_first = 0
+            } else {
+                if cs == 1 {
+                    have_first = 1
+                    first = ca
+                } else {
+                    if have_first == 1 {
+                        have_first = 0
+                        if is_act1 == 1 {
+                            p_row = {b[3], a[5:2], b[5:4], 10'b0000000000}
+                            p_bank = b[2:0]
+                            pending = 5
+                        }
+                        if is_act2 == 1 {
+                            open_row[act_bank] = new_act_row
+                            open_valid[act_bank] = 1
+                            act_at[act_bank] = nck
+                            act_h0 = nck
+                            act_h1 = act_h0
+                            act_h2 = act_h1
+                            act_h3 = act_h2
+                            act_cnt = if act_cnt == 4 { 4 } else { act_cnt + 1 }
+                            n_act_r = n_act_r + 1
+                            pending = 0
+                        }
+                        if is_pre == 1 {
+                            if pre_all == 1 {
+                                open_valid = 0
+                                pre_at[0] = nck
+                                pre_at[1] = nck
+                                pre_at[2] = nck
+                                pre_at[3] = nck
+                                pre_at[4] = nck
+                                pre_at[5] = nck
+                                pre_at[6] = nck
+                                pre_at[7] = nck
+                            } else {
+                                open_valid[ba] = 0
+                                pre_at[ba] = nck
+                            }
+                            pending = 0
+                        }
+                        if is_ref == 1 {
+                            ref_at = nck
+                            ref_seen = 1
+                            n_ref_r = n_ref_r + 1
+                            pending = 0
+                        }
+                        if is_mpc == 1 {
+                            pending = if mpc_rdc == 1 { 6 } else { 0 }
+                            if mpc_zqs == 1 {
+                                zq_start_at = nck
+                                zq_started = 1
+                            }
+                            if mpc_zql == 1 {
+                                zq_lat_at = nck
+                                zq_latched = 1
+                                zq_started = 0
+                                n_zq_r = n_zq_r + 1
+                            }
+                        }
+                        if is_wr1 == 1 {
+                            pending = 1
+                            p_bank = b[2:0]
+                            p_c9 = b[4]
+                        }
+                        if is_rd1 == 1 {
+                            pending = 2
+                            p_bank = b[2:0]
+                            p_c9 = b[4]
+                        }
+                        if is_mrw1 == 1 {
+                            pending = 3
+                            p_ma = b
+                            p_op7 = a[5]
+                        }
+                        if is_mrr1 == 1 {
+                            pending = 4
+                            p_ma = b
+                        }
+                        if is_mrw2 == 1 {
+                            match p_ma {
+                                1 => { mr1 = {p_op7, a[5], b} },
+                                2 => { mr2 = {p_op7, a[5], b} },
+                                3 => { mr3 = {p_op7, a[5], b} },
+                                11 => { mr11 = {p_op7, a[5], b} },
+                                12 => { mr12 = {p_op7, a[5], b} },
+                                13 => { mr13 = {p_op7, a[5], b} },
+                                14 => { mr14 = {p_op7, a[5], b} },
+                                15 => { mr15 = {p_op7, a[5], b} },
+                                20 => { mr20 = {p_op7, a[5], b} },
+                                22 => { mr22 = {p_op7, a[5], b} },
+                                32 => { mr32 = {p_op7, a[5], b} },
+                                40 => { mr40 = {p_op7, a[5], b} },
+                                _ => {}
+                            }
+                            last_mrw = nck
+                            any_mrw = 1
+                            n_mrw_r = n_mrw_r + 1
+                            pending = 0
+                        }
+                        if is_cas2 == 1 {
+                            last_cas = nck
+                            cas_seen = 1
+                            if pending == 1 && wq_full == 0 {
+                                wq_lo[wq_tail] = cyc + wl_clks + half_ck + quarter_ck
+                                wq_hi[wq_tail] = cyc + wl_clks + tck32 + quarter_ck
+                                wq_line[wq_tail] = cas_line
+                                wq_row[wq_tail] = cas_row
+                                wq_n = wq_n + 1
+                                wr_end_at[cas_bank] = nck + wl32 + 9
+                                wr_seen[cas_bank] = 1
+                                wr_end_any = nck + wl32 + 9
+                                wr_any = 1
+                                n_wr_r = n_wr_r + 1
+                                if cas_tag[17] == 1 && cas_tag[16:0] != cas_row {
+                                    aliased_r = aliased_r + 1
+                                }
+                            }
+                            if (pending == 2 || pending == 4 || pending == 6) && rq_full == 0 {
+                                rq_t0[rq_tail] = cyc + rl_clks + dqsck32
+                                rq_line[rq_tail] = cas_line
+                                rq_kind[rq_tail] = if pending == 4 { 1 } else { if pending == 6 { 2 } else { 0 } }
+                                rq_ok[rq_tail] = if cas_tag[17] == 1 && cas_tag[16:0] == cas_row { 1 } else { 0 }
+                                rq_mrv[rq_tail] = mr_read
+                                rq_n = rq_n + 1
+                                if pending == 2 {
+                                    rd_cas_at[cas_bank] = nck
+                                    rd_seen[cas_bank] = 1
+                                    rd_cas_any = nck
+                                    rd_any = 1
+                                }
+                                if pending == 6 { n_rd_r = n_rd_r + 1 }
+                                if pending == 2 {
+                                    n_rd_r = n_rd_r + 1
+                                    if cas_tag[17] == 0 { unwritten_r = unwritten_r + 1 }
+                                    if cas_tag[17] == 1 && cas_tag[16:0] != cas_row {
+                                        aliased_r = aliased_r + 1
+                                    }
+                                }
+                                if pending == 4 { n_mrr_r = n_mrr_r + 1 }
+                            }
+                            pending = 0
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- write capture
+        wr_hold = if wr_take == 1 { 1 } else { 0 }
+        wr_hold_dq = dq_in
+        // one write site, so the storage stays one memory (one write port)
+        if wr_take == 1 { mem[wr_addr] = dq_in }
+        if wr_st == 0 {
+            if wq_n != 0 {
+                wr_st = 1
+                wr_lo = wq_lo[wq_head]
+                wr_hi = wq_hi[wq_head]
+                wr_line = wq_line[wq_head]
+                wr_row = wq_row[wq_head]
+                wq_head = wq_head + 1
+                wq_n = if wr_cas == 1 && wq_full == 0 { wq_n } else { wq_n - 1 }
+            }
+        }
+        if wr_st == 1 {
+            if cyc > wr_hi {
+                wr_st = 0
+            } else {
+                if wr_take == 1 {
+                    wr_beat = 1
+                    wr_last = cyc
+                    wr_st = 2
+                }
+            }
+        }
+        if wr_st == 2 {
+            if since_edge > tck32 {
+                wr_st = 0
+            } else {
+                if dqs_edge == 1 {
+                    wr_last = cyc
+                    wr_beat = wr_beat + 1
+                    // the burst counts as written only once all 16 beats are in
+                    if wr_beat == 15 {
+                        wr_st = 0
+                        tag[wr_line] = {1'b1, wr_row}
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- read drive
+        // A burst starts on the clock its first DQS rise is due; a 2 tCK static preamble comes
+        // before it unless the previous burst ends right then.
+        if rd_st == 0 || rd_st == 3 {
+            if rq_due == 1 {
+                rd_st = 2
+                rd_b = 0
+                rd_sub = 1
+                rd_line = h_line
+                rd_kind = h_kind
+                rd_ok = h_ok
+                rd_mrv = h_mrv
+                rq_head = rq_head + 1
+                rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
+                dqs_out_r = 1
+                dqs_oe_r = 1
+                dq_out_r = h_data
+                dq_oe_r = 1
+            } else {
+                if rq_pre_due == 1 {
+                    rd_st = 1
+                    dqs_out_r = 0
+                    dqs_oe_r = 1
+                    dq_oe_r = 0
+                } else {
+                    if rd_st == 3 {
+                        if rd_sub == half_ck[7:0] {
+                            rd_st = 0
+                            dqs_oe_r = 0
+                        } else {
+                            rd_sub = rd_sub + 1
+                        }
+                    }
+                }
+            }
+        } else {
+            if rd_st == 1 {
+                if rq_due == 1 {
+                    rd_st = 2
+                    rd_b = 0
+                    rd_sub = 1
+                    rd_line = h_line
+                    rd_kind = h_kind
+                    rd_ok = h_ok
+                    rd_mrv = h_mrv
+                    rq_head = rq_head + 1
+                    rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
+                    dqs_out_r = 1
+                    dq_out_r = h_data
+                    dq_oe_r = 1
+                }
+            } else {
+                // rd_st == 2: 16 beats, each half a tCK
+                if rd_b == 15 && rd_sub == half_ck[7:0] && rq_due == 1 {
+                    // seamless: the next burst's beat 0 follows beat 15 directly
+                    rd_b = 0
+                    rd_sub = 1
+                    rd_line = h_line
+                    rd_kind = h_kind
+                    rd_ok = h_ok
+                    rd_mrv = h_mrv
+                    rq_head = rq_head + 1
+                    rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
+                    dqs_out_r = 1
+                    dq_out_r = h_data
+                } else {
+                    if rd_sub == half_ck[7:0] {
+                        rd_sub = 1
+                        if rd_b == 15 {
+                            // postamble: DQS held low for half a tCK, DQ released
+                            rd_st = 3
+                            dq_oe_r = 0
+                            dqs_out_r = 0
+                        } else {
+                            rd_b = rd_b + 1
+                            dqs_out_r = if rd_b[0] == 1 { 1 } else { 0 }
+                            dq_out_r = rd_data_next
+                        }
+                    } else {
+                        rd_sub = rd_sub + 1
+                    }
+                }
+            }
+        }
+    }
+
+    dq_out = dq_skewed
+    dq_oe = oe_skewed
+    dqs_out = dqs_out_r
+    dqs_oe = dqs_oe_r
+    errors = errors_r
+    err_code = err_code_r
+    err_cycle = err_cycle_r
+    contention = cont_r
+    aliased = aliased_r
+    unwritten = unwritten_r
+    n_act = n_act_r
+    n_wr = n_wr_r
+    n_rd = n_rd_r
+    n_mrw = n_mrw_r
+    n_mrr = n_mrr_r
+    n_ref = n_ref_r
+    n_zq = n_zq_r
+    t_ck_clks = t_ck
+    mr2_o = mr2
+    mr13_o = mr13
+}

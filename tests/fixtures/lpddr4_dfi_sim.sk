@@ -1,0 +1,257 @@
+// LPDDR4 controller + behavioural DFI PHY + LPDDR4 channel model, with a traffic generator.
+//
+// Init and training run first. Then each pass writes N_BURSTS bursts (data from the burst
+// number and the pass), reads them all back, then rewrites and reads back each burst in turn
+// (write-to-read and read-to-write turnarounds on every burst). Rows change with the burst number,
+// so banks see row hits, misses and closed rows. Undriven bus lines read 0.
+use skalp::memory::lpddr4_dfi_controller::Lpddr4DfiController;
+use skalp::memory::dfi_lpddr4_behav_phy::DfiLpddr4BehavPhy;
+use skalp::memory::lpddr4_model::Lpddr4ChannelModel;
+
+// 16 beats from the burst number and the pass
+fn pattern(i: bit[16], pass: bit[8]) -> bit[256] {
+    let s: bit[16] = (i * 16'h9E37) ^ {pass, pass}
+    return {s ^ 16'hF00F, s ^ 16'h0FF0, s ^ 16'hAAAA, s ^ 16'h5555, s ^ 16'h3333, s ^ 16'hCCCC, s ^ 16'h1234, s ^ 16'h8421,
+            ~s, s ^ 16'h00FF, s ^ 16'hFF00, s ^ 16'h0F0F, s ^ 16'hF0F0, s ^ 16'h6996, s ^ 16'h9669, s}
+}
+
+// address of burst i: bank i[2:0], column i[8:3], a row that changes with i
+fn burst_addr(i: bit[16]) -> bit[26] {
+    let row: bit[17] = {9'h000, i[7:0] ^ 8'h5A}
+    return {row, i[2:0], i[8:3]}
+}
+
+entity Lpddr4DfiSim<
+    const DQSCK_CLKS: nat = 0,
+    const DQ_SKEW_CLKS: nat = 0,
+    const N_BURSTS: nat = 64,
+    const N_PASSES: nat = 2,
+    const PHYUPD_EVERY: nat = 0
+> {
+    in clk: clock
+    out done: bit
+    out passes: bit[8]
+    out mismatches: bit[32]
+    out reads_ok: bit[32]
+    out gen_state: bit[3]
+    out init_done: bit
+    out train_fail: bit
+    out ctrl_state: bit[5]
+    out mr5: bit[8]
+    out mr8: bit[8]
+    out gate0: bit[8]
+    out gate1: bit[8]
+    out rdly0: bit[4]
+    out rdly1: bit[4]
+    out lvl_fail: bit[2]
+    out gate_timeouts: bit[16]
+    out upd_violations: bit[16]
+    out ctrlupd_count: bit[16]
+    out phyupd_count: bit[16]
+    out m_errors: bit[16]
+    out m_err_code: bit[8]
+    out m_err_cycle: bit[32]
+    out m_contention: bit[16]
+    out m_aliased: bit[16]
+    out m_unwritten: bit[16]
+    out m_n_act: bit[32]
+    out m_n_wr: bit[32]
+    out m_n_rd: bit[32]
+    out m_n_mrw: bit[16]
+    out m_n_mrr: bit[16]
+    out m_n_ref: bit[32]
+    out m_n_zq: bit[16]
+    out m_t_ck: bit[8]
+}
+
+impl Lpddr4DfiSim {
+    // ------------------------------------------------------------ traffic (DFI clock)
+    // 0 wait for init, 1 write all, 2 read all, 3 rewrite one, 4 read it back, 5 done
+    signal g_st: bit[3] = 0
+    signal g_i: bit[16] = 0
+    signal g_pass: bit[8] = 0
+    signal g_exp: bit[16] = 0
+    // the read being checked: its burst, and its place in the pass (phase-2 reads carry the
+    // pass's data, phase-4 reads the rewritten data of the next pass)
+    signal chk_n: bit[16] = 0
+    signal chk_pass: bit[8] = 0
+    signal g_wait: bit = 0
+    signal mism: bit[32] = 0
+    signal rd_ok: bit[32] = 0
+    signal passes_r: bit[8] = 0
+    signal done_r: bit = 0
+
+    let n_bursts: bit[16] = N_BURSTS
+    let n_passes: bit[8] = N_PASSES
+    let last_i: bit = if g_i + 1 == n_bursts { 1 } else { 0 }
+    let g_valid: bit = if (g_st == 1 || g_st == 2 || g_st == 3 || g_st == 4) && g_wait == 0 { 1 } else { 0 }
+    let g_write: bit = if g_st == 1 || g_st == 3 { 1 } else { 0 }
+    // the rewrite phase uses the next pass number's data
+    let g_data_pass: bit[8] = if g_st == 3 { g_pass + 1 } else { g_pass }
+    let fire: bit = if g_valid == 1 && ctrl.req_ready == 1 { 1 } else { 0 }
+    let exp_pass: bit[8] = if chk_n >= n_bursts { chk_pass + 1 } else { chk_pass }
+    let exp_data: bit[256] = pattern(g_exp, exp_pass)
+
+    inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10> {
+        clk: phy.dfi_clk,
+        req_valid: g_valid,
+        req_write: g_write,
+        req_addr: burst_addr(g_i),
+        req_wdata: pattern(g_i, g_data_pass),
+        dfi_rddata_w0: phy.dfi_rddata_w0,
+        dfi_rddata_w1: phy.dfi_rddata_w1,
+        dfi_rddata_w2: phy.dfi_rddata_w2,
+        dfi_rddata_w3: phy.dfi_rddata_w3,
+        dfi_rddata_valid_w0: phy.dfi_rddata_valid_w0,
+        dfi_rddata_valid_w1: phy.dfi_rddata_valid_w1,
+        dfi_rddata_valid_w2: phy.dfi_rddata_valid_w2,
+        dfi_rddata_valid_w3: phy.dfi_rddata_valid_w3,
+        dfi_init_complete: phy.dfi_init_complete,
+        dfi_ctrlupd_ack: phy.dfi_ctrlupd_ack,
+        dfi_phyupd_req: phy.dfi_phyupd_req,
+        dfi_rdlvl_gate_resp: phy.dfi_rdlvl_gate_resp,
+        dfi_rdlvl_resp: phy.dfi_rdlvl_resp
+    }
+
+    inst phy = DfiLpddr4BehavPhy<8, 4, 15450, 0, 0, 3, PHYUPD_EVERY, 4> {
+        clk: clk,
+        dfi_cs_p0: ctrl.dfi_cs_p0,
+        dfi_cs_p1: ctrl.dfi_cs_p1,
+        dfi_cs_p2: ctrl.dfi_cs_p2,
+        dfi_cs_p3: ctrl.dfi_cs_p3,
+        dfi_address_p0: ctrl.dfi_address_p0,
+        dfi_address_p1: ctrl.dfi_address_p1,
+        dfi_address_p2: ctrl.dfi_address_p2,
+        dfi_address_p3: ctrl.dfi_address_p3,
+        dfi_cke_p0: ctrl.dfi_cke_p0,
+        dfi_cke_p1: ctrl.dfi_cke_p1,
+        dfi_cke_p2: ctrl.dfi_cke_p2,
+        dfi_cke_p3: ctrl.dfi_cke_p3,
+        dfi_reset_n_p0: ctrl.dfi_reset_n_p0,
+        dfi_reset_n_p1: ctrl.dfi_reset_n_p1,
+        dfi_reset_n_p2: ctrl.dfi_reset_n_p2,
+        dfi_reset_n_p3: ctrl.dfi_reset_n_p3,
+        dfi_wrdata_en_p0: ctrl.dfi_wrdata_en_p0,
+        dfi_wrdata_en_p1: ctrl.dfi_wrdata_en_p1,
+        dfi_wrdata_en_p2: ctrl.dfi_wrdata_en_p2,
+        dfi_wrdata_en_p3: ctrl.dfi_wrdata_en_p3,
+        dfi_wrdata_p0: ctrl.dfi_wrdata_p0,
+        dfi_wrdata_p1: ctrl.dfi_wrdata_p1,
+        dfi_wrdata_p2: ctrl.dfi_wrdata_p2,
+        dfi_wrdata_p3: ctrl.dfi_wrdata_p3,
+        dfi_wrdata_mask_p0: ctrl.dfi_wrdata_mask_p0,
+        dfi_wrdata_mask_p1: ctrl.dfi_wrdata_mask_p1,
+        dfi_wrdata_mask_p2: ctrl.dfi_wrdata_mask_p2,
+        dfi_wrdata_mask_p3: ctrl.dfi_wrdata_mask_p3,
+        dfi_rddata_en_p0: ctrl.dfi_rddata_en_p0,
+        dfi_rddata_en_p1: ctrl.dfi_rddata_en_p1,
+        dfi_rddata_en_p2: ctrl.dfi_rddata_en_p2,
+        dfi_rddata_en_p3: ctrl.dfi_rddata_en_p3,
+        dfi_init_start: ctrl.dfi_init_start,
+        dfi_ctrlupd_req: ctrl.dfi_ctrlupd_req,
+        dfi_phyupd_ack: ctrl.dfi_phyupd_ack,
+        dfi_rdlvl_gate_en: ctrl.dfi_rdlvl_gate_en,
+        dfi_rdlvl_en: ctrl.dfi_rdlvl_en,
+        dq_i: bus_dq,
+        dqs_t_i: {bus_dqs, bus_dqs}
+    }
+
+    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16> {
+        clk: clk,
+        reset_n: phy.reset_n,
+        ck_t: phy.ck_t,
+        cke: phy.cke,
+        cs: phy.cs,
+        ca: phy.ca,
+        dq_in: bus_dq,
+        dq_driven: phy.dq_oe,
+        dqs_t_in: bus_dqs,
+        dqs_c_in: bus_dqsc,
+        dqs_driven: phy.dqs_oe
+    }
+
+    signal dclk: clock
+    signal bus_dq: bit[16]
+    signal bus_dqs: bit
+    signal bus_dqsc: bit
+    dclk = phy.dfi_clk
+    bus_dq = if dram.dq_oe == 1 { dram.dq_out } else { if phy.dq_oe == 1 { phy.dq_o } else { 0 } }
+    bus_dqs = if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_oe == 1 { phy.dqs_t_o[0] } else { 0 } }
+    bus_dqsc = if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_oe == 1 { phy.dqs_c_o[0] } else { 0 } }
+
+    on(dclk.rise) {
+        g_wait = 0
+        if g_st == 0 && ctrl.init_done == 1 {
+            g_st = 1
+            g_i = 0
+        }
+        if fire == 1 {
+            if g_st == 1 {
+                g_i = if last_i == 1 { 0 } else { g_i + 1 }
+                if last_i == 1 { g_st = 2 }
+            }
+            if g_st == 2 {
+                g_i = if last_i == 1 { 0 } else { g_i + 1 }
+                if last_i == 1 { g_st = 3 }
+            }
+            if g_st == 3 {
+                g_st = 4
+            }
+            if g_st == 4 {
+                g_i = if last_i == 1 { 0 } else { g_i + 1 }
+                g_st = 3
+                if last_i == 1 {
+                    g_pass = g_pass + 1
+                    passes_r = passes_r + 1
+                    g_st = if passes_r + 1 == n_passes { 5 } else { 1 }
+                }
+            }
+        }
+        // read data: in request order; reads in phase 2 carry this pass's data, in phase 4
+        // the rewritten (next pass) data
+        if ctrl.rsp_valid == 1 {
+            if ctrl.rsp_rdata == exp_data { rd_ok = rd_ok + 1 } else { mism = mism + 1 }
+            g_exp = if g_exp + 1 == n_bursts { 0 } else { g_exp + 1 }
+            if chk_n + 1 == n_bursts + n_bursts {
+                chk_n = 0
+                chk_pass = chk_pass + 1
+            } else {
+                chk_n = chk_n + 1
+            }
+        }
+        if g_st == 5 && rd_ok + mism == n_bursts * 2 * n_passes { done_r = 1 }
+    }
+    done = done_r
+    passes = passes_r
+    mismatches = mism
+    reads_ok = rd_ok
+    gen_state = g_st
+    init_done = ctrl.init_done
+    train_fail = ctrl.train_fail
+    ctrl_state = ctrl.state
+    mr5 = ctrl.mr5
+    mr8 = ctrl.mr8
+    gate0 = phy.gate_dly0
+    gate1 = phy.gate_dly1
+    rdly0 = phy.rd_dly0
+    rdly1 = phy.rd_dly1
+    lvl_fail = phy.lvl_fail
+    gate_timeouts = phy.gate_timeouts
+    upd_violations = phy.upd_violations
+    ctrlupd_count = phy.ctrlupd_count
+    phyupd_count = phy.phyupd_count
+    m_errors = dram.errors
+    m_err_code = dram.err_code
+    m_err_cycle = dram.err_cycle
+    m_contention = dram.contention
+    m_aliased = dram.aliased
+    m_unwritten = dram.unwritten
+    m_n_act = dram.n_act
+    m_n_wr = dram.n_wr
+    m_n_rd = dram.n_rd
+    m_n_mrw = dram.n_mrw
+    m_n_mrr = dram.n_mrr
+    m_n_ref = dram.n_ref
+    m_n_zq = dram.n_zq
+    m_t_ck = dram.t_ck_clks
+}

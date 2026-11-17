@@ -1,0 +1,916 @@
+// LPDDR4 controller for one x16 channel on the DFI 1:4 interface.
+//
+// It runs on the DFI clock (one cycle per 4 CK, phases p0..p3 one CK each) and sends at most one
+// command per cycle: a 4-CK command (ACT, RD/WR + CAS-2, MRW, MRR, MPC + CAS-2) fills all four
+// phases, a 2-CK command (PRE, REF, MPC) phases p0 and p1. Every JEDEC timing is converted to
+// DFI cycles from the CK edges the DRAM measures it between, so it holds for any CK as long as
+// the generics (in CK cycles, nCK) are right for it.
+//
+// Sequence: DFI init (dfi_init_start until dfi_init_complete), RESET_N low T_INIT1_CYC cycles,
+// CKE low T_INIT3_CYC, CKE high T_INIT5_CYC, mode registers (MR13, MR1, MR2, MR3, MR11, MR12,
+// MR14, MR22 from the generics), ZQ calibration start and latch, read training through the PHY
+// (DFI PHY-evaluation mode: read gate, then read eye, each with Read DQ Calibration reads until
+// the PHY reports every byte lane done, or TRAIN_MAX_READS reads), MRR of MR5 and MR8, then
+// normal operation.
+//
+// Normal operation: one request at a time, in order, open-page per bank (row hit: CAS; other row
+// open: PRE then ACT; closed: ACT), all-bank refresh every tREFI (PREab, REF, then a DFI
+// controller update), and PHY update windows: while dfi_phyupd_req is high no new request is taken,
+// and the window is granted once nothing is on the bus.
+//
+// User port (DFI clock): a request is taken when req_valid and req_ready are both high.
+// req_addr = {row[16:0], bank[2:0], column[9:4]}, one BL16 burst (32 bytes) per request; write
+// data: beat k in req_wdata[16k+15:16k]. Read data comes back in request order on rsp_valid /
+// rsp_rdata, in the same layout. Data mask is off (MR13 DMD), so writes are whole bursts.
+//
+// Bus safety: a write CAS follows a read CAS by no less than RL - WL + tDQSCK(max) + 10 nCK plus
+// RTW_GUARD_NCK (the read burst, its postamble and the write preamble cannot overlap), and write
+// data enables follow only write commands.
+//
+// PHY adjustments: the first write data slot is the write command's slot + WL + TPHY_WRLAT_ADJ,
+// the first read data slot the read command's slot + RL + TRDDATA_EN_ADJ (4 and 3 when commands
+// and data have the same latency through the PHY).
+pub entity Lpddr4DfiController<
+    const MR1: nat = 20,
+    const MR2: nat = 9,
+    const MR3: nat = 49,
+    const MR11: nat = 0,
+    const MR12: nat = 114,
+    const MR13: nat = 32,
+    const MR14: nat = 114,
+    const MR22: nat = 0,
+    const T_INIT1_CYC: nat = 26667,
+    const T_INIT3_CYC: nat = 266667,
+    const T_INIT5_CYC: nat = 267,
+    const TRCD_NCK: nat = 10,
+    const TRP_NCK: nat = 12,
+    const TRAS_NCK: nat = 23,
+    const TRRD_NCK: nat = 6,
+    const TFAW_NCK: nat = 22,
+    const TRFC_NCK: nat = 70,
+    const TREFI_NCK: nat = 2080,
+    const TWR_NCK: nat = 10,
+    const TWTR_NCK: nat = 8,
+    const TRTP_NCK: nat = 8,
+    const TMRW_NCK: nat = 10,
+    const TZQCAL_NCK: nat = 534,
+    const TZQLAT_NCK: nat = 16,
+    const DQSCK_MAX_NCK: nat = 2,
+    const RTW_GUARD_NCK: nat = 2,
+    const TPHY_WRLAT_ADJ: nat = 4,
+    const TRDDATA_EN_ADJ: nat = 3,
+    const TRAIN_GAP_CYC: nat = 16,
+    const TRAIN_MAX_READS: nat = 64,
+    const CTRLUPD_CYC: nat = 4
+> {
+    in clk: clock
+    // ---------------------------------------------------------------- user port
+    in req_valid: bit
+    out req_ready: bit
+    in req_write: bit
+    in req_addr: bit[26]
+    in req_wdata: bit[256]
+    out rsp_valid: bit
+    out rsp_rdata: bit[256]
+    out init_done: bit
+    out train_fail: bit
+    out mr5: bit[8]
+    out mr8: bit[8]
+    out state: bit[5]
+    // ---------------------------------------------------------------- DFI
+    out dfi_cs_p0: bit
+    out dfi_address_p0: bit[6]
+    out dfi_cke_p0: bit
+    out dfi_reset_n_p0: bit
+    out dfi_cs_p1: bit
+    out dfi_address_p1: bit[6]
+    out dfi_cke_p1: bit
+    out dfi_reset_n_p1: bit
+    out dfi_cs_p2: bit
+    out dfi_address_p2: bit[6]
+    out dfi_cke_p2: bit
+    out dfi_reset_n_p2: bit
+    out dfi_cs_p3: bit
+    out dfi_address_p3: bit[6]
+    out dfi_cke_p3: bit
+    out dfi_reset_n_p3: bit
+    out dfi_wrdata_en_p0: bit
+    out dfi_wrdata_p0: bit[32]
+    out dfi_wrdata_mask_p0: bit[4]
+    out dfi_rddata_en_p0: bit
+    out dfi_wrdata_en_p1: bit
+    out dfi_wrdata_p1: bit[32]
+    out dfi_wrdata_mask_p1: bit[4]
+    out dfi_rddata_en_p1: bit
+    out dfi_wrdata_en_p2: bit
+    out dfi_wrdata_p2: bit[32]
+    out dfi_wrdata_mask_p2: bit[4]
+    out dfi_rddata_en_p2: bit
+    out dfi_wrdata_en_p3: bit
+    out dfi_wrdata_p3: bit[32]
+    out dfi_wrdata_mask_p3: bit[4]
+    out dfi_rddata_en_p3: bit
+    in dfi_rddata_w0: bit[32]
+    in dfi_rddata_valid_w0: bit
+    in dfi_rddata_w1: bit[32]
+    in dfi_rddata_valid_w1: bit
+    in dfi_rddata_w2: bit[32]
+    in dfi_rddata_valid_w2: bit
+    in dfi_rddata_w3: bit[32]
+    in dfi_rddata_valid_w3: bit
+    out dfi_init_start: bit
+    in dfi_init_complete: bit
+    out dfi_ctrlupd_req: bit
+    in dfi_ctrlupd_ack: bit
+    in dfi_phyupd_req: bit
+    out dfi_phyupd_ack: bit
+    out dfi_rdlvl_gate_en: bit
+    out dfi_rdlvl_en: bit
+    in dfi_rdlvl_gate_resp: bit[2]
+    in dfi_rdlvl_resp: bit[2]
+}
+
+// Timing state of one bank, in DFI cycles. Each count is the number of cycles after the event
+// before the next command it gates may go; the inputs give them (constant in a design).
+pub entity Lpddr4BankState {
+    in clk: clock
+    in act: bit
+    in pre: bit
+    in rd: bit
+    in wr: bit
+    in row_in: bit[17]
+    in f_rcd: bit[8]
+    in f_ras: bit[8]
+    in f_rp: bit[8]
+    in f_wr: bit[8]
+    in f_rtp: bit[8]
+    out is_open: bit
+    out row: bit[17]
+    out act_ok: bit
+    out cas_ok: bit
+    out pre_ok: bit
+}
+
+impl Lpddr4BankState {
+    signal open_r: bit = 0
+    signal row_r: bit[17] = 0
+    signal t_act: bit[8] = 0
+    signal t_cas: bit[8] = 0
+    signal t_pre: bit[8] = 0
+    let act_d: bit[8] = if t_act == 0 { 0 } else { t_act - 1 }
+    let cas_d: bit[8] = if t_cas == 0 { 0 } else { t_cas - 1 }
+    let pre_d: bit[8] = if t_pre == 0 { 0 } else { t_pre - 1 }
+    let rcd_m1: bit[8] = if f_rcd == 0 { 0 } else { f_rcd - 1 }
+    let ras_m1: bit[8] = if f_ras == 0 { 0 } else { f_ras - 1 }
+    let rp_m1: bit[8] = if f_rp == 0 { 0 } else { f_rp - 1 }
+    let wr_m1: bit[8] = if f_wr == 0 { 0 } else { f_wr - 1 }
+    let rtp_m1: bit[8] = if f_rtp == 0 { 0 } else { f_rtp - 1 }
+    let pre_ld: bit[8] = if wr == 1 { wr_m1 } else { if rd == 1 { rtp_m1 } else { ras_m1 } }
+    on(clk.rise) {
+        if act == 1 {
+            open_r = 1
+            row_r = row_in
+            t_cas = rcd_m1
+            t_pre = ras_m1
+        } else {
+            t_cas = cas_d
+            if wr == 1 || rd == 1 {
+                t_pre = if pre_ld > pre_d { pre_ld } else { pre_d }
+            } else {
+                t_pre = pre_d
+            }
+        }
+        if pre == 1 {
+            open_r = 0
+            t_act = rp_m1
+        } else {
+            t_act = act_d
+        }
+    }
+    is_open = open_r
+    row = row_r
+    act_ok = if t_act == 0 { 1 } else { 0 }
+    cas_ok = if t_cas == 0 { 1 } else { 0 }
+    pre_ok = if t_pre == 0 { 1 } else { 0 }
+}
+
+// word i (beats 2i, 2i+1) of a BL16 burst
+fn burst_word(d: bit[256], i: bit[3]) -> bit[32] {
+    return match i {
+        0 => d[31:0],
+        1 => d[63:32],
+        2 => d[95:64],
+        3 => d[127:96],
+        4 => d[159:128],
+        5 => d[191:160],
+        6 => d[223:192],
+        _ => d[255:224]
+    }
+}
+
+fn dec8(x: bit[8]) -> bit[8] {
+    return if x == 0 { 0 } else { x - 1 }
+}
+
+fn max8(a: bit[8], b: bit[8]) -> bit[8] {
+    return if a > b { a } else { b }
+}
+
+// command frames: {p3, p2, p1, p0} CA words; 4-CK commands have CS on p0 and p2, 2-CK on p0
+fn ca_act(row: bit[17], ba: bit[3]) -> bit[24] {
+    return {row[5:0], row[9:6], 2'b11, row[11:10], row[16], ba, row[15:12], 2'b01}
+}
+fn ca_cas(op: bit[5], ba: bit[3], col: bit[6]) -> bit[24] {
+    return {col[3:0], 2'b00, col[4], 5'b10010, 1'b0, col[5], 1'b0, ba, 1'b0, op}
+}
+fn ca_mrw(ma: bit[6], op: bit[8]) -> bit[24] {
+    return {op[5:0], op[6], 5'b10110, ma, op[7], 5'b00110}
+}
+fn ca_mrr(ma: bit[6]) -> bit[24] {
+    return {6'b000000, 1'b0, 5'b10010, ma, 1'b0, 5'b01110}
+}
+fn ca_mpc(op: bit[7]) -> bit[24] {
+    return {6'b000000, 1'b0, 5'b10010, op[5:0], op[6], 5'b00000}
+}
+
+impl Lpddr4DfiController {
+    // ------------------------------------------------------------ states
+    // 0 PHY init, 1 reset low, 2 CKE low, 3 CKE high, 4 MRW, 5 ZQ start, 6 ZQ wait, 7 ZQ latch,
+    // 10 gate training, 11 read-eye training, 8 MRR, 9 wait for MRR data, 12 settle, 13 ready, 14 refresh precharge, 15 refresh, 16 PHY update, 17 controller update
+    signal st: bit[5] = 0
+    signal wait_c: bit[32] = 0
+    signal mi: bit[4] = 0
+    signal init_done_r: bit = 0
+    signal train_fail_r: bit = 0
+    signal mr5_r: bit[8] = 0
+    signal mr8_r: bit[8] = 0
+    signal train_reads: bit[16] = 0
+    signal train_gap: bit[16] = 0
+    signal gate_en_r: bit = 0
+    signal rdlvl_en_r: bit = 0
+    signal init_start_r: bit = 0
+    signal ctrlupd_r: bit = 0
+    signal phyupd_ack_r: bit = 0
+    signal reset_r: bit = 0
+    signal cke_r: bit = 0
+    // refresh
+    signal refc: bit[16] = 0
+    signal ref_due: bit = 0
+    signal ref_on: bit = 0
+    // global timers (DFI cycles)
+    signal t_cmd: bit[8] = 0
+    signal t_actg: bit[8] = 0
+    signal t_rd: bit[8] = 0
+    signal t_wr: bit[8] = 0
+    signal t_ref: bit[8] = 0
+    signal faw0: bit[8] = 0
+    signal faw1: bit[8] = 0
+    signal faw2: bit[8] = 0
+    signal faw3: bit[8] = 0
+    signal fp: bit[2] = 0
+    // the request being served
+    signal rq_v: bit = 0
+    signal rq_w: bit = 0
+    signal rq_row: bit[17] = 0
+    signal rq_ba: bit[3] = 0
+    signal rq_col: bit[6] = 0
+    signal rq_data: bit[256] = 0
+    // data enables, one bit per CK slot ahead (bit 0 = phase p0 of this cycle)
+    signal wr_ring: bit[64] = 0
+    signal rd_ring: bit[64] = 0
+    // write bursts waiting to go out, and the next word of the head burst
+    signal wq: [bit[256]; 4]
+    signal wq_wp: bit[2] = 0
+    signal wq_rp: bit[2] = 0
+    signal wq_n: bit[3] = 0
+    signal wi: bit[4] = 0
+    // reads in flight: 0 user, 1 MR5, 2 MR8
+    signal tq: [bit[2]; 8]
+    signal tq_wp: bit[3] = 0
+    signal tq_rp: bit[3] = 0
+    signal tq_n: bit[4] = 0
+    // read words assembled into bursts
+    signal rc: bit[4] = 0
+    signal rw0: bit[32] = 0
+    signal rw1: bit[32] = 0
+    signal rw2: bit[32] = 0
+    signal rw3: bit[32] = 0
+    signal rw4: bit[32] = 0
+    signal rw5: bit[32] = 0
+    signal rw6: bit[32] = 0
+    signal rw7: bit[32] = 0
+    signal rsp_v_r: bit = 0
+    signal rsp_d_r: bit[256] = 0
+    // DFI outputs
+    signal o_cs: bit[4] = 0
+    signal o_ca: bit[24] = 0
+    signal o_cke: bit = 0
+    signal o_rst: bit = 0
+    signal o_we: bit[4] = 0
+    signal o_wd: bit[128] = 0
+    signal o_re: bit[4] = 0
+
+    // ------------------------------------------------------------ constants
+    let mr1_c: bit[8] = MR1
+    let mr2_c: bit[8] = MR2
+    let mr3_c: bit[8] = MR3
+    let mr11_c: bit[8] = MR11
+    let mr12_c: bit[8] = MR12
+    let mr13_c: bit[8] = MR13
+    let mr14_c: bit[8] = MR14
+    let mr22_c: bit[8] = MR22
+    let rl: bit[16] = match mr2_c[2:0] {
+        0 => 6,
+        1 => 10,
+        2 => 14,
+        3 => 20,
+        4 => 24,
+        5 => 28,
+        6 => 32,
+        _ => 36
+    }
+    let wl_a: bit[16] = match mr2_c[5:3] {
+        0 => 4,
+        1 => 6,
+        2 => 8,
+        3 => 10,
+        4 => 12,
+        5 => 14,
+        6 => 16,
+        _ => 18
+    }
+    let wl_b: bit[16] = match mr2_c[5:3] {
+        0 => 4,
+        1 => 8,
+        2 => 12,
+        3 => 18,
+        4 => 22,
+        5 => 26,
+        6 => 30,
+        _ => 34
+    }
+    let wl: bit[16] = if mr2_c[6] == 1 { wl_b } else { wl_a }
+    let n_rcd: bit[16] = TRCD_NCK
+    let n_rp: bit[16] = TRP_NCK
+    let n_ras: bit[16] = TRAS_NCK
+    let n_rrd: bit[16] = TRRD_NCK
+    let n_faw: bit[16] = TFAW_NCK
+    let n_rfc: bit[16] = TRFC_NCK
+    let n_refi: bit[16] = TREFI_NCK
+    let n_wr: bit[16] = TWR_NCK
+    let n_wtr: bit[16] = TWTR_NCK
+    let n_rtp: bit[16] = TRTP_NCK
+    let n_mrw: bit[16] = TMRW_NCK
+    let n_zqcal: bit[16] = TZQCAL_NCK
+    let n_zqlat: bit[16] = TZQLAT_NCK
+    let n_dqsck: bit[16] = DQSCK_MAX_NCK
+    let n_guard: bit[16] = RTW_GUARD_NCK
+    let adj_w: bit[16] = TPHY_WRLAT_ADJ
+    let adj_r: bit[16] = TRDDATA_EN_ADJ
+    // DFI cycles between commands, from the CK edges the DRAM measures each timing between
+    // (second cycles of 2-cycle commands: a 4-CK command's is on p3, a 2-CK command's on p1)
+    let f_rcd16: bit[16] = (n_rcd + 5) >> 2
+    let f_ras16: bit[16] = (n_ras + 5) >> 2
+    let f_rp16: bit[16] = (n_rp + 3) >> 2
+    let f_rfc16: bit[16] = (n_rfc + 3) >> 2
+    let f_rrd16: bit[16] = (n_rrd + 3) >> 2
+    let f_faw16: bit[16] = (n_faw + 3) >> 2
+    let f_wtr16: bit[16] = (wl + n_wtr + 12) >> 2
+    let f_rtw16: bit[16] = (rl - wl + n_dqsck + n_guard + 13) >> 2
+    let f_wr16: bit[16] = (wl + n_wr + 14) >> 2
+    let f_rtp16: bit[16] = (n_rtp + 5) >> 2
+    let f_mrw16: bit[16] = (n_mrw + 6) >> 2
+    let f_zqcal32: bit[32] = {16'h0000, (n_zqcal + 3) >> 2}
+    let f_zqlat16: bit[16] = (n_zqlat + 4) >> 2
+    let f_refi: bit[16] = n_refi >> 2
+    let f_rcd: bit[8] = f_rcd16[7:0]
+    let f_ras: bit[8] = f_ras16[7:0]
+    let f_rp: bit[8] = f_rp16[7:0]
+    let f_wr: bit[8] = f_wr16[7:0]
+    let f_rtp: bit[8] = f_rtp16[7:0]
+    let m1_rp: bit[8] = dec8(f_rp16[7:0])
+    let m1_rfc: bit[8] = dec8(f_rfc16[7:0])
+    let m1_rrd: bit[8] = dec8(f_rrd16[7:0])
+    let m1_faw: bit[8] = dec8(f_faw16[7:0])
+    let m1_wtr: bit[8] = dec8(f_wtr16[7:0])
+    let m1_rtw: bit[8] = dec8(f_rtw16[7:0])
+    let m1_mrw: bit[8] = dec8(f_mrw16[7:0])
+    let m1_zqlat: bit[8] = dec8(f_zqlat16[7:0])
+    // tCCD (8 nCK) is two cycles; tMRR (8 nCK after an MRR's last edge) three
+    let m1_ccd: bit[8] = 1
+    let m1_mrr: bit[8] = 2
+    let wr_off: bit[16] = wl + adj_w
+    let rd_off: bit[16] = rl + adj_r
+    let wr_mask: bit[64] = 64'h00000000000000FF << wr_off[5:0]
+    let rd_mask: bit[64] = 64'h00000000000000FF << rd_off[5:0]
+    let i1_cyc: bit[32] = T_INIT1_CYC
+    let i3_cyc: bit[32] = T_INIT3_CYC
+    let i5_cyc: bit[32] = T_INIT5_CYC
+    let tr_gap: bit[16] = TRAIN_GAP_CYC
+    let tr_max: bit[16] = TRAIN_MAX_READS
+    let cu_cyc: bit[32] = CTRLUPD_CYC
+
+    // ------------------------------------------------------------ banks
+    let req_row: bit[17] = req_addr[25:9]
+    let req_ba: bit[3] = req_addr[8:6]
+    let req_col: bit[6] = req_addr[5:0]
+    let b_open: bit[8] = {b7.is_open, b6.is_open, b5.is_open, b4.is_open, b3.is_open, b2.is_open, b1.is_open, b0.is_open}
+    let b_actok: bit[8] = {b7.act_ok, b6.act_ok, b5.act_ok, b4.act_ok, b3.act_ok, b2.act_ok, b1.act_ok, b0.act_ok}
+    let b_casok: bit[8] = {b7.cas_ok, b6.cas_ok, b5.cas_ok, b4.cas_ok, b3.cas_ok, b2.cas_ok, b1.cas_ok, b0.cas_ok}
+    let b_preok: bit[8] = {b7.pre_ok, b6.pre_ok, b5.pre_ok, b4.pre_ok, b3.pre_ok, b2.pre_ok, b1.pre_ok, b0.pre_ok}
+    let q_row_open: bit[17] = match rq_ba {
+        0 => b0.row,
+        1 => b1.row,
+        2 => b2.row,
+        3 => b3.row,
+        4 => b4.row,
+        5 => b5.row,
+        6 => b6.row,
+        _ => b7.row
+    }
+    let q_open: bit = b_open[rq_ba]
+    let q_hit: bit = if q_open == 1 && q_row_open == rq_row { 1 } else { 0 }
+    let faw_now: bit[8] = match fp {
+        0 => faw0,
+        1 => faw1,
+        2 => faw2,
+        _ => faw3
+    }
+
+    // ------------------------------------------------------------ what to send this cycle
+    let quiet: bit = if rd_ring == 0 && wr_ring == 0 && tq_n == 0 && wq_n == 0 { 1 } else { 0 }
+    let idle: bit = if st == 13 { 1 } else { 0 }
+    let can_cmd: bit = if t_cmd == 0 { 1 } else { 0 }
+    let upd_go: bit = if idle == 1 && dfi_phyupd_req == 1 && rq_v == 0 && quiet == 1 { 1 } else { 0 }
+    let ref_go: bit = if idle == 1 && ref_due == 1 && upd_go == 0 { 1 } else { 0 }
+    let serve: bit = if idle == 1 && ref_due == 0 && upd_go == 0 && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
+    let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && t_wr == 0 && wq_n < 4) || (rq_w == 0 && t_rd == 0 && tq_n < 8)) { 1 } else { 0 }
+    let do_pre: bit = if serve == 1 && q_open == 1 && q_hit == 0 && b_preok[rq_ba] == 1 { 1 } else { 0 }
+    let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && t_actg == 0 && faw_now == 0 { 1 } else { 0 }
+    let do_wr: bit = if do_cas == 1 && rq_w == 1 { 1 } else { 0 }
+    let do_rd: bit = if do_cas == 1 && rq_w == 0 { 1 } else { 0 }
+    // refresh: precharge all once every bank may close, then REF tRP later
+    let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
+    let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
+    let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
+    let do_zqs: bit = if st == 5 && can_cmd == 1 { 1 } else { 0 }
+    let do_zql: bit = if st == 7 && wait_c == 0 { 1 } else { 0 }
+    let do_mrr: bit = if st == 8 && can_cmd == 1 && mi < 2 { 1 } else { 0 }
+    let training: bit = if st == 10 || st == 11 { 1 } else { 0 }
+    let lvl_done: bit = if (st == 10 && dfi_rdlvl_gate_resp == 2'b11) || (st == 11 && dfi_rdlvl_resp == 2'b11) { 1 } else { 0 }
+    // training reads stop for a refresh; one goes in once the gap since the last has passed
+    let train_ref: bit = if training == 1 && ref_due == 1 && can_cmd == 1 && t_actg == 0 && train_gap == 0 { 1 } else { 0 }
+    let do_rdc: bit = if training == 1 && lvl_done == 0 && train_ref == 0 && can_cmd == 1 && train_gap == 0 && train_reads < tr_max { 1 } else { 0 }
+
+    let mrw_ma: bit[6] = match mi {
+        0 => 13,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 11,
+        5 => 12,
+        6 => 14,
+        _ => 22
+    }
+    let mrw_op: bit[8] = match mi {
+        0 => mr13_c,
+        1 => mr1_c,
+        2 => mr2_c,
+        3 => mr3_c,
+        4 => mr11_c,
+        5 => mr12_c,
+        6 => mr14_c,
+        _ => mr22_c
+    }
+    let mrr_ma: bit[6] = if mi == 0 { 5 } else { 8 }
+    let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
+    let two: bit = if do_pre == 1 || do_preab == 1 || do_ref == 1 || train_ref == 1 || do_zqs == 1 || do_zql == 1 { 1 } else { 0 }
+    let f_cs: bit[4] = if four == 1 { 4'b0101 } else { if two == 1 { 4'b0001 } else { 4'b0000 } }
+    let f_ca: bit[24] =
+        if do_act == 1 { ca_act(rq_row, rq_ba) }
+        else { if do_wr == 1 { ca_cas(5'b00100, rq_ba, rq_col) }
+        else { if do_rd == 1 { ca_cas(5'b00010, rq_ba, rq_col) }
+        else { if do_mrw == 1 { ca_mrw(mrw_ma, mrw_op) }
+        else { if do_mrr == 1 { ca_mrr(mrr_ma) }
+        else { if do_rdc == 1 { ca_mpc(7'h43) }
+        else { if do_pre == 1 { {18'h00000, 3'b000, rq_ba, 6'b010000} }
+        else { if do_preab == 1 { {18'h00000, 6'b000000, 6'b110000} }
+        else { if do_ref == 1 || train_ref == 1 { {18'h00000, 6'b000000, 6'b101000} }
+        else { if do_zqs == 1 { {18'h00000, 6'd15, 6'b100000} }
+        else { if do_zql == 1 { {18'h00000, 6'd17, 6'b100000} }
+        else { 24'h000000 } } } } } } } } } } }
+
+    // ------------------------------------------------------------ data enables
+    let rd_issue: bit = if do_rd == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
+    let wr_mod: bit[64] = if do_wr == 1 { wr_ring | wr_mask } else { wr_ring }
+    let rd_mod: bit[64] = if rd_issue == 1 { rd_ring | rd_mask } else { rd_ring }
+    let e0: bit[4] = {3'b000, wr_mod[0]}
+    let e1: bit[4] = {3'b000, wr_mod[1]}
+    let e2: bit[4] = {3'b000, wr_mod[2]}
+    let e3: bit[4] = {3'b000, wr_mod[3]}
+    let wk1: bit[4] = wi + e0
+    let wk2: bit[4] = wk1 + e1
+    let wk3: bit[4] = wk2 + e2
+    let wtot: bit[4] = wk3 + e3
+    let wd_head: bit[256] = wq[wq_rp]
+    let wd_next: bit[256] = wq[wq_rp + 1]
+    let wd0: bit[32] = if wi < 8 { burst_word(wd_head, wi[2:0]) } else { burst_word(wd_next, wi[2:0]) }
+    let wd1: bit[32] = if wk1 < 8 { burst_word(wd_head, wk1[2:0]) } else { burst_word(wd_next, wk1[2:0]) }
+    let wd2: bit[32] = if wk2 < 8 { burst_word(wd_head, wk2[2:0]) } else { burst_word(wd_next, wk2[2:0]) }
+    let wd3: bit[32] = if wk3 < 8 { burst_word(wd_head, wk3[2:0]) } else { burst_word(wd_next, wk3[2:0]) }
+    let w_pop: bit = if wtot >= 8 { 1 } else { 0 }
+
+    // ------------------------------------------------------------ read data in
+    let v0: bit[4] = {3'b000, dfi_rddata_valid_w0}
+    let v1: bit[4] = {3'b000, dfi_rddata_valid_w1}
+    let v2: bit[4] = {3'b000, dfi_rddata_valid_w2}
+    let v3: bit[4] = {3'b000, dfi_rddata_valid_w3}
+    let rk1: bit[4] = rc + v0
+    let rk2: bit[4] = rk1 + v1
+    let rk3: bit[4] = rk2 + v2
+    let rtot: bit[4] = rk3 + v3
+    let r_emit: bit = if rtot >= 8 { 1 } else { 0 }
+    let re0: bit[32] = if v0 == 1 && rc == 0 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 0 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 0 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 0 { dfi_rddata_w3 } else { rw0 } } } }
+    let re1: bit[32] = if v0 == 1 && rc == 1 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 1 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 1 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 1 { dfi_rddata_w3 } else { rw1 } } } }
+    let re2: bit[32] = if v0 == 1 && rc == 2 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 2 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 2 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 2 { dfi_rddata_w3 } else { rw2 } } } }
+    let re3: bit[32] = if v0 == 1 && rc == 3 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 3 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 3 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 3 { dfi_rddata_w3 } else { rw3 } } } }
+    let re4: bit[32] = if v0 == 1 && rc == 4 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 4 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 4 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 4 { dfi_rddata_w3 } else { rw4 } } } }
+    let re5: bit[32] = if v0 == 1 && rc == 5 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 5 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 5 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 5 { dfi_rddata_w3 } else { rw5 } } } }
+    let re6: bit[32] = if v0 == 1 && rc == 6 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 6 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 6 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 6 { dfi_rddata_w3 } else { rw6 } } } }
+    let re7: bit[32] = if v0 == 1 && rc == 7 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 7 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 7 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 7 { dfi_rddata_w3 } else { rw7 } } } }
+    let rn0: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 8 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 8 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 8 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 8 { dfi_rddata_w3 } else { re0 } } } } } else { re0 }
+    let rn1: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 9 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 9 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 9 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 9 { dfi_rddata_w3 } else { re1 } } } } } else { re1 }
+    let rn2: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 10 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 10 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 10 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 10 { dfi_rddata_w3 } else { re2 } } } } } else { re2 }
+    let rn3: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 11 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 11 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 11 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 11 { dfi_rddata_w3 } else { re3 } } } } } else { re3 }
+    let rn4: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 12 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 12 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 12 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 12 { dfi_rddata_w3 } else { re4 } } } } } else { re4 }
+    let rn5: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 13 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 13 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 13 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 13 { dfi_rddata_w3 } else { re5 } } } } } else { re5 }
+    let rn6: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 14 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 14 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 14 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 14 { dfi_rddata_w3 } else { re6 } } } } } else { re6 }
+    let rn7: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 15 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 15 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 15 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 15 { dfi_rddata_w3 } else { re7 } } } } } else { re7 }
+    let r_burst: bit[256] = {re7, re6, re5, re4, re3, re2, re1, re0}
+    let r_tag: bit[2] = tq[tq_rp]
+    let tq_push: bit = if do_rd == 1 || do_mrr == 1 { 1 } else { 0 }
+
+    // ------------------------------------------------------------ banks
+    inst b0 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 0 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 0) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 0 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 0 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b1 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 1 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 1) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 1 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 1 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b2 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 2 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 2) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 2 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 2 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b3 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 3 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 3) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 3 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 3 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b4 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 4 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 4) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 4 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 4 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b5 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 5 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 5) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 5 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 5 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b6 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 6 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 6) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 6 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 6 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+    inst b7 = Lpddr4BankState {
+        clk: clk,
+        act: if do_act == 1 && rq_ba == 7 { 1 } else { 0 },
+        pre: if (do_pre == 1 && rq_ba == 7) || do_preab == 1 { 1 } else { 0 },
+        rd: if do_rd == 1 && rq_ba == 7 { 1 } else { 0 },
+        wr: if do_wr == 1 && rq_ba == 7 { 1 } else { 0 },
+        row_in: rq_row,
+        f_rcd: f_rcd,
+        f_ras: f_ras,
+        f_rp: f_rp,
+        f_wr: f_wr,
+        f_rtp: f_rtp
+    }
+
+    on(clk.rise) {
+        // ---------------------------------------------------------------- DFI frame out
+        o_cs = f_cs
+        o_ca = f_ca
+        o_we = wr_mod[3:0]
+        o_wd = {wd3, wd2, wd1, wd0}
+        o_re = rd_mod[3:0]
+        wr_ring = wr_mod >> 4
+        rd_ring = rd_mod >> 4
+        if w_pop == 1 {
+            wq_rp = wq_rp + 1
+            wi = wtot - 8
+        } else {
+            wi = wtot
+        }
+        if do_wr == 1 {
+            wq[wq_wp] = rq_data
+            wq_wp = wq_wp + 1
+        }
+        wq_n = if do_wr == 1 && w_pop == 0 { wq_n + 1 } else { if do_wr == 0 && w_pop == 1 { wq_n - 1 } else { wq_n } }
+
+        // ---------------------------------------------------------------- read data in
+        rw0 = rn0
+        rw1 = rn1
+        rw2 = rn2
+        rw3 = rn3
+        rw4 = rn4
+        rw5 = rn5
+        rw6 = rn6
+        rw7 = rn7
+        rc = if r_emit == 1 { rtot - 8 } else { rtot }
+        rsp_v_r = 0
+        if r_emit == 1 {
+            tq_rp = tq_rp + 1
+            if r_tag == 0 {
+                rsp_v_r = 1
+                rsp_d_r = r_burst
+            }
+            if r_tag == 1 { mr5_r = re0[7:0] }
+            if r_tag == 2 { mr8_r = re0[7:0] }
+        }
+        if tq_push == 1 {
+            tq[tq_wp] = if do_mrr == 1 { if mi == 0 { 2'd1 } else { 2'd2 } } else { 2'd0 }
+            tq_wp = tq_wp + 1
+        }
+        tq_n = if tq_push == 1 && r_emit == 0 { tq_n + 1 } else { if tq_push == 0 && r_emit == 1 { tq_n - 1 } else { tq_n } }
+
+        // ---------------------------------------------------------------- timers
+        t_cmd = if do_mrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
+        t_actg = if do_act == 1 { max8(dec8(t_actg), m1_rrd) } else { if do_ref == 1 { max8(dec8(t_actg), m1_rfc) } else { dec8(t_actg) } }
+        t_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_rd), m1_ccd) } else { if do_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
+        t_wr = if do_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
+        t_ref = if do_preab == 1 || do_pre == 1 { max8(dec8(t_ref), m1_rp) } else { dec8(t_ref) }
+        faw0 = if do_act == 1 && fp == 0 { m1_faw } else { dec8(faw0) }
+        faw1 = if do_act == 1 && fp == 1 { m1_faw } else { dec8(faw1) }
+        faw2 = if do_act == 1 && fp == 2 { m1_faw } else { dec8(faw2) }
+        faw3 = if do_act == 1 && fp == 3 { m1_faw } else { dec8(faw3) }
+        if do_act == 1 { fp = fp + 1 }
+
+        // ---------------------------------------------------------------- refresh interval
+        if ref_on == 1 {
+            if refc + 1 >= f_refi {
+                refc = 0
+                ref_due = 1
+            } else {
+                refc = refc + 1
+            }
+        }
+        if do_ref == 1 || train_ref == 1 { ref_due = 0 }
+
+        // ---------------------------------------------------------------- the request
+        // a pending PHY update stops new requests so the bus drains and the window is granted
+        if req_valid == 1 && rq_v == 0 && init_done_r == 1 && dfi_phyupd_req == 0 {
+            rq_v = 1
+            rq_w = req_write
+            rq_row = req_row
+            rq_ba = req_ba
+            rq_col = req_col
+            rq_data = req_wdata
+        }
+        if do_cas == 1 { rq_v = 0 }
+
+        // ---------------------------------------------------------------- sequence
+        wait_c = if wait_c == 0 { 0 } else { wait_c - 1 }
+        train_gap = if do_rdc == 1 { tr_gap } else { if train_gap == 0 { 0 } else { train_gap - 1 } }
+        if do_rdc == 1 { train_reads = train_reads + 1 }
+        match st {
+            0 => {
+                init_start_r = 1
+                if dfi_init_complete == 1 {
+                    st = 1
+                    wait_c = i1_cyc
+                }
+            },
+            1 => {
+                if wait_c == 0 {
+                    st = 2
+                    reset_r = 1
+                    wait_c = i3_cyc
+                }
+            },
+            2 => {
+                if wait_c == 0 {
+                    st = 3
+                    cke_r = 1
+                    wait_c = i5_cyc
+                }
+            },
+            3 => {
+                if wait_c == 0 {
+                    st = 4
+                    mi = 0
+                }
+            },
+            4 => {
+                if do_mrw == 1 { mi = mi + 1 }
+                if mi == 8 { st = 5 }
+            },
+            5 => {
+                if do_zqs == 1 {
+                    st = 6
+                    wait_c = f_zqcal32
+                }
+            },
+            6 => {
+                if wait_c == 0 { st = 7 }
+            },
+            7 => {
+                if do_zql == 1 {
+                    st = 10
+                    ref_on = 1
+                    gate_en_r = 1
+                    train_reads = 0
+                }
+            },
+            8 => {
+                if do_mrr == 1 { mi = mi + 1 }
+                if mi == 2 { st = 9 }
+            },
+            9 => {
+                if tq_n == 0 {
+                    st = 12
+                    wait_c = 4
+                }
+            },
+            10 => {
+                if lvl_done == 1 || train_reads >= tr_max {
+                    if lvl_done == 0 { train_fail_r = 1 }
+                    if quiet == 1 && train_gap == 0 {
+                        st = 11
+                        gate_en_r = 0
+                        rdlvl_en_r = 1
+                        train_reads = 0
+                    }
+                }
+            },
+            11 => {
+                if lvl_done == 1 || train_reads >= tr_max {
+                    if lvl_done == 0 { train_fail_r = 1 }
+                    if quiet == 1 && train_gap == 0 {
+                        st = 8
+                        rdlvl_en_r = 0
+                        mi = 0
+                    }
+                }
+            },
+            12 => {
+                if wait_c == 0 {
+                    st = 13
+                    init_done_r = 1
+                }
+            },
+            13 => {
+                if upd_go == 1 {
+                    st = 16
+                    phyupd_ack_r = 1
+                } else {
+                    if ref_go == 1 {
+                        st = 14
+                    }
+                }
+            },
+            14 => {
+                if b_open == 0 {
+                    st = 15
+                }
+            },
+            15 => {
+                if do_ref == 1 {
+                    st = 17
+                    wait_c = cu_cyc
+                }
+            },
+            16 => {
+                if dfi_phyupd_req == 0 {
+                    st = 13
+                    phyupd_ack_r = 0
+                }
+            },
+            _ => {
+                // controller update after a refresh, once nothing is on the bus
+                if quiet == 1 && ctrlupd_r == 0 && wait_c != 0 {
+                    ctrlupd_r = 1
+                }
+                if ctrlupd_r == 1 && wait_c == 0 {
+                    ctrlupd_r = 0
+                    st = 13
+                }
+            }
+        }
+    }
+
+    req_ready = if rq_v == 0 && init_done_r == 1 && dfi_phyupd_req == 0 { 1 } else { 0 }
+    rsp_valid = rsp_v_r
+    rsp_rdata = rsp_d_r
+    init_done = init_done_r
+    train_fail = train_fail_r
+    mr5 = mr5_r
+    mr8 = mr8_r
+    state = st
+    dfi_init_start = init_start_r
+    dfi_ctrlupd_req = ctrlupd_r
+    dfi_phyupd_ack = phyupd_ack_r
+    dfi_rdlvl_gate_en = gate_en_r
+    dfi_rdlvl_en = rdlvl_en_r
+    dfi_cs_p0 = o_cs[0]
+    dfi_address_p0 = o_ca[5:0]
+    dfi_cke_p0 = cke_r
+    dfi_reset_n_p0 = reset_r
+    dfi_wrdata_en_p0 = o_we[0]
+    dfi_wrdata_p0 = o_wd[31:0]
+    dfi_wrdata_mask_p0 = 4'b0000
+    dfi_rddata_en_p0 = o_re[0]
+    dfi_cs_p1 = o_cs[1]
+    dfi_address_p1 = o_ca[11:6]
+    dfi_cke_p1 = cke_r
+    dfi_reset_n_p1 = reset_r
+    dfi_wrdata_en_p1 = o_we[1]
+    dfi_wrdata_p1 = o_wd[63:32]
+    dfi_wrdata_mask_p1 = 4'b0000
+    dfi_rddata_en_p1 = o_re[1]
+    dfi_cs_p2 = o_cs[2]
+    dfi_address_p2 = o_ca[17:12]
+    dfi_cke_p2 = cke_r
+    dfi_reset_n_p2 = reset_r
+    dfi_wrdata_en_p2 = o_we[2]
+    dfi_wrdata_p2 = o_wd[95:64]
+    dfi_wrdata_mask_p2 = 4'b0000
+    dfi_rddata_en_p2 = o_re[2]
+    dfi_cs_p3 = o_cs[3]
+    dfi_address_p3 = o_ca[23:18]
+    dfi_cke_p3 = cke_r
+    dfi_reset_n_p3 = reset_r
+    dfi_wrdata_en_p3 = o_we[3]
+    dfi_wrdata_p3 = o_wd[127:96]
+    dfi_wrdata_mask_p3 = 4'b0000
+    dfi_rddata_en_p3 = o_re[3]
+}

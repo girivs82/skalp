@@ -1,0 +1,26 @@
+// A parent's const generic forwarded to a child's, beside a literal one
+entity GfChild<const A: nat = 1, const B: nat = 2> {
+    out y: bit[8]
+}
+impl GfChild {
+    let a: bit[8] = A
+    let b: bit[8] = B
+    y = a + b
+}
+entity GfMid<const P: nat = 5> {
+    out o: bit[8]
+}
+impl GfMid {
+    inst c = GfChild<P, 7> { }
+    o = c.y
+}
+entity GfTop {
+    out o: bit[8]
+    out o_default: bit[8]
+}
+impl GfTop {
+    inst m = GfMid<20> { }
+    inst d = GfMid { }
+    o = m.o
+    o_default = d.o
+}

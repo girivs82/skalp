@@ -1,0 +1,19 @@
+// A function call as an instance port connection
+fn f(x: bit[4]) -> bit[8] {
+    return {x, x}
+}
+entity Sub {
+    in a: bit[8]
+    out y: bit[8]
+}
+impl Sub {
+    y = a
+}
+entity Top {
+    in i: bit[4]
+    out o: bit[8]
+}
+impl Top {
+    inst s = Sub { a: f(i) }
+    o = s.y
+}
