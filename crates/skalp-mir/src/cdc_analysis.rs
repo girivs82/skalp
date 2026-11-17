@@ -592,6 +592,18 @@ impl CdcAnalyzer {
     ) -> Vec<CdcViolation> {
         let mut violations = Vec::new();
 
+        // A clock output driven from logic (a divider, a gated or muxed
+        // clock) makes a clock: the clocks it is built from are its source,
+        // not data crossing into its domain. Logic clocked by it is checked
+        // where its own data crosses.
+        if let LValue::Port(port_id) = &continuous_assign.lhs {
+            if module.ports.iter().any(|p| {
+                p.id == *port_id && matches!(p.port_type, crate::mir::DataType::Clock { .. })
+            }) {
+                return violations;
+            }
+        }
+
         // Get the clock domains involved in the assignment
         let target_domain = self.get_lvalue_clock_domain(&continuous_assign.lhs);
         let source_domains = self.get_expression_clock_domains(&continuous_assign.rhs);

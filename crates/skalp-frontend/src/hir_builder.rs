@@ -2023,6 +2023,12 @@ impl HirBuilderContext {
         for port in &ports {
             self.symbols
                 .add_to_scope(&port.name, SymbolId::Port(port.id));
+            // Event triggers (`on(clk.rise)`) look ports up by name in the flat
+            // port table, which otherwise holds the ports of whichever entity was
+            // declared last. With `entity A`, `entity B`, `impl A` in one file,
+            // A's `on(clk.rise)` bound to B's `clk`, so its process lost its
+            // clock and became combinational.
+            self.symbols.ports.insert(port.name.clone(), port.id);
         }
 
         // Add generic parameters to scope so they can be referenced in the impl
@@ -3196,6 +3202,21 @@ impl HirBuilderContext {
                     }),
                 });
             }
+        }
+
+        // A call `f(x)` (optionally with postfix `[i]`, `.f` after it) arrives as
+        // sibling nodes [IdentExpr(f), CallExpr((x)), ...]. Picking one node built
+        // the bare name `f`, which fails, and dropped the connection (the inst
+        // check then reported the port unconnected): build the whole chain.
+        if expr_children.len() >= 2
+            && expr_children[0].kind() == SyntaxKind::IdentExpr
+            && expr_children[1].kind() == SyntaxKind::CallExpr
+        {
+            let expr = self.build_chained_rhs_expression(&expr_children)?;
+            return Some(HirConnection {
+                port: port_name,
+                expr,
+            });
         }
 
         // Prefer IndexExpr/FieldExpr/CastExpr over IdentExpr when both exist
