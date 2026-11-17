@@ -1,0 +1,689 @@
+// Behavioural LPDDR4 PHY on the DFI 1:4 interface, for simulation.
+//
+// It turns the controller's DFI frames into LPDDR4 pin activity on one x16 channel, so that a
+// DFI controller can be run against an LPDDR4 model before any vendor PHY exists. It is cycle
+// based: it runs on a fast clock `clk` with CLK_PER_CK clocks per CK (even, 4 to 16) and makes
+// the DFI clock itself (`dfi_clk`, one per 4 CK). It is not meant for synthesis.
+//
+// DFI subset (see dfi.md next to this file for the full definition):
+//   phases p0..p3 per dfi_clk cycle, one CK each; command: dfi_cs_pN, dfi_address_pN (CA[5:0]),
+//   dfi_cke_pN, dfi_reset_n_pN; write: dfi_wrdata_en_pN, dfi_wrdata_pN (2 beats x 16 bits, the
+//   earlier beat in [15:0]), dfi_wrdata_mask_pN; read: dfi_rddata_en_pN, dfi_rddata_wN,
+//   dfi_rddata_valid_wN; status: dfi_init_start, dfi_init_complete; update: dfi_ctrlupd_req/ack,
+//   dfi_phyupd_req/ack; training (PHY evaluation): dfi_rdlvl_gate_en, dfi_rdlvl_en and the
+//   per-byte-lane dfi_rdlvl_gate_resp, dfi_rdlvl_resp.
+//
+// Timing at the pins: every DFI phase comes out two dfi_clk cycles after the controller drives
+// it, commands and data alike, so DFI slot timing equals DRAM timing. CK rises in the middle of
+// each slot; CA and CS change at slot starts. Write data: a slot with dfi_wrdata_en sends its two
+// beats centred on DQS edges at the slot middle and end, with a 2 tCK static DQS preamble and a
+// half-tCK postamble. With a write command in slot c, the first data slot is c + WL + 4.
+//
+// Reads: dfi_rddata_en marks the slots in which read data is expected (8 per BL16 burst; with a
+// read command in slot c, the nominal first slot is c + RL + 3). Each byte lane opens its read
+// gate a trained number of clocks after the first slot of a burst starts, then takes 16 beats on
+// its DQS edges, delayed by a trained sample delay. A burst goes back on dfi_rddata_wN with
+// dfi_rddata_valid_wN once both lanes have it, four words per dfi_clk cycle.
+//
+// Training, PHY evaluation, one read burst per dfi_rddata_en burst (the controller sends Read DQ
+// Calibration reads; no data comes back on DFI while either enable is set):
+//   gate: each lane measures the clocks from the burst's first slot to the first DQS rise after
+//         the preamble; GATE_MATCHES equal measurements in a row set its gate half a tCK before
+//         that rise, and raise the lane's dfi_rdlvl_gate_resp bit.
+//   read eye: each burst is captured with the next sample delay (0 to half a tCK - 1 clocks) and
+//         compared with the Read DQ Calibration pattern (RDC_PATTERN = {MR40, MR32}, inverted per
+//         lane by RDC_INV0/RDC_INV1 = MR15/MR20); after the sweep the lane takes the middle of the
+//         longest passing run and raises its dfi_rdlvl_resp bit (lvl_fail if nothing passed).
+//
+// PHY update: with PHYUPD_EVERY != 0 the PHY asks for an update window every PHYUPD_EVERY dfi_clk
+// cycles (dfi_phyupd_req) and holds it PHYUPD_LEN cycles once acknowledged. A DFI cycle with a
+// command or data enable while the window is granted counts in `upd_violations`.
+pub entity DfiLpddr4BehavPhy<
+    const CLK_PER_CK: nat = 8,
+    const INIT_CYCLES: nat = 4,
+    const RDC_PATTERN: nat = 15450,
+    const RDC_INV0: nat = 0,
+    const RDC_INV1: nat = 0,
+    const GATE_MATCHES: nat = 3,
+    const PHYUPD_EVERY: nat = 0,
+    const PHYUPD_LEN: nat = 4
+> {
+    in clk: clock
+    out dfi_clk: clock
+    // ---------------------------------------------------------------- DFI from the controller
+    in dfi_cs_p0: bit
+    in dfi_cs_p1: bit
+    in dfi_cs_p2: bit
+    in dfi_cs_p3: bit
+    in dfi_address_p0: bit[6]
+    in dfi_address_p1: bit[6]
+    in dfi_address_p2: bit[6]
+    in dfi_address_p3: bit[6]
+    in dfi_cke_p0: bit
+    in dfi_cke_p1: bit
+    in dfi_cke_p2: bit
+    in dfi_cke_p3: bit
+    in dfi_reset_n_p0: bit
+    in dfi_reset_n_p1: bit
+    in dfi_reset_n_p2: bit
+    in dfi_reset_n_p3: bit
+    in dfi_wrdata_en_p0: bit
+    in dfi_wrdata_en_p1: bit
+    in dfi_wrdata_en_p2: bit
+    in dfi_wrdata_en_p3: bit
+    in dfi_wrdata_p0: bit[32]
+    in dfi_wrdata_p1: bit[32]
+    in dfi_wrdata_p2: bit[32]
+    in dfi_wrdata_p3: bit[32]
+    in dfi_wrdata_mask_p0: bit[4]
+    in dfi_wrdata_mask_p1: bit[4]
+    in dfi_wrdata_mask_p2: bit[4]
+    in dfi_wrdata_mask_p3: bit[4]
+    in dfi_rddata_en_p0: bit
+    in dfi_rddata_en_p1: bit
+    in dfi_rddata_en_p2: bit
+    in dfi_rddata_en_p3: bit
+    in dfi_init_start: bit
+    in dfi_ctrlupd_req: bit
+    in dfi_phyupd_ack: bit
+    in dfi_rdlvl_gate_en: bit
+    in dfi_rdlvl_en: bit
+    // ---------------------------------------------------------------- DFI to the controller
+    out dfi_rddata_w0: bit[32]
+    out dfi_rddata_w1: bit[32]
+    out dfi_rddata_w2: bit[32]
+    out dfi_rddata_w3: bit[32]
+    out dfi_rddata_valid_w0: bit
+    out dfi_rddata_valid_w1: bit
+    out dfi_rddata_valid_w2: bit
+    out dfi_rddata_valid_w3: bit
+    out dfi_init_complete: bit
+    out dfi_ctrlupd_ack: bit
+    out dfi_phyupd_req: bit
+    out dfi_rdlvl_gate_resp: bit[2]
+    out dfi_rdlvl_resp: bit[2]
+    // ---------------------------------------------------------------- LPDDR4 pins
+    out ck_t: bit
+    out ck_c: bit
+    out cke: bit
+    out cs: bit
+    out ca: bit[6]
+    out reset_n: bit
+    out dq_o: bit[16]
+    out dq_oe: bit
+    in dq_i: bit[16]
+    out dqs_t_o: bit[2]
+    out dqs_c_o: bit[2]
+    out dqs_oe: bit
+    in dqs_t_i: bit[2]
+    out dmi_o: bit[2]
+    out dmi_oe: bit
+    // ---------------------------------------------------------------- status
+    out gate_dly0: bit[8]
+    out gate_dly1: bit[8]
+    out rd_dly0: bit[4]
+    out rd_dly1: bit[4]
+    out lvl_fail: bit[2]
+    out gate_timeouts: bit[16]
+    out upd_violations: bit[16]
+    // completed controller and PHY updates
+    out ctrlupd_count: bit[16]
+    out phyupd_count: bit[16]
+}
+
+impl DfiLpddr4BehavPhy {
+    // ------------------------------------------------------------ clocking
+    signal cyc: bit[32] = 0
+    signal sb: bit[8] = 0
+    signal sl: bit[2] = 0
+    signal sclk_r: bit = 0
+    // DFI frames: captured in the middle of a dfi_clk cycle, then nxt, cur (at the pins), prv
+    signal cap_cs: bit[4] = 0
+    signal cap_ca: bit[24] = 0
+    signal cap_cke: bit[4] = 0
+    signal cap_rst: bit[4] = 0
+    signal cap_we: bit[4] = 0
+    signal cap_wd: bit[128] = 0
+    signal cap_re: bit[4] = 0
+    signal nxt_cs: bit[4] = 0
+    signal nxt_ca: bit[24] = 0
+    signal nxt_cke: bit[4] = 0
+    signal nxt_rst: bit[4] = 0
+    signal nxt_we: bit[4] = 0
+    signal nxt_wd: bit[128] = 0
+    signal nxt_re: bit[4] = 0
+    signal cur_cs: bit[4] = 0
+    signal cur_ca: bit[24] = 0
+    signal cur_cke: bit[4] = 0
+    signal cur_rst: bit[4] = 0
+    signal cur_we: bit[4] = 0
+    signal cur_wd: bit[128] = 0
+    signal cur_re: bit[4] = 0
+    signal prv_we: bit[4] = 0
+    signal prv_wd: bit[128] = 0
+    // ------------------------------------------------------------ status and handshakes
+    signal init_cnt: bit[16] = 0
+    signal init_done_r: bit = 0
+    signal ctrlupd_ack_r: bit = 0
+    signal phyupd_req_r: bit = 0
+    signal phyupd_cnt: bit[32] = 0
+    signal phyupd_held: bit[16] = 0
+    signal ctrlupd_n: bit[16] = 0
+    signal phyupd_n: bit[16] = 0
+    signal upd_viol_r: bit[16] = 0
+    signal gate_to_r: bit[16] = 0
+    // ------------------------------------------------------------ read bursts
+    // first slot of each expected burst (clock count), shared by both lanes
+    signal bq_t: [bit[32]; 4]
+    signal bq_tail: bit[2] = 0
+    signal ecnt: bit[3] = 0
+    // per lane: queue head, capture state (0 idle, 1 gate open, 2 taking beats), beats
+    signal hd0: bit[2] = 0
+    signal hd1: bit[2] = 0
+    signal st0: bit[2] = 0
+    signal st1: bit[2] = 0
+    signal armed_at0: bit[32] = 0
+    signal armed_at1: bit[32] = 0
+    signal nb0: bit[5] = 0
+    signal nb1: bit[5] = 0
+    signal buf0: bit[128] = 0
+    signal buf1: bit[128] = 0
+    signal hist0: bit[8] = 0
+    signal hist1: bit[8] = 0
+    signal dprev0: bit = 0
+    signal dprev1: bit = 0
+    // completed bursts per lane (4 deep), and the output stage
+    signal cq0: [bit[128]; 4]
+    signal cq1: [bit[128]; 4]
+    signal cw0: bit[2] = 0
+    signal cw1: bit[2] = 0
+    signal cr: bit[2] = 0
+    signal cn0: bit[3] = 0
+    signal cn1: bit[3] = 0
+    signal out_half: bit = 0
+    signal rdw0: bit[32] = 0
+    signal rdw1: bit[32] = 0
+    signal rdw2: bit[32] = 0
+    signal rdw3: bit[32] = 0
+    signal rdv: bit = 0
+    // ------------------------------------------------------------ training
+    signal gate_d0: bit[8] = 0
+    signal gate_d1: bit[8] = 0
+    signal rdly0: bit[4] = 0
+    signal rdly1: bit[4] = 0
+    signal gate_en_q: bit = 0
+    signal rdlvl_en_q: bit = 0
+    signal gresp: bit[2] = 0
+    signal rresp: bit[2] = 0
+    signal fail_r: bit[2] = 0
+    // gate measurement per lane: 0 idle, 1 looking for the first rise after the preamble
+    signal gm0: bit = 0
+    signal gm1: bit = 0
+    signal gt0: bit[32] = 0
+    signal gt1: bit[32] = 0
+    signal glow0: bit[8] = 0
+    signal glow1: bit[8] = 0
+    signal glast0: bit[8] = 0
+    signal glast1: bit[8] = 0
+    signal gmatch0: bit[4] = 0
+    signal gmatch1: bit[4] = 0
+    // read-eye sweep per lane
+    signal sweep0: bit[4] = 0
+    signal sweep1: bit[4] = 0
+    signal run_st0: bit[4] = 0
+    signal run_st1: bit[4] = 0
+    signal run_ln0: bit[4] = 0
+    signal run_ln1: bit[4] = 0
+    signal best_st0: bit[4] = 0
+    signal best_st1: bit[4] = 0
+    signal best_ln0: bit[4] = 0
+    signal best_ln1: bit[4] = 0
+
+    // ------------------------------------------------------------ constants
+    let c_ck: bit[8] = CLK_PER_CK
+    let c_last: bit[8] = c_ck - 1
+    let c_half: bit[8] = c_ck >> 1
+    let c_q1: bit[8] = c_ck >> 2
+    let c_q3: bit[8] = c_half + c_q1
+    let half4: bit[4] = c_half[3:0]
+    let pat: bit[16] = RDC_PATTERN
+    let inv0: bit[8] = RDC_INV0
+    let inv1: bit[8] = RDC_INV1
+    let gm_need: bit[4] = GATE_MATCHES
+    let pu_every: bit[32] = PHYUPD_EVERY
+    let pu_len: bit[16] = PHYUPD_LEN
+    let init_need: bit[16] = INIT_CYCLES
+
+    // ------------------------------------------------------------ slot timing
+    let slot_end: bit = if sb == c_last { 1 } else { 0 }
+    let mid_edge: bit = if sl == 1 && slot_end == 1 { 1 } else { 0 }
+    let frame_edge: bit = if sl == 3 && slot_end == 1 { 1 } else { 0 }
+    let sl_next: bit[2] = if slot_end == 1 { sl + 1 } else { sl }
+    let slot_start: bit = if sb == 0 { 1 } else { 0 }
+
+    // ------------------------------------------------------------ command pins
+    let ca_now: bit[6] = match sl {
+        0 => cur_ca[5:0],
+        1 => cur_ca[11:6],
+        2 => cur_ca[17:12],
+        _ => cur_ca[23:18]
+    }
+
+    // ------------------------------------------------------------ write pins
+    let we_cur: bit = cur_we[sl]
+    let sl_m1: bit[2] = sl - 1
+    let sl_p1: bit[2] = sl + 1
+    let sl_p2: bit[2] = sl + 2
+    let we_prev: bit = if sl == 0 { prv_we[3] } else { cur_we[sl_m1] }
+    let we_next1: bit = if sl == 3 { nxt_we[0] } else { cur_we[sl_p1] }
+    let we_next2: bit = if sl >= 2 { nxt_we[sl_p2] } else { cur_we[sl_p2] }
+    let w_cur: bit[32] = match sl {
+        0 => cur_wd[31:0],
+        1 => cur_wd[63:32],
+        2 => cur_wd[95:64],
+        _ => cur_wd[127:96]
+    }
+    let w_prev: bit[32] = match sl {
+        0 => prv_wd[127:96],
+        1 => cur_wd[31:0],
+        2 => cur_wd[63:32],
+        _ => cur_wd[95:64]
+    }
+    let dq_now: bit[16] = if sb < c_q1 { w_prev[31:16] } else { if sb < c_q3 { w_cur[15:0] } else { w_cur[31:16] } }
+    let dq_drv: bit = if sb < c_q1 { we_prev } else { we_cur }
+    let dqs_hi: bit = if we_cur == 1 && sb >= c_half { 1 } else { 0 }
+    let dqs_drv: bit = if we_cur == 1 || we_next1 == 1 || we_next2 == 1 || (we_prev == 1 && sb < c_half) { 1 } else { 0 }
+
+    // ------------------------------------------------------------ read capture
+    // the strobe each lane samples on: its DQS delayed by the lane's sample delay
+    let ds0: bit = if rdly0 == 0 { dqs_t_i[0] } else { hist0[rdly0 - 1] }
+    let ds1: bit = if rdly1 == 0 { dqs_t_i[1] } else { hist1[rdly1 - 1] }
+    let e0: bit = if ds0 != dprev0 { 1 } else { 0 }
+    let e1: bit = if ds1 != dprev1 { 1 } else { 0 }
+    let r0: bit = if ds0 == 1 && dprev0 == 0 { 1 } else { 0 }
+    let r1: bit = if ds1 == 1 && dprev1 == 0 { 1 } else { 0 }
+    let byte0: bit[8] = dq_i[7:0]
+    let byte1: bit[8] = dq_i[15:8]
+    let training: bit = if gate_en_q == 1 { 1 } else { 0 }
+    // a burst starts in a slot with dfi_rddata_en when 0 mod 8 such slots have gone by
+    let re_now: bit = if slot_start == 1 && cur_re[sl] == 1 { 1 } else { 0 }
+    let burst_start: bit = if re_now == 1 && ecnt == 0 { 1 } else { 0 }
+    let n0: bit[2] = bq_tail - hd0
+    let n1: bit[2] = bq_tail - hd1
+    let open0: bit[32] = bq_t[hd0] + {24'h000000, gate_d0}
+    let open1: bit[32] = bq_t[hd1] + {24'h000000, gate_d1}
+    let arm0: bit = if st0 == 0 && n0 != 0 && cyc >= open0 && training == 0 { 1 } else { 0 }
+    let arm1: bit = if st1 == 0 && n1 != 0 && cyc >= open1 && training == 0 { 1 } else { 0 }
+    // the gate stays open at most 4 tCK waiting for the first rise
+    let to0: bit = if st0 == 1 && cyc - armed_at0 > {22'h000000, c_ck, 2'b00} { 1 } else { 0 }
+    let to1: bit = if st1 == 1 && cyc - armed_at1 > {22'h000000, c_ck, 2'b00} { 1 } else { 0 }
+    let take0: bit = if (st0 == 1 && r0 == 1) || (st0 == 2 && e0 == 1) { 1 } else { 0 }
+    let take1: bit = if (st1 == 1 && r1 == 1) || (st1 == 2 && e1 == 1) { 1 } else { 0 }
+    let nbuf0: bit[128] = {byte0, buf0[127:8]}
+    let nbuf1: bit[128] = {byte1, buf1[127:8]}
+    let done0: bit = if (take0 == 1 && st0 == 2 && nb0 == 15) || to0 == 1 { 1 } else { 0 }
+    let done1: bit = if (take1 == 1 && st1 == 2 && nb1 == 15) || to1 == 1 { 1 } else { 0 }
+    let fin0: bit[128] = if to0 == 1 { 0 } else { nbuf0 }
+    let fin1: bit[128] = if to1 == 1 { 0 } else { nbuf1 }
+
+    // read-eye check of a finished burst: each beat's byte is all ones or all zeros per the
+    // pattern bit, inverted by the lane's mask
+    let exp0: bit[128] = {
+        if pat[15] == 1 { ~inv0 } else { inv0 }, if pat[14] == 1 { ~inv0 } else { inv0 },
+        if pat[13] == 1 { ~inv0 } else { inv0 }, if pat[12] == 1 { ~inv0 } else { inv0 },
+        if pat[11] == 1 { ~inv0 } else { inv0 }, if pat[10] == 1 { ~inv0 } else { inv0 },
+        if pat[9] == 1 { ~inv0 } else { inv0 }, if pat[8] == 1 { ~inv0 } else { inv0 },
+        if pat[7] == 1 { ~inv0 } else { inv0 }, if pat[6] == 1 { ~inv0 } else { inv0 },
+        if pat[5] == 1 { ~inv0 } else { inv0 }, if pat[4] == 1 { ~inv0 } else { inv0 },
+        if pat[3] == 1 { ~inv0 } else { inv0 }, if pat[2] == 1 { ~inv0 } else { inv0 },
+        if pat[1] == 1 { ~inv0 } else { inv0 }, if pat[0] == 1 { ~inv0 } else { inv0 }
+    }
+    let exp1: bit[128] = {
+        if pat[15] == 1 { ~inv1 } else { inv1 }, if pat[14] == 1 { ~inv1 } else { inv1 },
+        if pat[13] == 1 { ~inv1 } else { inv1 }, if pat[12] == 1 { ~inv1 } else { inv1 },
+        if pat[11] == 1 { ~inv1 } else { inv1 }, if pat[10] == 1 { ~inv1 } else { inv1 },
+        if pat[9] == 1 { ~inv1 } else { inv1 }, if pat[8] == 1 { ~inv1 } else { inv1 },
+        if pat[7] == 1 { ~inv1 } else { inv1 }, if pat[6] == 1 { ~inv1 } else { inv1 },
+        if pat[5] == 1 { ~inv1 } else { inv1 }, if pat[4] == 1 { ~inv1 } else { inv1 },
+        if pat[3] == 1 { ~inv1 } else { inv1 }, if pat[2] == 1 { ~inv1 } else { inv1 },
+        if pat[1] == 1 { ~inv1 } else { inv1 }, if pat[0] == 1 { ~inv1 } else { inv1 }
+    }
+    let pass0: bit = if fin0 == exp0 && to0 == 0 { 1 } else { 0 }
+    let pass1: bit = if fin1 == exp1 && to1 == 0 { 1 } else { 0 }
+    let sweeping0: bit = if rdlvl_en_q == 1 && rresp[0] == 0 { 1 } else { 0 }
+    let sweeping1: bit = if rdlvl_en_q == 1 && rresp[1] == 0 { 1 } else { 0 }
+    let last_d: bit[4] = half4 - 1
+    // the run including this burst, when it passes
+    let rl0: bit[4] = run_ln0 + 1
+    let rl1: bit[4] = run_ln1 + 1
+    let rs0: bit[4] = if run_ln0 == 0 { sweep0 } else { run_st0 }
+    let rs1: bit[4] = if run_ln1 == 0 { sweep1 } else { run_st1 }
+    let bl0: bit[4] = if pass0 == 1 && rl0 > best_ln0 { rl0 } else { best_ln0 }
+    let bl1: bit[4] = if pass1 == 1 && rl1 > best_ln1 { rl1 } else { best_ln1 }
+    let bs0: bit[4] = if pass0 == 1 && rl0 > best_ln0 { rs0 } else { best_st0 }
+    let bs1: bit[4] = if pass1 == 1 && rl1 > best_ln1 { rs1 } else { best_st1 }
+    let ctr0: bit[4] = bs0 + ((bl0 - 1) >> 1)
+    let ctr1: bit[4] = bs1 + ((bl1 - 1) >> 1)
+
+    // gate measurement: clocks from the burst's first slot to the first rise after at least
+    // one tCK of low (the preamble)
+    let graw0: bit = dqs_t_i[0]
+    let graw1: bit = dqs_t_i[1]
+    let gr0: bit = if gm0 == 1 && graw0 == 1 && hist0[0] == 0 && glow0 >= c_ck { 1 } else { 0 }
+    let gr1: bit = if gm1 == 1 && graw1 == 1 && hist1[0] == 0 && glow1 >= c_ck { 1 } else { 0 }
+    let goff0: bit[32] = cyc - gt0
+    let goff1: bit[32] = cyc - gt1
+
+    // completed-burst output: both lanes have one
+    let have_burst: bit = if cn0 != 0 && cn1 != 0 { 1 } else { 0 }
+    let ob0: bit[128] = cq0[cr]
+    let ob1: bit[128] = cq1[cr]
+    // word k of the half: beats 2k and 2k+1 of both lanes
+    let oa0: bit[64] = if out_half == 0 { ob0[63:0] } else { ob0[127:64] }
+    let oa1: bit[64] = if out_half == 0 { ob1[63:0] } else { ob1[127:64] }
+    let ow0: bit[32] = {oa1[15:8], oa0[15:8], oa1[7:0], oa0[7:0]}
+    let ow1: bit[32] = {oa1[31:24], oa0[31:24], oa1[23:16], oa0[23:16]}
+    let ow2: bit[32] = {oa1[47:40], oa0[47:40], oa1[39:32], oa0[39:32]}
+    let ow3: bit[32] = {oa1[63:56], oa0[63:56], oa1[55:48], oa0[55:48]}
+    let pop_out: bit = if mid_edge == 1 && have_burst == 1 && out_half == 1 { 1 } else { 0 }
+    let push0: bit = if done0 == 1 && training == 0 && rdlvl_en_q == 0 { 1 } else { 0 }
+    let push1: bit = if done1 == 1 && training == 0 && rdlvl_en_q == 0 { 1 } else { 0 }
+    // DFI activity (a command or a data enable) driven while the update window is granted;
+    // what the controller sent before granting it is still allowed through the pipeline
+    let dfi_busy: bit = if dfi_cs_p0 == 1 || dfi_cs_p1 == 1 || dfi_cs_p2 == 1 || dfi_cs_p3 == 1 || dfi_wrdata_en_p0 == 1 || dfi_wrdata_en_p1 == 1 || dfi_wrdata_en_p2 == 1 || dfi_wrdata_en_p3 == 1 || dfi_rddata_en_p0 == 1 || dfi_rddata_en_p1 == 1 || dfi_rddata_en_p2 == 1 || dfi_rddata_en_p3 == 1 { 1 } else { 0 }
+    let cmd_in_window: bit = if mid_edge == 1 && dfi_busy == 1 && dfi_phyupd_ack == 1 && phyupd_req_r == 1 { 1 } else { 0 }
+
+    on(clk.rise) {
+        cyc = cyc + 1
+        sb = if slot_end == 1 { 0 } else { sb + 1 }
+        sl = sl_next
+        sclk_r = if sl_next < 2 { 1 } else { 0 }
+        hist0 = {hist0[6:0], dqs_t_i[0]}
+        hist1 = {hist1[6:0], dqs_t_i[1]}
+        dprev0 = ds0
+        dprev1 = ds1
+        if cmd_in_window == 1 {
+            upd_viol_r = if upd_viol_r == 65535 { 65535 } else { upd_viol_r + 1 }
+        }
+
+        // ---------------------------------------------------------------- DFI frames
+        if mid_edge == 1 {
+            cap_cs = {dfi_cs_p3, dfi_cs_p2, dfi_cs_p1, dfi_cs_p0}
+            cap_ca = {dfi_address_p3, dfi_address_p2, dfi_address_p1, dfi_address_p0}
+            cap_cke = {dfi_cke_p3, dfi_cke_p2, dfi_cke_p1, dfi_cke_p0}
+            cap_rst = {dfi_reset_n_p3, dfi_reset_n_p2, dfi_reset_n_p1, dfi_reset_n_p0}
+            cap_we = {dfi_wrdata_en_p3, dfi_wrdata_en_p2, dfi_wrdata_en_p1, dfi_wrdata_en_p0}
+            cap_wd = {dfi_wrdata_p3, dfi_wrdata_p2, dfi_wrdata_p1, dfi_wrdata_p0}
+            cap_re = {dfi_rddata_en_p3, dfi_rddata_en_p2, dfi_rddata_en_p1, dfi_rddata_en_p0}
+
+            // init: complete INIT_CYCLES dfi_clk cycles after dfi_init_start
+            if dfi_init_start == 1 && init_done_r == 0 {
+                init_cnt = init_cnt + 1
+                if init_cnt + 1 >= init_need { init_done_r = 1 }
+            }
+            // controller update: acknowledged at once, for as long as it is requested
+            if dfi_ctrlupd_req == 1 && ctrlupd_ack_r == 0 { ctrlupd_n = ctrlupd_n + 1 }
+            ctrlupd_ack_r = dfi_ctrlupd_req
+            // PHY update window
+            if pu_every != 0 && init_done_r == 1 {
+                if phyupd_req_r == 0 {
+                    phyupd_cnt = phyupd_cnt + 1
+                    if phyupd_cnt + 1 >= pu_every {
+                        phyupd_req_r = 1
+                        phyupd_cnt = 0
+                        phyupd_held = 0
+                    }
+                } else {
+                    if dfi_phyupd_ack == 1 {
+                        phyupd_held = phyupd_held + 1
+                        if phyupd_held + 1 >= pu_len {
+                            phyupd_req_r = 0
+                            phyupd_n = phyupd_n + 1
+                        }
+                    }
+                }
+            }
+            // training enables: a new start clears the lane results
+            if dfi_rdlvl_gate_en == 1 && gate_en_q == 0 {
+                gresp = 0
+                gmatch0 = 0
+                gmatch1 = 0
+                glast0 = 0
+                glast1 = 0
+            }
+            if dfi_rdlvl_en == 1 && rdlvl_en_q == 0 {
+                rresp = 0
+                sweep0 = 0
+                sweep1 = 0
+                run_ln0 = 0
+                run_ln1 = 0
+                best_ln0 = 0
+                best_ln1 = 0
+                best_st0 = 0
+                best_st1 = 0
+                rdly0 = 0
+                rdly1 = 0
+            }
+            gate_en_q = dfi_rdlvl_gate_en
+            rdlvl_en_q = dfi_rdlvl_en
+
+            // read data out: half a burst per dfi_clk cycle
+            if have_burst == 1 {
+                rdw0 = ow0
+                rdw1 = ow1
+                rdw2 = ow2
+                rdw3 = ow3
+                rdv = 1
+                out_half = ~out_half
+                if out_half == 1 { cr = cr + 1 }
+            } else {
+                rdv = 0
+            }
+        }
+        if frame_edge == 1 {
+            prv_we = cur_we
+            prv_wd = cur_wd
+            cur_cs = nxt_cs
+            cur_ca = nxt_ca
+            cur_cke = nxt_cke
+            cur_rst = nxt_rst
+            cur_we = nxt_we
+            cur_wd = nxt_wd
+            cur_re = nxt_re
+            nxt_cs = cap_cs
+            nxt_ca = cap_ca
+            nxt_cke = cap_cke
+            nxt_rst = cap_rst
+            nxt_we = cap_we
+            nxt_wd = cap_wd
+            nxt_re = cap_re
+        }
+
+        // ---------------------------------------------------------------- read bursts
+        if re_now == 1 {
+            ecnt = ecnt + 1
+            if ecnt == 0 {
+                if training == 1 {
+                    // gate training: measure from this slot instead of capturing
+                    gm0 = 1
+                    gm1 = 1
+                    gt0 = cyc
+                    gt1 = cyc
+                } else {
+                    bq_t[bq_tail] = cyc
+                    bq_tail = bq_tail + 1
+                }
+            }
+        }
+
+        // lane 0 capture
+        if arm0 == 1 {
+            st0 = 1
+            armed_at0 = cyc
+            hd0 = hd0 + 1
+        }
+        if st0 == 1 && to0 == 0 && r0 == 1 {
+            st0 = 2
+            nb0 = 1
+            buf0 = nbuf0
+        }
+        if st0 == 2 && e0 == 1 {
+            nb0 = nb0 + 1
+            buf0 = nbuf0
+            if nb0 == 15 { st0 = 0 }
+        }
+        if to0 == 1 {
+            st0 = 0
+            gate_to_r = if gate_to_r == 65535 { 65535 } else { gate_to_r + 1 }
+        }
+        if push0 == 1 {
+            cq0[cw0] = fin0
+            cw0 = cw0 + 1
+        }
+        // lane 1 capture
+        if arm1 == 1 {
+            st1 = 1
+            armed_at1 = cyc
+            hd1 = hd1 + 1
+        }
+        if st1 == 1 && to1 == 0 && r1 == 1 {
+            st1 = 2
+            nb1 = 1
+            buf1 = nbuf1
+        }
+        if st1 == 2 && e1 == 1 {
+            nb1 = nb1 + 1
+            buf1 = nbuf1
+            if nb1 == 15 { st1 = 0 }
+        }
+        if to1 == 1 {
+            st1 = 0
+            gate_to_r = if gate_to_r == 65535 { 65535 } else { gate_to_r + 1 }
+        }
+        if push1 == 1 {
+            cq1[cw1] = fin1
+            cw1 = cw1 + 1
+        }
+        // completed-burst counts: a push and an output pop can coincide
+        cn0 = if push0 == 1 && pop_out == 0 { cn0 + 1 } else { if push0 == 0 && pop_out == 1 { cn0 - 1 } else { cn0 } }
+        cn1 = if push1 == 1 && pop_out == 0 { cn1 + 1 } else { if push1 == 0 && pop_out == 1 { cn1 - 1 } else { cn1 } }
+
+        // ---------------------------------------------------------------- gate training
+        // low time counts all the time: the preamble starts before the read slot
+        glow0 = if graw0 == 0 { if glow0 == 255 { 255 } else { glow0 + 1 } } else { 0 }
+        if gm0 == 1 {
+            if gr0 == 1 {
+                gm0 = 0
+                if goff0[7:0] == glast0 {
+                    gmatch0 = gmatch0 + 1
+                    if gmatch0 + 1 >= gm_need && gresp[0] == 0 {
+                        gresp[0] = 1
+                        gate_d0 = goff0[7:0] - c_half
+                    }
+                } else {
+                    gmatch0 = 1
+                    glast0 = goff0[7:0]
+                }
+            } else {
+                if goff0 > 255 { gm0 = 0 }
+            }
+        }
+        // low time counts all the time: the preamble starts before the read slot
+        glow1 = if graw1 == 0 { if glow1 == 255 { 255 } else { glow1 + 1 } } else { 0 }
+        if gm1 == 1 {
+            if gr1 == 1 {
+                gm1 = 0
+                if goff1[7:0] == glast1 {
+                    gmatch1 = gmatch1 + 1
+                    if gmatch1 + 1 >= gm_need && gresp[1] == 0 {
+                        gresp[1] = 1
+                        gate_d1 = goff1[7:0] - c_half
+                    }
+                } else {
+                    gmatch1 = 1
+                    glast1 = goff1[7:0]
+                }
+            } else {
+                if goff1 > 255 { gm1 = 0 }
+            }
+        }
+
+        // ---------------------------------------------------------------- read-eye sweep
+        if done0 == 1 && sweeping0 == 1 {
+            run_ln0 = if pass0 == 1 { rl0 } else { 0 }
+            run_st0 = rs0
+            best_ln0 = bl0
+            best_st0 = bs0
+            if sweep0 == last_d {
+                rresp[0] = 1
+                if bl0 == 0 {
+                    fail_r[0] = 1
+                    rdly0 = 0
+                } else {
+                    rdly0 = ctr0
+                }
+            } else {
+                sweep0 = sweep0 + 1
+                rdly0 = sweep0 + 1
+            }
+        }
+        if done1 == 1 && sweeping1 == 1 {
+            run_ln1 = if pass1 == 1 { rl1 } else { 0 }
+            run_st1 = rs1
+            best_ln1 = bl1
+            best_st1 = bs1
+            if sweep1 == last_d {
+                rresp[1] = 1
+                if bl1 == 0 {
+                    fail_r[1] = 1
+                    rdly1 = 0
+                } else {
+                    rdly1 = ctr1
+                }
+            } else {
+                sweep1 = sweep1 + 1
+                rdly1 = sweep1 + 1
+            }
+        }
+    }
+
+    dfi_clk = sclk_r
+    dfi_rddata_w0 = rdw0
+    dfi_rddata_w1 = rdw1
+    dfi_rddata_w2 = rdw2
+    dfi_rddata_w3 = rdw3
+    dfi_rddata_valid_w0 = rdv
+    dfi_rddata_valid_w1 = rdv
+    dfi_rddata_valid_w2 = rdv
+    dfi_rddata_valid_w3 = rdv
+    dfi_init_complete = init_done_r
+    dfi_ctrlupd_ack = ctrlupd_ack_r
+    dfi_phyupd_req = phyupd_req_r
+    dfi_rdlvl_gate_resp = gresp
+    dfi_rdlvl_resp = rresp
+
+    ck_t = if sb >= c_half { 1 } else { 0 }
+    ck_c = if sb >= c_half { 0 } else { 1 }
+    cke = cur_cke[sl]
+    cs = cur_cs[sl]
+    ca = ca_now
+    reset_n = cur_rst[sl]
+    dq_o = dq_now
+    dq_oe = dq_drv
+    dqs_t_o = if dqs_hi == 1 { 2'b11 } else { 2'b00 }
+    dqs_c_o = if dqs_hi == 1 { 2'b00 } else { 2'b11 }
+    dqs_oe = dqs_drv
+    // data mask is off (MR13 DMD): DMI is held low while DQ is driven
+    dmi_o = 2'b00
+    dmi_oe = dq_drv
+
+    gate_dly0 = gate_d0
+    gate_dly1 = gate_d1
+    rd_dly0 = rdly0
+    rd_dly1 = rdly1
+    lvl_fail = fail_r
+    gate_timeouts = gate_to_r
+    upd_violations = upd_viol_r
+    ctrlupd_count = ctrlupd_n
+    phyupd_count = phyupd_n
+}
