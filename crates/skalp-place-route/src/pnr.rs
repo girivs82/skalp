@@ -571,6 +571,15 @@ pub fn place_and_route_nexus_real(
 
     let bypassed = prepare::bypass_pll_output_buffers(netlist);
     let netlist = bypassed.as_ref().unwrap_or(netlist);
+    // DDR I/O blocks: the primitives at each pad connect to it inside the
+    // I/O, so buffers between them are left out
+    let ddr_primitives =
+        crate::device::nexus::ddr::Primitives::load(db_root, variant.prjoxide_family())
+            .map_err(PlaceRouteError::BitstreamFailed)?;
+    let ddr_bypassed = crate::device::nexus::ddr::bypass_pad_buffers(netlist, &ddr_primitives);
+    let netlist = ddr_bypassed.as_ref().unwrap_or(netlist);
+    let ddr_blocks = crate::device::nexus::ddr::analyze(netlist, &ddr_primitives, &prepare::is_pad)
+        .map_err(PlaceRouteError::PlacementFailed)?;
     let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
     let packages =
         sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
@@ -629,7 +638,51 @@ pub fn place_and_route_nexus_real(
         variant.prjoxide_family(),
     )
     .map_err(PlaceRouteError::PlacementFailed)?;
+    // Each DDR primitive's block: the I/O logic of its pad, the DQS buffer of
+    // its strobe's group, the edge clock blocks of the bank it clocks
+    let ddr_sites = if ddr_blocks.cells.is_empty() {
+        Vec::new()
+    } else {
+        crate::device::nexus::ddr::sites(db_root, variant.prjoxide_family(), &tiles)
+    };
+    let ddr_chosen = if ddr_blocks.cells.is_empty() {
+        crate::collections::HashMap::default()
+    } else {
+        let package = variant
+            .default_package()
+            .and_then(|name| packages.get(name))
+            .or_else(|| packages.values().next());
+        let pad_site = |cell: &skalp_lir::gate_netlist::Cell| {
+            let loc = cell.parameters.get("LOC")?;
+            package?
+                .pins
+                .get(loc)
+                .map(|&(x, y, pio)| (x, y, u32::from(pio)))
+        };
+        let groups =
+            sites::dqs_groups(db_root, variant).map_err(PlaceRouteError::PlacementFailed)?;
+        let strobe_of = |x: u32, y: u32| groups.get(&(x, y)).copied();
+        crate::device::nexus::ddr::choose_sites(
+            netlist,
+            &ddr_primitives,
+            &ddr_blocks,
+            &ddr_sites,
+            &pad_site,
+            &strobe_of,
+        )
+        .map_err(PlaceRouteError::PlacementFailed)?
+    };
     let mut pad_sites = pad_sites;
+    for &site in ddr_chosen.values() {
+        let site = &ddr_sites[site];
+        pad_sites.push((site.x, site.y));
+        pad_sites.extend(
+            tiles
+                .iter()
+                .filter(|t| site.settings_tiles.contains(&t.name))
+                .map(|t| (t.x, t.y)),
+        );
+    }
     pad_sites.extend(pll_sites.values().copied());
     pad_sites.extend(vref_generator_sites.values().map(|s| (s.x, s.y)));
     pad_sites.extend(adc_site.map(|(_, site)| site));
@@ -713,6 +766,7 @@ pub fn place_and_route_nexus_real(
     let mut logic = prepare::logic_only_netlist(netlist);
     for cell in &mut logic.cells {
         if pll_sites.contains_key(&cell.id)
+            || ddr_chosen.contains_key(&cell.id)
             || vref_generator_sites.contains_key(&cell.id)
             || adc_site.is_some_and(|(id, _)| id == cell.id)
         {
@@ -766,6 +820,20 @@ pub fn place_and_route_nexus_real(
         placement.placements.insert(
             cell,
             crate::placer::PlacementLoc::new(x, y, bel, crate::device::BelType::VrefGen),
+        );
+    }
+    for (&cell, &index) in &ddr_chosen {
+        let site = &device.ddr_sites()[index];
+        // The device found the same blocks, in the same order
+        let bel = device.ddr_bel_index(index).ok_or_else(|| {
+            PlaceRouteError::PlacementFailed(format!(
+                "The DDR block {} at ({}, {}) has no routing data in the device database",
+                site.name, site.x, site.y
+            ))
+        })?;
+        placement.placements.insert(
+            cell,
+            crate::placer::PlacementLoc::new(site.x, site.y, bel, crate::device::BelType::DdrBlock),
         );
     }
     if let Some((cell, (x, y))) = adc_site {
@@ -861,6 +929,12 @@ pub fn place_and_route_nexus_real(
     };
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
+    // Connections inside an I/O (a gearbox to its pad) are not routed
+    for net in &mut routable.nets {
+        if ddr_blocks.internal_nets.contains(&net.id) {
+            net.fanout.clear();
+        }
+    }
     let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
     for net in &mut routable.nets {
         if !clock_routes.general.contains(&net.id) {

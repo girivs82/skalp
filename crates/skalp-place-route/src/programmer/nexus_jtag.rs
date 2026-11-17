@@ -987,6 +987,11 @@ mod tests {
 
     #[test]
     fn versa_leds_have_boundary_bits() {
+        // The pads' boundary-scan bits are device data, in the prjoxide database
+        if crate::device::nexus::prjoxide_load::find_database().is_none() {
+            eprintln!("skipping: no prjoxide database");
+            return;
+        }
         let board = NexusBoard::by_name("certuspro-versa").unwrap();
         let pads = board.labelled_pads();
         let led = |name: &str| pads.iter().find(|(_, l)| l.starts_with(name)).cloned();

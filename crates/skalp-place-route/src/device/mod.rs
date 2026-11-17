@@ -268,6 +268,13 @@ pub const WIDE_LUT_PIN_SEL: usize = 8;
 /// Router pin number of a block RAM's read clock. Its write clock is
 /// [`FF_PIN_CLK`].
 pub const RAM_PIN_READ_CLK: usize = 103;
+/// First router pin number of a hard block's clock pins (an I/O block's
+/// edge clock, say), routed on the clock network; there are at most
+/// [`HARD_CLOCK_PIN_COUNT`] of them.
+pub const HARD_CLOCK_PIN_BASE: usize = 3000;
+/// How many hard block clock pin numbers there are, from
+/// [`HARD_CLOCK_PIN_BASE`].
+pub const HARD_CLOCK_PIN_COUNT: usize = 1000;
 
 /// Cell parameter holding where a multiplier's or RAM's added low-driven
 /// inputs start.
@@ -298,7 +305,9 @@ pub(crate) fn ff_slice_group<D: Device + ?Sized>(
 
 /// Whether a router pin number is a clock pin, routed on the clock network.
 pub fn is_clock_pin(pin: usize) -> bool {
-    pin == FF_PIN_CLK || pin == RAM_PIN_READ_CLK
+    pin == FF_PIN_CLK
+        || pin == RAM_PIN_READ_CLK
+        || (HARD_CLOCK_PIN_BASE..HARD_CLOCK_PIN_BASE + HARD_CLOCK_PIN_COUNT).contains(&pin)
 }
 
 /// [`Device::bel_pin_wire`] for a Lattice logic tile (Nexus, ECP5) whose
@@ -798,6 +807,24 @@ pub trait Device: Send + Sync {
         None
     }
 
+    /// Whether a cell is a hard block the device sites itself, even when
+    /// none of its pins are routed (a delay line between an I/O's gearbox
+    /// and its pad, say).
+    fn is_hard_block(&self, _cell: &skalp_lir::gate_netlist::Cell) -> bool {
+        false
+    }
+
+    /// The value a hard block's `input`-th input reads when nothing is
+    /// routed to it, if the device gives one: a constant of that value is
+    /// left unrouted instead of driven from the fabric.
+    fn hard_block_input_unrouted_value(
+        &self,
+        _cell: &skalp_lir::gate_netlist::Cell,
+        _input: usize,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Router pin a multiplier input connects to, or `None` if it has no pin.
     fn dsp_input_pin(&self, _cell: &skalp_lir::gate_netlist::Cell, _input: usize) -> Option<usize> {
         None
@@ -997,6 +1024,11 @@ pub enum BelType {
     /// Analog-to-digital converter block (Lattice Nexus ADC_CORE: two
     /// converters, their channel selects and comparators)
     Adc,
+    /// A DDR I/O block the device data describes: a pad's I/O logic
+    /// (gearboxes, delays), a DQS buffer, a DDR DLL, an edge clock
+    /// synchronizer or divider (Lattice Nexus IOLOGIC, DQSBUF, DDRDLL,
+    /// ECLKSYNC, ECLKDIV)
+    DdrBlock,
 }
 
 impl BelType {

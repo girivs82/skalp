@@ -564,6 +564,10 @@ fn emit_bits(
             emit_pll(&mut config, cell, x, y, &used_wires)?;
             continue;
         }
+        if loc.bel_type == BelType::DdrBlock {
+            emit_ddr_block(&mut config, netlist, placement, cell, loc)?;
+            continue;
+        }
         if loc.bel_type == BelType::VrefGen {
             emit_vref_generator(&mut config, cell, x, y, &mut banks)?;
             continue;
@@ -720,7 +724,7 @@ fn emit_bits(
     emit_vref_drivers(&mut config, netlist, placement, &banks.vref)?;
     emit_lvstl_banks(&mut config, &banks)?;
     check_lvstl_references(config.device, &banks)?;
-    release_unused_pads(&mut config, netlist, placement, &banks.vref)?;
+    release_unused_pads(&mut config, netlist, placement, &banks)?;
     release_unused_banks(&mut config, &banks.vcc)?;
 
     for (&(x, y, slice), &(set, path)) in &slices_with_ff {
@@ -1673,6 +1677,58 @@ pub(crate) fn vref_level(standard: &str) -> Option<u32> {
 
 /// Turn on a bank's input reference generator (`BANK<n>.IVREF`); the
 /// router has already connected its level pins.
+/// A DDR primitive's settings in its block ([`super::ddr`]): the
+/// primitive's own, those of its connected pins, and its parameters, all
+/// from the device data.
+fn emit_ddr_block(
+    config: &mut ConfigDb<'_>,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    placement: &crate::placer::PlacementResult,
+    cell: &Cell,
+    loc: &crate::placer::PlacementLoc,
+) -> Result<()> {
+    let device = config.device;
+    let site = device
+        .ddr_site_at(loc.tile_x, loc.tile_y, loc.bel_index)
+        .ok_or_else(|| emit_err(format!("'{}' is not on a DDR block", cell.path)))?;
+    // The block driving an input, by name
+    let driver_site = |input: usize| -> Option<String> {
+        let net = cell.inputs.get(input)?;
+        let driver = netlist.nets.get(net.0 as usize)?.driver?;
+        let at = placement.placements.get(&driver)?;
+        device
+            .ddr_site_at(at.tile_x, at.tile_y, at.bel_index)
+            .map(|s| s.name.clone())
+    };
+    let (enums, words) =
+        super::ddr::cell_settings(device.ddr_primitives(), cell, &driver_site).map_err(emit_err)?;
+    let tiles: Vec<PrjoxideTile> = device
+        .prjoxide_tiles()
+        .iter()
+        .filter(|t| site.settings_tiles.contains(&t.name))
+        .cloned()
+        .collect();
+    for (name, option) in enums {
+        let full = format!("{}.{name}", site.prefix);
+        set_ram_enum(config, &tiles, &full, &option).map_err(|_| {
+            emit_err(format!(
+                "'{}': the device data has no setting {full}.{option} in {} {}",
+                cell.path, site.name, site.prefix
+            ))
+        })?;
+    }
+    for (name, value) in words {
+        let full = format!("{}.{name}", site.prefix);
+        set_ram_word(config, &tiles, &full, value).map_err(|_| {
+            emit_err(format!(
+                "'{}': the device data has no setting {full} in {}",
+                cell.path, site.name
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn emit_vref_generator(
     config: &mut ConfigDb<'_>,
     cell: &Cell,
@@ -1802,6 +1858,12 @@ struct BankUse {
     lvstl_inputs: HashMap<u32, String>,
     /// Banks whose input reference generator the design uses
     vref_generators: HashSet<u32>,
+    /// Differential pads: the site of each one's complement (pad B), and
+    /// the pad, for messages
+    complements: HashMap<(u32, u32, usize), String>,
+    /// Single-ended pads A of high-performance pairs: the pair's first
+    /// tile position and the pad's type (`<direction>_<standard>`)
+    pair_firsts: HashMap<(u32, u32), String>,
 }
 
 /// The voltage a bank's pads have set it to.
@@ -1866,6 +1928,57 @@ fn pad_settings(
         bank,
         high_performance,
     })
+}
+
+/// The setting holding a differential pad pair's type, in both of the
+/// pair's tiles, under pad A's name.
+const DIFFERENTIAL_BASE_TYPE: &str = "PIOA.DIFFIO18.BASE_TYPE";
+
+/// The two tiles of a high-performance pad pair used as one differential
+/// pad: pad A's (which holds its settings) and the next (which holds pad B's).
+struct DifferentialPair {
+    first: PrjoxideTile,
+    second: PrjoxideTile,
+}
+
+/// The pad pair a pad of type `base_type` (`<direction>_<standard>`) uses,
+/// if that type is a differential one: one the pair's type setting has.
+/// A differential pad is the pair's true pad, A.
+fn differential_pair(
+    config: &mut ConfigDb<'_>,
+    x: u32,
+    y: u32,
+    side: char,
+    base_type: &str,
+    path: &str,
+) -> Result<Option<DifferentialPair>> {
+    let Some(first) = config
+        .device
+        .prjoxide_tile(x, y, |t| t.starts_with("SYSIO_B"))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    if !super::sites::is_high_performance_io(&first.tiletype)
+        || config
+            .db(&first.tiletype)?
+            .enum_option(DIFFERENTIAL_BASE_TYPE, base_type)
+            .is_none()
+    {
+        return Ok(None);
+    }
+    if side != 'A' {
+        return Err(emit_err(format!(
+            "Pad '{path}' is differential ({base_type}), so it must be its pair's true \
+             (A) pad"
+        )));
+    }
+    let second = config
+        .device
+        .prjoxide_tile(x + 1, y, |t| t.starts_with("SYSIO_B"))
+        .cloned()
+        .ok_or_else(|| emit_err(format!("Pad '{path}' has no second tile for its pair")))?;
+    Ok(Some(DifferentialPair { first, second }))
 }
 
 fn emit_pad(
@@ -1948,14 +2061,18 @@ fn emit_pad(
             )));
         }
     }
-    let tiles = settings_tiles.as_slice();
-    set_ram_enum(
-        config,
-        tiles,
-        &format!("{prefix}.BASE_TYPE"),
-        &format!("{direction}_{standard}"),
-    )
-    .map_err(|_| {
+    let base_type = format!("{direction}_{standard}");
+    let pair = differential_pair(config, x, y, side, &base_type, &cell.path)?;
+    // Where the pad's own settings go: for a differential pair, those of
+    // both its pads (the true pad A and its complement B).
+    let targets: Vec<(Vec<PrjoxideTile>, String, char)> = match &pair {
+        Some(pair) => vec![
+            (vec![pair.first.clone()], "PIOA.SEIO18".to_string(), 'A'),
+            (vec![pair.second.clone()], "PIOB.SEIO18".to_string(), 'B'),
+        ],
+        None => vec![(settings_tiles.clone(), prefix.clone(), side)],
+    };
+    let unsupported = || {
         let bank = if high_performance {
             "a high-performance (1.8 V at most) I/O"
         } else {
@@ -1966,13 +2083,49 @@ fn emit_pad(
             cell.path,
             direction.to_lowercase()
         ))
-    })?;
-    set_ram_enum(
-        config,
-        tiles,
-        &format!("{prefix}.PULLMODE"),
-        pull_mode(cell)?,
-    )?;
+    };
+    match &pair {
+        // The pair's type is set in both of its tiles, under pad A's name
+        Some(pair) => {
+            banks.complements.insert((x, y, 1), cell.path.clone());
+            for tile in [&pair.first, &pair.second] {
+                set_ram_enum(
+                    config,
+                    std::slice::from_ref(tile),
+                    DIFFERENTIAL_BASE_TYPE,
+                    &base_type,
+                )
+                .map_err(|_| unsupported())?;
+            }
+            set_ram_enum(
+                config,
+                std::slice::from_ref(&pair.second),
+                "PIOA.DIFFIO18.PULLMODE",
+                pull_mode(cell)?,
+            )?;
+        }
+        None => {
+            set_ram_enum(
+                config,
+                &settings_tiles,
+                &format!("{prefix}.BASE_TYPE"),
+                &base_type,
+            )
+            .map_err(|_| unsupported())?;
+            if high_performance && side == 'A' {
+                banks.pair_firsts.insert((x, y), base_type.clone());
+            }
+        }
+    }
+    for (tiles, prefix, _) in &targets {
+        set_ram_enum(
+            config,
+            tiles,
+            &format!("{prefix}.PULLMODE"),
+            pull_mode(cell)?,
+        )?;
+    }
+    let tiles = settings_tiles.as_slice();
     if let Some(level) = vref {
         set_ram_enum(config, tiles, &format!("{prefix}.VREF"), "VREF1_LOAD")?;
         enable_vref_receiver(config, x, y, side, &cell.path)?;
@@ -1998,23 +2151,28 @@ fn emit_pad(
     }
     if let Some(class) = lvstl {
         // Radiant's LVSTL defaults for a pad that reads: no on-die
-        // termination unless the port asks for one (`odt`), and the input
-        // compared against the device's internal LVSTL reference (without
-        // it the input has no reference at all). No bank reference pad is
-        // involved, so those pads stay free.
+        // termination unless the port asks for one (`odt`), and a
+        // single-ended input compared against the device's internal LVSTL
+        // reference (without it the input has no reference at all; a
+        // differential input compares its two pads instead). No bank
+        // reference pad is involved, so those pads stay free.
         if !is_output {
-            let termination = lvstl_termination(config, tiles, &prefix, cell)?;
-            set_ram_enum(
-                config,
-                tiles,
-                &format!("{prefix}.TERMINATION_1V1"),
-                &termination,
-            )?;
-            set_ram_enum(config, tiles, &format!("{prefix}.VREF_LVSTL"), "VREF_INT")?;
-            banks
-                .lvstl_inputs
-                .entry(bank)
-                .or_insert_with(|| cell.path.clone());
+            for (tiles, prefix, _) in &targets {
+                let termination = lvstl_termination(config, tiles, prefix, cell)?;
+                set_ram_enum(
+                    config,
+                    tiles,
+                    &format!("{prefix}.TERMINATION_1V1"),
+                    &termination,
+                )?;
+            }
+            if pair.is_none() {
+                set_ram_enum(config, tiles, &format!("{prefix}.VREF_LVSTL"), "VREF_INT")?;
+                banks
+                    .lvstl_inputs
+                    .entry(bank)
+                    .or_insert_with(|| cell.path.clone());
+            }
         }
         let user = BankVcc {
             voltage,
@@ -2037,16 +2195,20 @@ fn emit_pad(
         } else {
             (voltage, "8")
         };
-        set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{drive}"), strength)?;
         let slew = if is_referenced(standard) {
             "SLEWRATE_REF"
         } else {
             "SLEWRATE"
         };
-        set_ram_enum(config, tiles, &format!("{prefix}.{slew}"), "MED")?;
+        for (tiles, prefix, _) in &targets {
+            set_ram_enum(config, tiles, &format!("{prefix}.DRIVE_{drive}"), strength)?;
+            set_ram_enum(config, tiles, &format!("{prefix}.{slew}"), "MED")?;
+        }
     }
     if is_output {
-        set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), "INV")?;
+        for (tiles, _, side) in &targets {
+            set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), "INV")?;
+        }
         let enable = config
             .device
             .bel_wire(x, y, &format!("PIO{bel_index}_T"))
@@ -2062,7 +2224,9 @@ fn emit_pad(
             .get(skalp_lir::gate_netlist::OE_ACTIVE_LOW_PARAM)
             .is_some_and(|v| v == "1");
         let tmux = if active_low { "T" } else { "INV" };
-        set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), tmux)?;
+        for (tiles, _, side) in &targets {
+            set_ram_enum(config, tiles, &format!("PIO{side}.TMUX"), tmux)?;
+        }
     }
 
     // High-performance banks have no VCC setting to make.
@@ -2189,8 +2353,10 @@ fn release_unused_pads(
     config: &mut ConfigDb<'_>,
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     placement: &crate::placer::PlacementResult,
-    vref_banks: &HashMap<u32, VrefBank>,
+    banks: &BankUse,
 ) -> Result<()> {
+    let vref_banks = &banks.vref;
+    let complements = &banks.complements;
     let device = config.device;
     let packages = device.packages();
     let package = device
@@ -2210,6 +2376,20 @@ fn release_unused_pads(
         .filter_map(|c| placement.placements.get(&c.id))
         .map(|loc| (loc.tile_x, loc.tile_y, loc.bel_index))
         .collect();
+    for (site, pad) in complements {
+        if let Some(other) = netlist.cells.iter().filter(|c| is_pad(c)).find(|c| {
+            placement
+                .placements
+                .get(&c.id)
+                .is_some_and(|loc| (loc.tile_x, loc.tile_y, loc.bel_index) == *site)
+        }) {
+            return Err(emit_err(format!(
+                "Pad '{}' is on the complement of differential pad '{pad}'",
+                other.path
+            )));
+        }
+        used.insert(*site);
+    }
     for bank in vref_banks.keys() {
         if let Some(driver) = device.vref_driver(*bank) {
             let (x, y, pio) = driver.site;
@@ -2242,11 +2422,55 @@ fn release_unused_pads(
                 .enum_option(&name, "NONE")
                 .is_some();
         }
-        if defined {
+        if defined && !conflicts_with_pair(config, &settings.tiles, &name, side, (x, y), banks)? {
             set_ram_enum(config, &settings.tiles, &name, "NONE")?;
         }
     }
     Ok(())
+}
+
+/// Whether releasing pad B of a high-performance pair (`NONE`) would set a
+/// bit that its pair's pad A, in use, needs clear: the second tile holds
+/// bits of pad A's type that `NONE` of pad B shares. Radiant leaves such a
+/// pad B as it is (an LVSTL pad A, say).
+fn conflicts_with_pair(
+    config: &mut ConfigDb<'_>,
+    tiles: &[PrjoxideTile],
+    none_name: &str,
+    side: char,
+    first: (u32, u32),
+    banks: &BankUse,
+) -> Result<bool> {
+    let Some(base_type) = banks.pair_firsts.get(&first).filter(|_| side == 'B') else {
+        return Ok(false);
+    };
+    let first_name = "PIOA.SEIO18.BASE_TYPE";
+    for tile in tiles {
+        let db = config.db(&tile.tiletype)?;
+        let Some(none) = db.enum_option(none_name, "NONE") else {
+            continue;
+        };
+        let used: HashSet<(usize, usize)> = db
+            .enum_option(first_name, base_type)
+            .into_iter()
+            .flatten()
+            .map(|b| (b.frame, b.bit))
+            .collect();
+        // Bits of pad A's type setting in this tile, whatever the option
+        let shared: HashSet<(usize, usize)> = db
+            .enums()
+            .filter(|(name, _)| *name == first_name)
+            .flat_map(|(_, options)| options.values().flatten())
+            .map(|b| (b.frame, b.bit))
+            .collect();
+        if none
+            .iter()
+            .any(|b| shared.contains(&(b.frame, b.bit)) && !used.contains(&(b.frame, b.bit)))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Turn on the comparator a reference-voltage input reads through: the
