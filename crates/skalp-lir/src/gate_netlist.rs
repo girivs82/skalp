@@ -860,6 +860,14 @@ pub struct GateNetlist {
     /// again with the device's delays.
     #[serde(default)]
     pub retime_regions: Vec<String>,
+    /// For a settle-time measurement build only: every arbiter and
+    /// step-decision wait is sized to this length, in picoseconds, instead
+    /// of from the device family's settle time (see
+    /// `ncl_bundle::ArbiterTiming::sized_for_wait`). Kept with the netlist
+    /// so place and route sizes the same way. (Always written: compiled IP
+    /// stores netlists in a format that cannot skip fields.)
+    #[serde(default)]
+    pub settle_wait_ps: Option<i64>,
 }
 
 impl GateNetlist {
@@ -875,6 +883,7 @@ impl GateNetlist {
             clocks: Vec::new(),
             resets: Vec::new(),
             is_ncl: false,
+            settle_wait_ps: None,
             ncl_constraints: None,
             ncl_wire_delays: None,
             net_map: IndexMap::new(),

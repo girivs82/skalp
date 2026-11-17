@@ -580,6 +580,7 @@ impl<D: Device + ?Sized> RoutedBundleDelays<'_, '_, D> {
             Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
                 tau_ps: m.tau_ps,
                 t0_ps: m.t0_ps,
+                measured: true,
                 ..default
             },
             None => default,
@@ -719,6 +720,8 @@ pub fn summarize_bundles(
             let slack_ns = c.slack_ps() as f64 / PS_PER_NS;
             let key = (c.delay_path.clone(), c.times);
             let worse = by_key.get(&key).is_none_or(|r| slack_ns < r.slack_ns);
+            let unmeasured =
+                c.unmeasured_settle || by_key.get(&key).is_some_and(|r| r.unmeasured_settle);
             if worse {
                 by_key.insert(
                     key,
@@ -731,8 +734,11 @@ pub fn summarize_bundles(
                         slack_ns,
                         chain_len: c.chain_len,
                         corner: corner.to_string(),
+                        unmeasured_settle: unmeasured,
                     },
                 );
+            } else if let Some(r) = by_key.get_mut(&key) {
+                r.unmeasured_settle |= unmeasured;
             }
         }
     }

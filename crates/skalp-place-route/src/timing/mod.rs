@@ -191,6 +191,11 @@ pub struct BundleReport {
     /// Delay corner of the worst slack ("slow" or "fast")
     #[serde(default)]
     pub corner: String,
+    /// An arbiter or step decision whose wait was sized from assumed
+    /// settle-time figures: the family's device data has no measured one, so
+    /// the wait is generous but not signed off
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unmeasured_settle: bool,
 }
 
 /// Hold check: whether data launched by a clock edge reaches each register

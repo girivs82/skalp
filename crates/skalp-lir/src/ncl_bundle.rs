@@ -122,18 +122,34 @@ pub struct ArbiterTiming {
     pub request_rate_hz: f64,
     /// Required mean time between failures, per arbiter, in years
     pub mtbf_years: f64,
+    /// Whether `tau_ps` and `t0_ps` were measured on the device family
+    /// (from its device database). Without a measurement they are
+    /// [`UNMEASURED_TAU_PS`] and a 1 ns window: a wait sized from them is
+    /// safe by a wide margin but not signed off
+    pub measured: bool,
 }
 
+/// Resolution time constant assumed for a latch in one LUT with its own
+/// feedback on a family with no measured figure, in picoseconds. The one
+/// family measured so far gave at most 30 ps in its fast-corner delay
+/// units, 90 ps with its process, voltage and temperature margin; this is
+/// ten times the measured bound, to cover a slower process or a LUT that
+/// resolves worse. A loop of several cells resolves far slower (about
+/// 0.7-1 ns where measured), which is why these elements are built in one
+/// LUT.
+pub const UNMEASURED_TAU_PS: f64 = 300.0;
+
 impl Default for ArbiterTiming {
-    /// Conservative figures for a latch built from FPGA LUTs, without
-    /// measured device data: tau 60 ps, T0 1 ns, requests at up to 200 MHz,
-    /// 1000 years between failures
+    /// Figures for a family without measured device data: tau
+    /// [`UNMEASURED_TAU_PS`], T0 1 ns, requests at up to 200 MHz, 1000
+    /// years between failures
     fn default() -> Self {
         Self {
-            tau_ps: 60.0,
+            tau_ps: UNMEASURED_TAU_PS,
             t0_ps: 1000.0,
             request_rate_hz: 200e6,
             mtbf_years: 1000.0,
+            measured: false,
         }
     }
 }
@@ -151,6 +167,18 @@ impl ArbiterTiming {
             return 0;
         }
         (self.tau_ps * x.ln()).ceil() as i64
+    }
+
+    /// Figures under which [`Self::resolution_ps`] is `wait_ps`: for a
+    /// measurement build that cuts the wait short on purpose to see the
+    /// element fail. Not measured, so never signed off.
+    pub fn sized_for_wait(self, wait_ps: i64) -> Self {
+        let x = self.mtbf_years * SECONDS_PER_YEAR * self.base_rate();
+        Self {
+            tau_ps: wait_ps.max(1) as f64 / x.max(std::f64::consts::E).ln(),
+            measured: false,
+            ..self
+        }
     }
 
     /// Mean time between failures after waiting `wait_ps`, in years
@@ -186,6 +214,11 @@ pub struct BundleCheck {
     /// sender's own strobe; a "channel hold" check is reported against the
     /// sender's `go` delay.
     pub sender: Option<String>,
+    /// For an "arbiter" or "step decision" check, whether its resolution
+    /// wait was sized from assumed figures, the device family having no
+    /// measured settle time ([`ArbiterTiming::measured`]): such a wait is
+    /// generous but not signed off
+    pub unmeasured_settle: bool,
 }
 
 impl BundleCheck {
@@ -477,6 +510,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                 control_ps,
                 chain_len: md.chain.len(),
                 sender: None,
+                unmeasured_settle: false,
             });
         }
 
@@ -514,6 +548,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                 control_ps,
                 chain_len: md.chain.len(),
                 sender: None,
+                unmeasured_settle: false,
             });
         }
 
@@ -593,6 +628,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                 control_ps,
                 chain_len: md.chain.len(),
                 sender: None,
+                unmeasured_settle: false,
             });
         }
     }
@@ -853,6 +889,7 @@ fn check_releases(
             control_ps: at_control - direct,
             chain_len: md.chain.len(),
             sender: None,
+            unmeasured_settle: false,
         });
     }
     checks
@@ -899,6 +936,10 @@ fn check_arbiters(
         } else {
             latch
         };
+        let timing = match netlist.settle_wait_ps {
+            Some(wait) => timing.sized_for_wait(wait),
+            None => timing,
+        };
         let required = timing.resolution_ps();
         tracing::debug!(
             "NCL step decision {}: resolution wait {} ps (needs {} ps), MTBF {:.3e} years",
@@ -919,6 +960,7 @@ fn check_arbiters(
             control_ps: wait,
             chain_len: md.chain.len(),
             sender: None,
+            unmeasured_settle: !timing.measured,
         });
     }
     checks
@@ -1008,6 +1050,7 @@ fn check_channels(
                     control_ps,
                     chain_len: md.chain.len(),
                     sender: control_prefix.get(&clock).map(|p| p.to_string()),
+                    unmeasured_settle: false,
                 });
             }
         }
@@ -1128,6 +1171,7 @@ fn check_channel_holds(
                     control_ps: changes,
                     chain_len: tx.chain.len(),
                     sender: Some(tx.prefix.clone()),
+                    unmeasured_settle: false,
                 });
             }
         }
@@ -1196,6 +1240,7 @@ fn check_register_holds(
                 control_ps: changes,
                 chain_len: md.chain.len(),
                 sender: None,
+                unmeasured_settle: false,
             });
         }
     }
@@ -1294,6 +1339,9 @@ pub struct LibraryDelays<'a> {
     pub wire_ps: i64,
     /// Cell delay when the library has no arc for a cell, in picoseconds
     pub default_cell_ps: i64,
+    /// Metastability of the step latches and arbiters (one LUT with its own
+    /// feedback), from the target's device data where it has them
+    pub latch_timing: ArbiterTiming,
 }
 
 impl<'a> LibraryDelays<'a> {
@@ -1303,6 +1351,7 @@ impl<'a> LibraryDelays<'a> {
             library,
             wire_ps: 500,
             default_cell_ps: 400,
+            latch_timing: ArbiterTiming::default(),
         }
     }
 
@@ -1364,6 +1413,9 @@ impl BundleDelays for LibraryDelays<'_> {
             .get_cell(&cell.cell_type)
             .and_then(|c| c.hold_ps)
             .map_or(0, i64::from)
+    }
+    fn arbiter_timing(&self) -> ArbiterTiming {
+        self.latch_timing
     }
 }
 
@@ -1938,13 +1990,42 @@ mod tests {
     fn arbiter_timing_meets_its_mtbf() {
         let timing = ArbiterTiming::default();
         let wait = timing.resolution_ps();
-        // tau * ln(MTBF * T0 * f^2): about 2.5 ns with the defaults
-        assert!((2400..2600).contains(&wait), "{wait}");
+        // tau * ln(MTBF * T0 * f^2): about 12.5 ns with the defaults
+        // (unmeasured: tau 300 ps)
+        assert!((12_400..12_600).contains(&wait), "{wait}");
+        assert!(!timing.measured);
         assert!(timing.mtbf_years_after(wait) >= timing.mtbf_years);
         assert!(timing.mtbf_years_after(wait - 100) < timing.mtbf_years);
         // ten tau more wait: e^10 times the MTBF
-        let ratio = timing.mtbf_years_after(wait + 600) / timing.mtbf_years_after(wait);
+        let ratio = timing.mtbf_years_after(wait + 3_000) / timing.mtbf_years_after(wait);
         assert!((ratio / 10f64.exp() - 1.0).abs() < 1e-6, "{ratio}");
+    }
+
+    /// A measurement build sizes every decision wait to the length it asks
+    /// for, whatever the device's figures, and never counts as signed off
+    #[test]
+    fn a_measurement_build_sizes_decisions_to_its_wait() {
+        for wait in [450, 2_000, 9_000] {
+            let timing = ArbiterTiming {
+                measured: true,
+                ..ArbiterTiming::default()
+            }
+            .sized_for_wait(wait);
+            assert!(
+                (wait..=wait + 1).contains(&timing.resolution_ps()),
+                "{wait}"
+            );
+            assert!(!timing.measured);
+        }
+        let mut netlist = arbitrating_block();
+        netlist.settle_wait_ps = Some(2_000);
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let arb = checks
+            .iter()
+            .find(|c| c.times == "arbiter")
+            .expect("arbiter");
+        assert!((2_000..=2_001).contains(&arb.data_ps), "{}", arb.data_ps);
+        assert!(arb.unmeasured_settle);
     }
 
     #[test]
@@ -2033,10 +2114,10 @@ mod tests {
     #[test]
     fn step_decision_uses_the_step_latch_timing() {
         let latch = ArbiterTiming {
-            tau_ps: 90.0,
+            tau_ps: 400.0,
             ..ArbiterTiming::default()
         };
-        let checks = check_matched_delays(&self_timed_block(false), &LatchDelays(90.0));
+        let checks = check_matched_delays(&self_timed_block(false), &LatchDelays(400.0));
         let decision = checks
             .iter()
             .find(|c| c.times == "step decision")
@@ -2044,7 +2125,7 @@ mod tests {
         assert_eq!(decision.data_ps, latch.resolution_ps());
 
         // slower latch than arbiter: the latch sets the wait
-        let checks = check_matched_delays(&arbitrating_block(), &LatchDelays(90.0));
+        let checks = check_matched_delays(&arbitrating_block(), &LatchDelays(400.0));
         let arb = checks
             .iter()
             .find(|c| c.times == "arbiter")
@@ -2057,6 +2138,55 @@ mod tests {
             .find(|c| c.times == "arbiter")
             .expect("arbiter");
         assert_eq!(arb.data_ps, ArbiterTiming::default().resolution_ps());
+    }
+
+    /// A decision wait sized from assumed settle-time figures is marked so
+    /// the report can say it is not signed off; one from measured figures is
+    /// not
+    #[test]
+    fn decisions_without_a_measured_settle_time_are_marked() {
+        struct Measured;
+        impl BundleDelays for Measured {
+            fn wire_ps(&self, n: &GateNetlist, net: GateNetId, c: &Cell, i: usize) -> i64 {
+                UnitDelays.wire_ps(n, net, c, i)
+            }
+            fn clock_wire_ps(&self, n: &GateNetlist, net: GateNetId, c: &Cell) -> i64 {
+                UnitDelays.clock_wire_ps(n, net, c)
+            }
+            fn arc_ps(&self, c: &Cell, i: usize, o: usize) -> Option<i64> {
+                UnitDelays.arc_ps(c, i, o)
+            }
+            fn clock_to_out_ps(&self, c: &Cell) -> i64 {
+                UnitDelays.clock_to_out_ps(c)
+            }
+            fn setup_ps(&self, c: &Cell, i: usize) -> i64 {
+                UnitDelays.setup_ps(c, i)
+            }
+            fn arbiter_timing(&self) -> ArbiterTiming {
+                ArbiterTiming {
+                    tau_ps: 90.0,
+                    measured: true,
+                    ..ArbiterTiming::default()
+                }
+            }
+        }
+        let netlist = arbitrating_block();
+        let decisions = |checks: Vec<BundleCheck>| -> Vec<bool> {
+            checks
+                .into_iter()
+                .filter(|c| c.times == "arbiter" || c.times == "step decision")
+                .map(|c| c.unmeasured_settle)
+                .collect()
+        };
+        let assumed = decisions(check_matched_delays(&netlist, &UnitDelays));
+        assert!(!assumed.is_empty() && assumed.iter().all(|&u| u));
+        let measured = decisions(check_matched_delays(&netlist, &Measured));
+        assert!(!measured.is_empty() && measured.iter().all(|&u| !u));
+        // Other checks never are
+        assert!(check_matched_delays(&netlist, &UnitDelays)
+            .iter()
+            .filter(|c| c.times != "arbiter" && c.times != "step decision")
+            .all(|c| !c.unmeasured_settle));
     }
 
     /// The step control and `go` delay of a self-timed block `prefix`
