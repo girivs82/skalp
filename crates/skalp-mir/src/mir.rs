@@ -1325,6 +1325,30 @@ impl Mir {
         }
     }
 
+    /// Read a MIR dump (`--emit mir`).
+    ///
+    /// Expressions nest as deep as the design makes them: a 32-way
+    /// if/else chain inlined into an operand is over 100 levels, past
+    /// serde_json's default limit of 128. The limit is lifted, and the
+    /// recursive parse runs on its own thread with a stack sized for it.
+    pub fn from_json(text: &str) -> serde_json::Result<Mir> {
+        const STACK_BYTES: usize = 256 * 1024 * 1024;
+        let text = text.to_owned();
+        std::thread::Builder::new()
+            .name("mir-json".into())
+            .stack_size(STACK_BYTES)
+            .spawn(move || {
+                let mut de = serde_json::Deserializer::from_str(&text);
+                de.disable_recursion_limit();
+                let mir = Mir::deserialize(&mut de)?;
+                de.end()?;
+                Ok(mir)
+            })
+            .expect("spawn MIR reader thread")
+            .join()
+            .expect("MIR reader thread panicked")
+    }
+
     /// Add a module to the MIR
     pub fn add_module(&mut self, module: Module) {
         self.modules.push(module);

@@ -2377,7 +2377,7 @@ fn simulate_design(
         Some("mir") => {
             // Pre-compiled MIR file
             let design_str = fs::read_to_string(design_file)?;
-            let mir: Mir = serde_json::from_str(&design_str)?;
+            let mir = Mir::from_json(&design_str)?;
             if mir.modules.is_empty() {
                 anyhow::bail!("No modules found in MIR");
             }

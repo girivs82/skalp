@@ -451,7 +451,8 @@ fn test_operators_use_their_stdlib_instance() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mir: skalp_mir::Mir = serde_json::from_slice(&output.stdout).expect("MIR dump parses");
+    let mir = skalp_mir::Mir::from_json(&String::from_utf8_lossy(&output.stdout))
+        .expect("MIR dump parses");
     let top = mir
         .modules
         .iter()
@@ -762,7 +763,8 @@ fn test_fp_ops_without_import_instantiate_specializations() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mir: skalp_mir::Mir = serde_json::from_slice(&output.stdout).expect("MIR dump parses");
+    let mir = skalp_mir::Mir::from_json(&String::from_utf8_lossy(&output.stdout))
+        .expect("MIR dump parses");
     let mut seen = 0;
     for owner in ["FpMethodCalls", "func_exec"] {
         let module = mir.modules.iter().find(|m| m.name == owner).unwrap();
