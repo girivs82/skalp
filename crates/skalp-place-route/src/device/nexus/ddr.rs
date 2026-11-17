@@ -336,7 +336,7 @@ pub struct Site {
     /// Its bank, for the edge clock blocks
     pub bank: Option<u32>,
     /// Its pins: the tile that names each pin's wire, and the name there
-    pub pins: BTreeMap<String, (u32, u32, String)>,
+    pub pins: SitePins,
     /// The tiles that hold its settings (prjoxide tile names)
     pub settings_tiles: Vec<String>,
     /// The prefix of its settings' names: `IOLOGICA`, `DQSBUF`, `DDRDLL`,
@@ -394,8 +394,7 @@ pub fn sites(db_root: &Path, family: &str, tiles: &[PrjoxideTile]) -> Vec<Site> 
     // DQS buffer outputs every pad of the group reaches (`DQSG:` wires,
     // one per group): the I/O tiles name them, not the buffer's tile
     let mut group_pins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut edge: BTreeMap<(SiteKind, u32, u32), BTreeMap<String, (u32, u32, String)>> =
-        BTreeMap::new();
+    let mut edge: BTreeMap<(SiteKind, u32, u32), SitePins> = BTreeMap::new();
     for tile in tiles {
         let Some(text) = text_of(tile) else {
             continue;
@@ -718,7 +717,7 @@ pub fn analyze(
     // A pad that a primitive reads cannot also feed the fabric directly.
     for &net in &blocks.internal_nets {
         let driver = netlist.nets.get(net.0 as usize).and_then(|n| n.driver);
-        if !driver.and_then(cell).is_some_and(|d| is_pad(d)) {
+        if !driver.and_then(cell).is_some_and(is_pad) {
             continue;
         }
         for &(sink, input) in sinks.get(&net).map(Vec::as_slice).unwrap_or(&[]) {
@@ -785,8 +784,8 @@ pub fn choose_sites(
     prims: &Primitives,
     blocks: &DesignBlocks,
     sites: &[Site],
-    pad_site: &dyn Fn(&Cell) -> Option<(u32, u32, u32)>,
-    strobe_of: &dyn Fn(u32, u32) -> Option<(u32, u32)>,
+    pad_site: PadSiteOf<'_>,
+    strobe_of: StrobeOf<'_>,
 ) -> Result<HashMap<CellId, usize>, String> {
     let mut chosen: HashMap<CellId, usize> = HashMap::new();
     let cell = |id: CellId| {
@@ -1012,7 +1011,7 @@ pub fn cell_settings(
     prims: &Primitives,
     cell: &Cell,
     driver_site: &dyn Fn(usize) -> Option<String>,
-) -> Result<(Vec<(String, String)>, Vec<(String, u64)>), String> {
+) -> Result<CellSettings, String> {
     let prim = prims
         .of(cell)
         .ok_or_else(|| format!("'{}' is not a DDR primitive", cell.path))?;
@@ -1100,6 +1099,18 @@ pub fn cell_settings(
     Ok((out, words))
 }
 
+/// A site's pins: pin name -> (tile column, tile row, wire name).
+pub type SitePins = BTreeMap<String, (u32, u32, String)>;
+
+/// The pad site (column, row, PIO index) of a pad cell.
+pub type PadSiteOf<'a> = &'a dyn Fn(&Cell) -> Option<(u32, u32, u32)>;
+
+/// The strobe pad (column, row) of the DQS group of a pad at (column, row).
+pub type StrobeOf<'a> = &'a dyn Fn(u32, u32) -> Option<(u32, u32)>;
+
+/// A placed primitive's settings: (name, option) enums and (name, value) words.
+pub type CellSettings = (Vec<(String, String)>, Vec<(String, u64)>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,6 +1125,9 @@ mod tests {
         "DELAYB": {"site": "IOLOGIC", "pad": {"role": "output_delay", "ports": ["A", "Z"]},
             "pins": {}, "settings": ["OUTMUX.DELAY"],
             "parameters": {"DEL_VALUE": {"default": "0", "word": "DELAY.DEL_VALUE", "bits": 7}}},
+        "ECLKSYNC": {"site": "ECLKSYNC",
+            "pins": {"ECLKIN": {"pin": "ECLKIN", "clock": true}, "STOP": {"pin": "STOP", "unrouted": 0},
+                     "ECLKOUT": {"pin": "ECLKOUT", "clock": true}}},
         "DQSBUF": {"site": "DQSBUF", "pad": {"role": "strobe", "ports": ["DQSI"]},
             "pins": {"DLLCODE0": {"pin": "DLLCODE0", "dedicated": "DDRDLL.CODE"},
                      "RST": {"pin": "RST"}},
@@ -1163,6 +1177,16 @@ mod tests {
         assert!(prims.port_problems(&dqs).is_none());
         let odd = blackbox("ODDRX4", &["D0", "NOPE"], &["Q"], &[]);
         assert!(prims.port_problems(&odd).unwrap().contains("NOPE"));
+    }
+
+    #[test]
+    fn unrouted_values_come_from_the_device_data() {
+        let prims = Primitives::from_json(DATA).unwrap();
+        let sync = blackbox("ECLKSYNC", &["ECLKIN", "STOP"], &["ECLKOUT"], &[]);
+        assert_eq!(prims.input_unrouted_value(&sync, 0), None);
+        assert_eq!(prims.input_unrouted_value(&sync, 1), Some(false));
+        // A port the data does not describe has no value
+        assert_eq!(prims.input_unrouted_value(&sync, 2), None);
     }
 
     #[test]

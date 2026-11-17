@@ -147,10 +147,10 @@ fn load_io_database(db_root: &Path, variant: NexusVariant) -> Result<IoDatabase,
 /// or that pad's second I/O logic (the next tile along the edge), the tile
 /// of the group's strobe pad. A group's strobe clocks (`DQSG:` wires) are
 /// one node per group.
-pub fn dqs_groups(
-    db_root: &Path,
-    variant: NexusVariant,
-) -> Result<HashMap<(u32, u32), (u32, u32)>, String> {
+/// Each DQS pad tile (column, row) -> its group's strobe pad tile.
+pub type DqsGroups = HashMap<(u32, u32), (u32, u32)>;
+
+pub fn dqs_groups(db_root: &Path, variant: NexusVariant) -> Result<DqsGroups, String> {
     let io = load_io_database(db_root, variant)?;
     let (width, height) = variant.grid_size();
     let mut strobe_tile: HashMap<i64, (u32, u32)> = HashMap::new();
