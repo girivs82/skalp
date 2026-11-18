@@ -497,3 +497,59 @@ async fn test_tiled_multiplies_gate_level() {
         }
     }
 }
+
+/// Arithmetic whose operands are all constant once generics are applied
+/// (`latency + adjustment`) folds to a constant instead of becoming
+/// carry-chain cells, so logic that depends on the result simplifies too: a
+/// mask shifted by the constant leaves its low bits constant 0
+#[test]
+fn constant_arithmetic_folds_instead_of_using_the_carry_chain() {
+    let net = synthesize("fpga_carry_constant_fold.sk", "nexus");
+    // Only `x + off` is on the carry chain: a carry-in half and 16 sum halves
+    assert_eq!(ccu2_count(&net), 9, "only the add of the input remains");
+    // Driven by a tie cell, possibly through buffers
+    let tied = |id: &skalp_lir::GateNetId| {
+        let mut id = *id;
+        loop {
+            let Some(cell) = net.nets[id.0 as usize]
+                .driver
+                .map(|d| &net.cells[d.0 as usize])
+            else {
+                return false;
+            };
+            match (cell.inputs.as_slice(), cell.function.as_ref()) {
+                ([], _) => return cell.outputs.len() == 1,
+                ([input], Some(CellFunction::Buf)) => id = *input,
+                _ => return false,
+            }
+        }
+    };
+    for cell in net
+        .cells
+        .iter()
+        .filter(|c| c.function == Some(CellFunction::Ccu2))
+    {
+        assert!(
+            !cell.inputs.iter().all(tied),
+            "{} computes only constants",
+            cell.path
+        );
+    }
+    // MODE 1, ADJ 3: off = 9, so mask = 0xFF << 9 has bits 0..8 constant 0
+    for bit in 0..9 {
+        let name = format!("top.mask[{bit}]");
+        let id = net
+            .outputs
+            .iter()
+            .find(|id| net.nets[id.0 as usize].name == name)
+            .unwrap_or_else(|| panic!("{name} is an output"));
+        let driver = net.nets[id.0 as usize]
+            .driver
+            .map(|d| &net.cells[d.0 as usize]);
+        assert!(
+            tied(id),
+            "{name} is a constant: driven by {:?}",
+            driver.map(|c| (&c.cell_type, &c.lut_init, c.inputs.len()))
+        );
+    }
+}
