@@ -127,6 +127,22 @@ pub enum ViolationKind {
     UnknownClock,
 }
 
+/// Two inputs of a latch built in one cell (its output wired back to its
+/// own inputs, such as an arbiter's mutex) changing what it holds less
+/// than one trip round its loop apart: a race the latch decides, as a
+/// mutex is there to. In hardware it may go metastable for a while; an
+/// arbiter waits for that to settle before it uses the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatchRace {
+    /// When the second change reached the latch, in picoseconds
+    pub time_ps: i64,
+    /// The latch
+    pub cell: CellId,
+    /// How long before the first change would have come round the loop
+    /// the second came, in picoseconds
+    pub margin_ps: i64,
+}
+
 /// A timing violation seen at a clocked cell's pins
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
@@ -411,6 +427,56 @@ struct NodeOutput {
     /// Counts evaluations that changed `value`, so a commit that a later
     /// evaluation replaced is dropped
     generation: u16,
+}
+
+/// A table node whose output feeds back to its own inputs and holds a
+/// value through that loop: a latch made of one cell (a mutex, a set/reset
+/// or C-element latch built in a LUT)
+///
+/// Its feedback inputs are read from the node's own latest value, not from
+/// their nets, so the latch holds what it decided at once. Read from the
+/// nets, a change of another input that comes before the loop has carried
+/// the last change round leaves a pulse circling the loop for ever: every
+/// delay is the same each trip, where in hardware the pulse narrows and
+/// dies, or the latch goes metastable and settles. Such a change is a race
+/// ([`LatchRace`]). It always settles to a definite value, as hardware
+/// does (an unknown latch would hold unknown for ever, where an arbiter
+/// waits out the settling): with [`Metastability::Unknown`] the first
+/// change wins, with [`Metastability::Resolve`] either, at random.
+#[derive(Debug, Clone, Copy)]
+struct FeedbackLoop {
+    /// The latch's cell
+    cell: u32,
+    /// The node's input bits that read its own output
+    mask: u64,
+    /// From the node deciding a new value to every feedback input seeing it
+    loop_ps: i64,
+    /// When the node last decided a new value, and the value before it
+    changed_ps: i64,
+    before: Logic,
+}
+
+/// The node is not a [`FeedbackLoop`]
+const NO_LOOP: u32 = u32::MAX;
+
+/// Whether a table over `inputs` inputs, with the inputs in `mask` tied
+/// together as one feedback value, can hold a value through them and never
+/// oscillates: with every other input fixed, it is either constant or
+/// follows the feedback, never its inverse
+fn holds_through_feedback(table: &[u64], inputs: usize, mask: u64) -> bool {
+    let bit = |index: u64| (table[(index / 64) as usize] >> (index % 64)) & 1 == 1;
+    let mut holds = false;
+    for index in 0..1u64 << inputs {
+        if index & mask != 0 {
+            continue;
+        }
+        match (bit(index), bit(index | mask)) {
+            (true, false) => return false,
+            (false, true) => holds = true,
+            _ => {}
+        }
+    }
+    holds
 }
 
 /// Which edge of its clock a register samples on
@@ -734,6 +800,9 @@ pub struct TimedSim<'a> {
     slot_node: Vec<u32>,
     slot_bit: Vec<u16>,
     dirty_nodes: Vec<u32>,
+    /// Each node's entry in `loops`, or `NO_LOOP`
+    node_loop: Vec<u32>,
+    loops: Vec<FeedbackLoop>,
 
     // Clocked cells
     seqs: Vec<Seq>,
@@ -761,6 +830,8 @@ pub struct TimedSim<'a> {
     events: u64,
     violations: Vec<Violation>,
     violation_count: u64,
+    latch_races: Vec<LatchRace>,
+    latch_race_count: u64,
     metastability: Metastability,
     rng: u64,
     /// Comb-cell arcs the delay model has no figure for (timed with the
@@ -994,6 +1065,7 @@ impl<'a> TimedSim<'a> {
         let mut wide_inputs: Vec<Logic> = Vec::new();
         let mut slot_node: Vec<u32> = Vec::new();
         let mut slot_bit: Vec<u16> = Vec::new();
+        let mut loops: Vec<(u32, FeedbackLoop)> = Vec::new();
 
         let mut seqs: Vec<Seq> = Vec::new();
         let mut seq_outputs: Vec<u32> = Vec::new();
@@ -1192,6 +1264,33 @@ impl<'a> TimedSim<'a> {
                             delay_ps: (wire(pin, net) + arc) as u32,
                         });
                     }
+                    // A latch in one cell: its only output read back by
+                    // its own inputs
+                    if matches!(kind, NodeKind::Table) && outs.len() == 1 {
+                        let out_net = out_nets[outs[0]];
+                        let mut mask = 0u64;
+                        let mut loop_ps = 0i64;
+                        for (bit, &pin) in pins.iter().enumerate() {
+                            let net = cell.inputs[pin];
+                            if canonical(net) == out_net {
+                                mask |= 1 << bit;
+                                loop_ps = loop_ps.max(wire(pin, net) + arcs[pin].unwrap_or(0));
+                            }
+                        }
+                        let table = node_outputs[out_start as usize].table as usize;
+                        if mask != 0 && holds_through_feedback(&tables[table..], n, mask) {
+                            loops.push((
+                                node_index,
+                                FeedbackLoop {
+                                    cell: index as u32,
+                                    mask,
+                                    loop_ps,
+                                    changed_ps: i64::MIN / 4,
+                                    before: Logic::X,
+                                },
+                            ));
+                        }
+                    }
                     nodes.push(Node {
                         kind,
                         inputs: n as u16,
@@ -1298,6 +1397,11 @@ impl<'a> TimedSim<'a> {
             .map(|net| (net.name.as_str(), net.id))
             .collect();
         let n_seqs = seqs.len();
+        let mut node_loop = vec![NO_LOOP; nodes.len()];
+        for (i, &(node, _)) in loops.iter().enumerate() {
+            node_loop[node as usize] = i as u32;
+        }
+        let loops = loops.into_iter().map(|(_, l)| l).collect();
         let mut sim = Self {
             netlist,
             names,
@@ -1313,6 +1417,8 @@ impl<'a> TimedSim<'a> {
             changes: Vec::new(),
             recorded_before: HashMap::new(),
             dirty_nodes: Vec::new(),
+            node_loop,
+            loops,
             nodes,
             node_outputs,
             tables,
@@ -1339,6 +1445,8 @@ impl<'a> TimedSim<'a> {
             events: 0,
             violations: Vec::new(),
             violation_count: 0,
+            latch_races: Vec::new(),
+            latch_race_count: 0,
             metastability: Metastability::Unknown,
             rng: 1,
             missing_arcs,
@@ -1347,8 +1455,15 @@ impl<'a> TimedSim<'a> {
         Ok(sim)
     }
 
+    /// What clocked elements take on a timing violation, and how a
+    /// one-cell latch's race settles
+    pub fn metastability(&self) -> Metastability {
+        self.metastability
+    }
+
     /// Choose what clocked elements take on a timing violation (unknown
-    /// by default)
+    /// by default), and how a one-cell latch's race settles
+    /// ([`LatchRace`])
     pub fn set_metastability(&mut self, metastability: Metastability) {
         self.metastability = metastability;
         if let Metastability::Resolve(seed) = metastability {
@@ -1584,6 +1699,17 @@ impl<'a> TimedSim<'a> {
     /// Number of timing violations seen so far
     pub fn violation_count(&self) -> u64 {
         self.violation_count
+    }
+
+    /// The first races of one-cell latches (up to 10 000; all of them are
+    /// counted, see [`Self::latch_race_count`])
+    pub fn latch_races(&self) -> &[LatchRace] {
+        &self.latch_races
+    }
+
+    /// How many races one-cell latches have decided
+    pub fn latch_race_count(&self) -> u64 {
+        self.latch_race_count
     }
 
     /// Events processed so far
@@ -2106,8 +2232,13 @@ impl<'a> TimedSim<'a> {
                 self.nodes[node].out_len as usize,
             );
             let inertia = i64::from(self.nodes[node].inertia_ps);
+            let feedback = self.node_loop[node];
             for k in 0..len {
-                let value = self.node_output(node, k);
+                let value = if feedback == NO_LOOP {
+                    self.node_output(node, k)
+                } else {
+                    self.loop_output(node, feedback as usize)
+                };
                 let index = start + k;
                 let out = &mut self.node_outputs[index];
                 if out.value == value {
@@ -2137,6 +2268,60 @@ impl<'a> TimedSim<'a> {
         // Keep whatever was marked while evaluating (nothing is, today)
         dirty.append(&mut self.dirty_nodes);
         self.dirty_nodes = dirty;
+    }
+
+    /// The output of latch node `node` ([`FeedbackLoop`] `l`), from its
+    /// other inputs and the value it holds; a race, if this decides other
+    /// than it would have before its last change came round the loop
+    fn loop_output(&mut self, node: usize, l: usize) -> Logic {
+        let n = &self.nodes[node];
+        let out = self.node_outputs[n.out_start as usize];
+        let lp = self.loops[l];
+        let table = &self.tables[out.table as usize..];
+        let with = |feedback: Logic| {
+            let (val, x) = match feedback {
+                Logic::One => (n.val | lp.mask, n.x & !lp.mask),
+                Logic::Zero => (n.val & !lp.mask, n.x & !lp.mask),
+                Logic::X => (n.val & !lp.mask, n.x | lp.mask),
+            };
+            table_lookup(table, val, x)
+        };
+        let held = out.value;
+        let decided = with(held);
+        let racing = self.now < lp.changed_ps + lp.loop_ps && lp.before != Logic::X;
+        let earlier = if racing { with(lp.before) } else { decided };
+        if earlier != decided {
+            // Would have decided otherwise before the last change came
+            // round: settles to one of the two, which then holds
+            let value = match self.metastability {
+                Metastability::Unknown => decided,
+                Metastability::Resolve(_) => {
+                    if self.coin() {
+                        decided
+                    } else {
+                        earlier
+                    }
+                }
+            };
+            self.latch_race_count += 1;
+            if self.latch_races.len() < MAX_KEPT_VIOLATIONS && self.now >= self.record_from_ps {
+                self.latch_races.push(LatchRace {
+                    time_ps: self.now,
+                    cell: CellId(lp.cell),
+                    margin_ps: lp.changed_ps + lp.loop_ps - self.now,
+                });
+            }
+            let lp = &mut self.loops[l];
+            lp.before = value;
+            lp.changed_ps = self.now;
+            return value;
+        }
+        if decided != held {
+            let lp = &mut self.loops[l];
+            lp.before = held;
+            lp.changed_ps = self.now;
+        }
+        decided
     }
 
     /// Output `k` of node `node`, from its current inputs
@@ -2940,6 +3125,108 @@ mod tests {
             assert_eq!(hold(&mut sim), (pq, pqn), "seed {seed}");
         }
         assert!(tried >= 2, "too few seeds tried");
+    }
+
+    /// A latch in one LUT (a mutex: `b` sets it, `a` clears it, both
+    /// high hold it) with its output wired back to two of its inputs:
+    /// `(nl, a, b, y)`
+    fn lut_mutex() -> (GateNetlist, GateNetId, GateNetId, GateNetId) {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let a = nl.add_input("a".into());
+        let b = nl.add_input("b".into());
+        let y = nl.add_output("y".into());
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "mutex".into(),
+            vec![a, b, y, y],
+            vec![y],
+        );
+        cell.lut_init = Some(0xd4d4);
+        nl.add_cell(cell);
+        (nl, a, b, y)
+    }
+
+    /// Run the mutex, cleared and then with both inputs low: `first` rises
+    /// at 1 ns and `second` `apart` ps later. Returns the sim at 10 ns.
+    fn race_mutex<'a>(
+        nl: &'a GateNetlist,
+        delays: &TestDelays,
+        metastability: Metastability,
+        (first, second): (GateNetId, GateNetId),
+        apart: i64,
+    ) -> TimedSim<'a> {
+        let mut sim = TimedSim::new(nl, delays).unwrap();
+        sim.set_metastability(metastability);
+        let clear = nl.inputs[0];
+        sim.set(first, Logic::Zero);
+        sim.set(second, Logic::Zero);
+        sim.set(clear, Logic::One);
+        sim.run_until(500).unwrap();
+        sim.set(clear, Logic::Zero);
+        sim.run_until(1_000).unwrap();
+        sim.set(first, Logic::One);
+        sim.run_until(1_000 + apart).unwrap();
+        sim.set(second, Logic::One);
+        sim.run_until(10_000).unwrap();
+        sim
+    }
+
+    /// A one-cell latch decides by which input came first; inputs closer
+    /// than one trip round its loop race, and the race settles to a
+    /// definite value instead of leaving a pulse circling the loop
+    #[test]
+    fn one_cell_latches_settle_their_races() {
+        let (nl, a, b, y) = lut_mutex();
+        // Arc 100 ps, wire 200 ps: the loop takes 300 ps
+        let delays = TestDelays {
+            wire_ps: 200,
+            ..Default::default()
+        };
+        // Far apart: the first input decides, and nothing is reported
+        for (order, held) in [((b, a), Logic::One), ((a, b), Logic::Zero)] {
+            let mut sim = race_mutex(&nl, &delays, Metastability::Unknown, order, 400);
+            assert_eq!(sim.value(y), held);
+            assert_eq!(sim.latch_race_count(), 0);
+            // Still held once the loser lets go
+            sim.set(order.1, Logic::Zero);
+            sim.run_until(12_000).unwrap();
+            assert_eq!(sim.value(y), held);
+        }
+        // 150 ps apart, after the output changed (100 ps) but before the
+        // change came round (300 ps)
+        let settled_by = |sim: &mut TimedSim| {
+            sim.watch(y);
+            sim.run_until(20_000).unwrap();
+            assert!(changes_of(sim, y).is_empty(), "still changing");
+            sim.value(y)
+        };
+        let mut outcomes = Vec::new();
+        for seed in 1..=32 {
+            let mut sim = race_mutex(&nl, &delays, Metastability::Resolve(seed), (b, a), 150);
+            assert_eq!(sim.latch_race_count(), 1, "seed {seed}");
+            assert_eq!(sim.violation_count(), 0, "seed {seed}");
+            let race = &sim.latch_races()[0];
+            assert_eq!(race.cell, CellId(0));
+            // Each input takes its 200 ps wire too: b at 1.2 ns, a at 1.35 ns
+            assert_eq!((race.time_ps, race.margin_ps), (1_350, 150));
+            outcomes.push(settled_by(&mut sim));
+        }
+        assert!(outcomes.contains(&Logic::Zero));
+        assert!(outcomes.contains(&Logic::One));
+        assert!(!outcomes.contains(&Logic::X));
+        // Without a seed the first input wins: never unknown, which a latch
+        // would hold for ever
+        let mut sim = race_mutex(&nl, &delays, Metastability::Unknown, (b, a), 150);
+        assert_eq!(sim.latch_race_count(), 1);
+        assert_eq!(settled_by(&mut sim), Logic::One);
+        // Clearing a latch that is already clear changes nothing, so the
+        // set that follows has nothing to race
+        let mut sim = race_mutex(&nl, &delays, Metastability::Unknown, (a, b), 150);
+        assert_eq!(sim.latch_race_count(), 0);
+        assert_eq!(settled_by(&mut sim), Logic::Zero);
     }
 
     /// Far events (beyond the wheel's horizon) still run in order

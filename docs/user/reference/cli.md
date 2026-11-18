@@ -292,6 +292,15 @@ skalp sim [OPTIONS] <DESIGN>
 - `--uart-lines <N>` - Stop once the `--uart` line has sent this many lines
 - `--corner`, `--power-up`, `--metastability` - Timed simulation only (see
   `skalp timed-sim --help`)
+- `--violations <N>` - Timed simulation only: how many timing violations to
+  list (20 unless given), first the earliest, then grouped by cell (setup
+  first, then the most often violated) with the net each reads, and as
+  many latch races. A latch race is two inputs of a latch built in one
+  cell (its output wired back to its own inputs, such as an arbiter's
+  mutex) changing what it holds less than one trip round its loop apart.
+  It is not a violation (deciding races is what a mutex is for, and an
+  arbiter waits for it to settle); the latch settles to the first input's
+  side with `--metastability x`, and to either at random with `resolve`
 - `-h, --help` - Print help
 
 ### Examples
