@@ -8,6 +8,7 @@
 //! - Test vector generation and golden reference comparison
 
 pub mod cache;
+pub mod gate_level;
 pub mod golden;
 pub mod testbench;
 

@@ -1169,6 +1169,11 @@ pub struct VendorIpConfig {
     /// primitive, so synthesis and netlists leave them out
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sim_clocks: Vec<String>,
+    /// The entity's generic parameters whose values specialization put in
+    /// `parameters` (a vendor primitive's generics become its cell
+    /// parameters), as against the attribute's own parameters
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generics: Vec<String>,
     /// Port name mapping: entity_port -> ip_port (for when names differ)
     pub port_map: Vec<(String, String)>,
     /// Clock definitions: (port_name, frequency_mhz)

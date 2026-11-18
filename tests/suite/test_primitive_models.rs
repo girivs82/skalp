@@ -19,6 +19,7 @@ const DEVICE: &str = "lfcpnx-100";
 const SIM_CLOCK: &str = "tests/fixtures/primitive_models/sim_clock.sk";
 const NEXUS_TX: &str = "tests/fixtures/primitive_models/nexus_tx.sk";
 const NEXUS_LOOP: &str = "tests/fixtures/primitive_models/nexus_loop.sk";
+const MIXED: &str = "tests/fixtures/gate_level/mixed_dut.sk";
 
 /// Ticks of `sim_tick` per edge clock period in the Nexus fixtures
 const ECLK_TICKS: usize = 16;
@@ -171,6 +172,97 @@ async fn nexus_output_gearing_from_the_library() {
         checked += 1;
     }
     assert!(checked > 30);
+}
+
+/// A vendor primitive's body is its simulation model: the netlist has the
+/// primitive's black box and nothing from the instances inside the model
+#[test]
+fn model_instances_stay_out_of_the_netlist() {
+    let source = std::fs::read_to_string(NEXUS_TX).expect("fixture");
+    let mir = mir_for_device(NEXUS_TX, &source, Some(DEVICE)).expect("compile");
+    let cells = nexus_cells(&mir);
+    let boxes: Vec<_> = cells
+        .iter()
+        .filter(|c| c.cell_type == "BLACKBOX_ODDRX4")
+        .collect();
+    assert_eq!(boxes.len(), 1, "ODDRX4 is a black box");
+    let inside: Vec<_> = cells
+        .iter()
+        .filter(|c| c.path.starts_with("top.o.") && !c.cell_type.starts_with("BLACKBOX_"))
+        .map(|c| format!("{} ({})", c.path, c.cell_type))
+        .collect();
+    assert!(
+        inside.is_empty(),
+        "cells from the ODDRX4 model's gearbox: {inside:?}"
+    );
+}
+
+/// A design simulated at gate level (its synthesized netlist, the ODDRX4 in
+/// it running its model) inside a behavioural testbench gives, tick for tick,
+/// what its behavioural simulation gives: counters on the carry chain,
+/// flip-flops with enable and reset, a distributed RAM and the gearbox output
+#[tokio::test]
+async fn gate_level_dut_matches_its_behaviour() {
+    let mut runs = Vec::new();
+    for gate_level in [false, true] {
+        let mut tb = if gate_level {
+            Testbench::gate_level_dut_for_device(MIXED, "MixedBench", DEVICE, &["MixedDut"]).await
+        } else {
+            Testbench::behavioral_for_device(MIXED, "MixedBench", DEVICE).await
+        }
+        .expect("build");
+        tb.set("rst", 1u8).set("en", 0u8).set("din", 0u8);
+        tb.clock_signal("sim_tick", 4 * SCLK_TICKS).await;
+        tb.set("rst", 0u8);
+        let mut trace = Vec::new();
+        for i in 0..60 * SCLK_TICKS {
+            // inputs change away from the SCLK edges, as a testbench drives them
+            if i % SCLK_TICKS == SCLK_TICKS / 2 {
+                let k = i / SCLK_TICKS;
+                tb.set("en", (k % 7 != 3) as u8);
+                tb.set("din", ((k * 5 + 3) % 16) as u8);
+            }
+            tb.clock_signal("sim_tick", 1).await;
+            let mut row = Vec::new();
+            for name in ["q", "count", "rd", "acc"] {
+                row.push(tb.get_u32(name).await);
+            }
+            trace.push(row);
+        }
+        runs.push(trace);
+    }
+    let (rtl, gates) = (&runs[0], &runs[1]);
+    assert!(
+        rtl.iter()
+            .map(|r| r[1])
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 30,
+        "the counter runs"
+    );
+    assert!(
+        rtl.iter().any(|r| r[0] == 1) && rtl.iter().any(|r| r[0] == 0),
+        "q toggles"
+    );
+    for (t, (a, b)) in rtl.iter().zip(gates).enumerate() {
+        assert_eq!(
+            a, b,
+            "tick {t}: behavioural [q, count, rd, acc] vs gate level"
+        );
+    }
+}
+
+/// Gate-level substitution names an entity the design does not instantiate:
+/// an error, not a silently behavioural run
+#[tokio::test]
+async fn gate_level_dut_must_be_in_the_design() {
+    let result =
+        Testbench::gate_level_dut_for_device(MIXED, "MixedBench", DEVICE, &["NoSuchEntity"]).await;
+    let err = result
+        .err()
+        .expect("an unknown entity is an error")
+        .to_string();
+    assert!(err.contains("NoSuchEntity"), "{err}");
 }
 
 /// A Nexus primitive used without a device to take it from is an unknown

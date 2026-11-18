@@ -1,0 +1,79 @@
+// A design for a Nexus device simulated at gate level inside a behavioural
+// testbench: carry-chain counters, flip-flops with enable and reset, LUT logic,
+// a small memory, and the family's output gearbox (ODDRX4) and output delay (DELAYB)
+// primitives, which a gate-level netlist keeps as black boxes.
+entity MixedDut {
+    in sim_tick: clock
+    in rst: bit
+    in en: bit
+    in din: bit[4]
+    out q: bit
+    out count: bit[8]
+    out rd: bit[4]
+    out acc: bit[6]
+}
+
+impl MixedDut {
+    // edge clock sim_tick / 16, SCLK = ECLK / 4
+    signal t: bit[4] = 0
+    signal ek: bit = 0
+    on(sim_tick.rise) {
+        t = t + 1
+        if t == 7 || t == 15 {
+            ek = !ek
+        }
+    }
+    signal eclk_in: clock
+    eclk_in = ek
+    inst es = ECLKSYNC { ECLKIN: eclk_in, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: rst, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+
+    signal n: bit[8] = 0
+    signal a: bit[6] = 5
+    signal mem: [bit[4]; 16]
+    signal wa: bit[4] = 0
+    on(sclk.rise) {
+        if rst == 1 {
+            n = 0
+            a = 5
+        } else if en == 1 {
+            n = n + 3
+            a = a ^ {din, n[1:0]}
+        }
+        mem[wa] = din ^ n[3:0]
+        wa = wa + 1
+    }
+    rd = mem[n[7:4]]
+    inst o = ODDRX4 {
+        D0: n[0], D1: n[1], D2: n[2], D3: n[3], D4: n[4], D5: n[5], D6: n[6], D7: n[7],
+        ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    // a generic other than its default: the netlist's black box carries it
+    inst dl = DELAYB<5> { A: o.Q }
+    q = dl.Z
+    count = n
+    acc = a
+}
+
+entity MixedBench {
+    in sim_tick: clock
+    in rst: bit
+    in en: bit
+    in din: bit[4]
+    out q: bit
+    out count: bit[8]
+    out rd: bit[4]
+    out acc: bit[6]
+}
+
+impl MixedBench {
+    inst d = MixedDut { sim_tick: sim_tick, rst: rst, en: en, din: din }
+    q = d.q
+    count = d.count
+    rd = d.rd
+    acc = d.acc
+}

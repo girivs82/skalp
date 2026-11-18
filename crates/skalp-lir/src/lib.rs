@@ -43,6 +43,7 @@ pub mod ncl_expand;
 pub mod ncl_optimizer;
 pub mod ncl_timing_closure;
 pub mod netlist;
+pub mod netlist_to_skalp;
 pub mod pattern_detector;
 pub mod pipeline_annotations;
 pub mod pipeline_choice;
@@ -77,9 +78,9 @@ pub use mir_to_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
 
 // Hierarchical MIR to LIR transformation
 pub use mir_to_lir::{
-    lower_mir_hierarchical, lower_mir_hierarchical_for_optimize_first,
-    lower_mir_hierarchical_with_top, HierarchicalMirToLirResult, InstanceLirResult,
-    PortConnectionInfo,
+    data_type_width, lower_mir_hierarchical, lower_mir_hierarchical_for_optimize_first,
+    lower_mir_hierarchical_for_optimize_first_with_top, lower_mir_hierarchical_with_top,
+    HierarchicalMirToLirResult, InstanceLirResult, PortConnectionInfo,
 };
 
 // Gate-level netlist (output of technology mapping)

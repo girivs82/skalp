@@ -43,6 +43,11 @@ pub struct SharedCodegen<'a> {
     array_read_sources: HashSet<&'a str>,
     /// The first declared signal with each name
     signal_by_name: HashMap<&'a str, &'a SirSignal>,
+    /// The most fields a buffer struct holds directly before its fields go
+    /// into anonymous member structs of this many (`None`: never)
+    field_group: Option<usize>,
+    /// The fields of the buffer struct being generated (one declaration each)
+    struct_fields: Vec<String>,
 }
 
 impl<'a> SharedCodegen<'a> {
@@ -55,6 +60,8 @@ impl<'a> SharedCodegen<'a> {
             indent: 0,
             concat_recursion_depth: 0,
             in_batched_mode: false,
+            field_group: None,
+            struct_fields: Vec::new(),
             signal_width_cache: HashMap::new(),
             declared_signal_widths: HashMap::new(),
             input_field_names: Vec::new(),
@@ -675,6 +682,57 @@ impl<'a> SharedCodegen<'a> {
         None
     }
 
+    /// Put the fields of a buffer struct with more than `fields` of them
+    /// into anonymous member structs of at most `fields` each. Their members
+    /// are named as members of the buffer struct itself, so every access and
+    /// `offsetof` stays as it is. C++ compilers take time that grows with
+    /// the square of the number of members of one struct: a gate-level
+    /// netlist's 200,000 signals in one struct take g++ about 45 minutes
+    /// before any function is compiled, while in groups of 1,000 they take
+    /// seconds. (Anonymous structs are a C11 feature that g++, clang and
+    /// MSVC accept in C++.)
+    pub fn set_field_group(&mut self, fields: usize) {
+        self.field_group = Some(fields.max(1));
+    }
+
+    /// Start a buffer struct named `name`
+    fn begin_struct(&mut self, name: &str) {
+        self.struct_fields.clear();
+        self.writeln(&format!("struct {} {{", name));
+        self.indent();
+    }
+
+    /// Add a field declaration (without indentation or newline) to the
+    /// buffer struct being generated
+    fn push_field(&mut self, declaration: String) {
+        self.struct_fields.push(declaration);
+    }
+
+    /// End the buffer struct being generated, writing its fields
+    fn end_struct(&mut self) {
+        let fields = std::mem::take(&mut self.struct_fields);
+        match self.field_group {
+            Some(group) if fields.len() > group => {
+                for chunk in fields.chunks(group) {
+                    self.write_indented("struct {\n");
+                    self.indent();
+                    for field in chunk {
+                        self.write_indented(&format!("{}\n", field));
+                    }
+                    self.dedent();
+                    self.write_indented("};\n");
+                }
+            }
+            _ => {
+                for field in &fields {
+                    self.write_indented(&format!("{}\n", field));
+                }
+            }
+        }
+        self.dedent();
+        self.writeln("};\n");
+    }
+
     /// Generate struct field definition for a signal
     /// Returns true if the signal was decomposed
     pub fn generate_signal_field(&mut self, name: &str, sir_type: &SirType) -> bool {
@@ -691,10 +749,7 @@ impl<'a> SharedCodegen<'a> {
         };
 
         let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(&effective_type);
-        self.write_indented(&format!(
-            "{} {}{};\n",
-            base_type, sanitized_name, array_suffix
-        ));
+        self.push_field(format!("{} {}{};", base_type, sanitized_name, array_suffix));
         // Track field name for offset table generation
         self.signal_field_names.push(sanitized_name);
         false
@@ -704,27 +759,24 @@ impl<'a> SharedCodegen<'a> {
     pub fn generate_inputs_struct(&mut self) {
         self.input_field_names.clear();
         self.writeln("// Input buffer");
-        self.writeln("struct Inputs {");
-        self.indent();
+        self.begin_struct("Inputs");
 
         for input in &self.module.inputs {
             let sanitized = self.sanitize_name(&input.name);
             let (base_type, array_suffix) =
                 self.type_mapper.get_struct_field_parts(&input.sir_type);
-            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
+            self.push_field(format!("{} {}{};", base_type, sanitized, array_suffix));
             self.input_field_names.push(sanitized);
         }
 
-        self.dedent();
-        self.writeln("};\n");
+        self.end_struct();
     }
 
     /// Generate the Registers struct definition
     pub fn generate_registers_struct(&mut self) {
         self.register_field_names.clear();
         self.writeln("// Register buffer (flip-flop outputs only)");
-        self.writeln("struct Registers {");
-        self.indent();
+        self.begin_struct("Registers");
 
         // Sort state elements by name for consistent ordering
         let mut sorted_states: Vec<_> = self.module.state_elements.iter().collect();
@@ -742,7 +794,7 @@ impl<'a> SharedCodegen<'a> {
 
             let sanitized = self.sanitize_name(name);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
-            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
+            self.push_field(format!("{} {}{};", base_type, sanitized, array_suffix));
             self.register_field_names.push(sanitized);
         }
 
@@ -767,20 +819,18 @@ impl<'a> SharedCodegen<'a> {
             let width = self.get_signal_width(name);
             let sir_type = SirType::Bits(width);
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(&sir_type);
-            self.write_indented(&format!("{} {}{};\n", base_type, sanitized, array_suffix));
+            self.push_field(format!("{} {}{};", base_type, sanitized, array_suffix));
             self.register_field_names.push(sanitized);
         }
 
-        self.dedent();
-        self.writeln("};\n");
+        self.end_struct();
     }
 
     /// Generate the Signals struct definition
     pub fn generate_signals_struct(&mut self) {
         self.signal_field_names.clear();
         self.writeln("// Signal buffer (all computed values)");
-        self.writeln("struct Signals {");
-        self.indent();
+        self.begin_struct("Signals");
 
         // Keep track of names already added
         let mut added_names: HashSet<String> = HashSet::new();
@@ -1006,8 +1056,7 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
-        self.dedent();
-        self.writeln("};\n");
+        self.end_struct();
     }
 
     /// Generate C++ field offset tables using offsetof()/sizeof().
@@ -4212,18 +4261,25 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
-    /// Generate combinational evaluation body
-    pub fn generate_combinational_body(&mut self) {
-        // Use pre-computed topological order; each id names its first node
+    /// The combinational nodes in evaluation order (the pre-computed
+    /// topological order; each id names its first node)
+    pub fn combinational_order(&self) -> Vec<&'a SirNode> {
         let module = self.module;
-        let mut node_by_id: HashMap<usize, &SirNode> = HashMap::new();
+        let mut node_by_id: HashMap<usize, &'a SirNode> = HashMap::new();
         for node in &module.combinational_nodes {
             node_by_id.entry(node.id).or_insert(node);
         }
-        for node_id in &module.sorted_combinational_node_ids {
-            if let Some(node) = node_by_id.get(node_id) {
-                self.generate_node(node);
-            }
+        module
+            .sorted_combinational_node_ids
+            .iter()
+            .filter_map(|id| node_by_id.get(id).copied())
+            .collect()
+    }
+
+    /// Generate combinational evaluation body
+    pub fn generate_combinational_body(&mut self) {
+        for node in self.combinational_order() {
+            self.generate_node(node);
         }
     }
 
@@ -4368,6 +4424,13 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
+        self.generate_flipflop_updates(current_reg, next_reg);
+    }
+
+    /// Generate every flip-flop's update, ordered by output name, without
+    /// first copying the current registers into the next ones (the second
+    /// half of `generate_sequential_body`)
+    pub fn generate_flipflop_updates(&mut self, current_reg: &str, next_reg: &str) {
         // Sort sequential nodes by output name
         let mut sorted_seq_nodes: Vec<_> = self.module.sequential_nodes.iter().collect();
         sorted_seq_nodes.sort_by(|a, b| {

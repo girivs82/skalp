@@ -39,6 +39,7 @@ mod test_chained_operator_specialization;
 mod test_child_let;
 mod test_child_memory_sim;
 mod test_clock_enable;
+mod test_compiled_cpu_parts;
 mod test_complete_hardware_flow;
 mod test_cone_extraction;
 mod test_const_eval;
