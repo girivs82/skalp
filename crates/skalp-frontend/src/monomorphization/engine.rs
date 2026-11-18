@@ -3104,6 +3104,9 @@ fn vendor_config_with_generics(
             Some((_, v)) => *v = quoted,
             None => cfg.parameters.push((name.clone(), quoted)),
         }
+        if !cfg.generics.contains(name) {
+            cfg.generics.push(name.clone());
+        }
     }
     cfg
 }

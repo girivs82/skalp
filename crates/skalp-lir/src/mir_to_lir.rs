@@ -7679,6 +7679,16 @@ pub fn lower_mir_hierarchical_with_top(
 /// - The hierarchical LIR result (without NCL expansion)
 /// - A flag indicating if any module was async (needs dual-rail conversion)
 pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirToLirResult, bool) {
+    lower_mir_hierarchical_for_optimize_first_with_top(mir, None)
+}
+
+/// [`lower_mir_hierarchical_for_optimize_first`] with the top module named
+/// (it may be a specialization of a generic entity, which automatic top
+/// selection never picks); `None` selects the top as that function does
+pub fn lower_mir_hierarchical_for_optimize_first_with_top(
+    mir: &Mir,
+    top_name: Option<&str>,
+) -> (HierarchicalMirToLirResult, bool) {
     use skalp_mir::ModuleId;
     use std::collections::HashSet;
 
@@ -7696,7 +7706,14 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     let module_by_name: IndexMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
-    let top_module = select_top_module(mir);
+    let top_module = match top_name {
+        Some(name) => mir
+            .modules
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("Requested top module '{name}' not found")),
+        None => select_top_module(mir),
+    };
 
     trace!(
         "[TOP_DETECT] Selected '{}' as top module (has {} instances, is_async={})",
@@ -7986,6 +8003,11 @@ fn elaborate_instance_for_optimize_first(
             ncl_boundary_mode: module.ncl_boundary_mode,
         },
     );
+}
+
+/// The number of bits a value of `dtype` takes in a netlist
+pub fn data_type_width(dtype: &DataType) -> u32 {
+    MirToLirTransform::get_type_width(dtype)
 }
 
 /// The child instances of `module` that become part of the netlist. A vendor

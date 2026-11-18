@@ -498,6 +498,60 @@ impl Testbench {
             .await
     }
 
+    /// A behavioural testbench for `device` in which every instance of
+    /// `entities` is simulated at gate level: synthesized for the device as a
+    /// build would synthesize it, with the vendor primitives in its netlist
+    /// running their simulation models (see [`crate::gate_level`]). Set
+    /// `SKALP_GATE_LEVEL_DUMP` to a directory to keep the netlists as SKALP.
+    pub async fn gate_level_dut_for_device(
+        source_path: &str,
+        top_module: &str,
+        device: &str,
+        entities: &[&str],
+    ) -> Result<Self> {
+        Self::gate_level_dut_for_device_with_pass(source_path, top_module, device, entities, None)
+            .await
+    }
+
+    /// [`Self::gate_level_dut_for_device`] with each netlist passed through
+    /// `pass` (a place-and-route step, say) before it is simulated
+    pub async fn gate_level_dut_for_device_with_pass(
+        source_path: &str,
+        top_module: &str,
+        device: &str,
+        entities: &[&str],
+        pass: Option<crate::gate_level::NetlistPass<'_>>,
+    ) -> Result<Self> {
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: HwAccel::Cpu,
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+        let substitute = |mir: &mut skalp_mir::Mir| -> Result<()> {
+            crate::gate_level::substitute_gate_level(
+                mir,
+                entities,
+                device,
+                skalp_lir::synth::SynthPreset::Compress2,
+                pass,
+            )
+            .map(|_| ())
+        };
+        let cache = CompilationCache::new();
+        let sir = Self::compile_to_sir_for_device(
+            Path::new(source_path),
+            &cache,
+            None,
+            Some(top_module),
+            Some(device),
+            Some(&substitute),
+        )?;
+        Self::from_sir_behavioral(sir, config).await
+    }
+
     // ========================================================================
     // Coverage-enabled constructors
     // ========================================================================
@@ -780,7 +834,7 @@ impl Testbench {
         // Compile to SIR (a build for a device is not cached: the key does
         // not cover the device's primitive library)
         let sir = if device.is_some() {
-            Self::compile_to_sir_for_device(path, &cache, None, top_module, device)?
+            Self::compile_to_sir_for_device(path, &cache, None, top_module, device, None)?
         } else if top_module.is_some() {
             Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
         } else if let Some(ref key) = cache_key {
@@ -793,6 +847,11 @@ impl Testbench {
             Self::compile_to_sir_with_top(path, &cache, None, None)?
         };
 
+        Self::from_sir_behavioral(sir, config).await
+    }
+
+    /// A behavioural testbench simulating `sir`
+    async fn from_sir_behavioral(sir: SirModule, config: UnifiedSimConfig) -> Result<Self> {
         // Extract port names
         let input_names: Vec<String> = sir.inputs.iter().map(|i| i.name.clone()).collect();
         let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
@@ -1048,7 +1107,7 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
     ) -> Result<skalp_sir::SirModule> {
-        Self::compile_to_sir_for_device(path, cache, cache_key, explicit_top, None)
+        Self::compile_to_sir_for_device(path, cache, cache_key, explicit_top, None, None)
     }
 
     fn compile_to_sir_for_device(
@@ -1057,6 +1116,7 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
         device: Option<&str>,
+        mir_pass: Option<&dyn Fn(&mut skalp_mir::Mir) -> Result<()>>,
     ) -> Result<skalp_sir::SirModule> {
         let context = match path.extension().and_then(|s| s.to_str()) {
             Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
@@ -1189,6 +1249,9 @@ impl Testbench {
         // Primitive models' simulation clocks come from a top-level `sim_tick`
         let top_id = top_module.id;
         let mut mir = mir;
+        if let Some(pass) = mir_pass {
+            pass(&mut mir)?;
+        }
         skalp_mir::sim_clocks::wire_sim_clocks(&mut mir, top_id);
         let top_module = mir
             .modules
