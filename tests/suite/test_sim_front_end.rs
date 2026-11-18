@@ -26,6 +26,36 @@ impl Counter {
 }
 "#;
 
+/// Sends "Hi\r\n" over and over at a quarter of the clock rate (8N1)
+const SENDER: &str = r#"entity Sender {
+    in clk: clock
+    out tx: bit
+}
+impl Sender {
+    signal baud: bit[2] = 0
+    signal bitn: bit[4] = 0
+    signal chn: bit[2] = 0
+    signal txr: bit = 1
+    signal ch: bit[8]
+    ch = if chn == 0 { 8'h48 } else if chn == 1 { 8'h69 } else if chn == 2 { 8'h0D } else { 8'h0A }
+    signal frame: bit[10]
+    frame = {1'b1, ch, 1'b0}
+    on(clk.rise) {
+        baud = baud + 1
+        if baud == 3 {
+            txr = frame[bitn]
+            if bitn == 9 {
+                bitn = 0
+                chn = chn + 1
+            } else {
+                bitn = bitn + 1
+            }
+        }
+    }
+    tx = txr
+}
+"#;
+
 fn skalp_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_skalp"))
 }
@@ -108,4 +138,42 @@ fn timed_simulation_of_a_build_takes_the_same_stimulus() {
         watched_values(&report, "count"),
         ["0x1", "0x2", "0x3", "0x4", "0x5"]
     );
+}
+
+/// The text a UART line sends, decoded the same way by every simulator
+#[test]
+fn simulators_decode_a_uart_line() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("sender.sk"), SENDER).unwrap();
+    // 20 ns clock, 4 clocks a bit: 12.5 Mbaud, a line (4 characters) in 3.2 us
+    let uart = ["--uart", "tx=12500000", "--uart-lines", "2"];
+    let lines = |report: &str| -> Vec<String> {
+        report
+            .lines()
+            .filter_map(|line| line.trim().split_once(" ns  ").map(|(_, t)| t.to_string()))
+            .collect()
+    };
+    for level in [None, Some("--gate-level")] {
+        let mut args = vec!["sim", "sender.sk", "--clock", "clk=20ns", "-d", "1000"];
+        args.extend(level);
+        args.extend(uart);
+        let report = skalp(dir.path(), &args);
+        assert!(report.contains("Stopped: 2 UART lines"), "{report}");
+        assert_eq!(lines(&report), ["Hi", "Hi"], "{report}");
+    }
+    skalp(
+        dir.path(),
+        &["synth", "sender.sk", "-d", "ice40-hx8k", "-f", "-o", "out"],
+    );
+    let mut args = vec!["sim", "out", "--clock", "clk=20", "-d", "100us"];
+    args.extend(uart);
+    let report = skalp(dir.path(), &args);
+    assert_eq!(lines(&report), ["Hi", "Hi"], "{report}");
+    // Stopped once the second line was in (before 3 lines, 9.6 us), not at 100 us
+    let stopped = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Stopped: 2 UART lines at "))
+        .unwrap_or_else(|| panic!("{report}"));
+    let ns: f64 = stopped.trim_end_matches(" ns").parse().unwrap();
+    assert!(ns < 9600.0, "stopped at {ns} ns");
 }

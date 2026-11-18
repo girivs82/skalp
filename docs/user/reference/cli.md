@@ -286,6 +286,10 @@ skalp sim [OPTIONS] <DESIGN>
   ending in `*` watches every signal it starts
 - `--watch-from <TIME>` - Report changes only from this time on
 - `--until <NET=VALUE>` - Stop once a signal has a value
+- `--uart <NET[=BAUD]>` - Decode a UART transmit line (8N1, 1 Mbaud unless
+  given) and print the text it sends, each line with the time it began, as
+  `skalp uart --text` prints what a board sends
+- `--uart-lines <N>` - Stop once the `--uart` line has sent this many lines
 - `--corner`, `--power-up`, `--metastability` - Timed simulation only (see
   `skalp timed-sim --help`)
 - `-h, --help` - Print help
@@ -312,6 +316,12 @@ skalp sim design.sk --gate-level -d 100
 skalp sim counter.sk --set rst=0 --set en=1 --watch count --until count=5
 skalp synth counter.sk -d ice40-hx8k -f -o out
 skalp sim out --clock clk=20ns --set rst=0 --set en=1 --watch count --until count=5 -d 2us
+```
+
+**Read the same report from a simulation and from the board:**
+```bash
+skalp sim out --clock clk=8ns --uart uart_tx --uart-lines 2 -d 5ms
+skalp uart --board certuspro-versa --seconds 10 --text
 ```
 
 ### Output
