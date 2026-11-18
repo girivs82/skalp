@@ -229,7 +229,8 @@ def commands(selection):
         cmds.append(f"cargo test --all-targets --all-features --no-fail-fast {pkgs}")
         cmds.append(f"cargo test --doc --all-features --no-fail-fast {pkgs}")
     if "skalp" in test_crates:
-        cmds.append("cargo test -p skalp --lib --bins --all-features --no-fail-fast")
+        # the skalp package is a binary only: its unit tests are in the binary
+        cmds.append("cargo test -p skalp --bins --all-features --no-fail-fast")
     if modules:
         cmds.append(
             "cargo test -p skalp --test suite --all-features --no-fail-fast -- "
