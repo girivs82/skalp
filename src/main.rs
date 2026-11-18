@@ -5192,15 +5192,9 @@ fn run_nexus_pnr_on_netlist(
     println!();
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
-    let mut result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
-    // Matched delays of async blocks that routing made too short: lengthen
-    // them by the shortfall and place and route again
-    for _ in 0..4 {
-        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
-            break;
-        }
-        result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
-    }
+    let result = fit_matched_delays_to_routing(&mut netlist, |n| {
+        place_and_route_nexus_for_cli(n, nexus, config.clone())
+    })?;
     let gate_netlist = &netlist;
 
     println!("Placement:");
@@ -5294,6 +5288,135 @@ fn run_nexus_pnr_on_netlist(
     let pins_path = bit_path.with_extension("pins.json");
     fs::write(&pins_path, serde_json::to_string_pretty(&driven)?)?;
     Ok(())
+}
+
+/// Place and route `netlist`, then fit its matched delays to the routed
+/// delays: lengthen any that routing made too short, and shorten any that
+/// are longer than their checks need, placing and routing again after each
+/// change. Matched delays are first sized before placement from library
+/// estimates with a wide margin; routed delays are what the design runs on,
+/// and a self-timed block steps no faster than its matched delays allow.
+fn fit_matched_delays_to_routing(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    mut place_and_route: impl FnMut(
+        &skalp_lir::gate_netlist::GateNetlist,
+    ) -> Result<skalp_place_route::PnrResult>,
+) -> Result<skalp_place_route::PnrResult> {
+    let mut result = place_and_route(netlist)?;
+    let mut changed = true;
+    // Lengthen what is short; once nothing is, shorten what is long (at
+    // most three times), and lengthen again what that left short
+    let mut shortened = 0;
+    for _ in 0..16 {
+        let timing = result.timing.as_ref();
+        changed = if lengthen_short_matched_delays(netlist, timing) {
+            true
+        } else if shortened < 3 && shorten_long_matched_delays(netlist, timing) {
+            shortened += 1;
+            true
+        } else {
+            false
+        };
+        if !changed {
+            break;
+        }
+        result = place_and_route(netlist)?;
+    }
+    if changed {
+        println!("NCL: matched delays still changing after 16 placements; reporting the last");
+    }
+    Ok(result)
+}
+
+/// Slack a matched delay keeps after [`shorten_long_matched_delays`], as a
+/// share of the data arrival it times. Routed timing already takes the
+/// worst of the slow and fast corners; this covers what the corners do not,
+/// such as on-die variation between the chain and the paths it matches.
+const MATCHED_DELAY_KEEP_PERCENT: f64 = 10.0;
+
+/// Shorten each matched delay whose routed checks all pass with more slack
+/// than it needs (`MATCHED_DELAY_KEEP_PERCENT` of the data, and at least one
+/// buffer). Returns whether any changed.
+fn shorten_long_matched_delays(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    timing: Option<&skalp_place_route::timing::TimingReport>,
+) -> bool {
+    let Some(timing) = timing else {
+        return false;
+    };
+    let matched = skalp_lir::ncl_bundle::find_matched_delays(netlist);
+    // The arrival of each delay's control, from its checks of data it
+    // clocks or acknowledges (a hold check reports another arrival)
+    let arrival = |path: &str| {
+        timing
+            .bundles
+            .iter()
+            .filter(|b| {
+                b.delay == path
+                    && matches!(b.times.as_str(), "registers" | "acknowledge" | "next state")
+            })
+            .map(|b| b.control_ns)
+            .reduce(f64::min)
+    };
+    let mut cuts = Vec::new();
+    for md in &matched {
+        let path = &netlist.cells[md.and_cell.0 as usize].path;
+        let checks: Vec<_> = timing
+            .bundles
+            .iter()
+            .filter(|b| &b.delay == path && b.times != skalp_lir::ncl_bundle::REGISTER_HOLD)
+            .collect();
+        if checks.is_empty() || md.chain.len() <= 1 {
+            continue;
+        }
+        // Delay one buffer adds: the chain's own share of the control's
+        // arrival, after the delay whose control is its source (if any)
+        let source_at = matched
+            .iter()
+            .find(|m| m.control == md.source)
+            .and_then(|m| arrival(&netlist.cells[m.and_cell.0 as usize].path))
+            .unwrap_or(0.0);
+        let Some(control_at) = arrival(path) else {
+            continue;
+        };
+        let per_buffer_ns = ((control_at - source_at) / (md.chain.len() + 1) as f64).max(0.01);
+        let spare_ns = checks
+            .iter()
+            .map(|b| b.slack_ns - b.data_ns.abs() * MATCHED_DELAY_KEEP_PERCENT / 100.0)
+            .reduce(f64::min)
+            .unwrap_or(0.0)
+            - per_buffer_ns;
+        let count = (spare_ns / per_buffer_ns).floor();
+        // Not worth another placement for a buffer or two
+        if count < 2.0 {
+            continue;
+        }
+        cuts.push((
+            md.clone(),
+            count as usize,
+            checks[0].block.clone(),
+            spare_ns,
+        ));
+    }
+    // Remove from the highest cell ids down, so the ids of the chains still
+    // to shorten stay valid
+    cuts.sort_by_key(|(md, ..)| std::cmp::Reverse(md.and_cell.0));
+    let mut changed = false;
+    for (md, count, block, spare_ns) in cuts {
+        let md = skalp_lir::ncl_bundle::find_matched_delays(netlist)
+            .into_iter()
+            .find(|m| m.control == md.control)
+            .expect("a matched delay is still there after shortening another");
+        let removed = skalp_lir::ncl_bundle::shorten_matched_delay(netlist, &md, count);
+        if removed > 0 {
+            println!(
+                "NCL: matched delay {} has {:.2} ns more than it needs after routing; removing {} buffer(s) and placing again",
+                block, spare_ns, removed
+            );
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Lengthen each matched delay that routed timing found too short, by its
@@ -5460,15 +5583,9 @@ fn run_pnr_on_netlist(
     println!();
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
-    let mut result = place_and_route(&netlist, ice40_variant, config.clone())?;
-    // Matched delays of async blocks that routing made too short: lengthen
-    // them by the shortfall and place and route again
-    for _ in 0..4 {
-        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
-            break;
-        }
-        result = place_and_route(&netlist, ice40_variant, config.clone())?;
-    }
+    let result = fit_matched_delays_to_routing(&mut netlist, |n| {
+        Ok(place_and_route(n, ice40_variant, config.clone())?)
+    })?;
     let gate_netlist = &netlist;
 
     // Report results
@@ -5572,6 +5689,9 @@ fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrRes
     let delays_path = output_dir.join(ROUTED_DELAYS_FILE);
     let file = std::io::BufWriter::new(fs::File::create(&delays_path)?);
     serde_json::to_writer(file, &routed.delays)?;
+    let loads_path = output_dir.join(ROUTED_LOADS_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&loads_path)?);
+    serde_json::to_writer(file, &routed.loads)?;
     println!(
         "Routed netlist and delays: {:?}, {:?}",
         netlist_path, delays_path
@@ -8956,6 +9076,9 @@ fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
 const ROUTED_NETLIST_FILE: &str = "design_routed.json";
 /// Its delays at each corner
 const ROUTED_DELAYS_FILE: &str = "design_delays.json";
+/// The routing load of each net (`skalp_lir::switching_energy::NetLoads`),
+/// for `skalp sim --energy`
+const ROUTED_LOADS_FILE: &str = "design_loads.json";
 
 /// What a simulation drives and reports, the same for every simulator
 /// (`sim` of a source file, cycle by cycle, and timed simulation of a
@@ -9020,6 +9143,20 @@ struct TimedOptions {
     /// (20 if not given)
     #[arg(long, value_name = "N")]
     violations: Option<usize>,
+    /// Estimate switching energy and average power from each net's
+    /// toggles and its routed load (an estimate, for comparing designs on
+    /// a family; see `skalp_lir::switching_energy`)
+    #[arg(long)]
+    energy: bool,
+    /// Count toggles for --energy from this time on (default: from the
+    /// start), to leave out power-up
+    #[arg(long, value_name = "TIME", requires = "energy")]
+    energy_from: Option<String>,
+    /// Also write the energy of each net that toggled to this CSV file
+    /// (net, driving cell, toggles, then femtojoules: routing, pins,
+    /// cells, clock)
+    #[arg(long, value_name = "FILE", requires = "energy")]
+    energy_nets: Option<std::path::PathBuf>,
 }
 
 impl TimedOptions {
@@ -9028,7 +9165,83 @@ impl TimedOptions {
             || self.power_up.is_some()
             || self.metastability.is_some()
             || self.violations.is_some()
+            || self.energy
     }
+}
+
+/// Print the switching energy of a timed simulation since `from_ps`
+fn report_energy(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    loads: &skalp_lir::switching_energy::NetLoads,
+    sim: &skalp_lir::timed_sim::TimedSim,
+    from_ps: i64,
+    nets_csv: Option<&std::path::Path>,
+) -> Result<()> {
+    use skalp_lir::switching_energy::{switching_energy, EnergyModel};
+    let model = EnergyModel::default();
+    let report = switching_energy(netlist, loads, sim.toggles(), &model, 3);
+    let span_ps = (sim.now() - from_ps).max(1);
+    let total = report.total.total_fj();
+    // fJ over ps is mW
+    let mw = |fj: f64| fj / span_ps as f64;
+    println!(
+        "Switching energy (estimate, {:.1} V, loads at the {} corner) over {:.3} us: {:.4} uJ, {:.4} mW average",
+        model.vdd,
+        loads.corner,
+        span_ps as f64 / 1e6,
+        total / 1e9,
+        mw(total)
+    );
+    let t = &report.total;
+    println!(
+        "  routing {:.4} mW, pins {:.4} mW, cells {:.4} mW, clocks {:.4} mW; {} toggles ({} on clocks)",
+        mw(t.routing_fj),
+        mw(t.pins_fj),
+        mw(t.cells_fj),
+        mw(t.clock_fj),
+        report.toggles,
+        report.clock_toggles
+    );
+    println!("  By block:");
+    for (block, parts) in report.by_block.iter().take(12) {
+        println!(
+            "    {:>9.4} mW  {} (clocks {:.4})",
+            mw(parts.total_fj()),
+            block,
+            mw(parts.clock_fj)
+        );
+    }
+    if let Some(path) = nets_csv {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(
+            fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+        );
+        writeln!(
+            out,
+            "net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj"
+        )?;
+        let toggles = sim.toggles();
+        for (index, parts) in &report.by_net {
+            let net = &netlist.nets[*index as usize];
+            let driver = net
+                .driver
+                .map_or("", |d| netlist.cells[d.0 as usize].path.as_str());
+            writeln!(
+                out,
+                "{},{},{},{:.3},{:.3},{:.3},{:.3}",
+                net.name,
+                driver,
+                toggles[*index as usize],
+                parts.routing_fj,
+                parts.pins_fj,
+                parts.cells_fj,
+                parts.clock_fj
+            )?;
+        }
+        out.flush()?;
+        println!("  Energy of each net written to {}", path.display());
+    }
+    Ok(())
 }
 
 /// Options of a timed simulation
@@ -9192,6 +9405,17 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     };
     let mut sim = TimedSim::with_power_up(&netlist, delays, power_up)?;
     sim.set_metastability(metastability);
+    let loads: Option<skalp_lir::switching_energy::NetLoads> = if args.timed.energy {
+        let path = args.dir.join(ROUTED_LOADS_FILE);
+        Some(serde_json::from_reader(read(&path)?).context("reading the routed net loads")?)
+    } else {
+        None
+    };
+    let energy_from_ps = match args.timed.energy_from.as_deref() {
+        Some(text) => parse_time_ps(text)?,
+        None => 0,
+    };
+    sim.count_toggles_from(energy_from_ps);
     println!(
         "Design: {} ({} cells, {} nets), {} corner, power-up {:?}, metastability {:?}, loaded in {:.1} s",
         netlist.name,
@@ -9287,6 +9511,35 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     }
     for &(net, value) in &held {
         sim.set(net, value);
+    }
+    // Vendor blocks with no model: say which of their outputs nothing drives
+    for blackbox in &sim.blackboxes {
+        let driven = |net: skalp_lir::gate_netlist::GateNetId| {
+            clocked
+                .iter()
+                .chain(held.iter().map(|(n, _)| n))
+                .any(|&d| netlist.resolve_alias(d) == net)
+        };
+        let undriven: Vec<&str> = blackbox
+            .outputs
+            .iter()
+            .filter(|&&net| !driven(net))
+            .map(|net| netlist.nets[net.0 as usize].name.as_str())
+            .collect();
+        let cell = &netlist.cells[blackbox.cell.0 as usize];
+        if undriven.is_empty() {
+            println!(
+                "  {} ({}) is not simulated; its outputs are driven as given",
+                cell.path, cell.cell_type
+            );
+        } else {
+            println!(
+                "  {} ({}) is not simulated; these outputs stay unknown unless given with --clock or --set: {}",
+                cell.path,
+                cell.cell_type,
+                undriven.join(", ")
+            );
+        }
     }
     // Watched signals: a name (a net, or a bus shown as one value) and its
     // bits, least significant first
@@ -9475,6 +9728,16 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             netlist.nets[output.0 as usize].name,
             sim.value(output)
         );
+    }
+
+    if let Some(loads) = &loads {
+        report_energy(
+            &netlist,
+            loads,
+            &sim,
+            energy_from_ps,
+            args.timed.energy_nets.as_deref(),
+        )?;
     }
 
     // Violations

@@ -790,6 +790,34 @@ pub fn annotate_delays<D: Device + ?Sized>(
     skalp_lir::timed_sim::DelayAnnotation::capture(design.netlist, &delays, corner)
 }
 
+/// The routing load of every net of a routed design, for switching
+/// energy: the delays (from `model`, at `corner`) of the routing switches
+/// each net uses, summed with each switch once
+pub fn net_loads(
+    model: &dyn TimingModel,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    routing: &crate::router::RoutingResult,
+    corner: &str,
+) -> skalp_lir::switching_energy::NetLoads {
+    let mut routing_ps = vec![0i64; netlist.nets.len()];
+    let mut switches = vec![0u32; netlist.nets.len()];
+    for (net, route) in &routing.routes {
+        let Some(slot) = routing_ps.get_mut(net.0 as usize) else {
+            continue;
+        };
+        let mut pips = route.pips.clone();
+        pips.sort_unstable_by_key(|p| p.0);
+        pips.dedup();
+        *slot = pips.iter().map(|&p| model.interconnect_ps(p).max(0)).sum();
+        switches[net.0 as usize] = pips.len() as u32;
+    }
+    skalp_lir::switching_energy::NetLoads {
+        corner: corner.to_string(),
+        routing_ps,
+        switches,
+    }
+}
+
 /// Worst-corner summary of bundle checks made at several named corners
 pub fn summarize_bundles(
     corners: &[(&str, Vec<skalp_lir::ncl_bundle::BundleCheck>)],
