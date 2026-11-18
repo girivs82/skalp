@@ -1080,13 +1080,16 @@ mod tests {
         assert_eq!(model.arc_ps(&tx, 0, 0), None, "no path to the pad");
 
         let rx = blackbox("IDDRX4DQ", &["D", "ECLK", "SCLK", "RST"], &["Q0", "Q1"]);
-        let launch = timing
-            .table_arc_ps(&ArcRef {
-                cell: "IOLOGIC:IDDRXN".into(),
-                from: "SCLKIN".into(),
-                to: "RXDATA".into(),
-            })
-            .unwrap();
+        // the arc the device data names for the word outputs (the x4 DQ
+        // gearbox's own entry where the tables have one)
+        let launch_ref = prims
+            .pin_at(&rx, true, 1)
+            .and_then(|p| p.timing.as_ref())
+            .and_then(|t| t.launch.as_ref())
+            .expect("IDDRX4DQ words name their launch arc");
+        assert_eq!(launch_ref.from, "SCLKIN");
+        assert_eq!(launch_ref.to, "RXDATA");
+        let launch = timing.table_arc_ps(launch_ref).unwrap();
         assert_eq!(model.launch_ps(&rx, 1), Some(launch));
         assert_eq!(model.launch_clock(&rx, 1), Some(2));
         assert_eq!(model.arc_ps(&rx, 0, 0), None, "the pad is not a fabric arc");
