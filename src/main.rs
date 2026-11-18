@@ -4757,7 +4757,7 @@ fn synthesize_design(
     debug: bool,
     settle_wait: Option<&str>,
 ) -> Result<()> {
-    use skalp_frontend::parse_and_build_compilation_context;
+    use skalp_frontend::parse_and_build_compilation_context_for_device;
     use skalp_lir::get_stdlib_library;
 
     // An --emit dump goes to stdout on its own, so it can be piped.
@@ -4800,8 +4800,11 @@ fn synthesize_design(
         println!("Library: {}", library_name);
     }
 
-    // Parse and build HIR with full module resolution (stdlib, imports)
-    let context = parse_and_build_compilation_context(source).context("Failed to parse source")?;
+    // Parse and build HIR with full module resolution (stdlib, imports), and
+    // the declarations of the device family's vendor primitives, which a
+    // design instantiates by name
+    let context = parse_and_build_compilation_context_for_device(source, Some(device))
+        .context("Failed to parse source")?;
     let context = if debug {
         add_logic_analyzer(source, context, family, variant, output_dir)?
     } else {

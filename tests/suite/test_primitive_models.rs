@@ -519,3 +519,39 @@ impl Ticker {
     assert_eq!(tb.get_u32("n").await, 1005);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `skalp synth` for a device takes the declarations of the family's
+/// primitives from the library, as simulation for the device does, so a
+/// design that instantiates them by name builds from the command line
+#[test]
+fn synth_for_a_device_takes_the_family_primitives() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(NEXUS_TX);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args([
+            "synth",
+            source.to_str().unwrap(),
+            "-d",
+            "nexus-lfcpnx100",
+            "-o",
+            "out",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("skalp runs");
+    assert!(
+        output.status.success(),
+        "skalp synth failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist =
+        std::fs::read_to_string(dir.path().join("out/design_gates.json")).expect("gate netlist");
+    for prim in ["ECLKSYNC", "ECLKDIV", "ODDRX4"] {
+        assert_eq!(
+            netlist.matches(&format!("\"BLACKBOX_{prim}\"")).count(),
+            1,
+            "one {prim} black box"
+        );
+    }
+}
