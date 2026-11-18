@@ -64,9 +64,10 @@ pub trait TimingModel {
     /// Delay through a routing switch, in picoseconds.
     fn interconnect_ps(&self, pip: PipId) -> i64;
 
-    /// When an output is launched by a clock edge or has no timed inputs: the
-    /// clock-to-output delay, or 0 for pads and constants. `None` if the
-    /// output is a combinational function of the cell's inputs.
+    /// When an output is launched by a clock edge or is a pad's: the
+    /// clock-to-output delay, or 0 for pads. `None` if the output is a
+    /// combinational function of the cell's inputs, or a constant (a cell
+    /// with no inputs that is not a pad: it launches no path).
     fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64>;
 
     /// Combinational delay from an input to an output. `None` if there is no
@@ -275,7 +276,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         if let Some(launch) = self.model.launch_ps(cell, output) {
             let clock_input = self.model.launch_clock(cell, output);
             let clock_net = Self::clock_net(cell, clock_input);
-            // Pads and constants launch nothing hold has to check
+            // Pads launch nothing hold has to check
             let other_clock = self
                 .launch_clock
                 .is_some_and(|clock| clock_net != Some(clock));
@@ -303,11 +304,17 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             route_ps: 0,
             cell_ps: 0,
         };
+        // A constant (a cell with no inputs, or one whose every timed arc
+        // comes from a constant) never changes, so it launches no path
+        let mut arcs = 0;
+        let mut timed = 0;
         for input in 0..cell.inputs.len() {
             let Some(delay) = self.model.arc_ps(cell, input, output) else {
                 continue;
             };
+            arcs += 1;
             if let Some((time, net, route_ps)) = self.input_time(cell, input) {
+                timed += 1;
                 let candidate = time + delay;
                 let better = if self.early {
                     candidate < best.time
@@ -323,6 +330,9 @@ impl<D: Device + ?Sized> Engine<'_, D> {
                     };
                 }
             }
+        }
+        if timed == 0 && (cell.inputs.is_empty() || arcs > 0) {
+            best.time = NO_PATH;
         }
         best
     }
@@ -832,4 +842,109 @@ fn async_block_cells(netlist: &skalp_lir::gate_netlist::GateNetlist) -> HashSet<
         }
     }
     cells
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitstream::prepare::TiedInputs;
+    use crate::device::ice40::{Ice40Device, Ice40Variant};
+    use crate::placer::PlacementResult;
+    use crate::router::RoutingResult;
+    use skalp_lir::gate_netlist::{GateNet, GateNetlist};
+
+    /// Registers launch 100 ps after their clock; a logic cell's first input
+    /// is 9 ns slow, its others 100 ps; registers sample input 0
+    struct Stub;
+
+    impl TimingModel for Stub {
+        fn interconnect_ps(&self, _pip: PipId) -> i64 {
+            0
+        }
+        fn launch_ps(&self, cell: &Cell, _output: usize) -> Option<i64> {
+            cell.clock.map(|_| 100)
+        }
+        fn arc_ps(&self, cell: &Cell, input: usize, _output: usize) -> Option<i64> {
+            if cell.clock.is_some() {
+                return None;
+            }
+            Some(if input == 0 { 9000 } else { 100 })
+        }
+        fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
+            if cell.clock.is_none() {
+                return Vec::new();
+            }
+            vec![TimingEndpoint {
+                input: 0,
+                pin: 0,
+                setup_ps: 0,
+                hold_ps: 0,
+                clock: None,
+            }]
+        }
+    }
+
+    /// A constant never changes, so the slow arc from the one that drives
+    /// a logic cell's first input is no path: the register-to-register path
+    /// through the cell's other input is the one timed
+    #[test]
+    fn constants_launch_no_path() {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let net = |netlist: &mut GateNetlist, name: &str| {
+            netlist.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let clk = net(&mut netlist, "clk");
+        let constant = net(&mut netlist, "constant");
+        let q = net(&mut netlist, "q");
+        let d = net(&mut netlist, "d");
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "constant_driver".into(),
+            Vec::new(),
+            vec![constant],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "logic".into(),
+            vec![constant, q],
+            vec![d],
+        ));
+        netlist.add_cell(Cell::new_seq(
+            CellId(0),
+            "DFF".into(),
+            "test".into(),
+            0.0,
+            "reg".into(),
+            vec![d],
+            vec![q],
+            clk,
+            None,
+        ));
+        let (placement, routing, tied) = (
+            PlacementResult::default(),
+            RoutingResult::default(),
+            TiedInputs::default(),
+        );
+        let design = PlacedDesign {
+            netlist: &netlist,
+            placement: &placement,
+            routing: &routing,
+            tied: &tied,
+        };
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let report = analyze(&device, &Stub, &design, &ClockTargets::uniform(100.0));
+        let path = report
+            .critical_paths
+            .first()
+            .expect("the register is timed");
+        assert_eq!(path.source, "q", "{path:?}");
+        assert!((path.delay - 0.2).abs() < 1e-9, "{path:?}");
+        assert!(report.meets_timing);
+    }
 }

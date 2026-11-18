@@ -660,8 +660,12 @@ impl TimingModel for NexusTiming<'_> {
     }
 
     fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {
-        if is_pad(cell) || constant_value(cell).is_some() {
+        if is_pad(cell) {
             return Some(0);
+        }
+        // A constant never changes: it launches no path
+        if constant_value(cell).is_some() {
+            return None;
         }
         if self.ddr().of(cell).is_some() {
             return self.ddr_launch_ps(cell, output);

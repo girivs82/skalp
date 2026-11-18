@@ -44,14 +44,12 @@ impl<D: Device + ?Sized> TimingModel for FabricTiming<'_, D> {
     fn launch_ps(&self, cell: &Cell, _output: usize) -> Option<i64> {
         if cell.clock.is_some() {
             Some(ps(self.delays.register_clock_to_q()))
-        } else if cell.inputs.is_empty() {
-            // Constants, and input pads (whose own delay is counted here)
-            let pad = cell.cell_type.contains("IO") || cell.cell_type.contains("IB");
-            Some(if pad {
-                ps(self.delays.io_input_delay)
-            } else {
-                0
-            })
+        } else if cell.inputs.is_empty()
+            && (cell.cell_type.contains("IO") || cell.cell_type.contains("IB"))
+        {
+            // An input pad, whose own delay is counted here (a constant,
+            // with no inputs either, launches nothing)
+            Some(ps(self.delays.io_input_delay))
         } else {
             None
         }

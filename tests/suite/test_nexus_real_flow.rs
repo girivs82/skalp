@@ -172,6 +172,52 @@ fn distributed_ram_places_and_routes_on_the_real_device() {
     assert_eq!(result.routing.unrouted_connections, 0);
 }
 
+/// A LUT RAM with fewer words than it holds gets its unused address pins
+/// from a constant LUT, which never changes: no timed path starts there
+#[test]
+fn constant_lut_ram_inputs_launch_no_path() {
+    let Some(db) = find_database() else {
+        eprintln!("prjoxide database not found; skipping");
+        return;
+    };
+
+    let netlist = netlist_with_pads("nexus_distram_eight_words.sk", "RamEightWords");
+    assert!(
+        netlist
+            .cells
+            .iter()
+            .any(|c| c.function == Some(skalp_lir::CellFunction::DistRam16x4)),
+        "the design should use distributed RAM"
+    );
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("the RAM design should place and route");
+    assert!(result.routing.success);
+    assert!(
+        result
+            .routed
+            .as_ref()
+            .expect("the real flow keeps its routed netlist")
+            .netlist
+            .cells
+            .iter()
+            .any(|c| c.path.starts_with("constant_lut_ram_input")),
+        "the top address bit should be driven by a constant LUT"
+    );
+    let timing = result.timing.expect("the real flow reports timing");
+    assert!(!timing.critical_paths.is_empty());
+    for path in &timing.critical_paths {
+        assert!(
+            !path.source.starts_with("constant_"),
+            "a path is timed from a constant: {path:?}"
+        );
+    }
+}
+
 #[test]
 fn block_ram_builds_a_bitstream_for_the_real_device() {
     let Some(db) = find_database() else {

@@ -1,0 +1,25 @@
+// Writes a counter into an 8-word distributed RAM and shows a bit of it on an
+// LED. A LUT RAM holds 16 words, so its top address bit is a constant 0.
+entity RamEightWords {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit @ { pin: "R8", io_standard: "LVCMOS33" }
+}
+impl RamEightWords {
+    signal counter: nat[26] = 0
+    signal rf: [bit[16]; 8]
+    signal we: bit = 0
+    signal wa: bit[3] = 0
+    signal wd: bit[16] = 0
+    signal ra: bit[3] = 0
+    on(clk.rise) {
+        counter = counter + 1
+        we = counter[0]
+        wa = counter[3:1]
+        wd = counter[25:10]
+        ra = counter[3:1]
+        if we == 1 {
+            rf[wa] = wd
+        }
+    }
+    led = rf[ra][3]
+}
