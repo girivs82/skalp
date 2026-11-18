@@ -173,6 +173,29 @@ async fn nexus_output_gearing_from_the_library() {
     assert!(checked > 30);
 }
 
+/// A vendor primitive's body is its simulation model: the netlist has the
+/// primitive's black box and nothing from the instances inside the model
+#[test]
+fn model_instances_stay_out_of_the_netlist() {
+    let source = std::fs::read_to_string(NEXUS_TX).expect("fixture");
+    let mir = mir_for_device(NEXUS_TX, &source, Some(DEVICE)).expect("compile");
+    let cells = nexus_cells(&mir);
+    let boxes: Vec<_> = cells
+        .iter()
+        .filter(|c| c.cell_type == "BLACKBOX_ODDRX4")
+        .collect();
+    assert_eq!(boxes.len(), 1, "ODDRX4 is a black box");
+    let inside: Vec<_> = cells
+        .iter()
+        .filter(|c| c.path.starts_with("top.o.") && !c.cell_type.starts_with("BLACKBOX_"))
+        .map(|c| format!("{} ({})", c.path, c.cell_type))
+        .collect();
+    assert!(
+        inside.is_empty(),
+        "cells from the ODDRX4 model's gearbox: {inside:?}"
+    );
+}
+
 /// A Nexus primitive used without a device to take it from is an unknown
 /// entity: the build fails rather than leave a part of the design unmodelled
 #[test]

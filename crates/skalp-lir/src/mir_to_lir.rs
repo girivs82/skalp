@@ -7893,7 +7893,7 @@ fn elaborate_instance_for_optimize_first(
     );
 
     // Process child instances
-    for inst in &module.instances {
+    for inst in synthesized_instances(module) {
         let child_path = format!("{}.{}", instance_path, inst.name);
         children.push(child_path.clone());
 
@@ -7988,6 +7988,17 @@ fn elaborate_instance_for_optimize_first(
     );
 }
 
+/// The child instances of `module` that become part of the netlist. A vendor
+/// primitive is a black box: the instances in its body make up its simulation
+/// model, which must not be synthesized into the design's logic.
+fn synthesized_instances(module: &Module) -> &[skalp_mir::mir::ModuleInstance] {
+    if module.vendor_ip_config.is_some() {
+        &[]
+    } else {
+        &module.instances
+    }
+}
+
 /// Recursively elaborate a module instance
 ///
 /// The `is_async_context` parameter indicates whether this module is being
@@ -8073,7 +8084,7 @@ fn elaborate_instance(
         module.instances.len()
     );
     // Process child instances
-    for inst in &module.instances {
+    for inst in synthesized_instances(module) {
         trace!(
             "[ELABORATE]   Processing child instance '{}' -> module_id={}",
             inst.name,
