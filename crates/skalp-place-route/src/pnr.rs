@@ -939,6 +939,10 @@ pub fn place_and_route_nexus_real(
             if crate::device::nexus::pll::is_pll(cell) {
                 return crate::device::nexus::pll::driven_frequencies(cell, known);
             }
+            // Edge clock buffers and dividers, DQS strobes: from the device data
+            if device.ddr_primitives().of(cell).is_some() {
+                return device.ddr_primitives().driven_frequencies(cell, known);
+            }
             let Some(pin) = cell.parameters.get("LOC") else {
                 return Vec::new();
             };

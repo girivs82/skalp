@@ -5,6 +5,7 @@
 //! CrossLink-NX's only) borrows CrossLink-NX's, whose Nexus fabric it shares;
 //! see [`NexusVariant::timing_tables`].
 
+use super::ddr::{port_key, ArcRef, Primitives, SetupRef};
 use super::{dsp, ebr, lram, NexusDevice, NexusVariant};
 use crate::bitstream::prepare::{constant_value, is_pad};
 use crate::collections::HashMap;
@@ -52,6 +53,8 @@ struct IoPath {
 #[derive(Debug, Deserialize)]
 struct SetupHold {
     pin: String,
+    #[serde(default)]
+    clock: String,
     max_setup: i64,
     #[serde(default)]
     max_hold: i64,
@@ -93,6 +96,12 @@ pub struct TimingDb {
     large_ram_hold: HashMap<String, i64>,
     /// Hold time of each register pin
     hold: HashMap<String, i64>,
+    /// Every arc of the cell tables, by cell type, from and to pin (the
+    /// corner's extreme where a table repeats one)
+    table_arcs: HashMap<(String, String, String), i64>,
+    /// Every setup and hold check of the cell tables, by cell type, pin and
+    /// clock
+    table_checks: HashMap<(String, String, String), (i64, i64)>,
     /// Metastability of fabric elements, by name, from the family's
     /// `metastability.json` (measured on boards; absent for most families)
     metastability: HashMap<String, Metastability>,
@@ -311,7 +320,28 @@ impl TimingDb {
             .map(|s| (s.pin.clone(), s.max_hold))
             .collect();
 
+        let mut table_arcs: HashMap<(String, String, String), i64> = HashMap::default();
+        let mut table_checks: HashMap<(String, String, String), (i64, i64)> = HashMap::default();
+        for (name, timing) in &cells.celltypes {
+            for arc in &timing.iopaths {
+                let key = (name.clone(), arc.from_pin.clone(), arc.to_pin.clone());
+                let delay = value(arc);
+                table_arcs
+                    .entry(key)
+                    .and_modify(|d| *d = extreme(&mut [*d, delay].into_iter()))
+                    .or_insert(delay);
+            }
+            for check in &timing.setupholds {
+                let key = (name.clone(), check.pin.clone(), check.clock.clone());
+                let entry = table_checks.entry(key).or_insert((0, 0));
+                entry.0 = entry.0.max(check.max_setup);
+                entry.1 = entry.1.max(check.max_hold);
+            }
+        }
+
         Ok(Self {
+            table_arcs,
+            table_checks,
             pip_classes: classes
                 .into_iter()
                 .map(|(name, class)| {
@@ -342,6 +372,20 @@ impl TimingDb {
 }
 
 impl TimingDb {
+    /// A delay arc of the cell tables, in picoseconds
+    pub fn table_arc_ps(&self, arc: &ArcRef) -> Option<i64> {
+        self.table_arcs
+            .get(&(arc.cell.clone(), arc.from.clone(), arc.to.clone()))
+            .copied()
+    }
+
+    /// A setup and hold check of the cell tables, in picoseconds
+    pub fn table_check_ps(&self, check: &SetupRef) -> Option<(i64, i64)> {
+        self.table_checks
+            .get(&(check.cell.clone(), check.pin.clone(), check.clock.clone()))
+            .copied()
+    }
+
     /// A logic register's clock-to-output delay and data setup time, in
     /// picoseconds
     pub fn register_ps(&self) -> (i64, i64) {
@@ -511,6 +555,57 @@ impl NexusTiming<'_> {
         cell.function == Some(CellFunction::Lut5)
     }
 
+    fn ddr(&self) -> &Primitives {
+        self.device.ddr_primitives()
+    }
+
+    /// A DDR primitive output's clock-to-output delay: the table's arc, or
+    /// 0 for a pin the device data times against a clock without numbers;
+    /// `None` for an output not launched by a clock
+    fn ddr_launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {
+        let timing = self.ddr().pin_at(cell, true, output)?.timing.as_ref()?;
+        timing.clock.as_ref()?;
+        Some(
+            timing
+                .launch
+                .as_ref()
+                .and_then(|arc| self.db.table_arc_ps(arc))
+                .unwrap_or(0),
+        )
+    }
+
+    /// A DDR primitive's arc from an input to an output, where the device
+    /// data gives one; nothing else passes through the block
+    fn ddr_arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        let timing = self.ddr().pin_at(cell, true, output)?.timing.as_ref()?;
+        let port = port_key(cell.blackbox_pin(false, input)?);
+        self.db.table_arc_ps(timing.from.get(&port)?)
+    }
+
+    /// The inputs of a DDR primitive that are sampled by one of its clocks
+    fn ddr_endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
+        let ddr = self.ddr();
+        (0..cell.inputs.len())
+            .filter_map(|input| {
+                let timing = ddr.pin_at(cell, false, input)?.timing.as_ref()?;
+                let clock = ddr.timing_clock(cell, false, input)?;
+                let pin = ddr.input_router_pin(cell, input)?;
+                let (setup_ps, hold_ps) = timing
+                    .setup
+                    .as_ref()
+                    .and_then(|check| self.db.table_check_ps(check))
+                    .unwrap_or((0, 0));
+                Some(TimingEndpoint {
+                    input,
+                    pin,
+                    setup_ps,
+                    hold_ps,
+                    clock: Some(clock),
+                })
+            })
+            .collect()
+    }
+
     /// The table key of a block RAM pin: address buses have bus-wide
     /// entries.
     fn ram_table_key(pin: &str) -> String {
@@ -553,9 +648,12 @@ impl TimingModel for NexusTiming<'_> {
         self.db.pip_delay_ps(&src.name, &dst.name)
     }
 
-    fn launch_ps(&self, cell: &Cell, _output: usize) -> Option<i64> {
+    fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {
         if is_pad(cell) || constant_value(cell).is_some() {
             return Some(0);
+        }
+        if self.ddr().of(cell).is_some() {
+            return self.ddr_launch_ps(cell, output);
         }
         if Self::is_dist_ram(cell) {
             return None;
@@ -569,11 +667,21 @@ impl TimingModel for NexusTiming<'_> {
         cell.clock.map(|_| self.db.clk_to_q)
     }
 
+    fn launch_clock(&self, cell: &Cell, output: usize) -> Option<usize> {
+        self.ddr().timing_clock(cell, true, output)
+    }
+
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
+        if self.ddr().of(cell).is_some() {
+            return self.ddr_arc_ps(cell, input, output);
+        }
         self.db.cell_arc_ps(cell, input, output)
     }
 
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint> {
+        if self.ddr().of(cell).is_some() {
+            return self.ddr_endpoints(cell);
+        }
         let setup = |name: &str| self.db.setup.get(name).copied().unwrap_or(0);
         let hold = |name: &str| self.db.hold.get(name).copied().unwrap_or(0);
         if let Some(ports) = cell.ram_ports().filter(|_| lram::is_large_ram(cell)) {
@@ -600,6 +708,7 @@ impl TimingModel for NexusTiming<'_> {
                             .get(&bus(&name))
                             .copied()
                             .unwrap_or(0),
+                        clock: None,
                     })
                 })
                 .collect();
@@ -613,6 +722,7 @@ impl TimingModel for NexusTiming<'_> {
                         pin: ebr::router_pin(&name).unwrap_or(input),
                         setup_ps: self.ram_setup_ps(&name),
                         hold_ps: self.ram_hold_ps(&name),
+                        clock: None,
                     })
                 })
                 .collect();
@@ -624,6 +734,7 @@ impl TimingModel for NexusTiming<'_> {
                     pin: input,
                     setup_ps: 0,
                     hold_ps: 0,
+                    clock: None,
                 })
                 .collect();
         }
@@ -649,12 +760,16 @@ impl TimingModel for NexusTiming<'_> {
                     pin,
                     setup_ps,
                     hold_ps,
+                    clock: None,
                 }
             })
             .collect()
     }
 
     fn input_pins(&self, cell: &Cell, input: usize) -> Vec<usize> {
+        if let Some(pin) = self.device.hard_block_input_pin(cell, input) {
+            return vec![pin];
+        }
         if dsp::is_multiplier(cell) {
             return dsp::input_pin(cell, input)
                 .and_then(|pin| dsp::router_pin(&pin))
@@ -815,6 +930,155 @@ mod tests {
         }
         // Neighbour, span-2, span-6 and in-tile PIPs differ
         assert!(distinct.len() > 5, "{distinct:?}");
+    }
+
+    /// Every table entry the family's DDR primitives refer to exists, so
+    /// no hard-block pin is timed with a missing number by mistake
+    #[test]
+    fn ddr_timing_references_resolve() {
+        let Some(db) = super::super::prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        let prims = Primitives::load(&db, variant.prjoxide_family()).unwrap();
+        let mut checked = 0;
+        for corner in [Corner::Slow, Corner::Fast] {
+            let timing = TimingDb::load_corner(&db, variant, corner).unwrap();
+            for name in [
+                "ODDRX4",
+                "ODDRX4DQ",
+                "ODDRX4DQS",
+                "IDDRX4DQ",
+                "DELAYA",
+                "TSHX4DQ",
+            ] {
+                let Some(prim) = prims.named(name) else {
+                    continue;
+                };
+                for (port, pin) in &prim.pins {
+                    let Some(t) = &pin.timing else { continue };
+                    if let Some(check) = &t.setup {
+                        assert!(
+                            timing.table_check_ps(check).is_some(),
+                            "{name}.{port}: {check:?}"
+                        );
+                        checked += 1;
+                    }
+                    for arc in t.launch.iter().chain(t.from.values()) {
+                        assert!(timing.table_arc_ps(arc).is_some(), "{name}.{port}: {arc:?}");
+                        checked += 1;
+                    }
+                    if let Some(clock) = &t.clock {
+                        assert!(
+                            prim.pins.contains_key(clock),
+                            "{name}.{port}: clock {clock}"
+                        );
+                    }
+                }
+            }
+        }
+        if checked == 0 {
+            eprintln!("no timed DDR pins in this database — skipping");
+        }
+    }
+
+    /// DDR gearboxes are timed against their slow clock from the tables,
+    /// and nothing passes through them as if they were logic
+    #[test]
+    fn ddr_gearboxes_are_timed_from_the_device_data() {
+        let Some(db) = super::super::prjoxide_load::find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let variant = NexusVariant::Lfcpnx100;
+        let device = NexusDevice::from_prjoxide_bbox(variant, &db, (20, 20, 24, 24)).unwrap();
+        let prims = device.ddr_primitives();
+        let Some(oddr) = prims.named("ODDRX4") else {
+            eprintln!("no DDR primitives in this database — skipping");
+            return;
+        };
+        if oddr
+            .pins
+            .get("D0")
+            .and_then(|p| p.timing.as_ref())
+            .is_none()
+        {
+            eprintln!("DDR pins carry no timing in this database — skipping");
+            return;
+        }
+        let timing = TimingDb::load(&db, variant).unwrap();
+        let model = NexusTiming {
+            device: &device,
+            db: &timing,
+        };
+        let blackbox = |kind: &str, inputs: &[&str], outputs: &[&str]| {
+            let mut cell = Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(0),
+                format!("BLACKBOX_{kind}"),
+                "test".to_string(),
+                0.0,
+                format!("top.{kind}"),
+                (0..inputs.len() as u32)
+                    .map(skalp_lir::gate_netlist::GateNetId)
+                    .collect(),
+                (0..outputs.len() as u32)
+                    .map(|n| skalp_lir::gate_netlist::GateNetId(100 + n))
+                    .collect(),
+            );
+            cell.parameters.insert(
+                skalp_lir::gate_netlist::BLACKBOX_INPUTS_PARAM.to_string(),
+                inputs.join(","),
+            );
+            cell.parameters.insert(
+                skalp_lir::gate_netlist::BLACKBOX_OUTPUTS_PARAM.to_string(),
+                outputs.join(","),
+            );
+            cell
+        };
+        let check = |cell: &str, pin: &str, clock: &str| {
+            timing
+                .table_check_ps(&SetupRef {
+                    cell: cell.into(),
+                    pin: pin.into(),
+                    clock: clock.into(),
+                })
+                .unwrap()
+        };
+
+        let tx = blackbox("ODDRX4", &["D0", "D1", "ECLK", "SCLK", "RST"], &["Q"]);
+        let endpoints = model.endpoints(&tx);
+        let inputs: Vec<usize> = endpoints.iter().map(|e| e.input).collect();
+        assert_eq!(inputs, [0, 1, 4], "data and reset, not the clocks");
+        assert!(endpoints.iter().all(|e| e.clock == Some(3)), "on SCLK");
+        assert_eq!(
+            endpoints[0].setup_ps,
+            check("IOLOGIC:ODDRXN", "TXDATA", "SCLKOUT").0
+        );
+        assert_eq!(
+            endpoints[2].setup_ps,
+            check("IOLOGIC:ODDRXN", "LSROUT", "SCLKOUT").0
+        );
+        assert!(endpoints[0].setup_ps > 0);
+        assert_eq!(model.arc_ps(&tx, 0, 0), None, "no path to the pad");
+
+        let rx = blackbox("IDDRX4DQ", &["D", "ECLK", "SCLK", "RST"], &["Q0", "Q1"]);
+        let launch = timing
+            .table_arc_ps(&ArcRef {
+                cell: "IOLOGIC:IDDRXN".into(),
+                from: "SCLKIN".into(),
+                to: "RXDATA".into(),
+            })
+            .unwrap();
+        assert_eq!(model.launch_ps(&rx, 1), Some(launch));
+        assert_eq!(model.launch_clock(&rx, 1), Some(2));
+        assert_eq!(model.arc_ps(&rx, 0, 0), None, "the pad is not a fabric arc");
+
+        // A clock block launches nothing and passes nothing as data
+        let sync = blackbox("ECLKSYNC", &["ECLKIN", "STOP"], &["ECLKOUT"]);
+        assert_eq!(model.launch_ps(&sync, 0), None);
+        assert_eq!(model.arc_ps(&sync, 0, 0), None);
+        assert!(model.endpoints(&sync).is_empty());
     }
 
     /// A family's `metastability.json` gives each element's time constant

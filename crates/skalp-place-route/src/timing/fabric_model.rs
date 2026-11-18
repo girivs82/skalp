@@ -80,6 +80,7 @@ impl<D: Device + ?Sized> TimingModel for FabricTiming<'_, D> {
                 pin: input,
                 setup_ps,
                 hold_ps,
+                clock: None,
             })
             .collect()
     }

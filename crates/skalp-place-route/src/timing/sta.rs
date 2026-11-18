@@ -36,6 +36,10 @@ pub struct TimingEndpoint {
     pub setup_ps: i64,
     /// Hold time in picoseconds
     pub hold_ps: i64,
+    /// The cell input whose clock samples it, for a block with several
+    /// clocks (a DDR gearbox takes data on its slow clock); `None`: the
+    /// cell's own clock
+    pub clock: Option<usize>,
 }
 
 /// How fast a storage element built in the fabric leaves a metastable state
@@ -71,6 +75,13 @@ pub trait TimingModel {
 
     /// Inputs a clocked cell samples, with their setup times.
     fn endpoints(&self, cell: &Cell) -> Vec<TimingEndpoint>;
+
+    /// The cell input whose clock launches an output that
+    /// [`launch_ps`](Self::launch_ps) gives a clock-to-output delay for, for
+    /// a block with several clocks; `None`: the cell's own clock
+    fn launch_clock(&self, _cell: &Cell, _output: usize) -> Option<usize> {
+        None
+    }
 
     /// Router pins an input reaches. Most inputs have one.
     fn input_pins(&self, _cell: &Cell, input: usize) -> Vec<usize> {
@@ -171,10 +182,30 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         }
     }
 
-    /// When a cell's clock reaches it, from the clock net's source.
-    fn clock_arrival(&mut self, cell: &Cell) -> i64 {
-        cell.clock
-            .map_or(0, |clock| self.route_delay(clock, cell.id, FF_PIN_CLK))
+    /// The clock net on cell input `input`, or the cell's own clock
+    fn clock_net(cell: &Cell, input: Option<usize>) -> Option<GateNetId> {
+        match input {
+            Some(input) => cell.inputs.get(input).copied(),
+            None => cell.clock,
+        }
+    }
+
+    /// When the clock on cell input `input` (the cell's own clock for
+    /// `None`) reaches the cell, from the clock net's source
+    fn clock_arrival_on(&mut self, cell: &Cell, input: Option<usize>) -> i64 {
+        let Some(clock) = Self::clock_net(cell, input) else {
+            return 0;
+        };
+        let pin = match input {
+            Some(input) => self
+                .model
+                .input_pins(cell, input)
+                .first()
+                .copied()
+                .unwrap_or(input),
+            None => FF_PIN_CLK,
+        };
+        self.route_delay(clock, cell.id, pin)
     }
 
     fn net_arrival(&mut self, net: GateNetId) -> i64 {
@@ -242,11 +273,13 @@ impl<D: Device + ?Sized> Engine<'_, D> {
 
     fn output_time(&mut self, cell: &Cell, output: usize) -> Arrival {
         if let Some(launch) = self.model.launch_ps(cell, output) {
+            let clock_input = self.model.launch_clock(cell, output);
+            let clock_net = Self::clock_net(cell, clock_input);
             // Pads and constants launch nothing hold has to check
             let other_clock = self
                 .launch_clock
-                .is_some_and(|clock| cell.clock != Some(clock));
-            if self.early && (cell.clock.is_none() || other_clock) {
+                .is_some_and(|clock| clock_net != Some(clock));
+            if self.early && (clock_net.is_none() || other_clock) {
                 return Arrival {
                     time: NO_PATH,
                     from: None,
@@ -256,7 +289,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             }
             // A register launches when its clock reaches it: the clock's
             // routing shows as the routing into the launching cell.
-            let clock = self.clock_arrival(cell);
+            let clock = self.clock_arrival_on(cell, clock_input);
             return Arrival {
                 time: clock + launch,
                 from: None,
@@ -360,15 +393,28 @@ pub fn analyze<D: Device + ?Sized>(
     let mut paths = Vec::new();
 
     for cell in &netlist.cells {
-        let Some(clock) = cell.clock else { continue };
         if engine.async_cells.contains(&cell.id) {
             continue;
         }
-        let target_ns = targets.required_ns(clock);
-        let entry = per_clock.entry(clock.0).or_insert((0, 0.0));
-        entry.0 += 1;
-        let capture = engine.clock_arrival(cell);
-        for endpoint in model.endpoints(cell) {
+        let endpoints = model.endpoints(cell);
+        // Each clock the cell samples on, counted once
+        let mut clocks: Vec<GateNetId> = Vec::new();
+        for endpoint in &endpoints {
+            if let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) {
+                if !clocks.contains(&clock) {
+                    clocks.push(clock);
+                }
+            }
+        }
+        for clock in &clocks {
+            per_clock.entry(clock.0).or_insert((0, 0.0)).0 += 1;
+        }
+        for endpoint in endpoints {
+            let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
+                continue;
+            };
+            let target_ns = targets.required_ns(clock);
+            let capture = engine.clock_arrival_on(cell, endpoint.clock);
             let Some(routed) = engine.input_time_at(cell, endpoint) else {
                 continue;
             };
@@ -481,9 +527,10 @@ pub fn analyze_hold<D: Device + ?Sized>(
     let mut groups: Vec<(Option<GateNetId>, Vec<&Cell>)> = vec![(None, Vec::new())];
     let mut by_clock: BTreeMap<u32, Vec<&Cell>> = BTreeMap::new();
     for cell in &design.netlist.cells {
-        let Some(clock) = cell.clock else { continue };
         if async_cells.contains(&cell.id) {
-            by_clock.entry(clock.0).or_default().push(cell);
+            if let Some(clock) = cell.clock {
+                by_clock.entry(clock.0).or_default().push(cell);
+            }
         } else {
             groups[0].1.push(cell);
         }
@@ -505,8 +552,11 @@ pub fn analyze_hold<D: Device + ?Sized>(
             },
         );
         for cell in cells {
-            let capture = e.clock_arrival(cell);
             for endpoint in model.endpoints(cell) {
+                if Engine::<D>::clock_net(cell, endpoint.clock).is_none() {
+                    continue;
+                }
+                let capture = e.clock_arrival_on(cell, endpoint.clock);
                 let Some((time, net)) = e.input_time_at(cell, endpoint) else {
                     continue;
                 };

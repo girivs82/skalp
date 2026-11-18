@@ -384,6 +384,68 @@ fn pll_builds_a_bitstream_for_the_real_device() {
     assert!(!pll_bytes.is_empty(), "the PLL registers are written");
 }
 
+/// DDR gearing is timed against its own clocks: the slow clock comes out of
+/// the edge clock divider at the PLL's frequency over the divider's ratio,
+/// the gearbox's data inputs are checked against it with the setup time the
+/// device data gives, and no path runs through the clock blocks as logic
+#[test]
+fn ddr_gearing_is_timed_against_its_divided_clock() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nexus_ddr_timing.sk");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args([
+            "synth",
+            source.to_str().unwrap(),
+            "-d",
+            "nexus-lfcpnx100",
+            "-f",
+            "-o",
+            "out",
+        ])
+        .env("PRJOXIDE_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("skalp runs");
+    assert!(
+        output.status.success(),
+        "skalp synth failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: skalp_place_route::timing::TimingReport = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("out/timing_report.json")).expect("report"),
+    )
+    .expect("the report parses");
+    // Only the divided clock has registers: 100 MHz / 4. A summary's period
+    // is its slack plus the time its worst path takes.
+    let periods: Vec<f64> = report
+        .clock_summaries
+        .iter()
+        .map(|c| c.worst_slack + 1000.0 / c.frequency)
+        .collect();
+    assert_eq!(periods.len(), 1, "{:?}", report.clock_summaries);
+    assert!((periods[0] - 40.0).abs() < 1e-6, "{periods:?}");
+    assert!(
+        report
+            .critical_paths
+            .iter()
+            .any(|p| p.destination.ends_with("ODDRX4")),
+        "the gearbox's data inputs are endpoints: {:?}",
+        report.critical_paths
+    );
+    for path in &report.critical_paths {
+        assert!(
+            path.delay < 10.0,
+            "no path runs through the clock blocks: {path:?}"
+        );
+    }
+}
+
 #[test]
 fn wide_lut_builds_a_bitstream_for_the_real_device() {
     let Some(db) = find_database() else {
