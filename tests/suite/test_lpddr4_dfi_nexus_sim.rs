@@ -72,6 +72,9 @@ struct Variant {
     /// further board delay of each byte lane's DQ behind its DQS, in ticks
     wr_dq_skew: [u64; 2],
     n_bursts: u64,
+    /// entities simulated at gate level (synthesized for the device, their
+    /// vendor primitives running the models); none: all behavioural
+    gate_level: &'static [&'static str],
 }
 
 const STATUS: [&str; 22] = [
@@ -122,9 +125,13 @@ async fn run(v: Variant) {
     let file = dir.join(format!("{}.sk", v.name));
     std::fs::write(&file, src).unwrap();
 
-    let mut tb = Testbench::behavioral_for_device(file.to_str().unwrap(), TOP, DEVICE)
-        .await
-        .expect("build testbench");
+    let mut tb = if v.gate_level.is_empty() {
+        Testbench::behavioral_for_device(file.to_str().unwrap(), TOP, DEVICE).await
+    } else {
+        Testbench::gate_level_dut_for_device(file.to_str().unwrap(), TOP, DEVICE, v.gate_level)
+            .await
+    }
+    .expect("build testbench");
     tb.set_capture_waveforms(false);
 
     let verbose = std::env::var("SKALP_NEXUS_SIM_TRACE").is_ok();
@@ -256,6 +263,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
         n_bursts: 16,
+        gate_level: &[],
     })
     .await;
 }
@@ -272,6 +280,42 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         wr_skew: [5, 2],
         wr_dq_skew: [2, 0],
         n_bursts: 16,
+        gate_level: &[],
+    })
+    .await;
+}
+
+/// The PHY and the controller as they are built for the device: their
+/// synthesized netlists, with the PHY's DDR primitives running their models
+const GATE_LEVEL: &[&str] = &["DfiLpddr4NexusPhy", "Lpddr4DfiController"];
+
+/// [`lpddr4_dfi_nexus_nominal`] with the PHY and controller at gate level
+#[tokio::test]
+async fn lpddr4_dfi_nexus_gate_level_nominal() {
+    run(Variant {
+        name: "gate_level_nominal",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        gate_level: GATE_LEVEL,
+    })
+    .await;
+}
+
+/// [`lpddr4_dfi_nexus_dqsck_and_board_skew`] with the PHY and controller at
+/// gate level
+#[tokio::test]
+async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
+    run(Variant {
+        name: "gate_level_skewed",
+        dqsck: 20,
+        dq_skew: 1,
+        wr_skew: [5, 2],
+        wr_dq_skew: [2, 0],
+        n_bursts: 16,
+        gate_level: GATE_LEVEL,
     })
     .await;
 }
