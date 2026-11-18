@@ -1,0 +1,38 @@
+// Words of a memory connected straight to an instance's ports (`a: m[1]`),
+// and a second memory that is written but never read.
+
+entity PairSum {
+    in clk: clock
+    in a: bit[32]
+    in b: bit[32]
+    out y: bit[32]
+}
+
+impl PairSum {
+    signal r: bit[32] = 0
+    on(clk.rise) {
+        r = a + b
+    }
+    y = r
+}
+
+entity PortMapReads {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[32]
+    out y: bit[32]
+}
+
+impl PortMapReads {
+    signal m: bit[32][8]
+    signal unread: bit[32][8]
+    on(clk.rise) {
+        if we == 1 {
+            m[wa] = wd
+            unread[wa] = wd
+        }
+    }
+    inst sum = PairSum { clk: clk, a: m[1], b: m[6] }
+    y = sum.y
+}

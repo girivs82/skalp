@@ -212,6 +212,44 @@ async fn test_regfile_gate_level_generic() {
     check_regfile(tb, "generic_asic").await;
 }
 
+/// Words of a memory connected straight to an instance's ports used to be
+/// wired as one bit of the memory's name: the child's inputs and the
+/// memory's read address had no driver. A memory nothing reads left its
+/// read address undriven too.
+async fn check_port_map_reads(mut tb: Testbench, what: &str) {
+    for (a, d) in [(1u8, 0x1111_0000u64), (6, 0x0000_2222), (3, 0x7777_7777)] {
+        tb.set("we", 1u8).set("wa", a).set("wd", d);
+        tb.clock(1).await;
+    }
+    tb.set("we", 0u8);
+    tb.clock(2).await;
+    assert_eq!(tb.get_u64("y").await, 0x1111_2222, "{what}: m[1] + m[6]");
+    tb.set("we", 1u8).set("wa", 6u8).set("wd", 0x0000_0001u64);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(2).await;
+    assert_eq!(
+        tb.get_u64("y").await,
+        0x1111_0001,
+        "{what}: after m[6] changed"
+    );
+}
+
+#[tokio::test]
+async fn test_port_map_memory_reads() {
+    let path = fixture_path("distram_port_map_reads.sk");
+    let tb = Testbench::with_top_module(&path, "PortMapReads")
+        .await
+        .unwrap();
+    check_port_map_reads(tb, "behavioral").await;
+    for lib in ["nexus", "ecp5", "ice40", "generic_asic"] {
+        let tb = Testbench::gate_level_with_top_and_library(&path, "PortMapReads", lib)
+            .await
+            .unwrap_or_else(|e| panic!("{lib}: {e}"));
+        check_port_map_reads(tb, lib).await;
+    }
+}
+
 /// Place and route the 32 x 64 register file and check every RAM cell sits on
 /// a distributed-RAM site whose LUTs (which the RAM uses) hold no other cell,
 /// and that every net is routed.
