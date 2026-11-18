@@ -8969,14 +8969,23 @@ struct TimedOptions {
     /// What a register or memory takes on a setup or hold violation, or
     /// an unknown clock edge: x (unknown, pessimistic, the default) or
     /// resolve[:SEED] (the old or the new value, picked at random, as a
-    /// metastable flip-flop settles in hardware)
+    /// metastable flip-flop settles in hardware). A latch built in one
+    /// cell (such as an arbiter's mutex) whose inputs race always settles:
+    /// with x the first input wins, with resolve either, at random.
     #[arg(long)]
     metastability: Option<String>,
+    /// How many timing violations to list, first in time and by cell
+    /// (20 if not given)
+    #[arg(long, value_name = "N")]
+    violations: Option<usize>,
 }
 
 impl TimedOptions {
     fn any(&self) -> bool {
-        self.corner.is_some() || self.power_up.is_some() || self.metastability.is_some()
+        self.corner.is_some()
+            || self.power_up.is_some()
+            || self.metastability.is_some()
+            || self.violations.is_some()
     }
 }
 
@@ -9449,14 +9458,104 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             sim.violations().len(),
             by_kind.join(", ")
         );
-        for v in sim.violations().iter().take(20) {
+        const DEFAULT_SHOWN: usize = 20;
+        let shown = args.timed.violations.unwrap_or(DEFAULT_SHOWN);
+        // The net a violated input reads, which names a register better
+        // than its cell does after synthesis
+        let data_net = |v: &skalp_lir::timed_sim::Violation| -> String {
+            v.input
+                .and_then(|i| netlist.cells[v.cell.0 as usize].inputs.get(i))
+                .map(|&net| format!(" ({})", netlist.nets[net.0 as usize].name))
+                .unwrap_or_default()
+        };
+        for v in sim.violations().iter().take(shown) {
             println!(
-                "  {:>14.3} ns  {:?} at {}{} by {:.3} ns",
+                "  {:>14.3} ns  {:?} at {}{}{} by {:.3} ns",
                 v.time_ps as f64 / 1e3,
                 v.kind,
                 sim.cell_path(v.cell),
                 v.input.map(|i| format!(" input {i}")).unwrap_or_default(),
+                data_net(v),
                 v.margin_ps as f64 / 1e3
+            );
+        }
+        // By cell and kind: setup first, then the most often violated
+        let mut groups: Vec<(
+            ViolationKind,
+            skalp_lir::gate_netlist::CellId,
+            usize,
+            i64,
+            &skalp_lir::timed_sim::Violation,
+        )> = Vec::new();
+        let mut index: std::collections::HashMap<(u32, u8), usize> =
+            std::collections::HashMap::new();
+        for v in sim.violations() {
+            let key = (v.cell.0, v.kind as u8);
+            match index.get(&key) {
+                Some(&g) => {
+                    groups[g].2 += 1;
+                    groups[g].3 = groups[g].3.max(v.margin_ps);
+                }
+                None => {
+                    index.insert(key, groups.len());
+                    groups.push((v.kind, v.cell, 1, v.margin_ps, v));
+                }
+            }
+        }
+        groups.sort_by_key(|g| (g.0 != ViolationKind::Setup, std::cmp::Reverse(g.2)));
+        println!(
+            "  By cell ({} cells; setup first, then most often):",
+            groups.len()
+        );
+        for (kind, cell, n, worst, first) in groups.iter().take(shown) {
+            println!(
+                "    {:>6} x {:?} at {}{}, worst by {:.3} ns, first at {:.3} ns",
+                n,
+                kind,
+                sim.cell_path(*cell),
+                data_net(first),
+                *worst as f64 / 1e3,
+                first.time_ps as f64 / 1e3
+            );
+        }
+    }
+
+    // Races decided by one-cell latches (mutexes): not violations, but
+    // worth knowing about, by latch
+    let races = sim.latch_race_count();
+    if races > 0 {
+        let settled = match sim.metastability() {
+            skalp_lir::timed_sim::Metastability::Unknown => "the first input won",
+            skalp_lir::timed_sim::Metastability::Resolve(_) => "either input won, at random",
+        };
+        let mut by_latch: Vec<(skalp_lir::gate_netlist::CellId, usize, i64, i64)> = Vec::new();
+        let mut index: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for r in sim.latch_races() {
+            match index.get(&r.cell.0) {
+                Some(&g) => {
+                    by_latch[g].1 += 1;
+                    by_latch[g].2 = by_latch[g].2.max(r.margin_ps);
+                }
+                None => {
+                    index.insert(r.cell.0, by_latch.len());
+                    by_latch.push((r.cell, 1, r.margin_ps, r.time_ps));
+                }
+            }
+        }
+        by_latch.sort_by_key(|g| std::cmp::Reverse(g.1));
+        println!(
+            "Latch races: {races} decided by {} one-cell latches ({settled})",
+            by_latch.len()
+        );
+        const DEFAULT_SHOWN: usize = 20;
+        let shown = args.timed.violations.unwrap_or(DEFAULT_SHOWN);
+        for (cell, n, closest, first) in by_latch.iter().take(shown) {
+            println!(
+                "    {:>6} x at {}, closest {:.3} ns inside its loop, first at {:.3} ns",
+                n,
+                sim.cell_path(*cell),
+                *closest as f64 / 1e3,
+                *first as f64 / 1e3
             );
         }
     }
