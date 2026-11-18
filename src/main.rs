@@ -286,6 +286,14 @@ enum Commands {
         /// triggered by its #[breakpoint] signals, sending over the board's UART
         #[arg(long)]
         debug: bool,
+
+        /// For measuring a device family's settle time on a board only: size
+        /// every arbiter and step-decision wait to this length (such as
+        /// 1.5ns) instead of from the family's figure, so a test design can
+        /// cut it short on purpose and count the failures. Such a build is
+        /// not safe to use
+        #[arg(long, value_name = "TIME")]
+        settle_wait: Option<String>,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -907,6 +915,7 @@ fn main() -> Result<()> {
             emit,
             power_stub,
             debug,
+            settle_wait,
         } => {
             synthesize_design(
                 &source,
@@ -919,6 +928,7 @@ fn main() -> Result<()> {
                 emit.as_deref(),
                 power_stub,
                 debug,
+                settle_wait.as_deref(),
             )?;
         }
 
@@ -4578,6 +4588,37 @@ fn choose_pipeline_latencies(
     Ok(true)
 }
 
+/// Metastability of a Nexus family's step latches and arbiters, measured on
+/// its boards where its database has a figure; otherwise the assumed
+/// figures (and a warning that async timing on it is not signed off)
+#[cfg(feature = "nexus-real")]
+fn nexus_latch_timing(variant: &str) -> Result<skalp_lir::ncl_bundle::ArbiterTiming> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+    let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
+    let Some(db_root) = find_database() else {
+        return Ok(default);
+    };
+    let measured = skalp_place_route::device::nexus::timing::measured_metastability(
+        &db_root,
+        nexus_variant(variant)?,
+        skalp_place_route::timing::sta::STEP_LATCH_ELEMENT,
+    )?;
+    Ok(match measured {
+        Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
+            tau_ps: m.tau_ps,
+            t0_ps: m.t0_ps,
+            measured: true,
+            ..default
+        },
+        None => default,
+    })
+}
+
+#[cfg(not(feature = "nexus-real"))]
+fn nexus_latch_timing(_variant: &str) -> Result<skalp_lir::ncl_bundle::ArbiterTiming> {
+    Ok(skalp_lir::ncl_bundle::ArbiterTiming::default())
+}
+
 /// The Nexus device's delays for choosing pipeline latencies
 #[cfg(feature = "nexus-real")]
 fn nexus_retime_delays(variant: &str) -> Result<Box<dyn skalp_lir::retime::RetimeDelays>> {
@@ -4629,6 +4670,7 @@ fn synthesize_design(
     emit: Option<&str>,
     power_stub: bool,
     debug: bool,
+    settle_wait: Option<&str>,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
@@ -4824,7 +4866,19 @@ fn synthesize_design(
         synth_cache.as_ref(),
     );
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
-    size_ncl_matched_delays(&mut gate_netlist, &library);
+    let latch_timing = if family == "nexus" {
+        nexus_latch_timing(variant)?
+    } else {
+        skalp_lir::ncl_bundle::ArbiterTiming::default()
+    };
+    if let Some(wait) = settle_wait {
+        gate_netlist.settle_wait_ps = Some(parse_time_ps(wait)?);
+        println!(
+            "⚠️  Settle-time measurement build: every arbiter and step-decision wait is sized to \
+             {wait}, not from the device's figure. Do not use this build for anything else."
+        );
+    }
+    size_ncl_matched_delays(&mut gate_netlist, &library, latch_timing);
     if family == "nexus" {
         // Pads go in before the netlist is saved, so `skalp pnr` on the saved
         // netlist gets the same pins (and the on-chip clock) as the full flow.
@@ -5091,19 +5145,7 @@ fn run_nexus_pnr_on_netlist(
                 }
             }
         }
-        for b in &timing.bundles {
-            println!(
-                "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers, {} corner)",
-                b.block,
-                b.times,
-                if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
-                b.slack_ns.abs(),
-                b.data_ns,
-                b.control_ns,
-                b.chain_len,
-                b.corner
-            );
-        }
+        print_matched_delays(timing, gate_netlist.settle_wait_ps);
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -5290,7 +5332,17 @@ fn run_pnr_on_netlist(
     // Run place and route
     println!();
     println!("Running placement and routing...");
-    let result = place_and_route(gate_netlist, ice40_variant, config)?;
+    let mut netlist = gate_netlist.clone();
+    let mut result = place_and_route(&netlist, ice40_variant, config.clone())?;
+    // Matched delays of async blocks that routing made too short: lengthen
+    // them by the shortfall and place and route again
+    for _ in 0..4 {
+        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
+            break;
+        }
+        result = place_and_route(&netlist, ice40_variant, config.clone())?;
+    }
+    let gate_netlist = &netlist;
 
     // Report results
     println!("Placement:");
@@ -5317,6 +5369,7 @@ fn run_pnr_on_netlist(
             println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
             println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
         }
+        print_matched_delays(timing, gate_netlist.settle_wait_ps);
     }
 
     // Write bitstream
@@ -5347,6 +5400,38 @@ fn run_pnr_on_netlist(
     write_routed(output_dir, &result)?;
 
     Ok(())
+}
+
+/// Report the matched delays of bundled-data async blocks, checked with
+/// routed delays
+fn print_matched_delays(
+    timing: &skalp_place_route::timing::TimingReport,
+    settle_wait_ps: Option<i64>,
+) {
+    for b in &timing.bundles {
+        println!(
+            "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers, {} corner)",
+            b.block,
+            b.times,
+            if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
+            b.slack_ns.abs(),
+            b.data_ns,
+            b.control_ns,
+            b.chain_len,
+            b.corner
+        );
+    }
+    if let Some(wait) = settle_wait_ps {
+        println!(
+            "  ⚠️  Settle-time measurement build: decision waits sized to {:.2} ns on purpose",
+            wait as f64 / 1000.0
+        );
+    } else if timing.bundles.iter().any(|b| b.unmeasured_settle) {
+        println!(
+            "  {}",
+            unmeasured_settle_warning(&skalp_lir::ncl_bundle::ArbiterTiming::default())
+        );
+    }
 }
 
 /// Save the routed netlist and its delays, for `skalp timed-sim`
@@ -8608,11 +8693,21 @@ fn run_signal_trace(
 
 /// Size the matched delays of bundled-data async instances (estimated with
 /// the library's delays; place and route checks them with routed delays)
-fn size_ncl_matched_delays(netlist: &mut skalp_lir::GateNetlist, library: &skalp_lir::TechLibrary) {
-    let delays = skalp_lir::ncl_bundle::LibraryDelays::new(library);
+fn size_ncl_matched_delays(
+    netlist: &mut skalp_lir::GateNetlist,
+    library: &skalp_lir::TechLibrary,
+    latch_timing: skalp_lir::ncl_bundle::ArbiterTiming,
+) {
+    let delays = skalp_lir::ncl_bundle::LibraryDelays {
+        latch_timing,
+        ..skalp_lir::ncl_bundle::LibraryDelays::new(library)
+    };
     let report = skalp_lir::ncl_bundle::size_matched_delays(netlist, &delays, 50);
     if report.checks.is_empty() {
         return;
+    }
+    if netlist.settle_wait_ps.is_none() && report.checks.iter().any(|c| c.unmeasured_settle) {
+        println!("{}", unmeasured_settle_warning(&latch_timing));
     }
     let worst = report.checks.iter().min_by_key(|c| c.slack_ps());
     println!(
@@ -8626,6 +8721,19 @@ fn size_ncl_matched_delays(netlist: &mut skalp_lir::GateNetlist, library: &skalp
             c.slack_ps() as f64 / 1000.0
         ))
     );
+}
+
+/// The warning for async blocks whose decision waits were sized without a
+/// measured settle time for the device family
+fn unmeasured_settle_warning(timing: &skalp_lir::ncl_bundle::ArbiterTiming) -> String {
+    format!(
+        "⚠️  NCL: this device family has no measured settle time for its arbiters and step \
+         latches, so their waits assume tau {:.0} ps ({:.1} ns each). That is generous but \
+         not signed off: measure the family on a board and add the figure to its device \
+         database (timing/metastability.json)",
+        timing.tau_ps,
+        timing.resolution_ps() as f64 / 1000.0
+    )
 }
 
 /// Refuse a gate netlist with a net that feeds cells but has no driver, or
