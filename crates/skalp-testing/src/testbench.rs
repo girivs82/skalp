@@ -40,6 +40,9 @@ use skalp_sim::{
 use skalp_sir::{convert_mir_to_sir_with_hierarchy, SirModule};
 use std::path::Path;
 
+/// A pass over the MIR of a design before it becomes SIR
+type MirPass<'a> = &'a dyn Fn(&mut skalp_mir::Mir) -> Result<()>;
+
 /// Simulation mode for the testbench
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestbenchMode {
@@ -1116,7 +1119,7 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
         device: Option<&str>,
-        mir_pass: Option<&dyn Fn(&mut skalp_mir::Mir) -> Result<()>>,
+        mir_pass: Option<MirPass<'_>>,
     ) -> Result<skalp_sir::SirModule> {
         let context = match path.extension().and_then(|s| s.to_str()) {
             Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
