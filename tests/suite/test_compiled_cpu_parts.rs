@@ -1,9 +1,9 @@
 //! The compiled CPU kernel of a large design puts its combinational logic
-//! into parts, functions of a bounded size, so that compile time grows with
-//! the size of the design rather than faster (one function of a few
-//! hundred thousand statements took an hour at -O2). A kernel in parts must
-//! simulate exactly as the kernel in one function does, stepped and
-//! batched.
+//! into parts, functions of a bounded size, and the fields of its buffer
+//! structs into groups (anonymous member structs), so that compile time
+//! grows with the size of the design rather than faster (a gate-level
+//! netlist's kernel took over an hour). A kernel in parts must simulate
+//! exactly as the kernel in one piece does, stepped and batched.
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::MirCompiler;
@@ -105,13 +105,21 @@ async fn cycle(sir: &SirModule, runtimes: &mut [&mut CompiledCpuRuntime], n: u32
 }
 
 #[test]
-fn small_parts_split_the_combinational_logic() {
+fn small_parts_split_the_logic_and_the_structs() {
     let sir = module();
     let whole = CppBackend::generate(&sir);
     assert!(!whole.contains("combinational_eval_part_"));
     assert!(!whole.contains("sequential_update_in_place"));
 
-    let parts = CppBackend::generate_in_parts(&sir, 3);
+    assert!(!whole.contains("    struct {\n"));
+
+    let parts = CppBackend::generate_in_parts(&sir, 3, 2);
+    let signals = &parts[parts.find("struct Signals {").expect("Signals")..];
+    let signals = &signals[..signals.find("\n};").expect("end of Signals")];
+    assert!(
+        signals.matches("    struct {\n").count() > 1,
+        "Signals fields in groups:\n{signals}"
+    );
     assert!(parts.contains("static SKALP_NOINLINE void combinational_eval_part_0("));
     assert!(parts.contains("static SKALP_NOINLINE void combinational_eval_part_1("));
     assert!(parts.contains("combinational_eval_part_1(inputs, registers, signals);"));
@@ -122,8 +130,7 @@ fn small_parts_split_the_combinational_logic() {
 async fn kernel_in_parts_simulates_as_one_function() {
     let sir = module();
     let mut whole = CompiledCpuRuntime::new(&sir).expect("kernel in one function");
-    let mut parts =
-        CompiledCpuRuntime::with_combinational_part_nodes(&sir, 3).expect("kernel in parts");
+    let mut parts = CompiledCpuRuntime::with_kernel_parts(&sir, 3, 2).expect("kernel in parts");
     whole.initialize(&sir).await.expect("init");
     parts.initialize(&sir).await.expect("init");
 

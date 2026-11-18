@@ -251,12 +251,17 @@ impl CompiledCpuRuntime {
     }
 
     /// A compiled CPU runtime whose kernel has at most `part_nodes`
-    /// combinational nodes in one function (`CppBackend::generate_in_parts`)
-    pub fn with_combinational_part_nodes(
+    /// combinational nodes in one function and at most `struct_fields`
+    /// fields directly in one struct (`CppBackend::generate_in_parts`)
+    pub fn with_kernel_parts(
         module: &SirModule,
         part_nodes: usize,
+        struct_fields: usize,
     ) -> Result<Self, CompileError> {
-        Self::from_source(module, CppBackend::generate_in_parts(module, part_nodes))
+        Self::from_source(
+            module,
+            CppBackend::generate_in_parts(module, part_nodes, struct_fields),
+        )
     }
 
     /// The runtime of `source`, the C++ kernel `CppBackend` generated for

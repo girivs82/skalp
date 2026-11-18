@@ -20,11 +20,17 @@ use super::types::BackendTarget;
 /// (see `generate_combinational_function`)
 const COMBINATIONAL_PART_NODES: usize = 2000;
 
+/// The most fields one struct of the generated source holds directly
+/// (see `SharedCodegen::set_field_group`)
+const STRUCT_FIELD_GROUP: usize = 1000;
+
 /// C++ backend for compiled CPU simulation
 pub struct CppBackend<'a> {
     shared: SharedCodegen<'a>,
     /// The most combinational nodes one function holds
     part_nodes: usize,
+    /// The most fields one struct holds directly
+    struct_fields: usize,
 }
 
 impl<'a> CppBackend<'a> {
@@ -33,21 +39,28 @@ impl<'a> CppBackend<'a> {
         Self {
             shared: SharedCodegen::new(module, BackendTarget::Cpp),
             part_nodes: COMBINATIONAL_PART_NODES,
+            struct_fields: STRUCT_FIELD_GROUP,
         }
     }
 
     /// Generate complete C++ source code
     pub fn generate(module: &SirModule) -> String {
-        Self::generate_in_parts(module, COMBINATIONAL_PART_NODES)
+        Self::generate_in_parts(module, COMBINATIONAL_PART_NODES, STRUCT_FIELD_GROUP)
     }
 
-    /// Generate complete C++ source code, with at most `part_nodes`
+    /// Generate complete C++ source code with at most `part_nodes`
     /// combinational nodes in one function (see
-    /// `generate_combinational_function`); `generate` uses a size that
-    /// keeps compile times linear
-    pub fn generate_in_parts(module: &SirModule, part_nodes: usize) -> String {
+    /// `generate_combinational_function`) and at most `struct_fields` fields
+    /// directly in one struct (see `SharedCodegen::set_field_group`);
+    /// `generate` uses sizes that keep compile times linear
+    pub fn generate_in_parts(
+        module: &SirModule,
+        part_nodes: usize,
+        struct_fields: usize,
+    ) -> String {
         let mut backend = CppBackend::new(module);
         backend.part_nodes = part_nodes.max(1);
+        backend.struct_fields = struct_fields.max(1);
         backend.generate_source()
     }
 
@@ -149,6 +162,7 @@ static inline uint32_t _fp32_to_fp16(float f) {
         );
 
         // Generate struct definitions using shared codegen
+        self.shared.set_field_group(self.struct_fields);
         self.shared.generate_inputs_struct();
         self.shared.generate_registers_struct();
         self.shared.generate_signals_struct();
