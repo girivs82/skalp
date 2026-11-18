@@ -9316,6 +9316,35 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     for &(net, value) in &held {
         sim.set(net, value);
     }
+    // Vendor blocks with no model: say which of their outputs nothing drives
+    for blackbox in &sim.blackboxes {
+        let driven = |net: skalp_lir::gate_netlist::GateNetId| {
+            clocked
+                .iter()
+                .chain(held.iter().map(|(n, _)| n))
+                .any(|&d| netlist.resolve_alias(d) == net)
+        };
+        let undriven: Vec<&str> = blackbox
+            .outputs
+            .iter()
+            .filter(|&&net| !driven(net))
+            .map(|net| netlist.nets[net.0 as usize].name.as_str())
+            .collect();
+        let cell = &netlist.cells[blackbox.cell.0 as usize];
+        if undriven.is_empty() {
+            println!(
+                "  {} ({}) is not simulated; its outputs are driven as given",
+                cell.path, cell.cell_type
+            );
+        } else {
+            println!(
+                "  {} ({}) is not simulated; these outputs stay unknown unless given with --clock or --set: {}",
+                cell.path,
+                cell.cell_type,
+                undriven.join(", ")
+            );
+        }
+    }
     // Watched signals: a name (a net, or a bus shown as one value) and its
     // bits, least significant first
     let mut watched: Vec<(String, Vec<skalp_lir::gate_netlist::GateNetId>)> = Vec::new();

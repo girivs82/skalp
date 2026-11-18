@@ -50,7 +50,9 @@
 //! * Each instant runs in delta cycles: apply every event of the instant,
 //!   evaluate each touched node once, then commit the nets that changed.
 
-use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist, FF_INIT_PARAM};
+use crate::gate_netlist::{
+    Cell, CellId, GateNetId, GateNetlist, BLACKBOX_OUTPUTS_PARAM, FF_INIT_PARAM,
+};
 use crate::lir::PrimitiveType;
 use crate::ncl_bundle::BundleDelays;
 use crate::primitive_eval::{evaluate_primitive, primitive_for_cell};
@@ -125,6 +127,28 @@ pub enum ViolationKind {
     Hold,
     /// The clock pin went to or came from an unknown value
     UnknownClock,
+}
+
+/// A vendor block the simulator has no model of (such as a PLL), kept as
+/// a blackbox: nothing in the simulation drives its outputs, which stay
+/// unknown unless the caller drives them ([`TimedSim::add_clock`],
+/// [`TimedSim::set`])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blackbox {
+    /// The cell
+    pub cell: CellId,
+    /// Its outputs
+    pub outputs: Vec<GateNetId>,
+}
+
+/// Whether `cell` is a vendor block with no model here: a blackbox cell
+/// that no function, truth table or hard-block port map describes
+fn is_blackbox(cell: &Cell) -> bool {
+    (cell.cell_type.starts_with("BLACKBOX_")
+        || cell.parameters.contains_key(BLACKBOX_OUTPUTS_PARAM))
+        && cell.function.is_none()
+        && cell.lut_init.is_none()
+        && cell.dsp_ports().is_none()
 }
 
 /// Two inputs of a latch built in one cell (its output wired back to its
@@ -840,6 +864,8 @@ pub struct TimedSim<'a> {
     /// Comb-cell arcs the delay model has no figure for (timed with the
     /// slowest arc of that output instead)
     pub missing_arcs: usize,
+    /// Vendor blocks with no model, whose outputs nothing drives
+    pub blackboxes: Vec<Blackbox>,
 }
 
 /// Group a cell's outputs by their arc delays. Returns, per group, the
@@ -1083,8 +1109,20 @@ impl<'a> TimedSim<'a> {
         let mut fanout: Vec<Vec<Fanout>> = vec![Vec::new(); n_nets];
         let mut unsupported = Vec::new();
         let mut missing_arcs = 0usize;
+        let mut blackboxes: Vec<Blackbox> = Vec::new();
 
         for (index, cell) in netlist.cells.iter().enumerate() {
+            if is_blackbox(cell) {
+                blackboxes.push(Blackbox {
+                    cell: CellId(index as u32),
+                    outputs: cell
+                        .outputs
+                        .iter()
+                        .map(|&n| netlist.resolve_alias(n))
+                        .collect(),
+                });
+                continue;
+            }
             let ptype = primitive_for_cell(cell);
             let out_nets: Vec<u32> = cell.outputs.iter().map(|&n| canonical(n)).collect();
             let wire =
@@ -1455,6 +1493,7 @@ impl<'a> TimedSim<'a> {
             metastability: Metastability::Unknown,
             rng: 1,
             missing_arcs,
+            blackboxes,
         };
         sim.power_up(power_up);
         Ok(sim)
@@ -3332,6 +3371,52 @@ mod tests {
         assert_eq!(toggles[y.0 as usize], 3);
         // Edges every 0.5 ns, 5.5 to 10 ns
         assert_eq!(toggles[clk.0 as usize], 10);
+    }
+
+    /// A vendor block with no model (a PLL) drives nothing: its output
+    /// follows only what the caller drives on it, not the block's inputs
+    #[test]
+    fn blackboxes_leave_their_outputs_to_the_caller() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let refclk = nl.add_clock("refclk".into());
+        let out = nl.add_net(crate::gate_netlist::GateNet::new(
+            GateNetId(0),
+            "pll_out".into(),
+        ));
+        let y = nl.add_output("y".into());
+        let mut pll = Cell::new_comb(
+            CellId(0),
+            "PLL_X".into(),
+            "test".into(),
+            0.0,
+            "pll".into(),
+            vec![refclk],
+            vec![out],
+        );
+        pll.parameters.insert(
+            crate::gate_netlist::BLACKBOX_INPUTS_PARAM.into(),
+            "REF".into(),
+        );
+        pll.parameters
+            .insert(BLACKBOX_OUTPUTS_PARAM.into(), "OUT".into());
+        nl.add_cell(pll);
+        gate(&mut nl, "buf", CellFunction::Buf, vec![out], y);
+        let mut sim = TimedSim::new(&nl, &TestDelays::default()).unwrap();
+        assert_eq!(sim.blackboxes.len(), 1);
+        assert_eq!(sim.blackboxes[0].outputs, vec![nl.resolve_alias(out)]);
+        // The reference clock alone leaves the output unknown
+        sim.add_clock(refclk, 800);
+        sim.run_until(5_000).unwrap();
+        assert_eq!(sim.value(out), Logic::X);
+        // Driven as a clock of its own, it toggles at that clock only
+        sim.watch(y);
+        sim.add_clock(out, 3_000);
+        sim.run_until(20_000).unwrap();
+        let edges: Vec<i64> = sim.changes().iter().map(|&(t, _, _)| t).collect();
+        assert!(edges.len() >= 9, "{edges:?}");
+        for pair in edges[1..].windows(2) {
+            assert_eq!(pair[1] - pair[0], 1_500, "{edges:?}");
+        }
     }
 
     /// A watched bus reports one value per moment its bits settle, starting
