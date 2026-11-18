@@ -2,7 +2,9 @@
 //! (controller + PHY model + memory model, each with child instances):
 //!
 //! - an impl's `on(clk.rise)` bound to a same-named port of the entity
-//!   declared last, so its process lost its clock and became combinational
+//!   declared last, so its process lost its clock and became combinational;
+//!   and a clock signal named like another entity's port bound to that port,
+//!   so the block on it was dropped
 //! - `a == b + c + d` parsed as `(a == b + c) + d`: chains of
 //!   same-precedence operators were built as siblings, not left-nested
 //! - a function call as an instance port connection was dropped
@@ -62,6 +64,46 @@ fn impl_after_other_entity_process_is_sequential() {
             "{name}: every on(clk.rise) process is sequential"
         );
     }
+}
+
+#[tokio::test]
+async fn clock_signal_named_like_a_child_port_keeps_its_block() {
+    let mut tb = Testbench::behavioral_with_top(
+        &fixture("clock_signal_named_like_child_port.sk"),
+        "ClockNamedLikePort",
+    )
+    .await
+    .expect("build");
+    tb.clock_signal("sim_tick", 20).await;
+    assert_eq!(tb.get_u32("count").await, 10, "one count per eclk rise");
+}
+
+#[test]
+fn clock_signal_named_like_a_child_port_is_the_trigger() {
+    use skalp_mir::{EdgeType, LValue, ProcessKind, SensitivityList};
+    let path = fixture("clock_signal_named_like_child_port.sk");
+    let source = std::fs::read_to_string(&path).expect("read fixture");
+    let hir = skalp_frontend::parse_and_build_hir(&source).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("mir");
+    let top = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "ClockNamedLikePort")
+        .expect("top module");
+    let eclk = top
+        .signals
+        .iter()
+        .find(|s| s.name == "eclk")
+        .expect("eclk signal")
+        .id;
+    let on_eclk = top.processes.iter().filter(|p| {
+        p.kind == ProcessKind::Sequential
+            && matches!(&p.sensitivity, SensitivityList::Edge(e)
+                if e.iter().any(|e| e.signal == LValue::Signal(eclk) && e.edge == EdgeType::Rising))
+    });
+    assert_eq!(on_eclk.count(), 1, "the top's on(eclk.rise) block");
 }
 
 #[tokio::test]

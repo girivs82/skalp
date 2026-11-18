@@ -3890,13 +3890,27 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
-        // Look up signal ID - check ports first, then signals
-        // We check ports and signals directly rather than using general scope lookup
-        // because clock domain generics (e.g., 'clk stored as "clk") can shadow port names
-        let signal = if let Some(&port_id) = self.symbols.ports.get(&signal_name) {
-            HirEventSignal::Port(port_id)
+        // Look the name up as a port or signal in scope, innermost first, skipping other
+        // kinds of symbol (clock domain generics, e.g. 'clk stored as "clk", can shadow a
+        // port's name). The flat port table holds the ports of every entity built so far, so
+        // it is only a fallback: with `entity A { in clk }` and a top whose `signal clk:
+        // clock` feeds an A, the top's `on(clk.rise)` bound to A's port and was dropped.
+        let in_scope =
+            self.symbols
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| match scope.get(&signal_name) {
+                    Some(SymbolId::Port(id)) => Some(HirEventSignal::Port(*id)),
+                    Some(SymbolId::Signal(id)) => Some(HirEventSignal::Signal(*id)),
+                    _ => None,
+                });
+        let signal = if let Some(signal) = in_scope {
+            signal
         } else if let Some(&signal_id) = self.symbols.signals.get(&signal_name) {
             HirEventSignal::Signal(signal_id)
+        } else if let Some(&port_id) = self.symbols.ports.get(&signal_name) {
+            HirEventSignal::Port(port_id)
         } else {
             // Not found in ports or signals
             return None;
