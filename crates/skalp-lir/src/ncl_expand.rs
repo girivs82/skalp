@@ -2983,6 +2983,45 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         }
     }
 
+    // What the arbiters took (`taken(s)`): each stream input read through
+    // an `NclTake` gate of its arm's grant, in place of the behavioural mux
+    if ready.is_some() {
+        use skalp_frontend::ncl_streams::NCL_TAKE_PREFIX;
+        let inputs: Vec<(LirSignalId, String)> = new_lir
+            .inputs
+            .iter()
+            .map(|id| (*id, new_lir.signals[id.0 as usize].name.clone()))
+            .collect();
+        for (data, name) in inputs {
+            let value_name = format!("{NCL_TAKE_PREFIX}_{name}");
+            let (Some(value), Some(grant)) = (
+                new_lir.get_signal(&value_name),
+                new_lir.get_signal(&format!("{value_name}_gnt")),
+            ) else {
+                continue;
+            };
+            let (value_id, grant_id, width, driver) =
+                (value.id, grant.id, value.width, value.driver);
+            match driver {
+                Some(driver) => {
+                    let node = &mut new_lir.nodes[driver.0 as usize];
+                    node.op = LirOp::NclTake { width };
+                    node.inputs = vec![data, grant_id];
+                    node.clock = None;
+                    node.reset = None;
+                }
+                None => {
+                    new_lir.add_node(
+                        LirOp::NclTake { width },
+                        vec![data, grant_id],
+                        value_id,
+                        format!("ncl_bundle.take_{name}"),
+                    );
+                }
+            }
+        }
+    }
+
     // The request that starts a step: `ncl_req` itself, or the block's own
     // step request
     let step_req = match ready {
@@ -3198,7 +3237,9 @@ pub fn check_step_conditions(hier_lir: &crate::HierarchicalMirToLirResult) -> Ve
 /// moment, not at a clock edge, so it must only change when the block's own
 /// strobe or a channel's phase bit does: the conditions may read the
 /// registers and memories of the block (and of async children coalesced
-/// into it), constants and the phase bits of its streams, nothing else. A
+/// into it), constants, the phase bits of its streams and what its arbiters
+/// took (a stream's value through its grant, `LirOp::NclTake`), nothing
+/// else. A
 /// data port, the parent's run request or anything else from outside can
 /// change at any time (a stream's value even changes while the sender
 /// writes it), and the step latch would see a glitch as a ready channel.
@@ -3212,6 +3253,7 @@ pub fn step_condition_errors(flat: &Lir, path: &str, module: &str) -> Vec<String
     };
     use std::collections::{BTreeSet, HashMap, HashSet};
     let prefix = format!("{path}.");
+    let take_prefix = format!("{prefix}{}_", skalp_frontend::ncl_streams::NCL_TAKE_PREFIX);
     let Some(ready) = flat.get_signal(&format!("{prefix}{NCL_READY_SIGNAL}")) else {
         return Vec::new();
     };
@@ -3227,6 +3269,15 @@ pub fn step_condition_errors(flat: &Lir, path: &str, module: &str) -> Vec<String
             continue;
         }
         let signal = &flat.signals[id.0 as usize];
+        // What an arbiter took (`LirOp::NclTake`): the stream's value gated
+        // by its arm's grant changes only when the grant does, since the
+        // sender holds the value still while the grant can be high
+        if signal.name.starts_with(&take_prefix) {
+            if let Some(grant) = flat.get_signal(&format!("{}_gnt", signal.name)) {
+                stack.push(grant.id);
+                continue;
+            }
+        }
         match drivers.get(&id) {
             Some(node) => {
                 if !node.path.starts_with(&prefix) {

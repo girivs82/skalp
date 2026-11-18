@@ -1,0 +1,78 @@
+// Misuses of `taken(s)`, each refused with an error
+
+async entity TbSource {
+    out q: stream<bit[8]>
+}
+impl TbSource {
+    signal n: bit[8] = 1
+    on() {
+        q.send(n)
+        n = n + 8'h01
+    }
+}
+
+// `taken(a)` in the `_ if` guard decides the grant it reports
+async entity TbGuard {
+    in a: stream<bit[8]>
+    in b: stream<bit[8]>
+    out last: bit[8]
+}
+impl TbGuard {
+    signal l: bit[8] = 0
+    last = l
+    on() {
+        match arbitrate(a, b) {
+            0 => {
+                l = a.recv()
+            }
+            1 => {
+                l = b.recv()
+            }
+            _ if taken(a) == 1 => {
+            }
+        }
+    }
+}
+
+// `a` is received without an arbiter, so nothing reports taking it
+async entity TbPlain {
+    in a: stream<bit[8]>
+    out last: bit[8]
+}
+impl TbPlain {
+    signal l: bit[8] = 0
+    last = l
+    on() {
+        let x: bit[8] = a.recv()
+        if taken(a) == 1 {
+            l = x
+        }
+    }
+}
+
+entity TbGuardTop {
+    in clk: clock
+    in run: bit
+    out last: bit[8]
+}
+impl TbGuardTop {
+    signal req: bit = 0
+    inst sa = TbSource { ncl_req: req }
+    inst sb = TbSource { ncl_req: req }
+    inst g = TbGuard { a: sa.q, b: sb.q, ncl_req: req }
+    on(clk.rise) { req = run }
+    last = g.last
+}
+
+entity TbPlainTop {
+    in clk: clock
+    in run: bit
+    out last: bit[8]
+}
+impl TbPlainTop {
+    signal req: bit = 0
+    inst sa = TbSource { ncl_req: req }
+    inst p = TbPlain { a: sa.q, ncl_req: req }
+    on(clk.rise) { req = run }
+    last = p.last
+}
