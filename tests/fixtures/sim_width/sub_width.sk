@@ -1,0 +1,69 @@
+// `a - b` and `a + b` keep their operands' width wherever they are used, also
+// straight into a wider target (zero-extended); `+:` is the widening add
+
+entity SubWidth {
+    in clk: clock
+    in ra: bit[5]
+    in wa: bit[5]
+    in we: bit
+    in d: bit[11]
+    in r: bit[32]
+    out eq: bit
+    out cat: bit[6]
+    out shr: bit[5]
+    out lt: bit
+    out ix: bit
+    out q: bit[11]
+    out q_next: bit[11]
+    out wide_sum: bit[6]
+    out wide_diff: bit[6]
+    out inc: bit[6]
+    out wsum: bit[6]
+}
+
+impl SubWidth {
+    // two arrays side by side: a read must never reach the second from the first
+    signal a: [bit[11]; 32]
+    signal b: [bit[11]; 32]
+    on(clk.rise) {
+        if we == 1 {
+            a[wa] = d
+            b[wa] = ~d
+        }
+    }
+    eq = if ra - wa == 31 { 1 } else { 0 }
+    cat = {ra - wa, 1'b0}
+    shr = (ra - wa) >> 1
+    lt = if ra - wa < 16 { 1 } else { 0 }
+    ix = r[ra - wa]
+    q = a[ra - wa]
+    q_next = b[ra + wa]
+    wide_sum = ra + wa
+    wide_diff = ra - wa
+    inc = ra + 1
+    wsum = ra +: wa
+}
+
+// arrays whose depth is not a power of two: an index past the end writes
+// nothing, and never reaches the array declared next to it
+entity OddDepth {
+    in clk: clock
+    in wa: bit[5]
+    in ra: bit[5]
+    in we: bit
+    in d: bit[8]
+    out q: bit[8]
+    out guard: bit[8]
+}
+
+impl OddDepth {
+    signal m: [bit[8]; 24]
+    signal g: [bit[8]; 24]
+    on(clk.rise) {
+        if we == 1 {
+            m[wa] = d
+        }
+    }
+    q = m[ra]
+    guard = g[ra]
+}

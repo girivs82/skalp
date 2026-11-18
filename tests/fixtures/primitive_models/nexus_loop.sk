@@ -1,0 +1,123 @@
+// Nexus DDR byte lane looped back on itself, built from the family's primitive library: one DQ
+// and the DQS go out through the write gearboxes and come straight back into the DQS buffer and
+// the read gearbox. Every 16 SCLK cycles the lane sends a 2 tCK preamble and an 8-pulse DQS burst
+// with two data words on DQ; READ is raised for two SCLK cycles starting RD_AT cycles into the
+// period, with the read clock select RDCLKSEL. The edge clock is sim_tick / 16.
+entity NexusLoop<const RD_AT: nat = 1, const RDCLKSEL: nat = 0> {
+    in sim_tick: clock
+    in rst: bit
+    out bursts: bit[8]
+    out bts: bit[8]
+    out valids: bit[8]
+    out w0: bit[8]
+    out w1: bit[8]
+    out locked: bit
+    out code: bit[9]
+}
+
+impl NexusLoop {
+    signal t: bit[4] = 0
+    signal ek: bit = 0
+    on(sim_tick.rise) {
+        t = t + 1
+        if t == 7 || t == 15 {
+            ek = !ek
+        }
+    }
+    signal eclk_in: clock
+    eclk_in = ek
+    inst es = ECLKSYNC { ECLKIN: eclk_in, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: rst, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+
+    inst dll = DDRDLL { CLKIN: eclk, RST: rst, FREEZE: 0, UDDCNTL_N: 0 }
+
+    // SCLK sequencer
+    signal c: bit[8] = 0
+    on(sclk.rise) {
+        if rst == 1 {
+            c = 0
+        } else {
+            c = c + 1
+        }
+    }
+    let ph: bit[4] = c[3:0]
+    // the DQS buffer settings load once the DLL has locked
+    let loading: bit = if c >= 6 && c < 8 { 0 } else { 1 }
+    let running: bit = if c >= 16 { 1 } else { 0 }
+    let rd_at: bit[4] = RD_AT
+    let sel: bit[4] = RDCLKSEL
+    // DQS: preamble (driven low) in phase 0, pulses in 1 and 2
+    let dqs_d: bit[8] = if running == 1 && (ph == 1 || ph == 2) { 8'h55 } else { 8'h00 }
+    let dqs_t: bit[4] = if running == 1 && ph <= 2 { 4'h0 } else { 4'hF }
+    let dq_d: bit[8] = if ph == 1 { 8'hA6 } else { 8'h3C }
+    let read: bit[4] = if running == 1 && (ph == rd_at || ph == rd_at + 1) { 4'hF } else { 4'h0 }
+
+    inst dqs = DQSBUF {
+        DQSI: pin_dqs, ECLKIN: eclk, SCLK: sclk, RST: rst, PAUSE: 0, RSTSMCNT: 0,
+        RDCLKSEL: sel, READ: read, RDDIR: 0, RDLOADN: loading, READMOVE: 0, SELCLK: 0,
+        WRDIR: 0, WRLOAD_N: loading, WRMOVE: 0, WRLVDIR: 0, WRLVLOAD_N: loading, WRLVMOVE: 0,
+        DLLCODE: dll.CODE
+    }
+    inst dqs_o = ODDRX4DQS {
+        D0: dqs_d[0], D1: dqs_d[1], D2: dqs_d[2], D3: dqs_d[3],
+        D4: dqs_d[4], D5: dqs_d[5], D6: dqs_d[6], D7: dqs_d[7],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst dqs_z = TSHX4DQS {
+        T0: dqs_t[0], T1: dqs_t[1], T2: dqs_t[2], T3: dqs_t[3],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst dq_o = ODDRX4DQ {
+        D0: dq_d[0], D1: dq_d[1], D2: dq_d[2], D3: dq_d[3],
+        D4: dq_d[4], D5: dq_d[5], D6: dq_d[6], D7: dq_d[7],
+        DQSW270: dqs.DQSW270, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    // the pads, looped back: an undriven line reads low
+    signal pin_dqs: bit
+    pin_dqs = if dqs_z.Q == 0 { dqs_o.Q } else { 0 }
+    inst dq_dl = DELAYA<38> {
+        A: dq_o.Q, LOAD_N: 1, MOVE: 0, DIRECTION: 0, COARSE0: 0, COARSE1: 0,
+        RANKSELECT: 0, RANKENABLE: 0, RANK0UPDATE: 0, RANK1UPDATE: 0
+    }
+    inst dq_i = IDDRX4DQ {
+        D: dq_dl.Z, DQSR90: dqs.DQSR90, ECLK: eclk, SCLK: sclk, RST: rst,
+        RDPNTR0: dqs.RDPNTR[0], RDPNTR1: dqs.RDPNTR[1], RDPNTR2: dqs.RDPNTR[2],
+        WRPNTR0: dqs.WRPNTR[0], WRPNTR1: dqs.WRPNTR[1], WRPNTR2: dqs.WRPNTR[2]
+    }
+    let q: bit[8] = {dq_i.Q7, dq_i.Q6, dq_i.Q5, dq_i.Q4, dq_i.Q3, dq_i.Q2, dq_i.Q1, dq_i.Q0}
+
+    signal nb: bit[8] = 0
+    signal nt: bit[8] = 0
+    signal nv: bit[8] = 0
+    signal bd_p: bit = 0
+    signal r0: bit[8] = 0
+    signal r1: bit[8] = 0
+    on(sclk.rise) {
+        bd_p = dqs.BURSTDETECT
+        if dqs.BURSTDETECT == 1 && bd_p == 0 {
+            nb = nb + 1
+        }
+        if dqs.BTDETECT == 1 {
+            nt = nt + 1
+        }
+        if dqs.DATAVALID == 1 {
+            nv = nv + 1
+            if nv[0] == 0 {
+                r0 = q
+            } else {
+                r1 = q
+            }
+        }
+    }
+    bursts = nb
+    bts = nt
+    valids = nv
+    w0 = r0
+    w1 = r1
+    locked = dll.LOCK
+    code = dll.CODE
+}

@@ -1,0 +1,864 @@
+// Simulation models of the Nexus family's DDR I/O primitives (CrossLink-NX, Certus-NX,
+// CertusPro-NX, MachXO5-NX).
+//
+// A design instantiates these primitives by name (`inst o = ODDRX4 { ... }`) without declaring
+// them; a build for a Nexus device takes their declarations from here. Synthesis keeps each one
+// as the vendor primitive (a black box placed and configured from the device data); simulation
+// runs the body below. Parameters are the entity's generics (`DELAYB<DEL_VALUE: 8>`); the
+// attribute's parameters are the mode these models are written for.
+//
+// What the models do comes from Lattice's public description of its LPDDR4 PHY on these blocks
+// (FPGA-IPUG-02154) where it says, and is this file's own choice where it does not (marked
+// "Model:"). The board ladder checks them against silicon.
+//
+// Time: models that need finer time than a clock (delay lines, the DQS buffer, the DLL) run on
+// `tick`, which simulation drives from the top-level `sim_tick` and synthesis drops. One tick
+// is 117.1875 ps: 16 ticks per 533.33 MHz edge clock. A delay step is 12.5 ps, so N steps are
+// (N * 109) >> 10 ticks.
+//
+// Gearing (from the guide): data is registered on an SCLK rising edge and leaves the pin after
+// two more SCLK cycles, D0 first, on both edges of the edge clock (ECLK = 4 x SCLK). The edge
+// clock cycle that starts an SCLK cycle is the one whose rising edge is SCLK's.
+
+// ---------------------------------------------------------------------------- clocks
+
+// Edge clock synchronizer: passes ECLKIN; STOP, taken on a falling edge, holds the output low
+#[lattice_ip(name = "ECLKSYNC")]
+pub entity ECLKSYNC {
+    in ECLKIN: clock
+    in STOP: bit
+    out ECLKOUT: clock
+}
+
+impl ECLKSYNC {
+    signal stopped: bit = 0
+    on(ECLKIN.fall) {
+        stopped = STOP
+    }
+    ECLKOUT = if stopped == 0 { ECLKIN } else { 0 }
+}
+
+// Edge clock divider: DIVOUT = ECLKIN / ECLK_DIV (2 or 4), rising with an ECLKIN rising edge.
+// DIVRST holds it low; a rising SLIP holds it for one more ECLKIN cycle.
+#[lattice_ip(name = "ECLKDIV", GSR = "DISABLED")]
+pub entity ECLKDIV<const ECLK_DIV: nat = 4> {
+    in ECLKIN: clock
+    in DIVRST: bit
+    in SLIP: bit
+    out DIVOUT: clock
+}
+
+impl ECLKDIV {
+    signal cnt: bit = 0
+    signal div: bit = 0
+    signal slip_d: bit = 0
+    let half: bit = if ECLK_DIV == 2 { 0 } else { 1 }
+    on(ECLKIN.rise) {
+        slip_d = SLIP
+        if DIVRST == 1 {
+            cnt = 0
+            div = 0
+        } else if SLIP == 1 && slip_d == 0 {
+            cnt = cnt
+        } else if cnt == half {
+            cnt = 0
+            div = !div
+        } else {
+            cnt = cnt + 1
+        }
+    }
+    DIVOUT = div
+}
+
+// ---------------------------------------------------------------------------- output gearing
+
+// The common 8:1 output gearbox. MODE 0 shifts out on `eclk` edges (ODDRX4). MODE 1 and 2 shift
+// out on `strobe` edges, a delayed copy of the edge clock from the DQS buffer, through an
+// eight-entry ring that the edge clock fills and the strobe empties, so the strobe can lag the
+// edge clock by any amount the DQS buffer's delays reach. MODE 1 sends each edge clock cycle's
+// pair on the strobe cycle that starts in it (DQS: strobe = DQSW); MODE 2 sends the next cycle's
+// pair (DQ: strobe = DQSW270, three quarters of a cycle later, so DQ changes a quarter cycle
+// before the DQS edge it goes with). The strobe's first rising edge must come less than an edge
+// clock cycle after the edge clock's (as it does with the DQS buffer's settings just loaded).
+// Model: RST clears the gearbox; the ring starts with the first edge clock cycle after it.
+pub entity NexusSimTxGear<const MODE: nat = 0> {
+    in eclk: clock
+    in strobe: clock
+    in sclk: clock
+    in rst: bit
+    in d: bit[8]
+    out q: bit
+}
+
+impl NexusSimTxGear {
+    // SCLK side: the word registered on an SCLK edge, and the one before it
+    signal r1: bit[8] = 0
+    signal r2: bit[8] = 0
+    on(sclk.rise) {
+        r1 = d
+        r2 = r1
+    }
+
+    // edge clock side: the word being sent and the cycle in it
+    // SCLK as the edge clock sees it (the gearbox's own phase detector)
+    #[cdc]
+    signal s_prev: bit = 0
+    signal w: bit[8] = 0
+    signal p: bit[2] = 0
+    signal cur: bit[2] = 0
+    signal ring: [bit[2]; 8]
+    signal wp: bit[3] = 0
+    signal live: bit = 0
+    // the rising edge that starts an SCLK cycle: SCLK was low before it and on the edge before
+    let start: bit = if sclk == 0 && s_prev == 0 { 1 } else { 0 }
+    let p_n: bit[2] = if start == 1 { 0 } else { p + 1 }
+    let w_n: bit[8] = if start == 1 { r2 } else { w }
+    let cur_n: bit[2] = match p_n {
+        0 => w_n[1:0],
+        1 => w_n[3:2],
+        2 => w_n[5:4],
+        _ => w_n[7:6]
+    }
+    // at the last cycle, the next word is the one SCLK registered before this one
+    let nxt_n: bit[2] = match p_n {
+        0 => w_n[3:2],
+        1 => w_n[5:4],
+        2 => w_n[7:6],
+        _ => r2[1:0]
+    }
+    let live_n: bit = if live == 1 || start == 1 { 1 } else { 0 }
+    on(eclk.rise) {
+        s_prev = sclk
+        if rst == 1 {
+            p = 0
+            w = 0
+            cur = 0
+            wp = 0
+            live = 0
+        } else {
+            p = p_n
+            w = w_n
+            cur = cur_n
+            live = live_n
+            if live_n == 1 {
+                ring[wp] = if MODE == 2 { nxt_n } else { cur_n }
+                wp = wp + 1
+            }
+        }
+    }
+
+    // strobe side
+    signal rp: bit[3] = 0
+    // read from the ring, which the edge clock filled at least a strobe edge earlier
+    #[cdc]
+    signal sq: bit[2] = 0
+    // the strobe has started reading; its first edge takes the entry the
+    // edge clock wrote last (the strobe may start long after the edge clock,
+    // once the DQS buffer's settings are loaded)
+    signal rlive: bit = 0
+    let last_wp: bit[3] = wp - 1
+    on(strobe.rise) {
+        if rst == 1 {
+            rp = 0
+            sq = 0
+            rlive = 0
+        } else if live == 0 {
+            sq = 0
+        } else if rlive == 0 {
+            sq = ring[last_wp]
+            rp = wp
+            rlive = 1
+        } else {
+            sq = ring[rp]
+            rp = rp + 1
+        }
+    }
+
+    q = if MODE == 0 {
+        if eclk == 1 { cur[0] } else { cur[1] }
+    } else {
+        if strobe == 1 { sq[0] } else { sq[1] }
+    }
+}
+
+// x4 output (CK, CA, CS, CKE): D0..D7 out on ECLK edges
+#[lattice_ip(name = "ODDRX4", GSR = "DISABLED")]
+pub entity ODDRX4 {
+    in D0: bit
+    in D1: bit
+    in D2: bit
+    in D3: bit
+    in D4: bit
+    in D5: bit
+    in D6: bit
+    in D7: bit
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    out Q: bit
+}
+
+impl ODDRX4 {
+    inst g = NexusSimTxGear<0> {
+        eclk: ECLK,
+        strobe: ECLK,
+        sclk: SCLK,
+        rst: RST,
+        d: {D7, D6, D5, D4, D3, D2, D1, D0}
+    }
+    Q = g.q
+}
+
+// x4 DQ output: D0..D7 out on DQSW270 edges
+#[lattice_ip(name = "ODDRX4DQ", GSR = "DISABLED")]
+pub entity ODDRX4DQ {
+    in D0: bit
+    in D1: bit
+    in D2: bit
+    in D3: bit
+    in D4: bit
+    in D5: bit
+    in D6: bit
+    in D7: bit
+    in DQSW270: clock
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    out Q: bit
+}
+
+impl ODDRX4DQ {
+    inst g = NexusSimTxGear<2> {
+        eclk: ECLK,
+        strobe: DQSW270,
+        sclk: SCLK,
+        rst: RST,
+        d: {D7, D6, D5, D4, D3, D2, D1, D0}
+    }
+    Q = g.q
+}
+
+// x4 DQS output: D0..D7 out on DQSW edges
+#[lattice_ip(name = "ODDRX4DQS", GSR = "DISABLED")]
+pub entity ODDRX4DQS {
+    in D0: bit
+    in D1: bit
+    in D2: bit
+    in D3: bit
+    in D4: bit
+    in D5: bit
+    in D6: bit
+    in D7: bit
+    in DQSW: clock
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    out Q: bit
+}
+
+impl ODDRX4DQS {
+    inst g = NexusSimTxGear<1> {
+        eclk: ECLK,
+        strobe: DQSW,
+        sclk: SCLK,
+        rst: RST,
+        d: {D7, D6, D5, D4, D3, D2, D1, D0}
+    }
+    Q = g.q
+}
+
+// x4 DQ tristate: T0..T3, one per edge clock cycle, T0 first (1 = the pad does not drive),
+// changing with the DQ data of the same cycle
+#[lattice_ip(name = "TSHX4DQ", GSR = "DISABLED")]
+pub entity TSHX4DQ {
+    in T0: bit
+    in T1: bit
+    in T2: bit
+    in T3: bit
+    in DQSW270: clock
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    out Q: bit
+}
+
+impl TSHX4DQ {
+    inst g = NexusSimTxGear<2> {
+        eclk: ECLK,
+        strobe: DQSW270,
+        sclk: SCLK,
+        rst: RST,
+        d: {T3, T3, T2, T2, T1, T1, T0, T0}
+    }
+    Q = g.q
+}
+
+// x4 DQS tristate: T0..T3, one per edge clock cycle, changing with the DQS data of the same cycle
+#[lattice_ip(name = "TSHX4DQS", GSR = "DISABLED")]
+pub entity TSHX4DQS {
+    in T0: bit
+    in T1: bit
+    in T2: bit
+    in T3: bit
+    in DQSW: clock
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    out Q: bit
+}
+
+impl TSHX4DQS {
+    inst g = NexusSimTxGear<1> {
+        eclk: ECLK,
+        strobe: DQSW,
+        sclk: SCLK,
+        rst: RST,
+        d: {T3, T3, T2, T2, T1, T1, T0, T0}
+    }
+    Q = g.q
+}
+
+// ---------------------------------------------------------------------------- delays
+
+// Delay steps (12.5 ps) to ticks
+fn nexus_sim_ticks(steps: bit[8]) -> bit[8] {
+    let s: bit[16] = steps
+    let t: bit[16] = (s * 109) >> 10
+    return t[7:0]
+}
+
+// Static output delay: Z = A, DEL_VALUE steps later
+#[lattice_ip(name = "DELAYB", sim_clock = "tick", DEL_MODE = "USER_DEFINED")]
+pub entity DELAYB<const DEL_VALUE: nat = 0> {
+    in tick: clock
+    in A: bit
+    out Z: bit
+}
+
+impl DELAYB {
+    let del: bit[8] = DEL_VALUE
+    let n: bit[8] = nexus_sim_ticks(del)
+    signal h: bit[32] = 0
+    on(tick.rise) {
+        h = {h[30:0], A}
+    }
+    Z = h[n[4:0]]
+}
+
+// Dynamic input delay: Z = A, a setting of 0..127 steps later. The setting starts at DEL_VALUE;
+// LOAD_N low puts it back there; each rising MOVE takes one step, up when DIRECTION is low and
+// down when it is high, stopping at 0 and 127. CFLAG is high at either end.
+// Model: the coarse delay (COARSE0/1 with COARSE_DELAY_MODE DYNAMIC) and the rank controls are
+// not modelled; EDETERR stays low.
+#[lattice_ip(name = "DELAYA", sim_clock = "tick", DEL_MODE = "USER_DEFINED")]
+pub entity DELAYA<const DEL_VALUE: nat = 0> {
+    in tick: clock
+    in A: bit
+    in LOAD_N: bit
+    in MOVE: bit
+    in DIRECTION: bit
+    in COARSE0: bit
+    in COARSE1: bit
+    in RANKSELECT: bit
+    in RANKENABLE: bit
+    in RANK0UPDATE: bit
+    in RANK1UPDATE: bit
+    out Z: bit
+    out EDETERR: bit
+    out CFLAG: bit
+}
+
+impl DELAYA {
+    let init: bit[7] = DEL_VALUE
+    signal v: bit[7] = DEL_VALUE
+    signal mv_p: bit = 0
+    signal h: bit[32] = 0
+    on(tick.rise) {
+        mv_p = MOVE
+        h = {h[30:0], A}
+        if LOAD_N == 0 {
+            v = init
+        } else if MOVE == 1 && mv_p == 0 {
+            if DIRECTION == 0 {
+                if v != 127 {
+                    v = v + 1
+                }
+            } else {
+                if v != 0 {
+                    v = v - 1
+                }
+            }
+        }
+    }
+    let n: bit[8] = nexus_sim_ticks({1'b0, v})
+    Z = h[n[4:0]]
+    EDETERR = 0
+    CFLAG = if v == 0 || v == 127 { 1 } else { 0 }
+}
+
+// ---------------------------------------------------------------------------- DLL
+
+// DDR DLL: measures the period of CLKIN. CODE is the delay of a quarter period (90 degrees),
+// which the DQS buffers it feeds take as their 90-degree delay. LOCK rises after four equal
+// periods in a row. FREEZE holds CODE; DCNTL follows CODE while UDDCNTL_N is low.
+// Model: CODE is in ticks, not the silicon's delay cell units; only the DQS buffer model reads it.
+#[lattice_ip(name = "DDRDLL", sim_clock = "tick", GSR = "DISABLED")]
+pub entity DDRDLL {
+    in tick: clock
+    in CLKIN: clock
+    in RST: bit
+    in FREEZE: bit
+    in UDDCNTL_N: bit
+    out LOCK: bit
+    out CODE: bit[9]
+    out DCNTL: bit[9]
+}
+
+impl DDRDLL {
+    signal clk_p: bit = 0
+    signal cnt: bit[9] = 0
+    signal per: bit[9] = 0
+    signal same: bit[3] = 0
+    signal code: bit[9] = 0
+    signal dcntl: bit[9] = 0
+    signal lock: bit = 0
+    let up_edge: bit = if CLKIN == 1 && clk_p == 0 { 1 } else { 0 }
+    let quarter: bit[9] = (cnt + 2) >> 2
+    on(tick.rise) {
+        clk_p = CLKIN
+        if RST == 1 {
+            cnt = 0
+            per = 0
+            same = 0
+            code = 0
+            lock = 0
+        } else if up_edge == 1 {
+            cnt = 1
+            per = cnt
+            if cnt == per {
+                if same != 7 {
+                    same = same + 1
+                }
+            } else {
+                same = 0
+            }
+            if FREEZE == 0 {
+                code = quarter
+            }
+            if same >= 3 {
+                lock = 1
+            }
+        } else if cnt != 511 {
+            cnt = cnt + 1
+        }
+        if UDDCNTL_N == 0 {
+            dcntl = code
+        }
+    }
+    LOCK = lock
+    CODE = code
+    DCNTL = dcntl
+}
+
+// ---------------------------------------------------------------------------- DQS buffer
+
+// DQS buffer of one byte lane, in the MDDRX4 mode (ECLK = 4 x SCLK) with read and write paths.
+//
+// Write clocks: DQSW, the edge clock delayed by the write leveling setting, clocks the DQS
+// output; DQSW270, three quarters of an edge clock cycle after DQSW, moved by the write setting,
+// clocks DQ. Read clock: DQSR90 is the read DQS delayed by a quarter cycle (DLLCODE), moved by the
+// read setting, and runs only inside the read gate.
+//
+// Settings (taken on SCLK; from the guide, not set by reset: each needs its LOAD_N pulsed low
+// before its clock runs): RDLOADN, WRLOAD_N load the read and write settings to their middle
+// (128 of 0..255, no move), WRLVLOAD_N the write leveling setting to 0; each rising MOVE takes a
+// 12.5 ps step, up when its DIR is low and down when high, stopping at 0 and 255; its COUT is
+// high at either end.
+//
+// Read gate (from the guide): READ[3:0] says which edge clock cycles of an SCLK cycle hold a
+// read burst; taken on an SCLK edge, it opens the gate in those cycles two SCLK cycles later,
+// RDCLKSEL[1:0] x 45 degrees, + 180 when RDCLKSEL[2], + 360 when RDCLKSEL[3], after the cycle
+// starts. The gate passes DQS pulses only when DQS was low (preamble) as it opened, starting at
+// the first rising edge; a pulse that started inside the gate finishes. BURSTDETECT goes high for
+// two SCLK cycles when a gate passed one pulse per enabled cycle after a preamble; BTDETECT for
+// one SCLK cycle when it passed its first pulse after a preamble.
+// Model: the data of each enabled cycle is read out of the input FIFO eight edge clock cycles
+// after the gate cycle; IDDRX4DQ's Q and DATAVALID carry an SCLK cycle's reads in the SCLK cycle
+// after next. The FIFO pointers realign whenever no read is in flight. PAUSE and SELCLK are not
+// modelled (the clocks keep running); DQSWRD stays low.
+#[lattice_ip(name = "DQSBUF", sim_clock = "tick", GSR = "DISABLED", ENABLE_FIFO = "ENABLED", MODX = "MDDRX4", READ_ENABLE = "ENABLED", WRITE_ENABLE = "ENABLED")]
+pub entity DQSBUF {
+    in tick: clock
+    in DQSI: bit
+    in ECLKIN: clock
+    in SCLK: clock
+    in RST: bit
+    in PAUSE: bit
+    in RSTSMCNT: bit
+    in RDCLKSEL: bit[4]
+    in READ: bit[4]
+    in RDDIR: bit
+    in RDLOADN: bit
+    in READMOVE: bit
+    in SELCLK: bit
+    in WRDIR: bit
+    in WRLOAD_N: bit
+    in WRMOVE: bit
+    in WRLVDIR: bit
+    in WRLVLOAD_N: bit
+    in WRLVMOVE: bit
+    in DLLCODE: bit[9]
+    out DQSR90: clock
+    out DQSW: clock
+    out DQSW270: clock
+    out RDPNTR: bit[3]
+    out WRPNTR: bit[3]
+    out BTDETECT: bit
+    out BURSTDETECT: bit
+    out DATAVALID: bit
+    out READCOUT: bit
+    out WRCOUT: bit
+    out WRLVCOUT: bit
+    out DQSWRD: bit
+}
+
+impl DQSBUF {
+    // the read gate is open (tick side), and the FIFO write pointer
+    signal sess: bit = 0
+    signal wp: bit[3] = 0
+    let clr: bit = if RST == 1 || RSTSMCNT == 1 { 1 } else { 0 }
+
+    // ------------------------------------------------ settings (SCLK)
+    signal rd_s: bit[8] = 128
+    signal wr_s: bit[8] = 128
+    signal wl_s: bit[8] = 0
+    signal rd_ld: bit = 0
+    signal wr_ld: bit = 0
+    signal wl_ld: bit = 0
+    signal rdm_p: bit = 0
+    signal wrm_p: bit = 0
+    signal wlm_p: bit = 0
+    on(SCLK.rise) {
+        rdm_p = READMOVE
+        wrm_p = WRMOVE
+        wlm_p = WRLVMOVE
+        if RDLOADN == 0 {
+            rd_s = 128
+            rd_ld = 1
+        } else if READMOVE == 1 && rdm_p == 0 {
+            if RDDIR == 0 {
+                if rd_s != 255 {
+                    rd_s = rd_s + 1
+                }
+            } else if rd_s != 0 {
+                rd_s = rd_s - 1
+            }
+        }
+        if WRLOAD_N == 0 {
+            wr_s = 128
+            wr_ld = 1
+        } else if WRMOVE == 1 && wrm_p == 0 {
+            if WRDIR == 0 {
+                if wr_s != 255 {
+                    wr_s = wr_s + 1
+                }
+            } else if wr_s != 0 {
+                wr_s = wr_s - 1
+            }
+        }
+        if WRLVLOAD_N == 0 {
+            wl_s = 0
+            wl_ld = 1
+        } else if WRLVMOVE == 1 && wlm_p == 0 {
+            if WRLVDIR == 0 {
+                if wl_s != 255 {
+                    wl_s = wl_s + 1
+                }
+            } else if wl_s != 0 {
+                wl_s = wl_s - 1
+            }
+        }
+    }
+    READCOUT = if rd_s == 0 || rd_s == 255 { 1 } else { 0 }
+    WRCOUT = if wr_s == 0 || wr_s == 255 { 1 } else { 0 }
+    WRLVCOUT = if wl_s == 0 || wl_s == 255 { 1 } else { 0 }
+
+
+    // ------------------------------------------------ delays in ticks
+    let code: bit[8] = DLLCODE[7:0]
+    let rd_up: bit[8] = if rd_s >= 128 { nexus_sim_ticks(rd_s - 128) } else { 0 }
+    let rd_dn: bit[8] = if rd_s < 128 { nexus_sim_ticks(128 - rd_s) } else { 0 }
+    let wr_up: bit[8] = if wr_s >= 128 { nexus_sim_ticks(wr_s - 128) } else { 0 }
+    let wr_dn: bit[8] = if wr_s < 128 { nexus_sim_ticks(128 - wr_s) } else { 0 }
+    let d_wl: bit[8] = nexus_sim_ticks(wl_s)
+    let rd_base: bit[8] = code + rd_up
+    let d_rd: bit[8] = if rd_dn >= rd_base { 0 } else { rd_base - rd_dn }
+    let w270_base: bit[8] = d_wl + code + code + code + wr_up
+    let d_270: bit[8] = if wr_dn >= w270_base { 0 } else { w270_base - wr_dn }
+    let sel_q: bit[8] = (code * {6'b0, RDCLKSEL[1:0]}) >> 1
+    let sel_h: bit[8] = if RDCLKSEL[2] == 1 { code + code } else { 0 }
+    let sel_f: bit[8] = if RDCLKSEL[3] == 1 { code + code + code + code } else { 0 }
+    let d_sel: bit[8] = sel_q + sel_h + sel_f
+
+    // ------------------------------------------------ edge clock side: gate cycles and reads
+    signal r1: bit[4] = 0
+    signal r2: bit[4] = 0
+    on(SCLK.rise) {
+        r1 = READ
+        r2 = r1
+    }
+    #[cdc]
+    signal s_prev: bit = 0
+    signal p: bit[2] = 0
+    signal gw: bit[4] = 0
+    signal ge: bit = 0
+    // gate cycles of the last eight edge clock cycles, newest in bit 0
+    signal gh8: bit[9] = 0
+    signal rp: bit[3] = 0
+    signal dvacc: bit = 0
+    signal dv_e: bit = 0
+    let start: bit = if SCLK == 0 && s_prev == 0 { 1 } else { 0 }
+    let p_n: bit[2] = if start == 1 { 0 } else { p + 1 }
+    let gw_n: bit[4] = if start == 1 { r2 } else { gw }
+    let ge_n: bit = match p_n {
+        0 => gw_n[0],
+        1 => gw_n[1],
+        2 => gw_n[2],
+        _ => gw_n[3]
+    }
+    let gh8_n: bit[9] = {gh8[7:0], ge_n}
+    let rd_now: bit = gh8_n[8]
+    let in_flight: bit = if gh8_n != 0 || sess == 1 { 1 } else { 0 }
+    on(ECLKIN.rise) {
+        s_prev = SCLK
+        if clr == 1 {
+            p = 0
+            gw = 0
+            ge = 0
+            gh8 = 0
+            rp = 0
+            dvacc = 0
+            dv_e = 0
+        } else {
+            p = p_n
+            gw = gw_n
+            ge = ge_n
+            gh8 = gh8_n
+            if start == 1 {
+                dv_e = dvacc
+                dvacc = rd_now
+            } else if rd_now == 1 {
+                dvacc = 1
+            }
+            if rd_now == 1 {
+                rp = rp + 1
+            } else if in_flight == 0 {
+                rp = wp
+            }
+        }
+    }
+    signal dv_f: bit = 0
+    on(ECLKIN.fall) {
+        if p == 0 {
+            dv_f = dv_e
+        }
+    }
+    signal dv_s: bit = 0
+    on(SCLK.rise) {
+        dv_s = dv_f
+    }
+    DATAVALID = dv_s
+    RDPNTR = rp
+
+    // ------------------------------------------------ tick side: clocks and the read gate
+    signal eh: bit[128] = 0
+    signal gh: bit[128] = 0
+    signal mh: bit[128] = 0
+    signal dh: bit[128] = 0
+    signal qw: bit = 0
+    signal q270: bit = 0
+    signal w_run: bit = 0
+    signal w270_run: bit = 0
+    signal q90: bit = 0
+    signal q90_p: bit = 0
+    signal dqs_p: bit = 0
+    signal req_p: bit = 0
+    signal mk_p: bit = 0
+    signal pre_ok: bit = 0
+    signal passing: bit = 0
+    signal n_pass: bit[6] = 0
+    signal n_mark: bit[6] = 0
+    signal bd_tog: bit = 0
+    signal bt_tog: bit = 0
+    let req: bit = gh[d_sel[6:0]]
+    let mk: bit = mh[d_sel[6:0]]
+    let opening: bit = if sess == 0 && req == 1 && req_p == 0 { 1 } else { 0 }
+    let sess_n: bit = if opening == 1 { 1 } else { sess }
+    let pre_n: bit = if opening == 1 { if DQSI == 0 { 1 } else { 0 } } else { pre_ok }
+    let pulse: bit = if sess_n == 1 && pre_n == 1 && req == 1 && DQSI == 1 && dqs_p == 0 { 1 } else { 0 }
+    let passing_n: bit = if pulse == 1 || (passing == 1 && DQSI == 1) { 1 } else { 0 }
+    let n_pass_o: bit[6] = if opening == 1 { 0 } else { n_pass }
+    let n_mark_o: bit[6] = if opening == 1 { 0 } else { n_mark }
+    let n_pass_n: bit[6] = if pulse == 1 { n_pass_o + 1 } else { n_pass_o }
+    let n_mark_n: bit[6] = if sess_n == 1 && mk == 1 && mk_p == 0 { n_mark_o + 1 } else { n_mark_o }
+    // one mark per gate cycle, in its first half
+    let mark: bit = if ge == 1 && ECLKIN == 1 { 1 } else { 0 }
+    let closing: bit = if sess_n == 1 && req == 0 && passing_n == 0 { 1 } else { 0 }
+    on(tick.rise) {
+        eh = {eh[126:0], ECLKIN}
+        gh = {gh[126:0], ge}
+        mh = {mh[126:0], mark}
+        dqs_p = DQSI
+        req_p = req
+        mk_p = mk
+        q90_p = q90
+        // the write clocks start, once loaded, from a low half of their
+        // delayed edge clock, so their first rising edge is a whole one
+        if wl_ld == 1 && eh[d_wl[6:0]] == 0 {
+            w_run = 1
+        }
+        if wl_ld == 1 && wr_ld == 1 && eh[d_270[6:0]] == 0 {
+            w270_run = 1
+        }
+        qw = if w_run == 1 { eh[d_wl[6:0]] } else { 0 }
+        q270 = if w270_run == 1 { eh[d_270[6:0]] } else { 0 }
+        if clr == 1 {
+            sess = 0
+            pre_ok = 0
+            passing = 0
+            n_pass = 0
+            n_mark = 0
+            wp = 0
+            dh = 0
+            q90 = 0
+        } else {
+            pre_ok = pre_n
+            passing = passing_n
+            n_pass = n_pass_n
+            n_mark = n_mark_n
+            if pulse == 1 && n_pass_o == 0 {
+                bt_tog = !bt_tog
+            }
+            if closing == 1 {
+                sess = 0
+                if pre_n == 1 && n_pass_n != 0 && n_pass_n == n_mark_n {
+                    bd_tog = !bd_tog
+                }
+            } else {
+                sess = sess_n
+            }
+            dh = {dh[126:0], passing_n}
+            q90 = if rd_ld == 1 { dh[d_rd[6:0]] } else { 0 }
+            // a DQSR90 fall has written the FIFO entry at the pointer
+            if q90_p == 1 && q90 == 0 {
+                wp = wp + 1
+            }
+        }
+    }
+    DQSW = qw
+    DQSW270 = q270
+    DQSR90 = q90
+    WRPNTR = wp
+
+    // ------------------------------------------------ detect flags (SCLK)
+    #[cdc]
+    signal bd_s: bit = 0
+    #[cdc]
+    signal bt_s: bit = 0
+    signal bd_cnt: bit[2] = 0
+    signal bt_o: bit = 0
+    on(SCLK.rise) {
+        bd_s = bd_tog
+        bt_s = bt_tog
+        if bd_s != bd_tog {
+            bd_cnt = 2
+        } else if bd_cnt != 0 {
+            bd_cnt = bd_cnt - 1
+        }
+        bt_o = if bt_s != bt_tog { 1 } else { 0 }
+    }
+    BURSTDETECT = if bd_cnt != 0 { 1 } else { 0 }
+    BTDETECT = bt_o
+    DQSWRD = 0
+}
+
+// ---------------------------------------------------------------------------- input gearing
+
+// x4 DQ input: D sampled on both DQSR90 edges into the eight-entry FIFO at WRPNTR; each edge
+// clock cycle takes the entry at RDPNTR; the four cycles of an SCLK cycle come out together on
+// Q0..Q7 (Q0 = the rising-edge sample of the first) in the SCLK cycle after next.
+#[lattice_ip(name = "IDDRX4DQ", GSR = "DISABLED")]
+pub entity IDDRX4DQ {
+    in D: bit
+    in DQSR90: clock
+    in ECLK: clock
+    in SCLK: clock
+    in RST: bit
+    in RDPNTR0: bit
+    in RDPNTR1: bit
+    in RDPNTR2: bit
+    in WRPNTR0: bit
+    in WRPNTR1: bit
+    in WRPNTR2: bit
+    out Q0: bit
+    out Q1: bit
+    out Q2: bit
+    out Q3: bit
+    out Q4: bit
+    out Q5: bit
+    out Q6: bit
+    out Q7: bit
+}
+
+impl IDDRX4DQ {
+    signal dr: bit = 0
+    signal fifo: [bit[2]; 8]
+    let wp: bit[3] = {WRPNTR2, WRPNTR1, WRPNTR0}
+    let rp: bit[3] = {RDPNTR2, RDPNTR1, RDPNTR0}
+    on(DQSR90.rise) {
+        dr = D
+    }
+    on(DQSR90.fall) {
+        fifo[wp] = {D, dr}
+    }
+
+    #[cdc]
+    signal s_prev: bit = 0
+    signal p: bit[2] = 0
+    #[cdc]
+    signal acc: bit[8] = 0
+    signal word_e: bit[8] = 0
+    let start: bit = if SCLK == 0 && s_prev == 0 { 1 } else { 0 }
+    on(ECLK.rise) {
+        s_prev = SCLK
+        if RST == 1 {
+            p = 0
+            acc = 0
+            word_e = 0
+        } else {
+            p = if start == 1 { 0 } else { p + 1 }
+            if start == 1 {
+                word_e = acc
+            }
+            acc = {fifo[rp], acc[7:2]}
+        }
+    }
+    signal word: bit[8] = 0
+    on(ECLK.fall) {
+        if p == 0 {
+            word = word_e
+        }
+    }
+    signal q: bit[8] = 0
+    on(SCLK.rise) {
+        q = word
+    }
+    Q0 = q[0]
+    Q1 = q[1]
+    Q2 = q[2]
+    Q3 = q[3]
+    Q4 = q[4]
+    Q5 = q[5]
+    Q6 = q[6]
+    Q7 = q[7]
+}

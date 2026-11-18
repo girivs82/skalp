@@ -1,0 +1,38 @@
+// a function result too wide to inline becomes a module instance; each
+// specialisation of an entity needs its own, not the first one's signal
+
+fn pattern(z: bit) -> bit[72] {
+    return {8'h09, 8'h18, 8'h27, 8'h36, 8'h45, 8'h54, 8'h63, 8'h72, 8'h81}
+}
+
+entity WideChild<const G: nat = 0> {
+    out lo: bit[32]
+    out hi: bit[32]
+    out g: bit[8]
+}
+
+impl WideChild {
+    let x: bit[72] = pattern(0)
+    lo = x[31:0]
+    hi = x[71:40]
+    g = G
+}
+
+entity WideTop {
+    in clk: clock
+    out a_lo: bit[32]
+    out a_hi: bit[32]
+    out b_lo: bit[32]
+    out b_hi: bit[32]
+    out b_g: bit[8]
+}
+
+impl WideTop {
+    inst a = WideChild { }
+    inst b = WideChild<200> { }
+    a_lo = a.lo
+    a_hi = a.hi
+    b_lo = b.lo
+    b_hi = b.hi
+    b_g = b.g
+}

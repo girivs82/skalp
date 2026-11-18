@@ -801,21 +801,23 @@ impl CompiledCpuRuntime {
         self.current_cycle += 1;
     }
 
-    /// Run `cycles` clock cycles of the design's one input clock in the
-    /// compiled batched kernel (combinational logic, then every flip-flop,
-    /// once per cycle), when that is the same as stepping each half period:
-    /// every flip-flop takes one input clock. Returns false, having done
-    /// nothing, when the design has flip-flops on several clocks or on a
-    /// clock its own logic makes. Leaves the cycle count to the caller.
-    pub fn run_batched_cycles(&mut self, cycles: u64) -> bool {
+    /// Run `cycles` cycles of the input clock `clock` (any one input clock
+    /// when `None`) in the compiled batched kernel (combinational logic, then
+    /// every flip-flop, once per cycle), when that is the same as stepping
+    /// each half period: every flip-flop takes that one input clock. Returns
+    /// false, having done nothing, when the design has flip-flops on several
+    /// clocks, on a clock its own logic makes, or on another input. Leaves
+    /// the cycle count to the caller.
+    pub fn run_batched_cycles(&mut self, cycles: u64, clock: Option<&str>) -> bool {
         if cycles == 0 {
             return true;
         }
         let one_input_clock = self.kernel_clocks.len() <= 1
-            && self
-                .kernel_clocks
-                .iter()
-                .all(|c| matches!(c.source, ClockSource::Input(_) | ClockSource::Unknown));
+            && self.kernel_clocks.iter().all(|c| match c.source {
+                ClockSource::Input(_) => clock.is_none_or(|name| c.name == name),
+                ClockSource::Unknown => true,
+                ClockSource::Register(_) | ClockSource::Signal(_) => false,
+            });
         if !one_input_clock {
             return false;
         }
@@ -886,7 +888,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
 
     async fn run(&mut self, cycles: u64) -> SimulationResult<Vec<SimulationState>> {
         let mut states = Vec::with_capacity(cycles as usize);
-        if cycles > 10 && self.run_batched_cycles(cycles) {
+        if cycles > 10 && self.run_batched_cycles(cycles, None) {
             self.current_cycle += cycles;
             states.push(self.extract_state());
         } else {

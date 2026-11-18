@@ -1226,6 +1226,11 @@ impl<'hir> HirToMir<'hir> {
             self.entity_instance_outputs.clear();
             self.entity_instance_info.clear();
             self.tuple_call_results.clear();
+            // A cached call result names the function-module instance and result
+            // signal made in the module being converted: reused in another impl
+            // (a specialisation of the same entity, say) it referred to a signal
+            // that module does not have, which read as 0.
+            self.module_call_cache.clear();
             // Debug: Find entity name
             let impl_entity_name = hir
                 .entities
@@ -8131,8 +8136,12 @@ impl<'hir> HirToMir<'hir> {
             },
             // Build replicate: pop count, pop value, wrap
             BuildReplicate,
-            // Build index: pop index, pop base, wrap
-            BuildIndex,
+            // Build index: pop index, pop base, wrap. `bit_concat`: the base is a
+            // `{...}` bit concatenation in the source, so the index selects a bit
+            // of it, never one of its parts
+            BuildIndex {
+                bit_concat: bool,
+            },
             // Build range: pop low, pop high, pop base, wrap
             BuildRange,
         }
@@ -8193,6 +8202,19 @@ impl<'hir> HirToMir<'hir> {
                             work_stack.push(ExprWork::Convert(&unary.operand));
                         }
 
+                        // A concatenation with a part that has no width of its
+                        // own: the full conversion gives it the width the context
+                        // leaves it, or the fewest bits that hold its values
+                        hir::HirExpression::Concat(exprs)
+                            if exprs.len() > 1
+                                && exprs.iter().any(|x| {
+                                    Self::unsized_value_width(x).is_some()
+                                        && self.infer_hir_expression_width(x).is_none()
+                                }) =>
+                        {
+                            result_stack.push(self.convert_expression_impl(e, depth));
+                        }
+
                         // Concat - process iteratively
                         hir::HirExpression::Concat(exprs) => {
                             work_stack.push(ExprWork::BuildConcat { count: exprs.len() });
@@ -8240,7 +8262,12 @@ impl<'hir> HirToMir<'hir> {
                                 // Dynamic index into flattened array — balanced MUX tree
                                 result_stack.push(Some(expr));
                             } else {
-                                work_stack.push(ExprWork::BuildIndex);
+                                work_stack.push(ExprWork::BuildIndex {
+                                    bit_concat: matches!(
+                                        base.as_ref(),
+                                        hir::HirExpression::Concat(_)
+                                    ),
+                                });
                                 work_stack.push(ExprWork::Convert(index));
                                 work_stack.push(ExprWork::Convert(base));
                             }
@@ -8382,7 +8409,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                ExprWork::BuildIndex => {
+                ExprWork::BuildIndex { bit_concat } => {
                     let index = result_stack.pop().flatten();
                     let base = result_stack.pop().flatten();
                     if let (Some(base), Some(index)) = (base, index) {
@@ -8408,10 +8435,14 @@ impl<'hir> HirToMir<'hir> {
                                 _ => None,
                             };
 
-                            let is_bit_index = match const_index {
-                                Some(idx) => idx >= elements.len() as u64,
-                                None => false,
-                            };
+                            // A `{...}` written in the source is always bits (`{i, 1'b1}[0]`
+                            // passed into a function is bit 0, not part 0); only an array
+                            // value, which MIR also holds as a Concat, is indexed by part.
+                            let is_bit_index = bit_concat
+                                || match const_index {
+                                    Some(idx) => idx >= elements.len() as u64,
+                                    None => false,
+                                };
 
                             if elements.is_empty() {
                                 result_stack.push(None);
@@ -10426,16 +10457,27 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
 
-                    if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
-                        mir_exprs.push(mir_expr);
+                    // A part whose value has no width of its own (a bare
+                    // integer, or an `if`/`match` choosing between them)
+                    // takes the width the context leaves it, like a bare
+                    // integer; with none left it takes the fewest bits that
+                    // hold every value it can have (`{v[6:0], 0}` is 8 bits).
+                    // It used to keep whatever width conversion gave it,
+                    // 32 bits in a clocked block.
+                    let unsized_width = if known_widths[idx].is_none() {
+                        Self::unsized_value_width(expr)
                     } else {
-                        // Print more info about the element
-                        match expr {
-                            hir::HirExpression::Unary(unary) => {}
-                            hir::HirExpression::Range(base, high, low) => {}
-                            _ => {}
+                        None
+                    };
+                    let mir_expr = self.convert_expression(expr, depth + 1)?;
+                    match (unsized_width, inferred_width) {
+                        (Some(_), Some(width)) => {
+                            mir_exprs.push(Self::sized_bits(mir_expr, width as usize))
                         }
-                        return None;
+                        (Some(width), None) => {
+                            mir_exprs.push(Self::sized_bits(mir_expr, width as usize))
+                        }
+                        _ => mir_exprs.push(mir_expr),
                     }
                 }
 
@@ -14980,6 +15022,41 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// BUG #160 FIX: Infer the bit width of an HIR expression
+    /// The fewest bits that hold every value of `expr`, when its value has no
+    /// width of its own: a bare integer, or an `if`/`match` whose every result
+    /// is one. `None` for anything else.
+    fn unsized_value_width(expr: &hir::HirExpression) -> Option<u32> {
+        match expr {
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(v)) => {
+                Some((u64::BITS - v.leading_zeros()).max(1))
+            }
+            hir::HirExpression::If(i) => Some(
+                Self::unsized_value_width(&i.then_expr)?
+                    .max(Self::unsized_value_width(&i.else_expr)?),
+            ),
+            hir::HirExpression::Ternary {
+                true_expr,
+                false_expr,
+                ..
+            } => Some(
+                Self::unsized_value_width(true_expr)?.max(Self::unsized_value_width(false_expr)?),
+            ),
+            hir::HirExpression::Match(m) => {
+                let mut width = None;
+                for arm in &m.arms {
+                    let w = Self::unsized_value_width(&arm.expr)?;
+                    width = Some(width.map_or(w, |x: u32| x.max(w)));
+                }
+                width
+            }
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } if statements.is_empty() => Self::unsized_value_width(result_expr),
+            _ => None,
+        }
+    }
+
     fn infer_hir_expression_width(&self, expr: &hir::HirExpression) -> Option<u32> {
         match expr {
             hir::HirExpression::Literal(lit) => {
@@ -19758,6 +19835,13 @@ impl<'hir> HirToMir<'hir> {
                 return None;
             }
         };
+
+        // `a +: b` on bits is one bit wider than its operands. `Add::add`
+        // returns `Self`, so routing it through `impl Add for bit<N>` would
+        // drop the carry: the widening add stays primitive.
+        if matches!(op, hir::HirBinaryOp::WidenAdd) && type_name.starts_with("bit[") {
+            return None;
+        }
 
         // Float types now use trait-based resolution exclusively
         // The distinct fp16/fp32/fp64/bf16 types have trait implementations in stdlib
@@ -25875,6 +25959,7 @@ impl<'hir> HirToMir<'hir> {
         self.dynamic_variables.clear();
         self.payload_var_expressions.clear();
         self.tuple_call_results.clear();
+        self.module_call_cache.clear();
         self.entity_instance_outputs.clear();
         self.entity_instance_info.clear();
         self.placeholder_signal_to_entity_output.clear();

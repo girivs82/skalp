@@ -788,6 +788,13 @@ Field/method: s.field   x.sqrt()
 `a ++ b` lowers to exactly the same node as `{a, b}`; use whichever reads
 better. `++` binds loosest of all operators.
 
+A bare integer, or an `if`/`match` whose every result is a bare integer, has
+no width of its own. In a concatenation it takes the fewest bits that hold
+every value it can have (`0` and `if c { 1 } else { 0 }` are one bit, `5` is
+three); in a concatenation a function returns, a single such part takes the
+width the return type leaves it instead. Write a sized literal when you mean
+another width.
+
 There is no `**` power operator, no `<<<`/`>>>`, and no `|x` OR-reduction
 (write `x != 0`).
 

@@ -276,6 +276,11 @@ impl MirCompiler {
                             // checked by the NCL bridge (only a clocked parent needs it)
                             && port.name != skalp_frontend::hir::NCL_REQ_PORT
                             && port.name != skalp_frontend::ncl_streams::NCL_TICK_PORT
+                            // wired by the simulator (`sim_clocks::wire_sim_clocks`)
+                            && !target
+                                .vendor_ip_config
+                                .as_ref()
+                                .is_some_and(|v| v.sim_clocks.contains(&port.name))
                         {
                             inst_errors.push(format!(
                                 "input port `{p}` of `{t}` is not connected in `inst {n}` (in entity `{o}`)",
@@ -1742,6 +1747,12 @@ impl MirCompiler {
         let mut all_violations = Vec::new();
 
         for module in &mir.modules {
+            // A vendor primitive's body is its simulation model, which
+            // describes a hard block and is never synthesized: the block's
+            // own clocking is the vendor's, not the design's to check
+            if module.vendor_ip_config.is_some() {
+                continue;
+            }
             let mut analyzer = CdcAnalyzer::new();
             let mut violations = analyzer.analyze_module(module);
             // Carry the module name for diagnostics (TRIAGE #10)

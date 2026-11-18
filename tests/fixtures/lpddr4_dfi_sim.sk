@@ -1,6 +1,7 @@
 // LPDDR4 controller + behavioural DFI PHY + LPDDR4 channel model, with a traffic generator.
 //
-// Init and training run first. Then each pass writes N_BURSTS bursts (data from the burst
+// Init and training (write leveling, read gate, read eye, write DQ) run first; each byte lane can
+// be given its own board write delay (WR_SKEWn_CLKS for DQS and DQ, WR_DQ_SKEWn_CLKS more for DQ). Then each pass writes N_BURSTS bursts (data from the burst
 // number and the pass), reads them all back, then rewrites and reads back each burst in turn
 // (write-to-read and read-to-write turnarounds on every burst). Rows change with the burst number,
 // so banks see row hits, misses and closed rows. Undriven bus lines read 0.
@@ -26,7 +27,11 @@ entity Lpddr4DfiSim<
     const DQ_SKEW_CLKS: nat = 0,
     const N_BURSTS: nat = 64,
     const N_PASSES: nat = 2,
-    const PHYUPD_EVERY: nat = 0
+    const PHYUPD_EVERY: nat = 0,
+    const WR_SKEW0_CLKS: nat = 0,
+    const WR_SKEW1_CLKS: nat = 0,
+    const WR_DQ_SKEW0_CLKS: nat = 0,
+    const WR_DQ_SKEW1_CLKS: nat = 0
 > {
     in clk: clock
     out done: bit
@@ -44,6 +49,12 @@ entity Lpddr4DfiSim<
     out rdly0: bit[4]
     out rdly1: bit[4]
     out lvl_fail: bit[2]
+    out wl0: bit[4]
+    out wl1: bit[4]
+    out wdq0: bit[4]
+    out wdq1: bit[4]
+    out wrlvl_fail: bit[2]
+    out wdq_fail: bit[2]
     out gate_timeouts: bit[16]
     out upd_violations: bit[16]
     out ctrlupd_count: bit[16]
@@ -52,6 +63,10 @@ entity Lpddr4DfiSim<
     out m_err_code: bit[8]
     out m_err_cycle: bit[32]
     out m_contention: bit[16]
+    out m_dq_viol: bit[16]
+    // at the end of training
+    out m_dq_viol_init: bit[16]
+    out m_n_wr_init: bit[32]
     out m_aliased: bit[16]
     out m_unwritten: bit[16]
     out m_n_act: bit[32]
@@ -80,6 +95,9 @@ impl Lpddr4DfiSim {
     signal rd_ok: bit[32] = 0
     signal passes_r: bit[8] = 0
     signal done_r: bit = 0
+    signal snap: bit = 0
+    signal viol_init: bit[16] = 0
+    signal nwr_init: bit[32] = 0
 
     let n_bursts: bit[16] = N_BURSTS
     let n_passes: bit[8] = N_PASSES
@@ -110,7 +128,9 @@ impl Lpddr4DfiSim {
         dfi_ctrlupd_ack: phy.dfi_ctrlupd_ack,
         dfi_phyupd_req: phy.dfi_phyupd_req,
         dfi_rdlvl_gate_resp: phy.dfi_rdlvl_gate_resp,
-        dfi_rdlvl_resp: phy.dfi_rdlvl_resp
+        dfi_rdlvl_resp: phy.dfi_rdlvl_resp,
+        dfi_wrlvl_resp: phy.dfi_wrlvl_resp,
+        dfi_wdqlvl_resp: phy.dfi_wdqlvl_resp
     }
 
     inst phy = DfiLpddr4BehavPhy<8, 4, 15450, 0, 0, 3, PHYUPD_EVERY, 4> {
@@ -152,11 +172,14 @@ impl Lpddr4DfiSim {
         dfi_phyupd_ack: ctrl.dfi_phyupd_ack,
         dfi_rdlvl_gate_en: ctrl.dfi_rdlvl_gate_en,
         dfi_rdlvl_en: ctrl.dfi_rdlvl_en,
+        dfi_wrlvl_en: ctrl.dfi_wrlvl_en,
+        dfi_wrlvl_strobe: ctrl.dfi_wrlvl_strobe,
+        dfi_wdqlvl_en: ctrl.dfi_wdqlvl_en,
         dq_i: bus_dq,
-        dqs_t_i: {bus_dqs, bus_dqs}
+        dqs_t_i: bus_dqs
     }
 
-    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16> {
+    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8> {
         clk: clk,
         reset_n: phy.reset_n,
         ck_t: phy.ck_t,
@@ -172,15 +195,30 @@ impl Lpddr4DfiSim {
 
     signal dclk: clock
     signal bus_dq: bit[16]
-    signal bus_dqs: bit
-    signal bus_dqsc: bit
+    signal bus_dqs: bit[2]
+    signal bus_dqsc: bit[2]
     dclk = phy.dfi_clk
-    bus_dq = if dram.dq_oe == 1 { dram.dq_out } else { if phy.dq_oe == 1 { phy.dq_o } else { 0 } }
-    bus_dqs = if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_oe == 1 { phy.dqs_t_o[0] } else { 0 } }
-    bus_dqsc = if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_oe == 1 { phy.dqs_c_o[0] } else { 0 } }
+    bus_dq = {
+        if dram.dq_oe == 1 { dram.dq_out[15:8] } else { if phy.dq_oe[1] == 1 { phy.dq_o[15:8] } else { 8'h00 } },
+        if dram.dq_oe == 1 { dram.dq_out[7:0] } else { if phy.dq_oe[0] == 1 { phy.dq_o[7:0] } else { 8'h00 } }
+    }
+    bus_dqs = {
+        if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_oe[1] == 1 { phy.dqs_t_o[1] } else { 1'b0 } },
+        if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_oe[0] == 1 { phy.dqs_t_o[0] } else { 1'b0 } }
+    }
+    bus_dqsc = {
+        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_oe[1] == 1 { phy.dqs_c_o[1] } else { 1'b0 } },
+        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_oe[0] == 1 { phy.dqs_c_o[0] } else { 1'b0 } }
+    }
 
     on(dclk.rise) {
         g_wait = 0
+        // DQ timing violations and writes so far, as training ends
+        if ctrl.init_done == 1 && snap == 0 {
+            snap = 1
+            viol_init = dram.dq_viol
+            nwr_init = dram.n_wr
+        }
         if g_st == 0 && ctrl.init_done == 1 {
             g_st = 1
             g_i = 0
@@ -236,6 +274,12 @@ impl Lpddr4DfiSim {
     rdly0 = phy.rd_dly0
     rdly1 = phy.rd_dly1
     lvl_fail = phy.lvl_fail
+    wl0 = phy.wl_dly0
+    wl1 = phy.wl_dly1
+    wdq0 = phy.wdq_dly0
+    wdq1 = phy.wdq_dly1
+    wrlvl_fail = phy.wrlvl_fail
+    wdq_fail = phy.wdq_fail
     gate_timeouts = phy.gate_timeouts
     upd_violations = phy.upd_violations
     ctrlupd_count = phy.ctrlupd_count
@@ -244,6 +288,9 @@ impl Lpddr4DfiSim {
     m_err_code = dram.err_code
     m_err_cycle = dram.err_cycle
     m_contention = dram.contention
+    m_dq_viol = dram.dq_viol
+    m_dq_viol_init = viol_init
+    m_n_wr_init = nwr_init
     m_aliased = dram.aliased
     m_unwritten = dram.unwritten
     m_n_act = dram.n_act

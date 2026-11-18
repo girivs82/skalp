@@ -476,6 +476,28 @@ impl Testbench {
         Self::from_source_behavioral_with_top(source_path, config, Some(top_module)).await
     }
 
+    /// A behavioral testbench for a design built for `device` (a part or
+    /// family name, as `--device` takes it). The design instantiates the
+    /// family's vendor primitives by name, and simulates their models from
+    /// the family's primitive library; a model's own clock is the top-level
+    /// `sim_tick` input.
+    pub async fn behavioral_for_device(
+        source_path: &str,
+        top_module: &str,
+        device: &str,
+    ) -> Result<Self> {
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: HwAccel::Cpu,
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+        Self::from_source_behavioral_for_device(source_path, config, Some(top_module), Some(device))
+            .await
+    }
+
     // ========================================================================
     // Coverage-enabled constructors
     // ========================================================================
@@ -739,6 +761,15 @@ impl Testbench {
         config: UnifiedSimConfig,
         top_module: Option<&str>,
     ) -> Result<Self> {
+        Self::from_source_behavioral_for_device(source_path, config, top_module, None).await
+    }
+
+    async fn from_source_behavioral_for_device(
+        source_path: &str,
+        config: UnifiedSimConfig,
+        top_module: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<Self> {
         let path = Path::new(source_path);
 
         // Initialize cache
@@ -746,8 +777,11 @@ impl Testbench {
         let dependencies = collect_dependencies(path).unwrap_or_default();
         let cache_key = cache.compute_cache_key(path, &dependencies).ok();
 
-        // Compile to SIR
-        let sir = if top_module.is_some() {
+        // Compile to SIR (a build for a device is not cached: the key does
+        // not cover the device's primitive library)
+        let sir = if device.is_some() {
+            Self::compile_to_sir_for_device(path, &cache, None, top_module, device)?
+        } else if top_module.is_some() {
             Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
         } else if let Some(ref key) = cache_key {
             if let Ok(Some(cached_sir)) = cache.load(key) {
@@ -1014,9 +1048,19 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
     ) -> Result<skalp_sir::SirModule> {
+        Self::compile_to_sir_for_device(path, cache, cache_key, explicit_top, None)
+    }
+
+    fn compile_to_sir_for_device(
+        path: &Path,
+        cache: &CompilationCache,
+        cache_key: Option<&String>,
+        explicit_top: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<skalp_sir::SirModule> {
         let context = match path.extension().and_then(|s| s.to_str()) {
             Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
-            _ => skalp_frontend::parse_and_build_compilation_context(path)?,
+            _ => skalp_frontend::parse_and_build_compilation_context_for_device(path, device)?,
         };
 
         let compiler = MirCompiler::new();
@@ -1142,6 +1186,15 @@ impl Testbench {
             }
         };
 
+        // Primitive models' simulation clocks come from a top-level `sim_tick`
+        let top_id = top_module.id;
+        let mut mir = mir;
+        skalp_mir::sim_clocks::wire_sim_clocks(&mut mir, top_id);
+        let top_module = mir
+            .modules
+            .iter()
+            .find(|m| m.id == top_id)
+            .expect("top module");
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         if let Some(key) = cache_key {
@@ -1270,7 +1323,7 @@ impl Testbench {
                 let batch_cycles = (sample_rate - 1).min(remaining);
                 if batch_cycles > 0 {
                     self.sim.set_input(clock_name, 1).await;
-                    self.sim.run_batched(batch_cycles as u64).await;
+                    self.sim.run_batched(batch_cycles as u64, clock_name).await;
                     self.cycle_count += batch_cycles as u64;
                     remaining -= batch_cycles;
                 }
@@ -1316,7 +1369,7 @@ impl Testbench {
             let mut remaining = cycles;
             while remaining > 0 {
                 let chunk_size = remaining.min(BATCH_CHUNK);
-                self.sim.run_batched(chunk_size as u64).await;
+                self.sim.run_batched(chunk_size as u64, clock_name).await;
                 self.cycle_count += chunk_size as u64;
                 remaining -= chunk_size;
             }

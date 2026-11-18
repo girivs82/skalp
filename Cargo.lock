@@ -3309,6 +3309,7 @@ dependencies = [
  "rowan",
  "serde",
  "serde_json",
+ "skalp-stdlib",
  "stacker",
  "tempfile",
  "thiserror 1.0.69",

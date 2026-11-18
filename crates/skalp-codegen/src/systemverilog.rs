@@ -1630,10 +1630,107 @@ fn format_lvalue(lvalue: &skalp_mir::LValue) -> String {
 }
 
 /// Format an expression with module context
+/// Width of a scalar type with a fixed width, `None` for anything else
+/// (arrays, structs, parameter-sized types, whose emitted width can differ).
+fn fixed_scalar_width(ty: &DataType) -> Option<usize> {
+    match ty {
+        DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => Some(*w),
+        DataType::Bool => Some(1),
+        _ => None,
+    }
+}
+
+fn lvalue_type<'m>(lvalue: &skalp_mir::LValue, module: &'m Module) -> Option<&'m DataType> {
+    match lvalue {
+        skalp_mir::LValue::Variable(id) => module
+            .variables
+            .iter()
+            .find(|v| v.id == *id)
+            .map(|v| &v.var_type),
+        skalp_mir::LValue::Signal(id) => module
+            .signals
+            .iter()
+            .find(|s| s.id == *id)
+            .map(|s| &s.signal_type),
+        skalp_mir::LValue::Port(id) => module
+            .ports
+            .iter()
+            .find(|p| p.id == *id)
+            .map(|p| &p.port_type),
+        _ => None,
+    }
+}
+
+/// Self-determined width of a `+`/`-` expression, for a size cast:
+/// `Some(Some(w))` when the expression is `w` bits on its own, `Some(None)`
+/// for an unsized integer literal (sized by the other operand), and `None`
+/// when the width is not known for certain here, in which case no cast is
+/// emitted.
+fn arith_self_width(expr: &skalp_mir::Expression, module: &Module) -> Option<Option<usize>> {
+    use skalp_mir::BinaryOp as B;
+    use skalp_mir::ExpressionKind as K;
+    let combine = |l: Option<usize>, r: Option<usize>| match (l, r) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+    match &expr.kind {
+        K::Literal(skalp_mir::Value::Integer(_)) => Some(None),
+        K::Literal(skalp_mir::Value::BitVector { width, .. }) => Some(Some(*width)),
+        K::Ref(lvalue) => match lvalue {
+            skalp_mir::LValue::BitSelect { base, .. } => {
+                fixed_scalar_width(lvalue_type(base, module)?).map(|_| Some(1))
+            }
+            skalp_mir::LValue::RangeSelect { base, high, low } => {
+                fixed_scalar_width(lvalue_type(base, module)?)?;
+                match (&high.kind, &low.kind) {
+                    (
+                        K::Literal(skalp_mir::Value::Integer(h)),
+                        K::Literal(skalp_mir::Value::Integer(l)),
+                    ) if h >= l => Some(Some((h - l + 1) as usize)),
+                    _ => None,
+                }
+            }
+            _ => fixed_scalar_width(lvalue_type(lvalue, module)?).map(Some),
+        },
+        K::Binary {
+            op: B::Add | B::Sub | B::BitwiseAnd | B::BitwiseOr | B::BitwiseXor,
+            left,
+            right,
+        } => Some(combine(
+            arith_self_width(left, module)?,
+            arith_self_width(right, module)?,
+        )),
+        K::Unary { op, operand } => match op {
+            skalp_mir::UnaryOp::Reduce(_) => Some(Some(1)),
+            _ => arith_self_width(operand, module),
+        },
+        K::Cast { target_type, .. } => fixed_scalar_width(target_type).map(Some),
+        _ => None,
+    }
+}
+
 fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module) -> String {
     match &expr.kind {
         skalp_mir::ExpressionKind::Literal(val) => format_value(val),
         skalp_mir::ExpressionKind::Ref(lval) => format_lvalue_with_context(lval, module),
+        // `+` and `-` keep their operands' width. SystemVerilog sizes them by
+        // context instead, so `assign s9 = a8 + b8` or `a - b == 31` would keep
+        // the carry or borrow: a size cast makes them self-determined.
+        skalp_mir::ExpressionKind::Binary {
+            op: op @ (skalp_mir::BinaryOp::Add | skalp_mir::BinaryOp::Sub),
+            left,
+            right,
+        } if matches!(arith_self_width(expr, module), Some(Some(_))) => {
+            let w = arith_self_width(expr, module).flatten().unwrap_or_default();
+            format!(
+                "{}'({} {} {})",
+                w,
+                format_expression_with_context(left, module),
+                format_binary_op(op),
+                format_expression_with_context(right, module)
+            )
+        }
         skalp_mir::ExpressionKind::Binary { op, left, right } => {
             format!(
                 "({} {} {})",
@@ -3274,7 +3371,12 @@ fn generate_vendor_ip_wrapper(
 
     // Generate port list
     let mut ports = Vec::new();
-    for port in &mir_module.ports {
+    // a simulation model's own clock is not a port of the primitive
+    for port in mir_module
+        .ports
+        .iter()
+        .filter(|p| !vendor_config.sim_clocks.contains(&p.name))
+    {
         let direction = match port.direction {
             skalp_mir::PortDirection::Input => "input",
             skalp_mir::PortDirection::Output => "output",
@@ -3372,6 +3474,7 @@ fn generate_vendor_ip_wrapper(
         let mut all_connections: Vec<String> = mir_module
             .ports
             .iter()
+            .filter(|p| !vendor_config.sim_clocks.contains(&p.name))
             .map(|p| {
                 // Use mapped IP port name if available, otherwise use entity port name
                 let ip_port_name = match port_mapping.get(p.name.as_str()) {

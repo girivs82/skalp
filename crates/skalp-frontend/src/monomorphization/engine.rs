@@ -538,7 +538,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
             assignments: specialized_assignments, // Use remapped assignments
             span: entity.span.clone(),            // Preserve source span from original entity
             pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
-            vendor_ip_config: entity.vendor_ip_config.clone(), // Preserve vendor IP config
+            vendor_ip_config: entity
+                .vendor_ip_config
+                .as_ref()
+                .map(|cfg| vendor_config_with_generics(cfg, &instantiation.const_args)),
             power_domains: entity.power_domains.clone(), // Preserve power domains
             power_domain_config: entity.power_domain_config.clone(), // Preserve power domain config for CCF
             safety_mechanism_config: entity.safety_mechanism_config.clone(), // Preserve safety config
@@ -3074,6 +3077,35 @@ impl<'hir> MonomorphizationEngine<'hir> {
             _ => expr.clone(),
         }
     }
+}
+
+/// A vendor primitive's configuration for one specialization of its entity:
+/// the entity's generics are the primitive's parameters, so each const
+/// argument becomes a parameter of the cell (`inst d = DELAYB<DEL_VALUE: 9>`
+/// gives the cell `DEL_VALUE = "9"`), over the attribute's own value of the
+/// same name. Arguments with no scalar value (types, structs, float
+/// formats) are not parameters and are left out.
+fn vendor_config_with_generics(
+    cfg: &crate::hir::VendorIpConfig,
+    const_args: &IndexMap<String, ConstValue>,
+) -> crate::hir::VendorIpConfig {
+    let mut cfg = cfg.clone();
+    for (name, value) in const_args {
+        let text = match value {
+            ConstValue::Nat(n) => n.to_string(),
+            ConstValue::Int(i) => i.to_string(),
+            ConstValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            ConstValue::String(s) => s.clone(),
+            ConstValue::Float(_) | ConstValue::FloatFormat(_) | ConstValue::Struct(_) => continue,
+        };
+        // Attribute values keep their quotes until the cell is made
+        let quoted = format!("\"{text}\"");
+        match cfg.parameters.iter_mut().find(|(k, _)| k == name) {
+            Some((_, v)) => *v = quoted,
+            None => cfg.parameters.push((name.clone(), quoted)),
+        }
+    }
+    cfg
 }
 
 impl Default for MonomorphizationEngine<'_> {

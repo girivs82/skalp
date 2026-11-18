@@ -10,18 +10,15 @@ This directory contains GitHub Actions workflows for automated testing, building
 
 Runs comprehensive test suite and quality checks:
 
-- **Test Suite Job**
-  - Tests on Rust stable and beta
-  - Parser regression tests (156 tests)
-  - HIR builder regression tests (53 tests)
-  - Golden file tests (11 tests)
-  - All unit tests across all crates
-  - Integration tests
-  - Documentation tests
+- **Test Suite Job** (`test-suite.yml`, Linux, stable Rust)
+  - Formatting, clippy, then the tests
+  - On a pull request only the tests the change can affect run, as picked by
+    `scripts/select_tests.py` (see below). Add the `full-tests` label to a pull
+    request to run everything. Pushes to master always run everything.
 
-- **Coverage Job**
-  - Generates code coverage using tarpaulin
-  - Uploads to Codecov for tracking
+- **Clippy Job**
+  - Clippy on beta and on macOS (their full test runs happen in
+    `full-test-matrix.yml` before every release and on demand)
 
 - **Lint Job**
   - Formatting check (`cargo fmt`)
@@ -63,11 +60,31 @@ Automates release process:
 3. Uploads binaries to release
 4. Publishes to crates.io (if configured)
 
+### Affected-test selection
+
+`scripts/select_tests.py` maps the changed files to tests:
+
+- a crate's own tests run when that crate or a workspace crate it depends on
+  changed (a place-and-route change does not run the frontend's tests);
+- a module of the integration suite (`tests/suite/<module>.rs`) runs when a
+  crate it uses changed, when the module itself changed, or when a fixture or
+  library source file it names changed;
+- documentation changes run nothing;
+- changes to `Cargo.toml`, the lockfile, CI, scripts or any path the script
+  does not recognise run everything.
+
+Every file in `tests/suite/` must be declared in `tests/suite/main.rs`, or the
+script fails, so no test can drop out of the selection unnoticed.
+
 ## Usage
 
 ### Running Tests Locally
 
 ```bash
+# Run only the tests your change can affect (compared with origin/master)
+scripts/select_tests.py          # print the commands
+scripts/select_tests.py --run    # run them
+
 # Run all tests
 cargo test --workspace
 

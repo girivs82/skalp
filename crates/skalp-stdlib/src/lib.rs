@@ -44,6 +44,23 @@ pub const FIFO_SK: &str = include_str!("../components/fifo.sk");
 pub const UART_SK: &str = include_str!("../components/uart.sk");
 pub const AXI4_LITE_SK: &str = include_str!("../components/axi4_lite.sk");
 
+/// The simulation models of a device family's vendor primitives, as
+/// (file name, source) pairs: what a design built for one of the family's
+/// devices may instantiate without declaring. `family` is a primitive-library
+/// family name (`nexus`); a family without models gives `None`.
+pub fn primitive_models(family: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match family {
+        "nexus" => Some(&NEXUS_PRIMITIVES),
+        _ => None,
+    }
+}
+
+/// Nexus (CrossLink-NX, Certus-NX, CertusPro-NX, MachXO5-NX) primitive models
+const NEXUS_PRIMITIVES: [(&str, &str); 1] = [(
+    "skalp/primitives/nexus/ddr.sk",
+    include_str!("../skalp/primitives/nexus/ddr.sk"),
+)];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +71,12 @@ mod tests {
         assert!(!components.is_empty());
         assert!(components.iter().any(|(name, _)| *name == "counter"));
         assert!(components.iter().any(|(name, _)| *name == "fifo"));
+    }
+
+    #[test]
+    fn primitive_models_by_family() {
+        let nexus = primitive_models("nexus").expect("nexus models");
+        assert!(nexus.iter().any(|(_, src)| src.contains("entity ODDRX4")));
+        assert!(primitive_models("none").is_none());
     }
 }

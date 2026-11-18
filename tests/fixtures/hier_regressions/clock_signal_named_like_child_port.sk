@@ -1,0 +1,37 @@
+// The top makes a clock `eclk` as a signal (sim_tick / 2) and feeds it to a child whose clock
+// port is also named `eclk`. The top's own `on(eclk.rise)` must count on its signal: it used to
+// bind to the child's port of that name, which the top does not have, and the block vanished.
+entity Halver {
+    in eclk: clock
+    out q: bit
+}
+
+impl Halver {
+    signal d: bit = 0
+    on(eclk.rise) {
+        d = !d
+    }
+    q = d
+}
+
+entity ClockNamedLikePort {
+    in sim_tick: clock
+    out count: bit[16]
+    out half: bit
+}
+
+impl ClockNamedLikePort {
+    signal ek: bit = 0
+    on(sim_tick.rise) {
+        ek = !ek
+    }
+    signal eclk: clock
+    eclk = ek
+    signal a: bit[16] = 0
+    on(eclk.rise) {
+        a = a + 1
+    }
+    inst h = Halver { eclk: eclk }
+    count = a
+    half = h.q
+}

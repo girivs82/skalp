@@ -1,8 +1,10 @@
 name: Test Suite
 
 # Full test run: fmt, clippy, every test target once, doc tests.
-# Pull requests run it on Linux stable only (ci.yml); beta and macOS run
-# before a release (release.yml) or on demand (Actions -> Full Test Matrix).
+# Pull requests run it on Linux stable only (ci.yml), with only the tests the
+# change can affect (`selective`); pushes to master and releases run them all.
+# Beta and macOS run before a release (release.yml) or on demand
+# (Actions -> Full Test Matrix).
 
 on:
   workflow_call:
@@ -15,6 +17,12 @@ on:
         description: JSON list of toolchains
         type: string
         default: '["stable"]'
+      selective:
+        description: >-
+          Run only the tests the change can affect (scripts/select_tests.py,
+          against the pull request's base); otherwise run everything
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,6 +50,10 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # the selective run diffs against the base branch's merge base, so it
+          # needs full history (a quoted '0': a bare 0 is falsy in `&&`/`||`)
+          fetch-depth: ${{ inputs.selective && '0' || '1' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -65,10 +77,22 @@ jobs:
       # differing features used to rebuild the workspace and rerun the
       # suite about 2.3 times.)
       - name: Run all tests
+        if: ${{ !inputs.selective }}
         run: cargo test --workspace --exclude skalp-verify --exclude skalp-formal --all-targets --all-features --no-fail-fast
 
       - name: Run doc tests
+        if: ${{ !inputs.selective }}
         run: cargo test --doc --workspace --all-features --exclude skalp --exclude skalp-verify --exclude skalp-formal
+
+      # Pull requests: the crates that depend on what changed, and the suite
+      # modules that use them (or the fixtures and library files that changed).
+      # Build, CI or unrecognised changes still run everything.
+      - name: Run affected tests
+        if: ${{ inputs.selective }}
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          python3 scripts/select_tests.py --base "origin/${{ github.base_ref }}"
+          python3 scripts/select_tests.py --base "origin/${{ github.base_ref }}" --run
 
       - name: Run verification tests
         if: runner.os == 'macOS'  # z3 only available on macOS

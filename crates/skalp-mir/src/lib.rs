@@ -19,6 +19,7 @@ pub mod monomorphize;
 pub mod ncl_bridge;
 pub mod optimize;
 pub mod pipelining;
+pub mod sim_clocks;
 pub mod ssa_conversion;
 pub mod timing;
 pub mod transform;
