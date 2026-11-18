@@ -177,3 +177,104 @@ fn simulators_decode_a_uart_line() {
     let ns: f64 = stopped.trim_end_matches(" ns").parse().unwrap();
     assert!(ns < 9600.0, "stopped at {ns} ns");
 }
+
+/// The average power `skalp sim --energy` reports, in mW
+fn energy_mw(report: &str) -> f64 {
+    let line = report
+        .lines()
+        .find(|l| l.starts_with("Switching energy"))
+        .unwrap_or_else(|| panic!("no energy report:\n{report}"));
+    let at = line.find(" mW average").expect("an average power");
+    line[..at]
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .expect("a number")
+}
+
+/// A build's switching energy: counting costs more than holding, the clock
+/// costs something even when nothing else switches, and a clock twice as
+/// fast costs about twice the power
+#[test]
+fn timed_simulation_estimates_switching_energy() {
+    let dir = counter_dir();
+    skalp(
+        dir.path(),
+        &["synth", "counter.sk", "-d", "ice40-hx8k", "-f", "-o", "out"],
+    );
+    assert!(dir.path().join("out/design_loads.json").exists());
+    let run = |clock: &str, en: &str| {
+        let report = skalp(
+            dir.path(),
+            &[
+                "sim",
+                "out",
+                "--clock",
+                clock,
+                "--set",
+                "rst=0",
+                "--set",
+                en,
+                "-d",
+                "4us",
+                "--energy",
+                "--energy-from",
+                "1us",
+            ],
+        );
+        assert!(report.contains("By block:"), "{report}");
+        energy_mw(&report)
+    };
+    let counting = run("clk=20", "en=1");
+    let holding = run("clk=20", "en=0");
+    let holding_slow = run("clk=40", "en=0");
+    assert!(holding > 0.0, "the clock switches");
+    assert!(counting > holding, "{counting} vs {holding}");
+    let ratio = holding / holding_slow;
+    assert!((1.8..2.2).contains(&ratio), "{holding} vs {holding_slow}");
+
+    // Each net's share, as CSV, adds up to the total
+    let report = skalp(
+        dir.path(),
+        &[
+            "sim",
+            "out",
+            "--clock",
+            "clk=20",
+            "--set",
+            "rst=0",
+            "--set",
+            "en=1",
+            "-d",
+            "4us",
+            "--energy",
+            "--energy-from",
+            "1us",
+            "--energy-nets",
+            "nets.csv",
+        ],
+    );
+    let csv = std::fs::read_to_string(dir.path().join("nets.csv")).expect("the CSV");
+    let mut lines = csv.lines();
+    assert_eq!(
+        lines.next(),
+        Some("net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj")
+    );
+    let mut fj = 0.0;
+    let mut rows = 0;
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        assert_eq!(fields.len(), 7, "{line}");
+        assert!(fields[2].parse::<u64>().unwrap() > 0, "{line}");
+        fj += fields[3..]
+            .iter()
+            .map(|f| f.parse::<f64>().unwrap())
+            .sum::<f64>();
+        rows += 1;
+    }
+    assert!(rows > 1, "{csv}");
+    // fJ over the 3 us counted is mW
+    let mw = fj / 3e6;
+    let total = energy_mw(&report);
+    assert!((mw - total).abs() <= total * 0.01 + 1e-4, "{mw} vs {total}");
+}

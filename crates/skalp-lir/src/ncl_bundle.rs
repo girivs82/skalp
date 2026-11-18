@@ -1455,6 +1455,24 @@ pub fn extend_matched_delay(netlist: &mut GateNetlist, md: &MatchedDelay, count:
     netlist.rebuild_net_connectivity();
 }
 
+/// Take the last `count` stages off a matched delay's chain, the AND then
+/// taking the stage before them. The first stage always stays, so the chain
+/// keeps its fast reset (see [`extend_matched_delay`]). Returns how many
+/// stages were removed.
+pub fn shorten_matched_delay(netlist: &mut GateNetlist, md: &MatchedDelay, count: usize) -> usize {
+    let keep = md.chain.len().saturating_sub(count).max(1);
+    if keep >= md.chain.len() {
+        return 0;
+    }
+    let last_kept = md.chain[keep - 1];
+    let input = netlist.cells[last_kept.0 as usize].outputs[0];
+    netlist.cells[md.and_cell.0 as usize].inputs[1] = input;
+    let dropped: HashSet<CellId> = md.chain[keep..].iter().copied().collect();
+    netlist.cells.retain(|c| !dropped.contains(&c.id));
+    netlist.rebuild_net_connectivity();
+    dropped.len()
+}
+
 /// Result of sizing the matched delays of a netlist
 #[derive(Debug, Clone, Default)]
 pub struct SizingReport {
@@ -1937,6 +1955,48 @@ mod tests {
             let next = &netlist.cells[pair[1].0 as usize];
             assert_eq!(next.inputs[1], prev.outputs[0]);
         }
+    }
+
+    /// Shortening keeps the chain's head and its AND-with-source stages, and
+    /// the shorter chain is still found; it never drops the first stage
+    #[test]
+    fn shortened_chains_keep_their_head() {
+        let mut netlist = block_with_feedback();
+        let find_done = |netlist: &GateNetlist| {
+            find_matched_delays(netlist)
+                .into_iter()
+                .find(|md| netlist.cells[md.and_cell.0 as usize].path.contains("done"))
+                .unwrap()
+        };
+        let done = find_done(&netlist);
+        extend_matched_delay(&mut netlist, &done, 5);
+        let done = find_done(&netlist);
+        assert_eq!(done.chain.len(), 6);
+        let cells = netlist.cells.len();
+        assert_eq!(shorten_matched_delay(&mut netlist, &done, 3), 3);
+        assert_eq!(netlist.cells.len(), cells - 3);
+        let done = find_done(&netlist);
+        assert_eq!(done.chain.len(), 3);
+        assert_eq!(
+            netlist.cells[done.and_cell.0 as usize].inputs[1],
+            netlist.cells[done.chain[2].0 as usize].outputs[0]
+        );
+        let before = check_matched_delays(&netlist, &UnitDelays);
+        // Asking for more than the chain has leaves one stage
+        assert_eq!(shorten_matched_delay(&mut netlist, &done, 10), 2);
+        let done = find_done(&netlist);
+        assert_eq!(done.chain.len(), 1);
+        assert_eq!(shorten_matched_delay(&mut netlist, &done, 1), 0);
+        // and the delay is shorter by the stages removed
+        let after = check_matched_delays(&netlist, &UnitDelays);
+        let control = |checks: &[BundleCheck]| {
+            checks
+                .iter()
+                .find(|c| c.times == "next state")
+                .map(|c| c.control_ps)
+                .unwrap()
+        };
+        assert_eq!(control(&before) - control(&after), 200);
     }
 
     /// A self-timed block whose step request comes through an arbiter

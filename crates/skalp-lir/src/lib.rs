@@ -51,6 +51,7 @@ pub mod primitive_eval;
 pub mod primitives;
 pub mod retime;
 pub mod signal_trace;
+pub mod switching_energy;
 pub mod synth;
 pub mod synth_cache;
 pub mod tech_library;

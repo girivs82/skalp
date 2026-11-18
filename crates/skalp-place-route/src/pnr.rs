@@ -134,6 +134,8 @@ pub struct RoutedNetlist {
     pub netlist: GateNetlist,
     /// Its delays, one annotation per corner
     pub delays: Vec<skalp_lir::timed_sim::DelayAnnotation>,
+    /// The routing load of each net, for switching energy
+    pub loads: skalp_lir::switching_energy::NetLoads,
 }
 
 impl PnrResult {
@@ -329,6 +331,7 @@ fn routed_from_tables<D: crate::device::Device + ?Sized>(
         delays: vec![crate::timing::sta::annotate_delays(
             device, &model, &design, "typical",
         )],
+        loads: crate::timing::sta::net_loads(&model, netlist, routing, "typical"),
     };
     (routed, timing)
 }
@@ -1155,6 +1158,7 @@ pub fn place_and_route_nexus_real(
             crate::timing::sta::annotate_delays(&device, &timing_model, &design, "slow"),
             crate::timing::sta::annotate_delays(&device, &fast_model, &design, "fast"),
         ],
+        loads: crate::timing::sta::net_loads(&timing_model, netlist, &routing, "slow"),
     };
 
     Ok(PnrResult {

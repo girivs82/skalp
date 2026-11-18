@@ -301,6 +301,18 @@ skalp sim [OPTIONS] <DESIGN>
   It is not a violation (deciding races is what a mutex is for, and an
   arbiter waits for it to settle); the latch settles to the first input's
   side with `--metastability x`, and to either at random with `resolve`
+- `--energy` - Timed simulation only: estimate switching energy and average
+  power from each net's toggles and its routed load (place and route writes
+  each net's routing in `design_loads.json`). A toggle costs `C V^2 / 2`
+  for the net's routing wires, the pins it reaches and the driving cell's
+  insides; clock nets are reported apart, and the energy is broken down by
+  block. The capacitances are round figures, not a vendor's: use it to
+  compare designs on the same family, not to sign off power
+- `--energy-from <TIME>` - Count toggles for `--energy` from this time on,
+  to leave out power-up
+- `--energy-nets <FILE>` - Also write each toggled net's energy to a CSV
+  file (`net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj`), to
+  group it in other ways than by block, such as by clock domain
 - `-h, --help` - Print help
 
 ### Examples

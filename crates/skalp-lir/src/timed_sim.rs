@@ -50,7 +50,9 @@
 //! * Each instant runs in delta cycles: apply every event of the instant,
 //!   evaluate each touched node once, then commit the nets that changed.
 
-use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist, FF_INIT_PARAM};
+use crate::gate_netlist::{
+    Cell, CellId, GateNetId, GateNetlist, BLACKBOX_OUTPUTS_PARAM, FF_INIT_PARAM,
+};
 use crate::lir::PrimitiveType;
 use crate::ncl_bundle::BundleDelays;
 use crate::primitive_eval::{evaluate_primitive, primitive_for_cell};
@@ -125,6 +127,28 @@ pub enum ViolationKind {
     Hold,
     /// The clock pin went to or came from an unknown value
     UnknownClock,
+}
+
+/// A vendor block the simulator has no model of (such as a PLL), kept as
+/// a blackbox: nothing in the simulation drives its outputs, which stay
+/// unknown unless the caller drives them ([`TimedSim::add_clock`],
+/// [`TimedSim::set`])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blackbox {
+    /// The cell
+    pub cell: CellId,
+    /// Its outputs
+    pub outputs: Vec<GateNetId>,
+}
+
+/// Whether `cell` is a vendor block with no model here: a blackbox cell
+/// that no function, truth table or hard-block port map describes
+fn is_blackbox(cell: &Cell) -> bool {
+    (cell.cell_type.starts_with("BLACKBOX_")
+        || cell.parameters.contains_key(BLACKBOX_OUTPUTS_PARAM))
+        && cell.function.is_none()
+        && cell.lut_init.is_none()
+        && cell.dsp_ports().is_none()
 }
 
 /// Two inputs of a latch built in one cell (its output wired back to its
@@ -790,6 +814,9 @@ pub struct TimedSim<'a> {
     changes: Vec<(i64, GateNetId, Logic)>,
     /// Value of each watched net just before its first recorded change
     recorded_before: HashMap<u32, Logic>,
+    /// Changes of each net from `activity_from_ps` on (switching activity)
+    toggles: Vec<u64>,
+    activity_from_ps: i64,
 
     // Combinational nodes
     nodes: Vec<Node>,
@@ -837,6 +864,8 @@ pub struct TimedSim<'a> {
     /// Comb-cell arcs the delay model has no figure for (timed with the
     /// slowest arc of that output instead)
     pub missing_arcs: usize,
+    /// Vendor blocks with no model, whose outputs nothing drives
+    pub blackboxes: Vec<Blackbox>,
 }
 
 /// Group a cell's outputs by their arc delays. Returns, per group, the
@@ -1080,8 +1109,20 @@ impl<'a> TimedSim<'a> {
         let mut fanout: Vec<Vec<Fanout>> = vec![Vec::new(); n_nets];
         let mut unsupported = Vec::new();
         let mut missing_arcs = 0usize;
+        let mut blackboxes: Vec<Blackbox> = Vec::new();
 
         for (index, cell) in netlist.cells.iter().enumerate() {
+            if is_blackbox(cell) {
+                blackboxes.push(Blackbox {
+                    cell: CellId(index as u32),
+                    outputs: cell
+                        .outputs
+                        .iter()
+                        .map(|&n| netlist.resolve_alias(n))
+                        .collect(),
+                });
+                continue;
+            }
             let ptype = primitive_for_cell(cell);
             let out_nets: Vec<u32> = cell.outputs.iter().map(|&n| canonical(n)).collect();
             let wire =
@@ -1416,6 +1457,8 @@ impl<'a> TimedSim<'a> {
             record_from_ps: i64::MIN,
             changes: Vec::new(),
             recorded_before: HashMap::new(),
+            toggles: vec![0; n_nets],
+            activity_from_ps: 0,
             dirty_nodes: Vec::new(),
             node_loop,
             loops,
@@ -1450,6 +1493,7 @@ impl<'a> TimedSim<'a> {
             metastability: Metastability::Unknown,
             rng: 1,
             missing_arcs,
+            blackboxes,
         };
         sim.power_up(power_up);
         Ok(sim)
@@ -1636,6 +1680,20 @@ impl<'a> TimedSim<'a> {
     pub fn watch(&mut self, net: GateNetId) {
         let net = self.netlist.resolve_alias(net);
         self.watched[net.0 as usize] = true;
+    }
+
+    /// Count each net's changes (its switching activity, [`Self::toggles`])
+    /// from `time_ps` on, forgetting those counted so far
+    pub fn count_toggles_from(&mut self, time_ps: i64) {
+        self.activity_from_ps = time_ps;
+        self.toggles.iter_mut().for_each(|t| *t = 0);
+    }
+
+    /// How many times each net has changed value (by net index; aliases
+    /// count on the net they alias), from the time
+    /// [`Self::count_toggles_from`] set (power-up by default)
+    pub fn toggles(&self) -> &[u64] {
+        &self.toggles
     }
 
     /// Changes of the watched nets so far: time, net, new value
@@ -2438,6 +2496,9 @@ impl<'a> TimedSim<'a> {
                 continue;
             }
             let before = std::mem::replace(&mut self.net_val[net], value);
+            if now >= self.activity_from_ps {
+                self.toggles[net] += 1;
+            }
             if self.watched[net] {
                 self.watched_changed = true;
                 if now >= self.record_from_ps {
@@ -3281,6 +3342,80 @@ mod tests {
                 vec![]
             };
             assert_eq!(changes_of(&sim, y), expected, "width {width}");
+        }
+    }
+
+    /// Each net's changes are counted from the time asked for
+    #[test]
+    fn toggles_count_each_nets_changes_from_a_time() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let clk = nl.add_clock("clk".into());
+        let a = nl.add_input("a".into());
+        let y = nl.add_output("y".into());
+        gate(&mut nl, "buf", CellFunction::Buf, vec![a], y);
+        let mut sim = TimedSim::new(&nl, &TestDelays::default()).unwrap();
+        sim.set(a, Logic::Zero);
+        sim.add_clock(clk, 1_000);
+        // Changes before 5.25 ns are not counted
+        sim.set(a, Logic::One);
+        sim.run_until(5_000).unwrap();
+        sim.count_toggles_from(5_250);
+        sim.run_until(5_300).unwrap();
+        for k in 0..3 {
+            sim.set(a, if k % 2 == 1 { Logic::One } else { Logic::Zero });
+            sim.run_until(6_300 + k * 1_000).unwrap();
+        }
+        sim.run_until(10_250).unwrap();
+        let toggles = sim.toggles();
+        assert_eq!(toggles[a.0 as usize], 3);
+        assert_eq!(toggles[y.0 as usize], 3);
+        // Edges every 0.5 ns, 5.5 to 10 ns
+        assert_eq!(toggles[clk.0 as usize], 10);
+    }
+
+    /// A vendor block with no model (a PLL) drives nothing: its output
+    /// follows only what the caller drives on it, not the block's inputs
+    #[test]
+    fn blackboxes_leave_their_outputs_to_the_caller() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let refclk = nl.add_clock("refclk".into());
+        let out = nl.add_net(crate::gate_netlist::GateNet::new(
+            GateNetId(0),
+            "pll_out".into(),
+        ));
+        let y = nl.add_output("y".into());
+        let mut pll = Cell::new_comb(
+            CellId(0),
+            "PLL_X".into(),
+            "test".into(),
+            0.0,
+            "pll".into(),
+            vec![refclk],
+            vec![out],
+        );
+        pll.parameters.insert(
+            crate::gate_netlist::BLACKBOX_INPUTS_PARAM.into(),
+            "REF".into(),
+        );
+        pll.parameters
+            .insert(BLACKBOX_OUTPUTS_PARAM.into(), "OUT".into());
+        nl.add_cell(pll);
+        gate(&mut nl, "buf", CellFunction::Buf, vec![out], y);
+        let mut sim = TimedSim::new(&nl, &TestDelays::default()).unwrap();
+        assert_eq!(sim.blackboxes.len(), 1);
+        assert_eq!(sim.blackboxes[0].outputs, vec![nl.resolve_alias(out)]);
+        // The reference clock alone leaves the output unknown
+        sim.add_clock(refclk, 800);
+        sim.run_until(5_000).unwrap();
+        assert_eq!(sim.value(out), Logic::X);
+        // Driven as a clock of its own, it toggles at that clock only
+        sim.watch(y);
+        sim.add_clock(out, 3_000);
+        sim.run_until(20_000).unwrap();
+        let edges: Vec<i64> = sim.changes().iter().map(|&(t, _, _)| t).collect();
+        assert!(edges.len() >= 9, "{edges:?}");
+        for pair in edges[1..].windows(2) {
+            assert_eq!(pair[1] - pair[0], 1_500, "{edges:?}");
         }
     }
 
