@@ -810,6 +810,7 @@ pub entity DfiLpddr4NexusPhy<
     out dmi_o: bit[2]
     out dmi_t: bit[2]
     // ---------------------------------------------------------------- status
+    // the DLL's lock flag, synchronized to SCLK
     out dll_lock: bit
     out gate_dly0: bit[8]
     out gate_dly1: bit[8]
@@ -888,6 +889,9 @@ impl DfiLpddr4NexusPhy {
     signal wdq_q: bit = 0
     // write slots captured, mod 8 (a beat's place in its burst, for the write DQ pattern)
     signal wcap: bit[3] = 0
+    // per-lane DQ output enables (1 = not driven)
+    signal dq_tt0: bit[4] = 15
+    signal dq_tt1: bit[4] = 15
 
     let wde0: bit[3] = {2'b00, dfi_wrdata_en_p0}
     let wde1: bit[3] = {2'b00, dfi_wrdata_en_p1}
@@ -917,31 +921,34 @@ impl DfiLpddr4NexusPhy {
     // DQS: 2 slots of preamble, the data slots, 1 slot of postamble; DQ: the data slots and one
     // more holding the last beat
     let sdrv0: bit = if em1 == 1 || e0 == 1 || e1 == 1 || e2 == 1 { 1 } else { 0 }
-    let qdrv0: bit = if e0 == 1 || em1 == 1 { 1 } else { 0 }
     let ws0: bit[32] = wd12[127:96]
     let wp0: bit[32] = wd12[95:64]
     let bt0_0: bit[16] = if e0 == 1 { ws0[15:0] } else { wp0[31:16] }
     let bt1_0: bit[16] = if e0 == 1 { ws0[31:16] } else { wp0[31:16] }
     let sdrv1: bit = if e0 == 1 || e1 == 1 || e2 == 1 || e3 == 1 { 1 } else { 0 }
-    let qdrv1: bit = if e1 == 1 || e0 == 1 { 1 } else { 0 }
     let ws1: bit[32] = wd12[159:128]
     let wp1: bit[32] = wd12[127:96]
     let bt0_1: bit[16] = if e1 == 1 { ws1[15:0] } else { wp1[31:16] }
     let bt1_1: bit[16] = if e1 == 1 { ws1[31:16] } else { wp1[31:16] }
     let sdrv2: bit = if e1 == 1 || e2 == 1 || e3 == 1 || e4 == 1 { 1 } else { 0 }
-    let qdrv2: bit = if e2 == 1 || e1 == 1 { 1 } else { 0 }
     let ws2: bit[32] = wd12[191:160]
     let wp2: bit[32] = wd12[159:128]
     let bt0_2: bit[16] = if e2 == 1 { ws2[15:0] } else { wp2[31:16] }
     let bt1_2: bit[16] = if e2 == 1 { ws2[31:16] } else { wp2[31:16] }
     let sdrv3: bit = if e2 == 1 || e3 == 1 || e4 == 1 || e5 == 1 { 1 } else { 0 }
-    let qdrv3: bit = if e3 == 1 || e2 == 1 { 1 } else { 0 }
     let ws3: bit[32] = wd12[223:192]
     let wp3: bit[32] = wd12[191:160]
     let bt0_3: bit[16] = if e3 == 1 { ws3[15:0] } else { wp3[31:16] }
     let bt1_3: bit[16] = if e3 == 1 { ws3[31:16] } else { wp3[31:16] }
     let dqs_tt_w: bit[4] = {~sdrv3, ~sdrv2, ~sdrv1, ~sdrv0}
-    let dq_tt: bit[4] = {~qdrv3, ~qdrv2, ~qdrv1, ~qdrv0}
+    // DQ output enables (1 = not driven): DQ drives in slot j when e(j) or e(j-1) is set.
+    // Registered from the frames they come from (b and c now are a and b next cycle), one
+    // register per lane so each sits by its lane's gearboxes
+    let nqdrv0: bit = if b_we[3] == 1 || b_we[2] == 1 { 1 } else { 0 }
+    let nqdrv1: bit = if c_we[0] == 1 || b_we[3] == 1 { 1 } else { 0 }
+    let nqdrv2: bit = if c_we[1] == 1 || c_we[0] == 1 { 1 } else { 0 }
+    let nqdrv3: bit = if c_we[2] == 1 || c_we[1] == 1 { 1 } else { 0 }
+    let dq_tt_next: bit[4] = {~nqdrv3, ~nqdrv2, ~nqdrv1, ~nqdrv0}
     // DQS rises at the start of each data slot; a write leveling frame has a slot of preamble,
     // two pulses and a slot of postamble
     let dqs_d_w: bit[8] = {1'b0, e3, 1'b0, e2, 1'b0, e1, 1'b0, e0}
@@ -1012,7 +1019,7 @@ impl DfiLpddr4NexusPhy {
 
     inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
-        dq_d: dq_d0, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
@@ -1021,7 +1028,7 @@ impl DfiLpddr4NexusPhy {
 
     inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
-        dq_d: dq_d1, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
@@ -1045,8 +1052,10 @@ impl DfiLpddr4NexusPhy {
     let oa0: bit[64] = q0[qr]
     let oa1: bit[64] = q1[qr]
     // the PLL and DLL lock flags change with no relation to SCLK: two registers each
+    #[cdc]
     signal pll_lock_m: bit = 0
     signal pll_lock_s: bit = 0
+    #[cdc]
     signal dll_lock_m: bit = 0
     signal dll_lock_s: bit = 0
     let push0: bit = lane0.dv
@@ -1133,6 +1142,8 @@ impl DfiLpddr4NexusPhy {
         b_eye_en = c_eye_en
         b_wdq_en = c_wdq_en
         a_we = b_we
+        dq_tt0 = dq_tt_next
+        dq_tt1 = dq_tt_next
         a_wd = b_wd
         a_re = b_re
         rst_n_r = b_rst[0]
@@ -1187,7 +1198,7 @@ impl DfiLpddr4NexusPhy {
     dmi_o = {lane1.dmi_o, lane0.dmi_o}
     dmi_t = {lane1.dmi_t, lane0.dmi_t}
 
-    dll_lock = dll.LOCK
+    dll_lock = dll_lock_s
     gate_dly0 = lane0.gate_set
     gate_dly1 = lane1.gate_set
     rd_dly0 = lane0.rd_pos

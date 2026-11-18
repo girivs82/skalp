@@ -341,6 +341,8 @@ impl Lpddr4DfiController {
     signal rq_w: bit = 0
     signal rq_row: bit[17] = 0
     signal rq_ba: bit[3] = 0
+    // rq_ba one-hot, so each bank's command strobe needs only that bank's flags
+    signal rq_sel: bit[8] = 1
     signal rq_col: bit[6] = 0
     signal rq_data: bit[256] = 0
     // data enables, one bit per CK slot ahead (bit 0 = phase p0 of this cycle)
@@ -352,6 +354,9 @@ impl Lpddr4DfiController {
     signal wq: [bit[256]; 4]
     signal wq_wp: bit[2] = 0
     signal wq_rp: bit[2] = 0
+    // wq_rp + 1, kept in its own register so the second read address is
+    // ready at the clock edge
+    signal wq_rp1: bit[2] = 1
     signal wq_n: bit[3] = 0
     // reads in flight: 0 user, 1 MR5, 2 MR8
     signal tq: [bit[2]; 8]
@@ -542,14 +547,27 @@ impl Lpddr4DfiController {
     let ref_go: bit = if idle == 1 && ref_due == 1 && upd_go == 0 { 1 } else { 0 }
     // write DQ training goes through the request path (refresh waits until it is over)
     let wdq_st: bit = if st == 19 { 1 } else { 0 }
-    let serve: bit = if ((idle == 1 && ref_due == 0 && upd_go == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
+    // a PHY update is only granted with no request held (upd_go needs rq_v == 0), so it never
+    // stops one being served: the condition leaves it out to keep the command choice shallow
+    let serve: bit = if ((idle == 1 && ref_due == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
     let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && wr_z == 1 && wq_room == 1) || (rq_w == 0 && rd_z == 1 && tq_room == 1)) { 1 } else { 0 }
     let do_pre: bit = if serve == 1 && q_open == 1 && q_hit == 0 && b_preok[rq_ba] == 1 { 1 } else { 0 }
     let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && actg_z == 1 && faw_ok == 1 { 1 } else { 0 }
     let do_wr: bit = if do_cas == 1 && rq_w == 1 { 1 } else { 0 }
     let do_rd: bit = if do_cas == 1 && rq_w == 0 { 1 } else { 0 }
+    // the same commands as strobes for each bank: do_wr && rq_ba == k and so on, from bank k's
+    // own flags, with no choice of bank in front of its timers
+    let cas_w: bit = if serve == 1 && rq_rowm == 1 && rq_w == 1 && wr_z == 1 && wq_room == 1 { 1 } else { 0 }
+    let cas_r: bit = if serve == 1 && rq_rowm == 1 && rq_w == 0 && rd_z == 1 && tq_room == 1 { 1 } else { 0 }
+    let act_q: bit = if serve == 1 && actg_z == 1 && faw_ok == 1 { 1 } else { 0 }
+    let pre_q: bit = if serve == 1 && rq_rowm == 0 { 1 } else { 0 }
+    let cas_k: bit[8] = rq_sel & b_open & b_casok
+    let bk_wr: bit[8] = if cas_w == 1 { cas_k } else { 8'h00 }
+    let bk_rd: bit[8] = if cas_r == 1 { cas_k } else { 8'h00 }
+    let bk_act: bit[8] = if act_q == 1 { rq_sel & ~b_open & b_actok } else { 8'h00 }
     // refresh: precharge all once every bank may close, then REF tRP later
     let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
+    let bk_pre: bit[8] = if do_preab == 1 { 8'hFF } else { if pre_q == 1 { rq_sel & b_open & b_preok } else { 8'h00 } }
     let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
     let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
     // MR2 with WR-LEV set (in) and clear (out)
@@ -627,7 +645,7 @@ impl Lpddr4DfiController {
     let wend2: bit = if wr_mod[2] == 1 && wb2 == 7 { 1 } else { 0 }
     let wend3: bit = if wr_mod[3] == 1 && wb3 == 7 { 1 } else { 0 }
     let wd_head: bit[256] = wq[wq_rp]
-    let wd_next: bit[256] = wq[wq_rp + 1]
+    let wd_next: bit[256] = wq[wq_rp1]
     let wd0: bit[32] = burst_word(wd_head, wb0)
     let wd1: bit[32] = if wend0 == 1 { burst_word(wd_next, wb1) } else { burst_word(wd_head, wb1) }
     let wd2: bit[32] = if wend0 == 1 || wend1 == 1 { burst_word(wd_next, wb2) } else { burst_word(wd_head, wb2) }
@@ -724,10 +742,10 @@ impl Lpddr4DfiController {
     // ------------------------------------------------------------ banks
     inst b0 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 0 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 0) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 0 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 0 { 1 } else { 0 },
+        act: bk_act[0],
+        pre: bk_pre[0],
+        rd: bk_rd[0],
+        wr: bk_wr[0],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -737,10 +755,10 @@ impl Lpddr4DfiController {
     }
     inst b1 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 1 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 1) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 1 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 1 { 1 } else { 0 },
+        act: bk_act[1],
+        pre: bk_pre[1],
+        rd: bk_rd[1],
+        wr: bk_wr[1],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -750,10 +768,10 @@ impl Lpddr4DfiController {
     }
     inst b2 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 2 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 2) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 2 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 2 { 1 } else { 0 },
+        act: bk_act[2],
+        pre: bk_pre[2],
+        rd: bk_rd[2],
+        wr: bk_wr[2],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -763,10 +781,10 @@ impl Lpddr4DfiController {
     }
     inst b3 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 3 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 3) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 3 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 3 { 1 } else { 0 },
+        act: bk_act[3],
+        pre: bk_pre[3],
+        rd: bk_rd[3],
+        wr: bk_wr[3],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -776,10 +794,10 @@ impl Lpddr4DfiController {
     }
     inst b4 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 4 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 4) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 4 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 4 { 1 } else { 0 },
+        act: bk_act[4],
+        pre: bk_pre[4],
+        rd: bk_rd[4],
+        wr: bk_wr[4],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -789,10 +807,10 @@ impl Lpddr4DfiController {
     }
     inst b5 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 5 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 5) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 5 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 5 { 1 } else { 0 },
+        act: bk_act[5],
+        pre: bk_pre[5],
+        rd: bk_rd[5],
+        wr: bk_wr[5],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -802,10 +820,10 @@ impl Lpddr4DfiController {
     }
     inst b6 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 6 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 6) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 6 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 6 { 1 } else { 0 },
+        act: bk_act[6],
+        pre: bk_pre[6],
+        rd: bk_rd[6],
+        wr: bk_wr[6],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -815,10 +833,10 @@ impl Lpddr4DfiController {
     }
     inst b7 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 7 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 7) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 7 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 7 { 1 } else { 0 },
+        act: bk_act[7],
+        pre: bk_pre[7],
+        rd: bk_rd[7],
+        wr: bk_wr[7],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -838,7 +856,8 @@ impl Lpddr4DfiController {
         wb_ring = wb_mod >> 12
         rd_ring = rd_mod >> 4
         if w_pop == 1 {
-            wq_rp = wq_rp + 1
+            wq_rp = wq_rp1
+            wq_rp1 = wq_rp1 + 1
         }
         if do_wr == 1 {
             wq[wq_wp] = rq_data
@@ -922,6 +941,7 @@ impl Lpddr4DfiController {
             rq_w = req_write
             rq_row = req_row
             rq_ba = req_ba
+            rq_sel = 8'h01 << req_ba
             rq_col = req_col
             rq_data = req_wdata
             rq_rowm = if req_row_open == req_row { 1 } else { 0 }
@@ -1088,6 +1108,7 @@ impl Lpddr4DfiController {
                     rq_w = tw_w
                     rq_row = tr_addr[25:9]
                     rq_ba = tr_addr[8:6]
+                    rq_sel = 8'h01 << tr_addr[8:6]
                     rq_col = tr_addr[5:0]
                     rq_data = 0
                     rq_rowm = if tr_row_open == tr_addr[25:9] { 1 } else { 0 }
