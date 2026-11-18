@@ -7428,8 +7428,13 @@ fn create_blackbox_lir_placeholder(
     let mut inouts = Vec::new();
     let mut port_widths = IndexMap::new();
 
-    // Add port signals
-    for port in &module.ports {
+    // Add port signals (a simulation model's own clock is not a port of the
+    // primitive)
+    for port in module
+        .ports
+        .iter()
+        .filter(|p| !vendor_config.sim_clocks.contains(&p.name))
+    {
         let width = MirToLirTransform::get_type_width(&port.port_type);
         port_widths.insert(port.name.clone(), width);
 

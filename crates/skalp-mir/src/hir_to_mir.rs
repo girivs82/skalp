@@ -8202,6 +8202,19 @@ impl<'hir> HirToMir<'hir> {
                             work_stack.push(ExprWork::Convert(&unary.operand));
                         }
 
+                        // A concatenation with a part that has no width of its
+                        // own: the full conversion gives it the width the context
+                        // leaves it, or the fewest bits that hold its values
+                        hir::HirExpression::Concat(exprs)
+                            if exprs.len() > 1
+                                && exprs.iter().any(|x| {
+                                    Self::unsized_value_width(x).is_some()
+                                        && self.infer_hir_expression_width(x).is_none()
+                                }) =>
+                        {
+                            result_stack.push(self.convert_expression_impl(e, depth));
+                        }
+
                         // Concat - process iteratively
                         hir::HirExpression::Concat(exprs) => {
                             work_stack.push(ExprWork::BuildConcat { count: exprs.len() });
@@ -10444,16 +10457,27 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
 
-                    if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
-                        mir_exprs.push(mir_expr);
+                    // A part whose value has no width of its own (a bare
+                    // integer, or an `if`/`match` choosing between them)
+                    // takes the width the context leaves it, like a bare
+                    // integer; with none left it takes the fewest bits that
+                    // hold every value it can have (`{v[6:0], 0}` is 8 bits).
+                    // It used to keep whatever width conversion gave it,
+                    // 32 bits in a clocked block.
+                    let unsized_width = if known_widths[idx].is_none() {
+                        Self::unsized_value_width(expr)
                     } else {
-                        // Print more info about the element
-                        match expr {
-                            hir::HirExpression::Unary(unary) => {}
-                            hir::HirExpression::Range(base, high, low) => {}
-                            _ => {}
+                        None
+                    };
+                    let mir_expr = self.convert_expression(expr, depth + 1)?;
+                    match (unsized_width, inferred_width) {
+                        (Some(_), Some(width)) => {
+                            mir_exprs.push(Self::sized_bits(mir_expr, width as usize))
                         }
-                        return None;
+                        (Some(width), None) => {
+                            mir_exprs.push(Self::sized_bits(mir_expr, width as usize))
+                        }
+                        _ => mir_exprs.push(mir_expr),
                     }
                 }
 
@@ -14998,6 +15022,41 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// BUG #160 FIX: Infer the bit width of an HIR expression
+    /// The fewest bits that hold every value of `expr`, when its value has no
+    /// width of its own: a bare integer, or an `if`/`match` whose every result
+    /// is one. `None` for anything else.
+    fn unsized_value_width(expr: &hir::HirExpression) -> Option<u32> {
+        match expr {
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(v)) => {
+                Some((u64::BITS - v.leading_zeros()).max(1))
+            }
+            hir::HirExpression::If(i) => Some(
+                Self::unsized_value_width(&i.then_expr)?
+                    .max(Self::unsized_value_width(&i.else_expr)?),
+            ),
+            hir::HirExpression::Ternary {
+                true_expr,
+                false_expr,
+                ..
+            } => Some(
+                Self::unsized_value_width(true_expr)?.max(Self::unsized_value_width(false_expr)?),
+            ),
+            hir::HirExpression::Match(m) => {
+                let mut width = None;
+                for arm in &m.arms {
+                    let w = Self::unsized_value_width(&arm.expr)?;
+                    width = Some(width.map_or(w, |x: u32| x.max(w)));
+                }
+                width
+            }
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } if statements.is_empty() => Self::unsized_value_width(result_expr),
+            _ => None,
+        }
+    }
+
     fn infer_hir_expression_width(&self, expr: &hir::HirExpression) -> Option<u32> {
         match expr {
             hir::HirExpression::Literal(lit) => {

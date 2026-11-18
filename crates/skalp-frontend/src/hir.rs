@@ -1163,6 +1163,12 @@ pub struct VendorIpConfig {
     pub tie_high: Vec<String>,
     /// Ports to leave unconnected (for unused IP outputs)
     pub unconnected: Vec<String>,
+    /// Clock inputs of the entity's simulation model that the design never
+    /// connects (`sim_clock = "tick"`): simulation drives them from the
+    /// top-level `sim_tick` input, and they are not ports of the vendor
+    /// primitive, so synthesis and netlists leave them out
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sim_clocks: Vec<String>,
     /// Port name mapping: entity_port -> ip_port (for when names differ)
     pub port_map: Vec<(String, String)>,
     /// Clock definitions: (port_name, frequency_mhz)

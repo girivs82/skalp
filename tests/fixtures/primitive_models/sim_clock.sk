@@ -1,0 +1,41 @@
+// A vendor primitive with a simulation model that ticks on a clock the
+// design never connects: simulation drives it from the top-level sim_tick
+
+#[lattice_ip(name = "DLYTEST", sim_clock = "tick")]
+entity DLYTEST {
+    in tick: clock
+    in A: bit
+    out Z: bit
+}
+
+impl DLYTEST {
+    signal q: bit = 0
+    on(tick.rise) {
+        q = A
+    }
+    Z = q
+}
+
+entity Wrap {
+    in a: bit
+    out z: bit
+}
+
+impl Wrap {
+    inst d = DLYTEST { A: a }
+    z = d.Z
+}
+
+entity SimClockTop {
+    in clk: clock
+    in a: bit
+    out z: bit
+    out zz: bit
+}
+
+impl SimClockTop {
+    inst w = Wrap { a: a }
+    inst d = DLYTEST { A: a }
+    z = d.Z
+    zz = w.z
+}

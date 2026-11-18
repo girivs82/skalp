@@ -3074,6 +3074,12 @@ impl HirBuilderContext {
                         // `ncl_req` is only required under a clocked parent,
                         // which MIR lowering checks (an async parent coalesces)
                         && port.name != crate::hir::NCL_REQ_PORT
+                        // a primitive model's simulation clock is wired by
+                        // the simulator, never by the design
+                        && !entity_def
+                            .vendor_ip_config
+                            .as_ref()
+                            .is_some_and(|v| v.sim_clocks.contains(&port.name))
                     {
                         self.errors.push(HirError {
                             message: format!(
@@ -12350,6 +12356,7 @@ impl HirBuilderContext {
         let mut tie_low: Vec<String> = Vec::new();
         let mut tie_high: Vec<String> = Vec::new();
         let mut unconnected: Vec<String> = Vec::new();
+        let mut sim_clocks: Vec<String> = Vec::new();
         let mut port_map: Vec<(String, String)> = Vec::new();
         let mut clocks: Vec<(String, f64)> = Vec::new();
         let mut async_groups: Vec<(String, String)> = Vec::new();
@@ -12396,6 +12403,9 @@ impl HirBuilderContext {
                     }
                     "unconnected" | "nc" | "open" => {
                         current_key = Some("unconnected".to_string());
+                    }
+                    "sim_clock" | "sim_clocks" => {
+                        current_key = Some("sim_clock".to_string());
                     }
                     "port_map" | "portmap" | "map" => {
                         current_key = Some("port_map".to_string());
@@ -12484,6 +12494,11 @@ impl HirBuilderContext {
                     Some("tie_high") => {
                         // Comma-separated list of ports to tie high
                         tie_high = unquoted.split(',').map(|s| s.trim().to_string()).collect();
+                        current_key = None;
+                    }
+                    Some("sim_clock") => {
+                        // Ports a simulation model ticks on, wired by the simulator
+                        sim_clocks = unquoted.split(',').map(|s| s.trim().to_string()).collect();
                         current_key = None;
                     }
                     Some("unconnected") => {
@@ -12605,6 +12620,7 @@ impl HirBuilderContext {
                         "tie_low" => tie_low = std::mem::take(&mut current_list),
                         "tie_high" => tie_high = std::mem::take(&mut current_list),
                         "unconnected" => unconnected = std::mem::take(&mut current_list),
+                        "sim_clock" => sim_clocks = std::mem::take(&mut current_list),
                         _ => {
                             // Unknown list key - ignore for now
                         }
@@ -12626,6 +12642,7 @@ impl HirBuilderContext {
             tie_low,
             tie_high,
             unconnected,
+            sim_clocks,
             port_map,
             clocks,
             async_groups,

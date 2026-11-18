@@ -3371,7 +3371,12 @@ fn generate_vendor_ip_wrapper(
 
     // Generate port list
     let mut ports = Vec::new();
-    for port in &mir_module.ports {
+    // a simulation model's own clock is not a port of the primitive
+    for port in mir_module
+        .ports
+        .iter()
+        .filter(|p| !vendor_config.sim_clocks.contains(&p.name))
+    {
         let direction = match port.direction {
             skalp_mir::PortDirection::Input => "input",
             skalp_mir::PortDirection::Output => "output",
@@ -3469,6 +3474,7 @@ fn generate_vendor_ip_wrapper(
         let mut all_connections: Vec<String> = mir_module
             .ports
             .iter()
+            .filter(|p| !vendor_config.sim_clocks.contains(&p.name))
             .map(|p| {
                 // Use mapped IP port name if available, otherwise use entity port name
                 let ip_port_name = match port_mapping.get(p.name.as_str()) {

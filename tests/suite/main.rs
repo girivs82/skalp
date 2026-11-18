@@ -142,6 +142,7 @@ mod test_popcount_in_mux;
 mod test_postfix_chain_regressions;
 mod test_power_domains;
 mod test_power_intent;
+mod test_primitive_models;
 mod test_regression_bugs;
 mod test_safety_annotation_pipeline;
 mod test_safety_tech_mapping_flow;
