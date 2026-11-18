@@ -1,16 +1,21 @@
-# LPDDR4 over DFI: controller, behavioural PHY, channel model
+# LPDDR4 over DFI: controller, PHYs, channel model
 
-Three library entities in `skalp::memory` let an LPDDR4 controller be built and checked in
-simulation before any vendor PHY is involved:
+Library entities in `skalp::memory` for an LPDDR4 controller, a behavioural PHY to check it in
+simulation before any vendor PHY is involved, a PHY for Lattice Nexus devices, and a channel
+model:
 
 | Entity | File | Synthesisable | Role |
 |---|---|---|---|
 | `Lpddr4DfiController` (+ `Lpddr4BankState`) | `lpddr4_dfi_controller.sk` | yes | LPDDR4 controller, one x16 channel, DFI 1:4 |
-| `DfiLpddr4BehavPhy` | `dfi_lpddr4_behav_phy.sk` | no | DFI to LPDDR4 pins, read capture, training evaluation |
+| `DfiLpddr4BehavPhy` | `dfi_lpddr4_behav_phy.sk` | no | DFI to LPDDR4 pins, write delays, read capture, training evaluation |
+| `DfiLpddr4NexusPhy` (+ `NexusLpddr4Lane`, `NexusLpddr4DqPin`) | `dfi_lpddr4_nexus_phy.sk` | yes (Nexus) | The same DFI on the Nexus DDR primitives: x4 gearing, DQS buffers, DLL, delays |
 | `Lpddr4ChannelModel` | `lpddr4_model.sk` | no | One LPDDR4 channel: storage, JEDEC timing and protocol checks, bus contention |
 
-`tests/fixtures/lpddr4_dfi_sim.sk` wires the three together with a traffic generator, and
-`tests/suite/test_lpddr4_dfi_sim.rs` runs it.
+`tests/fixtures/lpddr4_dfi_sim.sk` wires the controller, the behavioural PHY and the model
+together with a traffic generator, and `tests/suite/test_lpddr4_dfi_sim.rs` runs it.
+`tests/fixtures/lpddr4_dfi_nexus_sim.sk` does the same with the Nexus PHY at 1066 Mbps, built
+for a Nexus device so the primitives come from the family's simulation models
+(`tests/suite/test_lpddr4_dfi_nexus_sim.rs`).
 
 ## DFI subset
 
@@ -25,7 +30,7 @@ present.
 | Read data | `dfi_rddata_en_pN`; PHY to controller: `dfi_rddata_wN[31:0]`, `dfi_rddata_valid_wN` | `rddata_en` marks the slots data is expected in |
 | Status | `dfi_init_start`; PHY to controller: `dfi_init_complete` | |
 | Update | `dfi_ctrlupd_req`, PHY: `dfi_ctrlupd_ack`; PHY: `dfi_phyupd_req`, `dfi_phyupd_ack` | |
-| Training | `dfi_rdlvl_gate_en`, `dfi_rdlvl_en`; PHY: `dfi_rdlvl_gate_resp[1:0]`, `dfi_rdlvl_resp[1:0]` | one response bit per byte lane |
+| Training | `dfi_wrlvl_en`, `dfi_wrlvl_strobe`, `dfi_rdlvl_gate_en`, `dfi_rdlvl_en`, `dfi_wdqlvl_en`; PHY: `dfi_wrlvl_resp[1:0]`, `dfi_rdlvl_gate_resp[1:0]`, `dfi_rdlvl_resp[1:0]`, `dfi_wdqlvl_resp[1:0]` | one response bit per byte lane |
 
 Read data words: `dfi_rddata_wN` holds beats 2N and 2N+1 of both byte lanes, so one BL16 burst
 comes back as two dfi_clk cycles of four words.
@@ -35,8 +40,10 @@ comes back as two dfi_clk cycles of four words.
 - Every DFI phase reaches the pins two dfi_clk cycles after the controller drives it, commands
   and data alike, so slot-to-slot timing on DFI equals DRAM timing.
 - CK rises in the middle of each slot; CA and CS change at slot starts.
-- Write: with the write CAS-2 in slot c, the first `wrdata_en` slot is c + WL + 4
-  (`TPHY_WRLAT_ADJ`). Data is centred on DQS edges, with a 2 tCK preamble.
+- Write: with the write CAS-2 in slot c, the first `wrdata_en` slot is c + WL + 3
+  (`TPHY_WRLAT_ADJ`). The PHY launches DQS a trained delay after its slot (half a tCK before
+  write leveling) and DQ a trained delay after DQS, with a 2 tCK preamble; at the nominal
+  leveling point this adds one tCK, which the 3 accounts for.
 - Read: with the read CAS-2 in slot c, the nominal first `rddata_en` slot is c + RL + 3
   (`TRDDATA_EN_ADJ`). The real arrival is later by tDQSCK and board delay; the trained read gate
   absorbs it.
@@ -50,14 +57,22 @@ comes back as two dfi_clk cycles of four words.
   measures them from, so they hold at any CK frequency.
 - Init: DFI init handshake, RESET_N low (`T_INIT1_CYC`), CKE low (`T_INIT3_CYC`), CKE high
   (`T_INIT5_CYC`), MRW of MR13, MR1, MR2, MR3, MR11, MR12, MR14 and MR22, ZQ start and latch,
-  read training, then MRR of MR5 and MR8 (`mr5`, `mr8` outputs).
-- Training (PHY evaluation): read gate, then read eye. The controller sends Read DQ Calibration
-  reads (MPC) with `rdlvl_gate_en` or `rdlvl_en` set until the PHY raises every lane's response,
-  or `TRAIN_MAX_READS` reads (`train_fail`).
+  training, then MRR of MR5 and MR8 (`mr5`, `mr8` outputs).
+- Training (PHY evaluation), in this order:
+  - write leveling: MRW MR2 with OP7 set, `TWLMRD_NCK`, then `dfi_wrlvl_strobe` every
+    `WL_GAP_CYC` cycles with `dfi_wrlvl_en` set until the PHY raises every lane's response (at
+    most `WL_MAX_STROBES`), then MRW MR2 back;
+  - read gate, then read eye: Read DQ Calibration reads (MPC) with `rdlvl_gate_en` or `rdlvl_en`
+    set until every lane responds;
+  - write DQ: with `dfi_wdqlvl_en` set, a write to `TRAIN_ADDR` and its read-back in turn until
+    every lane responds. The PHY supplies the write data and checks the read data, which does not
+    come back to the user port.
+
+  A phase that reaches `TRAIN_MAX_READS` reads without every response sets `train_fail`.
 - Operation: one request at a time, in order; open page per bank (row hit: CAS; other row: PRE,
   ACT; closed: ACT); per-bank tRCD, tRAS, tRP, tWR and tRTP in `Lpddr4BankState`; tRRD, tFAW,
   tCCD and tWTR across banks; all-bank refresh every tREFI (PREab, REF, then a controller
-  update); while the PHY requests an update no new request is taken, and the window is
+  update of `CTRLUPD_CYC` cycles once reads issued before the refresh have come back); while the PHY requests an update no new request is taken, and the window is
   granted once no read or write is on the bus.
 - User port (DFI clock): `req_valid`/`req_ready`, `req_write`, `req_addr = {row[16:0],
   bank[2:0], column[9:4]}`, `req_wdata[255:0]` (beat k in [16k+15:16k]); read data in request
@@ -80,6 +95,16 @@ require none.
 
 - Runs on a fast simulation clock with `CLK_PER_CK` clocks per CK (even, 4 to 16) and makes
   `dfi_clk` itself. It is for simulation only.
+- Write path per byte lane: DQS goes out half a tCK plus the lane's write leveling delay
+  (`wl_dly0/1`) after its slot, DQ a further write DQ delay (`wdq_dly0/1`) after DQS. Before
+  training they are half a tCK and a quarter tCK.
+- Write leveling: each strobe sends one DQS pulse with the next delay (0 to `CLK_PER_CK` - 1) and
+  samples the DRAM's feedback on DQ at the next strobe. Each lane keeps the first delay whose
+  feedback goes from 0 to 1, where its DQS rise meets CK at the DRAM (`wrlvl_fail` if none).
+- Write DQ training: the n-th write goes out with write DQ delay n and the PHY's own data (byte
+  k of lane 0 is {k, k}, inverted on odd beats; lane 1 is the inverse); its read-back is compared
+  with it. After half a tCK of delays each lane takes the middle of the longest passing run, or
+  reports `wdq_fail`.
 - Read capture per byte lane: the gate opens a trained number of clocks after the first slot of
   each burst, takes 16 beats on DQS edges with a trained sample delay, and closes after 4 tCK if no
   DQS edge comes (`gate_timeouts`). A burst goes back on DFI once both lanes have it.
@@ -94,6 +119,35 @@ require none.
   it `PHYUPD_LEN` cycles once acknowledged. A DFI cycle carrying a command or data enable while
   the window is granted counts in `upd_violations`. `ctrlupd_count` and `phyupd_count` count completed updates.
 
+## Nexus PHY
+
+`DfiLpddr4NexusPhy` takes the edge clock (CK rate, from a PLL) and makes `dfi_clk` with an
+ECLKDIV /4, so at 1066 Mbps the fabric runs at 133 MHz. Its pins end at the I/O logic (`*_o`,
+`*_t` with 1 = not driven, `*_i` = the pad); the design's top level adds the pads. The header of
+the file describes the clocking, the pin timing and the training in full; in short:
+
+- Commands and data reach the pins with the timing contract above, so a controller keeps
+  `TPHY_WRLAT_ADJ = 3` and `TRDDATA_EN_ADJ = 3`.
+- Writes: DQS through ODDRX4DQS on DQSW (the write leveling delay), DQ and DMI through ODDRX4DQ on
+  DQSW270 (a quarter tCK early, moved by the write DQ delay); 2 tCK static preamble.
+- Reads: each lane's DQS buffer gates DQS with READ, which follows `rddata_en` delayed by the
+  lane's gate setting in eighths of a tCK (whole slots, then RDCLKSEL). DQ is sampled on DQSR90
+  into the IDDRX4DQ FIFO. Each DATAVALID word holds its enabled slots in place, so the lane packs
+  the words into half bursts from the READ masks it issued.
+- Delays move in 12.5 ps steps, one per two DFI cycles, with PAUSE held meanwhile. Init resets the
+  DLL, waits for lock, resets the DQS buffers, loads every setting and moves the read and write
+  DQ delays to the start of their sweeps before `dfi_init_complete`.
+- Training (PHY evaluation; each event is judged over `TRAIN_WIN` DFI cycles, so the controller
+  spaces events by `TRAIN_GAP_CYC` and `WL_GAP_CYC` >= 32 and allows `TRAIN_MAX_READS` >= 8 x
+  `GATE_SLOTS`):
+  - write leveling: the PHY reads the DRAM's feedback through its own read path (the gate opened
+    around its own DQS); the leveling delay climbs `WL_STEP` steps per strobe to the first 0 to 1;
+  - read gate: setting n for the n-th calibration read; a setting passes when the DQS buffer
+    reports BURSTDETECT. The run of passing settings ends at the first DQS rise; the gate goes to
+    the middle of the run but at most a tCK before that rise, inside the preamble;
+  - read eye and write DQ: the read or write DQ delay sweeps `EYE_HALF` / `WDQ_HALF` steps
+    either side of the middle; the lane takes the middle of the longest passing run.
+
 ## Channel model
 
 - Decodes the JESD209-4 command truth table on CK rising edges and checks command sequencing,
@@ -101,6 +155,13 @@ require none.
   and tRCD, tRP, tRAS, tRRD, tFAW, tRFCab, tMRW, tCCD, tWR, tRTP, tWTR, tZQCAL, tZQLAT, refresh
   overdue (9 x tREFI) and bus contention. `errors` counts them; `err_code` and `err_cycle` give the
   first. The codes are listed at the top of `lpddr4_model.sk`.
+- Board delay behind CK per byte lane: `WR_SKEW0/1_CLKS` for DQS and DQ, plus
+  `WR_DQ_SKEW0/1_CLKS` more for DQ. Each lane's write capture (`Lpddr4WriteLane`) sees its pins
+  through that delay; a write whose DQ breaks setup or hold around a DQS edge stores corrupted
+  data and counts in `dq_viol` rather than `errors`, so write DQ training can sweep through bad
+  delays.
+- Write leveling mode (MR2 OP7): on each DQS rise the model samples CK and drives it back on DQ
+  `TWLO_NCK` later, driving DQ for as long as the mode is on; contention checks cover it.
 - Reads, MRR and Read DQ Calibration drive DQS with a static 2 tCK preamble ending RL x tCK +
   `DQSCK_CLKS` after CAS-2, with DQ lagging DQS by `DQ_SKEW_CLKS`.
 - Storage keeps one burst per (bank, column[9:4]), tagged with its row. `aliased` counts reads of
@@ -108,8 +169,9 @@ require none.
 
 ## Not covered yet
 
-- Write leveling and write DQ (write eye) training, and the matching model features (MPC FIFO
-  commands, write-leveling mode). The model reports unknown MPC opcodes as error 25.
+- Write DQ training through the MPC FIFO commands (WR-FIFO/RD-FIFO); the training here uses
+  ordinary writes and reads to `TRAIN_ADDR`. The model reports unknown MPC opcodes as error 25.
+- Per-bit (deskew) delays; the delays here are per byte lane.
 - Data mask / DBI (MR13 DMD is set; writes are whole bursts).
 - More than one request in flight; reordering; per-bank refresh; power-down and self refresh.
 - A second channel (one controller per channel).

@@ -1,0 +1,44 @@
+// Nexus output gearing from the family's primitive library: the design declares none of the
+// primitives. The edge clock is sim_tick / 16; SCLK = ECLK / 4. Each SCLK cycle sends the
+// word `n` (an SCLK counter) through ODDRX4.
+entity NexusTx {
+    in sim_tick: clock
+    in rst: bit
+    out eclk_o: bit
+    out sclk_o: bit
+    out q: bit
+    out n_o: bit[8]
+}
+
+impl NexusTx {
+    signal t: bit[4] = 0
+    signal ek: bit = 0
+    on(sim_tick.rise) {
+        t = t + 1
+        if t == 7 || t == 15 {
+            ek = !ek
+        }
+    }
+    signal eclk_in: clock
+    eclk_in = ek
+
+    inst es = ECLKSYNC { ECLKIN: eclk_in, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: rst, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+
+    signal n: bit[8] = 0
+    on(sclk.rise) {
+        n = n + 1
+    }
+    inst o = ODDRX4 {
+        D0: n[0], D1: n[1], D2: n[2], D3: n[3], D4: n[4], D5: n[5], D6: n[6], D7: n[7],
+        ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    eclk_o = eclk
+    sclk_o = sclk
+    q = o.Q
+    n_o = n
+}

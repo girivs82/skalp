@@ -9,10 +9,20 @@
 // must be followed straight away by CAS-2, MRW-1 by MRW-2, ACT-1 by ACT-2. Timings are checked
 // in CK cycles between the second cycles of the commands involved.
 //
-// Writes: the first data DQS_t rising edge must land in WL + tDQSS (0.75 to 1.25 tCK) after the
-// CAS-2 edge, then 16 edges half a tCK (+-1 clock) apart, with DQ driven and stable one clock
-// either side of every edge and DQS_c the complement of DQS_t. Bursts may follow each other
-// seamlessly (CAS-to-CAS = 8 tCK); up to four writes may be in flight.
+// Board: each byte lane's DQ, DMI and DQS from the controller side reach the DRAM
+// WR_SKEWn_CLKS clocks later than CK, and its DQ WR_DQ_SKEWn_CLKS clocks later again. Write
+// leveling and write DQ training are what take these out.
+//
+// Writes, per byte lane (Lpddr4WriteLane): the first data DQS_t rising edge must land in WL +
+// tDQSS (0.75 to 1.25 tCK) after the CAS-2 edge, then 16 edges half a tCK (+-1 clock) apart with
+// DQS_c the complement of DQS_t. Bursts may follow each other seamlessly (CAS-to-CAS = 8 tCK); up
+// to four writes may be in flight. DQ must be driven and stable one clock either side of every
+// edge; when it is not, the beat is taken anyway, the lane's data of that burst reads back
+// inverted, and the clock counts in `dq_viol` rather than in `errors`, so that write DQ training
+// can sweep through failing delays. A design must show no `dq_viol` once trained.
+//
+// Write leveling (MR2 OP7 = 1): on each DQS_t rising edge a lane samples CK_t and drives the
+// sample on all its DQ TWLO_NCK tCK later; DQ is driven for as long as the mode is on.
 //
 // Reads, MRR and Read DQ Calibration: DQS_t is driven low for a 2 tCK static preamble ending
 // RL x tCK + DQSCK_CLKS after the CAS-2 edge, then toggles 16 times half a tCK apart with DQ
@@ -24,24 +34,24 @@
 //
 // RL and WL come from MR2 (write latency set A or B). MR5..MR8 read back the generics.
 //
-// Storage: one 16-beat burst per (bank, column[9:4]), tagged with the row that wrote it. A burst
-// counts as written once all 16 beats are captured. Reading a row other than the one stored
-// counts in `aliased` (a limitation of the model, not a design error); reading a location never
-// fully written counts in `unwritten` and returns 16'hDEAD on every beat.
+// Storage: one 16-beat burst per (bank, column[9:4]), tagged per byte lane with the row that
+// wrote it. A lane's burst counts as written once all 16 beats are captured. Reading a row
+// other than the one stored counts in `aliased` (a limitation of the model, not a design error);
+// reading a location never fully written counts in `unwritten` and returns 16'hDEAD on every
+// beat.
 //
-// Bus contention: `dq_driven` and `dqs_driven` say when the other side drives DQ and DQS. Any
-// clock in which both sides drive the same lines is an error (code 26).
+// Bus contention: `dq_driven` and `dqs_driven` say, per byte lane, when the other side drives DQ
+// and DQS. Any clock in which both sides drive the same lines, at the controller's pins or after
+// the board delay, is an error (code 26).
 //
 // `errors` counts design errors; `err_code` and `err_cycle` record the first one:
 //   1 CS high on a command's second cycle      2 ACT-2 without ACT-1
 //   3 MRW-2 without MRW-1                       4 CAS-2 without WR/RD/MRR/MPC
 //   5 RD/WR to a closed bank                    6 REF with a bank open
 //   7 unknown command                           8 write DQS missed the tDQSS window
-//   9 DQ changed in the clock before a DQS edge 10 DQ changed in the clock after a DQS edge
-//  11 write DQS edges not half a tCK apart      12 DQ not driven at a write DQS edge
-//  13 tRCD                                      14 tRP
-//  15 tRFCab                                    16 tMRW
-//  17 WR-1/RD-1/MRR-1/MPC-1 not followed by CAS-2
+//  11 write DQS edges not half a tCK apart      13 tRCD
+//  14 tRP                                       15 tRFCab
+//  16 tMRW                                      17 WR-1/RD-1/MRR-1/MPC-1 not followed by CAS-2
 //  18 MRW-1 not followed by MRW-2               19 ACT to an open bank
 //  20 DQS_c not the complement of DQS_t         21 refresh overdue (9 x tREFI)
 //  22 CA/CS changed in the clock before CK rose 23 CA/CS changed in the clock after CK rose
@@ -52,6 +62,171 @@
 //  32 tCCD                                      33 tWR (write recovery before PRE)
 //  34 tRTP                                      35 tWTR
 //  36 more than four reads or writes in flight  37 ACT-1 not followed by ACT-2
+// Codes 9 (DQ changed in the clock of a write DQS edge), 10 (DQ changed in the clock after it)
+// and 12 (DQ not driven at it) are DQ timing and count in `dq_viol` (see Writes).
+
+// One byte lane of the write path at the DRAM: the board delay, write capture and checks, and
+// the lane's storage. `err` is a design error code for this clock (0 none), `viol` a DQ timing
+// violation.
+pub entity Lpddr4WriteLane<
+    const SKEW_CLKS: nat = 0,
+    const DQ_SKEW_CLKS: nat = 0
+> {
+    in clk: clock
+    in cyc: bit[32]
+    in half_ck: bit[32]
+    in tck32: bit[32]
+    // the lane at the controller's pins
+    in dq_in: bit[8]
+    in dq_driven: bit
+    in dqs_t_in: bit
+    in dqs_c_in: bit
+    in dqs_driven: bit
+    // a write CAS: the window for its first DQS rise, and its line and row
+    in push: bit
+    in push_lo: bit[32]
+    in push_hi: bit[32]
+    in push_line: bit[9]
+    in push_row: bit[17]
+    // storage reads: two data addresses {bank, column[9:4], beat} and one tag line
+    in rd_addr_a: bit[13]
+    in rd_addr_b: bit[13]
+    in tag_line: bit[9]
+    out rd_a: bit[8]
+    out rd_b: bit[8]
+    // {inverted (DQ timing violated), written, row}
+    out tag_out: bit[19]
+    // the lane at the DRAM, after the board delay
+    out dqs_seen: bit
+    out dq_drv_seen: bit
+    out dqs_drv_seen: bit
+    out q_full: bit
+    out err: bit[8]
+    out viol: bit
+}
+
+impl Lpddr4WriteLane {
+    // board delay line: {dqs_driven, dqs_c, dqs_t, dq_driven, dq[7:0]}
+    signal hist: [bit[12]; 16]
+    signal mem: [bit[8]; 8192]
+    signal tag: [bit[19]; 512]
+    // writes in flight
+    signal q_lo: [bit[32]; 4]
+    signal q_hi: [bit[32]; 4]
+    signal q_line: [bit[9]; 4]
+    signal q_row: [bit[17]; 4]
+    signal q_head: bit[2] = 0
+    signal q_n: bit[3] = 0
+    // capture: 0 idle, 1 waiting for the first rise, 2 in the burst, 3 the clock after the last
+    // edge (its hold check)
+    signal st: bit[2] = 0
+    signal lo: bit[32] = 0
+    signal hi: bit[32] = 0
+    signal line: bit[9] = 0
+    signal row: bit[17] = 0
+    signal beat: bit[5] = 0
+    signal last: bit[32] = 0
+    signal hold: bit = 0
+    signal hold_dq: bit[8] = 0
+    signal cor: bit = 0
+    signal dq_prev: bit[8] = 0
+    signal dqs_prev: bit = 0
+
+    let sk: bit[4] = SKEW_CLKS
+    let dqk: bit[4] = DQ_SKEW_CLKS
+    let dk: bit[4] = sk + dqk
+    let raw: bit[12] = {dqs_driven, dqs_c_in, dqs_t_in, dq_driven, dq_in}
+    let hs: bit[12] = if sk == 0 { raw } else { hist[cyc[3:0] - sk] }
+    let hd: bit[12] = if dk == 0 { raw } else { hist[cyc[3:0] - dk] }
+    let dq: bit[8] = hd[7:0]
+    let dq_drv: bit = hd[8]
+    let dqs: bit = hs[9]
+    let dqs_c: bit = hs[10]
+    let dqs_drv: bit = hs[11]
+
+    let dqs_edge: bit = if dqs != dqs_prev { 1 } else { 0 }
+    let dqs_rise: bit = if dqs == 1 && dqs_prev == 0 { 1 } else { 0 }
+    let since_edge: bit[32] = cyc - last
+    let first: bit = if st == 1 && dqs_rise == 1 && cyc >= lo { 1 } else { 0 }
+    let take: bit = if first == 1 || (st == 2 && dqs_edge == 1) { 1 } else { 0 }
+    let setup_v: bit = if take == 1 && (dq != dq_prev || dq_drv == 0) { 1 } else { 0 }
+    let hold_v: bit = if hold == 1 && dq != hold_dq { 1 } else { 0 }
+    let err_now: bit[8] =
+        if st == 1 && cyc > hi { 8 }
+        else { if st == 2 && dqs_edge == 1 && (since_edge + 1 < half_ck || since_edge > half_ck + 1) { 11 }
+        else { if take == 1 && dqs_c == dqs { 20 }
+        else { if st == 2 && since_edge > tck32 { 24 }
+        else { 0 } } } }
+    let idx: bit[4] = if st == 1 { 4'h0 } else { beat[3:0] }
+    let q_tail: bit[2] = q_head + q_n[1:0]
+    let push_ok: bit = if push == 1 && q_n != 4 { 1 } else { 0 }
+    let load: bit = if (st == 0 || st == 3) && q_n != 0 { 1 } else { 0 }
+
+    on(clk.rise) {
+        hist[cyc[3:0]] = raw
+        dq_prev = dq
+        dqs_prev = dqs
+        hold = take
+        hold_dq = dq
+        if take == 1 { mem[{line, idx}] = dq }
+        if setup_v == 1 || hold_v == 1 { cor = 1 }
+        if push_ok == 1 {
+            q_lo[q_tail] = push_lo
+            q_hi[q_tail] = push_hi
+            q_line[q_tail] = push_line
+            q_row[q_tail] = push_row
+        }
+        q_n = if push_ok == 1 && load == 0 { q_n + 1 } else { if push_ok == 0 && load == 1 { q_n - 1 } else { q_n } }
+
+        if st == 1 {
+            if cyc > hi {
+                st = 0
+            } else {
+                if first == 1 {
+                    beat = 1
+                    last = cyc
+                    st = 2
+                }
+            }
+        }
+        if st == 2 {
+            if since_edge > tck32 {
+                st = 0
+            } else {
+                if dqs_edge == 1 {
+                    last = cyc
+                    beat = beat + 1
+                    if beat == 15 { st = 3 }
+                }
+            }
+        }
+        if st == 3 {
+            // the burst counts as written only once all 16 beats are in and held
+            tag[line] = {cor | hold_v, 1'b1, row}
+            st = 0
+        }
+        if load == 1 {
+            st = 1
+            lo = q_lo[q_head]
+            hi = q_hi[q_head]
+            line = q_line[q_head]
+            row = q_row[q_head]
+            q_head = q_head + 1
+            cor = 0
+        }
+    }
+
+    rd_a = mem[rd_addr_a]
+    rd_b = mem[rd_addr_b]
+    tag_out = tag[tag_line]
+    dqs_seen = dqs
+    dq_drv_seen = dq_drv
+    dqs_drv_seen = dqs_drv
+    q_full = if q_n == 4 { 1 } else { 0 }
+    err = err_now
+    viol = if setup_v == 1 || hold_v == 1 { 1 } else { 0 }
+}
+
 pub entity Lpddr4ChannelModel<
     const MR5: nat = 255,
     const MR6: nat = 0,
@@ -72,7 +247,12 @@ pub entity Lpddr4ChannelModel<
     const TRTP_NCK: nat = 8,
     const TCCD_NCK: nat = 8,
     const TZQCAL_NCK: nat = 16,
-    const TZQLAT_NCK: nat = 8
+    const TZQLAT_NCK: nat = 8,
+    const WR_SKEW0_CLKS: nat = 0,
+    const WR_SKEW1_CLKS: nat = 0,
+    const WR_DQ_SKEW0_CLKS: nat = 0,
+    const WR_DQ_SKEW1_CLKS: nat = 0,
+    const TWLO_NCK: nat = 8
 > {
     in clk: clock
     in reset_n: bit
@@ -81,10 +261,11 @@ pub entity Lpddr4ChannelModel<
     in cs: bit
     in ca: bit[6]
     in dq_in: bit[16]
-    in dq_driven: bit
-    in dqs_t_in: bit
-    in dqs_c_in: bit
-    in dqs_driven: bit
+    // per byte lane: what the controller side drives
+    in dq_driven: bit[2]
+    in dqs_t_in: bit[2]
+    in dqs_c_in: bit[2]
+    in dqs_driven: bit[2]
     out dq_out: bit[16]
     out dq_oe: bit
     out dqs_out: bit
@@ -93,6 +274,7 @@ pub entity Lpddr4ChannelModel<
     out err_code: bit[8]
     out err_cycle: bit[32]
     out contention: bit[16]
+    out dq_viol: bit[16]
     out aliased: bit[16]
     out unwritten: bit[16]
     out n_act: bit[32]
@@ -183,34 +365,24 @@ impl Lpddr4ChannelModel {
     signal n_mrr_r: bit[16] = 0
     signal n_ref_r: bit[32] = 0
     signal n_zq_r: bit[16] = 0
-    // storage: {bank, col[9:4], beat}; tags {written, row} per {bank, col[9:4]}
-    signal mem: [bit[16]; 8192]
-    signal tag: [bit[18]; 512]
-    // writes in flight: window for the first DQS rise, and the burst's line and row
-    signal wq_lo: [bit[32]; 4]
-    signal wq_hi: [bit[32]; 4]
-    signal wq_line: [bit[9]; 4]
-    signal wq_row: [bit[17]; 4]
-    signal wq_head: bit[2] = 0
-    signal wq_n: bit[3] = 0
-    // write capture: 0 idle, 1 waiting for the first rise, 2 in the burst
-    signal wr_st: bit[2] = 0
-    signal wr_lo: bit[32] = 0
-    signal wr_hi: bit[32] = 0
-    signal wr_line: bit[9] = 0
-    signal wr_row: bit[17] = 0
-    signal wr_beat: bit[5] = 0
-    signal wr_last: bit[32] = 0
-    signal wr_hold: bit = 0
-    signal wr_hold_dq: bit[16] = 0
-    signal dq_prev: bit[16] = 0
-    signal dqs_prev: bit = 0
+    // write leveling feedback per lane: pending, due clock, sampled CK, value driven
+    signal fb_pend: bit[2] = 0
+    signal fb_at0: bit[32] = 0
+    signal fb_at1: bit[32] = 0
+    signal fb_s: bit[2] = 0
+    signal fb_v: bit[2] = 0
+    signal wl_prev: bit[2] = 0
+    signal viol_r: bit[16] = 0
     // reads in flight: clock of the first data DQS rise, line, kind (0 data, 1 MRR, 2 Read DQ
     // Calibration), whether the stored row matches, and the MRR value
     signal rq_t0: [bit[32]; 4]
     signal rq_line: [bit[9]; 4]
     signal rq_kind: [bit[2]; 4]
-    signal rq_ok: bit[4] = 0
+    // per lane: stored row matches, and the lane's data reads back inverted
+    signal rq_ok0: bit[4] = 0
+    signal rq_ok1: bit[4] = 0
+    signal rq_cor0: bit[4] = 0
+    signal rq_cor1: bit[4] = 0
     signal rq_mrv: [bit[8]; 4]
     signal rq_head: bit[2] = 0
     signal rq_n: bit[3] = 0
@@ -220,7 +392,10 @@ impl Lpddr4ChannelModel {
     signal rd_b: bit[5] = 0
     signal rd_line: bit[9] = 0
     signal rd_kind: bit[2] = 0
-    signal rd_ok: bit = 0
+    signal rd_ok0: bit = 0
+    signal rd_ok1: bit = 0
+    signal rd_cor0: bit = 0
+    signal rd_cor1: bit = 0
     signal rd_mrv: bit[8] = 0
     signal dq_out_r: bit[16] = 0
     signal dq_oe_r: bit = 0
@@ -274,9 +449,6 @@ impl Lpddr4ChannelModel {
 
     let ck_rise: bit = if ck_t == 1 && ck_prev == 0 { 1 } else { 0 }
     let dev_on: bit = if reset_n == 1 && cke == 1 { 1 } else { 0 }
-    let dqs_edge: bit = if dqs_t_in != dqs_prev { 1 } else { 0 }
-    let dqs_rise: bit = if dqs_t_in == 1 && dqs_prev == 0 { 1 } else { 0 }
-    let since_edge: bit[32] = cyc - wr_last
     let rise_gap: bit[32] = cyc - last_rise
 
     // second-cycle decode helpers (valid when have_first == 1 and cs == 0 on a rise)
@@ -319,7 +491,13 @@ impl Lpddr4ChannelModel {
     let cas_line: bit[9] = {cas_bank, cas_col[9:4]}
     let cas_row: bit[17] = open_row[cas_bank]
     let cas_open: bit = open_valid[cas_bank]
-    let cas_tag: bit[18] = tag[cas_line]
+    let tag0: bit[19] = lane0.tag_out
+    let tag1: bit[19] = lane1.tag_out
+    let cas_wr0: bit = tag0[17]
+    let cas_wr1: bit = tag1[17]
+    let cas_hit0: bit = if tag0[17] == 1 && tag0[16:0] == cas_row { 1 } else { 0 }
+    let cas_hit1: bit = if tag1[17] == 1 && tag1[16:0] == cas_row { 1 } else { 0 }
+    let cas_alias: bit = if (tag0[17] == 1 && tag0[16:0] != cas_row) || (tag1[17] == 1 && tag1[16:0] != cas_row) { 1 } else { 0 }
     // (generics read through lets: a generic used directly in a match arm is not substituted)
     let mr5_c: bit[8] = MR5
     let mr6_c: bit[8] = MR6
@@ -412,41 +590,38 @@ impl Lpddr4ChannelModel {
     let oe_skewed: bit = if skew3 == 0 { dq_oe_r } else { skew_oe[skew_at] }
     let hold_err: bit[8] = if hold_chk == 1 && (ca != hold_ca || cs != hold_cs) { 23 } else { 0 }
     let ref_err: bit[8] = if ck_rise == 1 && ref_seen == 1 && since_ref == TREFI_NCK * 9 { 21 } else { 0 }
-    let both_drive: bit = if (oe_skewed == 1 && dq_driven == 1) || (dqs_oe_r == 1 && dqs_driven == 1) { 1 } else { 0 }
+    // write leveling: MR2 OP7; DQ carries each lane's CK sample
+    let wl_mode: bit = mr2[7]
+    let twlo32: bit[32] = TWLO_NCK
+    let twlo_clks: bit[32] = twlo32 * tck32
+    let wl_rise0: bit = if wl_mode == 1 && lane0.dqs_seen == 1 && wl_prev[0] == 0 { 1 } else { 0 }
+    let wl_rise1: bit = if wl_mode == 1 && lane1.dqs_seen == 1 && wl_prev[1] == 0 { 1 } else { 0 }
+    let dram_dq_oe: bit = if oe_skewed == 1 || wl_mode == 1 { 1 } else { 0 }
+    // the controller side drives a lane at its pins or, after the board delay, at the DRAM
+    let ctl_dq: bit = if dq_driven != 0 || lane0.dq_drv_seen == 1 || lane1.dq_drv_seen == 1 { 1 } else { 0 }
+    let ctl_dqs: bit = if dqs_driven != 0 || lane0.dqs_drv_seen == 1 || lane1.dqs_drv_seen == 1 { 1 } else { 0 }
+    let both_drive: bit = if (dram_dq_oe == 1 && ctl_dq == 1) || (dqs_oe_r == 1 && ctl_dqs == 1) { 1 } else { 0 }
     let cont_err: bit[8] = if both_drive == 1 { 26 } else { 0 }
-    let wq_full: bit = if wq_n == 4 { 1 } else { 0 }
+    let wq_full: bit = if lane0.q_full == 1 || lane1.q_full == 1 { 1 } else { 0 }
     let rq_full: bit = if rq_n == 4 { 1 } else { 0 }
     let wr_cas: bit = if is_cas2 == 1 && pending == 1 { 1 } else { 0 }
     let rd_cas: bit = if is_cas2 == 1 && (pending == 2 || pending == 4 || pending == 6) { 1 } else { 0 }
     let q_err: bit[8] = if (wr_cas == 1 && wq_full == 1) || (rd_cas == 1 && rq_full == 1) { 36 } else { 0 }
 
-    // write capture checks
-    let wr_err: bit[8] =
-        if wr_st == 1 && cyc > wr_hi { 8 }
-        else { if wr_st == 2 && dqs_edge == 1 && dq_in != dq_prev { 9 }
-        else { if wr_st == 2 && dqs_edge == 1 && (since_edge + 1 < half_ck || since_edge > half_ck + 1) { 11 }
-        else { if wr_st == 2 && dqs_edge == 1 && dq_driven == 0 { 12 }
-        else { if wr_st == 2 && dqs_edge == 1 && dqs_c_in == dqs_t_in { 20 }
-        else { if wr_st == 2 && since_edge > tck32 { 24 }
-        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dq_in != dq_prev { 9 }
-        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dq_driven == 0 { 12 }
-        else { if wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo && dqs_c_in == dqs_t_in { 20 }
-        else { 0 } } } } } } } } }
-    let whold_err: bit[8] = if wr_hold == 1 && dq_in != wr_hold_dq { 10 } else { 0 }
+    // write capture checks, per lane
+    let wr_err: bit[8] = if lane0.err != 0 { lane0.err } else { lane1.err }
     let err_now: bit[8] =
         if cmd_err != 0 { cmd_err }
         else { if hold_err != 0 { hold_err }
         else { if ref_err != 0 { ref_err }
         else { if cont_err != 0 { cont_err }
         else { if q_err != 0 { q_err }
-        else { if wr_err != 0 { wr_err }
-        else { whold_err } } } } } }
+        else { wr_err } } } } }
 
-    // write beat index for this edge
-    let wr_take: bit = if (wr_st == 1 && dqs_rise == 1 && cyc >= wr_lo) || (wr_st == 2 && dqs_edge == 1) { 1 } else { 0 }
-    let wr_idx: bit[4] = if wr_st == 1 { 4'h0 } else { wr_beat[3:0] }
-    let wr_addr: bit[13] = {wr_line, wr_idx}
-    let wq_tail: bit[2] = wq_head + wq_n[1:0]
+    // a write CAS for the lanes' queues: the window for the first data DQS rise
+    let wr_push: bit = if is_cas2 == 1 && pending == 1 && wq_full == 0 { 1 } else { 0 }
+    let wr_lo: bit[32] = cyc + wl_clks + half_ck + quarter_ck
+    let wr_hi: bit[32] = cyc + wl_clks + tck32 + quarter_ck
     let rq_tail: bit[2] = rq_head + rq_n[1:0]
 
     // read data for the current beat
@@ -456,28 +631,73 @@ impl Lpddr4ChannelModel {
     let rdc_bit_next: bit = if rd_b4_next[3] == 0 { mr32[rd_b4_next[2:0]] } else { mr40[rd_b4_next[2:0]] }
     let rdc_mask: bit[16] = {mr20, mr15}
     let rdc_word_next: bit[16] = if rdc_bit_next == 1 { ~rdc_mask } else { rdc_mask }
-    let rd_word_next: bit[16] = if rd_ok == 1 { mem[rd_addr_next] } else { 16'hDEAD }
+    let rd_byte0: bit[8] = if rd_ok0 == 0 { 8'hAD } else { if rd_cor0 == 1 { ~lane0.rd_a } else { lane0.rd_a } }
+    let rd_byte1: bit[8] = if rd_ok1 == 0 { 8'hDE } else { if rd_cor1 == 1 { ~lane1.rd_a } else { lane1.rd_a } }
+    let rd_word_next: bit[16] = {rd_byte1, rd_byte0}
     let rd_data_next: bit[16] = if rd_kind == 2 { rdc_word_next } else { if rd_kind == 1 { {8'h00, rd_mrv} } else { rd_word_next } }
     // the head of the read queue, for starting its burst (beat 0)
     let h_line: bit[9] = rq_line[rq_head]
     let h_kind: bit[2] = rq_kind[rq_head]
-    let h_ok: bit = rq_ok[rq_head]
+    let h_ok0: bit = rq_ok0[rq_head]
+    let h_ok1: bit = rq_ok1[rq_head]
+    let h_cor0: bit = rq_cor0[rq_head]
+    let h_cor1: bit = rq_cor1[rq_head]
     let h_mrv: bit[8] = rq_mrv[rq_head]
     let h_t0: bit[32] = rq_t0[rq_head]
     let h_rdc_bit: bit = mr32[0]
     let h_rdc_word: bit[16] = if h_rdc_bit == 1 { ~rdc_mask } else { rdc_mask }
-    let h_word: bit[16] = if h_ok == 1 { mem[{h_line, 4'h0}] } else { 16'hDEAD }
+    let h_byte0: bit[8] = if h_ok0 == 0 { 8'hAD } else { if h_cor0 == 1 { ~lane0.rd_b } else { lane0.rd_b } }
+    let h_byte1: bit[8] = if h_ok1 == 0 { 8'hDE } else { if h_cor1 == 1 { ~lane1.rd_b } else { lane1.rd_b } }
+    let h_word: bit[16] = {h_byte1, h_byte0}
     let h_data: bit[16] = if h_kind == 2 { h_rdc_word } else { if h_kind == 1 { {8'h00, h_mrv} } else { h_word } }
     let rq_due: bit = if rq_n != 0 && cyc + 1 == h_t0 { 1 } else { 0 }
     let rq_pre_due: bit = if rq_n != 0 && cyc + 1 + tck32 + tck32 >= h_t0 { 1 } else { 0 }
+
+    inst lane0 = Lpddr4WriteLane<WR_SKEW0_CLKS, WR_DQ_SKEW0_CLKS> {
+        clk: clk,
+        cyc: cyc,
+        half_ck: half_ck,
+        tck32: tck32,
+        dq_in: dq_in[7:0],
+        dq_driven: dq_driven[0],
+        dqs_t_in: dqs_t_in[0],
+        dqs_c_in: dqs_c_in[0],
+        dqs_driven: dqs_driven[0],
+        push: wr_push,
+        push_lo: wr_lo,
+        push_hi: wr_hi,
+        push_line: cas_line,
+        push_row: cas_row,
+        rd_addr_a: rd_addr_next,
+        rd_addr_b: {h_line, 4'h0},
+        tag_line: cas_line
+    }
+    inst lane1 = Lpddr4WriteLane<WR_SKEW1_CLKS, WR_DQ_SKEW1_CLKS> {
+        clk: clk,
+        cyc: cyc,
+        half_ck: half_ck,
+        tck32: tck32,
+        dq_in: dq_in[15:8],
+        dq_driven: dq_driven[1],
+        dqs_t_in: dqs_t_in[1],
+        dqs_c_in: dqs_c_in[1],
+        dqs_driven: dqs_driven[1],
+        push: wr_push,
+        push_lo: wr_lo,
+        push_hi: wr_hi,
+        push_line: cas_line,
+        push_row: cas_row,
+        rd_addr_a: rd_addr_next,
+        rd_addr_b: {h_line, 4'h0},
+        tag_line: cas_line
+    }
 
     on(clk.rise) {
         cyc = cyc + 1
         ck_prev = ck_t
         ca_prev = ca
         cs_prev = cs
-        dq_prev = dq_in
-        dqs_prev = dqs_t_in
+        wl_prev = {lane1.dqs_seen, lane0.dqs_seen}
         skew_dq[cyc[2:0]] = dq_out_r
         skew_oe[cyc[2:0]] = dq_oe_r
 
@@ -490,6 +710,35 @@ impl Lpddr4ChannelModel {
         }
         if both_drive == 1 {
             cont_r = if cont_r == 65535 { 65535 } else { cont_r + 1 }
+        }
+        if lane0.viol == 1 || lane1.viol == 1 {
+            viol_r = if viol_r == 65535 { 65535 } else { viol_r + 1 }
+        }
+
+        // write leveling: a lane's DQS rise samples CK; the sample is driven tWLO later
+        if wl_rise0 == 1 {
+            fb_pend[0] = 1
+            fb_at0 = cyc + twlo_clks
+            fb_s[0] = ck_t
+        } else {
+            if fb_pend[0] == 1 && cyc >= fb_at0 {
+                fb_pend[0] = 0
+                fb_v[0] = fb_s[0]
+            }
+        }
+        if wl_rise1 == 1 {
+            fb_pend[1] = 1
+            fb_at1 = cyc + twlo_clks
+            fb_s[1] = ck_t
+        } else {
+            if fb_pend[1] == 1 && cyc >= fb_at1 {
+                fb_pend[1] = 0
+                fb_v[1] = fb_s[1]
+            }
+        }
+        if wl_mode == 0 {
+            fb_pend = 0
+            fb_v = 0
         }
 
         // CA/CS hold: checked on the clock after each CK rise
@@ -608,17 +857,12 @@ impl Lpddr4ChannelModel {
                             last_cas = nck
                             cas_seen = 1
                             if pending == 1 && wq_full == 0 {
-                                wq_lo[wq_tail] = cyc + wl_clks + half_ck + quarter_ck
-                                wq_hi[wq_tail] = cyc + wl_clks + tck32 + quarter_ck
-                                wq_line[wq_tail] = cas_line
-                                wq_row[wq_tail] = cas_row
-                                wq_n = wq_n + 1
                                 wr_end_at[cas_bank] = nck + wl32 + 9
                                 wr_seen[cas_bank] = 1
                                 wr_end_any = nck + wl32 + 9
                                 wr_any = 1
                                 n_wr_r = n_wr_r + 1
-                                if cas_tag[17] == 1 && cas_tag[16:0] != cas_row {
+                                if cas_alias == 1 {
                                     aliased_r = aliased_r + 1
                                 }
                             }
@@ -626,7 +870,10 @@ impl Lpddr4ChannelModel {
                                 rq_t0[rq_tail] = cyc + rl_clks + dqsck32
                                 rq_line[rq_tail] = cas_line
                                 rq_kind[rq_tail] = if pending == 4 { 1 } else { if pending == 6 { 2 } else { 0 } }
-                                rq_ok[rq_tail] = if cas_tag[17] == 1 && cas_tag[16:0] == cas_row { 1 } else { 0 }
+                                rq_ok0[rq_tail] = cas_hit0
+                                rq_ok1[rq_tail] = cas_hit1
+                                rq_cor0[rq_tail] = tag0[18]
+                                rq_cor1[rq_tail] = tag1[18]
                                 rq_mrv[rq_tail] = mr_read
                                 rq_n = rq_n + 1
                                 if pending == 2 {
@@ -638,8 +885,8 @@ impl Lpddr4ChannelModel {
                                 if pending == 6 { n_rd_r = n_rd_r + 1 }
                                 if pending == 2 {
                                     n_rd_r = n_rd_r + 1
-                                    if cas_tag[17] == 0 { unwritten_r = unwritten_r + 1 }
-                                    if cas_tag[17] == 1 && cas_tag[16:0] != cas_row {
+                                    if cas_wr0 == 0 || cas_wr1 == 0 { unwritten_r = unwritten_r + 1 }
+                                    if cas_alias == 1 {
                                         aliased_r = aliased_r + 1
                                     }
                                 }
@@ -647,49 +894,6 @@ impl Lpddr4ChannelModel {
                             }
                             pending = 0
                         }
-                    }
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------- write capture
-        wr_hold = if wr_take == 1 { 1 } else { 0 }
-        wr_hold_dq = dq_in
-        // one write site, so the storage stays one memory (one write port)
-        if wr_take == 1 { mem[wr_addr] = dq_in }
-        if wr_st == 0 {
-            if wq_n != 0 {
-                wr_st = 1
-                wr_lo = wq_lo[wq_head]
-                wr_hi = wq_hi[wq_head]
-                wr_line = wq_line[wq_head]
-                wr_row = wq_row[wq_head]
-                wq_head = wq_head + 1
-                wq_n = if wr_cas == 1 && wq_full == 0 { wq_n } else { wq_n - 1 }
-            }
-        }
-        if wr_st == 1 {
-            if cyc > wr_hi {
-                wr_st = 0
-            } else {
-                if wr_take == 1 {
-                    wr_beat = 1
-                    wr_last = cyc
-                    wr_st = 2
-                }
-            }
-        }
-        if wr_st == 2 {
-            if since_edge > tck32 {
-                wr_st = 0
-            } else {
-                if dqs_edge == 1 {
-                    wr_last = cyc
-                    wr_beat = wr_beat + 1
-                    // the burst counts as written only once all 16 beats are in
-                    if wr_beat == 15 {
-                        wr_st = 0
-                        tag[wr_line] = {1'b1, wr_row}
                     }
                 }
             }
@@ -705,7 +909,10 @@ impl Lpddr4ChannelModel {
                 rd_sub = 1
                 rd_line = h_line
                 rd_kind = h_kind
-                rd_ok = h_ok
+                rd_ok0 = h_ok0
+                rd_ok1 = h_ok1
+                rd_cor0 = h_cor0
+                rd_cor1 = h_cor1
                 rd_mrv = h_mrv
                 rq_head = rq_head + 1
                 rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
@@ -738,7 +945,10 @@ impl Lpddr4ChannelModel {
                     rd_sub = 1
                     rd_line = h_line
                     rd_kind = h_kind
-                    rd_ok = h_ok
+                    rd_ok0 = h_ok0
+                rd_ok1 = h_ok1
+                rd_cor0 = h_cor0
+                rd_cor1 = h_cor1
                     rd_mrv = h_mrv
                     rq_head = rq_head + 1
                     rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
@@ -754,7 +964,10 @@ impl Lpddr4ChannelModel {
                     rd_sub = 1
                     rd_line = h_line
                     rd_kind = h_kind
-                    rd_ok = h_ok
+                    rd_ok0 = h_ok0
+                rd_ok1 = h_ok1
+                rd_cor0 = h_cor0
+                rd_cor1 = h_cor1
                     rd_mrv = h_mrv
                     rq_head = rq_head + 1
                     rq_n = if rd_cas == 1 && rq_full == 0 { rq_n } else { rq_n - 1 }
@@ -781,14 +994,15 @@ impl Lpddr4ChannelModel {
         }
     }
 
-    dq_out = dq_skewed
-    dq_oe = oe_skewed
+    dq_out = if wl_mode == 1 { {fb_v[1], fb_v[1], fb_v[1], fb_v[1], fb_v[1], fb_v[1], fb_v[1], fb_v[1], fb_v[0], fb_v[0], fb_v[0], fb_v[0], fb_v[0], fb_v[0], fb_v[0], fb_v[0]} } else { dq_skewed }
+    dq_oe = dram_dq_oe
     dqs_out = dqs_out_r
     dqs_oe = dqs_oe_r
     errors = errors_r
     err_code = err_code_r
     err_cycle = err_cycle_r
     contention = cont_r
+    dq_viol = viol_r
     aliased = aliased_r
     unwritten = unwritten_r
     n_act = n_act_r

@@ -208,11 +208,16 @@ impl<'a> SharedCodegen<'a> {
                     BinaryOperation::Shr => left_width,
                     BinaryOperation::Div | BinaryOperation::Mod => left_width,
                     BinaryOperation::Add | BinaryOperation::Sub => {
-                        // +1 to capture carry/borrow — the result is masked to the
-                        // output signal's declared width when assigned, so the extra
-                        // bit is harmless for same-width uses (e.g., counter + 1)
-                        // but necessary when the target is wider (e.g., bit[9] = bit[8] + bit[8]).
-                        std::cmp::max(left_width, right_width) + 1
+                        // The width SIR declares for the node: the operands' width, or the
+                        // assignment target's when that is wider (the carry or borrow of
+                        // `s: bit[9] = a + b`). A blanket extra bit leaked the borrow into
+                        // every use of `a - b` as an index, a compared value or a shifted one.
+                        let max_in = std::cmp::max(left_width, right_width);
+                        node.outputs
+                            .first()
+                            .and_then(|o| self.declared_signal_widths.get(&o.signal_id))
+                            .copied()
+                            .map_or(max_in, |d| d.max(max_in))
                     }
                     BinaryOperation::And | BinaryOperation::Or | BinaryOperation::Xor => {
                         std::cmp::max(left_width, right_width)
@@ -3957,11 +3962,13 @@ impl<'a> SharedCodegen<'a> {
             } else {
                 format!("signals->{}", self.sanitize_name(array_signal))
             };
+            // A bit index past the top reads 0 (a C++ shift that far is undefined)
             self.write_indented(&format!(
-                "signals->{} = ({} >> signals->{}) & 1;\n",
-                self.sanitize_name(output),
-                source_loc,
-                self.sanitize_name(index_signal)
+                "signals->{out} = (signals->{idx} < {w}) ? (({src} >> signals->{idx}) & 1) : 0;\n",
+                out = self.sanitize_name(output),
+                idx = self.sanitize_name(index_signal),
+                w = source_width,
+                src = source_loc,
             ));
             return;
         }
@@ -3985,6 +3992,33 @@ impl<'a> SharedCodegen<'a> {
 
         // Check if the source array is a 2D array (array of arrays)
         let is_2d = self.is_2d_array(&resolved_signal);
+
+        // An index past the last element reads 0 (and never memory beyond the array, which
+        // belongs to other signals). Elements are counted from the array's type.
+        let depth = self
+            .get_array_type_for_signal(&resolved_signal)
+            .or_else(|| self.get_array_type_for_signal(array_signal))
+            .and_then(|t| match t {
+                SirType::Array(_, n) => Some(n),
+                _ => None,
+            });
+        if let Some(depth) = depth {
+            let sanitized_output = self.sanitize_name(output);
+            let sanitized_index = self.sanitize_name(index_signal);
+            let zero = if let Some(size) = output_array_size {
+                format!(
+                    "for (uint32_t i = 0; i < {}; i++) signals->{}[i] = 0;",
+                    size, sanitized_output
+                )
+            } else {
+                format!("signals->{} = 0;", sanitized_output)
+            };
+            self.write_indented(&format!(
+                "if (signals->{} >= {}) {{ {} }} else {{\n",
+                sanitized_index, depth, zero
+            ));
+            self.indent();
+        }
 
         if let Some(size) = output_array_size {
             // Output is an array type (multi-word value)
@@ -4013,6 +4047,10 @@ impl<'a> SharedCodegen<'a> {
                 array_location,
                 self.sanitize_name(index_signal)
             ));
+        }
+        if depth.is_some() {
+            self.dedent();
+            self.write_indented("}\n");
         }
     }
 
@@ -4059,10 +4097,11 @@ impl<'a> SharedCodegen<'a> {
                         "memcpy(signals->{}, signals->{}, sizeof(signals->{}));\n",
                         output_name, old_name, output_name
                     ));
-                    // Update the specific row by copying value array
+                    // Update the specific row by copying value array (an index past the
+                    // last row writes nothing)
                     self.write_indented(&format!(
-                        "for (uint32_t i = 0; i < {}; i++) signals->{}[signals->{}][i] = signals->{}[i];\n",
-                        inner_size, output_name, index_name, value_name
+                        "if (signals->{} < {}) for (uint32_t i = 0; i < {}; i++) signals->{}[signals->{}][i] = signals->{}[i];\n",
+                        index_name, outer_size, inner_size, output_name, index_name, value_name
                     ));
                 } else {
                     // Metal: nested loops for copy
@@ -4078,10 +4117,10 @@ impl<'a> SharedCodegen<'a> {
                     self.write_indented("}\n");
                     self.dedent();
                     self.write_indented("}\n");
-                    // Update specific row
+                    // Update specific row (an index past the last row writes nothing)
                     self.write_indented(&format!(
-                        "for (uint j = 0; j < {}; j++) signals->{}[signals->{}][j] = signals->{}[j];\n",
-                        inner_size, output_name, index_name, value_name
+                        "if (signals->{} < {}) for (uint j = 0; j < {}; j++) signals->{}[signals->{}][j] = signals->{}[j];\n",
+                        index_name, outer_size, inner_size, output_name, index_name, value_name
                     ));
                 }
             } else {
@@ -4098,10 +4137,11 @@ impl<'a> SharedCodegen<'a> {
                 self.dedent();
                 self.write_indented("}\n");
 
-                // Update the specific element
+                // Update the specific element (an index past the last element writes
+                // nothing)
                 self.write_indented(&format!(
-                    "signals->{}[signals->{}] = signals->{};\n",
-                    output_name, index_name, value_name
+                    "if (signals->{} < {}) signals->{}[signals->{}] = signals->{};\n",
+                    index_name, outer_size, output_name, index_name, value_name
                 ));
             }
         }

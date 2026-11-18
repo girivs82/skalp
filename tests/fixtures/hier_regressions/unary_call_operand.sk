@@ -1,0 +1,20 @@
+// `~f(a)` as a let value, and `~f(a)[2:0]`: the unary operand is a call
+
+fn f(z: bit) -> bit[8] {
+    return {7'b0000000, z} + 8'h35
+}
+
+entity NotCall {
+    in clk: clock
+    in a: bit
+    out o: bit[8]
+    out p: bit[8]
+    out q: bit[3]
+}
+
+impl NotCall {
+    let x: bit[8] = ~f(a)
+    o = x
+    p = f(a)
+    q = ~f(a)[2:0]
+}

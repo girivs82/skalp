@@ -3074,6 +3074,12 @@ impl HirBuilderContext {
                         // `ncl_req` is only required under a clocked parent,
                         // which MIR lowering checks (an async parent coalesces)
                         && port.name != crate::hir::NCL_REQ_PORT
+                        // a primitive model's simulation clock is wired by
+                        // the simulator, never by the design
+                        && !entity_def
+                            .vendor_ip_config
+                            .as_ref()
+                            .is_some_and(|v| v.sim_clocks.contains(&port.name))
                     {
                         self.errors.push(HirError {
                             message: format!(
@@ -3884,13 +3890,27 @@ impl HirBuilderContext {
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
-        // Look up signal ID - check ports first, then signals
-        // We check ports and signals directly rather than using general scope lookup
-        // because clock domain generics (e.g., 'clk stored as "clk") can shadow port names
-        let signal = if let Some(&port_id) = self.symbols.ports.get(&signal_name) {
-            HirEventSignal::Port(port_id)
+        // Look the name up as a port or signal in scope, innermost first, skipping other
+        // kinds of symbol (clock domain generics, e.g. 'clk stored as "clk", can shadow a
+        // port's name). The flat port table holds the ports of every entity built so far, so
+        // it is only a fallback: with `entity A { in clk }` and a top whose `signal clk:
+        // clock` feeds an A, the top's `on(clk.rise)` bound to A's port and was dropped.
+        let in_scope =
+            self.symbols
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| match scope.get(&signal_name) {
+                    Some(SymbolId::Port(id)) => Some(HirEventSignal::Port(*id)),
+                    Some(SymbolId::Signal(id)) => Some(HirEventSignal::Signal(*id)),
+                    _ => None,
+                });
+        let signal = if let Some(signal) = in_scope {
+            signal
         } else if let Some(&signal_id) = self.symbols.signals.get(&signal_name) {
             HirEventSignal::Signal(signal_id)
+        } else if let Some(&port_id) = self.symbols.ports.get(&signal_name) {
+            HirEventSignal::Port(port_id)
         } else {
             // Not found in ports or signals
             return None;
@@ -6872,6 +6892,18 @@ impl HirBuilderContext {
         if let Some(let_stmt) = self.build_let_statement(node) {
             vec![HirStatement::Let(let_stmt)]
         } else {
+            // A `let` that cannot be built would otherwise vanish, and every later use of its
+            // name reports an undefined identifier far from the cause.
+            let name = node
+                .descendants_with_tokens()
+                .filter_map(|elem| elem.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())
+                .unwrap_or_default();
+            self.errors.push(HirError {
+                message: format!("cannot build the value of `let {name}`"),
+                span: self.make_span(node),
+            });
             Vec::new()
         }
     }
@@ -10027,6 +10059,21 @@ impl HirBuilderContext {
             })
             .collect();
 
+        // An operand with a call in it, `~f(a)`, `~f(a)[3]` or `-a.m(1)`, arrives as a sibling
+        // chain ([IdentExpr(f), CallExpr((a)), ...] or [IdentExpr(a), FieldExpr(.m),
+        // CallExpr((1))]). Picking one child dropped the call: `~f(a)` failed to build and the
+        // `let` it was in vanished, `-a.m(1)` became `-a`. Build the whole chain.
+        let is_call_chain = expr_children.len() >= 2
+            && expr_children[1..]
+                .iter()
+                .any(|n| n.kind() == SyntaxKind::CallExpr)
+            && expr_children[1..].iter().all(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::CallExpr | SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                )
+            });
+
         // If we have both IdentExpr and IndexExpr/FieldExpr, use the last one (it's the complete expression)
         let operand_node = if expr_children.len() > 1 {
             // Check if last is IndexExpr and previous is IdentExpr/FieldExpr/PathExpr
@@ -10062,7 +10109,11 @@ impl HirBuilderContext {
             expr_children.first()?
         };
 
-        let operand = self.build_expression(operand_node)?;
+        let operand = if is_call_chain {
+            self.build_chained_rhs_expression(&expr_children)?
+        } else {
+            self.build_expression(operand_node)?
+        };
 
         // Get operator
         // BUG #188 FIX: Include Pipe for reduction OR operator (|expr)
@@ -12319,6 +12370,7 @@ impl HirBuilderContext {
         let mut tie_low: Vec<String> = Vec::new();
         let mut tie_high: Vec<String> = Vec::new();
         let mut unconnected: Vec<String> = Vec::new();
+        let mut sim_clocks: Vec<String> = Vec::new();
         let mut port_map: Vec<(String, String)> = Vec::new();
         let mut clocks: Vec<(String, f64)> = Vec::new();
         let mut async_groups: Vec<(String, String)> = Vec::new();
@@ -12365,6 +12417,9 @@ impl HirBuilderContext {
                     }
                     "unconnected" | "nc" | "open" => {
                         current_key = Some("unconnected".to_string());
+                    }
+                    "sim_clock" | "sim_clocks" => {
+                        current_key = Some("sim_clock".to_string());
                     }
                     "port_map" | "portmap" | "map" => {
                         current_key = Some("port_map".to_string());
@@ -12453,6 +12508,11 @@ impl HirBuilderContext {
                     Some("tie_high") => {
                         // Comma-separated list of ports to tie high
                         tie_high = unquoted.split(',').map(|s| s.trim().to_string()).collect();
+                        current_key = None;
+                    }
+                    Some("sim_clock") => {
+                        // Ports a simulation model ticks on, wired by the simulator
+                        sim_clocks = unquoted.split(',').map(|s| s.trim().to_string()).collect();
                         current_key = None;
                     }
                     Some("unconnected") => {
@@ -12574,6 +12634,7 @@ impl HirBuilderContext {
                         "tie_low" => tie_low = std::mem::take(&mut current_list),
                         "tie_high" => tie_high = std::mem::take(&mut current_list),
                         "unconnected" => unconnected = std::mem::take(&mut current_list),
+                        "sim_clock" => sim_clocks = std::mem::take(&mut current_list),
                         _ => {
                             // Unknown list key - ignore for now
                         }
@@ -12595,6 +12656,7 @@ impl HirBuilderContext {
             tie_low,
             tie_high,
             unconnected,
+            sim_clocks,
             port_map,
             clocks,
             async_groups,

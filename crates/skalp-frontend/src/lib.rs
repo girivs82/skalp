@@ -87,9 +87,22 @@ fn find_project_root(start_path: &Path) -> Option<PathBuf> {
 /// Parse and build HIR from a file with full module resolution
 /// Returns a CompilationContext containing both the main HIR and all module HIRs
 pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<CompilationContext> {
+    parse_and_build_compilation_context_for_device(file_path, None)
+}
+
+/// Like [`parse_and_build_compilation_context`], for a design built for
+/// `device` (a part or family name, as `--device` takes it). The design can
+/// then instantiate the vendor primitives of the device's family by name
+/// (`inst o = ODDRX4 { ... }`) without declaring them: their declarations,
+/// with a simulation model as the body, come from the family's primitive
+/// library in the standard library (`skalp/primitives/<family>/`).
+pub fn parse_and_build_compilation_context_for_device(
+    file_path: &Path,
+    device: Option<&str>,
+) -> Result<CompilationContext> {
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
-    parse_and_build_compilation_context_from_source(file_path, source)
+    parse_and_build_compilation_context_from_source_for_device(file_path, source, device)
 }
 
 /// Like [`parse_and_build_compilation_context`], for source text held in
@@ -98,6 +111,102 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
 pub fn parse_and_build_compilation_context_from_source(
     file_path: &Path,
     source: String,
+) -> Result<CompilationContext> {
+    parse_and_build_compilation_context_from_source_for_device(file_path, source, None)
+}
+
+/// The primitive-library family of a device: the directory under
+/// `skalp/primitives/` that holds the simulation models of its vendor
+/// primitives. Part numbers and family aliases are accepted.
+pub fn primitive_family(device: &str) -> Option<&'static str> {
+    let d: String = device
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    const NEXUS: [&str; 9] = [
+        "nexus",
+        "lfcpnx",
+        "lifcl",
+        "lfd2nx",
+        "lfmxo5",
+        "certus",
+        "crosslink",
+        "machxo5",
+        "latticenexus",
+    ];
+    if NEXUS.iter().any(|p| d.starts_with(p)) {
+        return Some("nexus");
+    }
+    if d.starts_with("ice40") || d.starts_with("ice5") {
+        return Some("ice40");
+    }
+    if d.starts_with("xc7") || d.starts_with("artix7") || d.starts_with("kintex7") {
+        return Some("xc7");
+    }
+    None
+}
+
+/// Merge the declarations of the target family's primitives that `hir` does
+/// not declare itself (a design that declares a primitive keeps its own).
+/// The models are built into SKALP (`skalp-stdlib`'s
+/// `skalp/primitives/<family>/`); a family without a library adds nothing, so
+/// a primitive it would need is reported as an unknown entity.
+fn merge_primitive_library(hir: &mut Hir, device: &str) -> Result<()> {
+    let Some(files) = primitive_family(device).and_then(skalp_stdlib::primitive_models) else {
+        return Ok(());
+    };
+    for (name, source) in files {
+        let module = primitive_library_hir(name, source)?;
+        // Helper functions first, so the models that call them find them
+        for function in &module.functions {
+            if !hir.functions.iter().any(|f| f.name == function.name) {
+                merge_symbol(hir, &module, &function.name)?;
+            }
+        }
+        for entity in &module.entities {
+            if !hir.entities.iter().any(|e| e.name == entity.name) {
+                merge_symbol(hir, &module, &entity.name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One file of a primitive library, parsed
+fn primitive_library_hir(name: &str, source: &str) -> Result<Hir> {
+    let (syntax_tree, parse_errors) = parse::parse_with_errors(source);
+    if let Some(e) = parse_errors.first() {
+        let line = source[..e.position.min(source.len())]
+            .lines()
+            .count()
+            .max(1);
+        anyhow::bail!(
+            "primitive library {name}, line {line}: {} ({} parse errors)",
+            e.message,
+            parse_errors.len()
+        );
+    }
+    let mut builder =
+        hir_builder::HirBuilderContext::with_source(source, Some(PathBuf::from(name)));
+    builder.build(&syntax_tree).map_err(|errors| {
+        anyhow::anyhow!(
+            "primitive library {name}: {}",
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        )
+    })
+}
+
+/// [`parse_and_build_compilation_context_from_source`] for a design built for
+/// `device` (see [`parse_and_build_compilation_context_for_device`])
+pub fn parse_and_build_compilation_context_from_source_for_device(
+    file_path: &Path,
+    source: String,
+    device: Option<&str>,
 ) -> Result<CompilationContext> {
     use module_resolver::ModuleResolver;
 
@@ -188,6 +297,12 @@ pub fn parse_and_build_compilation_context_from_source(
     resolver
         .preload_stdlib_numeric()
         .context("Failed to preload stdlib numeric modules")?;
+
+    // The vendor primitives of the target device's family, with their
+    // simulation models
+    if let Some(device) = device {
+        merge_primitive_library(&mut hir, device)?;
+    }
 
     // Second pass: Rebuild instances now that all entities are available
     // BUG FIX: Rebuild instances for ALL loaded modules, not just the main file

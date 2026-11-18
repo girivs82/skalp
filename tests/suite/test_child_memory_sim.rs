@@ -247,7 +247,7 @@ async fn batched_run_matches_stepping() {
     let mut batched = simulator(&sir).await;
     batched.set_input("ra", 0).await;
     batched.set_input("clk", 1).await;
-    batched.run_batched(cycles).await;
+    batched.run_batched(cycles, "clk").await;
 
     let mut stepped = simulator(&sir).await;
     stepped.set_input("ra", 0).await;
@@ -281,4 +281,90 @@ async fn batched_run_matches_stepping() {
         assert_eq!(b, s, "log[{ra}]: batched vs stepped");
         assert_eq!(s, Some(log[ra as usize]), "log[{ra}]");
     }
+}
+
+const SMALL: &str = r#"
+entity Pairs {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in d: bit
+    in ra: bit[3]
+    out rd: bit[2]
+    out first: bit[2]
+}
+
+impl Pairs {
+    signal dr: bit = 0
+    signal pairs: [bit[2]; 8]
+    on(clk.rise) {
+        dr = d
+        if we == 1 {
+            pairs[wa] = {d, dr}
+        }
+        pairs[7] = 2'b10
+    }
+    rd = pairs[ra]
+    first = pairs[0]
+}
+
+entity ChildMemTop {
+    in clk: clock
+    in we: bit
+    in wa: bit[3]
+    in d: bit
+    in ra: bit[3]
+    out rd: bit[2]
+    out first: bit[2]
+}
+
+impl ChildMemTop {
+    inst p = Pairs { clk: clk, we: we, wa: wa, d: d, ra: ra }
+    rd = p.rd
+    first = p.first
+}
+"#;
+
+/// A child's array too small to be kept as a memory is one register per
+/// entry. Its writes at a run-time index (`pairs[wa] = v`, lowered to a block
+/// of per-entry ifs) used to be dropped, so every entry kept its reset value.
+#[tokio::test]
+async fn child_small_array_writes_match_a_reference() {
+    let sir = sir_of(SMALL);
+    let mut sim = simulator(&sir).await;
+
+    let mut pairs = [0u64; 8];
+    let mut dr: u64 = 0;
+    let mut seed: u64 = 0x9e37_79b9;
+    let mut next = |bits: u32| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) & ((1u64 << bits) - 1)
+    };
+    let mut written = 0;
+    for cycle in 0..300 {
+        let we = next(1);
+        let wa = next(3);
+        let d = next(1);
+        let ra = next(3);
+        for (name, value) in [("we", we), ("wa", wa), ("d", d), ("ra", ra)] {
+            sim.set_input(name, value).await;
+        }
+        clock(&mut sim).await;
+
+        // reference: later writes in the block win
+        if we == 1 {
+            pairs[wa as usize] = (d << 1) | dr;
+            written += 1;
+        }
+        pairs[7] = 0b10;
+        dr = d;
+
+        let rd = sim.get_output("rd").await.expect("rd");
+        let first = sim.get_output("first").await.expect("first");
+        assert_eq!(rd, pairs[ra as usize], "pairs[{ra}] after cycle {cycle}");
+        assert_eq!(first, pairs[0], "pairs[0] after cycle {cycle}");
+    }
+    assert!(written > 100);
 }

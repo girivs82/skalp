@@ -2,7 +2,9 @@
 //! (controller + PHY model + memory model, each with child instances):
 //!
 //! - an impl's `on(clk.rise)` bound to a same-named port of the entity
-//!   declared last, so its process lost its clock and became combinational
+//!   declared last, so its process lost its clock and became combinational;
+//!   and a clock signal named like another entity's port bound to that port,
+//!   so the block on it was dropped
 //! - `a == b + c + d` parsed as `(a == b + c) + d`: chains of
 //!   same-precedence operators were built as siblings, not left-nested
 //! - a function call as an instance port connection was dropped
@@ -10,6 +12,15 @@
 //! - a clock output driven by a child's register was reported as a CDC
 //! - `a[i]` as an operand of an operator lowered to a library entity read
 //!   one bit of the array instead of the element
+//! - `let x = ~f(a)`: a call as a unary operand failed to build and the
+//!   `let` vanished, leaving `x` undefined (and `-a.m(1)` became `-a`); a
+//!   `let` that cannot be built is now an error at the `let`
+//! - `{i, 1'b1}` passed to a function and indexed there (`k[0]`) selected a
+//!   part of the concatenation (`i`) instead of a bit, whenever the index
+//!   was below the number of parts
+//! - a call too wide to inline (made a module instance) in an entity with
+//!   two specialisations: the second reused the first's cached result
+//!   signal, which it does not have, and read 0
 
 use skalp_testing::testbench::Testbench;
 
@@ -53,6 +64,46 @@ fn impl_after_other_entity_process_is_sequential() {
             "{name}: every on(clk.rise) process is sequential"
         );
     }
+}
+
+#[tokio::test]
+async fn clock_signal_named_like_a_child_port_keeps_its_block() {
+    let mut tb = Testbench::behavioral_with_top(
+        &fixture("clock_signal_named_like_child_port.sk"),
+        "ClockNamedLikePort",
+    )
+    .await
+    .expect("build");
+    tb.clock_signal("sim_tick", 20).await;
+    assert_eq!(tb.get_u32("count").await, 10, "one count per eclk rise");
+}
+
+#[test]
+fn clock_signal_named_like_a_child_port_is_the_trigger() {
+    use skalp_mir::{EdgeType, LValue, ProcessKind, SensitivityList};
+    let path = fixture("clock_signal_named_like_child_port.sk");
+    let source = std::fs::read_to_string(&path).expect("read fixture");
+    let hir = skalp_frontend::parse_and_build_hir(&source).expect("parse");
+    let mir = skalp_mir::MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("mir");
+    let top = mir
+        .modules
+        .iter()
+        .find(|m| m.name == "ClockNamedLikePort")
+        .expect("top module");
+    let eclk = top
+        .signals
+        .iter()
+        .find(|s| s.name == "eclk")
+        .expect("eclk signal")
+        .id;
+    let on_eclk = top.processes.iter().filter(|p| {
+        p.kind == ProcessKind::Sequential
+            && matches!(&p.sensitivity, SensitivityList::Edge(e)
+                if e.iter().any(|e| e.signal == LValue::Signal(eclk) && e.edge == EdgeType::Rising))
+    });
+    assert_eq!(on_eclk.count(), 1, "the top's on(eclk.rise) block");
 }
 
 #[tokio::test]
@@ -142,4 +193,76 @@ async fn array_element_operand_with_library_operators() {
         tb.step().await;
         assert_eq!(tb.get_u32("o").await, v.wrapping_add(5), "a[{i}] + 5");
     }
+}
+
+#[tokio::test]
+async fn unary_operator_on_a_call() {
+    let mut tb = Testbench::behavioral_with_top(&fixture("unary_call_operand.sk"), "NotCall")
+        .await
+        .expect("build");
+    for a in [0u8, 1] {
+        tb.set("a", a);
+        tb.step().await;
+        let f = (a as u32 + 0x35) & 0xff;
+        assert_eq!(tb.get_u32("p").await, f, "f(a), a={a}");
+        assert_eq!(tb.get_u32("o").await, !f & 0xff, "~f(a), a={a}");
+        assert_eq!(tb.get_u32("q").await, !f & 7, "~f(a)[2:0], a={a}");
+    }
+}
+
+#[tokio::test]
+async fn bit_index_of_a_concatenation_argument() {
+    let mut tb = Testbench::behavioral_with_top(&fixture("concat_argument_bit.sk"), "ConcatArg")
+        .await
+        .expect("build");
+    for i in 0..8u32 {
+        for n in 0..4u32 {
+            tb.set("i", i as u8).set("n", n as u8);
+            tb.step().await;
+            let k = (i << 1) | 1;
+            assert_eq!(tb.get_u32("lo1").await, 1, "{{i, 1}}[0], i={i}");
+            assert_eq!(tb.get_u32("lo0").await, 0, "{{i, 0}}[0], i={i}");
+            assert_eq!(tb.get_u32("b1").await, i & 1, "{{i, 1}}[1], i={i}");
+            assert_eq!(
+                tb.get_u32("dyn").await,
+                (k >> n) & 1,
+                "{{i, 1}}[{n}], i={i}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn wide_call_in_each_specialisation() {
+    let mut tb =
+        Testbench::behavioral_with_top(&fixture("wide_call_in_specialisation.sk"), "WideTop")
+            .await
+            .expect("build");
+    tb.step().await;
+    for p in ["a", "b"] {
+        assert_eq!(
+            tb.get_u32(&format!("{p}_lo")).await,
+            0x5463_7281,
+            "{p}: low word"
+        );
+        assert_eq!(
+            tb.get_u32(&format!("{p}_hi")).await,
+            0x0918_2736,
+            "{p}: high word"
+        );
+    }
+    assert_eq!(tb.get_u32("b_g").await, 200, "b is the specialisation");
+}
+
+#[test]
+fn let_that_cannot_be_built_is_an_error() {
+    let source = "entity E {\n    in a: bit\n    out o: bit[8]\n}\n\nimpl E {\n    let x: bit[8] = Nowhere::X\n    o = x\n}\n";
+    let err = match skalp_frontend::parse_and_build_hir(source) {
+        Ok(_) => panic!("a let naming an unknown enum must not build"),
+        Err(e) => format!("{e:?}"),
+    };
+    assert!(
+        err.contains("cannot build the value of `let x`"),
+        "error names the let: {err}"
+    );
 }

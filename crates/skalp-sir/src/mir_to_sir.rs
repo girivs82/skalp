@@ -4280,8 +4280,31 @@ impl<'a> MirToSirConverter<'a> {
                 let right_is_signed = self.is_expression_signed(right);
                 let is_signed = left_is_signed || right_is_signed;
 
-                let left_node = self.create_expression_node_with_width(left, operand_width);
-                let right_node = self.create_expression_node_with_width(right, operand_width);
+                // `+` and `-` keep their operands' width (width-preserving arithmetic;
+                // `+:` widens), also when the value goes into a wider target. An
+                // unsized integer literal takes the width of the other operand, so
+                // `cnt + 1` wraps at `cnt`'s width; only a sum of literals takes the
+                // target's width.
+                let is_int_literal =
+                    |e: &Expression| matches!(e.kind, ExpressionKind::Literal(Value::Integer(_)));
+                let (left_node, right_node) = if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && is_int_literal(left) != is_int_literal(right)
+                {
+                    if is_int_literal(right) {
+                        let l = self.create_expression_node_with_width(left, operand_width);
+                        let w = self.get_node_output_width(l);
+                        (l, self.create_expression_node_with_width(right, Some(w)))
+                    } else {
+                        let r = self.create_expression_node_with_width(right, operand_width);
+                        let w = self.get_node_output_width(r);
+                        (self.create_expression_node_with_width(left, Some(w)), r)
+                    }
+                } else {
+                    (
+                        self.create_expression_node_with_width(left, operand_width),
+                        self.create_expression_node_with_width(right, operand_width),
+                    )
+                };
 
                 self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
@@ -5445,10 +5468,39 @@ impl<'a> MirToSirConverter<'a> {
         node_id
     }
 
-    fn create_slice_node(&mut self, base: usize, start: usize, end: usize) -> usize {
-        let node_id = self.next_node_id();
+    /// Make flip-flop `ff` take only the low `width` bits of its data input
+    fn truncate_flipflop_data(&mut self, ff: usize, width: usize) {
+        let Some(data) = self
+            .sir
+            .sequential_nodes
+            .iter()
+            .find(|n| n.id == ff)
+            .and_then(|n| n.inputs.get(1).cloned())
+        else {
+            return;
+        };
+        if width == 0 || self.get_signal_width(&data.signal_id) <= width {
+            return;
+        }
+        let slice = self.create_slice_of_signal(data, width - 1, 0);
+        let sliced = self.node_to_signal_ref(slice);
+        if let Some(node) = self.sir.sequential_nodes.iter_mut().find(|n| n.id == ff) {
+            node.inputs[1] = sliced;
+        }
+    }
 
+    fn create_slice_node(&mut self, base: usize, start: usize, end: usize) -> usize {
         let base_signal = self.node_to_signal_ref(base);
+        self.create_slice_of_signal(base_signal, start, end)
+    }
+
+    fn create_slice_of_signal(
+        &mut self,
+        base_signal: SignalRef,
+        start: usize,
+        end: usize,
+    ) -> usize {
+        let node_id = self.next_node_id();
 
         // Create output signal for this node
         // For HDL range [high:low], start=high, end=low, width = high - low + 1
@@ -6162,8 +6214,10 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 return;
             }
-            // For FlipFlops, fall through to update the FlipFlop output directly
-            // The codegen will apply the appropriate width mask
+            // For FlipFlops, the register takes the low bits of its data: the
+            // data input is sliced to the register's width (a wider data
+            // signal may be a word array the register's storage cannot take)
+            self.truncate_flipflop_data(node_id, declared_width);
             if let Some(signal) = self.find_signal_mut(&internal_name) {
                 signal.driver_node = Some(node_id);
             }
@@ -9157,6 +9211,25 @@ impl<'a> MirToSirConverter<'a> {
                                 result = Some(resolved_result);
                             }
                         }
+                    }
+                }
+                // A nested block (an array write at a run-time index on a
+                // small array lowers to a block of per-entry ifs) used to be
+                // skipped here, so a child's flattened array kept every write
+                Statement::Block(block) => {
+                    if let Some(block_result) = self
+                        .find_assignment_in_branch_for_instance_with_default(
+                            &block.statements,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            target,
+                            parent_module_for_signals,
+                            parent_prefix,
+                            result,
+                        )
+                    {
+                        result = Some(block_result);
                     }
                 }
                 _ => {}

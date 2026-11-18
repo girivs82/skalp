@@ -403,6 +403,17 @@ signal x: bit[16] = {a, b}    // a in the high bits, b in the low bits
 signal y: bit[16] = a ++ b    // equivalent
 ```
 
+A bare integer, or an `if`/`match` that chooses between bare integers, has
+no width of its own. In a concatenation it takes the fewest bits that hold
+every value it can have, so `0` and `if a == b { 1 } else { 0 }` are one bit
+and `5` is three. (In a concatenation a function returns, a single such part
+takes the width the return type leaves it instead.) Write a sized literal
+(`3'b101`) when you mean another width:
+
+```skalp
+signal f: bit[8] = {1'b0, if a == b { 1 } else { 0 }, 3'b101, c[2:0]}
+```
+
 ### Array Indexing
 ```skalp
 signal memory: [bit[8]; 16]

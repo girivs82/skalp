@@ -7,6 +7,6 @@ module Adder (
     output [8:0] sum
 );
 
-    assign sum = (a + b);
+    assign sum = 8'(a + b);
 
 endmodule

@@ -1,0 +1,30 @@
+// a `{...}` passed to a function and indexed there is bits: `{i, 1'b1}[0]`
+// is bit 0 (1), not the concatenation's first part (i)
+
+fn low(k: bit[4]) -> bit {
+    return k[0]
+}
+
+fn second(k: bit[4]) -> bit {
+    return k[1]
+}
+
+fn pick(k: bit[4], n: bit[2]) -> bit {
+    return k[n]
+}
+
+entity ConcatArg {
+    in i: bit[3]
+    in n: bit[2]
+    out lo1: bit
+    out lo0: bit
+    out b1: bit
+    out dyn: bit
+}
+
+impl ConcatArg {
+    lo1 = low({i, 1'b1})
+    lo0 = low({i, 1'b0})
+    b1 = second({i, 1'b1})
+    dyn = pick({i, 1'b1}, n)
+}

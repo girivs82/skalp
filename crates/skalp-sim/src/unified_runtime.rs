@@ -1329,13 +1329,17 @@ impl UnifiedSimulator {
     /// eliminating per-cycle CPU<->GPU synchronization overhead.
     ///
     /// Falls back to regular step-by-step execution for non-GPU backends.
-    pub async fn run_batched(&mut self, cycles: u64) -> UnifiedSimResult {
+    ///
+    /// `clock` is the input clock the cycles are of: the one toggled when the
+    /// design cannot run batched (flip-flops on several clocks, or on clocks
+    /// its own logic makes from `clock`).
+    pub async fn run_batched(&mut self, cycles: u64, clock: &str) -> UnifiedSimResult {
         // The compiled C++ kernel's batched loop, when the design's
-        // flip-flops all take its one input clock and no output is read
+        // flip-flops all take this one input clock and no output is read
         // through a latency delay (those buffers fill once per step)
         if self.latency_adjustments.is_empty() {
             if let SimulatorBackend::CompiledCpu(runtime) = &mut self.backend {
-                if runtime.run_batched_cycles(cycles) {
+                if runtime.run_batched_cycles(cycles, Some(clock)) {
                     runtime.current_cycle += 2 * cycles;
                     self.current_cycle += 2 * cycles;
                     return self.build_result().await;
@@ -1351,10 +1355,9 @@ impl UnifiedSimulator {
                 self.build_result().await
             }
             _ => {
-                // Fallback to step-by-step for non-GPU backends
-                // BUG FIX: Must toggle clock like run_clocked does
-                // (testbench expects run_batched to handle clock toggling internally)
-                self.run_clocked(cycles, "clk").await
+                // Step each half period of the caller's clock (the
+                // testbench expects run_batched to toggle it)
+                self.run_clocked(cycles, clock).await
             }
         }
     }
