@@ -340,12 +340,12 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
-        self.mark_async_memory_reads(module);
-        self.tie_off_unwritten_memory_ports();
-        self.record_initial_values(module);
-
-        // Phase 4b: Synthesize instance port connection expressions
+        // Phase 4b: Synthesize instance port connection expressions (before
+        // the memory passes: a port connection may read a memory)
         self.synthesize_instance_port_expressions(module);
+        self.mark_async_memory_reads(module);
+        self.tie_off_unused_memory_ports();
+        self.record_initial_values(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -423,12 +423,12 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
-        self.mark_async_memory_reads(module);
-        self.tie_off_unwritten_memory_ports();
-        self.record_initial_values(module);
-
-        // Phase 4b: Synthesize instance port connection expressions
+        // Phase 4b: Synthesize instance port connection expressions (before
+        // the memory passes: a port connection may read a memory)
         self.synthesize_instance_port_expressions(module);
+        self.mark_async_memory_reads(module);
+        self.tie_off_unused_memory_ports();
+        self.record_initial_values(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -487,11 +487,14 @@ impl MirToLirTransform {
             for (port_name, expr) in &inst.connections {
                 // Check if this is a complex expression that needs synthesis
                 let needs_synthesis = match &expr.kind {
-                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
                     ExpressionKind::Literal(_) => false, // Constant, handled separately
-                    // Cast expressions that wrap simple Refs don't need synthesis
-                    ExpressionKind::Cast { expr: inner, .. } => {
-                        !matches!(inner.kind, ExpressionKind::Ref(_))
+                    // A reference is wired by name, unless it selects with a
+                    // computed index or reads an array element
+                    ExpressionKind::Ref(_) | ExpressionKind::Cast { .. } => {
+                        match connection_reference(expr) {
+                            Some(lvalue) => port_reference_needs_synthesis(lvalue, module, None),
+                            None => true,
+                        }
                     }
                     _ => true, // Complex expression needs synthesis
                 };
@@ -569,12 +572,12 @@ impl MirToLirTransform {
         for process in &module.processes {
             self.transform_process(process);
         }
-        self.mark_async_memory_reads(module);
-        self.tie_off_unwritten_memory_ports();
-        self.record_initial_values(module);
-
-        // Phase 4b: Synthesize instance port connection expressions
+        // Phase 4b: Synthesize instance port connection expressions (before
+        // the memory passes: a port connection may read a memory)
         self.synthesize_instance_port_expressions(module);
+        self.mark_async_memory_reads(module);
+        self.tie_off_unused_memory_ports();
+        self.record_initial_values(module);
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -706,23 +709,23 @@ impl MirToLirTransform {
     }
 
     /// Drive the write port of a memory nothing writes (a ROM declared without
-    /// `rom`) with constant zero: write enable low, address and data zero.
-    /// Left undriven, those nets float into the block RAM cell, which the
+    /// `rom`) with constant zero: write enable low, address and data zero;
+    /// and the read address of a memory nothing reads.
+    /// Left undriven, those nets float into the RAM cell, which the
     /// device reads as either level and the simulator as a fixed one.
-    fn tie_off_unwritten_memory_ports(&mut self) {
-        let mut memories: Vec<MemoryInfo> = self
-            .memory_signals
-            .values()
-            .filter(|m| !m.read_only)
-            .cloned()
-            .collect();
+    fn tie_off_unused_memory_ports(&mut self) {
+        let mut memories: Vec<MemoryInfo> = self.memory_signals.values().cloned().collect();
         memories.sort_by_key(|m| m.node_id.0);
         for mem in memories {
-            for (signal, width, what) in [
-                (mem.we_signal, 1, "mem_we_tie"),
-                (mem.waddr_signal, mem.addr_width, "mem_waddr_tie"),
-                (mem.wdata_signal, mem.element_width, "mem_wdata_tie"),
-            ] {
+            let mut ports = vec![(mem.raddr_signal, mem.addr_width, "mem_raddr_tie")];
+            if !mem.read_only {
+                ports.extend([
+                    (mem.we_signal, 1, "mem_we_tie"),
+                    (mem.waddr_signal, mem.addr_width, "mem_waddr_tie"),
+                    (mem.wdata_signal, mem.element_width, "mem_wdata_tie"),
+                ]);
+            }
+            for (signal, width, what) in ports {
                 if self.lir.signals[signal.0 as usize].driver.is_some() {
                     continue;
                 }
@@ -5397,6 +5400,12 @@ impl MirToLirTransform {
             mem_refs_in_expr(&assign.rhs, &mems, &mut found);
             mem_refs_in_lvalue_indices(&assign.lhs, &mems, &mut found);
         }
+        // An instance port connected to a memory word reads it combinationally
+        for inst in &module.instances {
+            for expr in inst.connections.values() {
+                mem_refs_in_expr(expr, &mems, &mut found);
+            }
+        }
         for process in &module.processes {
             if matches!(
                 process.kind,
@@ -5746,7 +5755,10 @@ impl MirToLirTransform {
             LValue::Signal(signal_id) => self.signal_widths.get(signal_id).copied().unwrap_or(1),
             // BUG #150 FIX: Look up variable width from the variable_widths map
             LValue::Variable(var_id) => self.variable_widths.get(var_id).copied().unwrap_or(1),
-            LValue::BitSelect { .. } => 1,
+            // An element of a memory is a word of it
+            LValue::BitSelect { base, .. } => self
+                .get_memory_signal_id(base)
+                .map_or(1, |memory| self.memory_signals[&memory].element_width),
             LValue::RangeSelect { high, low, .. } => {
                 if let (
                     ExpressionKind::Literal(Value::Integer(h)),
@@ -8171,6 +8183,71 @@ fn elaborate_instance(
 /// The `fallback_module` parameter is used when the parent module is a monomorphized version
 /// but the port IDs in expressions reference the original generic module. When a port ID
 /// isn't found in parent_module, we try fallback_module if provided.
+/// Whether a reference connected to an instance port has to be computed
+/// in the parent (into its `{inst}__port__{port}` signal) rather than
+/// wired by name: a select with an index that is not a constant, or an
+/// element of an array (a memory read, or a slice of the flattened array:
+/// either way not the bits a plain bit or range select of the name gives).
+fn port_reference_needs_synthesis(
+    lvalue: &LValue,
+    module: &Module,
+    fallback_module: Option<&Module>,
+) -> bool {
+    let is_array = |lvalue: &LValue| -> bool {
+        let modules = std::iter::once(module).chain(fallback_module);
+        let ty = |m: &Module| -> Option<DataType> {
+            match lvalue {
+                LValue::Signal(id) => m
+                    .signals
+                    .iter()
+                    .find(|s| s.id == *id)
+                    .map(|s| s.signal_type.clone()),
+                LValue::Port(id) => m
+                    .ports
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map(|p| p.port_type.clone()),
+                LValue::Variable(id) => m
+                    .variables
+                    .iter()
+                    .find(|v| v.id == *id)
+                    .map(|v| v.var_type.clone()),
+                _ => None,
+            }
+        };
+        modules
+            .filter_map(ty)
+            .next()
+            .is_some_and(|t| matches!(t, DataType::Array(..)))
+    };
+    match lvalue {
+        LValue::BitSelect { base, index } => {
+            extract_const_index(index).is_none()
+                || is_array(base)
+                || port_reference_needs_synthesis(base, module, fallback_module)
+        }
+        LValue::RangeSelect { base, high, low } => {
+            extract_const_index(high).is_none()
+                || extract_const_index(low).is_none()
+                || is_array(base)
+                || port_reference_needs_synthesis(base, module, fallback_module)
+        }
+        LValue::Concat(parts) => parts
+            .iter()
+            .any(|part| port_reference_needs_synthesis(part, module, fallback_module)),
+        LValue::Port(_) | LValue::Signal(_) | LValue::Variable(_) => false,
+    }
+}
+
+/// The reference an instance port connection is, under any casts
+fn connection_reference(expr: &Expression) -> Option<&LValue> {
+    match &expr.kind {
+        ExpressionKind::Ref(lvalue) => Some(lvalue),
+        ExpressionKind::Cast { expr: inner, .. } => connection_reference(inner),
+        _ => None,
+    }
+}
+
 fn extract_connection_info(
     connections: &IndexMap<String, Expression>,
     parent_module: &Module,
@@ -8223,6 +8300,17 @@ fn extract_connection_info(
 
     for port_name in sorted_port_names {
         let expr = connections.get(port_name).unwrap();
+
+        // Computed in the parent (Phase 4b of the lowering)
+        if connection_reference(expr).is_some_and(|lvalue| {
+            port_reference_needs_synthesis(lvalue, parent_module, fallback_module)
+        }) {
+            result.insert(
+                port_name.clone(),
+                PortConnectionInfo::Signal(format!("{}__port__{}", instance_name, port_name)),
+            );
+            continue;
+        }
 
         let info = match &expr.kind {
             ExpressionKind::Literal(value) => {

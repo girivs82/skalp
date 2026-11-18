@@ -23,6 +23,7 @@ mod golden_file_tests;
 mod test_32bit_match;
 mod test_64bit_reg_metal;
 mod test_assertions;
+mod test_async_any_family;
 mod test_async_reset;
 mod test_async_sta;
 mod test_async_sta_fix;

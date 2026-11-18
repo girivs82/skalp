@@ -124,6 +124,18 @@ fn unit_margin() -> f64 {
     1.0
 }
 
+/// Measured metastability of a device family's fabric element (by its
+/// database name, such as [`crate::timing::sta::STEP_LATCH_ELEMENT`]), with
+/// its margin applied; `None` where the family's database has no
+/// measurement
+pub fn measured_metastability(
+    db_root: &Path,
+    variant: NexusVariant,
+    element: &str,
+) -> Result<Option<Metastability>> {
+    Ok(load_metastability(db_root, variant)?.remove(element))
+}
+
 /// Read the family's metastability figures, if its database has them
 fn load_metastability(
     db_root: &Path,

@@ -203,9 +203,38 @@ pub fn drive_constant_inputs(netlist: &GateNetlist, device: &dyn Device) -> Gate
         }
     }
     drive_constant_flip_flop_data(&mut driven, &constants);
+    drive_constant_lut_ram_inputs(&mut driven, &constants);
     drive_constant_hard_block_inputs(&mut driven, &constants, device);
     drive_constant_pad_outputs(&mut driven, &constants);
     driven
+}
+
+/// The net of a LUT that outputs `value`, one per value and purpose: made
+/// the first time it is asked for, named after `purpose`
+fn constant_driver(
+    netlist: &mut GateNetlist,
+    drivers: &mut HashMap<bool, GateNetId>,
+    library: &str,
+    purpose: &str,
+    value: bool,
+) -> GateNetId {
+    *drivers.entry(value).or_insert_with(|| {
+        let name = format!("{purpose}_{}", u8::from(value));
+        let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
+        let mut driver = Cell::new_comb(
+            CellId(0),
+            "LUT4".to_string(),
+            library.to_string(),
+            0.0,
+            format!("{name}_driver"),
+            Vec::new(),
+            vec![net],
+        );
+        driver.function = Some(CellFunction::Lut4);
+        driver.lut_init = Some(if value { 0xFFFF } else { 0 });
+        netlist.add_cell(driver);
+        net
+    })
 }
 
 /// Give an output pad that shows a constant a LUT that outputs it. Nothing
@@ -223,23 +252,13 @@ fn drive_constant_pad_outputs(netlist: &mut GateNetlist, constants: &HashMap<Gat
             continue;
         };
         let library = cell.library.clone();
-        let net = *drivers.entry(value).or_insert_with(|| {
-            let name = format!("constant_pad_output_{}", u8::from(value));
-            let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
-            let mut driver = Cell::new_comb(
-                CellId(0),
-                "LUT4".to_string(),
-                library,
-                0.0,
-                format!("{name}_driver"),
-                Vec::new(),
-                vec![net],
-            );
-            driver.function = Some(CellFunction::Lut4);
-            driver.lut_init = Some(if value { 0xFFFF } else { 0 });
-            netlist.add_cell(driver);
-            net
-        });
+        let net = constant_driver(
+            netlist,
+            &mut drivers,
+            &library,
+            "constant_pad_output",
+            value,
+        );
         netlist.cells[index].inputs[0] = net;
     }
 }
@@ -265,23 +284,13 @@ fn drive_constant_hard_block_inputs(
         }
         let library = cell.library.clone();
         for (input, value) in tied {
-            let net = *drivers.entry(value).or_insert_with(|| {
-                let name = format!("constant_hard_block_input_{}", u8::from(value));
-                let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
-                let mut driver = Cell::new_comb(
-                    CellId(0),
-                    "LUT4".to_string(),
-                    library.clone(),
-                    0.0,
-                    format!("{name}_driver"),
-                    Vec::new(),
-                    vec![net],
-                );
-                driver.function = Some(CellFunction::Lut4);
-                driver.lut_init = Some(if value { 0xFFFF } else { 0 });
-                netlist.add_cell(driver);
-                net
-            });
+            let net = constant_driver(
+                netlist,
+                &mut drivers,
+                &library,
+                "constant_hard_block_input",
+                value,
+            );
             netlist.cells[index].inputs[input] = net;
         }
     }
@@ -302,24 +311,35 @@ fn drive_constant_flip_flop_data(netlist: &mut GateNetlist, constants: &HashMap<
             continue;
         };
         let library = cell.library.clone();
-        let net = *drivers.entry(value).or_insert_with(|| {
-            let name = format!("constant_ff_data_{}", u8::from(value));
-            let net = netlist.add_net(GateNet::new(GateNetId(0), name.clone()));
-            let mut driver = Cell::new_comb(
-                CellId(0),
-                "LUT4".to_string(),
-                library,
-                0.0,
-                format!("{name}_driver"),
-                Vec::new(),
-                vec![net],
-            );
-            driver.function = Some(CellFunction::Lut4);
-            driver.lut_init = Some(if value { 0xFFFF } else { 0 });
-            netlist.add_cell(driver);
-            net
-        });
+        let net = constant_driver(netlist, &mut drivers, &library, "constant_ff_data", value);
         netlist.cells[index].inputs[0] = net;
+    }
+}
+
+/// Replace each constant input of a LUT RAM (such as a read address that
+/// selects one fixed word) with a LUT that outputs it: the storage LUTs'
+/// address and data pins cannot be held at a constant by configuration.
+fn drive_constant_lut_ram_inputs(netlist: &mut GateNetlist, constants: &HashMap<GateNetId, bool>) {
+    let mut drivers: HashMap<bool, GateNetId> = HashMap::new();
+    for index in 0..netlist.cells.len() {
+        let cell = &netlist.cells[index];
+        if cell.function != Some(CellFunction::DistRam16x4) {
+            continue;
+        }
+        let tied: Vec<(usize, bool)> = (0..cell.inputs.len())
+            .filter_map(|i| Some((i, *constants.get(&cell.inputs[i])?)))
+            .collect();
+        let library = cell.library.clone();
+        for (input, value) in tied {
+            let net = constant_driver(
+                netlist,
+                &mut drivers,
+                &library,
+                "constant_lut_ram_input",
+                value,
+            );
+            netlist.cells[index].inputs[input] = net;
+        }
     }
 }
 
@@ -599,5 +619,63 @@ mod tests {
             .expect("the pad's input has a driver");
         assert_eq!(driver.function, Some(CellFunction::Lut4));
         assert_eq!(driver.lut_init, Some(0xFFFF));
+    }
+
+    /// A LUT RAM read at a fixed address: its address pins cannot be held
+    /// at a constant by configuration, so each constant gets a LUT driver
+    #[test]
+    fn constant_lut_ram_inputs_get_a_driver() {
+        let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+        let tie = |netlist: &mut GateNetlist, value: bool| {
+            let net = netlist.add_net(GateNet::new(GateNetId(0), format!("tie{value}")));
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                "TIE".to_string(),
+                "test".to_string(),
+                0.0,
+                format!("tie{value}_cell"),
+                Vec::new(),
+                vec![net],
+            );
+            cell.function = Some(if value {
+                CellFunction::TieHigh
+            } else {
+                CellFunction::TieLow
+            });
+            netlist.add_cell(cell);
+            net
+        };
+        let (zero, one) = (tie(&mut netlist, false), tie(&mut netlist, true));
+        let signal = netlist.add_net(GateNet::new(GateNetId(0), "wd".to_string()));
+        let out = netlist.add_net(GateNet::new(GateNetId(0), "q".to_string()));
+        // 4 data, 4 write address, write enable, 4 read address (word 1)
+        let mut inputs = vec![signal; 9];
+        inputs.extend([one, zero, zero, zero]);
+        let mut ram = Cell::new_comb(
+            CellId(0),
+            "DPR16X4".to_string(),
+            "test".to_string(),
+            0.0,
+            "ram".to_string(),
+            inputs,
+            vec![out],
+        );
+        ram.function = Some(CellFunction::DistRam16x4);
+        netlist.add_cell(ram);
+
+        let device =
+            crate::device::ice40::Ice40Device::new(crate::device::ice40::Ice40Variant::Hx1k);
+        let driven = drive_constant_inputs(&netlist, &device);
+        let ram = driven.cells.iter().find(|c| c.path == "ram").unwrap();
+        assert_eq!(&ram.inputs[..9], &[signal; 9], "signals stay");
+        for (pin, value) in [(9, 0xFFFF), (10, 0), (11, 0), (12, 0)] {
+            let driver = driven
+                .cells
+                .iter()
+                .find(|c| c.outputs.contains(&ram.inputs[pin]))
+                .expect("the address pin has a driver");
+            assert_eq!(driver.function, Some(CellFunction::Lut4), "pin {pin}");
+            assert_eq!(driver.lut_init, Some(value), "pin {pin}");
+        }
     }
 }

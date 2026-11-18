@@ -275,12 +275,13 @@ pub fn place_and_route(
     let generator = BitstreamGenerator::with_config(device.clone(), config.bitstream.clone());
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
-    let routed = routed_from_tables(
+    let (routed, timing) = routed_from_tables(
         &device,
         netlist,
         &placement,
         &routing,
         &crate::timing::DelayModel::for_variant(variant),
+        timing,
     );
 
     Ok(PnrResult {
@@ -295,14 +296,17 @@ pub fn place_and_route(
 }
 
 /// The routed netlist with its delays from a family's delay tables (one
-/// corner, "typical"), for families without a per-cell timing database
+/// corner, "typical"), for families without a per-cell timing database; and
+/// the timing report with the matched delays of bundled-data async blocks
+/// checked against those routed delays
 fn routed_from_tables<D: crate::device::Device + ?Sized>(
     device: &D,
     netlist: &GateNetlist,
     placement: &PlacementResult,
     routing: &RoutingResult,
     delays: &crate::timing::DelayModel,
-) -> RoutedNetlist {
+    timing: Option<TimingReport>,
+) -> (RoutedNetlist, Option<TimingReport>) {
     let tied = crate::bitstream::prepare::TiedInputs::default();
     let design = crate::bitstream::config::PlacedDesign {
         netlist,
@@ -311,12 +315,22 @@ fn routed_from_tables<D: crate::device::Device + ?Sized>(
         tied: &tied,
     };
     let model = crate::timing::fabric_model::FabricTiming { device, delays };
-    RoutedNetlist {
+    let bundles = crate::timing::sta::summarize_bundles(&[(
+        "typical",
+        crate::timing::sta::check_bundles(device, &model, &design),
+    )]);
+    let timing = timing.map(|mut report| {
+        report.meets_timing &= bundles.iter().all(|b| b.slack_ns >= 0.0);
+        report.bundles = bundles;
+        report
+    });
+    let routed = RoutedNetlist {
         netlist: netlist.clone(),
         delays: vec![crate::timing::sta::annotate_delays(
             device, &model, &design, "typical",
         )],
-    }
+    };
+    (routed, timing)
 }
 
 /// Collect frequency constraints from placer config and netlist inline annotations
@@ -583,12 +597,13 @@ pub fn place_and_route_nexus(
     let generator = BitstreamGenerator::for_nexus(device.variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
-    let routed = routed_from_tables(
+    let (routed, timing) = routed_from_tables(
         &device,
         netlist,
         &placement,
         &routing,
         &crate::timing::DelayModel::nexus(),
+        timing,
     );
 
     Ok(PnrResult {
@@ -1288,12 +1303,13 @@ pub fn place_and_route_ecp5(
     let generator = BitstreamGenerator::for_ecp5(variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
-    let routed = routed_from_tables(
+    let (routed, timing) = routed_from_tables(
         &device,
         netlist,
         &placement,
         &routing,
         &crate::timing::DelayModel::ecp5(),
+        timing,
     );
 
     Ok(PnrResult {
@@ -1372,12 +1388,13 @@ pub fn place_and_route_xc7(
     let generator = BitstreamGenerator::for_xc7(variant, bs_config);
     let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
-    let routed = routed_from_tables(
+    let (routed, timing) = routed_from_tables(
         &device,
         netlist,
         &placement,
         &routing,
         &crate::timing::DelayModel::for_xc7_variant(variant),
+        timing,
     );
 
     Ok(PnrResult {

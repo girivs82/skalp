@@ -1,0 +1,149 @@
+// Settle-time race test: measures how fast a device family's step latch (a
+// latch in one LUT with its own feedback, the element SKALP builds
+// self-timed blocks' step control and arbiters from) leaves a metastable
+// state. See README.md for the procedure and how to turn the counts into the
+// family's figure.
+//
+//   source ──stream──> sink
+//
+// A clocked checker runs the pair for a pseudo-random 16 to 1039 clocks (so
+// where the blocks are in their step against the clock differs at every
+// stop), drops the run request, waits for both blocks to stop, and starts
+// again. Each stop is a chance for a block's `ready` to rise just as the
+// request falls, racing the two into the step latch. A step whose latch
+// settles too late is partial: it corrupts a value or the sink's state. The
+// sink counts every value that is not the successor of the previous one
+// (and resynchronises), so its count is the number of partial steps seen.
+//
+// Outputs: eight LEDs, active low (as on most evaluation boards). Every 2^30
+// clocks the error count of that window is shown on LEDs 6:0: 0 if none,
+// else {msb position (5 bits), the next two bits}; LED7 toggles each window.
+// If a stop never completes, all LEDs light.
+//
+// Board pins: add `@ { pin: "...", io_standard: "..." }` to `clk` and the
+// LEDs for your board (README.md has an example). Drive only pins the board
+// leaves free for the FPGA to drive.
+
+fn lfsr16(x: bit[16]) -> bit[16] {
+    return if x[0] == 1 { (x >> 1) ^ 16'hB400 } else { x >> 1 }
+}
+
+async entity RaceSource {
+    out o: stream<bit[16]>
+    out sent: bit[32]
+}
+
+impl RaceSource {
+    signal v: bit[16] = 16'h1D0F
+    signal n: bit[32] = 0
+    on() {
+        o.send(v)
+        v = lfsr16(v)
+        n = n + 1
+    }
+    sent = n
+}
+
+async entity RaceSink {
+    in b: stream<bit[16]>
+    out errs: bit[32]
+}
+
+impl RaceSink {
+    signal e: bit[16] = 16'h1D0F
+    signal c: bit[32] = 0
+    on() {
+        let v: bit[16] = b.recv()
+        if v != e {
+            c = c + 1
+        }
+        e = lfsr16(v)
+    }
+    errs = c
+}
+
+entity SettleRace {
+    in clk: clock
+    out led0: bit
+    out led1: bit
+    out led2: bit
+    out led3: bit
+    out led4: bit
+    out led5: bit
+    out led6: bit
+    out led7: bit
+}
+
+impl SettleRace {
+    signal req: bit = 0
+    signal state: bit = 0
+    signal timer: bit[10] = 0
+    signal len: bit[10] = 0
+    signal rnd: bit[16] = 16'hACE1
+    signal wait: bit[16] = 0
+    signal stuck: bit = 0
+    signal window: bit[30] = 0
+    signal flip: bit = 0
+    signal base: bit[32] = 0
+    signal snap: bit[32] = 0
+    signal count: bit[32]
+    count = snap - base
+    signal shown: bit[7] = 0
+
+    inst sb = RaceSource { ncl_req: req }
+    inst kb = RaceSink { b: sb.o, ncl_req: req }
+
+    signal busy: bit
+    busy = sb.ncl_ack | kb.ncl_ack
+
+    // msb position and the two bits below it, of the window's count
+    signal msb: bit[5]
+    msb = if count[31] == 1 { 5'd31 } else if count[30] == 1 { 5'd30 } else if count[29] == 1 { 5'd29 } else if count[28] == 1 { 5'd28 } else if count[27] == 1 { 5'd27 } else if count[26] == 1 { 5'd26 } else if count[25] == 1 { 5'd25 } else if count[24] == 1 { 5'd24 } else if count[23] == 1 { 5'd23 } else if count[22] == 1 { 5'd22 } else if count[21] == 1 { 5'd21 } else if count[20] == 1 { 5'd20 } else if count[19] == 1 { 5'd19 } else if count[18] == 1 { 5'd18 } else if count[17] == 1 { 5'd17 } else if count[16] == 1 { 5'd16 } else if count[15] == 1 { 5'd15 } else if count[14] == 1 { 5'd14 } else if count[13] == 1 { 5'd13 } else if count[12] == 1 { 5'd12 } else if count[11] == 1 { 5'd11 } else if count[10] == 1 { 5'd10 } else if count[9] == 1 { 5'd9 } else if count[8] == 1 { 5'd8 } else if count[7] == 1 { 5'd7 } else if count[6] == 1 { 5'd6 } else if count[5] == 1 { 5'd5 } else if count[4] == 1 { 5'd4 } else if count[3] == 1 { 5'd3 } else if count[2] == 1 { 5'd2 } else if count[1] == 1 { 5'd1 } else { 5'd0 }
+    signal mant: bit[2]
+    mant = if msb >= 5'd2 { (count >> (msb - 5'd2))[1:0] } else { 2'd0 }
+
+    on(clk.rise) {
+        window = window + 1
+        if window == 30'h3FFFFFFF {
+            flip = ~flip
+            shown = if count == 0 { 7'd0 } else { {msb, mant} }
+            base = snap
+        }
+        if stuck == 0 {
+            if state == 0 {
+                // run
+                req = 1
+                timer = timer + 1
+                if timer == len + 10'd15 {
+                    req = 0
+                    state = 1
+                    wait = 0
+                    timer = 0
+                    rnd = lfsr16(rnd)
+                    len = rnd[9:0]
+                }
+            } else {
+                // wait for both blocks to stop, then read the count
+                if busy == 0 {
+                    snap = kb.errs
+                    state = 0
+                } else if wait == 16'hFFFF {
+                    stuck = 1
+                } else {
+                    wait = wait + 1
+                }
+            }
+        }
+    }
+
+    signal leds: bit[8]
+    leds = if stuck == 1 { 8'hFF } else { {flip, shown} }
+    led0 = ~leds[0]
+    led1 = ~leds[1]
+    led2 = ~leds[2]
+    led3 = ~leds[3]
+    led4 = ~leds[4]
+    led5 = ~leds[5]
+    led6 = ~leds[6]
+    led7 = ~leds[7]
+}

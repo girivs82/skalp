@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 mod memory_guard;
+mod uart_decode;
 
 /// ISO 26262 Safety build options
 #[derive(Debug, Clone)]
@@ -286,6 +287,14 @@ enum Commands {
         /// triggered by its #[breakpoint] signals, sending over the board's UART
         #[arg(long)]
         debug: bool,
+
+        /// For measuring a device family's settle time on a board only: size
+        /// every arbiter and step-decision wait to this length (such as
+        /// 1.5ns) instead of from the family's figure, so a test design can
+        /// cut it short on purpose and count the failures. Such a build is
+        /// not safe to use
+        #[arg(long, value_name = "TIME")]
+        settle_wait: Option<String>,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -380,6 +389,13 @@ enum Commands {
         /// How long to listen, in seconds
         #[arg(long, default_value_t = 2)]
         seconds: u64,
+        /// Print what came as text lines (as `skalp sim --uart` prints a
+        /// simulated line), not as hex bytes
+        #[arg(long)]
+        text: bool,
+        /// Also save every byte that came to this file
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
     },
 
     /// Format SKALP source files
@@ -907,6 +923,7 @@ fn main() -> Result<()> {
             emit,
             power_stub,
             debug,
+            settle_wait,
         } => {
             synthesize_design(
                 &source,
@@ -919,6 +936,7 @@ fn main() -> Result<()> {
                 emit.as_deref(),
                 power_stub,
                 debug,
+                settle_wait.as_deref(),
             )?;
         }
 
@@ -952,7 +970,9 @@ fn main() -> Result<()> {
             board,
             baud,
             seconds,
-        } => read_board_uart(&board, baud, seconds)?,
+            text,
+            save,
+        } => read_board_uart(&board, baud, seconds, text, save.as_deref())?,
         Commands::Program {
             bitstream,
             board,
@@ -2806,6 +2826,46 @@ impl Stimulus {
             || !self.watch.is_empty()
             || self.watch_from.is_some()
             || self.until.is_some()
+            || self.uart.is_some()
+    }
+
+    /// The --uart line's name and baud rate
+    fn uart_line(&self) -> Result<Option<(&str, u64)>> {
+        const DEFAULT_BAUD: u64 = 1_000_000;
+        let Some(spec) = self.uart.as_deref() else {
+            return Ok(None);
+        };
+        Ok(Some(match spec.rsplit_once('=') {
+            Some((name, baud)) => {
+                let baud: u64 = baud
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|&b| b > 0)
+                    .with_context(|| format!("'{spec}' is not NET=BAUD"))?;
+                (name.trim(), baud)
+            }
+            None => (spec.trim(), DEFAULT_BAUD),
+        }))
+    }
+}
+
+/// Print what a decoded UART line sent
+fn print_uart_text(name: &str, baud: u64, decoder: &uart_decode::UartDecoder, indent: &str) {
+    const MAX_LINES_SHOWN: usize = 1000;
+    let lines = uart_decode::text_lines(decoder.chars());
+    println!(
+        "{indent}UART {} at {} baud: {} characters, {} lines",
+        name,
+        baud,
+        decoder.chars().len(),
+        decoder.lines()
+    );
+    for (t, text) in lines.iter().take(MAX_LINES_SHOWN) {
+        println!("{indent}  {:>14.3} ns  {}", *t as f64 / 1e3, text);
+    }
+    if lines.len() > MAX_LINES_SHOWN {
+        println!("{indent}  ... and {} more", lines.len() - MAX_LINES_SHOWN);
     }
 }
 
@@ -2898,6 +2958,23 @@ async fn drive_cycles(
         }
         None => None,
     };
+    let mut uart = match stimulus.uart_line()? {
+        Some((name, baud)) => {
+            let signal = find(&outputs, name, "output")?;
+            // (a port's width is not known here: its lowest bit is read)
+            if matches!(&signal, CycleSignal::Bits(bits) if bits.len() != 1) {
+                anyhow::bail!("the UART line '{name}' is a bus");
+            }
+            let level = signal.value(sim).await.is_none_or(|v| v & 1 == 1);
+            Some((
+                name,
+                baud,
+                signal,
+                uart_decode::UartDecoder::new(baud, level),
+            ))
+        }
+        None => None,
+    };
     let record_from = stimulus
         .watch_from
         .as_deref()
@@ -2930,6 +3007,21 @@ async fn drive_cycles(
                 if now_ps >= record_from {
                     changes[k].push((now_ps, value));
                 }
+            }
+        }
+        if let Some((_, _, signal, decoder)) = &mut uart {
+            let level = signal.value(sim).await.is_none_or(|v| v & 1 == 1);
+            decoder.edge(now_ps, level);
+            if stimulus
+                .uart_lines
+                .is_some_and(|wanted| decoder.lines() >= wanted)
+            {
+                println!(
+                    "   Stopped: {} UART lines in cycle {}",
+                    decoder.lines(),
+                    cycle + 1
+                );
+                break;
             }
         }
         if let Some((signal, value)) = &until {
@@ -2965,6 +3057,9 @@ async fn drive_cycles(
         if changes.len() > MAX_CHANGES_SHOWN {
             println!("     ... and {} more", changes.len() - MAX_CHANGES_SHOWN);
         }
+    }
+    if let Some((name, baud, _, decoder)) = &uart {
+        print_uart_text(name, *baud, decoder, "   ");
     }
     Ok(sim.build_result().await)
 }
@@ -4578,6 +4673,37 @@ fn choose_pipeline_latencies(
     Ok(true)
 }
 
+/// Metastability of a Nexus family's step latches and arbiters, measured on
+/// its boards where its database has a figure; otherwise the assumed
+/// figures (and a warning that async timing on it is not signed off)
+#[cfg(feature = "nexus-real")]
+fn nexus_latch_timing(variant: &str) -> Result<skalp_lir::ncl_bundle::ArbiterTiming> {
+    use skalp_place_route::device::nexus::prjoxide_load::find_database;
+    let default = skalp_lir::ncl_bundle::ArbiterTiming::default();
+    let Some(db_root) = find_database() else {
+        return Ok(default);
+    };
+    let measured = skalp_place_route::device::nexus::timing::measured_metastability(
+        &db_root,
+        nexus_variant(variant)?,
+        skalp_place_route::timing::sta::STEP_LATCH_ELEMENT,
+    )?;
+    Ok(match measured {
+        Some(m) => skalp_lir::ncl_bundle::ArbiterTiming {
+            tau_ps: m.tau_ps,
+            t0_ps: m.t0_ps,
+            measured: true,
+            ..default
+        },
+        None => default,
+    })
+}
+
+#[cfg(not(feature = "nexus-real"))]
+fn nexus_latch_timing(_variant: &str) -> Result<skalp_lir::ncl_bundle::ArbiterTiming> {
+    Ok(skalp_lir::ncl_bundle::ArbiterTiming::default())
+}
+
 /// The Nexus device's delays for choosing pipeline latencies
 #[cfg(feature = "nexus-real")]
 fn nexus_retime_delays(variant: &str) -> Result<Box<dyn skalp_lir::retime::RetimeDelays>> {
@@ -4629,6 +4755,7 @@ fn synthesize_design(
     emit: Option<&str>,
     power_stub: bool,
     debug: bool,
+    settle_wait: Option<&str>,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::get_stdlib_library;
@@ -4824,7 +4951,19 @@ fn synthesize_design(
         synth_cache.as_ref(),
     );
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
-    size_ncl_matched_delays(&mut gate_netlist, &library);
+    let latch_timing = if family == "nexus" {
+        nexus_latch_timing(variant)?
+    } else {
+        skalp_lir::ncl_bundle::ArbiterTiming::default()
+    };
+    if let Some(wait) = settle_wait {
+        gate_netlist.settle_wait_ps = Some(parse_time_ps(wait)?);
+        println!(
+            "⚠️  Settle-time measurement build: every arbiter and step-decision wait is sized to \
+             {wait}, not from the device's figure. Do not use this build for anything else."
+        );
+    }
+    size_ncl_matched_delays(&mut gate_netlist, &library, latch_timing);
     if family == "nexus" {
         // Pads go in before the netlist is saved, so `skalp pnr` on the saved
         // netlist gets the same pins (and the on-chip clock) as the full flow.
@@ -5091,19 +5230,7 @@ fn run_nexus_pnr_on_netlist(
                 }
             }
         }
-        for b in &timing.bundles {
-            println!(
-                "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers, {} corner)",
-                b.block,
-                b.times,
-                if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
-                b.slack_ns.abs(),
-                b.data_ns,
-                b.control_ns,
-                b.chain_len,
-                b.corner
-            );
-        }
+        print_matched_delays(timing, gate_netlist.settle_wait_ps);
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -5290,7 +5417,17 @@ fn run_pnr_on_netlist(
     // Run place and route
     println!();
     println!("Running placement and routing...");
-    let result = place_and_route(gate_netlist, ice40_variant, config)?;
+    let mut netlist = gate_netlist.clone();
+    let mut result = place_and_route(&netlist, ice40_variant, config.clone())?;
+    // Matched delays of async blocks that routing made too short: lengthen
+    // them by the shortfall and place and route again
+    for _ in 0..4 {
+        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
+            break;
+        }
+        result = place_and_route(&netlist, ice40_variant, config.clone())?;
+    }
+    let gate_netlist = &netlist;
 
     // Report results
     println!("Placement:");
@@ -5317,6 +5454,7 @@ fn run_pnr_on_netlist(
             println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
             println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
         }
+        print_matched_delays(timing, gate_netlist.settle_wait_ps);
     }
 
     // Write bitstream
@@ -5347,6 +5485,38 @@ fn run_pnr_on_netlist(
     write_routed(output_dir, &result)?;
 
     Ok(())
+}
+
+/// Report the matched delays of bundled-data async blocks, checked with
+/// routed delays
+fn print_matched_delays(
+    timing: &skalp_place_route::timing::TimingReport,
+    settle_wait_ps: Option<i64>,
+) {
+    for b in &timing.bundles {
+        println!(
+            "  NCL matched delay {} ({}): {} {:.2} ns (data {:.2} ns, delay {:.2} ns, {} buffers, {} corner)",
+            b.block,
+            b.times,
+            if b.slack_ns >= 0.0 { "✅ slack" } else { "⚠️ short by" },
+            b.slack_ns.abs(),
+            b.data_ns,
+            b.control_ns,
+            b.chain_len,
+            b.corner
+        );
+    }
+    if let Some(wait) = settle_wait_ps {
+        println!(
+            "  ⚠️  Settle-time measurement build: decision waits sized to {:.2} ns on purpose",
+            wait as f64 / 1000.0
+        );
+    } else if timing.bundles.iter().any(|b| b.unmeasured_settle) {
+        println!(
+            "  {}",
+            unmeasured_settle_warning(&skalp_lir::ncl_bundle::ArbiterTiming::default())
+        );
+    }
 }
 
 /// Save the routed netlist and its delays, for `skalp timed-sim`
@@ -5710,7 +5880,13 @@ fn read_debug_capture(dir: &Path, board: &str, timeout: u64) -> Result<()> {
 }
 
 /// Print what a board's UART sends, as hex.
-fn read_board_uart(board: &str, baud: u32, seconds: u64) -> Result<()> {
+fn read_board_uart(
+    board: &str,
+    baud: u32,
+    seconds: u64,
+    text: bool,
+    save: Option<&Path>,
+) -> Result<()> {
     use skalp_place_route::programmer::nexus_jtag::NexusBoard;
     use skalp_place_route::programmer::uart::BoardUart;
     let board =
@@ -5727,9 +5903,19 @@ fn read_board_uart(board: &str, baud: u32, seconds: u64) -> Result<()> {
         seconds,
         board.name
     );
-    for line in data.chunks(32).take(16) {
-        let hex: Vec<String> = line.iter().map(|b| format!("{b:02x}")).collect();
-        println!("   {}", hex.join(" "));
+    if let Some(path) = save {
+        fs::write(path, &data).with_context(|| format!("cannot write {}", path.display()))?;
+        println!("   Saved to {}", path.display());
+    }
+    if text {
+        for line in uart_decode::byte_lines(&data) {
+            println!("   {}", line);
+        }
+    } else {
+        for line in data.chunks(32).take(16) {
+            let hex: Vec<String> = line.iter().map(|b| format!("{b:02x}")).collect();
+            println!("   {}", hex.join(" "));
+        }
     }
     Ok(())
 }
@@ -8608,11 +8794,21 @@ fn run_signal_trace(
 
 /// Size the matched delays of bundled-data async instances (estimated with
 /// the library's delays; place and route checks them with routed delays)
-fn size_ncl_matched_delays(netlist: &mut skalp_lir::GateNetlist, library: &skalp_lir::TechLibrary) {
-    let delays = skalp_lir::ncl_bundle::LibraryDelays::new(library);
+fn size_ncl_matched_delays(
+    netlist: &mut skalp_lir::GateNetlist,
+    library: &skalp_lir::TechLibrary,
+    latch_timing: skalp_lir::ncl_bundle::ArbiterTiming,
+) {
+    let delays = skalp_lir::ncl_bundle::LibraryDelays {
+        latch_timing,
+        ..skalp_lir::ncl_bundle::LibraryDelays::new(library)
+    };
     let report = skalp_lir::ncl_bundle::size_matched_delays(netlist, &delays, 50);
     if report.checks.is_empty() {
         return;
+    }
+    if netlist.settle_wait_ps.is_none() && report.checks.iter().any(|c| c.unmeasured_settle) {
+        println!("{}", unmeasured_settle_warning(&latch_timing));
     }
     let worst = report.checks.iter().min_by_key(|c| c.slack_ps());
     println!(
@@ -8626,6 +8822,19 @@ fn size_ncl_matched_delays(netlist: &mut skalp_lir::GateNetlist, library: &skalp
             c.slack_ps() as f64 / 1000.0
         ))
     );
+}
+
+/// The warning for async blocks whose decision waits were sized without a
+/// measured settle time for the device family
+fn unmeasured_settle_warning(timing: &skalp_lir::ncl_bundle::ArbiterTiming) -> String {
+    format!(
+        "⚠️  NCL: this device family has no measured settle time for its arbiters and step \
+         latches, so their waits assume tau {:.0} ps ({:.1} ns each). That is generous but \
+         not signed off: measure the family on a board and add the figure to its device \
+         database (timing/metastability.json)",
+        timing.tau_ps,
+        timing.resolution_ps() as f64 / 1000.0
+    )
 }
 
 /// Refuse a gate netlist with a net that feeds cells but has no driver, or
@@ -8733,6 +8942,15 @@ struct Stimulus {
     /// Stop once a signal has a value, as NET=VALUE
     #[arg(long, value_name = "NET=VALUE")]
     until: Option<String>,
+    /// A UART transmit line to decode, as NET or NET=BAUD (1 Mbaud if
+    /// not given; 8 data bits, no parity, one stop bit): the text it
+    /// sends is printed, each line with the time it began, as
+    /// `skalp uart --text` prints what a board sends
+    #[arg(long, value_name = "NET[=BAUD]")]
+    uart: Option<String>,
+    /// Stop once the --uart line has sent this many lines
+    #[arg(long, value_name = "N", requires = "uart")]
+    uart_lines: Option<usize>,
 }
 
 /// Options of timed simulation only
@@ -9073,18 +9291,65 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             sim.watch(net);
         }
     }
+    let mut uart = match args.stimulus.uart_line()? {
+        Some((name, baud)) => {
+            let net = match signal(name)?.as_slice() {
+                [net] => *net,
+                _ => anyhow::bail!("the UART line '{name}' is a bus"),
+            };
+            sim.watch(net);
+            let level = sim.value(net).to_bool().unwrap_or(true);
+            Some((name, baud, net, uart_decode::UartDecoder::new(baud, level)))
+        }
+        None => None,
+    };
     if let Some(from) = args.stimulus.watch_from.as_deref() {
         sim.record_from(parse_time_ps(from)?);
     }
 
     let end_ps = parse_time_ps(args.duration)?;
     let run_started = std::time::Instant::now();
-    let reached = match until {
-        Some((bits, value)) => sim.run_while(end_ps, |sim| sim.bus_value(&bits) == Some(value))?,
-        None => {
-            sim.run_until(end_ps)?;
-            false
+    let mut uart_done = false;
+    let lines_done = |decoder: &uart_decode::UartDecoder| {
+        args.stimulus
+            .uart_lines
+            .is_some_and(|wanted| decoder.lines() >= wanted)
+    };
+    let reached = if until.is_some() || uart.is_some() {
+        let mut reached = false;
+        loop {
+            // Run to the next sample of a character arriving, so it is read
+            // even when no change of the line follows it
+            let stop_at = uart
+                .as_ref()
+                .and_then(|(_, _, _, decoder)| decoder.next_sample())
+                .map_or(end_ps, |t| t.min(end_ps));
+            sim.run_while(stop_at, |sim| {
+                // A character starting: back to the loop, to run to its samples
+                let mut started = false;
+                if let Some((_, _, net, decoder)) = &mut uart {
+                    let idle = decoder.next_sample().is_none();
+                    decoder.edge(sim.now(), sim.value(*net).to_bool().unwrap_or(true));
+                    started = idle && decoder.next_sample().is_some();
+                    uart_done = lines_done(decoder);
+                }
+                reached = until
+                    .as_ref()
+                    .is_some_and(|(bits, value)| sim.bus_value(bits) == Some(*value));
+                reached || uart_done || started
+            })?;
+            if let Some((_, _, _, decoder)) = &mut uart {
+                decoder.advance_to(sim.now() + 1);
+                uart_done = lines_done(decoder);
+            }
+            if reached || uart_done || sim.now() >= end_ps {
+                break;
+            }
         }
+        reached
+    } else {
+        sim.run_until(end_ps)?;
+        false
     };
     let wall = run_started.elapsed().as_secs_f64();
     println!(
@@ -9098,6 +9363,13 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         println!("Stopped: {} at {:.3} ns", spec, sim.now() as f64 / 1e3);
     } else if let Some(spec) = args.stimulus.until.as_deref() {
         println!("{} did not happen", spec);
+    }
+    if uart_done {
+        println!(
+            "Stopped: {} UART lines at {:.3} ns",
+            args.stimulus.uart_lines.unwrap_or(0),
+            sim.now() as f64 / 1e3
+        );
     }
 
     // Watched changes
@@ -9116,6 +9388,9 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         if changes.len() > MAX_CHANGES_SHOWN {
             println!("  ... and {} more", changes.len() - MAX_CHANGES_SHOWN);
         }
+    }
+    if let Some((name, baud, _, decoder)) = &uart {
+        print_uart_text(name, *baud, decoder, "");
     }
     // Where unknowns first appeared among the watched nets, with the
     // cells that drove them
