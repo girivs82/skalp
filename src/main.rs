@@ -5159,15 +5159,9 @@ fn run_nexus_pnr_on_netlist(
     println!();
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
-    let mut result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
-    // Matched delays of async blocks that routing made too short: lengthen
-    // them by the shortfall and place and route again
-    for _ in 0..4 {
-        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
-            break;
-        }
-        result = place_and_route_nexus_for_cli(&netlist, nexus, config.clone())?;
-    }
+    let result = fit_matched_delays_to_routing(&mut netlist, |n| {
+        place_and_route_nexus_for_cli(n, nexus, config.clone())
+    })?;
     let gate_netlist = &netlist;
 
     println!("Placement:");
@@ -5252,6 +5246,135 @@ fn run_nexus_pnr_on_netlist(
     let pins_path = bit_path.with_extension("pins.json");
     fs::write(&pins_path, serde_json::to_string_pretty(&driven)?)?;
     Ok(())
+}
+
+/// Place and route `netlist`, then fit its matched delays to the routed
+/// delays: lengthen any that routing made too short, and shorten any that
+/// are longer than their checks need, placing and routing again after each
+/// change. Matched delays are first sized before placement from library
+/// estimates with a wide margin; routed delays are what the design runs on,
+/// and a self-timed block steps no faster than its matched delays allow.
+fn fit_matched_delays_to_routing(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    mut place_and_route: impl FnMut(
+        &skalp_lir::gate_netlist::GateNetlist,
+    ) -> Result<skalp_place_route::PnrResult>,
+) -> Result<skalp_place_route::PnrResult> {
+    let mut result = place_and_route(netlist)?;
+    let mut changed = true;
+    // Lengthen what is short; once nothing is, shorten what is long (at
+    // most three times), and lengthen again what that left short
+    let mut shortened = 0;
+    for _ in 0..16 {
+        let timing = result.timing.as_ref();
+        changed = if lengthen_short_matched_delays(netlist, timing) {
+            true
+        } else if shortened < 3 && shorten_long_matched_delays(netlist, timing) {
+            shortened += 1;
+            true
+        } else {
+            false
+        };
+        if !changed {
+            break;
+        }
+        result = place_and_route(netlist)?;
+    }
+    if changed {
+        println!("NCL: matched delays still changing after 16 placements; reporting the last");
+    }
+    Ok(result)
+}
+
+/// Slack a matched delay keeps after [`shorten_long_matched_delays`], as a
+/// share of the data arrival it times. Routed timing already takes the
+/// worst of the slow and fast corners; this covers what the corners do not,
+/// such as on-die variation between the chain and the paths it matches.
+const MATCHED_DELAY_KEEP_PERCENT: f64 = 10.0;
+
+/// Shorten each matched delay whose routed checks all pass with more slack
+/// than it needs (`MATCHED_DELAY_KEEP_PERCENT` of the data, and at least one
+/// buffer). Returns whether any changed.
+fn shorten_long_matched_delays(
+    netlist: &mut skalp_lir::gate_netlist::GateNetlist,
+    timing: Option<&skalp_place_route::timing::TimingReport>,
+) -> bool {
+    let Some(timing) = timing else {
+        return false;
+    };
+    let matched = skalp_lir::ncl_bundle::find_matched_delays(netlist);
+    // The arrival of each delay's control, from its checks of data it
+    // clocks or acknowledges (a hold check reports another arrival)
+    let arrival = |path: &str| {
+        timing
+            .bundles
+            .iter()
+            .filter(|b| {
+                b.delay == path
+                    && matches!(b.times.as_str(), "registers" | "acknowledge" | "next state")
+            })
+            .map(|b| b.control_ns)
+            .reduce(f64::min)
+    };
+    let mut cuts = Vec::new();
+    for md in &matched {
+        let path = &netlist.cells[md.and_cell.0 as usize].path;
+        let checks: Vec<_> = timing
+            .bundles
+            .iter()
+            .filter(|b| &b.delay == path && b.times != skalp_lir::ncl_bundle::REGISTER_HOLD)
+            .collect();
+        if checks.is_empty() || md.chain.len() <= 1 {
+            continue;
+        }
+        // Delay one buffer adds: the chain's own share of the control's
+        // arrival, after the delay whose control is its source (if any)
+        let source_at = matched
+            .iter()
+            .find(|m| m.control == md.source)
+            .and_then(|m| arrival(&netlist.cells[m.and_cell.0 as usize].path))
+            .unwrap_or(0.0);
+        let Some(control_at) = arrival(path) else {
+            continue;
+        };
+        let per_buffer_ns = ((control_at - source_at) / (md.chain.len() + 1) as f64).max(0.01);
+        let spare_ns = checks
+            .iter()
+            .map(|b| b.slack_ns - b.data_ns.abs() * MATCHED_DELAY_KEEP_PERCENT / 100.0)
+            .reduce(f64::min)
+            .unwrap_or(0.0)
+            - per_buffer_ns;
+        let count = (spare_ns / per_buffer_ns).floor();
+        // Not worth another placement for a buffer or two
+        if count < 2.0 {
+            continue;
+        }
+        cuts.push((
+            md.clone(),
+            count as usize,
+            checks[0].block.clone(),
+            spare_ns,
+        ));
+    }
+    // Remove from the highest cell ids down, so the ids of the chains still
+    // to shorten stay valid
+    cuts.sort_by_key(|(md, ..)| std::cmp::Reverse(md.and_cell.0));
+    let mut changed = false;
+    for (md, count, block, spare_ns) in cuts {
+        let md = skalp_lir::ncl_bundle::find_matched_delays(netlist)
+            .into_iter()
+            .find(|m| m.control == md.control)
+            .expect("a matched delay is still there after shortening another");
+        let removed = skalp_lir::ncl_bundle::shorten_matched_delay(netlist, &md, count);
+        if removed > 0 {
+            println!(
+                "NCL: matched delay {} has {:.2} ns more than it needs after routing; removing {} buffer(s) and placing again",
+                block, spare_ns, removed
+            );
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Lengthen each matched delay that routed timing found too short, by its
@@ -5418,15 +5541,9 @@ fn run_pnr_on_netlist(
     println!();
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
-    let mut result = place_and_route(&netlist, ice40_variant, config.clone())?;
-    // Matched delays of async blocks that routing made too short: lengthen
-    // them by the shortfall and place and route again
-    for _ in 0..4 {
-        if !lengthen_short_matched_delays(&mut netlist, result.timing.as_ref()) {
-            break;
-        }
-        result = place_and_route(&netlist, ice40_variant, config.clone())?;
-    }
+    let result = fit_matched_delays_to_routing(&mut netlist, |n| {
+        Ok(place_and_route(n, ice40_variant, config.clone())?)
+    })?;
     let gate_netlist = &netlist;
 
     // Report results
