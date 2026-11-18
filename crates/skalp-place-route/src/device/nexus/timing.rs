@@ -555,6 +555,17 @@ impl NexusTiming<'_> {
         cell.function == Some(CellFunction::Lut5)
     }
 
+    /// A vendor hard block the timing tables have nothing for (a PLL, the
+    /// ADC, a reference generator): no path is timed through it, and its
+    /// outputs launch none. They are clocks or flags with no relation to a
+    /// fabric clock (a PLL's lock), which designs synchronise.
+    fn is_untimed_block(&self, cell: &Cell) -> bool {
+        cell.cell_type.starts_with("BLACKBOX_")
+            && self.ddr().of(cell).is_none()
+            && !dsp::is_multiplier(cell)
+            && cell.ram_ports().is_none()
+    }
+
     fn ddr(&self) -> &Primitives {
         self.device.ddr_primitives()
     }
@@ -655,6 +666,9 @@ impl TimingModel for NexusTiming<'_> {
         if self.ddr().of(cell).is_some() {
             return self.ddr_launch_ps(cell, output);
         }
+        if self.is_untimed_block(cell) {
+            return None;
+        }
         if Self::is_dist_ram(cell) {
             return None;
         }
@@ -674,6 +688,9 @@ impl TimingModel for NexusTiming<'_> {
     fn arc_ps(&self, cell: &Cell, input: usize, output: usize) -> Option<i64> {
         if self.ddr().of(cell).is_some() {
             return self.ddr_arc_ps(cell, input, output);
+        }
+        if self.is_untimed_block(cell) {
+            return None;
         }
         self.db.cell_arc_ps(cell, input, output)
     }
@@ -1079,6 +1096,11 @@ mod tests {
         assert_eq!(model.launch_ps(&sync, 0), None);
         assert_eq!(model.arc_ps(&sync, 0, 0), None);
         assert!(model.endpoints(&sync).is_empty());
+        // Nor does a hard block with no timing data, such as a PLL: its lock
+        // flag is not a path from its reference clock
+        let pll = blackbox("PLL_CORE", &["REFCK", "RST"], &["CLKOP", "LOCK"]);
+        assert_eq!(model.launch_ps(&pll, 1), None);
+        assert_eq!(model.arc_ps(&pll, 1, 1), None);
     }
 
     /// A family's `metastability.json` gives each element's time constant

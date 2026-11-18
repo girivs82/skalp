@@ -1378,7 +1378,7 @@ mod tests {
         div.inputs = vec![GateNetId(1)];
         div.outputs = vec![GateNetId(2)];
         assert_eq!(prims.driven_frequencies(&div, &known), [(0, 125.0)]);
-        div.parameters.remove("ECLK_DIV");
+        div.parameters.shift_remove("ECLK_DIV");
         assert!(prims.driven_frequencies(&div, &known).is_empty());
         let mut sync = blackbox("ECLKSYNC", &["ECLKIN"], &["ECLKOUT"], &[]);
         sync.inputs = vec![GateNetId(1)];

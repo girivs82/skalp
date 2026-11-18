@@ -12,7 +12,7 @@
 //! source; hold does not time them.
 
 use super::clock_targets::ClockTargets;
-use super::{ClockSummary, CriticalPath, HoldReport, PathStep, TimingReport};
+use super::{ClockSummary, CriticalPath, FailingInstance, HoldReport, PathStep, TimingReport};
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
@@ -448,6 +448,25 @@ pub fn analyze<D: Device + ?Sized>(
     // path need not be the one that fails by most.
     paths.sort_by(|a, b| a.0.slack.total_cmp(&b.0.slack));
     let failing_paths = paths.iter().filter(|p| p.0.slack < 0.0).count();
+    let mut by_instance: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
+    for (path, _, _) in paths.iter().filter(|p| p.0.slack < 0.0) {
+        let instance = path
+            .destination
+            .rsplit_once('.')
+            .map_or("", |(parent, _)| parent);
+        let entry = by_instance.entry(instance).or_insert((0, 0.0));
+        entry.0 += 1;
+        entry.1 = entry.1.min(path.slack);
+    }
+    let mut failing_by_instance: Vec<FailingInstance> = by_instance
+        .into_iter()
+        .map(|(instance, (endpoints, worst_slack))| FailingInstance {
+            instance: instance.to_string(),
+            endpoints,
+            worst_slack,
+        })
+        .collect();
+    failing_by_instance.sort_by(|a, b| a.worst_slack.total_cmp(&b.worst_slack));
     let worst = paths.first().map(|p| (p.0.delay, p.0.slack, p.2));
     paths.truncate(10);
     let paths: Vec<CriticalPath> = paths
@@ -495,6 +514,7 @@ pub fn analyze<D: Device + ?Sized>(
         critical_paths: paths,
         hold: None,
         bundles: Vec::new(),
+        failing_by_instance,
     }
 }
 

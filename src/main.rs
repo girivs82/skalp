@@ -5233,6 +5233,15 @@ fn run_nexus_pnr_on_netlist(
                 }
             }
         }
+        if !timing.failing_by_instance.is_empty() {
+            println!("  Failing endpoints by instance (worst first):");
+            for entry in timing.failing_by_instance.iter().take(10) {
+                println!(
+                    "    {:>5}  worst {:>8.3} ns  {}",
+                    entry.endpoints, entry.worst_slack, entry.instance
+                );
+            }
+        }
         print_matched_delays(timing, gate_netlist.settle_wait_ps);
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;

@@ -169,6 +169,21 @@ pub struct TimingReport {
     /// delays (worst corner)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<BundleReport>,
+    /// Failing endpoints counted by the instance they are in, worst first:
+    /// where the design misses its target, beyond the few paths listed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_by_instance: Vec<FailingInstance>,
+}
+
+/// The failing endpoints of one instance
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailingInstance {
+    /// Instance path (an endpoint cell's path without its last component)
+    pub instance: String,
+    /// Endpoints in it that miss their requirement
+    pub endpoints: usize,
+    /// The worst slack among them, in ns
+    pub worst_slack: f64,
 }
 
 /// One matched delay of a bundled-data async block, checked after routing
@@ -225,6 +240,7 @@ impl Default for TimingReport {
             critical_paths: Vec::new(),
             hold: None,
             bundles: Vec::new(),
+            failing_by_instance: Vec::new(),
         }
     }
 }
