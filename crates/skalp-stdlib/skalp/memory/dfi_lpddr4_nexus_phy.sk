@@ -1,0 +1,1164 @@
+// LPDDR4 PHY on the DFI 1:4 interface for Lattice Nexus devices (CertusPro-NX, CrossLink-NX,
+// Certus-NX, MachXO5-NX), built from the I/O logic's x4 gearing and the DQS buffers.
+//
+// It has the DFI interface of DfiLpddr4BehavPhy (see dfi.md next to this file) and drives the
+// LPDDR4 pins of one x16 channel through the device's DDR blocks, which a build for a Nexus
+// device takes from the primitive library (simulation models in skalp/primitives/nexus):
+//   - clocks: the edge clock eclk (CK rate, from a PLL) through an ECLKSYNC per bank side, an
+//     ECLKDIV /4 makes the DFI clock (SCLK), a DDRDLL measures the edge clock for the DQS buffers;
+//   - command: CK, CA[5:0], CS and CKE through ODDRX4 (CA, CS and CKE then a DELAYB of CA_DELAY
+//     steps); RESET_N is a fabric register;
+//   - per byte lane: a DQSBUF; DQS through ODDRX4DQS and TSHX4DQS on DQSW; DQ and DMI through
+//     ODDRX4DQ and TSHX4DQ on DQSW270; each DQ in through a DELAYA (DQ_IN_DELAY steps) into an
+//     IDDRX4DQ on DQSR90 and the DQS buffer's FIFO pointers.
+//
+// Pins: the PHY ends at the I/O logic. Each bidirectional pin has an output (`*_o`), a tristate
+// control (`*_t`, 1 = not driven) and the pad's input (`*_i`); the design's top level connects
+// them to its pads (on Nexus: a BB per pin, with the LPDDR4 I/O standards; DQS and CK are
+// differential pads, so only the true side appears here). A simulation connects them to an
+// LPDDR4 model, with the pad's value as the input (the PHY reads its own DQS back while it
+// drives it, which write leveling uses).
+//
+// Timing at the pins: every DFI phase is one CK slot; a DFI cycle's four slots reach the pins
+// together, a fixed number of DFI cycles after the controller drives them, commands and data
+// alike. CK rises in the middle of each slot; CA, CS and CKE change at slot starts. Write data:
+// a slot with dfi_wrdata_en is sent in the next slot at the pins; DQS rises at that slot's start
+// plus the lane's write leveling delay and falls half a tCK later, with a 2 tCK static preamble
+// and a 1 tCK postamble (driven low); DQ is centred on DQS (DQSW270 is three quarters of a tCK
+// after DQSW, plus the lane's write DQ delay) and holds its last beat one more slot. So, as with
+// the behavioural PHY, a controller sets TPHY_WRLAT_ADJ = 3.
+//
+// Reads: each lane's read gate (the DQS buffer's READ) follows dfi_rddata_en, delayed by the
+// lane's trained gate setting in eighths of a tCK (whole slots, then RDCLKSEL in 45 degree steps).
+// The DQS buffer samples DQ on DQSR90 (DQS delayed a quarter tCK, moved by the lane's read
+// delay) into the I/O logic FIFO; DATAVALID marks each DFI cycle that brings a word, which holds
+// the beats of that cycle's gated slots in place, and the lane packs the words into half bursts
+// (eight beats) from the READ masks it issued. Once both lanes have a half burst it goes back on dfi_rddata_wN (four words, beats 2N
+// and 2N+1 of both lanes, the earlier beat in [15:0]) with dfi_rddata_valid_wN. A controller
+// keeps TRDDATA_EN_ADJ = 3; the gate training finds the burst after it.
+//
+// Delay settings move in 12.5 ps steps, one step per two DFI cycles; while one moves, the lane
+// holds the DQS buffer's PAUSE. At init the PHY resets the DLL, waits for it to lock, resets
+// the DQS buffers, loads every setting, and sets the read and write DQ delays to the start of
+// their sweeps (EYE_HALF and WDQ_HALF steps before the middle) before raising
+// dfi_init_complete.
+//
+// Training (PHY evaluation, as the behavioural PHY; each training event is evaluated over the
+// TRAIN_WIN DFI cycles after its frame is sent, then the delays move, so the controller spaces
+// events by TRAIN_GAP_CYC and WL_GAP_CYC >= 32):
+//   write leveling (dfi_wrlvl_en): each dfi_wrlvl_strobe sends a DQS preamble and two pulses on
+//         both lanes with the lane's leveling delay, and opens the read gate around them, so the
+//         DQS buffer samples DQ (the DRAM's feedback from the previous strobe: any bit set means
+//         CK was high) on the PHY's own DQS. The delay starts at 0 (DQS rising half a tCK before
+//         CK) and moves up WL_STEP steps per strobe; each lane keeps the first delay whose
+//         feedback goes from 0 to 1, moves back to it and raises its dfi_wrlvl_resp bit
+//         (wrlvl_fail when WL_MAX steps pass without one).
+//   read gate (dfi_rdlvl_gate_en): Read DQ Calibration bursts, the n-th with gate setting n
+//         (0 to 8 x GATE_SLOTS - 1, from the slot of dfi_rddata_en); a setting passes when the
+//         DQS buffer reports BURSTDETECT. The longest passing run ends where the gate would open
+//         after the first DQS rise; each lane takes the middle of the run but no more than a tCK
+//         before its end, inside the 2 tCK preamble (gate_fail if no run of 4).
+//   read eye (dfi_rdlvl_en): each burst is captured with the next read delay (EYE_STEP steps
+//         apart, from EYE_HALF below the middle to EYE_HALF above) and compared with the Read DQ
+//         Calibration pattern (RDC_PATTERN = {MR40, MR32}, per-lane inversion RDC_INV0/1 = MR15,
+//         MR20); the lane takes the middle of the longest passing run (lvl_fail if none).
+//   write DQ (dfi_wdqlvl_en): the PHY sends its own data on every write (byte k of a lane-0 burst
+//         is {k, k}, inverted on odd beats; lane 1 is the inverse) and compares each read-back
+//         with it; the write delay sweeps as the read delay does (WDQ_STEP, WDQ_HALF), and each
+//         lane takes the middle of the longest passing run (wdq_fail if none).
+// No read data comes back on DFI while any training enable is set.
+//
+// PHY updates: the PHY acknowledges controller updates and does not request any.
+
+// write DQ training data: byte k of a lane-0 burst is {k, k}, inverted on odd beats
+fn nx_wdq_byte(k: bit[4]) -> bit[8] {
+    return if k[0] == 1 { ~{k, k} } else { {k, k} }
+}
+
+// word i of a write DQ training burst: beats 2i and 2i+1 of both lanes, the earlier in [15:0]
+fn nx_wdq_word(i: bit[3]) -> bit[32] {
+    let b0: bit[8] = nx_wdq_byte({i, 1'b0})
+    let b1: bit[8] = nx_wdq_byte({i, 1'b1})
+    return {~b1, b1, ~b0, b0}
+}
+
+// a lane-0 write DQ training burst, beat k in [8k+7:8k]
+fn nx_wdq_lane(z: bit) -> bit[128] {
+    return {nx_wdq_byte(4'd15), nx_wdq_byte(4'd14), nx_wdq_byte(4'd13), nx_wdq_byte(4'd12),
+            nx_wdq_byte(4'd11), nx_wdq_byte(4'd10), nx_wdq_byte(4'd9), nx_wdq_byte(4'd8),
+            nx_wdq_byte(4'd7), nx_wdq_byte(4'd6), nx_wdq_byte(4'd5), nx_wdq_byte(4'd4),
+            nx_wdq_byte(4'd3), nx_wdq_byte(4'd2), nx_wdq_byte(4'd1), nx_wdq_byte(4'd0)}
+}
+
+// a Read DQ Calibration burst on one lane: beat k is all ones or all zeros per pattern bit k,
+// inverted by the lane's mask
+fn nx_rdc_lane(pat: bit[16], inv: bit[8]) -> bit[128] {
+    return {
+        if pat[15] == 1 { ~inv } else { inv }, if pat[14] == 1 { ~inv } else { inv },
+        if pat[13] == 1 { ~inv } else { inv }, if pat[12] == 1 { ~inv } else { inv },
+        if pat[11] == 1 { ~inv } else { inv }, if pat[10] == 1 { ~inv } else { inv },
+        if pat[9] == 1 { ~inv } else { inv }, if pat[8] == 1 { ~inv } else { inv },
+        if pat[7] == 1 { ~inv } else { inv }, if pat[6] == 1 { ~inv } else { inv },
+        if pat[5] == 1 { ~inv } else { inv }, if pat[4] == 1 { ~inv } else { inv },
+        if pat[3] == 1 { ~inv } else { inv }, if pat[2] == 1 { ~inv } else { inv },
+        if pat[1] == 1 { ~inv } else { inv }, if pat[0] == 1 { ~inv } else { inv }
+    }
+}
+
+// One DQ pin: x4 output and tristate gearing on DQSW270, delayed input into x4 input gearing on
+// DQSR90. d: D0..D7 (D0 first); t: one tristate bit per edge clock cycle (1 = not driven);
+// q: Q0..Q7 (Q0 = the first beat).
+pub entity NexusLpddr4DqPin<const IN_DELAY: nat = 0> {
+    in eclk: clock
+    in sclk: clock
+    in dqsw270: clock
+    in dqsr90: clock
+    in rst: bit
+    in load_n: bit
+    in d: bit[8]
+    in t: bit[4]
+    in rdp: bit[3]
+    in wrp: bit[3]
+    out o: bit
+    out ot: bit
+    in i: bit
+    out q: bit[8]
+}
+
+impl NexusLpddr4DqPin {
+    inst od = ODDRX4DQ {
+        D0: d[0], D1: d[1], D2: d[2], D3: d[3], D4: d[4], D5: d[5], D6: d[6], D7: d[7],
+        DQSW270: dqsw270, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst ts = TSHX4DQ {
+        T0: t[0], T1: t[1], T2: t[2], T3: t[3],
+        DQSW270: dqsw270, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst dl = DELAYA<IN_DELAY> {
+        A: i, LOAD_N: load_n, MOVE: 0, DIRECTION: 0, COARSE0: 0, COARSE1: 0,
+        RANKSELECT: 0, RANKENABLE: 0, RANK0UPDATE: 0, RANK1UPDATE: 0
+    }
+    inst id = IDDRX4DQ {
+        D: dl.Z, DQSR90: dqsr90, ECLK: eclk, SCLK: sclk, RST: rst,
+        RDPNTR0: rdp[0], RDPNTR1: rdp[1], RDPNTR2: rdp[2],
+        WRPNTR0: wrp[0], WRPNTR1: wrp[1], WRPNTR2: wrp[2]
+    }
+    o = od.Q
+    ot = ts.Q
+    q = {id.Q7, id.Q6, id.Q5, id.Q4, id.Q3, id.Q2, id.Q1, id.Q0}
+}
+
+// One byte lane: the DQS buffer, DQS, 8 DQ and DMI (output only: data mask and DBI are off),
+// and the lane's training.
+//
+// Inputs per DFI cycle, for the frame being sent: dq_d (pin b's D0..D7 in [8b+7:8b]), dq_tt and
+// dqs_tt (one tristate bit per slot), dqs_d; rd_win: dfi_rddata_en of the last 12 slots, the
+// newest (captured) frame in [11:8], the frame being sent in [7:4]; wl_frame: the frame carries a write leveling pulse; tr_start: a
+// training event (strobe or read burst) is in the frame being sent.
+pub entity NexusLpddr4Lane<
+    const IN_DELAY: nat = 0,
+    const GATE_SLOTS: nat = 8,
+    const TRAIN_WIN: nat = 14,
+    const WL_STEP: nat = 4,
+    const WL_MAX: nat = 200,
+    const EYE_STEP: nat = 4,
+    const EYE_HALF: nat = 64,
+    const WDQ_STEP: nat = 4,
+    const WDQ_HALF: nat = 64
+> {
+    in eclk: clock
+    in sclk: clock
+    in rst: bit
+    in load: bit
+    in dllcode: bit[9]
+    in dq_d: bit[64]
+    in dq_tt: bit[4]
+    in dqs_d: bit[8]
+    in dqs_tt: bit[4]
+    in rd_win: bit[12]
+    in wl_frame: bit
+    in tr_start: bit
+    in wl_en: bit
+    in gate_en: bit
+    in eye_en: bit
+    in wdq_en: bit
+    in exp_rdc: bit[128]
+    in exp_wdq: bit[128]
+    // pins
+    out dq_o: bit[8]
+    out dq_t: bit[8]
+    in dq_i: bit[8]
+    out dmi_o: bit
+    out dmi_t: bit
+    out dqs_o: bit
+    out dqs_t: bit
+    in dqs_i: bit
+    // read data: eight beats (beat k in [8k+7:8k]) of a burst, outside training
+    out dv: bit
+    out half: bit[64]
+    // training
+    out busy: bit
+    out resp_wl: bit
+    out resp_gate: bit
+    out resp_eye: bit
+    out resp_wdq: bit
+    out wl_fail: bit
+    out gate_fail: bit
+    out eye_fail: bit
+    out wdq_fail: bit
+    out wl_pos: bit[8]
+    out gate_set: bit[8]
+    out rd_pos: bit[8]
+    out wr_pos: bit[8]
+    out bursts: bit[16]
+}
+
+impl NexusLpddr4Lane {
+    // ------------------------------------------------------------ delay settings
+    // positions as the DQS buffer holds them (read and write: 128 = the middle)
+    signal rdp_r: bit[8] = 128
+    signal wrp_r: bit[8] = 128
+    signal wlp_r: bit[8] = 0
+    // steps still to move, the direction (1 = down) and the MOVE outputs
+    signal rd_n: bit[8] = 0
+    signal wr_n: bit[8] = 0
+    signal wl_n: bit[8] = 0
+    signal rd_dn: bit = 0
+    signal wr_dn: bit = 0
+    signal wl_dn: bit = 0
+    signal rd_mv: bit = 0
+    signal wr_mv: bit = 0
+    signal wl_mv: bit = 0
+    let moving: bit = if rd_n != 0 || wr_n != 0 || wl_n != 0 || rd_mv == 1 || wr_mv == 1 || wl_mv == 1 { 1 } else { 0 }
+    // after a gate setting changes, the DQS buffer pauses a few cycles
+    signal pause_n: bit[3] = 0
+    let pause: bit = if moving == 1 || pause_n != 0 { 1 } else { 0 }
+
+    // ------------------------------------------------------------ training state
+    signal gsel: bit[8] = 0
+    signal win: bit[8] = 0
+    signal bd_seen: bit = 0
+    signal nv: bit[2] = 0
+    signal mism: bit = 0
+    signal fb: bit = 0
+    // sweep: setting index or position of the event being evaluated, run and best run
+    signal idx: bit[8] = 0
+    signal run_st: bit[8] = 0
+    signal run_ln: bit[8] = 0
+    signal best_st: bit[8] = 0
+    signal best_end: bit[8] = 0
+    signal best_ln: bit[8] = 0
+    // write leveling: events seen, position of the last strobe, last feedback
+    signal wl_k: bit[8] = 0
+    signal wl_last: bit[8] = 0
+    signal wl_fb_p: bit = 0
+    signal wl_best: bit[8] = 0
+    // a phase's sweep is over; its result is being moved to
+    signal fin: bit = 0
+    signal r_wl: bit = 0
+    signal r_gate: bit = 0
+    signal r_eye: bit = 0
+    signal r_wdq: bit = 0
+    signal f_wl: bit = 0
+    signal f_gate: bit = 0
+    signal f_eye: bit = 0
+    signal f_wdq: bit = 0
+    signal wl_q: bit = 0
+    signal gate_q: bit = 0
+    signal eye_q: bit = 0
+    signal wdq_q: bit = 0
+    signal nburst: bit[16] = 0
+    signal load_q: bit = 0
+
+    let training: bit = if wl_en == 1 || gate_en == 1 || eye_en == 1 || wdq_en == 1 { 1 } else { 0 }
+    let gate_n: bit[8] = GATE_SLOTS * 8
+    let train_win: bit[8] = TRAIN_WIN
+    let wl_step: bit[8] = WL_STEP
+    let wl_max: bit[8] = WL_MAX
+    let eye_step: bit[8] = EYE_STEP
+    let eye_top: bit[8] = 128 + EYE_HALF
+    let eye_bot: bit[8] = 128 - EYE_HALF
+    let wdq_step: bit[8] = WDQ_STEP
+    let wdq_top: bit[8] = 128 + WDQ_HALF
+    let wdq_bot: bit[8] = 128 - WDQ_HALF
+
+    // ------------------------------------------------------------ read gate
+    let gs: bit[4] = {1'b0, gsel[5:3]}
+    let ri0: bit[4] = 8 - gs
+    let ri1: bit[4] = 9 - gs
+    let ri2: bit[4] = 10 - gs
+    let ri3: bit[4] = 11 - gs
+    let read_n: bit[4] = if wl_frame == 1 { 4'b0111 } else { {rd_win[ri3], rd_win[ri2], rd_win[ri1], rd_win[ri0]} }
+    let sel_n: bit[4] = if wl_en == 1 { 4'b0000 } else { {1'b0, gsel[2:0]} }
+
+    inst dqs = DQSBUF {
+        DQSI: dqs_i, ECLKIN: eclk, SCLK: sclk, RST: rst,
+        PAUSE: pause,
+        RSTSMCNT: 0, RDCLKSEL: sel_n, READ: read_n,
+        RDDIR: rd_dn, RDLOADN: ~load, READMOVE: rd_mv, SELCLK: 0,
+        WRDIR: wr_dn, WRLOAD_N: ~load, WRMOVE: wr_mv,
+        WRLVDIR: wl_dn, WRLVLOAD_N: ~load, WRLVMOVE: wl_mv,
+        DLLCODE: dllcode
+    }
+
+    // ------------------------------------------------------------ DQS and the pins
+    inst dqs_od = ODDRX4DQS {
+        D0: dqs_d[0], D1: dqs_d[1], D2: dqs_d[2], D3: dqs_d[3],
+        D4: dqs_d[4], D5: dqs_d[5], D6: dqs_d[6], D7: dqs_d[7],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst dqs_ts = TSHX4DQS {
+        T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    signal w270: clock
+    signal r90: clock
+    w270 = dqs.DQSW270
+    r90 = dqs.DQSR90
+    inst p0 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[7:0], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[0]
+    }
+    inst p1 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[15:8], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[1]
+    }
+    inst p2 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[23:16], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[2]
+    }
+    inst p3 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[31:24], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[3]
+    }
+    inst p4 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[39:32], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[4]
+    }
+    inst p5 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[47:40], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[5]
+    }
+    inst p6 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[55:48], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[6]
+    }
+    inst p7 = NexusLpddr4DqPin<IN_DELAY> {
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        d: dq_d[63:56], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[7]
+    }
+    inst dmi_od = ODDRX4DQ {
+        D0: 0, D1: 0, D2: 0, D3: 0, D4: 0, D5: 0, D6: 0, D7: 0,
+        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+    inst dmi_ts = TSHX4DQ {
+        T0: dq_tt[0], T1: dq_tt[1], T2: dq_tt[2], T3: dq_tt[3],
+        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: rst
+    }
+
+    // eight beats of the lane, beat k in [8k+7:8k]
+    let qb0: bit[8] = p0.q
+    let qb1: bit[8] = p1.q
+    let qb2: bit[8] = p2.q
+    let qb3: bit[8] = p3.q
+    let qb4: bit[8] = p4.q
+    let qb5: bit[8] = p5.q
+    let qb6: bit[8] = p6.q
+    let qb7: bit[8] = p7.q
+    let hb: bit[64] = {
+        qb7[7], qb6[7], qb5[7], qb4[7], qb3[7], qb2[7], qb1[7], qb0[7],
+        qb7[6], qb6[6], qb5[6], qb4[6], qb3[6], qb2[6], qb1[6], qb0[6],
+        qb7[5], qb6[5], qb5[5], qb4[5], qb3[5], qb2[5], qb1[5], qb0[5],
+        qb7[4], qb6[4], qb5[4], qb4[4], qb3[4], qb2[4], qb1[4], qb0[4],
+        qb7[3], qb6[3], qb5[3], qb4[3], qb3[3], qb2[3], qb1[3], qb0[3],
+        qb7[2], qb6[2], qb5[2], qb4[2], qb3[2], qb2[2], qb1[2], qb0[2],
+        qb7[1], qb6[1], qb5[1], qb4[1], qb3[1], qb2[1], qb1[1], qb0[1],
+        qb7[0], qb6[0], qb5[0], qb4[0], qb3[0], qb2[0], qb1[0], qb0[0]
+    }
+    let dvalid: bit = dqs.DATAVALID
+
+    // ------------------------------------------------------------ half bursts
+    // Each SCLK cycle with READ set brings one DATAVALID word, in order, holding the beats of
+    // its enabled slots in place (slot s in hb[16s+15:16s]). A burst's slots are contiguous but
+    // start wherever the gate put them, so a word can end in the middle of a half burst: the
+    // READ masks queue up until their words come back, and the halves are packed from the
+    // current word and the slots still pending from the one before.
+    signal rmq: [bit[4]; 8]
+    signal rmq_w: bit[3] = 0
+    signal rmq_r: bit[3] = 0
+    signal pv: bit[64] = 0
+    signal pn: bit[2] = 0
+    let rm: bit[4] = rmq[rmq_r]
+    // enabled slots of this word: first slot and count (contiguous)
+    let rm_s0: bit[2] = if rm[0] == 1 { 0 } else { if rm[1] == 1 { 1 } else { if rm[2] == 1 { 2 } else { 3 } } }
+    let rm_c: bit[3] = {2'b00, rm[0]} + {2'b00, rm[1]} + {2'b00, rm[2]} + {2'b00, rm[3]}
+    // with slots pending, the run continues at slot 0 of this word and takes 4 - pn of them
+    let pk_p: bit[64] = match pn {
+        1 => hb[47:0] ++ pv[63:48],
+        2 => hb[31:0] ++ pv[63:32],
+        _ => hb[15:0] ++ pv[63:16]
+    }
+    let pk_take: bit[3] = 4 - {1'b0, pn}
+    let hv: bit = if dvalid == 1 && wl_en == 0 && ((pn != 0 && rm_c >= pk_take) || (pn == 0 && rm_c == 4)) { 1 } else { 0 }
+    let hh: bit[64] = if pn != 0 { pk_p } else { hb }
+    // slots left pending after this word
+    let pn_n: bit[2] = if wl_en == 1 { 0 } else {
+        if pn != 0 {
+            if rm_c > pk_take { pn } else { 0 }
+        } else {
+            if rm_c == 4 || rm_c == 0 { 0 } else { rm_c[1:0] }
+        }
+    }
+
+    // ------------------------------------------------------------ evaluation of an event
+    let in_win: bit = if win != 0 { 1 } else { 0 }
+    let last_win: bit = if win == 1 { 1 } else { 0 }
+    let exp_h: bit[64] = if wdq_en == 1 {
+        if nv == 0 { exp_wdq[63:0] } else { exp_wdq[127:64] }
+    } else {
+        if nv == 0 { exp_rdc[63:0] } else { exp_rdc[127:64] }
+    }
+    let h_bad: bit = if hv == 1 && (nv >= 2 || hh != exp_h) { 1 } else { 0 }
+    let mism_n: bit = if mism == 1 || h_bad == 1 { 1 } else { 0 }
+    let nv_n: bit[2] = if hv == 1 && nv != 3 { nv + 1 } else { nv }
+    let fb_n: bit = if fb == 1 || (dvalid == 1 && hb[15:0] != 0) { 1 } else { 0 }
+    let bd_n: bit = if bd_seen == 1 || dqs.BURSTDETECT == 1 { 1 } else { 0 }
+    // the event's result (gate: BURSTDETECT; eye and write DQ: both halves as expected)
+    let data_ok: bit = if nv_n == 2 && mism_n == 0 { 1 } else { 0 }
+    let pass: bit = if gate_en == 1 { bd_n } else { data_ok }
+    // the sweep's position of the event (gate: its setting)
+    let pos: bit[8] = if gate_en == 1 { gsel } else { if eye_en == 1 { rdp_r } else { wrp_r } }
+    let rl: bit[8] = run_ln + 1
+    let rs: bit[8] = if run_ln == 0 { pos } else { run_st }
+    let better: bit = if pass == 1 && rl > best_ln { 1 } else { 0 }
+    let bl_n: bit[8] = if better == 1 { rl } else { best_ln }
+    let bs_n: bit[8] = if better == 1 { rs } else { best_st }
+    let be_n: bit[8] = if better == 1 { pos } else { best_end }
+    // (positions reach 192, so the sum takes 9 bits)
+    let mid_s: bit[9] = {1'b0, bs_n} + {1'b0, be_n}
+    let mid: bit[8] = mid_s[8:1]
+    // the gate: settings pass while it opens in the DQS preamble (or before DQS is driven), up
+    // to the first rising edge; it goes to the middle of the passing run, but no more than a
+    // tCK (8 settings) before that edge, so it stays inside the 2 tCK preamble
+    let g_ok: bit = if bl_n >= 4 && be_n >= 7 { 1 } else { 0 }
+    // the sweep ends with this event
+    let gate_last: bit = if gsel + 1 >= gate_n { 1 } else { 0 }
+    let eye_last: bit = if rdp_r + eye_step > eye_top { 1 } else { 0 }
+    let wdq_last: bit = if wrp_r + wdq_step > wdq_top { 1 } else { 0 }
+    let sweeping: bit = if (gate_en == 1 && gate_q == 1 && r_gate == 0) || (eye_en == 1 && eye_q == 1 && r_eye == 0) || (wdq_en == 1 && wdq_q == 1 && r_wdq == 0) { 1 } else { 0 }
+    let evaluate: bit = if last_win == 1 && sweeping == 1 && fin == 0 { 1 } else { 0 }
+    // write leveling: this strobe's sample is the feedback of the strobe before it
+    let wl_sweep: bit = if wl_en == 1 && wl_q == 1 && r_wl == 0 && fin == 0 { 1 } else { 0 }
+    let wl_eval: bit = if last_win == 1 && wl_sweep == 1 { 1 } else { 0 }
+    let wl_hit: bit = if wl_k >= 2 && wl_fb_p == 0 && fb_n == 1 { 1 } else { 0 }
+    let wl_end: bit = if wlp_r + wl_step > wl_max { 1 } else { 0 }
+    let any_start: bit = if (wl_en == 1 && wl_q == 0) || (gate_en == 1 && gate_q == 0) || (eye_en == 1 && eye_q == 0) || (wdq_en == 1 && wdq_q == 0) { 1 } else { 0 }
+
+    on(sclk.rise) {
+        // READ masks in flight, and the slots pending for the next half burst
+        if rst == 1 {
+            rmq_w = 0
+            rmq_r = 0
+            pn = 0
+        } else {
+            if read_n != 0 {
+                rmq[rmq_w] = read_n
+                rmq_w = rmq_w + 1
+            }
+            if dvalid == 1 {
+                rmq_r = rmq_r + 1
+                pn = pn_n
+                pv = hb
+            }
+        }
+        if pause_n != 0 {
+            pause_n = pause_n - 1
+        }
+        // ---------------------------------------------------------- moves
+        if load == 1 {
+            rdp_r = 128
+            wrp_r = 128
+            wlp_r = 0
+            rd_n = 0
+            wr_n = 0
+            wl_n = 0
+            rd_mv = 0
+            wr_mv = 0
+            wl_mv = 0
+        } else {
+            if rd_mv == 1 {
+                rd_mv = 0
+            } else if rd_n != 0 {
+                rd_mv = 1
+                rd_n = rd_n - 1
+                rdp_r = if rd_dn == 1 { rdp_r - 1 } else { rdp_r + 1 }
+            }
+            if wr_mv == 1 {
+                wr_mv = 0
+            } else if wr_n != 0 {
+                wr_mv = 1
+                wr_n = wr_n - 1
+                wrp_r = if wr_dn == 1 { wrp_r - 1 } else { wrp_r + 1 }
+            }
+            if wl_mv == 1 {
+                wl_mv = 0
+            } else if wl_n != 0 {
+                wl_mv = 1
+                wl_n = wl_n - 1
+                wlp_r = if wl_dn == 1 { wlp_r - 1 } else { wlp_r + 1 }
+            }
+        }
+        // after the load, the read and write DQ delays go to the bottom of their sweeps
+        load_q = load
+        if load == 0 && load_q == 1 {
+            rd_dn = 1
+            rd_n = EYE_HALF
+            wr_dn = 1
+            wr_n = WDQ_HALF
+        }
+
+        // ---------------------------------------------------------- phases start
+        wl_q = wl_en
+        gate_q = gate_en
+        eye_q = eye_en
+        wdq_q = wdq_en
+        if any_start == 1 {
+            run_ln = 0
+            best_ln = 0
+            best_st = 0
+            best_end = 0
+            fin = 0
+            win = 0
+            wl_k = 0
+            wl_fb_p = 0
+        }
+        if wl_en == 1 && wl_q == 0 {
+            r_wl = 0
+            f_wl = 0
+        }
+        if gate_en == 1 && gate_q == 0 {
+            r_gate = 0
+            f_gate = 0
+            gsel = 0
+            pause_n = 4
+        }
+        if eye_en == 1 && eye_q == 0 {
+            r_eye = 0
+            f_eye = 0
+        }
+        if wdq_en == 1 && wdq_q == 0 {
+            r_wdq = 0
+            f_wdq = 0
+        }
+
+        // ---------------------------------------------------------- an event's window
+        if tr_start == 1 && training == 1 {
+            win = train_win
+            bd_seen = 0
+            nv = 0
+            mism = 0
+            fb = 0
+        } else if in_win == 1 {
+            win = win - 1
+            bd_seen = bd_n
+            nv = nv_n
+            mism = mism_n
+            fb = fb_n
+        }
+
+        // ---------------------------------------------------------- gate, eye, write DQ sweeps
+        if evaluate == 1 {
+            if pass == 1 {
+                run_st = rs
+                run_ln = rl
+            } else {
+                run_ln = 0
+            }
+            best_ln = bl_n
+            best_st = bs_n
+            best_end = be_n
+            if gate_en == 1 {
+                if gate_last == 1 {
+                    fin = 1
+                    gsel = if g_ok == 0 { 0 } else { if mid > be_n - 7 { mid } else { be_n - 7 } }
+                    f_gate = if g_ok == 1 { 0 } else { 1 }
+                } else {
+                    gsel = gsel + 1
+                }
+                pause_n = 4
+            }
+            if eye_en == 1 {
+                if eye_last == 1 {
+                    fin = 1
+                    f_eye = if bl_n == 0 { 1 } else { 0 }
+                    rd_dn = 1
+                    rd_n = if bl_n == 0 { rdp_r - 128 } else { rdp_r - mid }
+                } else {
+                    rd_dn = 0
+                    rd_n = eye_step
+                }
+            }
+            if wdq_en == 1 {
+                if wdq_last == 1 {
+                    fin = 1
+                    f_wdq = if bl_n == 0 { 1 } else { 0 }
+                    wr_dn = 1
+                    wr_n = if bl_n == 0 { wrp_r - 128 } else { wrp_r - mid }
+                } else {
+                    wr_dn = 0
+                    wr_n = wdq_step
+                }
+            }
+        }
+
+        // ---------------------------------------------------------- write leveling
+        if wl_eval == 1 {
+            wl_k = wl_k + 1
+            if wl_k >= 1 {
+                wl_fb_p = fb_n
+            }
+            if wl_hit == 1 {
+                fin = 1
+                wl_best = wl_last
+                wl_dn = 1
+                wl_n = wlp_r - wl_last
+            } else if wl_end == 1 {
+                fin = 1
+                f_wl = 1
+                wl_dn = 1
+                wl_n = wlp_r
+            } else {
+                wl_last = wlp_r
+                wl_dn = 0
+                wl_n = wl_step
+            }
+        }
+
+        // ---------------------------------------------------------- results once moved
+        if fin == 1 && moving == 0 && pause_n == 0 {
+            if wl_en == 1 && r_wl == 0 {
+                r_wl = 1
+                fin = 0
+            }
+            if gate_en == 1 && r_gate == 0 {
+                r_gate = 1
+                fin = 0
+            }
+            if eye_en == 1 && r_eye == 0 {
+                r_eye = 1
+                fin = 0
+            }
+            if wdq_en == 1 && r_wdq == 0 {
+                r_wdq = 1
+                fin = 0
+            }
+        }
+        if hv == 1 && training == 0 {
+            nburst = nburst + 1
+        }
+    }
+
+    // pins
+    dq_o = {p7.o, p6.o, p5.o, p4.o, p3.o, p2.o, p1.o, p0.o}
+    dq_t = {p7.ot, p6.ot, p5.ot, p4.ot, p3.ot, p2.ot, p1.ot, p0.ot}
+    dmi_o = dmi_od.Q
+    dmi_t = dmi_ts.Q
+    dqs_o = dqs_od.Q
+    dqs_t = dqs_ts.Q
+
+    dv = if hv == 1 && training == 0 { 1 } else { 0 }
+    half = hh
+    busy = moving
+    resp_wl = if wl_en == 1 && r_wl == 1 { 1 } else { 0 }
+    resp_gate = if gate_en == 1 && r_gate == 1 { 1 } else { 0 }
+    resp_eye = if eye_en == 1 && r_eye == 1 { 1 } else { 0 }
+    resp_wdq = if wdq_en == 1 && r_wdq == 1 { 1 } else { 0 }
+    wl_fail = f_wl
+    gate_fail = f_gate
+    eye_fail = f_eye
+    wdq_fail = f_wdq
+    wl_pos = wlp_r
+    gate_set = gsel
+    rd_pos = rdp_r
+    wr_pos = wrp_r
+    bursts = nburst
+}
+
+// The PHY: DFI 1:4 to one x16 LPDDR4 channel (see the top of this file).
+pub entity DfiLpddr4NexusPhy<
+    const RDC_PATTERN: nat = 15450,
+    const RDC_INV0: nat = 0,
+    const RDC_INV1: nat = 0,
+    const CA_DELAY: nat = 0,
+    const DQ_IN_DELAY: nat = 0,
+    const GATE_SLOTS: nat = 8,
+    const TRAIN_WIN: nat = 14,
+    const WL_STEP: nat = 4,
+    const WL_MAX: nat = 200,
+    const EYE_STEP: nat = 4,
+    const EYE_HALF: nat = 64,
+    const WDQ_STEP: nat = 4,
+    const WDQ_HALF: nat = 64
+> {
+    // the edge clock (CK rate) and its PLL's lock
+    in eclk: clock
+    in pll_lock: bit
+    out dfi_clk: clock
+    // ---------------------------------------------------------------- DFI from the controller
+    in dfi_cs_p0: bit
+    in dfi_cs_p1: bit
+    in dfi_cs_p2: bit
+    in dfi_cs_p3: bit
+    in dfi_address_p0: bit[6]
+    in dfi_address_p1: bit[6]
+    in dfi_address_p2: bit[6]
+    in dfi_address_p3: bit[6]
+    in dfi_cke_p0: bit
+    in dfi_cke_p1: bit
+    in dfi_cke_p2: bit
+    in dfi_cke_p3: bit
+    in dfi_reset_n_p0: bit
+    in dfi_reset_n_p1: bit
+    in dfi_reset_n_p2: bit
+    in dfi_reset_n_p3: bit
+    in dfi_wrdata_en_p0: bit
+    in dfi_wrdata_en_p1: bit
+    in dfi_wrdata_en_p2: bit
+    in dfi_wrdata_en_p3: bit
+    in dfi_wrdata_p0: bit[32]
+    in dfi_wrdata_p1: bit[32]
+    in dfi_wrdata_p2: bit[32]
+    in dfi_wrdata_p3: bit[32]
+    in dfi_wrdata_mask_p0: bit[4]
+    in dfi_wrdata_mask_p1: bit[4]
+    in dfi_wrdata_mask_p2: bit[4]
+    in dfi_wrdata_mask_p3: bit[4]
+    in dfi_rddata_en_p0: bit
+    in dfi_rddata_en_p1: bit
+    in dfi_rddata_en_p2: bit
+    in dfi_rddata_en_p3: bit
+    in dfi_init_start: bit
+    in dfi_ctrlupd_req: bit
+    in dfi_phyupd_ack: bit
+    in dfi_rdlvl_gate_en: bit
+    in dfi_rdlvl_en: bit
+    in dfi_wrlvl_en: bit
+    in dfi_wrlvl_strobe: bit
+    in dfi_wdqlvl_en: bit
+    // ---------------------------------------------------------------- DFI to the controller
+    out dfi_rddata_w0: bit[32]
+    out dfi_rddata_w1: bit[32]
+    out dfi_rddata_w2: bit[32]
+    out dfi_rddata_w3: bit[32]
+    out dfi_rddata_valid_w0: bit
+    out dfi_rddata_valid_w1: bit
+    out dfi_rddata_valid_w2: bit
+    out dfi_rddata_valid_w3: bit
+    out dfi_init_complete: bit
+    out dfi_ctrlupd_ack: bit
+    out dfi_phyupd_req: bit
+    out dfi_rdlvl_gate_resp: bit[2]
+    out dfi_rdlvl_resp: bit[2]
+    out dfi_wrlvl_resp: bit[2]
+    out dfi_wdqlvl_resp: bit[2]
+    // ---------------------------------------------------------------- LPDDR4 pins (I/O logic side)
+    out ck_t: bit
+    out cke: bit
+    out cs: bit
+    out ca: bit[6]
+    out reset_n: bit
+    // per byte lane l: DQ[8l+7:8l], DQS[l], DMI[l]; *_t: 1 = not driven
+    out dq_o: bit[16]
+    out dq_t: bit[16]
+    in dq_i: bit[16]
+    out dqs_o: bit[2]
+    out dqs_t: bit[2]
+    in dqs_i: bit[2]
+    out dmi_o: bit[2]
+    out dmi_t: bit[2]
+    // ---------------------------------------------------------------- status
+    out dll_lock: bit
+    out gate_dly0: bit[8]
+    out gate_dly1: bit[8]
+    out rd_dly0: bit[8]
+    out rd_dly1: bit[8]
+    out wl_dly0: bit[8]
+    out wl_dly1: bit[8]
+    out wdq_dly0: bit[8]
+    out wdq_dly1: bit[8]
+    out gate_fail: bit[2]
+    out lvl_fail: bit[2]
+    out wrlvl_fail: bit[2]
+    out wdq_fail: bit[2]
+    // half bursts each lane has returned outside training
+    out bursts0: bit[16]
+    out bursts1: bit[16]
+    out ctrlupd_count: bit[16]
+}
+
+impl DfiLpddr4NexusPhy {
+    // ------------------------------------------------------------ clocks
+    inst es_ca = ECLKSYNC { ECLKIN: eclk, STOP: 0 }
+    inst es_dq = ECLKSYNC { ECLKIN: eclk, STOP: 0 }
+    signal eclk_ca: clock
+    signal eclk_dq: clock
+    eclk_ca = es_ca.ECLKOUT
+    eclk_dq = es_dq.ECLKOUT
+    inst ediv = ECLKDIV<4> { ECLKIN: eclk_dq, DIVRST: 0, SLIP: 0 }
+    signal sclk: clock
+    sclk = ediv.DIVOUT
+    signal dll_rst: bit = 1
+    inst dll = DDRDLL { CLKIN: eclk_dq, RST: dll_rst, FREEZE: 0, UDDCNTL_N: 0 }
+
+    // ------------------------------------------------------------ init
+    // 0 wait for init start and the PLL, 1 DLL reset, 2 wait for the DLL, 3 DQS buffer reset,
+    // 4 load the settings, 5 wait for the delays to move, 6 done
+    signal ist: bit[3] = 0
+    signal icnt: bit[16] = 0
+    signal dqs_rst: bit = 1
+    signal load: bit = 0
+    signal init_done_r: bit = 0
+    signal ctrlupd_ack_r: bit = 0
+    signal ctrlupd_n: bit[16] = 0
+
+    // ------------------------------------------------------------ DFI frames
+    // c: captured (newest), b: being sent to the I/O logic, a and a2: older
+    signal c_cs: bit[4] = 0
+    signal c_ca: bit[24] = 0
+    signal c_cke: bit[4] = 0
+    signal c_rst: bit[4] = 0
+    signal c_we: bit[4] = 0
+    signal c_wd: bit[128] = 0
+    signal c_re: bit[4] = 0
+    signal c_wls: bit = 0
+    signal b_cs: bit[4] = 0
+    signal b_ca: bit[24] = 0
+    signal b_cke: bit[4] = 0
+    signal b_rst: bit[4] = 0
+    signal b_we: bit[4] = 0
+    signal b_wd: bit[128] = 0
+    signal b_re: bit[4] = 0
+    signal b_wls: bit = 0
+    signal a_we: bit[4] = 0
+    signal a_wd: bit[128] = 0
+    signal a_re: bit[4] = 0
+    signal rst_n_r: bit = 0
+    // training enables, as of frame b
+    signal c_wl_en: bit = 0
+    signal c_gate_en: bit = 0
+    signal c_eye_en: bit = 0
+    signal c_wdq_en: bit = 0
+    signal b_wl_en: bit = 0
+    signal b_gate_en: bit = 0
+    signal b_eye_en: bit = 0
+    signal b_wdq_en: bit = 0
+    signal wdq_q: bit = 0
+    // write slots captured, mod 8 (a beat's place in its burst, for the write DQ pattern)
+    signal wcap: bit[3] = 0
+
+    let wde0: bit[3] = {2'b00, dfi_wrdata_en_p0}
+    let wde1: bit[3] = {2'b00, dfi_wrdata_en_p1}
+    let wde2: bit[3] = {2'b00, dfi_wrdata_en_p2}
+    let wi1: bit[3] = wcap + wde0
+    let wi2: bit[3] = wi1 + wde1
+    let wi3: bit[3] = wi2 + wde2
+    let wcap_next: bit[3] = wi3 + {2'b00, dfi_wrdata_en_p3}
+    let wdp0: bit[32] = nx_wdq_word(wcap)
+    let wdp1: bit[32] = nx_wdq_word(wi1)
+    let wdp2: bit[32] = nx_wdq_word(wi2)
+    let wdp3: bit[32] = nx_wdq_word(wi3)
+
+    // ------------------------------------------------------------ frame b at the pins
+    // slot k of the window {c, b, a}: k = 0..3 frame a, 4..7 frame b, 8..11 frame c
+    let we12: bit[12] = {c_we, b_we, a_we}
+    let wd12: bit[384] = {c_wd, b_wd, a_wd}
+    // a slot with wrdata_en is sent in the next slot: e(j) = we12[3 + j] for frame b's slot j
+
+    let e0: bit = we12[3]
+    let e1: bit = we12[4]
+    let e2: bit = we12[5]
+    let e3: bit = we12[6]
+    let em1: bit = we12[2]
+    let e4: bit = we12[7]
+    let e5: bit = we12[8]
+    // DQS: 2 slots of preamble, the data slots, 1 slot of postamble; DQ: the data slots and one
+    // more holding the last beat
+    let sdrv0: bit = if em1 == 1 || e0 == 1 || e1 == 1 || e2 == 1 { 1 } else { 0 }
+    let qdrv0: bit = if e0 == 1 || em1 == 1 { 1 } else { 0 }
+    let ws0: bit[32] = wd12[127:96]
+    let wp0: bit[32] = wd12[95:64]
+    let bt0_0: bit[16] = if e0 == 1 { ws0[15:0] } else { wp0[31:16] }
+    let bt1_0: bit[16] = if e0 == 1 { ws0[31:16] } else { wp0[31:16] }
+    let sdrv1: bit = if e0 == 1 || e1 == 1 || e2 == 1 || e3 == 1 { 1 } else { 0 }
+    let qdrv1: bit = if e1 == 1 || e0 == 1 { 1 } else { 0 }
+    let ws1: bit[32] = wd12[159:128]
+    let wp1: bit[32] = wd12[127:96]
+    let bt0_1: bit[16] = if e1 == 1 { ws1[15:0] } else { wp1[31:16] }
+    let bt1_1: bit[16] = if e1 == 1 { ws1[31:16] } else { wp1[31:16] }
+    let sdrv2: bit = if e1 == 1 || e2 == 1 || e3 == 1 || e4 == 1 { 1 } else { 0 }
+    let qdrv2: bit = if e2 == 1 || e1 == 1 { 1 } else { 0 }
+    let ws2: bit[32] = wd12[191:160]
+    let wp2: bit[32] = wd12[159:128]
+    let bt0_2: bit[16] = if e2 == 1 { ws2[15:0] } else { wp2[31:16] }
+    let bt1_2: bit[16] = if e2 == 1 { ws2[31:16] } else { wp2[31:16] }
+    let sdrv3: bit = if e2 == 1 || e3 == 1 || e4 == 1 || e5 == 1 { 1 } else { 0 }
+    let qdrv3: bit = if e3 == 1 || e2 == 1 { 1 } else { 0 }
+    let ws3: bit[32] = wd12[223:192]
+    let wp3: bit[32] = wd12[191:160]
+    let bt0_3: bit[16] = if e3 == 1 { ws3[15:0] } else { wp3[31:16] }
+    let bt1_3: bit[16] = if e3 == 1 { ws3[31:16] } else { wp3[31:16] }
+    let dqs_tt_w: bit[4] = {~sdrv3, ~sdrv2, ~sdrv1, ~sdrv0}
+    let dq_tt: bit[4] = {~qdrv3, ~qdrv2, ~qdrv1, ~qdrv0}
+    // DQS rises at the start of each data slot; a write leveling frame has a slot of preamble,
+    // two pulses and a slot of postamble
+    let dqs_d_w: bit[8] = {1'b0, e3, 1'b0, e2, 1'b0, e1, 1'b0, e0}
+    let dqs_d: bit[8] = if b_wls == 1 { 8'b00010100 } else { dqs_d_w }
+    let dqs_tt: bit[4] = if b_wls == 1 { 4'b0000 } else { dqs_tt_w }
+    let dq_d0: bit[64] = {bt1_3[7], bt0_3[7], bt1_2[7], bt0_2[7], bt1_1[7], bt0_1[7], bt1_0[7], bt0_0[7], bt1_3[6], bt0_3[6], bt1_2[6], bt0_2[6], bt1_1[6], bt0_1[6], bt1_0[6], bt0_0[6], bt1_3[5], bt0_3[5], bt1_2[5], bt0_2[5], bt1_1[5], bt0_1[5], bt1_0[5], bt0_0[5], bt1_3[4], bt0_3[4], bt1_2[4], bt0_2[4], bt1_1[4], bt0_1[4], bt1_0[4], bt0_0[4], bt1_3[3], bt0_3[3], bt1_2[3], bt0_2[3], bt1_1[3], bt0_1[3], bt1_0[3], bt0_0[3], bt1_3[2], bt0_3[2], bt1_2[2], bt0_2[2], bt1_1[2], bt0_1[2], bt1_0[2], bt0_0[2], bt1_3[1], bt0_3[1], bt1_2[1], bt0_2[1], bt1_1[1], bt0_1[1], bt1_0[1], bt0_0[1], bt1_3[0], bt0_3[0], bt1_2[0], bt0_2[0], bt1_1[0], bt0_1[0], bt1_0[0], bt0_0[0]}
+    let dq_d1: bit[64] = {bt1_3[15], bt0_3[15], bt1_2[15], bt0_2[15], bt1_1[15], bt0_1[15], bt1_0[15], bt0_0[15], bt1_3[14], bt0_3[14], bt1_2[14], bt0_2[14], bt1_1[14], bt0_1[14], bt1_0[14], bt0_0[14], bt1_3[13], bt0_3[13], bt1_2[13], bt0_2[13], bt1_1[13], bt0_1[13], bt1_0[13], bt0_0[13], bt1_3[12], bt0_3[12], bt1_2[12], bt0_2[12], bt1_1[12], bt0_1[12], bt1_0[12], bt0_0[12], bt1_3[11], bt0_3[11], bt1_2[11], bt0_2[11], bt1_1[11], bt0_1[11], bt1_0[11], bt0_0[11], bt1_3[10], bt0_3[10], bt1_2[10], bt0_2[10], bt1_1[10], bt0_1[10], bt1_0[10], bt0_0[10], bt1_3[9], bt0_3[9], bt1_2[9], bt0_2[9], bt1_1[9], bt0_1[9], bt1_0[9], bt0_0[9], bt1_3[8], bt0_3[8], bt1_2[8], bt0_2[8], bt1_1[8], bt0_1[8], bt1_0[8], bt0_0[8]}
+
+    // read gate window: rddata_en of frames a, b, c (the gate opens two SCLK cycles after
+    // READ, and the data comes back later than that, so the sweep starts from frame c)
+    let rd_win: bit[12] = {c_re, b_re, a_re}
+    let b_training: bit = if b_wl_en == 1 || b_gate_en == 1 || b_eye_en == 1 || b_wdq_en == 1 { 1 } else { 0 }
+    let rd_burst: bit = if b_re != 0 && a_re == 0 && (b_gate_en == 1 || b_eye_en == 1 || b_wdq_en == 1) { 1 } else { 0 }
+    let tr_start: bit = if (b_wl_en == 1 && b_wls == 1) || rd_burst == 1 { 1 } else { 0 }
+    let pat: bit[16] = RDC_PATTERN
+    let inv0: bit[8] = RDC_INV0
+    let inv1: bit[8] = RDC_INV1
+    let exp_rdc0: bit[128] = nx_rdc_lane(pat, inv0)
+    let exp_rdc1: bit[128] = nx_rdc_lane(pat, inv1)
+    let exp_wdq0: bit[128] = nx_wdq_lane(0)
+    let exp_wdq1: bit[128] = ~nx_wdq_lane(0)
+
+    // ------------------------------------------------------------ command pins
+    inst ck_od = ODDRX4 {
+        D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca0_od = ODDRX4 {
+        D0: b_ca[0], D1: b_ca[0], D2: b_ca[6], D3: b_ca[6], D4: b_ca[12], D5: b_ca[12], D6: b_ca[18], D7: b_ca[18],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca0_dl = DELAYB<CA_DELAY> { A: ca0_od.Q }
+    inst ca1_od = ODDRX4 {
+        D0: b_ca[1], D1: b_ca[1], D2: b_ca[7], D3: b_ca[7], D4: b_ca[13], D5: b_ca[13], D6: b_ca[19], D7: b_ca[19],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca1_dl = DELAYB<CA_DELAY> { A: ca1_od.Q }
+    inst ca2_od = ODDRX4 {
+        D0: b_ca[2], D1: b_ca[2], D2: b_ca[8], D3: b_ca[8], D4: b_ca[14], D5: b_ca[14], D6: b_ca[20], D7: b_ca[20],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca2_dl = DELAYB<CA_DELAY> { A: ca2_od.Q }
+    inst ca3_od = ODDRX4 {
+        D0: b_ca[3], D1: b_ca[3], D2: b_ca[9], D3: b_ca[9], D4: b_ca[15], D5: b_ca[15], D6: b_ca[21], D7: b_ca[21],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca3_dl = DELAYB<CA_DELAY> { A: ca3_od.Q }
+    inst ca4_od = ODDRX4 {
+        D0: b_ca[4], D1: b_ca[4], D2: b_ca[10], D3: b_ca[10], D4: b_ca[16], D5: b_ca[16], D6: b_ca[22], D7: b_ca[22],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca4_dl = DELAYB<CA_DELAY> { A: ca4_od.Q }
+    inst ca5_od = ODDRX4 {
+        D0: b_ca[5], D1: b_ca[5], D2: b_ca[11], D3: b_ca[11], D4: b_ca[17], D5: b_ca[17], D6: b_ca[23], D7: b_ca[23],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst ca5_dl = DELAYB<CA_DELAY> { A: ca5_od.Q }
+    inst cke_od = ODDRX4 {
+        D0: b_cke[0], D1: b_cke[0], D2: b_cke[1], D3: b_cke[1], D4: b_cke[2], D5: b_cke[2], D6: b_cke[3], D7: b_cke[3],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst cke_dl = DELAYB<CA_DELAY> { A: cke_od.Q }
+    inst cs_od = ODDRX4 {
+        D0: b_cs[0], D1: b_cs[0], D2: b_cs[1], D3: b_cs[1], D4: b_cs[2], D5: b_cs[2], D6: b_cs[3], D7: b_cs[3],
+        ECLK: eclk_ca, SCLK: sclk, RST: 0
+    }
+    inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
+
+    inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
+        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
+        dq_d: dq_d0, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        wl_frame: b_wls, tr_start: tr_start,
+        wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
+        exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
+        dq_i: dq_i[7:0], dqs_i: dqs_i[0]
+    }
+
+    inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
+        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
+        dq_d: dq_d1, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        wl_frame: b_wls, tr_start: tr_start,
+        wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
+        exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
+        dq_i: dq_i[15:8], dqs_i: dqs_i[1]
+    }
+
+    // ------------------------------------------------------------ read data out
+    signal q0: [bit[64]; 4]
+    signal q1: [bit[64]; 4]
+    signal qw0: bit[2] = 0
+    signal qw1: bit[2] = 0
+    signal qr: bit[2] = 0
+    signal qn0: bit[3] = 0
+    signal qn1: bit[3] = 0
+    signal rdw0: bit[32] = 0
+    signal rdw1: bit[32] = 0
+    signal rdw2: bit[32] = 0
+    signal rdw3: bit[32] = 0
+    signal rdv: bit = 0
+    let have: bit = if qn0 != 0 && qn1 != 0 { 1 } else { 0 }
+    let oa0: bit[64] = q0[qr]
+    let oa1: bit[64] = q1[qr]
+    let push0: bit = lane0.dv
+    let push1: bit = lane1.dv
+
+    on(sclk.rise) {
+        // ---------------------------------------------------------- init
+        if ist == 0 {
+            dll_rst = 1
+            dqs_rst = 1
+            if dfi_init_start == 1 && pll_lock == 1 {
+                ist = 1
+                icnt = 0
+            }
+        } else if ist == 1 {
+            icnt = icnt + 1
+            if icnt == 15 {
+                dll_rst = 0
+                ist = 2
+                icnt = 0
+            }
+        } else if ist == 2 {
+            if dll.LOCK == 1 {
+                ist = 3
+                icnt = 0
+            }
+        } else if ist == 3 {
+            icnt = icnt + 1
+            if icnt == 7 {
+                dqs_rst = 0
+                ist = 4
+                icnt = 0
+            }
+        } else if ist == 4 {
+            load = 1
+            icnt = icnt + 1
+            if icnt == 3 {
+                load = 0
+                ist = 5
+                icnt = 0
+            }
+        } else if ist == 5 {
+            icnt = icnt + 1
+            if icnt > 4 && lane0.busy == 0 && lane1.busy == 0 {
+                ist = 6
+                init_done_r = 1
+            }
+        }
+        if dfi_ctrlupd_req == 1 && ctrlupd_ack_r == 0 {
+            ctrlupd_n = ctrlupd_n + 1
+        }
+        ctrlupd_ack_r = dfi_ctrlupd_req
+
+        // ---------------------------------------------------------- frames
+        c_cs = {dfi_cs_p3, dfi_cs_p2, dfi_cs_p1, dfi_cs_p0}
+        c_ca = {dfi_address_p3, dfi_address_p2, dfi_address_p1, dfi_address_p0}
+        c_cke = {dfi_cke_p3, dfi_cke_p2, dfi_cke_p1, dfi_cke_p0}
+        c_rst = {dfi_reset_n_p3, dfi_reset_n_p2, dfi_reset_n_p1, dfi_reset_n_p0}
+        c_we = {dfi_wrdata_en_p3, dfi_wrdata_en_p2, dfi_wrdata_en_p1, dfi_wrdata_en_p0}
+        // write DQ training: the PHY's own data in place of the controller's
+        c_wd = if dfi_wdqlvl_en == 1 { {wdp3, wdp2, wdp1, wdp0} } else { {dfi_wrdata_p3, dfi_wrdata_p2, dfi_wrdata_p1, dfi_wrdata_p0} }
+        wcap = if dfi_wdqlvl_en == 1 && wdq_q == 0 { 3'b000 } else { wcap_next }
+        wdq_q = dfi_wdqlvl_en
+        c_re = {dfi_rddata_en_p3, dfi_rddata_en_p2, dfi_rddata_en_p1, dfi_rddata_en_p0}
+        c_wls = if dfi_wrlvl_en == 1 && dfi_wrlvl_strobe == 1 { 1 } else { 0 }
+        c_wl_en = dfi_wrlvl_en
+        c_gate_en = dfi_rdlvl_gate_en
+        c_eye_en = dfi_rdlvl_en
+        c_wdq_en = dfi_wdqlvl_en
+        b_cs = c_cs
+        b_ca = c_ca
+        b_cke = c_cke
+        b_rst = c_rst
+        b_we = c_we
+        b_wd = c_wd
+        b_re = c_re
+        b_wls = c_wls
+        b_wl_en = c_wl_en
+        b_gate_en = c_gate_en
+        b_eye_en = c_eye_en
+        b_wdq_en = c_wdq_en
+        a_we = b_we
+        a_wd = b_wd
+        a_re = b_re
+        rst_n_r = b_rst[0]
+
+        // ---------------------------------------------------------- read data
+        if push0 == 1 {
+            q0[qw0] = lane0.half
+            qw0 = qw0 + 1
+        }
+        if push1 == 1 {
+            q1[qw1] = lane1.half
+            qw1 = qw1 + 1
+        }
+        if have == 1 {
+            qr = qr + 1
+            rdw0 = {oa1[15:8], oa0[15:8], oa1[7:0], oa0[7:0]}
+            rdw1 = {oa1[31:24], oa0[31:24], oa1[23:16], oa0[23:16]}
+            rdw2 = {oa1[47:40], oa0[47:40], oa1[39:32], oa0[39:32]}
+            rdw3 = {oa1[63:56], oa0[63:56], oa1[55:48], oa0[55:48]}
+        }
+        rdv = have
+        qn0 = if push0 == 1 && have == 0 { qn0 + 1 } else { if push0 == 0 && have == 1 { qn0 - 1 } else { qn0 } }
+        qn1 = if push1 == 1 && have == 0 { qn1 + 1 } else { if push1 == 0 && have == 1 { qn1 - 1 } else { qn1 } }
+    }
+
+    dfi_clk = sclk
+    dfi_rddata_w0 = rdw0
+    dfi_rddata_w1 = rdw1
+    dfi_rddata_w2 = rdw2
+    dfi_rddata_w3 = rdw3
+    dfi_rddata_valid_w0 = rdv
+    dfi_rddata_valid_w1 = rdv
+    dfi_rddata_valid_w2 = rdv
+    dfi_rddata_valid_w3 = rdv
+    dfi_init_complete = init_done_r
+    dfi_ctrlupd_ack = ctrlupd_ack_r
+    dfi_phyupd_req = 0
+    dfi_rdlvl_gate_resp = {lane1.resp_gate, lane0.resp_gate}
+    dfi_rdlvl_resp = {lane1.resp_eye, lane0.resp_eye}
+    dfi_wrlvl_resp = {lane1.resp_wl, lane0.resp_wl}
+    dfi_wdqlvl_resp = {lane1.resp_wdq, lane0.resp_wdq}
+
+    ck_t = ck_od.Q
+    cke = cke_dl.Z
+    cs = cs_dl.Z
+    ca = {ca5_dl.Z, ca4_dl.Z, ca3_dl.Z, ca2_dl.Z, ca1_dl.Z, ca0_dl.Z}
+    reset_n = rst_n_r
+    dq_o = {lane1.dq_o, lane0.dq_o}
+    dq_t = {lane1.dq_t, lane0.dq_t}
+    dqs_o = {lane1.dqs_o, lane0.dqs_o}
+    dqs_t = {lane1.dqs_t, lane0.dqs_t}
+    dmi_o = {lane1.dmi_o, lane0.dmi_o}
+    dmi_t = {lane1.dmi_t, lane0.dmi_t}
+
+    dll_lock = dll.LOCK
+    gate_dly0 = lane0.gate_set
+    gate_dly1 = lane1.gate_set
+    rd_dly0 = lane0.rd_pos
+    rd_dly1 = lane1.rd_pos
+    wl_dly0 = lane0.wl_pos
+    wl_dly1 = lane1.wl_pos
+    wdq_dly0 = lane0.wr_pos
+    wdq_dly1 = lane1.wr_pos
+    gate_fail = {lane1.gate_fail, lane0.gate_fail}
+    lvl_fail = {lane1.eye_fail, lane0.eye_fail}
+    wrlvl_fail = {lane1.wl_fail, lane0.wl_fail}
+    wdq_fail = {lane1.wdq_fail, lane0.wdq_fail}
+    bursts0 = lane0.bursts
+    bursts1 = lane1.bursts
+    ctrlupd_count = ctrlupd_n
+}

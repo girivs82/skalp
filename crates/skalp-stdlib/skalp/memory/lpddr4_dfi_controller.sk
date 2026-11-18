@@ -928,8 +928,9 @@ impl Lpddr4DfiController {
                 }
             },
             19 => {
-                // a write and its read-back in turn until every lane is done
-                if rq_v == 0 && wdq_done == 0 && train_reads < tr_max {
+                // a write and its read-back in turn until every lane is done; each pair waits
+                // TRAIN_GAP_CYC after the last read-back, so the PHY can evaluate it and move
+                if rq_v == 0 && wdq_done == 0 && train_reads < tr_max && train_gap == 0 {
                     rq_v = 1
                     rq_w = tw_w
                     rq_row = tr_addr[25:9]

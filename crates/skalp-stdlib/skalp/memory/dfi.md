@@ -1,16 +1,21 @@
-# LPDDR4 over DFI: controller, behavioural PHY, channel model
+# LPDDR4 over DFI: controller, PHYs, channel model
 
-Three library entities in `skalp::memory` let an LPDDR4 controller be built and checked in
-simulation before any vendor PHY is involved:
+Library entities in `skalp::memory` for an LPDDR4 controller, a behavioural PHY to check it in
+simulation before any vendor PHY is involved, a PHY for Lattice Nexus devices, and a channel
+model:
 
 | Entity | File | Synthesisable | Role |
 |---|---|---|---|
 | `Lpddr4DfiController` (+ `Lpddr4BankState`) | `lpddr4_dfi_controller.sk` | yes | LPDDR4 controller, one x16 channel, DFI 1:4 |
 | `DfiLpddr4BehavPhy` | `dfi_lpddr4_behav_phy.sk` | no | DFI to LPDDR4 pins, write delays, read capture, training evaluation |
+| `DfiLpddr4NexusPhy` (+ `NexusLpddr4Lane`, `NexusLpddr4DqPin`) | `dfi_lpddr4_nexus_phy.sk` | yes (Nexus) | The same DFI on the Nexus DDR primitives: x4 gearing, DQS buffers, DLL, delays |
 | `Lpddr4ChannelModel` | `lpddr4_model.sk` | no | One LPDDR4 channel: storage, JEDEC timing and protocol checks, bus contention |
 
-`tests/fixtures/lpddr4_dfi_sim.sk` wires the three together with a traffic generator, and
-`tests/suite/test_lpddr4_dfi_sim.rs` runs it.
+`tests/fixtures/lpddr4_dfi_sim.sk` wires the controller, the behavioural PHY and the model
+together with a traffic generator, and `tests/suite/test_lpddr4_dfi_sim.rs` runs it.
+`tests/fixtures/lpddr4_dfi_nexus_sim.sk` does the same with the Nexus PHY at 1066 Mbps, built
+for a Nexus device so the primitives come from the family's simulation models
+(`tests/suite/test_lpddr4_dfi_nexus_sim.rs`).
 
 ## DFI subset
 
@@ -113,6 +118,35 @@ require none.
 - PHY updates: with `PHYUPD_EVERY` != 0 it requests a window every `PHYUPD_EVERY` cycles and holds
   it `PHYUPD_LEN` cycles once acknowledged. A DFI cycle carrying a command or data enable while
   the window is granted counts in `upd_violations`. `ctrlupd_count` and `phyupd_count` count completed updates.
+
+## Nexus PHY
+
+`DfiLpddr4NexusPhy` takes the edge clock (CK rate, from a PLL) and makes `dfi_clk` with an
+ECLKDIV /4, so at 1066 Mbps the fabric runs at 133 MHz. Its pins end at the I/O logic (`*_o`,
+`*_t` with 1 = not driven, `*_i` = the pad); the design's top level adds the pads. The header of
+the file describes the clocking, the pin timing and the training in full; in short:
+
+- Commands and data reach the pins with the timing contract above, so a controller keeps
+  `TPHY_WRLAT_ADJ = 3` and `TRDDATA_EN_ADJ = 3`.
+- Writes: DQS through ODDRX4DQS on DQSW (the write leveling delay), DQ and DMI through ODDRX4DQ on
+  DQSW270 (a quarter tCK early, moved by the write DQ delay); 2 tCK static preamble.
+- Reads: each lane's DQS buffer gates DQS with READ, which follows `rddata_en` delayed by the
+  lane's gate setting in eighths of a tCK (whole slots, then RDCLKSEL). DQ is sampled on DQSR90
+  into the IDDRX4DQ FIFO. Each DATAVALID word holds its enabled slots in place, so the lane packs
+  the words into half bursts from the READ masks it issued.
+- Delays move in 12.5 ps steps, one per two DFI cycles, with PAUSE held meanwhile. Init resets the
+  DLL, waits for lock, resets the DQS buffers, loads every setting and moves the read and write
+  DQ delays to the start of their sweeps before `dfi_init_complete`.
+- Training (PHY evaluation; each event is judged over `TRAIN_WIN` DFI cycles, so the controller
+  spaces events by `TRAIN_GAP_CYC` and `WL_GAP_CYC` >= 32 and allows `TRAIN_MAX_READS` >= 8 x
+  `GATE_SLOTS`):
+  - write leveling: the PHY reads the DRAM's feedback through its own read path (the gate opened
+    around its own DQS); the leveling delay climbs `WL_STEP` steps per strobe to the first 0 to 1;
+  - read gate: setting n for the n-th calibration read; a setting passes when the DQS buffer
+    reports BURSTDETECT. The run of passing settings ends at the first DQS rise; the gate goes to
+    the middle of the run but at most a tCK before that rise, inside the preamble;
+  - read eye and write DQ: the read or write DQ delay sweeps `EYE_HALF` / `WDQ_HALF` steps
+    either side of the middle; the lane takes the middle of the longest passing run.
 
 ## Channel model
 

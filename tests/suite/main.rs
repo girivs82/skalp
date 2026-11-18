@@ -102,6 +102,7 @@ mod test_lir_synthesis;
 mod test_logic_analyzer;
 mod test_logic_analyzer_insertion;
 mod test_logic_depth;
+mod test_lpddr4_dfi_nexus_sim;
 mod test_lpddr4_dfi_sim;
 mod test_match_default_arm;
 mod test_match_expressions;
