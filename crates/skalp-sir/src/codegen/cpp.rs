@@ -16,9 +16,15 @@ use crate::sir::SirModule;
 use super::shared::SharedCodegen;
 use super::types::BackendTarget;
 
+/// The most combinational nodes one function of the generated source holds
+/// (see `generate_combinational_function`)
+const COMBINATIONAL_PART_NODES: usize = 2000;
+
 /// C++ backend for compiled CPU simulation
 pub struct CppBackend<'a> {
     shared: SharedCodegen<'a>,
+    /// The most combinational nodes one function holds
+    part_nodes: usize,
 }
 
 impl<'a> CppBackend<'a> {
@@ -26,12 +32,22 @@ impl<'a> CppBackend<'a> {
     pub fn new(module: &'a SirModule) -> Self {
         Self {
             shared: SharedCodegen::new(module, BackendTarget::Cpp),
+            part_nodes: COMBINATIONAL_PART_NODES,
         }
     }
 
     /// Generate complete C++ source code
     pub fn generate(module: &SirModule) -> String {
+        Self::generate_in_parts(module, COMBINATIONAL_PART_NODES)
+    }
+
+    /// Generate complete C++ source code, with at most `part_nodes`
+    /// combinational nodes in one function (see
+    /// `generate_combinational_function`); `generate` uses a size that
+    /// keeps compile times linear
+    pub fn generate_in_parts(module: &SirModule, part_nodes: usize) -> String {
         let mut backend = CppBackend::new(module);
+        backend.part_nodes = part_nodes.max(1);
         backend.generate_source()
     }
 
@@ -48,6 +64,13 @@ impl<'a> CppBackend<'a> {
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
+
+// A function the compiler must keep out of line
+#if defined(_MSC_VER)
+#define SKALP_NOINLINE __declspec(noinline)
+#else
+#define SKALP_NOINLINE __attribute__((noinline))
+#endif
 
 // Type aliases to match Metal Shading Language
 using uint = uint32_t;
@@ -147,9 +170,47 @@ static inline uint32_t _fp32_to_fp16(float f) {
         output
     }
 
-    /// Generate the combinational evaluation function
+    /// Whether the combinational logic is split into parts (more nodes
+    /// than one part holds)
+    fn is_split(&self) -> bool {
+        self.shared.combinational_order().len() > self.part_nodes
+    }
+
+    /// Generate the combinational evaluation function.
+    ///
+    /// A large design's logic goes into parts of at most `part_nodes`
+    /// nodes, each a function of its own that the
+    /// compiler may not inline, called in order: optimizing compilers take
+    /// time that grows faster than linearly with the size of one function,
+    /// so one function of a few hundred thousand statements (a gate-level
+    /// netlist of a few thousand cells) takes an hour to compile at -O2,
+    /// while the same statements in parts compile in a time that grows
+    /// with their number. Every node reads and writes its values through
+    /// `signals`, so the parts share nothing else.
     fn generate_combinational_function(&mut self) -> String {
         let mut output = String::new();
+        let order = self.shared.combinational_order();
+        let parts: Vec<_> = order.chunks(self.part_nodes).collect();
+
+        if parts.len() > 1 {
+            for (index, part) in parts.iter().enumerate() {
+                output.push_str(&format!(
+                    "// Combinational logic, part {index}\n\
+                     static SKALP_NOINLINE void combinational_eval_part_{index}(\n\
+                     \x20   const Inputs* inputs,\n\
+                     \x20   const Registers* registers,\n\
+                     \x20   Signals* signals\n\
+                     ) {{\n"
+                ));
+                self.shared.indent();
+                for node in part.iter() {
+                    self.shared.generate_node(node);
+                }
+                self.shared.dedent();
+                output.push_str(&self.shared.take_output());
+                output.push_str("}\n\n");
+            }
+        }
 
         output.push_str(
             r#"// Combinational logic evaluation
@@ -161,10 +222,17 @@ extern "C" void combinational_eval(
 "#,
         );
 
-        // Generate combinational body using shared codegen
-        self.shared.indent();
-        self.shared.generate_combinational_body();
-        output.push_str(&self.shared.take_output());
+        if parts.len() > 1 {
+            for index in 0..parts.len() {
+                output.push_str(&format!(
+                    "    combinational_eval_part_{index}(inputs, registers, signals);\n"
+                ));
+            }
+        } else {
+            self.shared.indent();
+            self.shared.generate_combinational_body();
+            output.push_str(&self.shared.take_output());
+        }
 
         output.push_str("}\n\n");
         output
@@ -270,6 +338,10 @@ extern "C" void sequential_update_clock(
     fn generate_batched_function(&mut self) -> String {
         let mut output = String::new();
 
+        if self.is_split() {
+            return self.generate_split_batched_function();
+        }
+
         output.push_str(
             r#"// Batched simulation for multiple cycles
 extern "C" void batched_simulation(
@@ -315,6 +387,49 @@ extern "C" void batched_simulation(
         output.push_str(&self.shared.take_output());
 
         output.push_str("}\n\n");
+        output
+    }
+
+    /// The batched simulation of a design whose combinational logic is in
+    /// parts: each cycle calls `combinational_eval`, then updates every
+    /// flip-flop in place, rather than repeating the logic inline as the
+    /// batched function of a small design does (twice: in the loop and in
+    /// the final pass), which would put it all back into one function.
+    fn generate_split_batched_function(&mut self) -> String {
+        let mut output = String::from(
+            r#"// Every flip-flop takes its D input (after combinational_eval)
+static SKALP_NOINLINE void sequential_update_in_place(
+    const Inputs* inputs,
+    Registers* registers,
+    const Signals* signals
+) {
+"#,
+        );
+        self.shared.indent();
+        self.shared
+            .generate_flipflop_updates("registers", "registers");
+        self.shared.dedent();
+        output.push_str(&self.shared.take_output());
+        output.push_str(
+            r#"}
+
+// Batched simulation for multiple cycles
+extern "C" void batched_simulation(
+    Inputs* inputs,
+    Registers* registers,
+    Signals* signals,
+    uint32_t num_cycles
+) {
+    for (uint32_t cycle = 0; cycle < num_cycles; cycle++) {
+        combinational_eval(inputs, registers, signals);
+        sequential_update_in_place(inputs, registers, signals);
+    }
+    // Final combinational pass (FWFT: outputs reflect latest register state)
+    combinational_eval(inputs, registers, signals);
+}
+
+"#,
+        );
         output
     }
 

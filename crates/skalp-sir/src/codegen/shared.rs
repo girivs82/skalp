@@ -4212,18 +4212,25 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
-    /// Generate combinational evaluation body
-    pub fn generate_combinational_body(&mut self) {
-        // Use pre-computed topological order; each id names its first node
+    /// The combinational nodes in evaluation order (the pre-computed
+    /// topological order; each id names its first node)
+    pub fn combinational_order(&self) -> Vec<&'a SirNode> {
         let module = self.module;
-        let mut node_by_id: HashMap<usize, &SirNode> = HashMap::new();
+        let mut node_by_id: HashMap<usize, &'a SirNode> = HashMap::new();
         for node in &module.combinational_nodes {
             node_by_id.entry(node.id).or_insert(node);
         }
-        for node_id in &module.sorted_combinational_node_ids {
-            if let Some(node) = node_by_id.get(node_id) {
-                self.generate_node(node);
-            }
+        module
+            .sorted_combinational_node_ids
+            .iter()
+            .filter_map(|id| node_by_id.get(id).copied())
+            .collect()
+    }
+
+    /// Generate combinational evaluation body
+    pub fn generate_combinational_body(&mut self) {
+        for node in self.combinational_order() {
+            self.generate_node(node);
         }
     }
 
@@ -4368,6 +4375,13 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
+        self.generate_flipflop_updates(current_reg, next_reg);
+    }
+
+    /// Generate every flip-flop's update, ordered by output name, without
+    /// first copying the current registers into the next ones (the second
+    /// half of `generate_sequential_body`)
+    pub fn generate_flipflop_updates(&mut self, current_reg: &str, next_reg: &str) {
         // Sort sequential nodes by output name
         let mut sorted_seq_nodes: Vec<_> = self.module.sequential_nodes.iter().collect();
         sorted_seq_nodes.sort_by(|a, b| {

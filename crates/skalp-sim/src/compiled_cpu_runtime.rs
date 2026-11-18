@@ -247,9 +247,21 @@ unsafe impl Sync for CompiledCpuRuntime {}
 impl CompiledCpuRuntime {
     /// Create a new compiled CPU runtime for the given SIR module
     pub fn new(module: &SirModule) -> Result<Self, CompileError> {
-        // Generate C++ source code
-        let source = CppBackend::generate(module);
+        Self::from_source(module, CppBackend::generate(module))
+    }
 
+    /// A compiled CPU runtime whose kernel has at most `part_nodes`
+    /// combinational nodes in one function (`CppBackend::generate_in_parts`)
+    pub fn with_combinational_part_nodes(
+        module: &SirModule,
+        part_nodes: usize,
+    ) -> Result<Self, CompileError> {
+        Self::from_source(module, CppBackend::generate_in_parts(module, part_nodes))
+    }
+
+    /// The runtime of `source`, the C++ kernel `CppBackend` generated for
+    /// `module`
+    fn from_source(module: &SirModule, source: String) -> Result<Self, CompileError> {
         // Debug: dump C++ if env var set
         if std::env::var("SKALP_DUMP_CPP").is_ok() {
             let dump_path = std::env::var("SKALP_DUMP_CPP")
