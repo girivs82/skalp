@@ -51,8 +51,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # the selective run diffs against the base branch's merge base
-          fetch-depth: ${{ inputs.selective && 0 || 1 }}
+          # the selective run diffs against the base branch's merge base, so it
+          # needs full history (a quoted '0': a bare 0 is falsy in `&&`/`||`)
+          fetch-depth: ${{ inputs.selective && '0' || '1' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

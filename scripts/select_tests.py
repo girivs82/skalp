@@ -61,7 +61,13 @@ def git(*args):
 
 
 def changed_files(base):
-    merge_base = git("merge-base", base, "HEAD").strip()
+    """The changed paths, or None when there is no merge base to compare with
+    (a shallow clone, an unknown base): the caller then runs everything"""
+    try:
+        merge_base = git("merge-base", base, "HEAD").strip()
+    except subprocess.CalledProcessError as e:
+        print(f"no merge base with {base}: {e.stderr.strip()}", file=sys.stderr)
+        return None
     files = set(git("diff", "--name-only", merge_base).split())
     # untracked files count too (a new test or fixture not yet committed)
     files |= set(git("ls-files", "--others", "--exclude-standard").split())
@@ -147,6 +153,8 @@ def owning_crate(crates, path):
 def select(base, given=None):
     crates = workspace()
     files = given if given is not None else changed_files(base)
+    if files is None:
+        return None, f"no merge base with {base}", []
     modules = suite_modules()
     uses = {m: module_uses(crates, m) for m in modules}
 
@@ -196,7 +204,7 @@ def select(base, given=None):
         # build files, CI, scripts, lockfile, anything else: everything
         full_reason = f
     if full_reason:
-        return None, full_reason, files
+        return None, f"{full_reason} changed", files
 
     real = {c for c in changed_crates if c in crates}
     # crates whose tests are affected: those depending on a changed crate
@@ -242,7 +250,7 @@ def main():
 
     selection, full_reason, files = select(args.base, args.files)
     if selection is None:
-        print(f"full ({full_reason} changed)", file=sys.stderr)
+        print(f"full ({full_reason})", file=sys.stderr)
         cmds = [FULL_CMD, FULL_DOC_CMD]
     else:
         if args.print_modules:
