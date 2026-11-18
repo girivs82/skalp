@@ -266,3 +266,46 @@ fn let_that_cannot_be_built_is_an_error() {
         "error names the let: {err}"
     );
 }
+
+/// An index that is a concatenation, a parenthesised expression or a call
+/// keeps its assignment (each was dropped), on a let, a signal and a memory
+#[tokio::test]
+async fn index_of_any_expression_form() {
+    let path = format!(
+        "{}/tests/fixtures/hier_regressions/index_forms.sk",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut tb = Testbench::behavioral_with_top(&path, "IndexForms")
+        .await
+        .expect("build");
+    let tbl = 0b0110u32;
+    let sig = 0b1001u32;
+    for k in 0..4u32 {
+        let (a, b) = ((k >> 1) & 1, k & 1);
+        tb.set("a", a as u8).set("b", b as u8).set("s", k as u8);
+        tb.set("d", (k * 3 + 1) as u8);
+        tb.clock(1).await;
+        assert_eq!(
+            tb.get_u32("o_concat").await,
+            (tbl >> k) & 1,
+            "tbl[{{a, b}}], k={k}"
+        );
+        assert_eq!(
+            tb.get_u32("o_paren").await,
+            (tbl >> k) & 1,
+            "tbl[(s)], k={k}"
+        );
+        assert_eq!(
+            tb.get_u32("o_call").await,
+            (tbl >> k) & 1,
+            "tbl[idx(a, b)], k={k}"
+        );
+        let ba = (b << 1) | a;
+        assert_eq!(
+            tb.get_u32("o_signal").await,
+            (sig >> ba) & 1,
+            "sig[{{b, a}}], k={k}"
+        );
+        assert_eq!(tb.get_u32("o_mem").await, k * 3 + 1, "mem[{{a, b}}], k={k}");
+    }
+}

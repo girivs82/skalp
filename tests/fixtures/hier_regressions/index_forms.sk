@@ -1,0 +1,34 @@
+// Index expressions that are not a name, a literal or arithmetic: a
+// concatenation, a parenthesised index, a call. An assignment holding one
+// used to be dropped.
+fn idx(a: bit, b: bit) -> bit[2] {
+    return {a, b}
+}
+
+entity IndexForms {
+    in clk: clock
+    in a: bit
+    in b: bit
+    in s: bit[2]
+    in d: bit[4]
+    out o_concat: bit
+    out o_paren: bit
+    out o_call: bit
+    out o_signal: bit
+    out o_mem: bit[4]
+}
+
+impl IndexForms {
+    let tbl: bit[4] = 4'b0110
+    signal sig: bit[4]
+    sig = 4'b1001
+    signal mem: [bit[4]; 4]
+    on(clk.rise) {
+        mem[{a, b}] = d
+    }
+    o_concat = tbl[{a, b}]
+    o_paren = tbl[(s)]
+    o_call = tbl[idx(a, b)]
+    o_signal = sig[{b, a}]
+    o_mem = mem[{a, b}]
+}

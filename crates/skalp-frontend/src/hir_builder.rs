@@ -10360,16 +10360,23 @@ impl HirBuilderContext {
             })
             .collect();
 
-        if indices.is_empty() {
-            return None;
-        }
-
         // Check if it's a range access [start:end] by looking for colon token
         let has_colon = index_node.children_with_tokens().any(|element| {
             element
                 .as_token()
                 .is_some_and(|t| t.kind() == SyntaxKind::Colon)
         });
+
+        // A single index of any other form (`t[{a, b}]`, `t[(i)]`, `t[f(x)]`):
+        // the assignment holding it used to be dropped without a word
+        if indices.is_empty() {
+            if has_colon {
+                return None;
+            }
+            let raw_children: Vec<SyntaxNode> = index_node.children().collect();
+            let index_expr = self.build_index_operand(&raw_children)?;
+            return Some(HirExpression::Index(base, Box::new(index_expr)));
+        }
 
         if has_colon && indices.len() >= 2 {
             // Range access: base[start:end]
@@ -10427,7 +10434,7 @@ impl HirBuilderContext {
             // build_index_operand reassembles that shape. The `indices` filter above
             // drops IndexExpr children, so check the raw children here.
             let raw_children: Vec<SyntaxNode> = index_node.children().collect();
-            if Self::is_postfix_sibling_chain(&raw_children) {
+            if Self::is_postfix_sibling_chain(&raw_children) || Self::is_call_chain(&raw_children) {
                 let index_expr = self.build_index_operand(&raw_children)?;
                 return Some(HirExpression::Index(base, Box::new(index_expr)));
             }
@@ -11126,6 +11133,23 @@ impl HirBuilderContext {
     /// postfix operations, e.g. `[IdentExpr(s), FieldExpr(.a), IndexExpr(3:0)]`
     /// for `s.a[3:0]`. A bare `[IdentExpr(f), CallExpr(..)]` call is excluded:
     /// it is already handled wherever a CallExpr is built.
+    /// A call and the postfix operations on its result, split into siblings:
+    /// `f(a)` is [IdentExpr(f), CallExpr((a))], `f(a)[0]` adds an IndexExpr
+    fn is_call_chain(nodes: &[SyntaxNode]) -> bool {
+        nodes.len() >= 2
+            && matches!(
+                nodes[0].kind(),
+                SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+            )
+            && nodes[1].kind() == SyntaxKind::CallExpr
+            && nodes[2..].iter().all(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::FieldExpr | SyntaxKind::IndexExpr | SyntaxKind::CallExpr
+                )
+            })
+    }
+
     fn is_postfix_sibling_chain(nodes: &[SyntaxNode]) -> bool {
         nodes.len() >= 2
             && matches!(
@@ -11164,6 +11188,10 @@ impl HirBuilderContext {
         // chain. Only the two-node form used to be recognised, so
         // `mem[s.a[3:0]]` indexed `mem` with the instance `s` itself and
         // failed to lower.
+        // a call (`t[f(a, b)]` is [IdentExpr(f), CallExpr((a, b))])
+        if Self::is_call_chain(children) {
+            return self.build_chained_rhs_expression(children);
+        }
         if Self::is_postfix_sibling_chain(children) {
             if children.len() == 2 && children[1].kind() == SyntaxKind::IndexExpr {
                 let inner_base = self.build_expression(&children[0])?;
@@ -12657,6 +12685,7 @@ impl HirBuilderContext {
             tie_high,
             unconnected,
             sim_clocks,
+            generics: Vec::new(),
             port_map,
             clocks,
             async_groups,
