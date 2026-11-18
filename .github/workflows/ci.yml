@@ -14,6 +14,10 @@ jobs:
   test:
     name: Linux stable
     uses: ./.github/workflows/test-suite.yml
+    with:
+      # pull requests run only the tests their changes can affect; the
+      # `full-tests` label, and every push to master, run them all
+      selective: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-tests') }}
 
   # Beta and macOS are only linted on every change; their full test runs
   # happen before a release (see full-test-matrix.yml).
