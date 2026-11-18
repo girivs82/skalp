@@ -790,6 +790,9 @@ pub struct TimedSim<'a> {
     changes: Vec<(i64, GateNetId, Logic)>,
     /// Value of each watched net just before its first recorded change
     recorded_before: HashMap<u32, Logic>,
+    /// Changes of each net from `activity_from_ps` on (switching activity)
+    toggles: Vec<u64>,
+    activity_from_ps: i64,
 
     // Combinational nodes
     nodes: Vec<Node>,
@@ -1416,6 +1419,8 @@ impl<'a> TimedSim<'a> {
             record_from_ps: i64::MIN,
             changes: Vec::new(),
             recorded_before: HashMap::new(),
+            toggles: vec![0; n_nets],
+            activity_from_ps: 0,
             dirty_nodes: Vec::new(),
             node_loop,
             loops,
@@ -1636,6 +1641,20 @@ impl<'a> TimedSim<'a> {
     pub fn watch(&mut self, net: GateNetId) {
         let net = self.netlist.resolve_alias(net);
         self.watched[net.0 as usize] = true;
+    }
+
+    /// Count each net's changes (its switching activity, [`Self::toggles`])
+    /// from `time_ps` on, forgetting those counted so far
+    pub fn count_toggles_from(&mut self, time_ps: i64) {
+        self.activity_from_ps = time_ps;
+        self.toggles.iter_mut().for_each(|t| *t = 0);
+    }
+
+    /// How many times each net has changed value (by net index; aliases
+    /// count on the net they alias), from the time
+    /// [`Self::count_toggles_from`] set (power-up by default)
+    pub fn toggles(&self) -> &[u64] {
+        &self.toggles
     }
 
     /// Changes of the watched nets so far: time, net, new value
@@ -2438,6 +2457,9 @@ impl<'a> TimedSim<'a> {
                 continue;
             }
             let before = std::mem::replace(&mut self.net_val[net], value);
+            if now >= self.activity_from_ps {
+                self.toggles[net] += 1;
+            }
             if self.watched[net] {
                 self.watched_changed = true;
                 if now >= self.record_from_ps {
@@ -3282,6 +3304,34 @@ mod tests {
             };
             assert_eq!(changes_of(&sim, y), expected, "width {width}");
         }
+    }
+
+    /// Each net's changes are counted from the time asked for
+    #[test]
+    fn toggles_count_each_nets_changes_from_a_time() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let clk = nl.add_clock("clk".into());
+        let a = nl.add_input("a".into());
+        let y = nl.add_output("y".into());
+        gate(&mut nl, "buf", CellFunction::Buf, vec![a], y);
+        let mut sim = TimedSim::new(&nl, &TestDelays::default()).unwrap();
+        sim.set(a, Logic::Zero);
+        sim.add_clock(clk, 1_000);
+        // Changes before 5.25 ns are not counted
+        sim.set(a, Logic::One);
+        sim.run_until(5_000).unwrap();
+        sim.count_toggles_from(5_250);
+        sim.run_until(5_300).unwrap();
+        for k in 0..3 {
+            sim.set(a, if k % 2 == 1 { Logic::One } else { Logic::Zero });
+            sim.run_until(6_300 + k * 1_000).unwrap();
+        }
+        sim.run_until(10_250).unwrap();
+        let toggles = sim.toggles();
+        assert_eq!(toggles[a.0 as usize], 3);
+        assert_eq!(toggles[y.0 as usize], 3);
+        // Edges every 0.5 ns, 5.5 to 10 ns
+        assert_eq!(toggles[clk.0 as usize], 10);
     }
 
     /// A watched bus reports one value per moment its bits settle, starting

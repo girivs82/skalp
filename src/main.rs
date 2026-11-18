@@ -5530,6 +5530,9 @@ fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrRes
     let delays_path = output_dir.join(ROUTED_DELAYS_FILE);
     let file = std::io::BufWriter::new(fs::File::create(&delays_path)?);
     serde_json::to_writer(file, &routed.delays)?;
+    let loads_path = output_dir.join(ROUTED_LOADS_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&loads_path)?);
+    serde_json::to_writer(file, &routed.loads)?;
     println!(
         "Routed netlist and delays: {:?}, {:?}",
         netlist_path, delays_path
@@ -8914,6 +8917,9 @@ fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
 const ROUTED_NETLIST_FILE: &str = "design_routed.json";
 /// Its delays at each corner
 const ROUTED_DELAYS_FILE: &str = "design_delays.json";
+/// The routing load of each net (`skalp_lir::switching_energy::NetLoads`),
+/// for `skalp sim --energy`
+const ROUTED_LOADS_FILE: &str = "design_loads.json";
 
 /// What a simulation drives and reports, the same for every simulator
 /// (`sim` of a source file, cycle by cycle, and timed simulation of a
@@ -8978,6 +8984,15 @@ struct TimedOptions {
     /// (20 if not given)
     #[arg(long, value_name = "N")]
     violations: Option<usize>,
+    /// Estimate switching energy and average power from each net's
+    /// toggles and its routed load (an estimate, for comparing designs on
+    /// a family; see `skalp_lir::switching_energy`)
+    #[arg(long)]
+    energy: bool,
+    /// Count toggles for --energy from this time on (default: from the
+    /// start), to leave out power-up
+    #[arg(long, value_name = "TIME", requires = "energy")]
+    energy_from: Option<String>,
 }
 
 impl TimedOptions {
@@ -8986,6 +9001,50 @@ impl TimedOptions {
             || self.power_up.is_some()
             || self.metastability.is_some()
             || self.violations.is_some()
+            || self.energy
+    }
+}
+
+/// Print the switching energy of a timed simulation since `from_ps`
+fn report_energy(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    loads: &skalp_lir::switching_energy::NetLoads,
+    sim: &skalp_lir::timed_sim::TimedSim,
+    from_ps: i64,
+) {
+    use skalp_lir::switching_energy::{switching_energy, EnergyModel};
+    let model = EnergyModel::default();
+    let report = switching_energy(netlist, loads, sim.toggles(), &model, 3);
+    let span_ps = (sim.now() - from_ps).max(1);
+    let total = report.total.total_fj();
+    // fJ over ps is mW
+    let mw = |fj: f64| fj / span_ps as f64;
+    println!(
+        "Switching energy (estimate, {:.1} V, loads at the {} corner) over {:.3} us: {:.4} uJ, {:.4} mW average",
+        model.vdd,
+        loads.corner,
+        span_ps as f64 / 1e6,
+        total / 1e9,
+        mw(total)
+    );
+    let t = &report.total;
+    println!(
+        "  routing {:.4} mW, pins {:.4} mW, cells {:.4} mW, clocks {:.4} mW; {} toggles ({} on clocks)",
+        mw(t.routing_fj),
+        mw(t.pins_fj),
+        mw(t.cells_fj),
+        mw(t.clock_fj),
+        report.toggles,
+        report.clock_toggles
+    );
+    println!("  By block:");
+    for (block, parts) in report.by_block.iter().take(12) {
+        println!(
+            "    {:>9.4} mW  {} (clocks {:.4})",
+            mw(parts.total_fj()),
+            block,
+            mw(parts.clock_fj)
+        );
     }
 }
 
@@ -9150,6 +9209,17 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     };
     let mut sim = TimedSim::with_power_up(&netlist, delays, power_up)?;
     sim.set_metastability(metastability);
+    let loads: Option<skalp_lir::switching_energy::NetLoads> = if args.timed.energy {
+        let path = args.dir.join(ROUTED_LOADS_FILE);
+        Some(serde_json::from_reader(read(&path)?).context("reading the routed net loads")?)
+    } else {
+        None
+    };
+    let energy_from_ps = match args.timed.energy_from.as_deref() {
+        Some(text) => parse_time_ps(text)?,
+        None => 0,
+    };
+    sim.count_toggles_from(energy_from_ps);
     println!(
         "Design: {} ({} cells, {} nets), {} corner, power-up {:?}, metastability {:?}, loaded in {:.1} s",
         netlist.name,
@@ -9433,6 +9503,10 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
             netlist.nets[output.0 as usize].name,
             sim.value(output)
         );
+    }
+
+    if let Some(loads) = &loads {
+        report_energy(&netlist, loads, &sim, energy_from_ps);
     }
 
     // Violations
