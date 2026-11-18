@@ -504,7 +504,40 @@ async fn test_tiled_multiplies_gate_level() {
 /// mask shifted by the constant leaves its low bits constant 0
 #[test]
 fn constant_arithmetic_folds_instead_of_using_the_carry_chain() {
-    let net = synthesize("fpga_carry_constant_fold.sk", "nexus");
+    check_constant_arithmetic_folds("fpga_carry_constant_fold.sk");
+}
+
+/// The same with the arithmetic in adder instances: the parent's constant
+/// operands reach the first adder, whose constant sum comes back to the
+/// parent and on to the second, and a `carry_in: 0` adds nothing
+#[test]
+fn constants_cross_instance_boundaries() {
+    check_constant_arithmetic_folds("fpga_carry_constant_fold_hier.sk");
+}
+
+/// With the constants propagated, the hierarchy still computes the same:
+/// `off` = 6 + 3, so `mask` = 0xFF << 9 when enabled and `sum` = x + 9
+#[tokio::test]
+async fn constants_across_instances_keep_the_function() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("fpga_carry_constant_fold_hier.sk"),
+        "CarryConstantFoldHierTop",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    for (en, x) in [(1u64, 0u64), (0, 5), (1, 0xFFF0), (1, 0x1234), (0, 0xFFFF)] {
+        tb.set("en", en);
+        tb.set("x", x);
+        tb.step().await;
+        let mask = if en == 1 { (0xFFu64 << 9) & 0xFFFF } else { 0 };
+        assert_eq!(tb.get_u64("mask").await, mask, "mask with en = {en}");
+        assert_eq!(tb.get_u64("sum").await, (x + 9) & 0xFFFF, "{x:#x} + 9");
+    }
+}
+
+fn check_constant_arithmetic_folds(fixture: &str) {
+    let net = synthesize(fixture, "nexus");
     // Only `x + off` is on the carry chain: a carry-in half and 16 sum halves
     assert_eq!(ccu2_count(&net), 9, "only the add of the input remains");
     // Driven by a tie cell, possibly through buffers

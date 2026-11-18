@@ -89,7 +89,13 @@ impl<'a> LirToSynthAig<'a> {
     }
 
     /// Build the AIG from LIR
-    pub fn build(mut self) -> LirToAigResult {
+    pub fn build(self) -> LirToAigResult {
+        self.build_with_signal_lits().0
+    }
+
+    /// [`Self::build`], also returning the AIG literal of each built
+    /// `(signal, bit)`
+    fn build_with_signal_lits(mut self) -> (LirToAigResult, BTreeMap<(u32, u32), AigLit>) {
         // Phase 1: Find register and physical nodes
         let mut register_indices: Vec<usize> = Vec::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
@@ -294,7 +300,10 @@ impl<'a> LirToSynthAig<'a> {
             if self.is_fixed_physical(node) {
                 continue; // Handled by physical partition
             }
-            if self.is_carry_chain_op(&node.op) && !self.operands_constant(node) {
+            if self.is_carry_chain_op(&node.op)
+                && !self.operands_constant(node)
+                && !self.adds_only_zero(node)
+            {
                 // On the carry chain: AIG logic reads its output as an input
                 self.physical_nodes.push(idx);
                 if self.carry_consumed.contains(&node.output.0) {
@@ -497,11 +506,12 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
-        LirToAigResult {
+        let result = LirToAigResult {
             aig: self.aig,
             physical_node_indices: self.physical_nodes.clone(),
             internal_exports,
-        }
+        };
+        (result, self.signal_map)
     }
 
     /// Whether `op` is arithmetic mapped onto the target's carry chain.
@@ -542,6 +552,35 @@ impl<'a> LirToSynthAig<'a> {
                     .is_some_and(|lit| lit.is_const())
             })
         })
+    }
+
+    /// Whether an add or subtract leaves its one non-constant operand as it
+    /// is: every other operand is constant 0 (`x + 0`, `x - 0`, the carry-in
+    /// of an adder instance given `carry_in: 0`). Built in the AIG it is a
+    /// copy of that operand, with no carry chain.
+    fn adds_only_zero(&self, node: &LirNode) -> bool {
+        let zero = |input: &LirSignalId| {
+            let width = self
+                .lir
+                .signals
+                .get(input.0 as usize)
+                .map_or(0, |s| s.width);
+            (0..width).all(|bit| {
+                self.signal_map
+                    .get(&(input.0, bit))
+                    .is_some_and(|lit| lit.const_value() == Some(false))
+            })
+        };
+        match node.op {
+            LirOp::Add { const_b, .. } => {
+                node.inputs.len() >= 2
+                    && const_b.unwrap_or(0) == 0
+                    && node.inputs.iter().filter(|i| !zero(i)).count() <= 1
+            }
+            // `a - 0`; `0 - b` negates
+            LirOp::Sub { .. } => node.inputs.iter().skip(1).all(zero),
+            _ => false,
+        }
     }
 
     /// Whether a LIR node cannot be represented in the AIG whatever its
@@ -1471,4 +1510,36 @@ impl<'a> LirToSynthAig<'a> {
 enum ShiftDir {
     Left,
     Right,
+}
+
+/// The value of each of `signals` that is the same whatever the module's
+/// inputs and registers hold: its bits fold to constants when the logic is
+/// built (a signal read before any assignment, or wider than 64 bits, is
+/// `None`). Arithmetic is built in the AIG here, not left to a carry chain,
+/// so it folds too.
+pub fn constant_signal_values(lir: &Lir, signals: &[LirSignalId]) -> Vec<Option<u64>> {
+    // A signal nothing drives reads as 0 while the logic is built; here its
+    // value is unknown, so it becomes an input
+    let mut lir = lir.clone();
+    let driven: HashSet<u32> = lir.nodes.iter().map(|n| n.output.0).collect();
+    let inputs: HashSet<u32> = lir.inputs.iter().map(|s| s.0).collect();
+    let undriven: Vec<LirSignalId> = (0..lir.signals.len() as u32)
+        .filter(|id| !driven.contains(id) && !inputs.contains(id))
+        .map(LirSignalId)
+        .collect();
+    lir.inputs.extend(undriven);
+    let (_, lits) = LirToSynthAig::new(&lir).build_with_signal_lits();
+    signals
+        .iter()
+        .map(|&sig| {
+            let width = lir.signals.get(sig.0 as usize)?.width;
+            if width == 0 || width > 64 {
+                return None;
+            }
+            (0..width).try_fold(0u64, |value, bit| {
+                let bit_value = lits.get(&(sig.0, bit))?.const_value()?;
+                Some(value | (u64::from(bit_value) << bit))
+            })
+        })
+        .collect()
 }

@@ -1,0 +1,53 @@
+// Constants that cross instance boundaries: the parent computes both operands
+// of an adder instance from generics, and the adder's constant sum comes back
+// to the parent, which shifts a mask by it and gives it to a second adder.
+// Only the second adder's add of the input needs a carry chain.
+entity Add16 {
+    in a: bit[16]
+    in b: bit[16]
+    in cin: bit
+    out s: bit[16]
+}
+
+impl Add16 {
+    signal ext: bit[17]
+    ext = {1'b0, a} + {1'b0, b} + cin
+    s = ext[15:0]
+}
+
+entity CarryConstantFoldHier<const MODE: nat = 1, const ADJ: nat = 3> {
+    in en: bit
+    in x: bit[16]
+    out mask: bit[16]
+    out sum: bit[16]
+}
+
+impl CarryConstantFoldHier {
+    let mode: bit[8] = MODE
+    let lat: bit[16] = match mode[1:0] {
+        0 => 4,
+        1 => 6,
+        2 => 8,
+        _ => 10
+    }
+    let adj: bit[16] = ADJ
+    inst k = Add16 { a: lat, b: adj, cin: 0 }
+    let off: bit[16] = k.s
+    let m: bit[16] = 16'h00FF << off[3:0]
+    mask = if en == 1 { m } else { 16'h0000 }
+    inst u = Add16 { a: x, b: off, cin: 0 }
+    sum = u.s
+}
+
+entity CarryConstantFoldHierTop {
+    in en: bit
+    in x: bit[16]
+    out mask: bit[16]
+    out sum: bit[16]
+}
+
+impl CarryConstantFoldHierTop {
+    inst t = CarryConstantFoldHier<1, 3> { en: en, x: x }
+    mask = t.mask
+    sum = t.sum
+}

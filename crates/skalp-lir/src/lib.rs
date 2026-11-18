@@ -33,6 +33,7 @@ pub mod compiled_ip;
 pub mod gate_lut_opt;
 pub mod gate_netlist;
 pub mod gate_optimizer;
+pub mod hier_constants;
 pub mod hierarchical_netlist;
 pub mod known_bits;
 pub mod lir;
