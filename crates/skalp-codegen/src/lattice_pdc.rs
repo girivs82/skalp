@@ -5,7 +5,7 @@
 use skalp_frontend::hir::{
     DriveStrength, PhysicalConstraints, PinLocation, SlewRate, Termination, VrefSetting,
 };
-use skalp_mir::{Mir, Module, PortDirection};
+use skalp_mir::{DataType, Mir, Module, PortDirection};
 use std::fmt::Write;
 
 /// The modules no other module instantiates: the design's top levels
@@ -63,6 +63,12 @@ fn iobuf_settings(c: &PhysicalConstraints, direction: &PortDirection) -> Vec<Str
     s
 }
 
+/// A period in ns, without trailing zeros
+fn format_ns(ns: f64) -> String {
+    let s = format!("{ns:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// What the reference level of a port asks for, for a comment: Radiant takes
 /// the level from the bank's reference generator, not from the port
 fn vref_note(v: &VrefSetting) -> String {
@@ -75,12 +81,55 @@ fn vref_note(v: &VrefSetting) -> String {
     }
 }
 
-/// The `.pdc` of the design's top-level ports, or `None` when no port has a
-/// pin or I/O setting
-pub fn generate_lattice_pdc(mir: &Mir) -> Option<String> {
+/// The registers marked as the first stage of a synchronizer (`#[cdc]`), by
+/// hierarchical name below `prefix` (`phy/dll_lock_m`)
+fn synchronizers(mir: &Mir, module: &Module, prefix: &str, out: &mut Vec<String>) {
+    if module.vendor_ip_config.is_some() {
+        return;
+    }
+    for signal in module.signals.iter().filter(|s| s.cdc_config.is_some()) {
+        out.push(format!("{prefix}{}", signal.name));
+    }
+    for instance in &module.instances {
+        if let Some(child) = mir.modules.iter().find(|m| m.id == instance.module) {
+            synchronizers(mir, child, &format!("{prefix}{}/", instance.name), out);
+        }
+    }
+}
+
+/// The `.pdc` of the design: the top-level ports' pins and I/O settings, a
+/// clock on each clock pin whose frequency `pin_mhz` knows (the vendor's
+/// tools derive the PLL and divided clocks from it), and no timing into the
+/// first register of each synchronizer (`#[cdc]`), whose input changes with
+/// no relation to its clock. `None` when there is nothing to constrain.
+pub fn generate_lattice_pdc(mir: &Mir, pin_mhz: &dyn Fn(&str) -> Option<f64>) -> Option<String> {
     let mut pdc = String::new();
     let mut any = false;
     for top in top_modules(mir) {
+        for port in &top.ports {
+            if let (DataType::Clock { .. }, Some(PinLocation::Single(pin))) = (
+                &port.port_type,
+                port.physical_constraints
+                    .as_ref()
+                    .and_then(|c| c.pin_location.as_ref()),
+            ) {
+                if let Some(mhz) = pin_mhz(pin) {
+                    let _ = writeln!(
+                        pdc,
+                        "create_clock -name {{{0}}} -period {1} [get_ports {0}]",
+                        port.name,
+                        format_ns(1000.0 / mhz)
+                    );
+                    any = true;
+                }
+            }
+        }
+        let mut syncs = Vec::new();
+        synchronizers(mir, top, "", &mut syncs);
+        for sync in syncs {
+            let _ = writeln!(pdc, "set_false_path -to [get_cells {{{sync}*}}]");
+            any = true;
+        }
         for port in &top.ports {
             let Some(c) = &port.physical_constraints else {
                 continue;
@@ -149,16 +198,40 @@ entity Top {
     out led: bit[2] @ { pins: ["R5", "R4"], io_standard: "LVCMOS33" }
     inout dq: bit @ { pin: "AA6", io_standard: "LVSTL_I", odt: "60ohm", vref_code: 49 }
     out cs: bit @ { pin: "AC19", io_standard: "LVSTL_I" }
+    in d: bit
+    out y: bit
+}
+
+entity Sync {
+    in clk: clock
+    in a: bit
+    out y: bit
+}
+
+impl Sync {
+    #[cdc]
+    signal meta: bit = 0
+    signal held: bit = 0
+    on(clk.rise) {
+        meta = a
+        held = meta
+    }
+    y = held
 }
 
 impl Top {
     signal r: bit[2] = 0
+    inst s = Sync {
+        clk: clk,
+        a: d
+    }
     on(clk.rise) {
         r = r + 1
     }
     led = r
     cs = r[0]
     dq = r[1]
+    y = s.y
 }
 "#;
         let hir = parse_and_build_hir(source).expect("parse");
@@ -166,7 +239,8 @@ impl Top {
             .with_optimization_level(OptimizationLevel::None)
             .compile_to_mir(&hir)
             .expect("mir");
-        let pdc = generate_lattice_pdc(&mir).expect("constraints");
+        let pdc = generate_lattice_pdc(&mir, &|pin| (pin == "P24").then_some(125.0))
+            .expect("constraints");
         for line in [
             "ldc_set_location -site {P24} [get_ports clk]",
             "ldc_set_port -iobuf {IO_TYPE=LVCMOS33} [get_ports clk]",
@@ -176,6 +250,8 @@ impl Top {
             "ldc_set_port -iobuf {IO_TYPE=LVSTL_I VREF=VREF_INT TERMINATION=60} [get_ports dq]",
             "ldc_set_port -iobuf {IO_TYPE=LVSTL_I} [get_ports cs]",
             "# dq: reference level generator code 49",
+            "create_clock -name {clk} -period 8 [get_ports clk]",
+            "set_false_path -to [get_cells {s/meta*}]",
         ] {
             assert!(pdc.contains(line), "missing `{line}` in:\n{pdc}");
         }

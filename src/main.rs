@@ -1540,7 +1540,18 @@ fn build_design(
             // For a Lattice device, the pins and I/O settings of the top
             // ports, so the vendor's tools place the design as SKALP does
             if device.and_then(skalp_frontend::primitive_family) == Some("nexus") {
-                if let Some(pdc) = skalp_codegen::lattice_pdc::generate_lattice_pdc(&mir) {
+                // clock pins the board (or the device) fixes the frequency of
+                let board = device
+                    .and_then(|d| d.split_once('-'))
+                    .and_then(|(_, variant)| nexus_variant(variant).ok())
+                    .and_then(skalp_place_route::boards::for_nexus_variant);
+                let pin_mhz = |pin: &str| {
+                    board
+                        .and_then(|b| skalp_place_route::boards::clock_frequency(b, pin))
+                        .map(|hz| hz / 1e6)
+                };
+                if let Some(pdc) = skalp_codegen::lattice_pdc::generate_lattice_pdc(&mir, &pin_mhz)
+                {
                     let pdc_path = output_dir.join("design.pdc");
                     fs::write(&pdc_path, pdc)?;
                     println!("📄 Constraints: {:?}", pdc_path);
