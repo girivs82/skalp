@@ -96,6 +96,23 @@ def workspace():
     return crates
 
 
+def target_kinds(crate):
+    """The kinds of target a workspace crate has (lib, bin, test, ...)"""
+    meta = json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    for p in meta["packages"]:
+        if p["name"] == crate:
+            return {k for t in p["targets"] for k in t["kind"]}
+    return set()
+
+
 def closure(crates, start):
     """`start` and every workspace crate it depends on"""
     seen, todo = set(), [start]
@@ -229,7 +246,14 @@ def commands(selection):
         cmds.append(f"cargo test --all-targets --all-features --no-fail-fast {pkgs}")
         cmds.append(f"cargo test --doc --all-features --no-fail-fast {pkgs}")
     if "skalp" in test_crates:
-        cmds.append("cargo test -p skalp --lib --bins --all-features --no-fail-fast")
+        # its unit tests: `--lib` only if it has a library, which cargo
+        # otherwise refuses
+        kinds = target_kinds("skalp")
+        targets = [f"--{k}" for k, have in (("lib", "lib"), ("bins", "bin")) if have in kinds]
+        if targets:
+            cmds.append(
+                f"cargo test -p skalp {' '.join(targets)} --all-features --no-fail-fast"
+            )
     if modules:
         cmds.append(
             "cargo test -p skalp --test suite --all-features --no-fail-fast -- "
