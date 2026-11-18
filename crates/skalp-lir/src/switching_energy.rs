@@ -98,6 +98,8 @@ pub struct EnergyReport {
     /// By the hierarchy of the driving cell (its path cut to `depth`
     /// names), largest first
     pub by_block: Vec<(String, EnergyParts)>,
+    /// Each net that toggled (by net index), with its energy
+    pub by_net: Vec<(u32, EnergyParts)>,
     /// Toggles of every net, and of clock nets
     pub toggles: u64,
     pub clock_toggles: u64,
@@ -175,6 +177,7 @@ pub fn switching_energy(
             parts.cells_fj = n * half_v2 * driver.map_or(0.0, |c| driver_ff(c, model));
         }
         report.total.add(&parts);
+        report.by_net.push((index as u32, parts));
         let block = driver.map_or("(inputs)", |c| block_of(&c.path, depth));
         blocks.entry(block).or_default().add(&parts);
     }

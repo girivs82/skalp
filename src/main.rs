@@ -8993,6 +8993,11 @@ struct TimedOptions {
     /// start), to leave out power-up
     #[arg(long, value_name = "TIME", requires = "energy")]
     energy_from: Option<String>,
+    /// Also write the energy of each net that toggled to this CSV file
+    /// (net, driving cell, toggles, then femtojoules: routing, pins,
+    /// cells, clock)
+    #[arg(long, value_name = "FILE", requires = "energy")]
+    energy_nets: Option<std::path::PathBuf>,
 }
 
 impl TimedOptions {
@@ -9011,7 +9016,8 @@ fn report_energy(
     loads: &skalp_lir::switching_energy::NetLoads,
     sim: &skalp_lir::timed_sim::TimedSim,
     from_ps: i64,
-) {
+    nets_csv: Option<&std::path::Path>,
+) -> Result<()> {
     use skalp_lir::switching_energy::{switching_energy, EnergyModel};
     let model = EnergyModel::default();
     let report = switching_energy(netlist, loads, sim.toggles(), &model, 3);
@@ -9046,6 +9052,37 @@ fn report_energy(
             mw(parts.clock_fj)
         );
     }
+    if let Some(path) = nets_csv {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(
+            fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+        );
+        writeln!(
+            out,
+            "net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj"
+        )?;
+        let toggles = sim.toggles();
+        for (index, parts) in &report.by_net {
+            let net = &netlist.nets[*index as usize];
+            let driver = net
+                .driver
+                .map_or("", |d| netlist.cells[d.0 as usize].path.as_str());
+            writeln!(
+                out,
+                "{},{},{},{:.3},{:.3},{:.3},{:.3}",
+                net.name,
+                driver,
+                toggles[*index as usize],
+                parts.routing_fj,
+                parts.pins_fj,
+                parts.cells_fj,
+                parts.clock_fj
+            )?;
+        }
+        out.flush()?;
+        println!("  Energy of each net written to {}", path.display());
+    }
+    Ok(())
 }
 
 /// Options of a timed simulation
@@ -9535,7 +9572,13 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     }
 
     if let Some(loads) = &loads {
-        report_energy(&netlist, loads, &sim, energy_from_ps);
+        report_energy(
+            &netlist,
+            loads,
+            &sim,
+            energy_from_ps,
+            args.timed.energy_nets.as_deref(),
+        )?;
     }
 
     // Violations

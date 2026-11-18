@@ -232,4 +232,49 @@ fn timed_simulation_estimates_switching_energy() {
     assert!(counting > holding, "{counting} vs {holding}");
     let ratio = holding / holding_slow;
     assert!((1.8..2.2).contains(&ratio), "{holding} vs {holding_slow}");
+
+    // Each net's share, as CSV, adds up to the total
+    let report = skalp(
+        dir.path(),
+        &[
+            "sim",
+            "out",
+            "--clock",
+            "clk=20",
+            "--set",
+            "rst=0",
+            "--set",
+            "en=1",
+            "-d",
+            "4us",
+            "--energy",
+            "--energy-from",
+            "1us",
+            "--energy-nets",
+            "nets.csv",
+        ],
+    );
+    let csv = std::fs::read_to_string(dir.path().join("nets.csv")).expect("the CSV");
+    let mut lines = csv.lines();
+    assert_eq!(
+        lines.next(),
+        Some("net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj")
+    );
+    let mut fj = 0.0;
+    let mut rows = 0;
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        assert_eq!(fields.len(), 7, "{line}");
+        assert!(fields[2].parse::<u64>().unwrap() > 0, "{line}");
+        fj += fields[3..]
+            .iter()
+            .map(|f| f.parse::<f64>().unwrap())
+            .sum::<f64>();
+        rows += 1;
+    }
+    assert!(rows > 1, "{csv}");
+    // fJ over the 3 us counted is mW
+    let mw = fj / 3e6;
+    let total = energy_mw(&report);
+    assert!((mw - total).abs() <= total * 0.01 + 1e-4, "{mw} vs {total}");
 }

@@ -310,6 +310,9 @@ skalp sim [OPTIONS] <DESIGN>
   compare designs on the same family, not to sign off power
 - `--energy-from <TIME>` - Count toggles for `--energy` from this time on,
   to leave out power-up
+- `--energy-nets <FILE>` - Also write each toggled net's energy to a CSV
+  file (`net,driver,toggles,routing_fj,pins_fj,cells_fj,clock_fj`), to
+  group it in other ways than by block, such as by clock domain
 - `-h, --help` - Print help
 
 ### Examples
