@@ -186,6 +186,12 @@ enum Commands {
         /// Dump an intermediate representation and exit (hir, mir, lir)
         #[arg(long, value_name = "STAGE")]
         emit: Option<String>,
+
+        /// Device the design is built for: its vendor primitives (instantiated
+        /// by name, such as DDR I/O gearing) are declared from the family's
+        /// library and written out as instances of the vendor's primitive
+        #[arg(short, long, value_name = "DEVICE")]
+        device: Option<String>,
     },
 
     /// Simulate the design: a source file cycle by cycle (behavioural or
@@ -790,6 +796,7 @@ fn main() -> Result<()> {
             gate_opt_level,
             architecture,
             emit,
+            device,
         } => {
             // TRIAGE #25: accept the positional form the docs use
             // (`skalp build design.sk`); `-s` remains supported. If both are
@@ -863,6 +870,7 @@ fn main() -> Result<()> {
                 no_async_sta,
                 architecture.as_deref(),
                 emit.as_deref(),
+                device.as_deref(),
             )?;
         }
 
@@ -1394,11 +1402,12 @@ fn build_design(
     skip_async_sta: bool,
     architecture: Option<&str>,
     emit: Option<&str>,
+    device: Option<&str>,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::{
         generate_constraints_toml, generate_systemverilog_from_mir,
     };
-    use skalp_frontend::parse_and_build_compilation_context;
+    use skalp_frontend::parse_and_build_compilation_context_for_device;
 
     info!("Building design from {:?} to {}", source, target);
 
@@ -1413,8 +1422,8 @@ fn build_design(
             skalp_vhdl::parse_vhdl_directory(source).context("Failed to parse VHDL project")?;
         (ctx.main_hir, indexmap::IndexMap::new())
     } else {
-        let context =
-            parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
+        let context = parse_and_build_compilation_context_for_device(source, device)
+            .context("Failed to parse and build HIR")?;
         (context.main_hir, context.module_hirs)
     };
 
@@ -1526,6 +1535,16 @@ fn build_design(
                 let constraints_path = output_dir.join("constraints.toml");
                 fs::write(&constraints_path, constraints)?;
                 info!("Timing constraints written to {:?}", constraints_path);
+            }
+
+            // For a Lattice device, the pins and I/O settings of the top
+            // ports, so the vendor's tools place the design as SKALP does
+            if device.and_then(skalp_frontend::primitive_family) == Some("nexus") {
+                if let Some(pdc) = skalp_codegen::lattice_pdc::generate_lattice_pdc(&mir) {
+                    let pdc_path = output_dir.join("design.pdc");
+                    fs::write(&pdc_path, pdc)?;
+                    println!("📄 Constraints: {:?}", pdc_path);
+                }
             }
 
             // Emit UPF from the checked power-domain model (one backend of

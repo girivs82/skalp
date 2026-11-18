@@ -302,3 +302,114 @@ impl ExternalIp {
 
     println!("Black-box vendor IP test PASSED!");
 }
+
+/// A vendor primitive declared under its own name (a design instantiates
+/// `GEARBOX` and the vendor library provides `GEARBOX`): the wrapper must not
+/// define the module it instantiates, and its simulation model's parts are
+/// not written out
+#[test]
+fn primitive_declared_under_its_own_name_is_wrapped_without_recursion() {
+    let source = r#"
+entity ModelStage {
+    in clk: clock
+    in d: bit
+    out q: bit
+}
+
+impl ModelStage {
+    signal r: bit = 0
+    on(clk.rise) {
+        r = d
+    }
+    q = r
+}
+
+#[lattice_ip(name = "GEARBOX", GSR = "DISABLED")]
+entity GEARBOX {
+    in CLK: clock
+    in D: bit
+    out Q: bit
+}
+
+impl GEARBOX {
+    inst s = ModelStage {
+        clk: CLK,
+        d: D
+    }
+    Q = s.q
+}
+
+entity Top {
+    in clk: clock
+    in d: bit
+    out q: bit
+}
+
+impl Top {
+    inst g = GEARBOX {
+        CLK: clk,
+        D: d
+    }
+    q = g.Q
+}
+"#;
+
+    use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let mir = MirCompiler::new()
+        .with_optimization_level(OptimizationLevel::None)
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
+    let sv = generate_systemverilog_from_mir(&mir).expect("SV codegen should succeed");
+
+    assert!(
+        !sv.contains("module GEARBOX "),
+        "the vendor library defines GEARBOX; the output must not:\n{sv}"
+    );
+    assert!(sv.contains("module GEARBOX_wrap "), "{sv}");
+    assert!(
+        sv.contains("    GEARBOX #("),
+        "wrapper instantiates the primitive:\n{sv}"
+    );
+    assert!(sv.contains(".GSR(\"DISABLED\")"), "{sv}");
+    assert!(
+        sv.contains("    GEARBOX_wrap g ("),
+        "top instantiates the wrapper:\n{sv}"
+    );
+    assert!(
+        !sv.contains("module ModelStage"),
+        "a part of the simulation model is not hardware:\n{sv}"
+    );
+}
+
+/// `LOC` on a Lattice primitive places it (a PLL's corner); the vendor's
+/// module has no such parameter, so the SystemVerilog leaves it out
+#[test]
+fn lattice_placement_is_not_written_as_a_parameter() {
+    let source = r#"
+#[lattice_ip(name = "PLL_CORE", LOC = "LLC", DIVA = "2")]
+entity PllCore {
+    in REFCK: clock
+    out CLKOP: clock
+}
+
+impl PllCore {
+}
+"#;
+    use skalp_codegen::generate_systemverilog_from_mir;
+    use skalp_frontend::parse_and_build_hir;
+    use skalp_mir::{MirCompiler, OptimizationLevel};
+
+    let hir = parse_and_build_hir(source).expect("Failed to parse");
+    let mir = MirCompiler::new()
+        .with_optimization_level(OptimizationLevel::None)
+        .compile_to_mir(&hir)
+        .expect("Failed to compile to MIR");
+    let sv = generate_systemverilog_from_mir(&mir).expect("SV codegen should succeed");
+    assert!(!sv.contains(".LOC("), "{sv}");
+    assert!(sv.contains(".DIVA(\"2\")"), "{sv}");
+    assert!(sv.contains("// placed by SKALP at"), "{sv}");
+}
