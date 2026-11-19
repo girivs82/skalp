@@ -1,0 +1,82 @@
+// One edge clock for two banks: a DQS lane (DQS buffer, strobe and data
+// gearing) on bank 3 and a command pin's gearing on bank 4, both on the
+// edge clock of a single synchronizer and the slow clock of one divider. The
+// synchronizer belongs in the bank of the DQS buffer; bank 4 takes that edge
+// clock through its cascade mux, so the two banks' gearing shares one clock.
+#[lattice_ip(name = "PLL_CORE", LOC = "LLC", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
+entity PllCore {
+    in REFCK: clock
+    in RST: bit
+    out CLKOP: clock
+    out LOCK: bit
+}
+
+#[lattice_ip(name = "BB")]
+entity BB {
+    in I: bit
+    in T: bit
+    out O: bit
+    inout B: bit
+}
+
+entity NexusDdrCascade {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out cmd: bit @ { pin: "AC19", io_standard: "LVSTL_I" }
+    inout dq: bit @ { pin: "AA6", io_standard: "LVSTL_I", vref_code: 49 }
+    inout dqs: bit @ { pin: "AF4", io_standard: "LVSTL_I", vref_code: 49 }
+}
+
+impl NexusDdrCascade {
+    inst pll = PllCore { REFCK: clk, RST: 0 }
+    signal fast: clock
+    fast = pll.CLKOP
+
+    inst es = ECLKSYNC { ECLKIN: fast, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: 0, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+    inst dll = DDRDLL { CLKIN: eclk, RST: 0, FREEZE: 0, UDDCNTL_N: 1 }
+
+    signal n: bit[8] = 0
+    on(sclk.rise) {
+        n = n + 1
+    }
+
+    signal dqs_in: bit
+    inst sb = DQSBUF {
+        DQSI: dqs_in, ECLKIN: eclk, SCLK: sclk, RST: 0, PAUSE: 0,
+        RSTSMCNT: 0, RDCLKSEL: 0, READ: 0,
+        RDDIR: 0, RDLOADN: 1, READMOVE: 0, SELCLK: 0,
+        WRDIR: 0, WRLOAD_N: 1, WRMOVE: 0,
+        WRLVDIR: 0, WRLVLOAD_N: 1, WRLVMOVE: 0,
+        DLLCODE: dll.CODE
+    }
+    inst s_od = ODDRX4DQS {
+        D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
+        DQSW: sb.DQSW, ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    inst s_ts = TSHX4DQS {
+        T0: n[0], T1: n[0], T2: n[0], T3: n[0],
+        DQSW: sb.DQSW, ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    inst d_od = ODDRX4DQ {
+        D0: n[0], D1: n[1], D2: n[2], D3: n[3], D4: n[4], D5: n[5], D6: n[6], D7: n[7],
+        DQSW270: sb.DQSW270, ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    inst d_ts = TSHX4DQ {
+        T0: n[0], T1: n[0], T2: n[0], T3: n[0],
+        DQSW270: sb.DQSW270, ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    inst p_dqs = BB { I: s_od.Q, T: s_ts.Q, B: dqs }
+    dqs_in = p_dqs.O
+    inst p_dq = BB { I: d_od.Q, T: d_ts.Q, B: dq }
+
+    // the command pin, in the next bank, on the same edge and slow clocks
+    inst c_od = ODDRX4 {
+        D0: n[7], D1: n[6], D2: n[5], D3: n[4], D4: n[3], D5: n[2], D6: n[1], D7: n[0],
+        ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    cmd = c_od.Q
+}

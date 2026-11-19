@@ -1025,8 +1025,6 @@ pub fn choose_sites(
             sinks.entry(net).or_default().push(c.id);
         }
     }
-    let bank_of =
-        |id: CellId, chosen: &HashMap<CellId, usize>| chosen.get(&id).and_then(|&s| sites[s].bank);
     let mut used: HashSet<usize> = chosen.values().copied().collect();
     // Edge clock synchronizers: the bank of what they clock
     for &id in &blocks.cells {
@@ -1034,26 +1032,43 @@ pub fn choose_sites(
         if prims.of(c).map(|p| p.site) != Some(SiteKind::Eclksync) {
             continue;
         }
-        let mut banks: Vec<u32> = c
+        let clocked: Vec<(u32, SiteKind)> = c
             .outputs
             .iter()
             .flat_map(|net| sinks.get(net).into_iter().flatten())
-            .filter_map(|&s| bank_of(s, &chosen))
+            .filter_map(|&s| {
+                let site = &sites[*chosen.get(&s)?];
+                Some((site.bank?, site.kind))
+            })
             .collect();
+        let mut banks: Vec<u32> = clocked.iter().map(|&(b, _)| b).collect();
         banks.sort_unstable();
         banks.dedup();
-        let bank = match banks.as_slice() {
-            [bank] => *bank,
-            [] => {
+        // The banks of the DQS buffers it clocks
+        let mut strobe_banks: Vec<u32> = clocked
+            .iter()
+            .filter(|&&(_, kind)| kind == SiteKind::Dqsbuf)
+            .map(|&(b, _)| b)
+            .collect();
+        strobe_banks.sort_unstable();
+        strobe_banks.dedup();
+        let bank = match (banks.as_slice(), strobe_banks.as_slice()) {
+            ([bank], _) => *bank,
+            ([], _) => {
                 return Err(format!(
                     "'{}' clocks no I/O logic or DQS buffer, so its bank is unknown",
                     c.path
                 ))
             }
-            many => {
+            // An edge clock reaches its own bank, and other banks through their
+            // cascade muxes (as for a memory's command pins in the bank beside
+            // its data): the synchronizer sits in the bank of the DQS buffers it
+            // clocks, so their gearing and the divided clock share one edge clock.
+            (_, [bank]) => *bank,
+            (many, _) => {
                 return Err(format!(
-                    "'{}' clocks I/O in banks {many:?}; an edge clock reaches one bank, so use \
-                     one synchronizer per bank",
+                    "'{}' clocks I/O in banks {many:?} but DQS buffers in none or several of \
+                     them, so the bank it belongs in is unknown; use one synchronizer per bank",
                     c.path
                 ))
             }
