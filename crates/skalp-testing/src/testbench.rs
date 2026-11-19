@@ -381,6 +381,7 @@ impl Testbench {
                 generate_null_wavefront: true,
                 use_opaque_arithmetic: true,
                 async_state: skalp_lir::AsyncState::FlipFlop,
+                latch_blocks: None,
             };
             skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
         } else {
@@ -968,6 +969,7 @@ impl Testbench {
                     generate_null_wavefront: true,
                     use_opaque_arithmetic: true,
                     async_state: skalp_lir::AsyncState::FlipFlop,
+                    latch_blocks: None,
                 };
                 skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
             } else {

@@ -37,6 +37,25 @@ pub enum PlaceRouteError {
     #[error("Routing failed: {0}")]
     RoutingFailed(String),
 
+    /// Clock nets whose clock pins take their clock from the dedicated
+    /// network only, every entry to it that leads there being held by the
+    /// clocks routed before them
+    #[error(
+        "{} clock net(s) cannot reach their clock pins: {}. Those pins take their clock \
+         from the dedicated clock network only, and every entry to it that leads there \
+         already carries one of the {routed} clocks routed before them. Use fewer clocks \
+         (clock enables on a shared clock, say), or give the clock a source on the \
+         network (a clock pin or a PLL output)",
+        nets.len(),
+        nets.join(", ")
+    )]
+    ClockEntriesExhausted {
+        /// The stranded clock nets, by name
+        nets: Vec<String>,
+        /// How many clocks were routed onto the network
+        routed: usize,
+    },
+
     /// No route found for net
     #[error("No route found for net {net_name}")]
     NoRouteFound { net_name: String },

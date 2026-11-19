@@ -1,0 +1,105 @@
+// Async blocks under one clocked parent, for choosing which of them can keep
+// their state in latches: two accumulators of different widths can; a
+// combinational block has no state; a register file keeps a memory clocked
+// by its strobe; a cluster's coalesced child is clocked by its strobe.
+
+async entity LcAdd8 {
+    in a: bit[8]
+    in b: bit[8]
+    out s: bit[8]
+}
+
+impl LcAdd8 {
+    s = a + b
+}
+
+async entity LcAcc8 {
+    in a: bit[8]
+    out s: bit[8]
+}
+
+impl LcAcc8 {
+    signal acc: bit[8] = 0
+    on() {
+        acc = acc + a
+    }
+    s = acc
+}
+
+async entity LcAcc16 {
+    in a: bit[16]
+    out s: bit[16]
+}
+
+impl LcAcc16 {
+    signal acc: bit[16] = 0
+    on() {
+        acc = acc + a
+    }
+    s = acc
+}
+
+async entity LcRf {
+    in we: bit
+    in wa: bit[3]
+    in wd: bit[8]
+    in ra: bit[3]
+    out rd: bit[8]
+}
+
+impl LcRf {
+    signal mem: bit[8][8]
+    on() {
+        if we {
+            mem[wa] = wd
+        }
+    }
+    rd = mem[ra]
+}
+
+async entity LcCluster {
+    in a: bit[8]
+    out s: bit[8]
+}
+
+impl LcCluster {
+    inst inner = LcAcc8 { a: a }
+    s = inner.s
+}
+
+entity LcTop {
+    in clk: clock
+    in x: bit[8]
+    in w: bit[16]
+    in go: bit
+    out o: bit[8]
+    out p: bit[16]
+    out q: bit[8]
+    out r: bit[8]
+    out t: bit[8]
+    out done: bit
+}
+
+impl LcTop {
+    signal xr: bit[8] = 0
+    signal wr: bit[16] = 0
+    signal req: bit = 0
+
+    inst add = LcAdd8 { a: xr, b: xr, ncl_req: req }
+    inst small = LcAcc8 { a: xr, ncl_req: req }
+    inst wide = LcAcc16 { a: wr, ncl_req: req }
+    inst rf = LcRf { we: req, wa: xr[2:0], wd: xr, ra: xr[5:3], ncl_req: req }
+    inst cluster = LcCluster { a: xr, ncl_req: req }
+
+    on(clk.rise) {
+        xr = x
+        wr = w
+        req = go
+    }
+    o = add.s
+    p = wide.s
+    q = small.s
+    r = rf.rd
+    t = cluster.s
+    done = add.ncl_ack & small.ncl_ack & wide.ncl_ack & rf.ncl_ack & cluster.ncl_ack
+}

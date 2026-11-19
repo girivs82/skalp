@@ -67,6 +67,10 @@ pub struct NclConfig {
     pub boundary_only: bool,
     /// Where a bundled-data block keeps its state (see [`AsyncState`])
     pub async_state: AsyncState,
+    /// The blocks (instance paths) that keep their state as `async_state`
+    /// says; the others keep flip-flops. `None`: every block does. See
+    /// [`latch_candidates`].
+    pub latch_blocks: Option<std::collections::BTreeSet<String>>,
 }
 
 /// Where a bundled-data async block keeps its state. A flip-flop's clock
@@ -100,6 +104,7 @@ impl Default for NclConfig {
             use_opaque_arithmetic: true, // Enable by default for performance
             boundary_only: true, // Boundary-only NCL for efficiency (simulation needs hybrid mode)
             async_state: AsyncState::FlipFlop,
+            latch_blocks: None,
         }
     }
 }
@@ -3651,6 +3656,73 @@ pub fn step_condition_errors(flat: &Lir, path: &str, module: &str) -> Vec<String
         .collect()
 }
 
+/// An async block whose step strobe stops clocking anything once its
+/// registers become latches (see [`latch_candidates`])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatchCandidate {
+    /// Instance path of the block
+    pub path: String,
+    /// Latch bits it would take (two per register bit for a master-slave
+    /// pair)
+    pub latch_bits: u64,
+}
+
+/// The async blocks that would need no clock-network entry for their step
+/// strobe if their registers were kept as `state` latches, fewest latch
+/// bits first (ties by path). A block stays off the list when anything
+/// would still be clocked by its strobe: registers with an enable or a
+/// reset, memories, or the registers of coalesced child blocks.
+///
+/// A device whose flip-flop clock pins are reachable only from its clock
+/// network has room there for a limited number of strobes. Moving the
+/// smallest blocks to latches first keeps flip-flops, which are cheaper in
+/// energy and delay on such a device, where they hold the most state.
+pub fn latch_candidates(
+    hier_lir: &crate::HierarchicalMirToLirResult,
+    state: AsyncState,
+) -> Vec<LatchCandidate> {
+    if state == AsyncState::FlipFlop {
+        return Vec::new();
+    }
+    let latched = apply_boundary_ncl_to_hierarchy(
+        hier_lir,
+        &NclConfig {
+            async_state: state,
+            latch_blocks: None,
+            ..NclConfig::default()
+        },
+    );
+    let mut candidates: Vec<LatchCandidate> = latched
+        .instances
+        .iter()
+        .filter_map(|(path, inst)| {
+            let lir = &inst.lir_result.lir;
+            let go = lir.get_signal(crate::mir_to_lir::NCL_GO_SIGNAL)?.id;
+            let mut bits = 0u64;
+            for node in &lir.nodes {
+                if node.clock == Some(go) {
+                    return None;
+                }
+                if let LirOp::Latch { width } = node.op {
+                    bits += u64::from(width);
+                }
+            }
+            // A block whose coalesced children have registers keeps its
+            // own as flip-flops too, so it never gets here
+            (bits > 0).then(|| LatchCandidate {
+                path: path.clone(),
+                latch_bits: bits,
+            })
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        a.latch_bits
+            .cmp(&b.latch_bits)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    candidates
+}
+
 /// Apply boundary-only NCL to async modules in a hierarchical LIR result.
 ///
 /// Uses approach 3 for NCL boundary detection:
@@ -3781,10 +3853,14 @@ pub fn apply_boundary_ncl_to_hierarchy(
             && !parent_is_async(path);
 
         if bridged {
+            let async_state = match &config.latch_blocks {
+                Some(blocks) if !blocks.contains(path.as_str()) => AsyncState::FlipFlop,
+                _ => config.async_state,
+            };
             let ncl_result = expand_to_ncl_bridged_with(
                 &instance.lir_result.lir,
                 children_use_go(path),
-                config.async_state,
+                async_state,
             );
             new_instances.insert(
                 path.clone(),
@@ -4082,12 +4158,16 @@ mod tests {
             async_reset: false,
             reset_value: None,
         };
-        lir.add_node(LirOp::Add {
+        lir.add_node(
+            LirOp::Add {
                 width: 4,
                 has_carry: false,
                 const_b: None,
             },
-            vec![acc, a], sum, "add".into());
+            vec![acc, a],
+            sum,
+            "add".into(),
+        );
         lir.add_node(reg(4), vec![sum], acc, "acc_reg".into());
         let acc_reg = lir.nodes.len() - 1;
         lir.add_node(reg(4), vec![a], out, "out_reg".into());

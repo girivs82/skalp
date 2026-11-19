@@ -126,7 +126,8 @@ pub use ncl_optimizer::{NclOptConfig, NclOptStats, NclOptimizer};
 // NCL expansion
 pub use ncl_expand::{
     apply_boundary_ncl_to_hierarchy, check_step_conditions, expand_to_ncl, expand_to_ncl_boundary,
-    step_condition_errors, AsyncState, NclConfig, NclExpandResult,
+    latch_candidates, step_condition_errors, AsyncState, LatchCandidate, NclConfig,
+    NclExpandResult,
 };
 
 // Hierarchical netlist (for per-entity synthesis)

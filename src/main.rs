@@ -308,8 +308,11 @@ enum Commands {
         /// `latch`, master-slave pairs of latches built from logic; `pulse`,
         /// one latch per bit opened by a short pulse; or `pulsed-ms`,
         /// master-slave pairs whose masters open only for that pulse
-        /// (latches need no clock network)
-        #[arg(long, value_name = "KIND", default_value = "ff", value_parser = ["ff", "latch", "pulse", "pulsed-ms"])]
+        /// (latches need no clock network). `auto` (the default) uses
+        /// flip-flops while the clock network has room for the strobes, and
+        /// when it runs out moves the blocks with the least state to `pulse`
+        /// latches, a round at a time, until the strobes fit
+        #[arg(long, value_name = "KIND", default_value = "auto", value_parser = ["auto", "ff", "latch", "pulse", "pulsed-ms"])]
         async_state: String,
     },
 
@@ -944,25 +947,40 @@ fn main() -> Result<()> {
             settle_wait,
             async_state,
         } => {
-            synthesize_design(
-                &source,
-                &device,
-                full_flow,
-                &output,
-                &optimize,
-                &pnr_preset,
-                frequency,
-                emit.as_deref(),
-                power_stub,
-                debug,
-                settle_wait.as_deref(),
-                match async_state.as_str() {
-                    "latch" => skalp_lir::AsyncState::MasterSlaveLatch,
-                    "pulse" => skalp_lir::AsyncState::PulseLatch,
-                    "pulsed-ms" => skalp_lir::AsyncState::PulsedMasterSlave,
-                    _ => skalp_lir::AsyncState::FlipFlop,
-                },
-            )?;
+            let fixed = match async_state.as_str() {
+                "latch" => Some(skalp_lir::AsyncState::MasterSlaveLatch),
+                "pulse" => Some(skalp_lir::AsyncState::PulseLatch),
+                "pulsed-ms" => Some(skalp_lir::AsyncState::PulsedMasterSlave),
+                "ff" => Some(skalp_lir::AsyncState::FlipFlop),
+                _ => None,
+            };
+            let mut plan = match fixed {
+                Some(state) => AsyncStatePlan::fixed(state),
+                None => AsyncStatePlan::auto(),
+            };
+            loop {
+                let result = synthesize_design(
+                    &source,
+                    &device,
+                    full_flow,
+                    &output,
+                    &optimize,
+                    &pnr_preset,
+                    frequency,
+                    emit.as_deref(),
+                    power_stub,
+                    debug,
+                    settle_wait.as_deref(),
+                    &mut plan,
+                );
+                match result {
+                    Err(e) => match plan.after_failure(&e) {
+                        Some(note) => println!("\n{note}\n"),
+                        None => return Err(e),
+                    },
+                    Ok(()) => break,
+                }
+            }
         }
 
         Commands::Pnr {
@@ -1677,6 +1695,7 @@ fn build_design(
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
                         async_state: skalp_lir::AsyncState::FlipFlop,
+                        latch_blocks: None,
                     };
                     skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
                 } else {
@@ -1738,6 +1757,7 @@ fn build_design(
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
                         async_state: skalp_lir::AsyncState::FlipFlop,
+                        latch_blocks: None,
                     };
                     let ncl_result =
                         skalp_lir::expand_to_ncl_boundary(&lir_result.lir, &ncl_config);
@@ -4802,6 +4822,83 @@ fn synthesis_cache() -> Option<skalp_lir::synth_cache::SynthCache> {
 
 /// Synthesize design for FPGA target
 #[allow(clippy::too_many_arguments)]
+/// Where `skalp synth` keeps the state of bundled-data async blocks, and
+/// how `--async-state auto` changes that between attempts
+struct AsyncStatePlan {
+    /// The latch kind for the blocks in `latch_blocks`
+    state: skalp_lir::AsyncState,
+    /// The blocks that keep their state as `state`; `None`: all of them
+    latch_blocks: Option<std::collections::BTreeSet<String>>,
+    /// Whether to move blocks to latches when the clock network runs out
+    auto: bool,
+    /// The blocks that could move, fewest latch bits first (filled by the
+    /// first attempt)
+    candidates: Option<Vec<skalp_lir::LatchCandidate>>,
+}
+
+impl AsyncStatePlan {
+    /// Every block keeps its state as `state`
+    fn fixed(state: skalp_lir::AsyncState) -> Self {
+        Self {
+            state,
+            latch_blocks: None,
+            auto: false,
+            candidates: None,
+        }
+    }
+
+    /// Flip-flops until the clock network runs out, then pulsed latches
+    fn auto() -> Self {
+        Self {
+            state: skalp_lir::AsyncState::PulseLatch,
+            latch_blocks: Some(Default::default()),
+            auto: true,
+            candidates: None,
+        }
+    }
+
+    /// After a failed attempt: when strobes found no way onto the clock
+    /// network, move as many more blocks to latches as strobes were left
+    /// over, those with the least state first, and say what moved. `None`:
+    /// the failure is final.
+    fn after_failure(&mut self, error: &anyhow::Error) -> Option<String> {
+        if !self.auto {
+            return None;
+        }
+        let stranded = error.chain().find_map(|cause| match cause
+            .downcast_ref::<skalp_place_route::PlaceRouteError>()
+        {
+            Some(skalp_place_route::PlaceRouteError::ClockEntriesExhausted { nets, .. }) => {
+                Some(nets.len())
+            }
+            _ => None,
+        })?;
+        let latched = self.latch_blocks.get_or_insert_with(Default::default);
+        let moved: Vec<&skalp_lir::LatchCandidate> = self
+            .candidates
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| !latched.contains(&c.path))
+            .take(stranded)
+            .collect();
+        if moved.is_empty() {
+            return None;
+        }
+        let names: Vec<String> = moved
+            .iter()
+            .map(|c| format!("{} ({} latch bits)", c.path, c.latch_bits))
+            .collect();
+        latched.extend(moved.iter().map(|c| c.path.clone()));
+        Some(format!(
+            "⚠️  {stranded} async step strobe(s) found no room on the clock network; \
+             keeping the state of {} as pulsed latches and building again \
+             (--async-state ff turns this off)",
+            names.join(", ")
+        ))
+    }
+}
+
 fn synthesize_design(
     source: &PathBuf,
     device: &str,
@@ -4814,7 +4911,7 @@ fn synthesize_design(
     power_stub: bool,
     debug: bool,
     settle_wait: Option<&str>,
-    async_state: skalp_lir::AsyncState,
+    plan: &mut AsyncStatePlan,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context_for_device;
     use skalp_lir::get_stdlib_library;
@@ -4965,8 +5062,12 @@ fn synthesize_design(
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true,
-            async_state,
+            async_state: plan.state,
+            latch_blocks: plan.latch_blocks.clone(),
         };
+        if plan.auto && plan.candidates.is_none() {
+            plan.candidates = Some(skalp_lir::latch_candidates(&hier_lir, plan.state));
+        }
         skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
     } else {
         hier_lir

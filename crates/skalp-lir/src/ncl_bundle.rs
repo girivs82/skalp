@@ -3049,7 +3049,8 @@ mod tests {
     #[test]
     fn latch_enables_are_not_the_step_end() {
         let mut netlist = pulse_block(true);
-        let net = |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
+        let net =
+            |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
         let req = netlist.inputs[0];
         let ready = netlist.inputs[1];
         let ack = netlist.outputs[0];
