@@ -8,7 +8,9 @@
 //
 // Sequence: DFI init (dfi_init_start until dfi_init_complete), RESET_N low T_INIT1_CYC cycles,
 // CKE low T_INIT3_CYC, CKE high T_INIT5_CYC, mode registers (MR13, MR1, MR2, MR3, MR11, MR12,
-// MR14, MR22 from the generics), ZQ calibration start and latch, then training through the PHY
+// MR14, MR22, and the Read DQ Calibration invert masks and patterns MR15, MR20, MR32, MR40, from
+// the generics: the PHY's training compares with them, so they are written rather than left at
+// the DRAM's defaults, MR15/MR20 = 0x55), ZQ calibration start and latch, then training through the PHY
 // (DFI PHY-evaluation mode, each step until the PHY reports every byte lane done):
 //   write leveling: MR2 with OP7 (WR-LEV) set, tWLMRD, dfi_wrlvl_en with a dfi_wrlvl_strobe
 //     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back;
@@ -69,7 +71,13 @@ pub entity Lpddr4DfiController<
     const TWLMRD_NCK: nat = 40,
     const WL_GAP_CYC: nat = 16,
     const WL_MAX_STROBES: nat = 40,
-    const TRAIN_ADDR: nat = 63
+    const TRAIN_ADDR: nat = 63,
+    // Read DQ Calibration invert masks and patterns (last, so positional generics before them
+    // keep their places)
+    const MR15: nat = 0,
+    const MR20: nat = 0,
+    const MR32: nat = 90,
+    const MR40: nat = 60
 > {
     in clk: clock
     // ---------------------------------------------------------------- user port
@@ -400,6 +408,10 @@ impl Lpddr4DfiController {
     let mr13_c: bit[8] = MR13
     let mr14_c: bit[8] = MR14
     let mr22_c: bit[8] = MR22
+    let mr15_c: bit[8] = MR15
+    let mr20_c: bit[8] = MR20
+    let mr32_c: bit[8] = MR32
+    let mr40_c: bit[8] = MR40
     let rl: bit[16] = match mr2_c[2:0] {
         0 => 6,
         1 => 10,
@@ -569,7 +581,7 @@ impl Lpddr4DfiController {
     let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
     let bk_pre: bit[8] = if do_preab == 1 { 8'hFF } else { if pre_q == 1 { rq_sel & b_open & b_preok } else { 8'h00 } }
     let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
-    let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
+    let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 12 { 1 } else { 0 }
     // MR2 with WR-LEV set (in) and clear (out)
     let do_wlmrw: bit = if st == 18 && can_cmd == 1 && (wl_ph == 0 || wl_ph == 3) { 1 } else { 0 }
     let wl_mr2: bit[8] = if wl_ph == 0 { mr2_c | 8'h80 } else { mr2_c }
@@ -593,7 +605,11 @@ impl Lpddr4DfiController {
         4 => 11,
         5 => 12,
         6 => 14,
-        _ => 22
+        7 => 22,
+        8 => 15,
+        9 => 20,
+        10 => 32,
+        _ => 40
     }
     let mrw_op: bit[8] = match mi {
         0 => mr13_c,
@@ -603,7 +619,11 @@ impl Lpddr4DfiController {
         4 => mr11_c,
         5 => mr12_c,
         6 => mr14_c,
-        _ => mr22_c
+        7 => mr22_c,
+        8 => mr15_c,
+        9 => mr20_c,
+        10 => mr32_c,
+        _ => mr40_c
     }
     let mrr_ma: bit[6] = if mi == 0 { 5 } else { 8 }
     let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_wlmrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
@@ -984,7 +1004,7 @@ impl Lpddr4DfiController {
             },
             4 => {
                 if do_mrw == 1 { mi = mi + 1 }
-                if mi == 8 { st = 5 }
+                if mi == 12 { st = 5 }
             },
             5 => {
                 if do_zqs == 1 {

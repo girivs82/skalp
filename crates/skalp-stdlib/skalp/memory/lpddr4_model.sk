@@ -29,7 +29,8 @@
 // edge-aligned (DQ lags DQS by DQ_SKEW_CLKS clocks), then half a tCK of postamble. A burst that
 // starts as the previous one ends follows it with no preamble. Up to four reads may be in
 // flight. Read DQ Calibration returns, per beat, a bit of MR32 (beats 0-7) or MR40 (beats 8-15)
-// on every DQ, inverted per DQ by MR15 (DQ0-7) and MR20 (DQ8-15). MRR returns the register on
+// on every DQ, inverted per DQ by MR15 (DQ0-7) and MR20 (DQ8-15), both 0x55 after reset as JEDEC
+// sets them. MRR returns the register on
 // DQ[7:0].
 //
 // RL and WL come from MR2 (write latency set A or B). MR5..MR8 read back the generics.
@@ -320,8 +321,9 @@ impl Lpddr4ChannelModel {
     signal mr22: bit[8] = 0
     // Read DQ Calibration: invert masks (MR15 DQ0-7, MR20 DQ8-15) and patterns (MR32, MR40),
     // JEDEC defaults
-    signal mr15: bit[8] = 0
-    signal mr20: bit[8] = 0
+    // JEDEC defaults: DQ0, 2, 4, 6 (and 8, 10, 12, 14) inverted
+    signal mr15: bit[8] = 8'h55
+    signal mr20: bit[8] = 8'h55
     signal mr32: bit[8] = 8'h5A
     signal mr40: bit[8] = 8'h3C
     signal last_mrw: bit[32] = 0
