@@ -53,7 +53,9 @@
 //         CK was high) on the PHY's own DQS. The delay starts at 0 (DQS rising half a tCK before
 //         CK) and moves up WL_STEP steps per strobe; each lane keeps the first delay whose
 //         feedback goes from 0 to 1, moves back to it and raises its dfi_wrlvl_resp bit
-//         (wrlvl_fail when WL_MAX steps pass without one).
+//         (wrlvl_fail when WL_MAX steps pass without one). The edge comes about half a tCK
+//         in, so WL_MAX (248 steps, 3.1 ns; at most 255 - WL_STEP, the delay being 8 bits) reaches
+//         it down to 400 Mbps (half a tCK 2.5 ns) with board skew to spare.
 //   read gate (dfi_rdlvl_gate_en): Read DQ Calibration bursts, the n-th with gate setting n
 //         (0 to 8 x GATE_SLOTS - 1, from the slot of dfi_rddata_en); a setting passes when the
 //         DQS buffer reports BURSTDETECT. The longest passing run ends where the gate would open
@@ -161,7 +163,7 @@ pub entity NexusLpddr4Lane<
     const GATE_SLOTS: nat = 8,
     const TRAIN_WIN: nat = 14,
     const WL_STEP: nat = 4,
-    const WL_MAX: nat = 200,
+    const WL_MAX: nat = 248,
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,
@@ -727,7 +729,7 @@ pub entity DfiLpddr4NexusPhy<
     const GATE_SLOTS: nat = 8,
     const TRAIN_WIN: nat = 14,
     const WL_STEP: nat = 4,
-    const WL_MAX: nat = 200,
+    const WL_MAX: nat = 248,
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,

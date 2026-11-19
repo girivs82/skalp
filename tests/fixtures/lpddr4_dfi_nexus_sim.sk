@@ -30,7 +30,9 @@ entity Lpddr4DfiNexusSim<
     const WR_SKEW0_CLKS: nat = 0,
     const WR_SKEW1_CLKS: nat = 0,
     const WR_DQ_SKEW0_CLKS: nat = 0,
-    const WR_DQ_SKEW1_CLKS: nat = 0
+    const WR_DQ_SKEW1_CLKS: nat = 0,
+    // simulation ticks (117.1875 ps) per edge clock (= tCK); even. 16: 1066 Mbps
+    const CK_TICKS: nat = 16
 > {
     in sim_tick: clock
     out done: bit
@@ -134,12 +136,14 @@ impl Lpddr4DfiNexusSim {
         dfi_wdqlvl_resp: phy.dfi_wdqlvl_resp
     }
 
-    // edge clock: sim_tick / 16
-    signal tk: bit[4] = 0
+    // edge clock: sim_tick / CK_TICKS
+    let tk_half: bit[8] = CK_TICKS / 2 - 1
+    let tk_last: bit[8] = CK_TICKS - 1
+    signal tk: bit[8] = 0
     signal ek: bit = 0
     on(sim_tick.rise) {
-        tk = tk + 1
-        if tk == 7 || tk == 15 {
+        tk = if tk == tk_last { 0 } else { tk + 1 }
+        if tk == tk_half || tk == tk_last {
             ek = !ek
         }
     }
