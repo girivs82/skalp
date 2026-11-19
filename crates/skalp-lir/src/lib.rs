@@ -36,6 +36,7 @@ pub mod gate_optimizer;
 pub mod hier_constants;
 pub mod hierarchical_netlist;
 pub mod known_bits;
+pub mod latch_inference;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_bundle;
