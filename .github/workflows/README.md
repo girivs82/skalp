@@ -17,16 +17,19 @@ Runs comprehensive test suite and quality checks:
     request to run everything. Pushes to master always run everything.
 
 - **Clippy Job**
-  - Clippy on beta and on macOS (their full test runs happen in
-    `full-test-matrix.yml` before every release and on demand)
+  - Clippy on beta (its full test runs happen in `full-test-matrix.yml`
+    before every release and on demand)
+  - macOS runners are the slowest, so no job here runs on macOS: its clippy,
+    build and full tests run only before a release (`full-test-matrix.yml`,
+    `release.yml`) and on demand
 
 - **Lint Job**
   - Formatting check (`cargo fmt`)
   - Clippy lints with warnings as errors
 
 - **Build Job**
-  - Cross-platform builds (Linux, macOS, Windows)
-  - Uploads release binaries as artifacts
+  - Builds on Linux and Windows (macOS builds in `release.yml`)
+  - Uploads the binaries as artifacts
 
 - **Security Job**
   - Security audit using `cargo audit`

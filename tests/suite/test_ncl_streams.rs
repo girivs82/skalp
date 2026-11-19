@@ -522,3 +522,164 @@ async fn send_takes_compound_expressions() {
     assert_eq!(a, (n << 8) | 0x5A);
     assert_eq!(b, if n % 2 == 1 { n } else { 0xEE });
 }
+
+const TAKEN: &str = "tests/fixtures/ncl_streams_taken.sk";
+
+/// A block forwards each odd value of `a` in the step whose arbiter takes
+/// it, with `taken(a)` and the value taken used outside the arm (in whether
+/// the step sends, too), and counts the even ones: the sink gets 1, 3, 5,
+/// ... in order, and the other arm still adds up `b`
+async fn run_taken(mut tb: Testbench, cycles: usize) {
+    tb.set("run", 1u8);
+    tb.clock(cycles).await;
+    tb.set("run", 0u8);
+    tb.clock(STOP_LIMIT).await;
+    let count = tb.get_u32("count").await;
+    let even = tb.get_u32("even").await;
+    let nb = tb.get_u32("nb").await;
+    assert!(count > 4, "only {count} values of `a` forwarded");
+    assert!(nb > 4, "only {nb} values of `b` taken");
+    assert_eq!(tb.get_u32("bad").await, 0, "a value forwarded out of order");
+    // odd and even values of `a` alternate
+    assert!(
+        even == count || even + 1 == count,
+        "{count} odd values forwarded, {even} even ones counted"
+    );
+    let expected: u32 = (1..=nb).map(|k| k & 0xff).sum::<u32>() & 0xffff;
+    assert_eq!(tb.get_u32("total").await, expected, "sum of `b`'s values");
+}
+
+#[tokio::test]
+async fn taken_forwards_in_the_same_step_behavioural() {
+    let tb = Testbench::behavioral_with_top(TAKEN, "TkTop")
+        .await
+        .expect("build behavioural testbench");
+    run_taken(tb, 200).await;
+}
+
+/// At gate level the step's conditions read the value taken through kept
+/// AND gates of the arm's grant, one per bit they read; the datapath (the
+/// value forwarded, `b`'s sum) reads the stream itself, ungated
+#[tokio::test]
+async fn taken_forwards_in_the_same_step_gate_level() {
+    use skalp_lir::gate_netlist::{GateNetlist, TAKE_OP};
+    let check = |netlist: GateNetlist| {
+        let gates: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(|c| c.source_op.as_deref() == Some(TAKE_OP))
+            .collect();
+        // only `a[0]`: the one bit a send/recv condition reads
+        assert_eq!(gates.len(), 1, "take gates");
+        assert!(gates.iter().all(|c| c.is_kept() && c.inputs.len() == 2));
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(TAKEN, "TkTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_taken(tb, 200).await;
+}
+
+/// A block whose send condition reads the value taken has its "some arm
+/// granted" held back until that condition has settled (the grant settle
+/// delay), and the delay is checked; a block whose conditions read only its
+/// registers has none
+#[tokio::test]
+async fn taken_in_a_send_condition_waits_for_the_grant_to_settle() {
+    use skalp_lir::gate_netlist::GateNetlist;
+    use skalp_lir::ncl_bundle::{
+        check_matched_delays, size_matched_delays, LibraryDelays, GRANT_SETTLE_DELAY_PATH,
+    };
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let check = |mut netlist: GateNetlist| {
+        let delays = LibraryDelays::new(&library);
+        size_matched_delays(&mut netlist, &delays, 0);
+        let settles: Vec<_> = check_matched_delays(&netlist, &delays)
+            .into_iter()
+            .filter(|c| c.times == "grant settle")
+            .collect();
+        assert_eq!(settles.len(), 1, "one block's grants decide what it sends");
+        assert!(settles[0].prefix.ends_with(".f."), "{}", settles[0].prefix);
+        assert!(settles[0].delay_path.contains(GRANT_SETTLE_DELAY_PATH));
+        assert!(
+            settles[0].control_ps >= settles[0].data_ps,
+            "short: {:?}",
+            settles[0]
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(TAKEN, "TkTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_taken(tb, 200).await;
+    let none = |netlist: GateNetlist| {
+        assert!(
+            !netlist
+                .cells
+                .iter()
+                .any(|c| c.path.contains(GRANT_SETTLE_DELAY_PATH)),
+            "conditions on registers only need no grant settle delay"
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(SHARED_SERVER, "SsTop", "nexus", &none)
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
+/// `ready(s)` decides which channel a step sends to: every value reaches
+/// one of the two sinks, and both get some
+async fn run_ready(mut tb: Testbench, cycles: usize) {
+    tb.set("run", 1u8);
+    tb.clock(cycles).await;
+    tb.set("run", 0u8);
+    tb.clock(STOP_LIMIT).await;
+    let c0 = tb.get_u32("count0").await;
+    let c1 = tb.get_u32("count1").await;
+    assert!(c0 > 2 && c1 > 2, "sinks got {c0} and {c1} values");
+    // the values are 1, 2, 3, ..., each to exactly one sink
+    let n = c0 + c1;
+    let expected: u32 = (1..=n).map(|k| k & 0xff).sum::<u32>() & 0xffff;
+    assert_eq!(tb.get_u32("sum").await, expected, "{n} values");
+}
+
+#[tokio::test]
+async fn ready_picks_a_free_channel_behavioural() {
+    let tb = Testbench::behavioral_with_top(TAKEN, "RdTop")
+        .await
+        .expect("build behavioural testbench");
+    run_ready(tb, 200).await;
+}
+
+#[tokio::test]
+async fn ready_picks_a_free_channel_gate_level() {
+    let tb = Testbench::gate_level_with_top(TAKEN, "RdTop")
+        .await
+        .expect("build gate-level testbench");
+    run_ready(tb, 400).await;
+}
+
+/// `taken(s)` in the condition that decides the grant, or on a stream no
+/// arbiter takes, is refused
+#[tokio::test]
+async fn taken_misuse_is_refused() {
+    for (top, block, says) in [
+        ("TbGuardTop", "TbGuard", "only be used after the grant"),
+        (
+            "TbPlainTop",
+            "TbPlain",
+            "not an arm of a `match arbitrate(..)`",
+        ),
+    ] {
+        let error =
+            match Testbench::behavioral_with_top("tests/fixtures/ncl_streams_taken_bad.sk", top)
+                .await
+            {
+                Ok(_) => panic!("{top}: built, but it misuses `taken`"),
+                Err(e) => format!("{e:#}"),
+            };
+        assert!(error.contains(block), "{error}");
+        assert!(error.contains(says), "{error}");
+    }
+}

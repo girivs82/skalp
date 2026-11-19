@@ -3443,6 +3443,36 @@ fn merge_physical_nodes_into_netlist(
                 }
             }
 
+            LirOp::NclTake { width } => {
+                // out = data & grant, one kept AND per bit (see
+                // `LirOp::NclTake`)
+                let grant = input_nets
+                    .get(1)
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
+                for i in 0..*width as usize {
+                    let data = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let mut and = Cell::new_comb(
+                        CellId(0),
+                        and2_cell.name.clone(),
+                        library.name.clone(),
+                        and2_cell.fit,
+                        format!("{}.take{}", path, i),
+                        vec![data, grant],
+                        vec![out],
+                    );
+                    and2_cell.apply_to_cell(&mut and);
+                    and.source_op = Some(crate::gate_netlist::TAKE_OP.to_string());
+                    netlist.add_cell(and);
+                }
+            }
+
             LirOp::NclArbiter { width } => {
                 let requests: Vec<GateNetId> = (0..*width as usize)
                     .map(|i| {

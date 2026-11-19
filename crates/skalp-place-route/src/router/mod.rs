@@ -242,12 +242,25 @@ pub struct Router<D: Device> {
     config: RouterConfig,
     /// Target device
     device: D,
+    /// Routes the general router starts from
+    initial: HashMap<GateNetId, Route>,
 }
 
 impl<D: Device + Clone> Router<D> {
     /// Create a new router
     pub fn new(config: RouterConfig, device: D) -> Self {
-        Self { config, device }
+        Self {
+            config,
+            device,
+            initial: HashMap::new(),
+        }
+    }
+
+    /// Start the general router from `routes`, an earlier routing of nets
+    /// whose ends have not moved ([`PathFinder::with_initial_routes`])
+    pub fn with_initial_routes(mut self, routes: HashMap<GateNetId, Route>) -> Self {
+        self.initial = routes;
+        self
     }
 
     /// Route a design using integrated specialized routers
@@ -331,7 +344,8 @@ impl<D: Device + Clone> Router<D> {
                     self.config.max_iterations,
                     self.config.history_cost_factor,
                     self.config.present_congestion_factor,
-                );
+                )
+                .with_initial_routes(std::mem::take(&mut self.initial));
                 pathfinder.route_nets(netlist, placement, &regular_net_ids)
             }
             RoutingAlgorithm::MazeRouting => {
@@ -348,7 +362,8 @@ impl<D: Device + Clone> Router<D> {
                     self.config.history_cost_factor,
                     self.config.present_congestion_factor,
                     self.config.timing_weight,
-                );
+                )
+                .with_initial_routes(std::mem::take(&mut self.initial));
                 pathfinder.route_nets(netlist, placement, &regular_net_ids)
             }
         }?;

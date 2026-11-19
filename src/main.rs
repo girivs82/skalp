@@ -5192,8 +5192,10 @@ fn run_nexus_pnr_on_netlist(
     println!();
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
+    // Each placement after the first starts from the one before
+    let mut rerun = first_nexus_run();
     let result = fit_matched_delays_to_routing(&mut netlist, |n| {
-        place_and_route_nexus_for_cli(n, nexus, config.clone())
+        place_and_route_nexus_for_cli(n, nexus, config.clone(), &mut rerun)
     })?;
     let gate_netlist = &netlist;
 
@@ -5293,7 +5295,10 @@ fn run_nexus_pnr_on_netlist(
 /// Place and route `netlist`, then fit its matched delays to the routed
 /// delays: lengthen any that routing made too short, and shorten any that
 /// are longer than their checks need, placing and routing again after each
-/// change. Matched delays are first sized before placement from library
+/// change. `place_and_route` may start each run after the first from the
+/// one before (keeping what the change did not touch where it was), so a
+/// change moves only the delays it meant to. Matched delays are first
+/// sized before placement from library
 /// estimates with a wide margin; routed delays are what the design runs on,
 /// and a self-timed block steps no faster than its matched delays allow.
 fn fit_matched_delays_to_routing(
@@ -5492,12 +5497,33 @@ fn nexus_reference_voltage_pins(
     Ok(Vec::new())
 }
 
-/// Use the real device data when this build and machine have it.
+/// What a Nexus place and route leaves for the next one of the same
+/// netlist, changed a little
+#[cfg(feature = "nexus-real")]
+type NexusRerun = Option<skalp_place_route::pnr::NexusRerun>;
+/// Without real device data each placement starts over: nothing to carry
+#[cfg(not(feature = "nexus-real"))]
+struct NexusRerun;
+
+/// What the first Nexus place and route starts from: nothing
+#[cfg(feature = "nexus-real")]
+fn first_nexus_run() -> NexusRerun {
+    None
+}
+#[cfg(not(feature = "nexus-real"))]
+fn first_nexus_run() -> NexusRerun {
+    NexusRerun
+}
+
+/// Use the real device data when this build and machine have it. `rerun`
+/// holds what the previous call left; this one starts from it and leaves
+/// its own.
 #[cfg(feature = "nexus-real")]
 fn place_and_route_nexus_for_cli(
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     variant: skalp_place_route::NexusVariant,
     config: skalp_place_route::PnrConfig,
+    rerun: &mut NexusRerun,
 ) -> Result<skalp_place_route::PnrResult> {
     use skalp_place_route::device::nexus::prjoxide_load::find_database;
 
@@ -5508,9 +5534,15 @@ fn place_and_route_nexus_for_cli(
         );
     };
     println!("Using real device data from {:?}", db_root);
-    Ok(skalp_place_route::pnr::place_and_route_nexus_real(
-        netlist, variant, config, &db_root,
-    )?)
+    let (result, next) = skalp_place_route::pnr::place_and_route_nexus_real_from(
+        netlist,
+        variant,
+        config,
+        &db_root,
+        rerun.as_ref(),
+    )?;
+    *rerun = Some(next);
+    Ok(result)
 }
 
 /// Without real device data the output is only a model of the flow.
@@ -5519,6 +5551,7 @@ fn place_and_route_nexus_for_cli(
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     variant: skalp_place_route::NexusVariant,
     config: skalp_place_route::PnrConfig,
+    _rerun: &mut NexusRerun,
 ) -> Result<skalp_place_route::PnrResult> {
     println!(
         "⚠️  This build has no real Nexus device data; the bitstream it writes will not run on a chip."

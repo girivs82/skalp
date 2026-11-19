@@ -34,6 +34,20 @@
 //! (`inst c = Consumer { i: p.o }`); this pass adds the phase-bit connections
 //! in both directions.
 //!
+//! `taken(s)`, for a stream input `s` of a `match arbitrate(..)`, is 1 in a
+//! step whose arbiter took `s` (the step runs `s`'s arm) and 0 otherwise. It
+//! can be used anywhere in the block, outside the arm too: with `s` itself,
+//! which holds the value waiting on the channel, it lets logic outside the
+//! arm act on the value in the same step it is received (grant a request
+//! the step takes, say), instead of a step later from a register.
+//! Outside a step that takes `s`, the value read from `s` is unspecified
+//! (0 in send/recv conditions).
+//!
+//! `ready(s)` is 1 while channel `s` is ready: a stream output empty (a
+//! `send` would not wait), a stream input full (a `recv` would not wait).
+//! It reads only phase bits, so it may decide what a step sends or receives:
+//! send to whichever of two channels is free, say.
+//!
 //! Rules, each an error here:
 //! * each stream has exactly one `send` (or `recv`) site per block, under
 //!   `if`/`match` conditions only (not inside an expression);
@@ -67,6 +81,10 @@ pub const NCL_TICK_PORT: &str = "__ncl_tick";
 /// (grants). Behaviourally the grant is a fixed-priority pick; synthesis
 /// drives it from a mutual-exclusion element instead.
 pub const NCL_ARBITER_PREFIX: &str = "__ncl_arb";
+/// Suffix of an arbiter's "some arm granted" signal (`__ncl_arb<k>_any`),
+/// named when the block's send/recv conditions depend on its grants (see
+/// [`grant_settle_needed`]): synthesis delays it until they have settled.
+pub const NCL_GRANT_ANY_SUFFIX: &str = "_any";
 /// Suffix of a stream's sender phase port
 pub const STREAM_REQ_SUFFIX: &str = "__req";
 /// Suffix of a stream's receiver phase port
@@ -304,6 +322,8 @@ struct Arbiter {
     last: SignalId,
     /// Request expression of each arm
     requests: Vec<HirExpression>,
+    /// The stream of each arm, in arm order (for `taken(s)`)
+    streams: Vec<PortId>,
     /// Condition under which the step reaches the match
     reached: HirExpression,
 }
@@ -599,6 +619,7 @@ impl Lowering<'_> {
             gnt,
             last,
             requests,
+            streams,
             reached,
         });
         chain
@@ -747,6 +768,423 @@ fn contains_stream_call(expr: &HirExpression, streams: &HashMap<PortId, StreamPo
         }
     });
     found
+}
+
+/// Name prefix of the signals that carry what an arbiter took:
+/// `__ncl_take_<s>` is the value of stream input `s` (its data while the arm
+/// that receives it is granted, 0 otherwise) and `__ncl_take_<s>_gnt` the
+/// grant of that arm. Synthesis builds the value from kept AND gates
+/// (`skalp_lir::ncl_expand`), so that it only changes with the grant.
+pub const NCL_TAKE_PREFIX: &str = "__ncl_take";
+
+/// Replace each `ready(s)` with whether channel `s` is ready: for a stream
+/// output, empty (the receiver took the last value, so a `send` would not
+/// wait); for a stream input, full (a `recv` would not wait). It reads the
+/// block's phase register and the other end's phase bit, the same signals
+/// the step's own `ready` reads, so it may decide what a step sends or
+/// receives.
+fn lower_ready(
+    implementation: &mut crate::hir::HirImplementation,
+    arbiters: &mut [Arbiter],
+    used: &mut HashMap<PortId, HirExpression>,
+    phase: &HashMap<PortId, SignalId>,
+    streams: &HashMap<PortId, StreamPort>,
+    entity: &str,
+    errors: &mut Vec<String>,
+) {
+    let mut replace = |expr: &mut HirExpression| {
+        let HirExpression::Call(c) = expr else {
+            return;
+        };
+        if c.function != "ready" {
+            return;
+        }
+        let ready = match c.args.as_slice() {
+            [HirExpression::Port(p)] if streams.contains_key(p) => {
+                let s = &streams[p];
+                let ph = HirExpression::Signal(phase[&s.data]);
+                if s.output {
+                    bin(ph, HirBinaryOp::Equal, HirExpression::Port(s.ack))
+                } else {
+                    bin(HirExpression::Port(s.req), HirBinaryOp::NotEqual, ph)
+                }
+            }
+            _ => {
+                errors.push(format!(
+                    "`ready(..)` in async entity `{entity}` takes one stream port of the block"
+                ));
+                return;
+            }
+        };
+        *expr = ready;
+    };
+    for a in &mut implementation.assignments {
+        map_expr_mut(&mut a.rhs, &mut replace);
+    }
+    for cond in used.values_mut() {
+        map_expr_mut(cond, &mut replace);
+    }
+    for arb in arbiters.iter_mut() {
+        for r in arb.requests.iter_mut() {
+            map_expr_mut(r, &mut replace);
+        }
+        map_expr_mut(&mut arb.reached, &mut replace);
+    }
+    map_statements_mut(&mut implementation.statements, &mut replace);
+    for block in &mut implementation.event_blocks {
+        map_statements_mut(&mut block.statements, &mut replace);
+    }
+}
+
+/// Whether a step's `ready` needs the grants it depends on to settle first.
+///
+/// `ready` is the AND of "some arm granted" and, for each channel, "not
+/// used, or ready". The step latch reads it at any moment and keeps a step
+/// once `ready` has been high, so `ready` must only rise, never glitch. That
+/// holds while what each step uses depends on registers alone, and for an
+/// arm's own `recv` (its channel is full, or the arm would not have been
+/// granted). But a send or receive whose condition depends on a grant
+/// (through `taken(s)`, the value taken, or a send inside an arm) changes as
+/// the grant rises: "some arm granted" can then reach the latch before a
+/// full channel's term has fallen, and the step would start. When any
+/// condition depends on a grant, the arbiter's "some arm granted" is named
+/// `__ncl_arb<k>_any`, and synthesis delays it by a matched delay that
+/// covers those paths (`skalp_lir::ncl_expand`, the "grant settle" check).
+fn grant_settle_needed(
+    implementation: &crate::hir::HirImplementation,
+    arbiters: &[Arbiter],
+    used: &HashMap<PortId, HirExpression>,
+    streams: &HashMap<PortId, StreamPort>,
+) -> bool {
+    if arbiters.is_empty() {
+        return false;
+    }
+    // Signals that follow a grant: the grants, what the arbiters took, and
+    // everything computed from them
+    let mut derived: HashSet<SignalId> = arbiters.iter().map(|a| a.gnt).collect();
+    derived.extend(
+        implementation
+            .signals
+            .iter()
+            .filter(|s| s.name.starts_with(NCL_TAKE_PREFIX))
+            .map(|s| s.id),
+    );
+    let reads = |expr: &HirExpression, set: &HashSet<SignalId>| {
+        let mut hit = false;
+        map_expr_mut(&mut expr.clone(), &mut |e| {
+            if matches!(e, HirExpression::Signal(id) if set.contains(id)) {
+                hit = true;
+            }
+        });
+        hit
+    };
+    loop {
+        let before = derived.len();
+        for a in &implementation.assignments {
+            if let HirLValue::Signal(id) = a.lhs {
+                if !derived.contains(&id) && reads(&a.rhs, &derived) {
+                    derived.insert(id);
+                }
+            }
+        }
+        if derived.len() == before {
+            break;
+        }
+    }
+    let arm_streams: HashSet<PortId> = arbiters
+        .iter()
+        .flat_map(|a| a.streams.iter().copied())
+        .collect();
+    used.iter().any(|(port, cond)| {
+        let own_arm = streams.get(port).is_some_and(|s| !s.output) && arm_streams.contains(port);
+        !own_arm && reads(cond, &derived)
+    })
+}
+
+/// The block [`lower_taken`] works on: its entity's name, stream ports and
+/// port types
+struct TakeBlock<'a> {
+    entity: &'a str,
+    streams: &'a HashMap<PortId, StreamPort>,
+    port_types: &'a HashMap<PortId, HirType>,
+}
+
+/// `taken(s)` and the value of an arbitrated stream.
+///
+/// Each `taken(s)` in the block, and in the conditions under which it sends
+/// or receives (`used`), becomes the grant of the arm that receives from
+/// `s`. An arbiter's requests and the condition that reaches it decide the
+/// grant, so `taken` in them would be a loop: an error.
+///
+/// The send/recv conditions, and the combinational signals they read, read an
+/// arbitrated stream `s` gated by that grant: the value the step takes, or 0
+/// in a step that does not take `s`. A condition may be read at any moment
+/// and the sender only holds the value still while the channel is full;
+/// through the gate it changes only when the grant does, while it holds
+/// still. Every other read (the datapath, next-state logic) reads `s`
+/// itself: what it holds outside a step that takes `s` is unspecified, and
+/// only a step that takes `s` stores anything computed from it. Gating those
+/// reads as well would swing the datapath to 0 and back on every take, for
+/// nothing but energy.
+fn lower_taken(
+    implementation: &mut crate::hir::HirImplementation,
+    arbiters: &[Arbiter],
+    used: &mut HashMap<PortId, HirExpression>,
+    block: &TakeBlock,
+    ids: &mut Ids,
+    errors: &mut Vec<String>,
+) {
+    let TakeBlock {
+        entity,
+        streams,
+        port_types,
+    } = *block;
+    for arb in arbiters {
+        let mut uses_taken = false;
+        let mut find = |e: &mut HirExpression| {
+            if matches!(e, HirExpression::Call(c) if c.function == "taken") {
+                uses_taken = true;
+            }
+        };
+        for r in arb.requests.iter().chain(std::iter::once(&arb.reached)) {
+            map_expr_mut(&mut r.clone(), &mut find);
+        }
+        if uses_taken {
+            errors.push(format!(
+                "`taken(..)` in async entity `{entity}` decides whether a `match arbitrate(..)` is reached or which arm requests; it can only be used after the grant"
+            ));
+        }
+    }
+    // the grant and the gated value of each arbitrated stream
+    let mut grant_of: HashMap<PortId, SignalId> = HashMap::new();
+    let mut value_of: HashMap<PortId, SignalId> = HashMap::new();
+    let mut added_signals = Vec::new();
+    let mut added_assignments = Vec::new();
+    for arb in arbiters {
+        for (j, port) in arb.streams.iter().enumerate() {
+            let name = &streams[port].name;
+            let gnt = ids.signal();
+            added_signals.push(new_signal(
+                gnt,
+                format!("{NCL_TAKE_PREFIX}_{name}_gnt"),
+                HirType::Bit(1),
+                None,
+            ));
+            added_assignments.push(assign(
+                ids,
+                HirLValue::Signal(gnt),
+                HirExpression::Index(
+                    Box::new(HirExpression::Signal(arb.gnt)),
+                    Box::new(HirExpression::Literal(HirLiteral::Integer(j as u64))),
+                ),
+                HirAssignmentType::Combinational,
+            ));
+            let value = ids.signal();
+            added_signals.push(new_signal(
+                value,
+                format!("{NCL_TAKE_PREFIX}_{name}"),
+                port_types[port].clone(),
+                None,
+            ));
+            added_assignments.push(assign(
+                ids,
+                HirLValue::Signal(value),
+                HirExpression::If(crate::hir::HirIfExpr {
+                    condition: Box::new(HirExpression::Signal(gnt)),
+                    then_expr: Box::new(HirExpression::Port(*port)),
+                    else_expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                }),
+                HirAssignmentType::Combinational,
+            ));
+            grant_of.insert(*port, gnt);
+            value_of.insert(*port, value);
+        }
+    }
+    let mut replace_taken = |expr: &mut HirExpression| {
+        let HirExpression::Call(c) = expr else {
+            return;
+        };
+        if c.function != "taken" {
+            return;
+        }
+        let grant = match c.args.as_slice() {
+            [HirExpression::Port(p)] if streams.contains_key(p) => match grant_of.get(p) {
+                Some(g) => *g,
+                None => {
+                    errors.push(format!(
+                        "`taken({n})` in async entity `{entity}`: `{n}` is not an arm of a `match arbitrate(..)`",
+                        n = streams[p].name
+                    ));
+                    return;
+                }
+            },
+            _ => {
+                errors.push(format!(
+                    "`taken(..)` in async entity `{entity}` takes one stream input of the block"
+                ));
+                return;
+            }
+        };
+        *expr = HirExpression::Signal(grant);
+    };
+    let mut replace_value = |expr: &mut HirExpression| {
+        if let HirExpression::Port(p) = expr {
+            if let Some(v) = value_of.get(p) {
+                *expr = HirExpression::Signal(*v);
+            }
+        }
+    };
+    // `taken(s)` first: its argument is the stream itself
+    for a in &mut implementation.assignments {
+        map_expr_mut(&mut a.rhs, &mut replace_taken);
+    }
+    for cond in used.values_mut() {
+        map_expr_mut(cond, &mut replace_taken);
+    }
+    map_statements_mut(&mut implementation.statements, &mut replace_taken);
+    for block in &mut implementation.event_blocks {
+        map_statements_mut(&mut block.statements, &mut replace_taken);
+    }
+    // Only what the send/recv conditions read must be the gated value: the
+    // conditions themselves and the combinational signals they depend on.
+    // Every other read (the datapath, next-state logic) keeps the stream
+    // itself, which is only meaningful in a step that takes it. Gating
+    // those too would drive the datapath to 0 between steps and back,
+    // spending energy for nothing.
+    let mut cone: HashSet<SignalId> = HashSet::new();
+    let collect = |expr: &HirExpression, cone: &mut HashSet<SignalId>| {
+        map_expr_mut(&mut expr.clone(), &mut |e| {
+            if let HirExpression::Signal(id) = e {
+                cone.insert(*id);
+            }
+        });
+    };
+    for cond in used.values() {
+        collect(cond, &mut cone);
+    }
+    loop {
+        let before = cone.len();
+        for a in &implementation.assignments {
+            if matches!(a.assignment_type, HirAssignmentType::Combinational) {
+                if let HirLValue::Signal(id) = a.lhs {
+                    if cone.contains(&id) {
+                        collect(&a.rhs, &mut cone);
+                    }
+                }
+            }
+        }
+        if cone.len() == before {
+            break;
+        }
+    }
+    for a in &mut implementation.assignments {
+        let in_cone = matches!(a.assignment_type, HirAssignmentType::Combinational)
+            && matches!(a.lhs, HirLValue::Signal(id) if cone.contains(&id));
+        if in_cone {
+            map_expr_mut(&mut a.rhs, &mut replace_value);
+        }
+    }
+    for cond in used.values_mut() {
+        map_expr_mut(cond, &mut replace_value);
+    }
+    implementation.signals.extend(added_signals);
+    implementation.assignments.extend(added_assignments);
+}
+
+/// Call `f` on every expression in `expr`, innermost first
+fn map_expr_mut(expr: &mut HirExpression, f: &mut dyn FnMut(&mut HirExpression)) {
+    match expr {
+        HirExpression::Binary(b) => {
+            map_expr_mut(&mut b.left, f);
+            map_expr_mut(&mut b.right, f);
+        }
+        HirExpression::Unary(u) => map_expr_mut(&mut u.operand, f),
+        HirExpression::Call(c) => c.args.iter_mut().for_each(|a| map_expr_mut(a, f)),
+        HirExpression::Index(a, b) => {
+            map_expr_mut(a, f);
+            map_expr_mut(b, f);
+        }
+        HirExpression::Range(a, b, c) => {
+            map_expr_mut(a, f);
+            map_expr_mut(b, f);
+            map_expr_mut(c, f);
+        }
+        HirExpression::FieldAccess { base, .. } => map_expr_mut(base, f),
+        HirExpression::Concat(v)
+        | HirExpression::TupleLiteral(v)
+        | HirExpression::ArrayLiteral(v) => v.iter_mut().for_each(|e| map_expr_mut(e, f)),
+        HirExpression::Ternary {
+            condition,
+            true_expr,
+            false_expr,
+        } => {
+            map_expr_mut(condition, f);
+            map_expr_mut(true_expr, f);
+            map_expr_mut(false_expr, f);
+        }
+        HirExpression::Cast(c) => map_expr_mut(&mut c.expr, f),
+        HirExpression::ArrayRepeat { value, count } => {
+            map_expr_mut(value, f);
+            map_expr_mut(count, f);
+        }
+        HirExpression::If(i) => {
+            map_expr_mut(&mut i.condition, f);
+            map_expr_mut(&mut i.then_expr, f);
+            map_expr_mut(&mut i.else_expr, f);
+        }
+        HirExpression::Match(m) => {
+            map_expr_mut(&mut m.expr, f);
+            for arm in &mut m.arms {
+                if let Some(g) = &mut arm.guard {
+                    map_expr_mut(g, f);
+                }
+                map_expr_mut(&mut arm.expr, f);
+            }
+        }
+        HirExpression::Block {
+            statements,
+            result_expr,
+        } => {
+            map_statements_mut(statements, f);
+            map_expr_mut(result_expr, f);
+        }
+        HirExpression::StructLiteral(s) => {
+            for field in &mut s.fields {
+                map_expr_mut(&mut field.value, f);
+            }
+        }
+        _ => {}
+    }
+    f(expr);
+}
+
+fn map_statements_mut(statements: &mut [HirStatement], f: &mut dyn FnMut(&mut HirExpression)) {
+    for s in statements {
+        match s {
+            HirStatement::Assignment(a) => map_expr_mut(&mut a.rhs, f),
+            HirStatement::Let(l) => map_expr_mut(&mut l.value, f),
+            HirStatement::Expression(e) => map_expr_mut(e, f),
+            HirStatement::Block(b) => map_statements_mut(b, f),
+            HirStatement::If(i) => {
+                map_expr_mut(&mut i.condition, f);
+                map_statements_mut(&mut i.then_statements, f);
+                if let Some(e) = &mut i.else_statements {
+                    map_statements_mut(e, f);
+                }
+            }
+            HirStatement::Match(m) => {
+                map_expr_mut(&mut m.expr, f);
+                for arm in &mut m.arms {
+                    if let Some(g) = &mut arm.guard {
+                        map_expr_mut(g, f);
+                    }
+                    map_statements_mut(&mut arm.statements, f);
+                }
+            }
+            HirStatement::For(l) => map_statements_mut(&mut l.body, f),
+            _ => {}
+        }
+    }
 }
 
 fn walk_expr(expr: &HirExpression, f: &mut dyn FnMut(&HirExpression)) {
@@ -1015,7 +1453,7 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
                 "stream `send`/`recv` outside `on()` in async entity `{entity}`"
             ));
         }
-        let used = std::mem::take(&mut lowering.used);
+        let mut used = std::mem::take(&mut lowering.used);
         // Which outputs this block only sends in steps that also receive
         // from an input: (input, output)
         let sites = std::mem::take(&mut lowering.site_conds);
@@ -1031,8 +1469,31 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
         }
         entity_waits.insert(implementation.entity, waits);
         let phase = std::mem::take(&mut lowering.phase);
-        let arbiters = std::mem::take(&mut lowering.arbiters);
+        let mut arbiters = std::mem::take(&mut lowering.arbiters);
         errors.append(&mut lowering.errors);
+        lower_ready(
+            implementation,
+            &mut arbiters,
+            &mut used,
+            &phase,
+            streams,
+            &entity,
+            &mut errors,
+        );
+        lower_taken(
+            implementation,
+            &arbiters,
+            &mut used,
+            &TakeBlock {
+                entity: &entity,
+                streams,
+                port_types: &entity_port_types,
+            },
+            &mut ids,
+            &mut errors,
+        );
+
+        let settle = grant_settle_needed(implementation, &arbiters, &used, streams);
 
         // ready = AND over streams of (!used | ok)
         let mut terms = Vec::new();
@@ -1143,6 +1604,26 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
                 .map(|i| bit(arb.gnt, i))
                 .reduce(|a, b| bin(a, HirBinaryOp::LogicalOr, b))
                 .unwrap_or_else(truth);
+            // A named "some arm granted" that synthesis delays until what
+            // the grant decides has settled (see `grant_settle_needed`)
+            let any = if settle {
+                let id = ids.signal();
+                implementation.signals.push(new_signal(
+                    id,
+                    format!("{NCL_ARBITER_PREFIX}{k}{NCL_GRANT_ANY_SUFFIX}"),
+                    HirType::Bit(1),
+                    None,
+                ));
+                implementation.assignments.push(assign(
+                    &mut ids,
+                    HirLValue::Signal(id),
+                    any,
+                    HirAssignmentType::Combinational,
+                ));
+                HirExpression::Signal(id)
+            } else {
+                any
+            };
             terms.push(bin(not(arb.reached.clone()), HirBinaryOp::LogicalOr, any));
         }
 
