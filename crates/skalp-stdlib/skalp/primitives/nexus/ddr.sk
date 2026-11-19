@@ -23,7 +23,8 @@
 // ---------------------------------------------------------------------------- clocks
 
 // Edge clock synchronizer: passes ECLKIN; STOP, taken on a falling edge, holds the output low
-#[lattice_ip(name = "ECLKSYNC")]
+// (STOP_EN: without it the block ignores STOP)
+#[lattice_ip(name = "ECLKSYNC", STOP_EN = "ENABLE")]
 pub entity ECLKSYNC {
     in ECLKIN: clock
     in STOP: bit
@@ -486,7 +487,10 @@ impl DDRDLL {
 // after the gate cycle; IDDRX4DQ's Q and DATAVALID carry an SCLK cycle's reads in the SCLK cycle
 // after next. The FIFO pointers realign whenever no read is in flight. PAUSE and SELCLK are not
 // modelled (the clocks keep running); DQSWRD stays low.
-#[lattice_ip(name = "DQSBUF", sim_clock = "tick", GSR = "DISABLED", ENABLE_FIFO = "ENABLED", MODX = "MDDRX4", READ_ENABLE = "ENABLED", WRITE_ENABLE = "ENABLED")]
+// Mode (as the device's LPDDR4 interface sets it): FIFO, x4 gearing, read and write paths on,
+// FORCE_READ, and the MOVE/DIR adjustment (MT_EN_*) on for the read, write and write leveling
+// delays.
+#[lattice_ip(name = "DQSBUF", sim_clock = "tick", GSR = "DISABLED", ENABLE_FIFO = "ENABLED", MODX = "MDDRX4", READ_ENABLE = "ENABLED", WRITE_ENABLE = "ENABLED", FORCE_READ = "ENABLED", MT_EN_READ = "ENABLED", MT_EN_WRITE = "ENABLED", MT_EN_WRITE_LEVELING = "ENABLED")]
 pub entity DQSBUF {
     in tick: clock
     in DQSI: bit
