@@ -3271,13 +3271,6 @@ pub fn expand_to_ncl_bridged_with(
     }
 }
 
-/// Path of the matched delay that reopens a block's master latches after
-/// its step strobe falls (see [`expand_to_ncl_bridged_with`])
-pub const MASTER_OPEN_PATH: &str = "ncl_bundle.master_open";
-/// Path of the matched delay that opens a block's slave latches after its
-/// step strobe rises (see [`expand_to_ncl_bridged_with`])
-pub const SLAVE_OPEN_PATH: &str = "ncl_bundle.slave_open";
-
 /// Turn the registers clocked by `go` into master-slave latch pairs (see
 /// [`expand_to_ncl_bridged_with`]). Returns the slaves' enable, or `None`
 /// when no register could be turned (none, or only ones with an enable or
@@ -3313,14 +3306,14 @@ fn latch_registers(lir: &mut Lir, go: LirSignalId) -> Option<LirSignalId> {
         LirOp::NclMatchedDelay { width: 1 },
         vec![not_go],
         master_open,
-        MASTER_OPEN_PATH.to_string(),
+        crate::ncl_bundle::MASTER_OPEN_PATH.to_string(),
     );
     let slave_open = lir.add_signal("__ncl_slave_open".to_string(), 1);
     lir.add_node(
         LirOp::NclMatchedDelay { width: 1 },
         vec![go],
         slave_open,
-        SLAVE_OPEN_PATH.to_string(),
+        crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
     );
     for idx in regs {
         let q = lir.nodes[idx].output;
@@ -3641,12 +3634,11 @@ pub fn apply_boundary_ncl_to_hierarchy(
             && !parent_is_async(path);
 
         if bridged {
-            let ncl_result =
-                expand_to_ncl_bridged_with(
-                    &instance.lir_result.lir,
-                    children_use_go(path),
-                    config.latch_state,
-                );
+            let ncl_result = expand_to_ncl_bridged_with(
+                &instance.lir_result.lir,
+                children_use_go(path),
+                config.latch_state,
+            );
             new_instances.insert(
                 path.clone(),
                 InstanceLirResult {
