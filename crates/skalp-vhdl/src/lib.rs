@@ -25,6 +25,7 @@ pub fn parse_vhdl(file_path: &Path) -> Result<CompilationContext> {
     Ok(CompilationContext {
         main_hir: hir,
         module_hirs: indexmap::IndexMap::new(),
+        top_module: None,
     })
 }
 
@@ -186,6 +187,7 @@ pub fn parse_vhdl_project(files: &[PathBuf]) -> Result<CompilationContext> {
     Ok(CompilationContext {
         main_hir: hir,
         module_hirs: indexmap::IndexMap::new(),
+        top_module: None,
     })
 }
 

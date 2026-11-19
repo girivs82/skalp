@@ -1,0 +1,30 @@
+// A generic counter whose step defaults to 1, and a wrapper in the same file
+// that uses a specialization of it (step 3).
+entity Stepper<const STEP: nat = 1> {
+    in clk: clock
+    in rst: bit
+    out count: bit[8]
+}
+
+impl Stepper {
+    signal c: bit[8] = 0
+    on(clk.rise) {
+        if rst == 1 {
+            c = 0
+        } else {
+            c = c + STEP
+        }
+    }
+    count = c
+}
+
+entity TripleStepper {
+    in clk: clock
+    in rst: bit
+    out count: bit[8]
+}
+
+impl TripleStepper {
+    inst s = Stepper<3> { clk: clk, rst: rst }
+    count = s.count
+}

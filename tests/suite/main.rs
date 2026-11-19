@@ -80,6 +80,7 @@ mod test_generate_blocks;
 mod test_generic_add;
 mod test_generic_parse;
 mod test_generic_template_pruning;
+mod test_generic_top;
 mod test_generic_type_params;
 mod test_gpu_simulation;
 mod test_graphics_pipeline;

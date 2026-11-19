@@ -53,6 +53,11 @@ pub struct CompilationContext {
     pub main_hir: Hir,
     /// All loaded module HIRs (path -> HIR) for scope resolution
     pub module_hirs: IndexMap<PathBuf, Hir>,
+    /// The module of the top entity asked for when building (see
+    /// [`parse_and_build_compilation_context_for_top`]): the entity's own
+    /// name, or for a generic entity its specialization with default generics.
+    /// `None` when no top was asked for or the design does not define it.
+    pub top_module: Option<String>,
 }
 
 /// Find the project root by searching for skalp.toml
@@ -103,6 +108,22 @@ pub fn parse_and_build_compilation_context_for_device(
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
     parse_and_build_compilation_context_from_source_for_device(file_path, source, device)
+}
+
+/// Like [`parse_and_build_compilation_context_for_device`], for running the
+/// design from the entity `top`. A generic `top` runs with its default
+/// generics, even when the file also uses other specializations of it, so it
+/// is specialized that way too; [`CompilationContext::top_module`] names the
+/// module to run. A generic `top` with a generic that has no default is an
+/// error.
+pub fn parse_and_build_compilation_context_for_top(
+    file_path: &Path,
+    device: Option<&str>,
+    top: &str,
+) -> Result<CompilationContext> {
+    let source = std::fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read source file: {:?}", file_path))?;
+    build_compilation_context(file_path, source, device, Some(top))
 }
 
 /// Like [`parse_and_build_compilation_context`], for source text held in
@@ -207,6 +228,15 @@ pub fn parse_and_build_compilation_context_from_source_for_device(
     file_path: &Path,
     source: String,
     device: Option<&str>,
+) -> Result<CompilationContext> {
+    build_compilation_context(file_path, source, device, None)
+}
+
+fn build_compilation_context(
+    file_path: &Path,
+    source: String,
+    device: Option<&str>,
+    top: Option<&str>,
 ) -> Result<CompilationContext> {
     use module_resolver::ModuleResolver;
 
@@ -342,9 +372,22 @@ pub fn parse_and_build_compilation_context_from_source_for_device(
 
     // Monomorphize
     use monomorphization::MonomorphizationEngine;
-    let mut engine = MonomorphizationEngine::new();
+    let mut engine =
+        MonomorphizationEngine::new().with_tops(top.map(str::to_string).into_iter().collect());
     let mut monomorphized_hir = engine.monomorphize(&hir);
     monomorphized_hir.main_entity_names = main_entity_names;
+    let top_module = match top {
+        Some(top) => match engine.top_name(top) {
+            Some(name) => Some(name.to_string()),
+            None if hir.entities.iter().any(|e| e.name == top) => anyhow::bail!(
+                "top entity `{top}` has a generic without a default value, so it cannot \
+                 run on its own: give every generic a default, or run an entity that \
+                 instantiates it"
+            ),
+            None => None,
+        },
+        None => None,
+    };
 
     // Extract all loaded module HIRs from the resolver
     let mut module_hirs: IndexMap<PathBuf, Hir> = resolver
@@ -394,6 +437,7 @@ pub fn parse_and_build_compilation_context_from_source_for_device(
     Ok(CompilationContext {
         main_hir: monomorphized_hir,
         module_hirs,
+        top_module,
     })
 }
 

@@ -914,7 +914,14 @@ impl Testbench {
         // them), as the behavioral testbench and the CLI do: a design that
         // uses `fp32` arithmetic or `sqrt` without importing the fp module
         // gets those impls from there.
-        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
+        let context = match top_module_name {
+            Some(top) => {
+                skalp_frontend::parse_and_build_compilation_context_for_top(path, None, top)?
+            }
+            None => skalp_frontend::parse_and_build_compilation_context(path)?,
+        };
+        // A generic top runs as its specialization with default generics
+        let top_module_name = context.top_module.as_deref().or(top_module_name);
 
         // Compile to MIR
         let compiler = MirCompiler::new();
@@ -1049,8 +1056,15 @@ impl Testbench {
         // Parse with compilation context (supports module resolution)
         let context = match path.extension().and_then(|s| s.to_str()) {
             Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
-            _ => skalp_frontend::parse_and_build_compilation_context(path)?,
+            _ => match top_module {
+                Some(top) => {
+                    skalp_frontend::parse_and_build_compilation_context_for_top(path, None, top)?
+                }
+                None => skalp_frontend::parse_and_build_compilation_context(path)?,
+            },
         };
+        // A generic top runs as its specialization with default generics
+        let top_module = context.top_module.as_deref().or(top_module);
 
         // Compile to MIR with modules
         let compiler = MirCompiler::new();
@@ -1123,7 +1137,14 @@ impl Testbench {
     ) -> Result<skalp_sir::SirModule> {
         let context = match path.extension().and_then(|s| s.to_str()) {
             Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
-            _ => skalp_frontend::parse_and_build_compilation_context_for_device(path, device)?,
+            _ => match explicit_top {
+                Some(top) => {
+                    skalp_frontend::parse_and_build_compilation_context_for_top(path, device, top)?
+                }
+                None => {
+                    skalp_frontend::parse_and_build_compilation_context_for_device(path, device)?
+                }
+            },
         };
 
         let compiler = MirCompiler::new();
@@ -1158,7 +1179,15 @@ impl Testbench {
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
 
-        let top_module = if let Some(explicit_name) = explicit_top {
+        let top_module = if let Some(name) = &context.top_module {
+            // The frontend resolved the requested top: a generic one is its
+            // specialization with default generics, not whichever
+            // specialization the rest of the file happens to use
+            mir.modules
+                .iter()
+                .find(|m| &m.name == name)
+                .ok_or_else(|| anyhow::anyhow!("Top module '{}' not found", name))?
+        } else if let Some(explicit_name) = explicit_top {
             // BUG #230 + #232 FIX: When looking for a top module by name, also consider
             // specialized versions (e.g., "TriangularCarrier" should match "TriangularCarrier_1000").
             // Collect both exact matches and specialized versions.
