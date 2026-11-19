@@ -3048,6 +3048,98 @@ fn decompose_memblock_to_dffs(
 /// 2. Physical cell inputs connect to existing LIR primary input nets or
 ///    other physical node output nets
 /// 3. For NCL ops without native THmn gates, C-element macros are used
+/// One bit of a transparent latch, `q = en ? d : q`, with `q` its own output.
+///
+/// The library's latch cell where it has one. Otherwise a 4-input LUT whose
+/// output feeds back into it (one LUT and its own feedback wire: a LUT reads
+/// each input once, so changing one input with the output already at the
+/// value it keeps does not glitch it, which is what holds the value when the
+/// enable falls). Without either, kept gates with the consensus term
+/// `d & q`, which holds the output through the enable's fall whatever the
+/// gates' delays.
+fn map_latch_bit(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    en: GateNetId,
+    d: GateNetId,
+    q: GateNetId,
+    path: &str,
+) {
+    let kept = |cell: &mut Cell| {
+        cell.source_op = Some(crate::gate_netlist::LATCH_OP.to_string());
+    };
+    if let Some(latch) = library.find_best_cell(&CellFunction::Latch) {
+        let latch = LibraryCellInfo::from_library_cell(latch);
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            latch.name.clone(),
+            library.name.clone(),
+            latch.fit,
+            path.to_string(),
+            vec![en, d],
+            vec![q],
+        );
+        latch.apply_to_cell(&mut cell);
+        kept(&mut cell);
+        netlist.add_cell(cell);
+        return;
+    }
+    if let Some(lut) = library.find_best_cell(&CellFunction::Lut4) {
+        let lut = LibraryCellInfo::from_library_cell(lut);
+        let mut inputs = vec![GateNetId(0); 3];
+        inputs[crate::gate_netlist::LATCH_D_PIN] = d;
+        inputs[crate::gate_netlist::LATCH_EN_PIN] = en;
+        inputs[crate::gate_netlist::LATCH_Q_PIN] = q;
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            lut.name.clone(),
+            library.name.clone(),
+            lut.fit,
+            path.to_string(),
+            inputs,
+            vec![q],
+        );
+        lut.apply_to_cell(&mut cell);
+        cell.lut_init = Some(crate::gate_netlist::LATCH_LUT_INIT);
+        kept(&mut cell);
+        netlist.add_cell(cell);
+        return;
+    }
+    // q = (d & en) | (q & !en) | (d & q)
+    let inv = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
+    let and2 = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let or2 = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+    let net = |netlist: &mut GateNetlist, name: &str| {
+        netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{name}")))
+    };
+    let not_en = net(netlist, "not_en");
+    let load = net(netlist, "load");
+    let keep = net(netlist, "keep");
+    let both = net(netlist, "both");
+    let either = net(netlist, "either");
+    for (info, name, inputs, output) in [
+        (&inv, "inv", vec![en], not_en),
+        (&and2, "load_and", vec![d, en], load),
+        (&and2, "keep_and", vec![q, not_en], keep),
+        (&and2, "both_and", vec![d, q], both),
+        (&or2, "or_a", vec![load, keep], either),
+        (&or2, "or_b", vec![either, both], q),
+    ] {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            info.name.clone(),
+            library.name.clone(),
+            info.fit,
+            format!("{path}.{name}"),
+            inputs,
+            vec![output],
+        );
+        info.apply_to_cell(&mut cell);
+        kept(&mut cell);
+        netlist.add_cell(cell);
+    }
+}
+
 fn merge_physical_nodes_into_netlist(
     netlist: &mut GateNetlist,
     lir: &Lir,
@@ -3440,6 +3532,25 @@ fn merge_physical_nodes_into_netlist(
                         cell.source_op = Some(crate::gate_netlist::STEP_CONTROL_OP.to_string());
                         netlist.add_cell(cell);
                     }
+                }
+            }
+
+            LirOp::Latch { width } => {
+                // q = en ? d : q per bit: a transparent latch, built without
+                // a clock pin (see `LirOp::Latch`)
+                let enable = input_nets
+                    .first()
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
+                for i in 0..*width as usize {
+                    let d = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let q = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    map_latch_bit(netlist, library, enable, d, q, &format!("{path}.lat{i}"));
                 }
             }
 
