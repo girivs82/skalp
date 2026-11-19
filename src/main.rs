@@ -301,6 +301,14 @@ enum Commands {
         /// not safe to use
         #[arg(long, value_name = "TIME")]
         settle_wait: Option<String>,
+
+        /// Where a bundled-data async block keeps its state: `ff`, flip-flops
+        /// clocked by the block's step strobe (on FPGAs whose flip-flop clock
+        /// pins only the clock network reaches, one network entry per block),
+        /// or `latch`, master-slave pairs of latches built from logic (no
+        /// clock network)
+        #[arg(long, value_name = "KIND", default_value = "ff", value_parser = ["ff", "latch"])]
+        async_state: String,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -932,6 +940,7 @@ fn main() -> Result<()> {
             power_stub,
             debug,
             settle_wait,
+            async_state,
         } => {
             synthesize_design(
                 &source,
@@ -945,6 +954,7 @@ fn main() -> Result<()> {
                 power_stub,
                 debug,
                 settle_wait.as_deref(),
+                async_state == "latch",
             )?;
         }
 
@@ -1659,6 +1669,7 @@ fn build_design(
                         completion_tree_depth: None,
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
+                        latch_state: false,
                     };
                     skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
                 } else {
@@ -1719,6 +1730,7 @@ fn build_design(
                         completion_tree_depth: None,
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
+                        latch_state: false,
                     };
                     let ncl_result =
                         skalp_lir::expand_to_ncl_boundary(&lir_result.lir, &ncl_config);
@@ -4795,6 +4807,7 @@ fn synthesize_design(
     power_stub: bool,
     debug: bool,
     settle_wait: Option<&str>,
+    latch_state: bool,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context_for_device;
     use skalp_lir::get_stdlib_library;
@@ -4945,6 +4958,7 @@ fn synthesize_design(
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true,
+            latch_state,
         };
         skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
     } else {

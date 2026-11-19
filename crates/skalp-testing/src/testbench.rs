@@ -380,6 +380,7 @@ impl Testbench {
                 completion_tree_depth: None,
                 generate_null_wavefront: true,
                 use_opaque_arithmetic: true,
+                latch_state: false,
             };
             skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
         } else {
@@ -966,6 +967,7 @@ impl Testbench {
                     completion_tree_depth: None,
                     generate_null_wavefront: true,
                     use_opaque_arithmetic: true,
+                    latch_state: false,
                 };
                 skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
             } else {
