@@ -2933,7 +2933,7 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
 /// Each `x & delay(x)` is a [`LirOp::NclMatchedDelay`], sized after mapping
 /// to cover the block's data paths.
 pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
-    expand_to_ncl_bridged_with(lir, false, AsyncState::FlipFlop)
+    expand_to_ncl_bridged_with(lir, false, &[], AsyncState::FlipFlop)
 }
 
 /// [`expand_to_ncl_bridged`] for a block whose coalesced async children have
@@ -2979,9 +2979,15 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
 /// the step control's), so a bit that must start at 1 is stored inverted.
 /// Registers with an enable or reset, and blocks whose coalesced children
 /// have registers (clocked by `go` themselves), keep flip-flops.
+///
+/// `child_inputs` names the block's signals that its child instances read
+/// (a library adder, say). What a child does with them is not visible here,
+/// so a register whose value reaches one is taken to feed the block's own
+/// state.
 pub fn expand_to_ncl_bridged_with(
     lir: &Lir,
     children_have_regs: bool,
+    child_inputs: &[String],
     async_state: AsyncState,
 ) -> NclExpandResult {
     use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
@@ -3166,7 +3172,7 @@ pub fn expand_to_ncl_bridged_with(
     // Registers as latches: `done` then times from the strobe that opens
     // them last
     let state_strobe = if async_state != AsyncState::FlipFlop && !children_have_regs {
-        latch_registers(&mut new_lir, go, async_state).unwrap_or(go)
+        latch_registers(&mut new_lir, go, child_inputs, async_state).unwrap_or(go)
     } else {
         go
     };
@@ -3320,7 +3326,12 @@ pub fn expand_to_ncl_bridged_with(
 /// `done` follows (the slaves' enable, or the pulse's end), or `None` when
 /// no register could be turned (none, or only ones with an enable or
 /// reset), in which case nothing changes.
-fn latch_registers(lir: &mut Lir, go: LirSignalId, state: AsyncState) -> Option<LirSignalId> {
+fn latch_registers(
+    lir: &mut Lir,
+    go: LirSignalId,
+    child_inputs: &[String],
+    state: AsyncState,
+) -> Option<LirSignalId> {
     let regs: Vec<usize> = (0..lir.nodes.len())
         .filter(|&i| {
             let n = &lir.nodes[i];
@@ -3341,7 +3352,7 @@ fn latch_registers(lir: &mut Lir, go: LirSignalId, state: AsyncState) -> Option<
     }
     if state == AsyncState::PulseLatch {
         let (pulse_end, pulse) = make_pulse(lir, go);
-        let feedback = registers_feeding_state(lir, &regs, go);
+        let feedback = registers_feeding_state(lir, &regs, go, child_inputs);
         let slave_open = (!feedback.is_empty()).then(|| {
             let slave_open = lir.add_signal("__ncl_slave_open".to_string(), 1);
             lir.add_node(
@@ -3477,11 +3488,14 @@ fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignal
 
 /// The registers among `regs` (node indices) whose outputs reach, through
 /// logic, an input of a state-holding node of the block (another register,
-/// a latch, a memory) or of something clocked by `go`
+/// a latch, a memory), of something clocked by `go`, or of a child instance
+/// (`child_inputs`, by signal name: its insides are not visible here, and
+/// its outputs may come back to the block's state)
 fn registers_feeding_state(
     lir: &Lir,
     regs: &[usize],
     go: LirSignalId,
+    child_inputs: &[String],
 ) -> std::collections::HashSet<usize> {
     use std::collections::{HashMap, HashSet};
     let mut readers: HashMap<LirSignalId, Vec<usize>> = HashMap::new();
@@ -3491,6 +3505,15 @@ fn registers_feeding_state(
         }
     }
     let holds_state = |node: &LirNode| node.op.is_sequential() || node.clock == Some(go);
+    let to_child: Option<HashSet<LirSignalId>> = child_inputs
+        .iter()
+        .map(|name| lir.get_signal(name).map(|s| s.id))
+        .collect();
+    // A child reads something not found here: assume every register may
+    // reach it
+    let Some(to_child) = to_child else {
+        return regs.iter().copied().collect();
+    };
     let mut result = HashSet::new();
     for &idx in regs {
         let mut seen: HashSet<LirSignalId> = HashSet::new();
@@ -3498,6 +3521,10 @@ fn registers_feeding_state(
         'walk: while let Some(signal) = stack.pop() {
             if !seen.insert(signal) {
                 continue;
+            }
+            if to_child.contains(&signal) {
+                result.insert(idx);
+                break 'walk;
             }
             for &reader in readers.get(&signal).map_or(&[][..], |v| v.as_slice()) {
                 let node = &lir.nodes[reader];
@@ -3654,6 +3681,34 @@ pub fn step_condition_errors(flat: &Lir, path: &str, module: &str) -> Vec<String
             )
         })
         .collect()
+}
+
+/// The signals of instance `path` that its child instances read: the
+/// parent signal each child input port is connected to
+fn child_inputs(hier_lir: &crate::HierarchicalMirToLirResult, path: &str) -> Vec<String> {
+    use crate::mir_to_lir::PortConnectionInfo;
+    let mut names = Vec::new();
+    for child in hier_lir.hierarchy.get(path).into_iter().flatten() {
+        let Some(inst) = hier_lir.instances.get(child) else {
+            continue;
+        };
+        let lir = &inst.lir_result.lir;
+        for &input in &lir.inputs {
+            let port = &lir.signals[input.0 as usize].name;
+            match inst.port_connections.get(port) {
+                Some(PortConnectionInfo::Signal(name))
+                | Some(PortConnectionInfo::Range(name, _, _))
+                | Some(PortConnectionInfo::BitSelect(name, _)) => names.push(name.clone()),
+                // Driven by a constant, or by another child's output (which
+                // the walk reaches through that child's own inputs)
+                Some(PortConnectionInfo::Constant(_))
+                | Some(PortConnectionInfo::InstancePort(..)) => {}
+                // Not connected: nothing of the block reaches it
+                None => {}
+            }
+        }
+    }
+    names
 }
 
 /// An async block whose step strobe stops clocking anything once its
@@ -3860,6 +3915,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
             let ncl_result = expand_to_ncl_bridged_with(
                 &instance.lir_result.lir,
                 children_use_go(path),
+                &child_inputs(hier_lir, path),
                 async_state,
             );
             new_instances.insert(
@@ -4176,7 +4232,7 @@ mod tests {
             lir.nodes[idx].clock = Some(go);
         }
 
-        let strobe = latch_registers(&mut lir, go, AsyncState::PulseLatch);
+        let strobe = latch_registers(&mut lir, go, &[], AsyncState::PulseLatch);
         let latches = |prefix: &str| -> Vec<String> {
             lir.nodes
                 .iter()
@@ -4190,6 +4246,36 @@ mod tests {
         let strobe = strobe.expect("registers turned into latches");
         assert_eq!(lir.signals[strobe.0 as usize].name, "__ncl_slave_open");
         assert!(lir.nodes.iter().all(|n| n.clock.is_none()));
+    }
+
+    /// A register whose value goes into a child instance (a library adder,
+    /// say) may come back from it: that register gets a slave too, and so
+    /// does every register when a child reads a signal the block lacks
+    #[test]
+    fn registers_read_by_a_child_instance_feed_state() {
+        let mut lir = crate::lir::Lir::new("child".to_string());
+        let go = lir.add_input("go".to_string(), 1);
+        let a = lir.add_input("a".to_string(), 4);
+        let sum = lir.add_input("sum".to_string(), 4); // the child's output
+        let out = lir.add_output("out".to_string(), 4);
+        let acc = lir.add_signal("acc".to_string(), 4);
+        let reg = LirOp::Reg {
+            width: 4,
+            has_enable: false,
+            has_reset: false,
+            async_reset: false,
+            reset_value: None,
+        };
+        lir.add_node(reg.clone(), vec![sum], acc, "acc_reg".into());
+        lir.add_node(reg, vec![a], out, "out_reg".into());
+        for idx in [0, 1] {
+            lir.nodes[idx].clock = Some(go);
+        }
+        let feeding = registers_feeding_state(&lir, &[0, 1], go, &["acc".to_string()]);
+        assert_eq!(feeding, [0].into_iter().collect());
+        assert!(registers_feeding_state(&lir, &[0, 1], go, &[]).is_empty());
+        let all = registers_feeding_state(&lir, &[0, 1], go, &["missing".to_string()]);
+        assert_eq!(all, [0, 1].into_iter().collect());
     }
 
     #[test]
