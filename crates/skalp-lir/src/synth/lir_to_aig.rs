@@ -626,6 +626,7 @@ impl<'a> LirToSynthAig<'a> {
             | LirOp::NclStepControl
             | LirOp::NclArbiter { .. }
             | LirOp::NclTake { .. }
+            | LirOp::NclExclusive { .. }
             // A level-sensitive latch is one cell per bit whose output feeds
             // back into it: kept out of the AIG, which would see a loop
             | LirOp::Latch { .. }

@@ -1083,6 +1083,14 @@ pub enum LirOp {
     /// kept AND per bit, so no optimization merges the data into logic in
     /// which its changes could glitch while the grant is low.
     NclTake { width: u32 },
+    /// Exclusive merge of a self-timed block (`match exclusive(..)` in
+    /// `skalp_frontend::ncl_streams`): the design promises that at most one
+    /// of the merged channels holds a value at a time, so no arbiter is
+    /// needed and each grant is its request. Input: the requests. Output:
+    /// the grants, same width. Physical: one kept buffer per bit, so the
+    /// grants stay visible (the timed simulation reports any moment two of
+    /// them are high: the promise broken).
+    NclExclusive { width: u32 },
 }
 
 impl LirOp {
@@ -1148,6 +1156,7 @@ impl LirOp {
             LirOp::NclStepControl => 1,
             LirOp::NclArbiter { width } => *width,
             LirOp::NclTake { width } => *width,
+            LirOp::NclExclusive { width } => *width,
             // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
@@ -1236,6 +1245,7 @@ impl LirOp {
             LirOp::NclStepControl => 3,
             LirOp::NclArbiter { .. } => 3,
             LirOp::NclTake { .. } => 2,
+            LirOp::NclExclusive { .. } => 1,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

@@ -10007,6 +10007,31 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         }
     }
 
+    // Exclusive merges whose promise broke: two channels full at once
+    if sim.exclusive_merge_count() > 0 {
+        let clashes = sim.exclusive_clash_count();
+        if clashes == 0 {
+            println!(
+                "Exclusive merges: ✅ {} merges, never two grants at once",
+                sim.exclusive_merge_count()
+            );
+        } else {
+            println!(
+                "Exclusive merges: ❌ {clashes} times two channels of one merge held a value at once"
+            );
+            const DEFAULT_SHOWN: usize = 20;
+            let shown = args.timed.violations.unwrap_or(DEFAULT_SHOWN);
+            for c in sim.exclusive_clashes().iter().take(shown) {
+                println!(
+                    "  {:>14.3} ns  {} arms {:?}",
+                    c.time_ps as f64 / 1e3,
+                    c.merge,
+                    c.arms
+                );
+            }
+        }
+    }
+
     // Races decided by one-cell latches (mutexes): not violations, but
     // worth knowing about, by latch
     let races = sim.latch_race_count();

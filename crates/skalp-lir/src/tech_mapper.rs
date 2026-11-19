@@ -3584,6 +3584,31 @@ fn merge_physical_nodes_into_netlist(
                 }
             }
 
+            LirOp::NclExclusive { width } => {
+                // grant = request, one kept buffer per bit (see
+                // `LirOp::NclExclusive`)
+                for i in 0..*width as usize {
+                    let request = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let mut buf = Cell::new_comb(
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{path}.excl{i}"),
+                        vec![request],
+                        vec![out],
+                    );
+                    buf_cell.apply_to_cell(&mut buf);
+                    buf.source_op = Some(crate::gate_netlist::EXCLUSIVE_OP.to_string());
+                    netlist.add_cell(buf);
+                }
+            }
+
             LirOp::NclArbiter { width } => {
                 let requests: Vec<GateNetId> = (0..*width as usize)
                     .map(|i| {

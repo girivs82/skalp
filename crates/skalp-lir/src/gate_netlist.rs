@@ -157,6 +157,12 @@ pub const ARBITER_OP: &str = "NclArbiter";
 /// let a stream's changing value glitch it while the grant is low.
 pub const TAKE_OP: &str = "NclTake";
 
+/// `source_op` of the buffers that carry the grants of an exclusive merge
+/// of a self-timed block (`LirOp::NclExclusive`), one per arm, each cell's
+/// path ending in `.excl<arm>`: kept, so the grants stay visible to the
+/// timed simulation, which reports any moment two of one merge are high.
+pub const EXCLUSIVE_OP: &str = "NclExclusive";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -254,6 +260,7 @@ impl Cell {
                 | Some(STEP_CONTROL_OP)
                 | Some(ARBITER_OP)
                 | Some(TAKE_OP)
+                | Some(EXCLUSIVE_OP)
                 | Some(LATCH_OP)
         )
     }

@@ -49,8 +49,9 @@
 //! one of those inputs.
 
 use crate::gate_netlist::{
-    Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, LATCH_D_PIN, LATCH_EN_PIN,
-    LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN, MATCHED_DELAY_OP, STEP_CONTROL_OP, STEP_LATCH_READY_PIN,
+    Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, EXCLUSIVE_OP, LATCH_D_PIN,
+    LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN, MATCHED_DELAY_OP, STEP_CONTROL_OP,
+    STEP_LATCH_READY_PIN,
 };
 use crate::tech_library::{CellFunction, TechLibrary};
 use std::collections::{HashMap, HashSet};
@@ -1585,7 +1586,8 @@ pub const GRANT_SETTLE_DELAY_PATH: &str = "ncl_bundle.grant_settle";
 /// delayed signal arrives, or `ready` can glitch up for a step whose
 /// channel is not ready. Data: from the grants (every output of the
 /// block's arbiter cells, at time 0) to the step latch's `ready` input,
-/// leaving out the delayed signal itself. Control: from the grants through
+/// leaving out the delayed signal itself (an exclusive merge's grants are
+/// its kept buffers). Control: from the grants through
 /// "some arm granted" and the delay.
 fn check_grant_settles(
     netlist: &GateNetlist,
@@ -1602,7 +1604,10 @@ fn check_grant_settles(
             .cells
             .iter()
             .filter(|c| {
-                c.source_op.as_deref() == Some(ARBITER_OP) && c.path.starts_with(&md.prefix)
+                matches!(
+                    c.source_op.as_deref(),
+                    Some(ARBITER_OP) | Some(EXCLUSIVE_OP)
+                ) && c.path.starts_with(&md.prefix)
             })
             .flat_map(|c| c.outputs.iter().map(|&o| (o, 0)))
             .collect();

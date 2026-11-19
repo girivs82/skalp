@@ -3063,21 +3063,61 @@ pub fn expand_to_ncl_bridged_with(
         }
     }
 
+    // Exclusive merges (`match exclusive(..)`): no arbiter, each grant is
+    // its request, through kept buffers (`LirOp::NclExclusive`) that keep
+    // the grants visible to the timed simulation's exclusivity check
+    let mut exclusives = 0usize;
+    if ready.is_some() {
+        use skalp_frontend::ncl_streams::NCL_EXCLUSIVE_PREFIX;
+        for k in 0.. {
+            let (Some(req_sig), Some(gnt_sig)) = (
+                new_lir.get_signal(&format!("{NCL_EXCLUSIVE_PREFIX}{k}_req")),
+                new_lir.get_signal(&format!("{NCL_EXCLUSIVE_PREFIX}{k}_gnt")),
+            ) else {
+                break;
+            };
+            let (req_id, gnt_id, width) = (req_sig.id, gnt_sig.id, gnt_sig.width);
+            match gnt_sig.driver {
+                Some(driver) => {
+                    let node = &mut new_lir.nodes[driver.0 as usize];
+                    node.op = LirOp::NclExclusive { width };
+                    node.inputs = vec![req_id];
+                    node.clock = None;
+                    node.reset = None;
+                }
+                None => {
+                    new_lir.add_node(
+                        LirOp::NclExclusive { width },
+                        vec![req_id],
+                        gnt_id,
+                        format!("ncl_bundle.exclusive{k}"),
+                    );
+                }
+            }
+            exclusives += 1;
+        }
+    }
+
     // Grants that the step's send/recv conditions depend on: "some arm
     // granted" (`__ncl_arb<k>_any`) reaches `ready` only a matched delay
     // after it rises, once what the grant decides has settled ("grant
     // settle" check, see `ncl_bundle`), so `ready` never glitches up for a
     // step whose channel is not ready. It falls at once with the grant.
     if ready.is_some() {
-        use skalp_frontend::ncl_streams::{NCL_ARBITER_PREFIX, NCL_GRANT_ANY_SUFFIX};
-        for k in 0..arbiters.len() {
+        use skalp_frontend::ncl_streams::{
+            NCL_ARBITER_PREFIX, NCL_EXCLUSIVE_PREFIX, NCL_GRANT_ANY_SUFFIX,
+        };
+        let merges = (0..arbiters.len())
+            .map(|k| (NCL_ARBITER_PREFIX, k))
+            .chain((0..exclusives).map(|k| (NCL_EXCLUSIVE_PREFIX, k)));
+        for (prefix, k) in merges {
             let Some(any) = new_lir
-                .get_signal(&format!("{NCL_ARBITER_PREFIX}{k}{NCL_GRANT_ANY_SUFFIX}"))
+                .get_signal(&format!("{prefix}{k}{NCL_GRANT_ANY_SUFFIX}"))
                 .map(|s| s.id)
             else {
                 continue;
             };
-            let settled = new_lir.add_signal(format!("__ncl_arb{k}_settled"), 1);
+            let settled = new_lir.add_signal(format!("{prefix}{k}_settled"), 1);
             for node in new_lir.nodes.iter_mut() {
                 for input in node.inputs.iter_mut() {
                     if *input == any {
@@ -3085,11 +3125,17 @@ pub fn expand_to_ncl_bridged_with(
                     }
                 }
             }
+            // (one delay per merge: the matched-delay names must differ)
+            let name = if prefix == NCL_ARBITER_PREFIX {
+                format!("{}{k}", crate::ncl_bundle::GRANT_SETTLE_DELAY_PATH)
+            } else {
+                format!("{}_excl{k}", crate::ncl_bundle::GRANT_SETTLE_DELAY_PATH)
+            };
             new_lir.add_node(
                 LirOp::NclMatchedDelay { width: 1 },
                 vec![any],
                 settled,
-                format!("{}{k}", crate::ncl_bundle::GRANT_SETTLE_DELAY_PATH),
+                name,
             );
         }
     }
