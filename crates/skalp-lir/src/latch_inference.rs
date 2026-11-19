@@ -235,7 +235,14 @@ fn build_arm(
         (a, b) => {
             let a = hold_signal(lir, a, path, fresh);
             let b = hold_signal(lir, b, path, fresh);
-            Hold::When(add(lir, LirOp::Mux2 { width: 1 }, vec![sel, a, b], 1, path, fresh))
+            Hold::When(add(
+                lir,
+                LirOp::Mux2 { width: 1 },
+                vec![sel, a, b],
+                1,
+                path,
+                fresh,
+            ))
         }
     };
     let data = match (low.data, high.data) {
@@ -445,8 +452,18 @@ mod tests {
         let inner = lir.add_signal("inner".into(), 4);
         let m = lir.add_signal("t.mux_out".into(), 4);
         let l = lir.add_signal("l".into(), 4);
-        lir.add_node(LirOp::Mux2 { width: 4 }, vec![b, l, y], inner, "t.in".into());
-        lir.add_node(LirOp::Mux2 { width: 4 }, vec![a, inner, x], m, "t.out".into());
+        lir.add_node(
+            LirOp::Mux2 { width: 4 },
+            vec![b, l, y],
+            inner,
+            "t.in".into(),
+        );
+        lir.add_node(
+            LirOp::Mux2 { width: 4 },
+            vec![a, inner, x],
+            m,
+            "t.out".into(),
+        );
         lir.add_node(LirOp::Buffer { width: 4 }, vec![m], l, "t.assign".into());
         let made = infer_latches(&mut lir);
         assert_eq!(made.len(), 1);
