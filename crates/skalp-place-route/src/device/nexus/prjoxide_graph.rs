@@ -927,6 +927,78 @@ pub fn build_routing_graph_with_clocks(
     Ok(g)
 }
 
+/// The device's dedicated clock network: the arcs of every tile whose wiring
+/// carries device-global (`G:`) wires, such as the clock muxes of the edges
+/// and centre, the PLL tiles, and the I/O tiles' edge clock taps. General
+/// routing tiles have none, so a path found here is one a clock takes without
+/// entering general routing (from a PLL's output to an edge clock
+/// synchronizer, say).
+#[derive(Debug, Default)]
+pub struct ClockNetwork {
+    next: crate::collections::HashMap<NodeKey, Vec<NodeKey>>,
+}
+
+impl ClockNetwork {
+    /// The network of a device whose tiles are `tiles`.
+    pub fn load(db_root: &Path, family: &str, tiles: &[PrjoxideTile]) -> Result<Self, String> {
+        let mut cache: crate::collections::HashMap<String, Option<TileBitsDb>> =
+            crate::collections::HashMap::default();
+        let mut network = Self::default();
+        for tile in tiles {
+            let routing_type = routing_tiletype(tile, tiles);
+            if !cache.contains_key(&routing_type) {
+                let db = load_tiletype(db_root, family, &routing_type)?
+                    .filter(TileBitsDb::carries_global_wires);
+                cache.insert(routing_type.clone(), db);
+            }
+            let Some(db) = cache.get(&routing_type).and_then(Option::as_ref) else {
+                continue;
+            };
+            for edge in tile_edges(tile, db) {
+                network.next.entry(edge.src).or_default().push(edge.dst);
+            }
+        }
+        Ok(network)
+    }
+
+    /// Whether `from` has an arc of the network leaving it.
+    pub fn drives(&self, from: &NodeKey) -> bool {
+        self.next.get(from).is_some_and(|n| !n.is_empty())
+    }
+
+    /// Whether a path of the network leads from any of `from` to `to`.
+    pub fn reaches(&self, from: &[NodeKey], to: &NodeKey) -> bool {
+        let mut seen: crate::collections::HashSet<&NodeKey> =
+            crate::collections::HashSet::default();
+        let mut queue: Vec<&NodeKey> = from.iter().collect();
+        while let Some(node) = queue.pop() {
+            if node == to {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            queue.extend(self.next.get(node).into_iter().flatten());
+        }
+        false
+    }
+}
+
+impl TileBitsDb {
+    /// Whether any arc of the tile type starts or ends on a device-global
+    /// wire other than the constant `VCC`.
+    fn carries_global_wires(&self) -> bool {
+        let global = |w: &str| w.starts_with("G:") && w != "G:VCC";
+        self.pips
+            .iter()
+            .any(|(dst, arcs)| global(dst) || arcs.iter().any(|a| global(&a.from_wire)))
+            || self
+                .conns
+                .iter()
+                .any(|(dst, conns)| global(dst) || conns.iter().any(|c| global(&c.from_wire)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
