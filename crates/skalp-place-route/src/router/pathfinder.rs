@@ -269,6 +269,8 @@ pub struct PathFinder<'a, D: Device> {
     present_factor: f64,
     /// Timing weight for timing-driven routing (0.0 = ignore timing, 1.0 = full timing)
     timing_weight: f64,
+    /// Routes to start from (see [`Self::with_initial_routes`])
+    initial: HashMap<GateNetId, Route>,
 }
 
 impl<'a, D: Device + Clone> PathFinder<'a, D> {
@@ -285,6 +287,7 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             history_factor,
             present_factor,
             timing_weight: 0.0, // Default: no timing-driven routing
+            initial: HashMap::new(),
         }
     }
 
@@ -302,7 +305,17 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
             history_factor,
             present_factor,
             timing_weight,
+            initial: HashMap::new(),
         }
+    }
+
+    /// Start from `routes` (an earlier routing of nets whose ends have not
+    /// moved) instead of routing those nets first: only the other nets are
+    /// routed at the start, against them, and they are ripped up and
+    /// rerouted like any other net only where they then share a wire.
+    pub fn with_initial_routes(mut self, routes: HashMap<GateNetId, Route>) -> Self {
+        self.initial = routes;
+        self
     }
 
     /// Route every net that has a driver and a sink using PathFinder
@@ -406,8 +419,26 @@ impl<'a, D: Device + Clone> PathFinder<'a, D> {
         // Initial routing - use congestion-aware routing from the start
         // This reduces the number of conflicts that need to be resolved
         let t_start = std::time::Instant::now();
+        // The routes started from take their wires before anything routes
+        let mut started = 0;
+        for &net_id in &nets_to_route {
+            if let Some(route) = self.initial.get(&net_id) {
+                for wire in Self::shared_wires(route) {
+                    congestion.add_usage(wire);
+                }
+                result.routes.insert(net_id, route.clone());
+                started += 1;
+            }
+        }
+        if started > 0 {
+            log::info!(
+                "pathfinder: started from {started} earlier routes, routing {} nets",
+                nets_to_route.len() - started
+            );
+        }
         let initial: Vec<NetJob> = nets_to_route
             .iter()
+            .filter(|net_id| !result.routes.contains_key(net_id))
             .map(|&net_id| NetJob {
                 net_id,
                 margin: SEARCH_MARGIN,

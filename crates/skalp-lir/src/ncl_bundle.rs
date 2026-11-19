@@ -195,7 +195,8 @@ pub struct BundleCheck {
     /// Path of the matched delay's AND cell
     pub delay_path: String,
     /// What the control times: "registers", "acknowledge", "next state",
-    /// "channel", "channel hold", "arbiter" or "step decision"
+    /// "channel", "channel hold", "arbiter", "step decision", "release"
+    /// or "grant settle"
     pub times: &'static str,
     /// Latest data arrival plus setup, in picoseconds. For an "arbiter" or
     /// "step decision" check, the resolution wait the decision needs; for a
@@ -637,6 +638,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     checks.extend(check_register_holds(netlist, delays, &matched));
     checks.extend(check_arbiters(netlist, delays, &matched));
     checks.extend(check_releases(netlist, delays, &matched));
+    checks.extend(check_grant_settles(netlist, delays, &matched));
     checks
 }
 
@@ -789,6 +791,70 @@ fn settled_output(cell: &Cell, output: usize, inputs: &[Option<bool>]) -> Option
         }
     }
     value
+}
+
+/// Name (followed by the arbiter's number) of the matched delay that holds
+/// back a self-timed block's "some arm granted" until what the grant
+/// decides has settled (see `ncl_expand::expand_to_ncl_bridged_with` and
+/// [`check_grant_settles`])
+pub const GRANT_SETTLE_DELAY_PATH: &str = "ncl_bundle.grant_settle";
+
+/// A block whose send/recv conditions depend on its arbiters' grants
+/// (`skalp_frontend::ncl_streams::grant_settle_needed`) reads "some arm
+/// granted" at its step latch through a matched delay. Everything the
+/// grants decide must settle at the latch's `ready` input before that
+/// delayed signal arrives, or `ready` can glitch up for a step whose
+/// channel is not ready. Data: from the grants (every output of the
+/// block's arbiter cells, at time 0) to the step latch's `ready` input,
+/// leaving out the delayed signal itself. Control: from the grants through
+/// "some arm granted" and the delay.
+fn check_grant_settles(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    matched: &[MatchedDelay],
+) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    for md in matched {
+        let and_cell = &netlist.cells[md.and_cell.0 as usize];
+        if !and_cell.path.contains(GRANT_SETTLE_DELAY_PATH) {
+            continue;
+        }
+        let grants: HashMap<GateNetId, i64> = netlist
+            .cells
+            .iter()
+            .filter(|c| {
+                c.source_op.as_deref() == Some(ARBITER_OP) && c.path.starts_with(&md.prefix)
+            })
+            .flat_map(|c| c.outputs.iter().map(|&o| (o, 0)))
+            .collect();
+        let Some((cell, pin, input)) = step_control_ready(netlist, &md.prefix) else {
+            continue;
+        };
+        let Some(data_ps) = Arrivals::new(netlist, delays, &md.prefix, false)
+            .with_sources(grants.clone())
+            .at(input)
+            .map(|t| t + delays.wire_ps(netlist, input, cell, pin))
+        else {
+            continue;
+        };
+        let Some(control_ps) = Arrivals::new(netlist, delays, &md.prefix, false)
+            .with_sources(grants)
+            .at(md.control)
+        else {
+            continue;
+        };
+        checks.push(BundleCheck {
+            prefix: md.prefix.clone(),
+            delay_path: and_cell.path.clone(),
+            times: "grant settle",
+            data_ps,
+            control_ps,
+            chain_len: md.chain.len(),
+            sender: None,
+            unmeasured_settle: false,
+        });
+    }
+    checks
 }
 
 /// Name of the matched delay that holds a self-timed block's arbiter

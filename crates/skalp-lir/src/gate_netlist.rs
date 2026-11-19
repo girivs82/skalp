@@ -119,6 +119,11 @@ pub const ARBITER_MUTEX_INIT: u64 = 0xd4d4;
 /// that optimization must not touch.
 pub const ARBITER_OP: &str = "NclArbiter";
 
+/// `source_op` of the AND gates through which a self-timed block reads what
+/// its arbiter took (`LirOp::NclTake`): merging them into other logic could
+/// let a stream's changing value glitch it while the grant is low.
+pub const TAKE_OP: &str = "NclTake";
+
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
 pub const BLACKBOX_INPUTS_PARAM: &str = "BLACKBOX_INPUTS";
@@ -212,7 +217,7 @@ impl Cell {
     pub fn is_kept(&self) -> bool {
         matches!(
             self.source_op.as_deref(),
-            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(ARBITER_OP)
+            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(ARBITER_OP) | Some(TAKE_OP)
         )
     }
 

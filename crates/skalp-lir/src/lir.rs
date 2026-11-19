@@ -1074,6 +1074,15 @@ pub enum LirOp {
     /// same width as the requests. Physical: a tree of mutual-exclusion
     /// elements (cross-coupled gates), kept.
     NclArbiter { width: u32 },
+    /// What an arbiter of a self-timed block took: inputs `[data, grant]`,
+    /// output `data` while `grant` is high and 0 otherwise. A step may read
+    /// a stream's value in the same step its arbiter takes it (`taken(s)`
+    /// in `skalp_frontend::ncl_streams`); the sender only holds the value
+    /// still while the channel is full, so the step's logic reads it
+    /// through this gate, which changes only with the grant. Physical: one
+    /// kept AND per bit, so no optimization merges the data into logic in
+    /// which its changes could glitch while the grant is low.
+    NclTake { width: u32 },
 }
 
 impl LirOp {
@@ -1138,6 +1147,7 @@ impl LirOp {
             LirOp::NclMatchedDelay { width } => *width,
             LirOp::NclStepControl => 1,
             LirOp::NclArbiter { width } => *width,
+            LirOp::NclTake { width } => *width,
             // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
@@ -1225,6 +1235,7 @@ impl LirOp {
             LirOp::NclMatchedDelay { .. } => 1,
             LirOp::NclStepControl => 3,
             LirOp::NclArbiter { .. } => 3,
+            LirOp::NclTake { .. } => 2,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

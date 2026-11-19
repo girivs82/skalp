@@ -19,8 +19,9 @@ jobs:
       # `full-tests` label, and every push to master, run them all
       selective: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-tests') }}
 
-  # Beta and macOS are only linted on every change; their full test runs
-  # happen before a release (see full-test-matrix.yml).
+  # Beta is only linted on every change. macOS runners are the slowest, so
+  # macOS is not checked here at all: its lint, build and full test runs
+  # happen before a release (see full-test-matrix.yml and release.yml).
   toolchains:
     name: Clippy (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -30,8 +31,6 @@ jobs:
         include:
           - os: ubuntu-latest
             rust: beta
-          - os: macos-latest
-            rust: stable
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -73,7 +72,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS builds before a release only (release.yml)
+        os: [ubuntu-latest, windows-latest]
         rust: [stable]
     steps:
       - name: Checkout code
@@ -92,13 +92,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: skalp-linux
-          path: target/release/skalp
-
-      - name: Upload binary (macOS)
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: skalp-macos
           path: target/release/skalp
 
       - name: Upload binary (Windows)
