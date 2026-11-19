@@ -1,9 +1,9 @@
 // Nexus DDR byte lane looped back on itself, built from the family's primitive library: one DQ
 // and the DQS go out through the write gearboxes and come straight back into the DQS buffer and
 // the read gearbox. Every 16 SCLK cycles the lane sends a 2 tCK preamble and an 8-pulse DQS burst
-// with two data words on DQ; READ is raised for two SCLK cycles starting RD_AT cycles into the
-// period, with the read clock select RDCLKSEL. The edge clock is sim_tick / 16.
-entity NexusLoop<const RD_AT: nat = 1, const RDCLKSEL: nat = 0> {
+// with two data words on DQ; READ is raised for RD_LEN SCLK cycles (one or two) starting RD_AT
+// cycles into the period, with the read clock select RDCLKSEL. The edge clock is sim_tick / 16.
+entity NexusLoop<const RD_AT: nat = 1, const RDCLKSEL: nat = 0, const RD_LEN: nat = 2> {
     in sim_tick: clock
     in rst: bit
     // the DQS buffer's PAUSE: while it is high, READ is ignored
@@ -56,7 +56,8 @@ impl NexusLoop {
     let dqs_d: bit[8] = if running == 1 && (ph == 1 || ph == 2) { 8'h55 } else { 8'h00 }
     let dqs_t: bit[4] = if running == 1 && ph <= 2 { 4'h0 } else { 4'hF }
     let dq_d: bit[8] = if ph == 1 { 8'hA6 } else { 8'h3C }
-    let read: bit[4] = if running == 1 && (ph == rd_at || ph == rd_at + 1) { 4'hF } else { 4'h0 }
+    let rd_len: bit[4] = RD_LEN
+    let read: bit[4] = if running == 1 && (ph == rd_at || (rd_len == 2 && ph == rd_at + 1)) { 4'hF } else { 4'h0 }
 
     inst dqs = DQSBUF {
         DQSI: pin_dqs, ECLKIN: eclk, SCLK: sclk, RST: rst, PAUSE: pause, RSTSMCNT: 0,
