@@ -51,6 +51,26 @@ pub struct ModuleResolver {
     /// When true, allow loading modules with parse errors (for stdlib components
     /// where some secondary entities may use syntax the parser doesn't yet support)
     tolerant_parse: bool,
+
+    /// For each file of the design, the design-wide names of the entities it
+    /// names differently (see [`ModuleResolver::plan_entity_names`])
+    entity_names: IndexMap<PathBuf, IndexMap<String, String>>,
+}
+
+/// What one file of a design defines and imports, for naming its entities
+struct FileEntities {
+    /// Entities defined in the file
+    defined: Vec<String>,
+    /// Imports: the file imported from and what it takes from it
+    imports: Vec<(PathBuf, ImportedNames)>,
+}
+
+/// The names one `use` takes from a file
+enum ImportedNames {
+    /// Each name in the file, under a local name (the same name unless renamed)
+    Named(Vec<(String, String)>),
+    /// Every name in the file
+    Glob,
 }
 
 impl ModuleResolver {
@@ -170,6 +190,7 @@ impl ModuleResolver {
             loading: HashSet::new(),
             root_dir,
             tolerant_parse: false,
+            entity_names: IndexMap::new(),
         }
     }
 
@@ -337,6 +358,287 @@ impl ModuleResolver {
         bail!("Could not find module for import: {}", segments.join("::"))
     }
 
+    /// Give every entity of the design rooted at `main_path` a name no other
+    /// entity of the design has.
+    ///
+    /// Two files may each define an entity of the same name (a module and a
+    /// trimmed copy of it, say). Merged into one design, the two must stay
+    /// two entities: each file that names the entity means its own one, and
+    /// each importer means the one it imported. So an entity whose name is
+    /// defined in more than one file keeps that name only in the main file;
+    /// elsewhere it is named after its file as well (`Unit` of `fast.sk`
+    /// becomes `fast_Unit`). Each file's builder then maps the name the
+    /// file uses (in definitions, implementations, instances and imports) to
+    /// the design-wide one. Designs without such names are unchanged.
+    ///
+    /// A file that sees two different entities under one name, from two
+    /// imports of the same kind (two named imports, or two globs), is an
+    /// error: nothing says which one it means. A name the file defines comes
+    /// before an imported one, and a named import before a glob.
+    pub fn plan_entity_names(
+        &mut self,
+        main_path: &Path,
+        main_tree: &crate::syntax::SyntaxNode,
+    ) -> Result<()> {
+        self.entity_names.clear();
+
+        // Every file reachable from the main file, with what it defines and
+        // imports. Files that cannot be read or parsed are left out here;
+        // loading them reports the problem.
+        let mut files: IndexMap<PathBuf, FileEntities> = IndexMap::new();
+        let mut pending = vec![(main_path.to_path_buf(), Some(main_tree.clone()))];
+        while let Some((path, tree)) = pending.pop() {
+            if files.contains_key(&path) {
+                continue;
+            }
+            let tree = match tree {
+                Some(tree) => tree,
+                None => {
+                    let Ok(source) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    parse::parse_with_errors(&source).0
+                }
+            };
+            let (defined, hir_imports) = crate::hir_builder::scan_entities_and_imports(&tree);
+            let mut imports = Vec::new();
+            for import in &hir_imports {
+                let Ok(dep_path) = self.resolve_import_path(import) else {
+                    continue;
+                };
+                let names = match &import.path {
+                    HirImportPath::Glob { .. } => ImportedNames::Glob,
+                    HirImportPath::Simple { segments } => ImportedNames::Named(
+                        segments
+                            .last()
+                            .map(|n| (n.clone(), n.clone()))
+                            .into_iter()
+                            .collect(),
+                    ),
+                    HirImportPath::Renamed { segments, alias } => ImportedNames::Named(
+                        segments
+                            .last()
+                            .map(|n| (n.clone(), alias.clone()))
+                            .into_iter()
+                            .collect(),
+                    ),
+                    HirImportPath::Nested { paths, .. } => ImportedNames::Named(
+                        paths
+                            .iter()
+                            .filter_map(|p| match p {
+                                HirImportPath::Simple { segments } => {
+                                    segments.last().map(|n| (n.clone(), n.clone()))
+                                }
+                                HirImportPath::Renamed { segments, alias } => {
+                                    segments.last().map(|n| (n.clone(), alias.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                };
+                pending.push((dep_path.clone(), None));
+                imports.push((dep_path, names));
+            }
+            files.insert(path, FileEntities { defined, imports });
+        }
+
+        // Names defined in more than one file
+        let mut defining: IndexMap<&str, Vec<&PathBuf>> = IndexMap::new();
+        for (path, file) in &files {
+            for name in &file.defined {
+                let paths = defining.entry(name.as_str()).or_default();
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        let shared: Vec<&str> = defining
+            .iter()
+            .filter(|(_, paths)| paths.len() > 1)
+            .map(|(name, _)| *name)
+            .collect();
+        if shared.is_empty() {
+            return Ok(());
+        }
+
+        // Design-wide names of the definitions outside the main file
+        let mut taken: HashSet<String> = defining.keys().map(|n| n.to_string()).collect();
+        let mut design_name: IndexMap<(PathBuf, String), String> = IndexMap::new();
+        for name in &shared {
+            for path in &defining[name] {
+                if path.as_path() == main_path {
+                    continue;
+                }
+                let global = self.file_qualified_name(path, name, &taken);
+                taken.insert(global.clone());
+                design_name.insert(((*path).clone(), name.to_string()), global);
+            }
+        }
+
+        // Each file's own names for those entities
+        let shared: HashSet<&str> = shared.into_iter().collect();
+        let mut names: IndexMap<PathBuf, IndexMap<String, String>> = IndexMap::new();
+        for (path, file) in &files {
+            let mut local: Vec<String> = file
+                .defined
+                .iter()
+                .filter(|n| shared.contains(n.as_str()))
+                .cloned()
+                .collect();
+            for (_, imported) in &file.imports {
+                match imported {
+                    ImportedNames::Named(pairs) => local.extend(
+                        pairs
+                            .iter()
+                            .filter(|(name, _)| shared.contains(name.as_str()))
+                            .map(|(_, local)| local.clone()),
+                    ),
+                    ImportedNames::Glob => local.extend(shared.iter().map(|n| n.to_string())),
+                }
+            }
+            let mut file_names = IndexMap::new();
+            for name in local {
+                if file_names.contains_key(&name) {
+                    continue;
+                }
+                let target =
+                    Self::entity_seen_as(&files, &design_name, path, &name, &mut Vec::new())?;
+                if let Some(global) = target.filter(|global| *global != name) {
+                    file_names.insert(name, global);
+                }
+            }
+            if !file_names.is_empty() {
+                names.insert(path.clone(), file_names);
+            }
+        }
+        self.entity_names = names;
+        Ok(())
+    }
+
+    /// The design-wide name of the entity `file` knows as `name`: its own
+    /// definition, else the one its imports bring in. `None` when it sees no
+    /// entity of that name.
+    fn entity_seen_as(
+        files: &IndexMap<PathBuf, FileEntities>,
+        design_name: &IndexMap<(PathBuf, String), String>,
+        file: &Path,
+        name: &str,
+        visiting: &mut Vec<PathBuf>,
+    ) -> Result<Option<String>> {
+        let Some(entities) = files.get(file) else {
+            return Ok(None);
+        };
+        if entities.defined.iter().any(|n| n == name) {
+            return Ok(Some(
+                design_name
+                    .get(&(file.to_path_buf(), name.to_string()))
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string()),
+            ));
+        }
+        if visiting.iter().any(|p| p == file) {
+            return Ok(None);
+        }
+        visiting.push(file.to_path_buf());
+        // Names imported by name come before names a glob brings in, as in
+        // Rust: `use a::*; use b::Unit;` means b's `Unit`
+        let mut found: Option<(String, &Path)> = None;
+        for globs in [false, true] {
+            for (dep, imported) in &entities.imports {
+                let seen = match imported {
+                    ImportedNames::Named(pairs) if !globs => {
+                        match pairs.iter().find(|(_, local)| local == name) {
+                            Some((original, _)) => {
+                                Self::entity_seen_as(files, design_name, dep, original, visiting)?
+                            }
+                            None => None,
+                        }
+                    }
+                    ImportedNames::Glob if globs => {
+                        Self::entity_seen_as(files, design_name, dep, name, visiting)?
+                    }
+                    _ => None,
+                };
+                if let Some(seen) = seen {
+                    match &found {
+                        Some((earlier, earlier_dep)) if *earlier != seen => {
+                            visiting.pop();
+                            bail!(
+                                "`{}` in {} is ambiguous: it is imported from both {} and {}, \
+                                 which define different entities of that name. Import it from \
+                                 only one of them",
+                                name,
+                                file.display(),
+                                earlier_dep.display(),
+                                dep.display()
+                            );
+                        }
+                        Some(_) => {}
+                        None => found = Some((seen, dep)),
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        visiting.pop();
+        Ok(found.map(|(seen, _)| seen))
+    }
+
+    /// `name` qualified by the file defining it, unlike any name in `taken`:
+    /// the file's stem first, then as many parent directories as it takes
+    fn file_qualified_name(&self, path: &Path, name: &str, taken: &HashSet<String>) -> String {
+        let relative = path
+            .strip_prefix(&self.root_dir)
+            .unwrap_or(path)
+            .with_extension("");
+        let parts: Vec<String> = relative
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(part) => Some(
+                    part.to_string_lossy()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        for depth in 1..=parts.len().max(1) {
+            let prefix = parts[parts.len().saturating_sub(depth)..].join("_");
+            let candidate = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}_{name}")
+            };
+            if !taken.contains(&candidate) {
+                return candidate;
+            }
+        }
+        let base = format!("{}_{}", parts.join("_"), name);
+        (2..)
+            .map(|n| format!("{base}_{n}"))
+            .find(|candidate| !taken.contains(candidate))
+            .expect("an unused name")
+    }
+
+    /// The design-wide names of the entities `path` names differently, for
+    /// its builder (empty for most files)
+    pub fn entity_names_for(&self, path: &Path) -> IndexMap<String, String> {
+        self.entity_names.get(path).cloned().unwrap_or_default()
+    }
+
+    /// The design-wide name of the entity `module` exports as `name`, when
+    /// it differs from `name`
+    pub fn design_entity_name(&self, module: &Path, name: &str) -> Option<&str> {
+        self.entity_names
+            .get(module)
+            .and_then(|names| names.get(name))
+            .map(String::as_str)
+    }
+
     /// Load a module from a file path
     pub fn load_module(&mut self, path: &Path) -> Result<()> {
         trace!("[MODULE_RESOLVER] Loading module: {:?}", path);
@@ -390,6 +692,7 @@ impl ModuleResolver {
         // Build HIR
         trace!("[MODULE_RESOLVER] Building HIR for {:?}", path);
         let mut builder = HirBuilderContext::new();
+        builder.set_entity_names(self.entity_names_for(path));
         let mut hir = builder.build(&syntax_tree).map_err(|errors| {
             anyhow::anyhow!(
                 "Failed to build HIR: {}",
@@ -434,6 +737,7 @@ impl ModuleResolver {
 
             if has_dep_type_aliases {
                 let mut rebuild_builder = HirBuilderContext::new();
+                rebuild_builder.set_entity_names(self.entity_names_for(path));
 
                 // Preregister type aliases and other symbols from dependency HIRs
                 for (_, dep_path) in &dep_paths {
@@ -499,7 +803,7 @@ impl ModuleResolver {
         // does not also import lost that instance: the entity never reached
         // the design, and the instance's outputs were left undriven.
         if !hir.unresolved_instances.is_empty() {
-            hir = self.rebuild_with_imported_entities(hir, &syntax_tree, &dep_paths)?;
+            hir = self.rebuild_with_imported_entities(hir, path, &syntax_tree, &dep_paths)?;
         }
 
         // Mark as done loading
@@ -541,10 +845,10 @@ impl ModuleResolver {
     fn rebuild_with_imported_entities(
         &self,
         hir: Hir,
+        path: &Path,
         syntax_tree: &crate::syntax::SyntaxNode,
         dep_paths: &[(HirImport, PathBuf)],
     ) -> Result<Hir> {
-        let own_entities: HashSet<String> = hir.entities.iter().map(|e| e.name.clone()).collect();
         let mut merged = hir;
         for (import, dep_path) in dep_paths {
             let Some(dep_hir) = self.loaded_modules.get(dep_path) else {
@@ -565,13 +869,15 @@ impl ModuleResolver {
                 HirImportPath::Glob { .. } => dep_hir.entities.iter().map(|e| &e.name).collect(),
             };
             for name in names {
-                if dep_hir.entities.iter().any(|e| &e.name == name) {
+                let name = self.design_entity_name(dep_path, name).unwrap_or(name);
+                if dep_hir.entities.iter().any(|e| e.name == name) {
                     crate::merge_symbol(&mut merged, dep_hir, name)?;
                 }
             }
         }
 
         let mut builder = HirBuilderContext::new();
+        builder.set_entity_names(self.entity_names_for(path));
         for type_alias in &merged.type_aliases {
             builder.preregister_type_alias(type_alias);
         }
@@ -601,6 +907,12 @@ impl ModuleResolver {
                     .unwrap_or_else(|| "unknown error".to_string())
             )
         })?;
+
+        // The file's own entities are the ones the rebuild built: the merged
+        // HIR also holds the entities its imports brought in (before this
+        // rebuild too, for public ones), and those must survive it.
+        let own_entities: HashSet<String> =
+            rebuilt.entities.iter().map(|e| e.name.clone()).collect();
 
         // Preregistration kept every entity's id, so the rebuilt entities and
         // implementations replace their first-build versions one for one.

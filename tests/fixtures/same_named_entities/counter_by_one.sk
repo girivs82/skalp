@@ -1,0 +1,23 @@
+// One of two files that each define an entity named `Unit`. This one counts
+// by one and reports, a cycle late, that it counted.
+pub entity Unit {
+    in clk: clock
+    in go: bit
+    out busy: bit
+    out count: bit[8]
+}
+
+impl Unit {
+    signal c: bit[8] = 0
+    signal b: bit = 0
+    on(clk.rise) {
+        if (go) {
+            c = c + 1
+            b = 1
+        } else {
+            b = 0
+        }
+    }
+    busy = b
+    count = c
+}

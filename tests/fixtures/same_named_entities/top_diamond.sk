@@ -1,0 +1,21 @@
+// Two wrappers and this file all use the one `Unit` of counter_by_one.sk
+use wrapper::Wrapper;
+use other_wrapper::OtherWrapper;
+use counter_by_one::Unit;
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out a_count: bit[8]
+    out b_count: bit[8]
+    out c_count: bit[8]
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    inst x = OtherWrapper { clk: clk, go: go }
+    inst v = Unit { clk: clk, go: go }
+    a_count = w.count
+    b_count = x.count
+    c_count = v.count
+}

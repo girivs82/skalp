@@ -1,0 +1,25 @@
+// This file defines a `Unit` of its own, and the wrapper uses another one
+use wrapper::Wrapper;
+
+entity Unit {
+    in go: bit
+    out busy: bit
+}
+
+impl Unit {
+    busy = !go
+}
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out a_count: bit[8]
+    out b_busy: bit
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    inst v = Unit { go: go }
+    a_count = w.count
+    b_busy = v.busy
+}

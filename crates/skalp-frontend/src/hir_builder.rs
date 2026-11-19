@@ -117,6 +117,12 @@ pub struct HirBuilderContext {
     /// Built entities (for accessing ports during impl building)
     built_entities: IndexMap<String, HirEntity>,
 
+    /// Design-wide names of the entities this file names differently: an
+    /// entity defined under one name in several files of a design gets a
+    /// distinct name in all but one of them, and each file's own name for it
+    /// (its definition, or the import it came in by) maps to that name
+    entity_names: IndexMap<String, String>,
+
     /// Recursion depth counter to prevent infinite loops
     recursion_depth: usize,
 
@@ -334,6 +340,7 @@ impl HirBuilderContext {
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
             built_entities: IndexMap::new(),
+            entity_names: IndexMap::new(),
             recursion_depth: 0,
             intent_mux_styles: IndexMap::new(),
             pending_mux_style: None,
@@ -505,6 +512,22 @@ impl HirBuilderContext {
     }
 
     /// Pre-register entities from merged HIR (for handling imports)
+    /// Name entities the way the design does: `names` maps the names this
+    /// file uses for entities (in their definitions, implementations and
+    /// instances) to the design-wide names given to entities that share a
+    /// name with an entity of another file
+    pub fn set_entity_names(&mut self, names: IndexMap<String, String>) {
+        self.entity_names = names;
+    }
+
+    /// The design-wide name of the entity this file calls `name`
+    fn entity_name_in_design(&self, name: String) -> String {
+        match self.entity_names.get(&name) {
+            Some(global) => global.clone(),
+            None => name,
+        }
+    }
+
     pub fn preregister_entity(&mut self, entity: &HirEntity) {
         self.symbols.entities.insert(entity.name.clone(), entity.id);
         // Entities of this file that were not preregistered (in a module, the
@@ -1350,6 +1373,7 @@ impl HirBuilderContext {
     /// Build entity from syntax node
     fn build_entity(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
         let name = self.extract_name(node)?;
+        let name = self.entity_name_in_design(name);
 
         // Power-intent attributes (#[retention], #[isolation], ...) are staged
         // in `pending_power_config` by the attribute walk and consumed by the
@@ -1981,6 +2005,7 @@ impl HirBuilderContext {
 
         // Get target entity name
         let entity_name = self.extract_name(node)?;
+        let entity_name = self.entity_name_in_design(entity_name);
         trace!(
             "[HIR_IMPL_DEBUG] build_implementation: entity_name='{}', symbols.entities has {} entries",
             entity_name,
@@ -2097,6 +2122,7 @@ impl HirBuilderContext {
                         // BUG #85 FIX: Check if this signal's type is actually an entity name.
                         // If so, store it in entity_signal_map for later conversion to HirInstance.
                         if let HirType::Custom(ref type_name) = signal.signal_type {
+                            let type_name = &self.entity_name_in_design(type_name.clone());
                             if let Some(&entity_id) = self.symbols.entities.get(type_name) {
                                 let (generic_args, named_generic_args) = self
                                     .extract_entity_generic_args_from_signal_node(
@@ -2939,6 +2965,7 @@ impl HirBuilderContext {
             .filter(|token| token.kind() == SyntaxKind::Ident)
             .nth(1)
             .map(|t| t.text().to_string())?;
+        let entity_name = self.entity_name_in_design(entity_name);
 
         // Look up entity ID. If the entity is unknown, record it: this is tolerated
         // in the first build pass (the entity may come from an import that hasn't
@@ -3442,6 +3469,7 @@ impl HirBuilderContext {
             .filter(|token| token.kind() == SyntaxKind::Ident)
             .nth(1)
             .map(|t| t.text().to_string())?;
+        let entity_name = self.entity_name_in_design(entity_name);
 
         // Build the port connections from the connection list
         // InstanceDecl uses ConnectionList > Connection syntax, not StructLiteral
@@ -16129,7 +16157,7 @@ impl HirBuilderContext {
             TraitImplTarget::Type(target_type)
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility
-            let target_name = ident_tokens[1].text().to_string();
+            let target_name = self.entity_name_in_design(ident_tokens[1].text().to_string());
             {
                 let entity_id = self.symbols.entities.get(&target_name)?;
                 TraitImplTarget::Entity(*entity_id)
@@ -17114,6 +17142,22 @@ impl Default for HirBuilderContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The names of the entities a file defines and the imports it makes, read
+/// from its syntax tree without building the file
+pub fn scan_entities_and_imports(root: &SyntaxNode) -> (Vec<String>, Vec<HirImport>) {
+    let mut builder = HirBuilderContext::new();
+    let mut entities = Vec::new();
+    let mut imports = Vec::new();
+    for child in root.children() {
+        match child.kind() {
+            SyntaxKind::EntityDecl => entities.extend(builder.extract_name(&child)),
+            SyntaxKind::UseDecl => imports.extend(builder.build_import(&child)),
+            _ => {}
+        }
+    }
+    (entities, imports)
 }
 
 /// Build HIR from syntax tree

@@ -1,0 +1,21 @@
+// The wrapper's `Unit` counts by one; this file's `Unit` counts by a step
+use wrapper::Wrapper;
+use counter_by_step::Unit;
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out a_busy: bit
+    out a_count: bit[8]
+    out b_busy: bit
+    out b_count: bit[8]
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    inst v = Unit { clk: clk, go: go, step: 3 }
+    a_busy = w.busy
+    a_count = w.count
+    b_busy = v.busy
+    b_count = v.count
+}

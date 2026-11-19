@@ -1,0 +1,15 @@
+// Also uses the `Unit` that counts by one
+use counter_by_one::Unit;
+
+pub entity OtherWrapper {
+    in clk: clock
+    in go: bit
+    out busy: bit
+    out count: bit[8]
+}
+
+impl OtherWrapper {
+    inst u = Unit { clk: clk, go: go }
+    busy = u.busy
+    count = u.count
+}

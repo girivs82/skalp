@@ -1,0 +1,19 @@
+// The other `Unit`: different ports (it takes a step) and different signals.
+pub entity Unit {
+    in clk: clock
+    in go: bit
+    in step: bit[8]
+    out busy: bit
+    out count: bit[8]
+}
+
+impl Unit {
+    signal acc: bit[8] = 0
+    on(clk.rise) {
+        if (go) {
+            acc = acc + step
+        }
+    }
+    busy = go
+    count = acc
+}
