@@ -36,6 +36,7 @@ pub mod gate_optimizer;
 pub mod hier_constants;
 pub mod hierarchical_netlist;
 pub mod known_bits;
+pub mod latch_inference;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_bundle;
@@ -125,7 +126,8 @@ pub use ncl_optimizer::{NclOptConfig, NclOptStats, NclOptimizer};
 // NCL expansion
 pub use ncl_expand::{
     apply_boundary_ncl_to_hierarchy, check_step_conditions, expand_to_ncl, expand_to_ncl_boundary,
-    step_condition_errors, NclConfig, NclExpandResult,
+    latch_candidates, step_condition_errors, AsyncState, LatchCandidate, NclConfig,
+    NclExpandResult,
 };
 
 // Hierarchical netlist (for per-entity synthesis)

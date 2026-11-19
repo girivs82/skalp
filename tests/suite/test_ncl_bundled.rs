@@ -177,3 +177,62 @@ async fn bundled_nested_async_gate_level() {
         .expect("build gate-level testbench");
     run_cluster(tb).await;
 }
+
+/// Under `--async-state auto`, the blocks that can leave the clock network
+/// when their registers become latches, least state first: not one without
+/// state, nor one with a memory or coalesced children its strobe clocks
+#[test]
+fn latch_candidates_are_blocks_whose_strobe_would_clock_nothing() {
+    let path = std::path::PathBuf::from(format!(
+        "{}/tests/fixtures/ncl_latch_candidates.sk",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let ctx =
+        skalp_frontend::parse_and_build_compilation_context_for_top(&path, None, "LcTop").unwrap();
+    let mir = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None)
+        .compile_to_mir_with_modules(&ctx.main_hir, &ctx.module_hirs)
+        .unwrap();
+    let (hier, has_async) = skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+    assert!(has_async);
+
+    let found: Vec<(String, u64)> =
+        skalp_lir::latch_candidates(&hier, skalp_lir::AsyncState::PulseLatch)
+            .into_iter()
+            .map(|c| (c.path, c.latch_bits))
+            .collect();
+    // Each accumulator feeds its own state, so each bit is a pulsed latch
+    // and a slave; so does each word of the register file (written in
+    // place)
+    let names: Vec<&str> = found
+        .iter()
+        .map(|(p, _)| p.rsplit('.').next().unwrap())
+        .collect();
+    assert_eq!(names, ["small", "wide", "rf"], "{found:?}");
+    assert_eq!(found[0].1, 16, "{found:?}");
+    assert_eq!(found[1].1, 32, "{found:?}");
+    assert_eq!(found[2].1, 128, "{found:?}");
+
+    assert!(skalp_lir::latch_candidates(&hier, skalp_lir::AsyncState::FlipFlop).is_empty());
+
+    // Only the listed blocks change: the others keep flip-flops
+    let small = found[0].0.clone();
+    let latched = skalp_lir::apply_boundary_ncl_to_hierarchy(
+        &hier,
+        &skalp_lir::NclConfig {
+            async_state: skalp_lir::AsyncState::PulseLatch,
+            latch_blocks: Some([small.clone()].into_iter().collect()),
+            ..Default::default()
+        },
+    );
+    let has_latches = |path: &str| {
+        latched.instances[path]
+            .lir_result
+            .lir
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, skalp_lir::lir::LirOp::Latch { .. }))
+    };
+    assert!(has_latches(&small));
+    assert!(!has_latches(&found[1].0));
+}

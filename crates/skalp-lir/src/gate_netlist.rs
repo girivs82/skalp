@@ -106,6 +106,39 @@ pub const STEP_LATCH_READY_PIN: usize = 2;
 /// out)` over the inputs `[req, done, ready, out]`
 pub const STEP_LATCH_INIT: u64 = 0x3320;
 
+/// `source_op` of the cells of a level-sensitive latch (`LirOp::Latch`).
+/// A latch built from a LUT or gates holds its value through its own
+/// feedback, so no optimization may merge, split or remove them.
+pub const LATCH_OP: &str = "Latch";
+
+/// Inputs of a single-LUT latch bit (`<latch>.lat<i>`): `[d, en, q]`, input
+/// `k` being bit `k` of the LUT address, `q` its own output fed back. The
+/// fourth input is unused.
+pub const LATCH_D_PIN: usize = 0;
+/// See [`LATCH_D_PIN`]
+pub const LATCH_EN_PIN: usize = 1;
+/// See [`LATCH_D_PIN`]
+pub const LATCH_Q_PIN: usize = 2;
+
+/// Truth table of a single-LUT latch bit, `q = en ? d : q` over the inputs
+/// `[d, en, q, -]`
+pub const LATCH_LUT_INIT: u64 = latch_lut_init();
+
+const fn latch_lut_init() -> u64 {
+    let mut init = 0u64;
+    let mut a = 0;
+    while a < 16 {
+        let d = (a >> LATCH_D_PIN) & 1;
+        let en = (a >> LATCH_EN_PIN) & 1;
+        let q = (a >> LATCH_Q_PIN) & 1;
+        if (en == 1 && d == 1) || (en == 0 && q == 1) {
+            init |= 1 << a;
+        }
+        a += 1;
+    }
+    init
+}
+
 /// Truth table of the single-LUT state of a two-way mutual exclusion
 /// (`<block>.arb_mutex<n>`, built where the library has a 4-input LUT), over
 /// the inputs `[r0, r1, w, w]`: `w` is the latch's own output, fed back to
@@ -123,6 +156,12 @@ pub const ARBITER_OP: &str = "NclArbiter";
 /// its arbiter took (`LirOp::NclTake`): merging them into other logic could
 /// let a stream's changing value glitch it while the grant is low.
 pub const TAKE_OP: &str = "NclTake";
+
+/// `source_op` of the buffers that carry the grants of an exclusive merge
+/// of a self-timed block (`LirOp::NclExclusive`), one per arm, each cell's
+/// path ending in `.excl<arm>`: kept, so the grants stay visible to the
+/// timed simulation, which reports any moment two of one merge are high.
+pub const EXCLUSIVE_OP: &str = "NclExclusive";
 
 /// Parameter naming a blackbox cell's input pins, comma-separated in
 /// `inputs` order (a bus bit as `NAME[i]`).
@@ -217,7 +256,12 @@ impl Cell {
     pub fn is_kept(&self) -> bool {
         matches!(
             self.source_op.as_deref(),
-            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(ARBITER_OP) | Some(TAKE_OP)
+            Some(MATCHED_DELAY_OP)
+                | Some(STEP_CONTROL_OP)
+                | Some(ARBITER_OP)
+                | Some(TAKE_OP)
+                | Some(EXCLUSIVE_OP)
+                | Some(LATCH_OP)
         )
     }
 
@@ -2762,6 +2806,18 @@ mod tests {
             assert_eq!((STEP_LATCH_INIT >> a) & 1 == 1, want, "address {a:04b}");
         }
         assert_eq!(STEP_LATCH_READY_PIN, 2);
+    }
+
+    /// A latch bit's truth table is `en ? d : q` over `[d, en, q, -]`, the
+    /// unused input a don't-care
+    #[test]
+    fn latch_lut_init_is_the_latch() {
+        assert_eq!(LATCH_LUT_INIT, 0xb8b8);
+        for a in 0..16u64 {
+            let bit = |k: usize| (a >> k) & 1 == 1;
+            let (d, en, q) = (bit(LATCH_D_PIN), bit(LATCH_EN_PIN), bit(LATCH_Q_PIN));
+            assert_eq!((LATCH_LUT_INIT >> a) & 1 == 1, if en { d } else { q });
+        }
     }
 
     fn inverter_chain() -> (GateNetlist, Vec<GateNetId>) {

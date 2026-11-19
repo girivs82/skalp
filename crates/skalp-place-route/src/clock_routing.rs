@@ -356,11 +356,12 @@ pub fn route_clock_nets<D: Device + ?Sized>(
             ) {
                 Ok(entry) => entry,
                 Err(NoEntry::Unreachable(sink)) => {
-                    stranded.push(format!(
-                        "'{}' (clock pin {})",
+                    log::info!(
+                        "clock net '{}' cannot reach clock pin {}",
                         net.name,
                         device.wire(sink).map_or("?", |w| w.name.as_str())
-                    ));
+                    );
+                    stranded.push(net.name.clone());
                     continue;
                 }
                 Err(NoEntry::NoCommonEntry) => {
@@ -503,16 +504,10 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         // General routing would search for these until it gave up: on this
         // device the pins take their clock from the dedicated network only,
         // and every way onto it that leads to them is in use.
-        return Err(PlaceRouteError::RoutingFailed(format!(
-            "{} clock net(s) cannot reach their clock pins: {}. Those pins take their clock \
-             from the dedicated clock network only, and every entry to it that leads there \
-             already carries one of the {} clocks routed before them. Use fewer clocks \
-             (clock enables on a shared clock, say), or give the clock a source on the \
-             network (a clock pin or a PLL output)",
-            stranded.len(),
-            stranded.join(", "),
-            routing.routes.len()
-        )));
+        return Err(PlaceRouteError::ClockEntriesExhausted {
+            nets: stranded,
+            routed: routing.routes.len(),
+        });
     }
     Ok(routing)
 }

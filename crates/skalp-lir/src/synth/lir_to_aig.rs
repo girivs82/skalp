@@ -99,7 +99,7 @@ impl<'a> LirToSynthAig<'a> {
         // Phase 1: Find register and physical nodes
         let mut register_indices: Vec<usize> = Vec::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
+            if matches!(node.op, LirOp::Reg { .. }) {
                 register_indices.push(idx);
             } else if self.is_fixed_physical(node) {
                 self.physical_nodes.push(idx);
@@ -626,6 +626,10 @@ impl<'a> LirToSynthAig<'a> {
             | LirOp::NclStepControl
             | LirOp::NclArbiter { .. }
             | LirOp::NclTake { .. }
+            | LirOp::NclExclusive { .. }
+            // A level-sensitive latch is one cell per bit whose output feeds
+            // back into it: kept out of the AIG, which would see a loop
+            | LirOp::Latch { .. }
             | LirOp::Tristate { .. } => true,
             _ => false,
         }

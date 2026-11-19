@@ -51,7 +51,7 @@
 //!   evaluate each touched node once, then commit the nets that changed.
 
 use crate::gate_netlist::{
-    Cell, CellId, GateNetId, GateNetlist, BLACKBOX_OUTPUTS_PARAM, FF_INIT_PARAM,
+    Cell, CellId, GateNetId, GateNetlist, BLACKBOX_OUTPUTS_PARAM, EXCLUSIVE_OP, FF_INIT_PARAM,
 };
 use crate::lir::PrimitiveType;
 use crate::ncl_bundle::BundleDelays;
@@ -167,6 +167,21 @@ pub struct LatchRace {
     pub margin_ps: i64,
 }
 
+/// Two grants of one exclusive merge high at once
+/// (`skalp_frontend::ncl_streams`, `match exclusive(..)`): the design
+/// promised that at most one of the merged channels holds a value at a
+/// time, and broke the promise. In hardware the block would take both
+/// values in one step, or lose one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusiveClash {
+    /// When the second grant rose, in picoseconds
+    pub time_ps: i64,
+    /// The merge: its grant buffers' path, without the `.excl<arm>`
+    pub merge: String,
+    /// The arms whose grants were high, lowest first
+    pub arms: Vec<usize>,
+}
+
 /// A timing violation seen at a clocked cell's pins
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
@@ -234,6 +249,8 @@ const MAX_DELTAS: u32 = 10_000;
 
 /// Violations kept in full (all are counted)
 const MAX_KEPT_VIOLATIONS: usize = 10_000;
+/// A net that is no exclusive merge's grant
+const NO_MERGE: u32 = u32::MAX;
 
 /// Wheel size in picosecond slots (a power of two)
 const WHEEL_BITS: u32 = 16;
@@ -859,6 +876,13 @@ pub struct TimedSim<'a> {
     violation_count: u64,
     latch_races: Vec<LatchRace>,
     latch_race_count: u64,
+    /// Each net's exclusive merge (index into `exclusive_merges`), or
+    /// `NO_MERGE`
+    exclusive_of: Vec<u32>,
+    /// Exclusive merges: path and grant nets, in arm order
+    exclusive_merges: Vec<(String, Vec<u32>)>,
+    exclusive_clashes: Vec<ExclusiveClash>,
+    exclusive_clash_count: u64,
     metastability: Metastability,
     rng: u64,
     /// Comb-cell arcs the delay model has no figure for (timed with the
@@ -990,8 +1014,11 @@ fn seq_kind(cell: &Cell, ptype: &PrimitiveType) -> Option<SeqKind> {
             reg(Edge::Rising, None, None, false, false)
         }
         PrimitiveType::DffNeg => reg(Edge::Falling, None, None, false, false),
-        PrimitiveType::DffSR => reg(Edge::Rising, None, Some(1), false, false),
-        PrimitiveType::DffE => reg(Edge::Rising, Some(1), Some(2), false, false),
+        // A flip-flop's reset pin is asynchronous: synthesis folds a
+        // synchronous reset into the data input (`synth::aig_writer`), and
+        // the device resets the register as soon as the pin is active
+        PrimitiveType::DffSR => reg(Edge::Rising, None, Some(1), true, false),
+        PrimitiveType::DffE => reg(Edge::Rising, Some(1), Some(2), true, false),
         PrimitiveType::DffAR => reg(Edge::Rising, None, Some(1), true, false),
         PrimitiveType::DffAS => reg(Edge::Rising, None, Some(1), true, true),
         PrimitiveType::RamBlock {
@@ -1443,6 +1470,40 @@ impl<'a> TimedSim<'a> {
             node_loop[node as usize] = i as u32;
         }
         let loops = loops.into_iter().map(|(_, l)| l).collect();
+        // Exclusive merges: the grant buffers, by merge (see
+        // `ExclusiveClash`)
+        let mut exclusive_of = vec![NO_MERGE; n_nets];
+        let mut exclusive_merges: Vec<(String, Vec<(usize, u32)>)> = Vec::new();
+        for cell in &netlist.cells {
+            if cell.source_op.as_deref() != Some(EXCLUSIVE_OP) {
+                continue;
+            }
+            let (Some((merge, arm)), Some(&out)) =
+                (cell.path.rsplit_once(".excl"), cell.outputs.first())
+            else {
+                continue;
+            };
+            let Ok(arm) = arm.parse::<usize>() else {
+                continue;
+            };
+            let k = match exclusive_merges.iter().position(|(m, _)| m == merge) {
+                Some(k) => k,
+                None => {
+                    exclusive_merges.push((merge.to_string(), Vec::new()));
+                    exclusive_merges.len() - 1
+                }
+            };
+            let net = canonical(out);
+            exclusive_of[net as usize] = k as u32;
+            exclusive_merges[k].1.push((arm, net));
+        }
+        let exclusive_merges = exclusive_merges
+            .into_iter()
+            .map(|(merge, mut arms)| {
+                arms.sort_unstable();
+                (merge, arms.into_iter().map(|(_, net)| net).collect())
+            })
+            .collect();
         let mut sim = Self {
             netlist,
             names,
@@ -1490,6 +1551,10 @@ impl<'a> TimedSim<'a> {
             violation_count: 0,
             latch_races: Vec::new(),
             latch_race_count: 0,
+            exclusive_of,
+            exclusive_merges,
+            exclusive_clashes: Vec::new(),
+            exclusive_clash_count: 0,
             metastability: Metastability::Unknown,
             rng: 1,
             missing_arcs,
@@ -1768,6 +1833,22 @@ impl<'a> TimedSim<'a> {
     /// How many races one-cell latches have decided
     pub fn latch_race_count(&self) -> u64 {
         self.latch_race_count
+    }
+
+    /// The first clashes of exclusive merges (up to 10 000; all of them are
+    /// counted, see [`Self::exclusive_clash_count`])
+    pub fn exclusive_clashes(&self) -> &[ExclusiveClash] {
+        &self.exclusive_clashes
+    }
+
+    /// How many times two grants of an exclusive merge were high at once
+    pub fn exclusive_clash_count(&self) -> u64 {
+        self.exclusive_clash_count
+    }
+
+    /// How many exclusive merges the netlist has
+    pub fn exclusive_merge_count(&self) -> usize {
+        self.exclusive_merges.len()
     }
 
     /// Events processed so far
@@ -2484,6 +2565,28 @@ impl<'a> TimedSim<'a> {
         }
     }
 
+    /// A grant of exclusive merge `k` rose: a clash if another is high too
+    fn check_exclusive(&mut self, k: usize) {
+        let (merge, nets) = &self.exclusive_merges[k];
+        let arms: Vec<usize> = nets
+            .iter()
+            .enumerate()
+            .filter(|&(_, &n)| self.net_val[n as usize] == Logic::One)
+            .map(|(arm, _)| arm)
+            .collect();
+        if arms.len() < 2 {
+            return;
+        }
+        self.exclusive_clash_count += 1;
+        if self.exclusive_clashes.len() < MAX_KEPT_VIOLATIONS && self.now >= self.record_from_ps {
+            self.exclusive_clashes.push(ExclusiveClash {
+                time_ps: self.now,
+                merge: merge.clone(),
+                arms,
+            });
+        }
+    }
+
     /// Nets that changed in this delta pass the change on to their fanout
     fn commit_nets(&mut self) {
         let mut dirty = std::mem::take(&mut self.dirty_nets);
@@ -2498,6 +2601,9 @@ impl<'a> TimedSim<'a> {
             let before = std::mem::replace(&mut self.net_val[net], value);
             if now >= self.activity_from_ps {
                 self.toggles[net] += 1;
+            }
+            if value == Logic::One && self.exclusive_of[net] != NO_MERGE {
+                self.check_exclusive(self.exclusive_of[net] as usize);
             }
             if self.watched[net] {
                 self.watched_changed = true;
@@ -2761,6 +2867,62 @@ mod tests {
             .filter(|(_, n, _)| *n == net)
             .map(|(t, _, v)| (*t, *v))
             .collect()
+    }
+
+    /// Two grants of one exclusive merge high at once are reported, with
+    /// the merge and its arms; one at a time, or grants of two different
+    /// merges, are not
+    #[test]
+    fn exclusive_merge_clashes_are_reported() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let r: Vec<GateNetId> = (0..3).map(|k| nl.add_input(format!("r{k}"))).collect();
+        let other = nl.add_input("other".into());
+        let grant = |nl: &mut GateNetlist, path: &str, request: GateNetId| {
+            let out = nl.add_output(format!("{path}_g"));
+            gate(nl, path, CellFunction::Buf, vec![request], out);
+            let cell = nl.cells.last_mut().unwrap();
+            cell.source_op = Some(EXCLUSIVE_OP.to_string());
+        };
+        for (k, &request) in r.iter().enumerate() {
+            grant(
+                &mut nl,
+                &format!("blk.ncl_bundle.exclusive0.excl{k}"),
+                request,
+            );
+        }
+        // a second merge, of one arm, whose grant may be high with the first's
+        grant(&mut nl, "blk.ncl_bundle.exclusive1.excl0", other);
+        let delays = TestDelays::default();
+        let mut sim = TimedSim::with_power_up(&nl, &delays, PowerUp::Zero).unwrap();
+        assert_eq!(sim.exclusive_merge_count(), 2);
+        for &net in r.iter().chain([&other]) {
+            sim.set(net, Logic::Zero);
+        }
+        sim.run_until(1_000).unwrap();
+        // one at a time, and with the other merge's grant up
+        sim.set(other, Logic::One);
+        for &net in &r {
+            sim.set(net, Logic::One);
+            sim.run_until(sim.now() + 1_000).unwrap();
+            sim.set(net, Logic::Zero);
+            sim.run_until(sim.now() + 1_000).unwrap();
+        }
+        assert_eq!(sim.exclusive_clash_count(), 0);
+        // arms 0 and 2 at once
+        sim.set(r[2], Logic::One);
+        sim.run_until(sim.now() + 1_000).unwrap();
+        sim.set(r[0], Logic::One);
+        sim.run_until(sim.now() + 1_000).unwrap();
+        let rose = sim.now() - 1_000 + 100;
+        assert_eq!(sim.exclusive_clash_count(), 1);
+        assert_eq!(
+            sim.exclusive_clashes(),
+            &[ExclusiveClash {
+                time_ps: rose,
+                merge: "blk.ncl_bundle.exclusive0".to_string(),
+                arms: vec![0, 2],
+            }]
+        );
     }
 
     /// A change takes the wire and arc delays of each cell it goes through
