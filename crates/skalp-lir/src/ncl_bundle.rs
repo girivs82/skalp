@@ -1005,8 +1005,14 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
         // delay time registers only. In a self-timed block (stream ports)
         // the step's `done` (the matched delay after `go`) plays that part:
         // it ends the step, and the next one can start right after.
-        let self_timed_done =
-            controls.contains(&md.source) && step_control_ready(netlist, &md.prefix).is_some();
+        // (The enables of a block's latches also follow `go` but open or
+        // close latches: they end nothing.)
+        let latch_enable = [MASTER_OPEN_PATH, SLAVE_OPEN_PATH, PULSE_END_PATH]
+            .iter()
+            .any(|p| and_cell.path.contains(p));
+        let self_timed_done = controls.contains(&md.source)
+            && !latch_enable
+            && step_control_ready(netlist, &md.prefix).is_some();
         let ack = match block_output_driven_by(netlist, md.control, &md.prefix) {
             Some(ack) => ack,
             None if self_timed_done => md.control,
@@ -3035,6 +3041,39 @@ mod tests {
             let c = find_check(&report.checks, times);
             assert!(c.slack_ps() >= 0, "{c:?}");
         }
+    }
+
+    /// In a self-timed block (one with a step control) the matched delay
+    /// that ends the step is `done`; the latch enables that also follow
+    /// `go` time no acknowledge or next state of their own
+    #[test]
+    fn latch_enables_are_not_the_step_end() {
+        let mut netlist = pulse_block(true);
+        let net = |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
+        let req = netlist.inputs[0];
+        let ready = netlist.inputs[1];
+        let ack = netlist.outputs[0];
+        let out = net(&mut netlist, "top.u.st_out");
+        let mut st = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "top.u.ncl_bundle.st_latch".into(),
+            vec![req, ack, ready, out],
+            vec![out],
+        );
+        st.source_op = Some(STEP_CONTROL_OP.to_string());
+        netlist.add_cell(st);
+        netlist.rebuild_net_connectivity();
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let ends: Vec<&str> = checks
+            .iter()
+            .filter(|c| c.times == "acknowledge" || c.times == "next state")
+            .map(|c| c.delay_path.as_str())
+            .collect();
+        assert!(!ends.is_empty());
+        assert!(ends.iter().all(|p| p.ends_with("done_and")), "{ends:?}");
     }
 
     /// In-block hold: the register's new value comes back to its own input

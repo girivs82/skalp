@@ -4064,6 +4064,54 @@ mod tests {
     }
 
     /// End-to-end test: build simple AND gate → boundary NCL expand → tech map → validate netlist
+    /// Pulsed latches: a register feeding the block's own state (an
+    /// accumulator) gets a slave; one whose output only leaves the block
+    /// keeps a single latch
+    #[test]
+    fn pulsed_latches_get_slaves_only_where_they_feed_state() {
+        let mut lir = crate::lir::Lir::new("pulse".to_string());
+        let go = lir.add_input("go".to_string(), 1);
+        let a = lir.add_input("a".to_string(), 4);
+        let out = lir.add_output("out".to_string(), 4);
+        let acc = lir.add_signal("acc".to_string(), 4);
+        let sum = lir.add_signal("sum".to_string(), 4);
+        let reg = |op_width| LirOp::Reg {
+            width: op_width,
+            has_enable: false,
+            has_reset: false,
+            async_reset: false,
+            reset_value: None,
+        };
+        lir.add_node(LirOp::Add {
+                width: 4,
+                has_carry: false,
+                const_b: None,
+            },
+            vec![acc, a], sum, "add".into());
+        lir.add_node(reg(4), vec![sum], acc, "acc_reg".into());
+        let acc_reg = lir.nodes.len() - 1;
+        lir.add_node(reg(4), vec![a], out, "out_reg".into());
+        let out_reg = lir.nodes.len() - 1;
+        for idx in [acc_reg, out_reg] {
+            lir.nodes[idx].clock = Some(go);
+        }
+
+        let strobe = latch_registers(&mut lir, go, AsyncState::PulseLatch);
+        let latches = |prefix: &str| -> Vec<String> {
+            lir.nodes
+                .iter()
+                .filter(|n| matches!(n.op, LirOp::Latch { .. }) && n.path.starts_with(prefix))
+                .map(|n| n.path.clone())
+                .collect()
+        };
+        assert_eq!(latches("acc_reg"), ["acc_reg.master", "acc_reg.slave"]);
+        assert_eq!(latches("out_reg"), ["out_reg.latch"]);
+        // `done` follows the slaves' enable
+        let strobe = strobe.expect("registers turned into latches");
+        assert_eq!(lir.signals[strobe.0 as usize].name, "__ncl_slave_open");
+        assert!(lir.nodes.iter().all(|n| n.clock.is_none()));
+    }
+
     #[test]
     fn test_ncl_boundary_end_to_end_and_gate() {
         use crate::tech_mapper::synthesize;
