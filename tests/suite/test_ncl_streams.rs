@@ -557,8 +557,9 @@ async fn taken_forwards_in_the_same_step_behavioural() {
     run_taken(tb, 200).await;
 }
 
-/// At gate level the value taken is read through kept AND gates of the
-/// arm's grant (one per bit), so the step's conditions may read it
+/// At gate level the step's conditions read the value taken through kept
+/// AND gates of the arm's grant, one per bit they read; the datapath (the
+/// value forwarded, `b`'s sum) reads the stream itself, ungated
 #[tokio::test]
 async fn taken_forwards_in_the_same_step_gate_level() {
     use skalp_lir::gate_netlist::{GateNetlist, TAKE_OP};
@@ -568,8 +569,8 @@ async fn taken_forwards_in_the_same_step_gate_level() {
             .iter()
             .filter(|c| c.source_op.as_deref() == Some(TAKE_OP))
             .collect();
-        // the 8 bits of `a` and of `b`
-        assert_eq!(gates.len(), 16, "take gates");
+        // only `a[0]`: the one bit a send/recv condition reads
+        assert_eq!(gates.len(), 1, "take gates");
         assert!(gates.iter().all(|c| c.is_kept() && c.inputs.len() == 2));
         netlist
     };

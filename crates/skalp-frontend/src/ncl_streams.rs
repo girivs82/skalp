@@ -40,6 +40,8 @@
 //! which holds the value waiting on the channel, it lets logic outside the
 //! arm act on the value in the same step it is received (grant a request
 //! the step takes, say), instead of a step later from a register.
+//! Outside a step that takes `s`, the value read from `s` is unspecified
+//! (0 in send/recv conditions).
 //!
 //! `ready(s)` is 1 while channel `s` is ready: a stream output empty (a
 //! `send` would not wait), a stream input full (a `recv` would not wait).
@@ -914,12 +916,16 @@ struct TakeBlock<'a> {
 /// `s`. An arbiter's requests and the condition that reaches it decide the
 /// grant, so `taken` in them would be a loop: an error.
 ///
-/// Every read of an arbitrated stream `s` (in its arm and outside it) reads
-/// `s` gated by that grant: the value the step takes, or 0 in a step that
-/// does not take `s`. The sender only holds the value still while the
-/// channel is full, and the step's logic (its send/recv conditions too) may
-/// read it at any moment; through the gate it changes only when the grant
-/// does, while it holds still.
+/// The send/recv conditions, and the combinational signals they read, read an
+/// arbitrated stream `s` gated by that grant: the value the step takes, or 0
+/// in a step that does not take `s`. A condition may be read at any moment
+/// and the sender only holds the value still while the channel is full;
+/// through the gate it changes only when the grant does, while it holds
+/// still. Every other read (the datapath, next-state logic) reads `s`
+/// itself: what it holds outside a step that takes `s` is unspecified, and
+/// only a step that takes `s` stores anything computed from it. Gating those
+/// reads as well would swing the datapath to 0 and back on every take, for
+/// nothing but energy.
 fn lower_taken(
     implementation: &mut crate::hir::HirImplementation,
     arbiters: &[Arbiter],
@@ -1029,20 +1035,57 @@ fn lower_taken(
         }
     };
     // `taken(s)` first: its argument is the stream itself
-    for f in [
-        &mut replace_taken as &mut dyn FnMut(&mut HirExpression),
-        &mut replace_value,
-    ] {
-        for a in &mut implementation.assignments {
-            map_expr_mut(&mut a.rhs, f);
+    for a in &mut implementation.assignments {
+        map_expr_mut(&mut a.rhs, &mut replace_taken);
+    }
+    for cond in used.values_mut() {
+        map_expr_mut(cond, &mut replace_taken);
+    }
+    map_statements_mut(&mut implementation.statements, &mut replace_taken);
+    for block in &mut implementation.event_blocks {
+        map_statements_mut(&mut block.statements, &mut replace_taken);
+    }
+    // Only what the send/recv conditions read must be the gated value: the
+    // conditions themselves and the combinational signals they depend on.
+    // Every other read (the datapath, next-state logic) keeps the stream
+    // itself, which is only meaningful in a step that takes it. Gating
+    // those too would drive the datapath to 0 between steps and back,
+    // spending energy for nothing.
+    let mut cone: HashSet<SignalId> = HashSet::new();
+    let collect = |expr: &HirExpression, cone: &mut HashSet<SignalId>| {
+        map_expr_mut(&mut expr.clone(), &mut |e| {
+            if let HirExpression::Signal(id) = e {
+                cone.insert(*id);
+            }
+        });
+    };
+    for cond in used.values() {
+        collect(cond, &mut cone);
+    }
+    loop {
+        let before = cone.len();
+        for a in &implementation.assignments {
+            if matches!(a.assignment_type, HirAssignmentType::Combinational) {
+                if let HirLValue::Signal(id) = a.lhs {
+                    if cone.contains(&id) {
+                        collect(&a.rhs, &mut cone);
+                    }
+                }
+            }
         }
-        for cond in used.values_mut() {
-            map_expr_mut(cond, f);
+        if cone.len() == before {
+            break;
         }
-        map_statements_mut(&mut implementation.statements, f);
-        for block in &mut implementation.event_blocks {
-            map_statements_mut(&mut block.statements, f);
+    }
+    for a in &mut implementation.assignments {
+        let in_cone = matches!(a.assignment_type, HirAssignmentType::Combinational)
+            && matches!(a.lhs, HirLValue::Signal(id) if cone.contains(&id));
+        if in_cone {
+            map_expr_mut(&mut a.rhs, &mut replace_value);
         }
+    }
+    for cond in used.values_mut() {
+        map_expr_mut(cond, &mut replace_value);
     }
     implementation.signals.extend(added_signals);
     implementation.assignments.extend(added_assignments);
