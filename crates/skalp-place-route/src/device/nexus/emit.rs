@@ -736,10 +736,15 @@ fn emit_bits(
                  the write port of a distributed RAM"
             )));
         }
+        let tile = config.tile(x, y, "PLC")?;
         if set.reset.is_none() {
             // An unconnected set/reset input reads high; this holds it inactive.
-            let tile = config.tile(x, y, "PLC")?;
             config.set_enum(&tile, &format!("SLICE{slice}.LSRMUX"), "INV")?;
+        } else {
+            // A register's reset pin carries only an asynchronous reset
+            // (synthesis folds a synchronous one into the data input), and
+            // the slice's set/reset is synchronous unless told otherwise
+            config.set_enum(&tile, &format!("SLICE{slice}.SRMODE"), "ASYNC")?;
         }
     }
 

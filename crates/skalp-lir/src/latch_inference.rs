@@ -46,8 +46,8 @@ struct Arm {
 /// One latch found by [`infer_latches`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredLatch {
-    /// The latch's output signal, by the shortest of its names (the
-    /// source's, rather than a lowering temporary's)
+    /// The latch's output signal, by the source's name for it rather than a
+    /// lowering temporary's
     pub signal: String,
     /// Its width in bits
     pub width: u32,
@@ -107,7 +107,12 @@ pub fn infer_latches(lir: &mut Lir) -> Vec<InferredLatch> {
             Hold::When(hold) => invert(lir, hold, &path, &mut fresh),
         };
         let mut names: Vec<&LirSignalId> = aliases.iter().collect();
-        names.sort_by_key(|a| (lir.signals[a.0 as usize].name.len(), a.0));
+        // The source's own name: not a lowering temporary (`_t4`), then
+        // the shortest
+        names.sort_by_key(|a| {
+            let name = &lir.signals[a.0 as usize].name;
+            (name.starts_with('_'), name.len(), a.0)
+        });
         // Named after the signal it holds, so its cells are too
         let held = &lir.signals[names[0].0 as usize].name;
         let latch_path = match path.rsplit_once('.') {

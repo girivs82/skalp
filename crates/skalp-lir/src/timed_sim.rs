@@ -990,8 +990,11 @@ fn seq_kind(cell: &Cell, ptype: &PrimitiveType) -> Option<SeqKind> {
             reg(Edge::Rising, None, None, false, false)
         }
         PrimitiveType::DffNeg => reg(Edge::Falling, None, None, false, false),
-        PrimitiveType::DffSR => reg(Edge::Rising, None, Some(1), false, false),
-        PrimitiveType::DffE => reg(Edge::Rising, Some(1), Some(2), false, false),
+        // A flip-flop's reset pin is asynchronous: synthesis folds a
+        // synchronous reset into the data input (`synth::aig_writer`), and
+        // the device resets the register as soon as the pin is active
+        PrimitiveType::DffSR => reg(Edge::Rising, None, Some(1), true, false),
+        PrimitiveType::DffE => reg(Edge::Rising, Some(1), Some(2), true, false),
         PrimitiveType::DffAR => reg(Edge::Rising, None, Some(1), true, false),
         PrimitiveType::DffAS => reg(Edge::Rising, None, Some(1), true, true),
         PrimitiveType::RamBlock {
