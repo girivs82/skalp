@@ -4,9 +4,10 @@
 // It has the DFI interface of DfiLpddr4BehavPhy (see dfi.md next to this file) and drives the
 // LPDDR4 pins of one x16 channel through the device's DDR blocks, which a build for a Nexus
 // device takes from the primitive library (simulation models in skalp/primitives/nexus):
-//   - clocks: the edge clock eclk (CK rate, from a PLL) through an ECLKSYNC per bank side, an
-//     ECLKDIV /4 makes the DFI clock (SCLK), a DDRDLL measures the edge clock for the DQS buffers;
-//   - command: CK, CA[5:0], CS and CKE through ODDRX4 (CA, CS and CKE then a DELAYB of CA_DELAY
+//   - clocks: the edge clock eclk (CK rate, from a PLL) through one ECLKSYNC (cascaded to the
+//     command bank), an ECLKDIV /4 makes the DFI clock (SCLK), a DDRDLL measures the edge clock
+//     for the DQS buffers;
+//   - command: CK, CK_c, CA[5:0], CS and CKE through ODDRX4 (CA, CS and CKE then a DELAYB of CA_DELAY
 //     steps); RESET_N is a fabric register;
 //   - per byte lane: a DQSBUF; DQS through ODDRX4DQS and TSHX4DQS on DQSW; DQ and DMI through
 //     ODDRX4DQ and TSHX4DQ on DQSW270; each DQ in through a DELAYA (DQ_IN_DELAY steps) into an
@@ -14,8 +15,11 @@
 //
 // Pins: the PHY ends at the I/O logic. Each bidirectional pin has an output (`*_o`), a tristate
 // control (`*_t`, 1 = not driven) and the pad's input (`*_i`); the design's top level connects
-// them to its pads (on Nexus: a BB per pin, with the LPDDR4 I/O standards; DQS and CK are
-// differential pads, so only the true side appears here). A simulation connects them to an
+// them to its pads (on Nexus: a BB per pin, with the LPDDR4 I/O standards). CK and DQS are
+// pseudo-differential: the complement pins (`ck_c`, `dqs_c_*`) are single-ended outputs with their
+// own gearing and the inverted data, as a differential output pad of these devices does not drive
+// its complement pin (seen on a CertusPro-NX: CK_c and DQS_c stayed low, so the DRAM never took a
+// command). Reads take the strobe from DQS_t alone. A simulation connects them to an
 // LPDDR4 model, with the pad's value as the input (the PHY reads its own DQS back while it
 // drives it, which write leveling uses).
 //
@@ -46,8 +50,10 @@
 // blocks it resets are false paths. Controller updates take the DLL code again (see below), so
 // a controller sets CTRLUPD_CYC >= 8.
 //
-// Delay settings move in 12.5 ps steps, one step per two DFI cycles; while one moves, the lane
-// holds the DQS buffer's PAUSE. At init the PHY resets the DLL, waits for it to lock, resets
+// Delay settings move in 12.5 ps steps, one step per two DFI cycles, without PAUSE: the DQS
+// buffer's PAUSE stops its read side, so it is held only for a few cycles after a gate setting
+// changes (and around DLL code updates); a long move (back from a failed write leveling sweep)
+// would otherwise keep the gate shut through the next phase. At init the PHY resets the DLL, waits for it to lock, resets
 // the DQS buffers, loads every setting, and sets the read and write DQ delays to the start of
 // their sweeps (EYE_HALF and WDQ_HALF steps before the middle) before raising
 // dfi_init_complete.
@@ -208,6 +214,9 @@ pub entity NexusLpddr4Lane<
     out dqs_o: bit
     out dqs_t: bit
     in dqs_i: bit
+    // the complement strobe pin: the inverted strobe, driven when DQS is
+    out dqs_c_o: bit
+    out dqs_c_t: bit
     // read data: eight beats (beat k in [8k+7:8k]) of a burst, outside training
     out dv: bit
     out half: bit[64]
@@ -247,7 +256,7 @@ impl NexusLpddr4Lane {
     let moving: bit = if rd_n != 0 || wr_n != 0 || wl_n != 0 || rd_mv == 1 || wr_mv == 1 || wl_mv == 1 { 1 } else { 0 }
     // after a gate setting changes, the DQS buffer pauses a few cycles
     signal pause_n: bit[3] = 0
-    let pause: bit = if moving == 1 || pause_n != 0 { 1 } else { 0 }
+    let pause: bit = if pause_n != 0 { 1 } else { 0 }
 
     // ------------------------------------------------------------ training state
     signal gsel: bit[8] = 0
@@ -323,6 +332,17 @@ impl NexusLpddr4Lane {
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
     inst dqs_ts = TSHX4DQS {
+        T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
+    }
+    signal dqs_n: bit[8]
+    dqs_n = ~dqs_d
+    inst dqsc_od = ODDRX4DQS {
+        D0: dqs_n[0], D1: dqs_n[1], D2: dqs_n[2], D3: dqs_n[3],
+        D4: dqs_n[4], D5: dqs_n[5], D6: dqs_n[6], D7: dqs_n[7],
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
+    }
+    inst dqsc_ts = TSHX4DQS {
         T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
@@ -712,6 +732,8 @@ impl NexusLpddr4Lane {
     dmi_t = dmi_ts.Q
     dqs_o = dqs_od.Q
     dqs_t = dqs_ts.Q
+    dqs_c_o = dqsc_od.Q
+    dqs_c_t = dqsc_ts.Q
 
     dv = if hv_r == 1 && training == 0 { 1 } else { 0 }
     half = hh_r
@@ -813,6 +835,7 @@ pub entity DfiLpddr4NexusPhy<
     out dfi_wdqlvl_resp: bit[2]
     // ---------------------------------------------------------------- LPDDR4 pins (I/O logic side)
     out ck_t: bit
+    out ck_c: bit
     out cke: bit
     out cs: bit
     out ca: bit[6]
@@ -824,6 +847,9 @@ pub entity DfiLpddr4NexusPhy<
     out dqs_o: bit[2]
     out dqs_t: bit[2]
     in dqs_i: bit[2]
+    // the complement strobe pins (outputs only: reads use DQS_t)
+    out dqs_c_o: bit[2]
+    out dqs_c_t: bit[2]
     out dmi_o: bit[2]
     out dmi_t: bit[2]
     // ---------------------------------------------------------------- status
@@ -849,12 +875,14 @@ pub entity DfiLpddr4NexusPhy<
 
 impl DfiLpddr4NexusPhy {
     // ------------------------------------------------------------ clocks
-    inst es_ca = ECLKSYNC { ECLKIN: eclk, STOP: eclk_stop }
+    // One edge clock synchronizer for the data and the command pins: gearing needs its edge clock
+    // and SCLK from the same synchronizer and divider, so a command bank beside the data bank
+    // takes this edge clock through its cascade mux (as Lattice's own LPDDR4 interface does).
     inst es_dq = ECLKSYNC { ECLKIN: eclk, STOP: eclk_stop }
     signal eclk_ca: clock
     signal eclk_dq: clock
-    eclk_ca = es_ca.ECLKOUT
     eclk_dq = es_dq.ECLKOUT
+    eclk_ca = eclk_dq
     inst ediv = ECLKDIV<4> { ECLKIN: eclk_dq, DIVRST: ddr_rst, SLIP: 0 }
     signal sclk: clock
     sclk = ediv.DIVOUT
@@ -1082,6 +1110,10 @@ impl DfiLpddr4NexusPhy {
         D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
         ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
+    inst ckc_od = ODDRX4 {
+        D0: 1, D1: 0, D2: 1, D3: 0, D4: 1, D5: 0, D6: 1, D7: 0,
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+    }
     inst ca0_od = ODDRX4 {
         D0: b_ca[0], D1: b_ca[0], D2: b_ca[6], D3: b_ca[6], D4: b_ca[12], D5: b_ca[12], D6: b_ca[18], D7: b_ca[18],
         ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
@@ -1290,6 +1322,7 @@ impl DfiLpddr4NexusPhy {
     dfi_wdqlvl_resp = {lane1.resp_wdq, lane0.resp_wdq}
 
     ck_t = ck_od.Q
+    ck_c = ckc_od.Q
     cke = cke_dl.Z
     cs = cs_dl.Z
     ca = {ca5_dl.Z, ca4_dl.Z, ca3_dl.Z, ca2_dl.Z, ca1_dl.Z, ca0_dl.Z}
@@ -1298,6 +1331,8 @@ impl DfiLpddr4NexusPhy {
     dq_t = {lane1.dq_t, lane0.dq_t}
     dqs_o = {lane1.dqs_o, lane0.dqs_o}
     dqs_t = {lane1.dqs_t, lane0.dqs_t}
+    dqs_c_o = {lane1.dqs_c_o, lane0.dqs_c_o}
+    dqs_c_t = {lane1.dqs_c_t, lane0.dqs_c_t}
     dmi_o = {lane1.dmi_o, lane0.dmi_o}
     dmi_t = {lane1.dmi_t, lane0.dmi_t}
 

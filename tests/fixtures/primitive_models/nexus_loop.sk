@@ -6,6 +6,8 @@
 entity NexusLoop<const RD_AT: nat = 1, const RDCLKSEL: nat = 0> {
     in sim_tick: clock
     in rst: bit
+    // the DQS buffer's PAUSE: while it is high, READ is ignored
+    in pause: bit
     out bursts: bit[8]
     out bts: bit[8]
     out valids: bit[8]
@@ -57,7 +59,7 @@ impl NexusLoop {
     let read: bit[4] = if running == 1 && (ph == rd_at || ph == rd_at + 1) { 4'hF } else { 4'h0 }
 
     inst dqs = DQSBUF {
-        DQSI: pin_dqs, ECLKIN: eclk, SCLK: sclk, RST: rst, PAUSE: 0, RSTSMCNT: 0,
+        DQSI: pin_dqs, ECLKIN: eclk, SCLK: sclk, RST: rst, PAUSE: pause, RSTSMCNT: 0,
         RDCLKSEL: sel, READ: read, RDDIR: 0, RDLOADN: loading, READMOVE: 0, SELCLK: 0,
         WRDIR: 0, WRLOAD_N: loading, WRMOVE: 0, WRLVDIR: 0, WRLVLOAD_N: loading, WRLVMOVE: 0,
         DLLCODE: dll.CODE

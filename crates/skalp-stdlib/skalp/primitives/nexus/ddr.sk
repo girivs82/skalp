@@ -485,8 +485,10 @@ impl DDRDLL {
 // one SCLK cycle when it passed its first pulse after a preamble.
 // Model: the data of each enabled cycle is read out of the input FIFO eight edge clock cycles
 // after the gate cycle; IDDRX4DQ's Q and DATAVALID carry an SCLK cycle's reads in the SCLK cycle
-// after next. The FIFO pointers realign whenever no read is in flight. PAUSE and SELCLK are not
-// modelled (the clocks keep running); DQSWRD stays low.
+// after next. The FIFO pointers realign whenever no read is in flight. PAUSE stops the read
+// side: READ taken while it is high opens no gate (on the device its internal clocks stop, so
+// no burst is detected). The write clocks keep running; SELCLK is not modelled and DQSWRD stays
+// low.
 // Mode (as the device's LPDDR4 interface sets it): FIFO, x4 gearing, read and write paths on,
 // FORCE_READ, and the MOVE/DIR adjustment (MT_EN_*) on for the read, write and write leveling
 // delays.
@@ -608,7 +610,7 @@ impl DQSBUF {
     signal r1: bit[4] = 0
     signal r2: bit[4] = 0
     on(SCLK.rise) {
-        r1 = READ
+        r1 = if PAUSE == 1 { 4'b0000 } else { READ }
         r2 = r1
     }
     #[cdc]

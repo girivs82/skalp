@@ -222,6 +222,7 @@ impl Lpddr4DfiNexusSim {
     signal dclk: clock
     signal bus_dq: bit[16]
     signal bus_dqs: bit[2]
+    // the complement strobe pins are the PHY's own (pseudo-differential): the model checks them
     signal bus_dqsc: bit[2]
     dclk = phy.dfi_clk
     // a lane drives when any of its pins does
@@ -238,8 +239,8 @@ impl Lpddr4DfiNexusSim {
         if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_t[0] == 0 { phy.dqs_o[0] } else { 1'b0 } }
     }
     bus_dqsc = {
-        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_t[1] == 0 { ~phy.dqs_o[1] } else { 1'b0 } },
-        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_t[0] == 0 { ~phy.dqs_o[0] } else { 1'b0 } }
+        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_c_t[1] == 0 { phy.dqs_c_o[1] } else { 1'b0 } },
+        if dram.dqs_oe == 1 { ~dram.dqs_out } else { if phy.dqs_c_t[0] == 0 { phy.dqs_c_o[0] } else { 1'b0 } }
     }
 
     on(dclk.rise) {

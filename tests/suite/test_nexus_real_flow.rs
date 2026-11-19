@@ -595,6 +595,55 @@ fn a_pll_corner_must_reach_its_edge_clock() {
     }
 }
 
+/// One edge clock for gearing in two banks: the synchronizer goes in the bank
+/// of the DQS buffer it clocks, and the other bank's gearing takes that edge
+/// clock through its cascade mux (the design used to be refused as clocking
+/// I/O in two banks)
+#[test]
+fn an_edge_clock_cascades_to_the_bank_beside_its_dqs_buffer() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/nexus_ddr_cascade.sk");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args([
+            "synth",
+            source.to_str().unwrap(),
+            "-d",
+            "nexus-lfcpnx100",
+            "-f",
+            "-o",
+            "out",
+        ])
+        .env("PRJOXIDE_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("skalp runs");
+    assert!(
+        output.status.success(),
+        "gearing in two banks on one edge clock should build:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = std::fs::read(dir.path().join("out/design.bit")).expect("bitstream");
+    // Every synchronizer in use is enabled to stop; only one of bank 3's is
+    let used = |bank: u32| -> usize {
+        ["A", "B", "C", "D"]
+            .iter()
+            .map(|s| tiles_with_option(&db, &data, &format!("ECLKSYNC{bank}{s}.STOP_EN"), "ENABLE"))
+            .sum()
+    };
+    assert_eq!(used(3), 1, "the synchronizer sits in the DQS buffer's bank");
+    assert_eq!(
+        used(4),
+        0,
+        "the command bank has no synchronizer of its own"
+    );
+}
+
 #[test]
 fn wide_lut_builds_a_bitstream_for_the_real_device() {
     let Some(db) = find_database() else {
