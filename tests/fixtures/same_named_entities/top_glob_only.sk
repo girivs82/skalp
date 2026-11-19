@@ -1,0 +1,13 @@
+// A glob import of a module that imported a public entity itself
+use wrapper::*;
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out count: bit[8]
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    count = w.count
+}

@@ -1,0 +1,20 @@
+// The same design as top.sk, with its imports in the other order
+use counter_by_step::Unit;
+use wrapper::Wrapper;
+entity Top {
+    in clk: clock
+    in go: bit
+    out a_busy: bit
+    out a_count: bit[8]
+    out b_busy: bit
+    out b_count: bit[8]
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    inst v = Unit { clk: clk, go: go, step: 3 }
+    a_busy = w.busy
+    a_count = w.count
+    b_busy = v.busy
+    b_count = v.count
+}

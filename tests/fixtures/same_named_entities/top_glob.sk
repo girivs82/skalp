@@ -1,0 +1,18 @@
+// The glob brings in the wrapper and, through it, its `Unit`; the named
+// import of the other `Unit` comes first
+use wrapper::*;
+use counter_by_step::Unit;
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out a_count: bit[8]
+    out b_count: bit[8]
+}
+
+impl Top {
+    inst w = Wrapper { clk: clk, go: go }
+    inst v = Unit { clk: clk, go: go, step: 3 }
+    a_count = w.count
+    b_count = v.count
+}

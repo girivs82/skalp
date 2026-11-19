@@ -250,9 +250,16 @@ pub fn parse_and_build_compilation_context_from_source_for_device(
         );
     }
 
+    // Entities that share a name with an entity of another file get names of
+    // their own, so the design keeps them apart
+    resolver
+        .plan_entity_names(file_path, &syntax_tree)
+        .context("Failed to resolve the entities the design's files import")?;
+
     // Build HIR (first pass - will have incomplete instances for imported entities)
     let mut builder =
         hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
+    builder.set_entity_names(resolver.entity_names_for(file_path));
     let mut hir = builder.build(&syntax_tree).map_err(|errors| {
         let filename = file_path.display().to_string();
         let renderer = diagnostic_render::DiagnosticRenderer::new(&filename, &source);
@@ -408,22 +415,34 @@ pub fn parse_and_build_hir_from_file(file_path: &Path) -> Result<Hir> {
 }
 
 /// Rebuild instances with imported entities now available
-fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
+fn rebuild_instances_with_imports(
+    hir: &Hir,
+    file_path: &Path,
+    entity_names: IndexMap<String, String>,
+) -> Result<Hir> {
     let source = std::fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read source file for rebuild: {:?}", file_path))?;
-    rebuild_instances_from_source(hir, file_path, &source)
+    rebuild_instances_from_source(hir, file_path, &source, entity_names)
 }
 
 /// Rebuild instances of `source`, the text of `file_path`, with imported
 /// entities now available. The text is passed in rather than re-read, so a
 /// design built from edited source (such as `synth --debug`) keeps its edits.
-fn rebuild_instances_from_source(hir: &Hir, file_path: &Path, source: &str) -> Result<Hir> {
+/// `entity_names` maps the file's names for entities to their design-wide
+/// names (see `ModuleResolver::plan_entity_names`).
+fn rebuild_instances_from_source(
+    hir: &Hir,
+    file_path: &Path,
+    source: &str,
+    entity_names: IndexMap<String, String>,
+) -> Result<Hir> {
     // Parse to syntax tree
     let (syntax_tree, _) = parse::parse_with_errors(source);
 
     // Create a new builder with all entities pre-registered
     let mut builder =
         hir_builder::HirBuilderContext::with_source(source, Some(file_path.to_path_buf()));
+    builder.set_entity_names(entity_names);
 
     // Pre-register all entities in the symbol table
     for entity in &hir.entities {
@@ -672,8 +691,13 @@ fn rebuild_instances_for_all_modules(
     use std::collections::HashSet;
 
     // Start with the main file rebuild, from the text that was parsed
-    let mut result_hir = rebuild_instances_from_source(hir, main_file_path, main_source)
-        .context("Failed to rebuild main file instances")?;
+    let mut result_hir = rebuild_instances_from_source(
+        hir,
+        main_file_path,
+        main_source,
+        resolver.entity_names_for(main_file_path),
+    )
+    .context("Failed to rebuild main file instances")?;
 
     // Collect all loaded module paths (excluding stdlib and main file)
     let module_paths: Vec<PathBuf> = resolver
@@ -691,7 +715,11 @@ fn rebuild_instances_for_all_modules(
     // For each module, rebuild its instances
     for module_path in &module_paths {
         // Rebuild this module's instances with full entity set
-        match rebuild_instances_with_imports(&result_hir, module_path) {
+        match rebuild_instances_with_imports(
+            &result_hir,
+            module_path,
+            resolver.entity_names_for(module_path),
+        ) {
             Ok(rebuilt) => {
                 // Build a map of entity name -> instances in rebuilt HIR
                 // Only update implementations that now have MORE instances
@@ -1026,13 +1054,28 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
             HirImportPath::Simple { segments } => {
                 // Import a specific symbol
                 if let Some(symbol_name) = segments.last() {
+                    let symbol_name = resolver
+                        .design_entity_name(&module_path, symbol_name)
+                        .unwrap_or(symbol_name);
                     merge_symbol(&mut merged_hir, loaded_module, symbol_name)?;
                 }
             }
             HirImportPath::Renamed { segments, alias } => {
-                // Import a specific symbol with an alias
+                // Import a specific symbol with an alias. An entity with a
+                // design-wide name of its own keeps it: the importer's
+                // builder maps the alias to that name.
                 if let Some(symbol_name) = segments.last() {
-                    merge_symbol_with_rename(&mut merged_hir, loaded_module, symbol_name, alias)?;
+                    match resolver.design_entity_name(&module_path, symbol_name) {
+                        Some(design_name) => {
+                            merge_symbol(&mut merged_hir, loaded_module, design_name)?
+                        }
+                        None => merge_symbol_with_rename(
+                            &mut merged_hir,
+                            loaded_module,
+                            symbol_name,
+                            alias,
+                        )?,
+                    }
                 }
             }
             HirImportPath::Glob { segments: _ } => {
@@ -1045,17 +1088,25 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
                     match path {
                         HirImportPath::Simple { segments } => {
                             if let Some(symbol_name) = segments.last() {
+                                let symbol_name = resolver
+                                    .design_entity_name(&module_path, symbol_name)
+                                    .unwrap_or(symbol_name);
                                 merge_symbol(&mut merged_hir, loaded_module, symbol_name)?;
                             }
                         }
                         HirImportPath::Renamed { segments, alias } => {
                             if let Some(symbol_name) = segments.last() {
-                                merge_symbol_with_rename(
-                                    &mut merged_hir,
-                                    loaded_module,
-                                    symbol_name,
-                                    alias,
-                                )?;
+                                match resolver.design_entity_name(&module_path, symbol_name) {
+                                    Some(design_name) => {
+                                        merge_symbol(&mut merged_hir, loaded_module, design_name)?
+                                    }
+                                    None => merge_symbol_with_rename(
+                                        &mut merged_hir,
+                                        loaded_module,
+                                        symbol_name,
+                                        alias,
+                                    )?,
+                                }
                             }
                         }
                         _ => {}

@@ -1,0 +1,14 @@
+// Two globs bring in two different `Unit`s: nothing says which one is meant
+use counter_by_one::*;
+use counter_by_step::*;
+
+entity Top {
+    in clk: clock
+    in go: bit
+    out count: bit[8]
+}
+
+impl Top {
+    inst v = Unit { clk: clk, go: go }
+    count = v.count
+}

@@ -149,6 +149,7 @@ mod test_primitive_models;
 mod test_regression_bugs;
 mod test_safety_annotation_pipeline;
 mod test_safety_tech_mapping_flow;
+mod test_same_named_entities;
 mod test_sequential_lowering;
 mod test_sim_arith_width;
 mod test_sim_front_end;
