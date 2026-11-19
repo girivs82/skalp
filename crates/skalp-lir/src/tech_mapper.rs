@@ -3038,16 +3038,6 @@ fn decompose_memblock_to_dffs(
     }
 }
 
-/// Merge physical LIR nodes (NCL, BRAM) into an AIG-derived GateNetlist.
-///
-/// Physical ops were represented as pseudo-inputs (`__phys_*`) during
-/// LIR→AIG conversion. This function creates the actual gate cells for
-/// those ops and wires them into the existing netlist:
-///
-/// 1. Physical cell outputs drive `__phys_*` nets (removing them from inputs)
-/// 2. Physical cell inputs connect to existing LIR primary input nets or
-///    other physical node output nets
-/// 3. For NCL ops without native THmn gates, C-element macros are used
 /// One bit of a transparent latch, `q = en ? d : q`, with `q` its own output.
 ///
 /// The library's latch cell where it has one. Otherwise a 4-input LUT whose
@@ -3140,6 +3130,16 @@ fn map_latch_bit(
     }
 }
 
+/// Merge physical LIR nodes (NCL, BRAM) into an AIG-derived GateNetlist.
+///
+/// Physical ops were represented as pseudo-inputs (`__phys_*`) during
+/// LIR→AIG conversion. This function creates the actual gate cells for
+/// those ops and wires them into the existing netlist:
+///
+/// 1. Physical cell outputs drive `__phys_*` nets (removing them from inputs)
+/// 2. Physical cell inputs connect to existing LIR primary input nets or
+///    other physical node output nets
+/// 3. For NCL ops without native THmn gates, C-element macros are used
 fn merge_physical_nodes_into_netlist(
     netlist: &mut GateNetlist,
     lir: &Lir,

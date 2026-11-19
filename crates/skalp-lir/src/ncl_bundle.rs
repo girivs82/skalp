@@ -664,7 +664,7 @@ fn closed_at(
 
 impl LatchBlock<'_> {
     /// Times from `go` (at its own net, time 0) to the nets of this block
-    fn from_go<'n>(
+    fn arrivals_from_go<'n>(
         &self,
         netlist: &'n GateNetlist,
         delays: &'n dyn BundleDelays,
@@ -684,7 +684,7 @@ impl LatchBlock<'_> {
 
     /// The takers' enable: it falls (closing them) `at` after `go` rises
     fn takers(&self, netlist: &GateNetlist, delays: &dyn BundleDelays) -> Option<LatchGroup<'_>> {
-        let mut from_go = self.from_go(netlist, delays, false);
+        let mut from_go = self.arrivals_from_go(netlist, delays, false);
         let (en, at) = match self.opener {
             Opener::Transparent { master_open } => {
                 // `!go` changes the inverter's delay after `go`
@@ -724,7 +724,10 @@ impl LatchBlock<'_> {
     ) -> Vec<LatchGroup<'_>> {
         let mut groups = Vec::new();
         if let Some((slave_open, slaves)) = &self.slaves {
-            if let Some(at) = self.from_go(netlist, delays, early).at(slave_open.control) {
+            if let Some(at) = self
+                .arrivals_from_go(netlist, delays, early)
+                .at(slave_open.control)
+            {
                 groups.push(LatchGroup {
                     en: slave_open.control,
                     at,
@@ -1281,7 +1284,7 @@ fn check_latch_blocks(
         if let Some((slave_open, slaves)) = &lb.slaves {
             let closed = closed_at(netlist, delays, takers.bits, takers.en, takers.at);
             let opens = lb
-                .from_go(netlist, delays, false)
+                .arrivals_from_go(netlist, delays, false)
                 .at(slave_open.control)
                 .and_then(|at| opens_at(netlist, delays, slaves, slave_open.control, at));
             if let (Some(data_ps), Some(control_ps)) = (closed, opens) {
@@ -1299,7 +1302,7 @@ fn check_latch_blocks(
                 // After `go` falls: the slaves close straight through
                 // `slave_open`'s AND, the masters reopen through
                 // `master_open`'s chain
-                let mut from_go = lb.from_go(netlist, delays, false);
+                let mut from_go = lb.arrivals_from_go(netlist, delays, false);
                 let (Some(slave_close), Some(master_reopen)) = (
                     falls_through(netlist, delays, slave_open, 0),
                     from_go.at(mo),

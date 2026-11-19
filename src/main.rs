@@ -4820,8 +4820,6 @@ fn synthesis_cache() -> Option<skalp_lir::synth_cache::SynthCache> {
     skalp_lir::synth_cache::SynthCache::new(dir)
 }
 
-/// Synthesize design for FPGA target
-#[allow(clippy::too_many_arguments)]
 /// Where `skalp synth` keeps the state of bundled-data async blocks, and
 /// how `--async-state auto` changes that between attempts
 struct AsyncStatePlan {
@@ -4899,6 +4897,8 @@ impl AsyncStatePlan {
     }
 }
 
+/// Synthesize design for FPGA target
+#[allow(clippy::too_many_arguments)]
 fn synthesize_design(
     source: &PathBuf,
     device: &str,
