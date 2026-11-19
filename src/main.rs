@@ -3392,8 +3392,14 @@ fn run_equivalence_check(
 
     // Step 1: Parse and compile to MIR
     println!("📖 Parsing source...");
-    let context =
-        parse_and_build_compilation_context(source).context("Failed to parse source file")?;
+    let context = match entity {
+        Some(name) => {
+            skalp_frontend::parse_and_build_compilation_context_for_top(source, None, name)
+        }
+        None => parse_and_build_compilation_context(source),
+    }
+    .context("Failed to parse source file")?;
+    let top_module = context.top_module;
     let hir = context.main_hir;
     let module_hirs = context.module_hirs;
 
@@ -3404,11 +3410,14 @@ fn run_equivalence_check(
         .compile_to_mir_with_modules(&hir, &module_hirs)
         .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
 
-    // Find the target entity
-    // BUG FIX: Handle monomorphized module names (e.g., DabBatteryController_100000000_20000000_10000000)
-    // When generics are specialized, modules get parameter suffixes. We need to find the actual
-    // implementation, not just the base declaration.
-    let target_entity = if let Some(name) = entity {
+    // Find the target entity. The frontend names the module of a requested
+    // entity: a generic one runs as its specialization with default generics.
+    let target_entity = if let Some(name) = &top_module {
+        mir.modules
+            .iter()
+            .find(|m| &m.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+    } else if let Some(name) = entity {
         // First try exact match
         if let Some(m) = mir.modules.iter().find(|m| m.name == name) {
             // Check if this module has instances - if not, look for a monomorphized variant
@@ -8903,8 +8912,14 @@ fn run_signal_trace(
     } else {
         // Compile design to gate-level
         println!("📖 Parsing source...");
-        let context =
-            parse_and_build_compilation_context(source).context("Failed to parse source file")?;
+        let context = match entity {
+            Some(name) => {
+                skalp_frontend::parse_and_build_compilation_context_for_top(source, None, name)
+            }
+            None => parse_and_build_compilation_context(source),
+        }
+        .context("Failed to parse source file")?;
+        let top_module = context.top_module;
         let hir = context.main_hir;
         let module_hirs = context.module_hirs;
 
@@ -8915,8 +8930,13 @@ fn run_signal_trace(
             .compile_to_mir_with_modules(&hir, &module_hirs)
             .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
 
-        // Find target entity
-        let target_entity = if let Some(name) = entity {
+        // Find target entity (a generic one runs with its default generics)
+        let target_entity = if let Some(name) = &top_module {
+            mir.modules
+                .iter()
+                .find(|m| &m.name == name)
+                .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+        } else if let Some(name) = entity {
             if let Some(m) = mir.modules.iter().find(|m| m.name == name) {
                 if !m.instances.is_empty() || !m.processes.is_empty() {
                     m

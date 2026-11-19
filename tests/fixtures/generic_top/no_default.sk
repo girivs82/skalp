@@ -1,0 +1,29 @@
+// A generic counter whose step has no default, used by a wrapper with step 2.
+entity Stepper<const STEP: nat> {
+    in clk: clock
+    in rst: bit
+    out count: bit[8]
+}
+
+impl Stepper {
+    signal c: bit[8] = 0
+    on(clk.rise) {
+        if rst == 1 {
+            c = 0
+        } else {
+            c = c + STEP
+        }
+    }
+    count = c
+}
+
+entity DoubleStepper {
+    in clk: clock
+    in rst: bit
+    out count: bit[8]
+}
+
+impl DoubleStepper {
+    inst s = Stepper<2> { clk: clk, rst: rst }
+    count = s.count
+}

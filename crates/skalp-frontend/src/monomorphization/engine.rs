@@ -16,6 +16,10 @@ pub struct MonomorphizationEngine<'hir> {
     hir: Option<&'hir Hir>,
     /// Current implementation constants (set during specialization)
     current_constants: Vec<crate::hir::HirConstant>,
+    /// Entities requested as the design's top (see [`Self::with_tops`])
+    tops: Vec<String>,
+    /// Each requested top's module name after monomorphization
+    top_names: IndexMap<String, String>,
 }
 
 impl<'hir> MonomorphizationEngine<'hir> {
@@ -25,7 +29,25 @@ impl<'hir> MonomorphizationEngine<'hir> {
             evaluator: ConstEvaluator::new(),
             hir: None,
             current_constants: Vec::new(),
+            tops: Vec::new(),
+            top_names: IndexMap::new(),
         }
+    }
+
+    /// Treat `tops` as entities the design may be run from: each one that is
+    /// generic is also specialized with its default generics, even if the
+    /// design only uses other specializations of it
+    pub fn with_tops(mut self, tops: Vec<String>) -> Self {
+        self.tops = tops;
+        self
+    }
+
+    /// The module name of a top passed to [`Self::with_tops`], after
+    /// [`Self::monomorphize`]: its own name, or for a generic entity the name of
+    /// its default specialization. `None` for an entity the design does not
+    /// define, or a generic one with a generic that has no default.
+    pub fn top_name(&self, top: &str) -> Option<&str> {
+        self.top_names.get(top).map(String::as_str)
     }
 
     /// Monomorphize the entire HIR
@@ -48,6 +70,26 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // Store HIR reference for type resolution
         self.hir = Some(hir);
         use crate::monomorphization::InstantiationCollector;
+
+        // A requested top keeps its name unless it is generic: then it is the
+        // specialization with its default generics
+        self.top_names.clear();
+        for top in &self.tops {
+            let Some(entity) = hir.entities.iter().find(|e| &e.name == top) else {
+                continue;
+            };
+            let generic = entity
+                .generics
+                .iter()
+                .any(|g| matches!(g.param_type, crate::hir::HirGenericType::Const(_)));
+            if !generic {
+                self.top_names.insert(top.clone(), top.clone());
+            } else if let Some(defaults) =
+                InstantiationCollector::new(hir).default_instantiation(entity)
+            {
+                self.top_names.insert(top.clone(), defaults.mangled_name());
+            }
+        }
 
         // Track all instantiations across all iterations
         let mut all_instantiations = indexmap::IndexSet::new();
@@ -126,7 +168,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             };
 
             // Collect instantiations from current state
-            let collector = InstantiationCollector::new(&current_hir);
+            let collector = InstantiationCollector::new(&current_hir).with_tops(&self.tops);
             let new_instantiations_set = collector.collect(&current_hir);
 
             // Find truly new instantiations (not seen before)

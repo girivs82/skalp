@@ -164,6 +164,9 @@ pub struct InstantiationCollector<'hir> {
     hir: &'hir Hir,
     /// Current implementation context (for looking up signals/variables)
     current_impl: Option<&'hir HirImplementation>,
+    /// Entities requested as the top of the design: each gets an instantiation
+    /// with its default generics even when the design also specializes it
+    tops: Vec<String>,
 }
 
 impl<'hir> InstantiationCollector<'hir> {
@@ -203,7 +206,15 @@ impl<'hir> InstantiationCollector<'hir> {
             entities,
             hir,
             current_impl: None,
+            tops: Vec::new(),
         }
+    }
+
+    /// Also instantiate each of `tops` with its default generics (see
+    /// [`InstantiationCollector::collect`])
+    pub fn with_tops(mut self, tops: &[String]) -> Self {
+        self.tops = tops.to_vec();
+        self
     }
 
     /// Collect all instantiations from the HIR
@@ -226,12 +237,12 @@ impl<'hir> InstantiationCollector<'hir> {
         // const generics have default values. This ensures that when a generic entity
         // is used as a top module (not instantiated via struct literal), it still gets
         // monomorphized with its default values.
+        //
+        // An entity the design only uses through other specializations gets none,
+        // so the output holds no module nothing uses, unless it is a requested
+        // top: a testbench or analysis of `Foo` runs `Foo` with its defaults even
+        // when the same file also builds `Foo<3>`.
         for entity in &hir.entities {
-            // Skip if entity has no generics
-            if entity.generics.is_empty() {
-                continue;
-            }
-
             // Check if this entity already has an instantiation with POPULATED const_args
             // Instantiations created from struct literals within generic entities may have
             // empty const_args (when using pass-through generic params like `Foo<PERIOD>`).
@@ -240,75 +251,78 @@ impl<'hir> InstantiationCollector<'hir> {
                 .instantiations
                 .iter()
                 .any(|inst| inst.entity_id == entity.id && !inst.const_args.is_empty());
-            if has_concrete_instantiation {
+            if has_concrete_instantiation && !self.tops.contains(&entity.name) {
                 continue;
             }
-
-            // Check if all const generics have default values
-            let const_generics: Vec<_> = entity
-                .generics
-                .iter()
-                .filter(|g| matches!(g.param_type, HirGenericType::Const(_)))
-                .collect();
-
-            if const_generics.is_empty() {
-                continue;
-            }
-
-            let all_have_defaults = const_generics.iter().all(|g| g.default_value.is_some());
-            if !all_have_defaults {
-                continue;
-            }
-
-            // Build instantiation with default values
-            let mut type_args = IndexMap::new();
-            let mut const_args = IndexMap::new();
-            let mut intent_args = IndexMap::new();
-
-            for generic in &entity.generics {
-                match &generic.param_type {
-                    HirGenericType::Const(_const_type) => {
-                        if let Some(ref default) = generic.default_value {
-                            if let Ok(value) = self.evaluator.eval(default) {
-                                const_args.insert(generic.name.clone(), value);
-                            }
-                        }
-                    }
-                    HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
-                        if let Some(ref default) = generic.default_value {
-                            if let Some(ty) = self.extract_type_from_expr(default) {
-                                type_args.insert(generic.name.clone(), ty);
-                            }
-                        }
-                    }
-                    HirGenericType::Intent => {
-                        if let Some(ref default) = generic.default_value {
-                            let intent_name = self.extract_intent_name(default);
-                            let intent_value = IntentValue {
-                                name: intent_name,
-                                fields: IndexMap::new(),
-                            };
-                            intent_args.insert(generic.name.clone(), intent_value);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            // Only create instantiation if we successfully evaluated all const args
-            if const_args.len() == const_generics.len() {
-                let instantiation = Instantiation {
-                    entity_name: entity.name.clone(),
-                    entity_id: entity.id,
-                    type_args,
-                    const_args,
-                    intent_args,
-                };
+            if let Some(instantiation) = self.default_instantiation(entity) {
                 self.instantiations.insert(instantiation);
             }
         }
 
         self.instantiations
+    }
+
+    /// `entity` with every generic at its default value, or `None` if it has no
+    /// const generics or one of them has no default (or a default that does
+    /// not evaluate)
+    pub fn default_instantiation(&mut self, entity: &HirEntity) -> Option<Instantiation> {
+        let const_generics = entity
+            .generics
+            .iter()
+            .filter(|g| matches!(g.param_type, HirGenericType::Const(_)))
+            .count();
+        if const_generics == 0
+            || !entity
+                .generics
+                .iter()
+                .filter(|g| matches!(g.param_type, HirGenericType::Const(_)))
+                .all(|g| g.default_value.is_some())
+        {
+            return None;
+        }
+
+        let mut type_args = IndexMap::new();
+        let mut const_args = IndexMap::new();
+        let mut intent_args = IndexMap::new();
+
+        for generic in &entity.generics {
+            match &generic.param_type {
+                HirGenericType::Const(_const_type) => {
+                    if let Some(ref default) = generic.default_value {
+                        if let Ok(value) = self.evaluator.eval(default) {
+                            const_args.insert(generic.name.clone(), value);
+                        }
+                    }
+                }
+                HirGenericType::Type | HirGenericType::TypeWithBounds(_) => {
+                    if let Some(ref default) = generic.default_value {
+                        if let Some(ty) = self.extract_type_from_expr(default) {
+                            type_args.insert(generic.name.clone(), ty);
+                        }
+                    }
+                }
+                HirGenericType::Intent => {
+                    if let Some(ref default) = generic.default_value {
+                        let intent_name = self.extract_intent_name(default);
+                        let intent_value = IntentValue {
+                            name: intent_name,
+                            fields: IndexMap::new(),
+                        };
+                        intent_args.insert(generic.name.clone(), intent_value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Only an instantiation whose const args all evaluated
+        (const_args.len() == const_generics).then(|| Instantiation {
+            entity_name: entity.name.clone(),
+            entity_id: entity.id,
+            type_args,
+            const_args,
+            intent_args,
+        })
     }
 
     /// Collect instantiations from an implementation
