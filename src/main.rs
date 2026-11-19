@@ -4836,7 +4836,7 @@ fn synthesize_design(
     let context = parse_and_build_compilation_context_for_device(source, Some(device))
         .context("Failed to parse source")?;
     let context = if debug {
-        add_logic_analyzer(source, context, family, variant, output_dir)?
+        add_logic_analyzer(source, context, device, family, variant, output_dir)?
     } else {
         context
     };
@@ -5886,10 +5886,12 @@ fn program_nexus_board(
 }
 
 /// Report the device's state and which pads change over the watch period.
-/// Rebuild a design with the on-chip logic analyzer added.
+/// Rebuild a design with the on-chip logic analyzer added, with the device
+/// family's primitive declarations as the first build had them.
 fn add_logic_analyzer(
     source: &Path,
     context: skalp_frontend::CompilationContext,
+    device: &str,
     family: &str,
     variant: &str,
     output_dir: &Path,
@@ -5951,8 +5953,12 @@ fn add_logic_analyzer(
         map.trigger,
         tx_pin
     );
-    skalp_frontend::parse_and_build_compilation_context_from_source(source, edited)
-        .context("Failed to build the design with the logic analyzer")
+    skalp_frontend::parse_and_build_compilation_context_from_source_for_device(
+        source,
+        edited,
+        Some(device),
+    )
+    .context("Failed to build the design with the logic analyzer")
 }
 
 /// Read a logic analyzer capture from the board and save it as a waveform.

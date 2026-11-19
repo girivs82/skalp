@@ -2096,3 +2096,60 @@ fn test_io_constraint_propagation() {
         );
     }
 }
+
+/// LIR of `p = a * K` with K a constant driven at width `width`
+fn build_constant_multiply_lir(width: u32, result_width: u32, k: u64) -> Lir {
+    let mut lir = Lir::new("TestMulConst".to_string());
+    let a = lir.add_input("a".to_string(), width);
+    let c = lir.add_signal("k".to_string(), width);
+    lir.add_node(
+        LirOp::Constant { width, value: k },
+        vec![],
+        c,
+        "k".to_string(),
+    );
+    let p = lir.add_output("p".to_string(), result_width);
+    lir.add_node(
+        LirOp::Mul {
+            width,
+            result_width,
+            signed: false,
+        },
+        vec![a, c],
+        p,
+        "mul".to_string(),
+    );
+    lir
+}
+
+#[test]
+fn test_ecp5_multiply_by_shift_constant_uses_no_dsp() {
+    // An index scaled to a bit offset (`i * 8`) is wiring, not a multiplier:
+    // a DSP block for it only adds its delay to the path
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let lir = build_constant_multiply_lir(8, 16, 8);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    assert_eq!(count_dsp_cells_in(&result.netlist), 0, "a * 8 needs no DSP");
+    let luts = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type.contains("LUT") && !c.cell_type.ends_with("_BUF"))
+        .count();
+    // Only the buffers from `a` to the output port remain
+    assert_eq!(luts, 0, "a * 8 is a shift: no logic at all");
+
+    // Two set bits: a shift and one add
+    let lir = build_constant_multiply_lir(8, 16, 0b1010);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    assert_eq!(
+        count_dsp_cells_in(&result.netlist),
+        0,
+        "a * 10 needs no DSP"
+    );
+
+    // Three set bits stay on a DSP block
+    let lir = build_constant_multiply_lir(8, 16, 0b111);
+    let result = skalp_lir::synthesize(&lir, &library, skalp_lir::synth::SynthPreset::Quick);
+    assert_eq!(count_dsp_cells_in(&result.netlist), 1, "a * 7 uses a DSP");
+}

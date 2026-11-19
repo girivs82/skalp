@@ -154,13 +154,31 @@ impl<'a> LeadingZeros<'a> {
         }
     }
 
-    /// The value of a constant-driven signal.
-    fn constant_value(&self, sig: LirSignalId) -> Option<u64> {
-        let &idx = self.driver.get(&sig.0)?;
-        match self.lir.nodes[idx].op {
-            LirOp::Constant { value, .. } => Some(value),
-            _ => None,
+    /// The value of a constant-driven signal, through buffers and zero
+    /// extensions of a constant (truncated to the signal's width).
+    pub fn constant_value(&self, sig: LirSignalId) -> Option<u64> {
+        self.constant_at_depth(sig, 0)
+    }
+
+    fn constant_at_depth(&self, sig: LirSignalId, depth: u32) -> Option<u64> {
+        if depth > MAX_DEPTH {
+            return None;
         }
+        let &idx = self.driver.get(&sig.0)?;
+        let node = &self.lir.nodes[idx];
+        let value = match node.op {
+            LirOp::Constant { value, .. } => value,
+            LirOp::Buf { .. } | LirOp::Buffer { .. } | LirOp::ZeroExtend { .. } => {
+                self.constant_at_depth(*node.inputs.first()?, depth + 1)?
+            }
+            _ => return None,
+        };
+        let width = self.width(sig);
+        Some(if width >= 64 {
+            value
+        } else {
+            value & ((1u64 << width) - 1)
+        })
     }
 }
 

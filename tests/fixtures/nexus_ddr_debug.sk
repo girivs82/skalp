@@ -1,0 +1,51 @@
+// The DDR gearing design of nexus_ddr_timing.sk with a traced counter and a
+// breakpoint, for `synth --debug`: the debug rebuild must still know the
+// device's primitives (ECLKSYNC, ECLKDIV, ODDRX4).
+// The PLL is pinned to the lower-left corner: unpinned, it goes to the corner
+// nearest the design's pins, and the analyzer's UART pin moves that to one
+// whose output does not reach the edge clock (a placement issue of its own).
+#[lattice_ip(name = "PLL_CORE", LOC = "LLC", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
+entity PllCore {
+    in REFCK: clock
+    in RST: bit
+    out CLKOP: clock
+    out LOCK: bit
+}
+
+entity NexusDdrDebug {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out q: bit @ { pin: "AC19", io_standard: "LVSTL_I" }
+    out led: bit @ { pin: "R4", io_standard: "LVCMOS33" }
+}
+
+impl NexusDdrDebug {
+    inst pll = PllCore { REFCK: clk, RST: 0 }
+    signal fast: clock
+    fast = pll.CLKOP
+
+    inst es = ECLKSYNC { ECLKIN: fast, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: 0, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+
+    #[trace]
+    signal n: bit[8] = 0
+    #[breakpoint(condition = "n == 200")]
+    signal hit: bit
+    hit = n == 200
+    on(sclk.rise) {
+        n = n + 1
+    }
+    inst o = ODDRX4 {
+        D0: n[0], D1: n[1], D2: n[2], D3: n[3], D4: n[4], D5: n[5], D6: n[6], D7: n[7],
+        ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    q = o.Q
+    signal seen: bit = 0
+    on(sclk.rise) {
+        seen = n[7]
+    }
+    led = seen
+}

@@ -492,6 +492,47 @@ fn ddr_gearing_is_timed_against_its_divided_clock() {
     }
 }
 
+/// `synth --debug` rebuilds the design with the logic analyzer added; the
+/// rebuild must declare the device's primitives as the first build did, or a
+/// design using them fails with "unknown entity"
+#[test]
+fn debug_build_keeps_the_device_primitives() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nexus_ddr_debug.sk");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args([
+            "synth",
+            source.to_str().unwrap(),
+            "-d",
+            "nexus-lfcpnx100",
+            "-f",
+            "--debug",
+            "-o",
+            "out",
+        ])
+        .env("PRJOXIDE_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("skalp runs");
+    assert!(
+        output.status.success(),
+        "skalp synth --debug failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let map: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("out/debug_probes.json")).expect("probe map"),
+    )
+    .expect("the probe map parses");
+    assert_eq!(map["probes"][0]["name"], "n", "{map}");
+    assert!(dir.path().join("out/design.bit").exists());
+}
+
 #[test]
 fn wide_lut_builds_a_bitstream_for_the_real_device() {
     let Some(db) = find_database() else {
