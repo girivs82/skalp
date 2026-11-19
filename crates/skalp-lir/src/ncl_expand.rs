@@ -65,12 +65,28 @@ pub struct NclConfig {
     /// - Outputs: single-rail → encode → NCL dual-rail
     /// - Completion detection on outputs
     pub boundary_only: bool,
-    /// Keep a bundled-data block's state in latches built from logic
-    /// (master-slave pairs, see [`expand_to_ncl_bridged_with`]) instead of
-    /// flip-flops clocked by its step strobe. A flip-flop's clock pin is
-    /// reachable only from the device's clock network on some FPGAs, which
-    /// has room for a limited number of strobes; latches need none.
-    pub latch_state: bool,
+    /// Where a bundled-data block keeps its state (see [`AsyncState`])
+    pub async_state: AsyncState,
+}
+
+/// Where a bundled-data async block keeps its state. A flip-flop's clock
+/// pin is reachable only from the device's clock network on some FPGAs,
+/// which has room for a limited number of strobes; latches built from logic
+/// need none. See [`expand_to_ncl_bridged_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AsyncState {
+    /// Flip-flops clocked by the block's step strobe `go`
+    #[default]
+    FlipFlop,
+    /// Master-slave pairs of latches (two per bit), opened by two enables
+    /// made from `go` that are never high together
+    MasterSlaveLatch,
+    /// One latch per bit, opened by a short pulse at the start of each step
+    PulseLatch,
+    /// Master-slave pairs whose masters are open only for a short pulse at
+    /// the start of each step (closed while the block waits, so they pass
+    /// no glitches), the slaves copying them once they have closed
+    PulsedMasterSlave,
 }
 
 impl Default for NclConfig {
@@ -81,7 +97,7 @@ impl Default for NclConfig {
             generate_null_wavefront: true,
             use_opaque_arithmetic: true, // Enable by default for performance
             boundary_only: true, // Boundary-only NCL for efficiency (simulation needs hybrid mode)
-            latch_state: false,
+            async_state: AsyncState::FlipFlop,
         }
     }
 }
@@ -2910,16 +2926,16 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
 /// Each `x & delay(x)` is a [`LirOp::NclMatchedDelay`], sized after mapping
 /// to cover the block's data paths.
 pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
-    expand_to_ncl_bridged_with(lir, false, false)
+    expand_to_ncl_bridged_with(lir, false, AsyncState::FlipFlop)
 }
 
 /// [`expand_to_ncl_bridged`] for a block whose coalesced async children have
 /// registers of their own (`children_have_regs`): those are clocked by this
 /// block's `go` strobe too, so the acknowledge must wait for them.
 ///
-/// With `latch_state`, the block's registers become master-slave pairs of
-/// latches (`LirOp::Latch`, one LUT per bit on an FPGA) opened by two
-/// enables made from `go` that are never high together:
+/// With [`AsyncState::MasterSlaveLatch`], the block's registers become
+/// master-slave pairs of latches (`LirOp::Latch`, one LUT per bit on an
+/// FPGA) opened by two enables made from `go` that are never high together:
 ///
 /// * `master_open = !go & delay(!go)`: the masters follow the next state
 ///   while the block waits and close as `go` rises (the edge a flip-flop
@@ -2931,7 +2947,23 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
 ///
 /// So no value passes a master and its slave at once, and the step behaves
 /// as one edge of flip-flops. `done` then follows `slave_open` by the matched
-/// delay the next state needs. A latch built from logic has no power-up
+/// delay the next state needs. The masters are open while the block waits,
+/// so they pass every glitch of the logic in front of them.
+///
+/// With [`AsyncState::PulseLatch`], each register becomes one latch, open
+/// only for a short pulse as `go` rises: `pulse_end = go & delay(go)` and
+/// `pulse = go & !pulse_end`. The pulse must be long enough for every latch
+/// to take its data, and short enough that a latch's new value cannot come
+/// back round to its own input (or another latch's) while it is still open.
+/// `done` follows `pulse_end`.
+///
+/// With [`AsyncState::PulsedMasterSlave`], the masters take that pulse as
+/// their enable and the slaves `slave_open = go & delay(go)`, rising once
+/// every master has closed. The masters read only the slaves' old outputs
+/// while they are open, so nothing races through, and they are closed
+/// while the logic in front of them settles. `done` follows `slave_open`.
+///
+/// A latch built from logic has no power-up
 /// value of its own: the device starts its feedback loops at 0 (as it does
 /// the step control's), so a bit that must start at 1 is stored inverted.
 /// Registers with an enable or reset, and blocks whose coalesced children
@@ -2939,7 +2971,7 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
 pub fn expand_to_ncl_bridged_with(
     lir: &Lir,
     children_have_regs: bool,
-    latch_state: bool,
+    async_state: AsyncState,
 ) -> NclExpandResult {
     use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
 
@@ -3120,9 +3152,10 @@ pub fn expand_to_ncl_bridged_with(
         }
     }
 
-    // Registers as master-slave latches: `done` then times the slaves
-    let state_strobe = if latch_state && !children_have_regs {
-        latch_registers(&mut new_lir, go).unwrap_or(go)
+    // Registers as latches: `done` then times from the strobe that opens
+    // them last
+    let state_strobe = if async_state != AsyncState::FlipFlop && !children_have_regs {
+        latch_registers(&mut new_lir, go, async_state).unwrap_or(go)
     } else {
         go
     };
@@ -3271,11 +3304,12 @@ pub fn expand_to_ncl_bridged_with(
     }
 }
 
-/// Turn the registers clocked by `go` into master-slave latch pairs (see
-/// [`expand_to_ncl_bridged_with`]). Returns the slaves' enable, or `None`
-/// when no register could be turned (none, or only ones with an enable or
+/// Turn the registers clocked by `go` into latches (master-slave pairs or
+/// pulsed latches, see [`expand_to_ncl_bridged_with`]). Returns the strobe
+/// `done` follows (the slaves' enable, or the pulse's end), or `None` when
+/// no register could be turned (none, or only ones with an enable or
 /// reset), in which case nothing changes.
-fn latch_registers(lir: &mut Lir, go: LirSignalId) -> Option<LirSignalId> {
+fn latch_registers(lir: &mut Lir, go: LirSignalId, state: AsyncState) -> Option<LirSignalId> {
     let regs: Vec<usize> = (0..lir.nodes.len())
         .filter(|&i| {
             let n = &lir.nodes[i];
@@ -3293,6 +3327,27 @@ fn latch_registers(lir: &mut Lir, go: LirSignalId) -> Option<LirSignalId> {
         .collect();
     if regs.is_empty() {
         return None;
+    }
+    if state == AsyncState::PulseLatch {
+        let (pulse_end, pulse) = make_pulse(lir, go);
+        for &idx in &regs {
+            replace_register_with_latches(lir, idx, &[(pulse, "latch")]);
+        }
+        return Some(pulse_end);
+    }
+    if state == AsyncState::PulsedMasterSlave {
+        let (_, pulse) = make_pulse(lir, go);
+        let slave_open = lir.add_signal("__ncl_slave_open".to_string(), 1);
+        lir.add_node(
+            LirOp::NclMatchedDelay { width: 1 },
+            vec![go],
+            slave_open,
+            crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
+        );
+        for &idx in &regs {
+            replace_register_with_latches(lir, idx, &[(pulse, "master"), (slave_open, "slave")]);
+        }
+        return Some(slave_open);
     }
     let not_go = lir.add_signal("__ncl_go_n".to_string(), 1);
     lir.add_node(
@@ -3316,75 +3371,108 @@ fn latch_registers(lir: &mut Lir, go: LirSignalId) -> Option<LirSignalId> {
         crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
     );
     for idx in regs {
-        let q = lir.nodes[idx].output;
-        let d = lir.nodes[idx].inputs[0];
-        let path = lir.nodes[idx].path.clone();
-        let width = lir.signals[q.0 as usize].width;
-        let mask = if width >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << width) - 1
-        };
-        let init = lir.signals[q.0 as usize].initial.unwrap_or(0) & mask;
-        let name = lir.signals[q.0 as usize].name.clone();
-        let constant = |lir: &mut Lir, suffix: &str| {
-            let c = lir.add_signal(format!("{name}__{suffix}"), width);
-            lir.add_node(
-                LirOp::Constant { width, value: init },
-                vec![],
-                c,
-                format!("{path}.{suffix}"),
-            );
-            c
-        };
-        // Bits starting at 1 are stored inverted, so every loop starts at 0
-        let d_stored = if init != 0 {
-            let c = constant(lir, "init_d");
-            let x = lir.add_signal(format!("{name}__d_stored"), width);
-            lir.add_node(
-                LirOp::Xor { width },
-                vec![d, c],
-                x,
-                format!("{path}.d_stored"),
-            );
-            x
-        } else {
-            d
-        };
-        // The register's node becomes the master
-        let master = lir.add_signal(format!("{name}__master"), width);
-        {
-            let node = &mut lir.nodes[idx];
-            node.op = LirOp::Latch { width };
-            node.inputs = vec![master_open, d_stored];
-            node.output = master;
-            node.clock = None;
-            node.reset = None;
-            node.path = format!("{path}.master");
-        }
-        lir.signals[master.0 as usize].driver = Some(LirNodeId(idx as u32));
-        let slave_out = if init != 0 {
-            lir.add_signal(format!("{name}__slave"), width)
-        } else {
-            q
-        };
-        lir.add_node(
-            LirOp::Latch { width },
-            vec![slave_open, master],
-            slave_out,
-            format!("{path}.slave"),
-        );
-        if init != 0 {
-            let c = constant(lir, "init_q");
-            lir.add_node(
-                LirOp::Xor { width },
-                vec![slave_out, c],
-                q,
-                format!("{path}.q"),
-            );
-        }
+        replace_register_with_latches(lir, idx, &[(master_open, "master"), (slave_open, "slave")]);
     }
     Some(slave_open)
+}
+
+/// Turn the plain register at node `idx` into a chain of latches, one per
+/// `(enable, name)` in `stages`: the first takes the register's data, the
+/// last drives its output. A latch built from logic starts at 0, so bits
+/// that start at 1 are stored inverted.
+fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignalId, &str)]) {
+    let q = lir.nodes[idx].output;
+    let d = lir.nodes[idx].inputs[0];
+    let path = lir.nodes[idx].path.clone();
+    let width = lir.signals[q.0 as usize].width;
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    let init = lir.signals[q.0 as usize].initial.unwrap_or(0) & mask;
+    let name = lir.signals[q.0 as usize].name.clone();
+    let constant = |lir: &mut Lir, suffix: &str| {
+        let c = lir.add_signal(format!("{name}__{suffix}"), width);
+        lir.add_node(
+            LirOp::Constant { width, value: init },
+            vec![],
+            c,
+            format!("{path}.{suffix}"),
+        );
+        c
+    };
+    let mut data = if init != 0 {
+        let c = constant(lir, "init_d");
+        let x = lir.add_signal(format!("{name}__d_stored"), width);
+        lir.add_node(
+            LirOp::Xor { width },
+            vec![d, c],
+            x,
+            format!("{path}.d_stored"),
+        );
+        x
+    } else {
+        d
+    };
+    for (k, &(enable, stage)) in stages.iter().enumerate() {
+        let last = k + 1 == stages.len();
+        let out = if last && init == 0 {
+            q
+        } else {
+            lir.add_signal(format!("{name}__{stage}"), width)
+        };
+        if k == 0 {
+            // The register's node becomes the first latch
+            let node = &mut lir.nodes[idx];
+            node.op = LirOp::Latch { width };
+            node.inputs = vec![enable, data];
+            node.output = out;
+            node.clock = None;
+            node.reset = None;
+            node.path = format!("{path}.{stage}");
+            lir.signals[out.0 as usize].driver = Some(LirNodeId(idx as u32));
+        } else {
+            lir.add_node(
+                LirOp::Latch { width },
+                vec![enable, data],
+                out,
+                format!("{path}.{stage}"),
+            );
+        }
+        data = out;
+    }
+    if init != 0 {
+        let c = constant(lir, "init_q");
+        lir.add_node(LirOp::Xor { width }, vec![data, c], q, format!("{path}.q"));
+    }
+}
+
+/// The pulse `go & !pulse_end` with `pulse_end = go & delay(go)` (see
+/// [`expand_to_ncl_bridged_with`]); returns `(pulse_end, pulse)`
+fn make_pulse(lir: &mut Lir, go: LirSignalId) -> (LirSignalId, LirSignalId) {
+    let pulse_end = lir.add_signal("__ncl_pulse_end".to_string(), 1);
+    lir.add_node(
+        LirOp::NclMatchedDelay { width: 1 },
+        vec![go],
+        pulse_end,
+        crate::ncl_bundle::PULSE_END_PATH.to_string(),
+    );
+    let not_end = lir.add_signal("__ncl_pulse_end_n".to_string(), 1);
+    lir.add_node(
+        LirOp::Not { width: 1 },
+        vec![pulse_end],
+        not_end,
+        "ncl_bundle.pulse_end_n".to_string(),
+    );
+    let pulse = lir.add_signal("__ncl_pulse".to_string(), 1);
+    lir.add_node(
+        LirOp::And { width: 1 },
+        vec![go, not_end],
+        pulse,
+        crate::ncl_bundle::PULSE_PATH.to_string(),
+    );
+    (pulse_end, pulse)
 }
 
 /// Check the step conditions of every self-timed async block in `hier_lir`
@@ -3637,7 +3725,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
             let ncl_result = expand_to_ncl_bridged_with(
                 &instance.lir_result.lir,
                 children_use_go(path),
-                config.latch_state,
+                config.async_state,
             );
             new_instances.insert(
                 path.clone(),
