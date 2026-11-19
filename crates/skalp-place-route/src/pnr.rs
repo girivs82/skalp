@@ -725,10 +725,6 @@ pub fn place_and_route_nexus_real_from(
         })
         .map(|&(x, y, _)| (x, y))
         .collect();
-    // Each PLL goes to the corner its LOC names, or the corner nearest the
-    // design's pins; the region loaded must reach it
-    let pll_sites = crate::device::nexus::pll::choose_sites(&tiles, netlist, &pad_sites)
-        .map_err(PlaceRouteError::PlacementFailed)?;
     // A fixed reference level on a bank's pads (`vref` / `vref_code`) becomes a
     // generator on the bank. Each generator goes to the bank its LOC or PIN
     // names, or a bank whose LVSTL inputs need one.
@@ -759,6 +755,76 @@ pub fn place_and_route_nexus_real_from(
         &pin_bank,
     )
     .map_err(PlaceRouteError::PlacementFailed)?;
+    // Each DDR primitive's block: the I/O logic of its pad, the DQS buffer of
+    // its strobe's group, the edge clock blocks of the bank it clocks
+    let ddr_sites = if ddr_blocks.cells.is_empty() {
+        Vec::new()
+    } else {
+        crate::device::nexus::ddr::sites(db_root, variant.prjoxide_family(), &tiles)
+    };
+    let ddr_package = variant
+        .default_package()
+        .and_then(|name| packages.get(name))
+        .or_else(|| packages.values().next());
+    let dqs_groups = if ddr_blocks.cells.is_empty() {
+        Default::default()
+    } else {
+        sites::dqs_groups(db_root, variant).map_err(PlaceRouteError::PlacementFailed)?
+    };
+    let pad_site = |cell: &skalp_lir::gate_netlist::Cell| {
+        let loc = cell.parameters.get("LOC")?;
+        ddr_package?
+            .pins
+            .get(loc)
+            .map(|&(x, y, pio)| (x, y, u32::from(pio)))
+    };
+    let strobe_of = |x: u32, y: u32| dqs_groups.get(&(x, y)).copied();
+    let choose_ddr = (!ddr_blocks.cells.is_empty()).then_some(
+        |accepts: crate::device::nexus::ddr::Accepts<'_>| {
+            crate::device::nexus::ddr::choose_sites(
+                netlist,
+                &ddr_primitives,
+                &ddr_blocks,
+                &ddr_sites,
+                &pad_site,
+                &strobe_of,
+                accepts,
+            )
+        },
+    );
+    let ddr_chosen = match &choose_ddr {
+        Some(choose) => choose(&|_, _| true).map_err(PlaceRouteError::PlacementFailed)?,
+        None => crate::collections::HashMap::default(),
+    };
+    // Each PLL goes to the corner its LOC names, or the corner nearest the
+    // design's pins among those whose outputs reach the clock pins they
+    // drive over the dedicated clock network; the region loaded must reach it
+    let pll_clock_sinks = PllClockSinks::find(
+        netlist,
+        &tiles,
+        db_root,
+        variant.prjoxide_family(),
+        &ddr_primitives,
+        &ddr_sites,
+        &ddr_chosen,
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
+    let pll_sites = crate::device::nexus::pll::choose_sites(
+        &tiles,
+        netlist,
+        &pad_sites,
+        &pll_clock_sinks.needs(),
+    )
+    .map_err(PlaceRouteError::PlacementFailed)?;
+    // Then the edge clock blocks that have a choice take sites their clocks
+    // reach from the PLLs' corners
+    let ddr_chosen = match &choose_ddr {
+        Some(choose) if pll_clock_sinks.has_choices() => {
+            choose(&|id, site| pll_clock_sinks.accepts(id, site, &pll_sites))
+                .map_err(PlaceRouteError::PlacementFailed)?
+        }
+        _ => ddr_chosen,
+    };
     let adc_site = adc_site(
         netlist,
         &tiles,
@@ -767,40 +833,6 @@ pub fn place_and_route_nexus_real_from(
         variant.prjoxide_family(),
     )
     .map_err(PlaceRouteError::PlacementFailed)?;
-    // Each DDR primitive's block: the I/O logic of its pad, the DQS buffer of
-    // its strobe's group, the edge clock blocks of the bank it clocks
-    let ddr_sites = if ddr_blocks.cells.is_empty() {
-        Vec::new()
-    } else {
-        crate::device::nexus::ddr::sites(db_root, variant.prjoxide_family(), &tiles)
-    };
-    let ddr_chosen = if ddr_blocks.cells.is_empty() {
-        crate::collections::HashMap::default()
-    } else {
-        let package = variant
-            .default_package()
-            .and_then(|name| packages.get(name))
-            .or_else(|| packages.values().next());
-        let pad_site = |cell: &skalp_lir::gate_netlist::Cell| {
-            let loc = cell.parameters.get("LOC")?;
-            package?
-                .pins
-                .get(loc)
-                .map(|&(x, y, pio)| (x, y, u32::from(pio)))
-        };
-        let groups =
-            sites::dqs_groups(db_root, variant).map_err(PlaceRouteError::PlacementFailed)?;
-        let strobe_of = |x: u32, y: u32| groups.get(&(x, y)).copied();
-        crate::device::nexus::ddr::choose_sites(
-            netlist,
-            &ddr_primitives,
-            &ddr_blocks,
-            &ddr_sites,
-            &pad_site,
-            &strobe_of,
-        )
-        .map_err(PlaceRouteError::PlacementFailed)?
-    };
     let mut pad_sites = pad_sites;
     for &site in ddr_chosen.values() {
         let site = &ddr_sites[site];
@@ -1550,6 +1582,255 @@ pub fn place_and_route_xc7(
         wire_delays,
         routed: Some(routed),
     })
+}
+
+/// A clock pin a PLL output drives that the dedicated clock network may
+/// reach from some corners only.
+#[cfg(feature = "nexus-bitstream")]
+struct PllClockSink {
+    pll: skalp_lir::gate_netlist::CellId,
+    output: &'static str,
+    sink: skalp_lir::gate_netlist::CellId,
+    /// What it is, for messages
+    what: String,
+    /// The pin's wire node at each site the sink could take (the DDR site
+    /// index, if a DDR block) and at the one it has now (first)
+    targets: Vec<(Option<usize>, crate::device::nexus::NodeKey)>,
+}
+
+/// What each PLL's outputs drive that only some corners' PLLs reach over the
+/// dedicated clock network: the clock pins of edge clock and DDR blocks and
+/// the ADC's converter clock, through any buffers synthesis left. A clock
+/// pin that no corner reaches that way is routed through the general clock
+/// network, which every corner reaches, so it constrains nothing. An edge
+/// clock synchronizer can take any free one of its bank's synchronizers,
+/// whose input muxes take different corners' outputs; a DLL any DLL.
+#[cfg(feature = "nexus-bitstream")]
+struct PllClockSinks {
+    network: Option<crate::device::nexus::prjoxide_graph::ClockNetwork>,
+    corners: Vec<(String, u32, u32)>,
+    sinks: Vec<PllClockSink>,
+}
+
+#[cfg(feature = "nexus-bitstream")]
+impl PllClockSinks {
+    fn find(
+        netlist: &GateNetlist,
+        tiles: &[crate::device::nexus::prjoxide_load::PrjoxideTile],
+        db_root: &std::path::Path,
+        family: &str,
+        ddr_primitives: &crate::device::nexus::ddr::Primitives,
+        ddr_sites: &[crate::device::nexus::ddr::Site],
+        ddr_chosen: &crate::collections::HashMap<skalp_lir::gate_netlist::CellId, usize>,
+    ) -> std::result::Result<Self, String> {
+        use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
+        use crate::device::nexus::ddr::SiteKind;
+        use crate::device::nexus::prjoxide_graph::ClockNetwork;
+        use crate::device::nexus::{adc, pll, resolve_wire};
+        use skalp_lir::gate_netlist::{CellId, GateNetId};
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut found = Self {
+            network: None,
+            corners: pll::corners(tiles)
+                .into_iter()
+                .map(|(c, x, y)| (c.to_string(), x, y))
+                .collect(),
+            sinks: Vec::new(),
+        };
+        if !netlist.cells.iter().any(pll::is_pll) {
+            return Ok(found);
+        }
+        let mut sinks: HashMap<GateNetId, Vec<(CellId, usize)>> = HashMap::new();
+        for c in &netlist.cells {
+            for (i, &net) in c.inputs.iter().enumerate() {
+                sinks.entry(net).or_default().push((c.id, i));
+            }
+        }
+        let is_buffer = |c: &skalp_lir::gate_netlist::Cell| {
+            matches!(
+                c.function,
+                Some(CellFunction::Buf) | Some(CellFunction::ClkBuf)
+            ) && c.inputs.len() == 1
+        };
+        let adc_tile = tiles
+            .iter()
+            .find(|t| t.tiletype == adc::TILETYPE)
+            .map(|t| (t.x, t.y));
+        let node_at = |site: usize, pin: &str| {
+            let (x, y, wire) = ddr_sites[site].pins.get(pin)?;
+            resolve_wire(*x, *y, wire)
+        };
+        for cell in netlist.cells.iter().filter(|c| pll::is_pll(c)) {
+            for (index, &net) in cell.outputs.iter().enumerate() {
+                let Some(&output) =
+                    pll::output_router_pin(cell, index).and_then(|p| pll::output_pins().get(p))
+                else {
+                    continue;
+                };
+                let mut nets = vec![net];
+                let mut seen = HashSet::new();
+                while let Some(net) = nets.pop() {
+                    if !seen.insert(net) {
+                        continue;
+                    }
+                    for &(id, input) in sinks.get(&net).into_iter().flatten() {
+                        let Some(sink) = netlist.get_cell(id) else {
+                            continue;
+                        };
+                        if is_buffer(sink) {
+                            nets.extend(sink.outputs.iter().copied());
+                            continue;
+                        }
+                        let found_sink = if let Some(&site) = ddr_chosen.get(&id) {
+                            ddr_primitives
+                                .pin_at(sink, false, input)
+                                .filter(|p| p.clock)
+                                .and_then(|p| {
+                                    let here = &ddr_sites[site];
+                                    let movable =
+                                        matches!(here.kind, SiteKind::Eclksync | SiteKind::Ddrdll);
+                                    let mut targets = vec![(Some(site), node_at(site, &p.pin)?)];
+                                    if movable {
+                                        targets.extend(
+                                            (0..ddr_sites.len())
+                                                .filter(|&j| {
+                                                    j != site
+                                                        && ddr_sites[j].kind == here.kind
+                                                        && ddr_sites[j].bank == here.bank
+                                                })
+                                                .filter_map(|j| {
+                                                    Some((Some(j), node_at(j, &p.pin)?))
+                                                }),
+                                        );
+                                    }
+                                    let what = if movable {
+                                        format!("the {} of '{}'", p.pin, sink.path)
+                                    } else {
+                                        format!("{} {} ('{}')", here.name, p.pin, sink.path)
+                                    };
+                                    Some((what, targets))
+                                })
+                        } else if adc::is_adc(sink)
+                            && adc::input_pin_name(sink, input) == Some(adc::CONVERTER_CLOCK_PIN)
+                        {
+                            adc_tile.and_then(|(x, y)| {
+                                Some((
+                                    format!(
+                                        "the ADC's {} ('{}')",
+                                        adc::CONVERTER_CLOCK_PIN,
+                                        sink.path
+                                    ),
+                                    vec![(
+                                        None,
+                                        resolve_wire(
+                                            x,
+                                            y,
+                                            &adc::site_wire(adc::CONVERTER_CLOCK_PIN),
+                                        )?,
+                                    )],
+                                ))
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some((what, targets)) = found_sink {
+                            found.sinks.push(PllClockSink {
+                                pll: cell.id,
+                                output,
+                                sink: id,
+                                what,
+                                targets,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if !found.sinks.is_empty() {
+            found.network = Some(ClockNetwork::load(db_root, family, tiles)?);
+        }
+        Ok(found)
+    }
+
+    /// Whether the PLL in the corner whose tile is `(x, y)` reaches `node`
+    /// from its `output`.
+    fn reaches(&self, x: u32, y: u32, output: &str, node: &crate::device::nexus::NodeKey) -> bool {
+        self.network.as_ref().is_some_and(|network| {
+            network.reaches(
+                &crate::device::nexus::pll::output_nodes(network, x, y, output),
+                node,
+            )
+        })
+    }
+
+    /// The corners whose PLL reaches a sink at any of its sites.
+    fn reaching(&self, sink: &PllClockSink) -> Vec<String> {
+        self.corners
+            .iter()
+            .filter(|(_, x, y)| {
+                sink.targets
+                    .iter()
+                    .any(|(_, node)| self.reaches(*x, *y, sink.output, node))
+            })
+            .map(|c| c.0.clone())
+            .collect()
+    }
+
+    /// Per PLL, the sinks some corners only reach, and which.
+    fn needs(
+        &self,
+    ) -> crate::collections::HashMap<
+        skalp_lir::gate_netlist::CellId,
+        Vec<crate::device::nexus::pll::ClockNeed>,
+    > {
+        let mut needs: crate::collections::HashMap<_, Vec<_>> =
+            crate::collections::HashMap::default();
+        for sink in &self.sinks {
+            let corners = self.reaching(sink);
+            if !corners.is_empty() {
+                needs
+                    .entry(sink.pll)
+                    .or_default()
+                    .push(crate::device::nexus::pll::ClockNeed {
+                        output: sink.output.to_string(),
+                        sink: sink.what.clone(),
+                        corners,
+                    });
+            }
+        }
+        needs
+    }
+
+    /// Whether any sink is a DDR block that could take another site.
+    fn has_choices(&self) -> bool {
+        self.sinks
+            .iter()
+            .any(|s| s.targets.iter().filter(|t| t.0.is_some()).count() > 1)
+    }
+
+    /// Whether DDR block `id` may take `site`: each PLL clock pin of it that
+    /// the dedicated network reaches from some corner, it reaches there from
+    /// the PLL's chosen corner.
+    fn accepts(
+        &self,
+        id: skalp_lir::gate_netlist::CellId,
+        site: usize,
+        pll_sites: &crate::collections::HashMap<skalp_lir::gate_netlist::CellId, (u32, u32)>,
+    ) -> bool {
+        self.sinks
+            .iter()
+            .filter(|s| s.sink == id && !self.reaching(s).is_empty())
+            .all(|s| {
+                let Some(&(x, y)) = pll_sites.get(&s.pll) else {
+                    return true;
+                };
+                s.targets
+                    .iter()
+                    .find(|t| t.0 == Some(site))
+                    .is_some_and(|(_, node)| self.reaches(x, y, s.output, node))
+            })
+    }
 }
 
 /// An ADC cell and its tile.

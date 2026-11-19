@@ -38,6 +38,14 @@
 // and 2N+1 of both lanes, the earlier beat in [15:0]) with dfi_rddata_valid_wN. A controller
 // keeps TRDDATA_EN_ADJ = 3; the gate training finds the burst after it.
 //
+// Reset (as the device's LPDDR4 interface wants it): sync_clk, a free-running clock, runs the DDR
+// reset sequence once the PLL locks: DLL reset and lock, DLL frozen, edge clocks stopped, the DQS
+// buffers (with their state counters), the divider and every gearbox reset and released, edge
+// clocks restarted, DLL released, and the DLL code taken by the DQS buffers with their clocks
+// paused. The DDR reset changes only while the edge clocks are stopped: paths from it to the
+// blocks it resets are false paths. Controller updates take the DLL code again (see below), so
+// a controller sets CTRLUPD_CYC >= 8.
+//
 // Delay settings move in 12.5 ps steps, one step per two DFI cycles; while one moves, the lane
 // holds the DQS buffer's PAUSE. At init the PHY resets the DLL, waits for it to lock, resets
 // the DQS buffers, loads every setting, and sets the read and write DQ delays to the start of
@@ -53,7 +61,9 @@
 //         CK was high) on the PHY's own DQS. The delay starts at 0 (DQS rising half a tCK before
 //         CK) and moves up WL_STEP steps per strobe; each lane keeps the first delay whose
 //         feedback goes from 0 to 1, moves back to it and raises its dfi_wrlvl_resp bit
-//         (wrlvl_fail when WL_MAX steps pass without one).
+//         (wrlvl_fail when WL_MAX steps pass without one). The edge comes about half a tCK
+//         in, so WL_MAX (248 steps, 3.1 ns; at most 255 - WL_STEP, the delay being 8 bits) reaches
+//         it down to 400 Mbps (half a tCK 2.5 ns) with board skew to spare.
 //   read gate (dfi_rdlvl_gate_en): Read DQ Calibration bursts, the n-th with gate setting n
 //         (0 to 8 x GATE_SLOTS - 1, from the slot of dfi_rddata_en); a setting passes when the
 //         DQS buffer reports BURSTDETECT. The longest passing run ends where the gate would open
@@ -161,7 +171,7 @@ pub entity NexusLpddr4Lane<
     const GATE_SLOTS: nat = 8,
     const TRAIN_WIN: nat = 14,
     const WL_STEP: nat = 4,
-    const WL_MAX: nat = 200,
+    const WL_MAX: nat = 248,
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,
@@ -169,7 +179,11 @@ pub entity NexusLpddr4Lane<
 > {
     in eclk: clock
     in sclk: clock
+    // rst: the lane's fabric logic; io_rst: the DDR reset of its DQS buffer and I/O logic
+    // (with the edge clock stopped, see the PHY); io_pause: the PHY's PAUSE around DLL code updates
     in rst: bit
+    in io_rst: bit
+    in io_pause: bit
     in load: bit
     in dllcode: bit[9]
     in dq_d: bit[64]
@@ -293,9 +307,9 @@ impl NexusLpddr4Lane {
     let sel_n: bit[4] = if wl_en == 1 { 4'b0000 } else { {1'b0, gsel[2:0]} }
 
     inst dqs = DQSBUF {
-        DQSI: dqs_i, ECLKIN: eclk, SCLK: sclk, RST: rst,
-        PAUSE: pause,
-        RSTSMCNT: 0, RDCLKSEL: sel_n, READ: read_n,
+        DQSI: dqs_i, ECLKIN: eclk, SCLK: sclk, RST: io_rst,
+        PAUSE: pause | io_pause,
+        RSTSMCNT: io_rst, RDCLKSEL: sel_n, READ: read_n,
         RDDIR: rd_dn, RDLOADN: ~load, READMOVE: rd_mv, SELCLK: 0,
         WRDIR: wr_dn, WRLOAD_N: ~load, WRMOVE: wr_mv,
         WRLVDIR: wl_dn, WRLVLOAD_N: ~load, WRLVMOVE: wl_mv,
@@ -306,55 +320,55 @@ impl NexusLpddr4Lane {
     inst dqs_od = ODDRX4DQS {
         D0: dqs_d[0], D1: dqs_d[1], D2: dqs_d[2], D3: dqs_d[3],
         D4: dqs_d[4], D5: dqs_d[5], D6: dqs_d[6], D7: dqs_d[7],
-        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
     inst dqs_ts = TSHX4DQS {
         T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
-        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: rst
+        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
     signal w270: clock
     signal r90: clock
     w270 = dqs.DQSW270
     r90 = dqs.DQSR90
     inst p0 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[7:0], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[0]
     }
     inst p1 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[15:8], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[1]
     }
     inst p2 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[23:16], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[2]
     }
     inst p3 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[31:24], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[3]
     }
     inst p4 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[39:32], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[4]
     }
     inst p5 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[47:40], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[5]
     }
     inst p6 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[55:48], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[6]
     }
     inst p7 = NexusLpddr4DqPin<IN_DELAY> {
-        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: rst, load_n: ~load,
+        eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
         d: dq_d[63:56], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[7]
     }
     inst dmi_od = ODDRX4DQ {
         D0: 0, D1: 0, D2: 0, D3: 0, D4: 0, D5: 0, D6: 0, D7: 0,
-        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: rst
+        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
     inst dmi_ts = TSHX4DQ {
         T0: dq_tt[0], T1: dq_tt[1], T2: dq_tt[2], T3: dq_tt[3],
-        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: rst
+        DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
 
     // eight beats of the lane, beat k in [8k+7:8k]
@@ -727,7 +741,7 @@ pub entity DfiLpddr4NexusPhy<
     const GATE_SLOTS: nat = 8,
     const TRAIN_WIN: nat = 14,
     const WL_STEP: nat = 4,
-    const WL_MAX: nat = 200,
+    const WL_MAX: nat = 248,
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,
@@ -736,6 +750,9 @@ pub entity DfiLpddr4NexusPhy<
     // the edge clock (CK rate) and its PLL's lock
     in eclk: clock
     in pll_lock: bit
+    // a free-running clock of at most 200 MHz (such as the PLL's reference): the DDR reset
+    // sequence runs on it while the edge clock, and so the DFI clock, is stopped
+    in sync_clk: clock
     out dfi_clk: clock
     // ---------------------------------------------------------------- DFI from the controller
     in dfi_cs_p0: bit
@@ -832,21 +849,110 @@ pub entity DfiLpddr4NexusPhy<
 
 impl DfiLpddr4NexusPhy {
     // ------------------------------------------------------------ clocks
-    inst es_ca = ECLKSYNC { ECLKIN: eclk, STOP: 0 }
-    inst es_dq = ECLKSYNC { ECLKIN: eclk, STOP: 0 }
+    inst es_ca = ECLKSYNC { ECLKIN: eclk, STOP: eclk_stop }
+    inst es_dq = ECLKSYNC { ECLKIN: eclk, STOP: eclk_stop }
     signal eclk_ca: clock
     signal eclk_dq: clock
     eclk_ca = es_ca.ECLKOUT
     eclk_dq = es_dq.ECLKOUT
-    inst ediv = ECLKDIV<4> { ECLKIN: eclk_dq, DIVRST: 0, SLIP: 0 }
+    inst ediv = ECLKDIV<4> { ECLKIN: eclk_dq, DIVRST: ddr_rst, SLIP: 0 }
     signal sclk: clock
     sclk = ediv.DIVOUT
-    signal dll_rst: bit = 1
-    inst dll = DDRDLL { CLKIN: eclk_dq, RST: dll_rst, FREEZE: 0, UDDCNTL_N: 0 }
+    inst dll = DDRDLL { CLKIN: eclk_dq, RST: dll_rst, FREEZE: dll_freeze, UDDCNTL_N: dll_udd_n }
 
-    // ------------------------------------------------------------ init
-    // 0 wait for init start and the PLL, 1 DLL reset, 2 wait for the DLL, 3 DQS buffer reset,
+    // ------------------------------------------------------------ DDR reset sequence (sync_clk)
+    // As the device's LPDDR4 interface wants it (FPGA-IPUG-02154): once the PLL and the DLL
+    // lock, freeze the DLL, stop the edge clocks, pulse the DDR reset (the DQS buffers with
+    // their state counters, the divider and every gearbox), restart the edge clocks (SCLK
+    // then starts in step with them), release the DLL, and update the DQS buffers' delay code
+    // with their clocks paused. Then the DFI side (SCLK) loads the delay settings.
+    // ss: 0 wait for the PLL, 1 DLL reset, 2 wait for the DLL, 3 frozen, 4 stopped, 5 DDR
+    // reset, 6 reset released (still stopped), 7 restarted, 8 unfrozen, 9 code update, 10 ready
+    #[cdc]
+    signal s_pll_m: bit = 0
+    signal s_pll: bit = 0
+    #[cdc]
+    signal s_dll_m: bit = 0
+    signal s_dll: bit = 0
+    signal ss: bit[4] = 0
+    signal scnt: bit[5] = 0
+    signal dll_rst: bit = 1
+    signal dll_freeze: bit = 0
+    signal eclk_stop: bit = 0
+    signal ddr_rst: bit = 0
+    signal init_pause: bit = 0
+    signal init_udd_n: bit = 1
+    signal io_ready: bit = 0
+    on(sync_clk.rise) {
+        s_pll_m = pll_lock
+        s_pll = s_pll_m
+        s_dll_m = dll.LOCK
+        s_dll = s_dll_m
+        scnt = scnt + 1
+        if s_pll == 0 {
+            // the PLL lost lock (or has not locked yet): start over
+            ss = 0
+            dll_rst = 1
+            dll_freeze = 0
+            eclk_stop = 0
+            ddr_rst = 0
+            init_pause = 0
+            init_udd_n = 1
+            io_ready = 0
+        } else if ss == 0 {
+            ss = 1
+            scnt = 0
+        } else if ss == 1 {
+            if scnt == 15 {
+                dll_rst = 0
+                ss = 2
+            }
+        } else if ss == 2 {
+            if s_dll == 1 {
+                ss = 3
+                scnt = 0
+                dll_freeze = 1
+            }
+        } else if ss < 9 {
+            // eight cycles a step
+            if scnt == 7 {
+                scnt = 0
+                ss = ss + 1
+                if ss == 3 { eclk_stop = 1 }
+                if ss == 4 { ddr_rst = 1 }
+                if ss == 5 { ddr_rst = 0 }
+                if ss == 6 { eclk_stop = 0 }
+                if ss == 7 { dll_freeze = 0 }
+                if ss == 8 { init_pause = 1 }
+            }
+        } else if ss == 9 {
+            // UDDCNTL_N low for cycles 3-10 of 16 with PAUSE
+            if scnt == 3 { init_udd_n = 0 }
+            if scnt == 11 { init_udd_n = 1 }
+            if scnt == 15 {
+                init_pause = 0
+                ss = 10
+                io_ready = 1
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ DLL code updates (SCLK)
+    // each controller update window takes the DLL's code to the DQS buffers with their clocks
+    // paused for 7 cycles, so a controller holds dfi_ctrlupd_req at least 8 cycles (the DFI
+    // controller's CTRLUPD_CYC)
+    signal upd_cnt: bit[4] = 0
+    signal upd_pause: bit = 0
+    signal upd_udd_n: bit = 1
+    let dll_udd_n: bit = init_udd_n & upd_udd_n
+    let io_pause: bit = init_pause | upd_pause
+
+    // ------------------------------------------------------------ init (SCLK)
+    // 0 wait for init start and the DDR reset sequence, 3 hold the lanes in reset,
     // 4 load the settings, 5 wait for the delays to move, 6 done
+    #[cdc]
+    signal io_ready_m: bit = 0
+    signal io_ready_s: bit = 0
     signal ist: bit[3] = 0
     signal icnt: bit[16] = 0
     signal dqs_rst: bit = 1
@@ -974,51 +1080,52 @@ impl DfiLpddr4NexusPhy {
     // ------------------------------------------------------------ command pins
     inst ck_od = ODDRX4 {
         D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca0_od = ODDRX4 {
         D0: b_ca[0], D1: b_ca[0], D2: b_ca[6], D3: b_ca[6], D4: b_ca[12], D5: b_ca[12], D6: b_ca[18], D7: b_ca[18],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca0_dl = DELAYB<CA_DELAY> { A: ca0_od.Q }
     inst ca1_od = ODDRX4 {
         D0: b_ca[1], D1: b_ca[1], D2: b_ca[7], D3: b_ca[7], D4: b_ca[13], D5: b_ca[13], D6: b_ca[19], D7: b_ca[19],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca1_dl = DELAYB<CA_DELAY> { A: ca1_od.Q }
     inst ca2_od = ODDRX4 {
         D0: b_ca[2], D1: b_ca[2], D2: b_ca[8], D3: b_ca[8], D4: b_ca[14], D5: b_ca[14], D6: b_ca[20], D7: b_ca[20],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca2_dl = DELAYB<CA_DELAY> { A: ca2_od.Q }
     inst ca3_od = ODDRX4 {
         D0: b_ca[3], D1: b_ca[3], D2: b_ca[9], D3: b_ca[9], D4: b_ca[15], D5: b_ca[15], D6: b_ca[21], D7: b_ca[21],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca3_dl = DELAYB<CA_DELAY> { A: ca3_od.Q }
     inst ca4_od = ODDRX4 {
         D0: b_ca[4], D1: b_ca[4], D2: b_ca[10], D3: b_ca[10], D4: b_ca[16], D5: b_ca[16], D6: b_ca[22], D7: b_ca[22],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca4_dl = DELAYB<CA_DELAY> { A: ca4_od.Q }
     inst ca5_od = ODDRX4 {
         D0: b_ca[5], D1: b_ca[5], D2: b_ca[11], D3: b_ca[11], D4: b_ca[17], D5: b_ca[17], D6: b_ca[23], D7: b_ca[23],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca5_dl = DELAYB<CA_DELAY> { A: ca5_od.Q }
     inst cke_od = ODDRX4 {
         D0: b_cke[0], D1: b_cke[0], D2: b_cke[1], D3: b_cke[1], D4: b_cke[2], D5: b_cke[2], D6: b_cke[3], D7: b_cke[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst cke_dl = DELAYB<CA_DELAY> { A: cke_od.Q }
     inst cs_od = ODDRX4 {
         D0: b_cs[0], D1: b_cs[0], D2: b_cs[1], D3: b_cs[1], D4: b_cs[2], D5: b_cs[2], D6: b_cs[3], D7: b_cs[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: 0
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
 
     inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
-        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
+        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
+        load: load, dllcode: dll.CODE,
         dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
@@ -1027,7 +1134,8 @@ impl DfiLpddr4NexusPhy {
     }
 
     inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
-        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
+        eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
+        load: load, dllcode: dll.CODE,
         dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
@@ -1066,23 +1174,12 @@ impl DfiLpddr4NexusPhy {
         pll_lock_s = pll_lock_m
         dll_lock_m = dll.LOCK
         dll_lock_s = dll_lock_m
+        io_ready_m = io_ready
+        io_ready_s = io_ready_m
         // ---------------------------------------------------------- init
         if ist == 0 {
-            dll_rst = 1
             dqs_rst = 1
-            if dfi_init_start == 1 && pll_lock_s == 1 {
-                ist = 1
-                icnt = 0
-            }
-        } else if ist == 1 {
-            icnt = icnt + 1
-            if icnt == 15 {
-                dll_rst = 0
-                ist = 2
-                icnt = 0
-            }
-        } else if ist == 2 {
-            if dll_lock_s == 1 {
+            if dfi_init_start == 1 && io_ready_s == 1 {
                 ist = 3
                 icnt = 0
             }
@@ -1110,7 +1207,13 @@ impl DfiLpddr4NexusPhy {
         }
         if dfi_ctrlupd_req == 1 && ctrlupd_ack_r == 0 {
             ctrlupd_n = ctrlupd_n + 1
+            upd_cnt = 1
+        } else if upd_cnt != 0 {
+            upd_cnt = if upd_cnt == 7 { 0 } else { upd_cnt + 1 }
         }
+        // PAUSE through cycles 1-7 of the window, UDDCNTL_N low in 3-5
+        upd_pause = if upd_cnt != 0 { 1 } else { 0 }
+        upd_udd_n = if upd_cnt >= 3 && upd_cnt < 6 { 0 } else { 1 }
         ctrlupd_ack_r = dfi_ctrlupd_req
 
         // ---------------------------------------------------------- frames

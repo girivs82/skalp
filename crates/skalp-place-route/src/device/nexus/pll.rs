@@ -165,24 +165,88 @@ pub fn corner_of_tile(tiletype: &str) -> Option<&str> {
         .then_some(corner)
 }
 
-/// The PLL site (tile x, y) of every PLL of a design: the corner its `LOC`
-/// names (`LLC` or `PLL_LLC`), or else the free corner nearest the design's
-/// pins (`pads`). Every port must be one the PLL has.
-pub fn choose_sites(
-    tiles: &[PrjoxideTile],
-    netlist: &GateNetlist,
-    pads: &[(u32, u32)],
-) -> Result<HashMap<CellId, (u32, u32)>, String> {
+/// A block's clock pin that a PLL output drives and that only some corners'
+/// PLLs reach over the dedicated clock network (an edge clock synchronizer's
+/// input, the ADC's converter clock).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockNeed {
+    /// The PLL output (`CLKOP`, `CLKOS4`, ...)
+    pub output: String,
+    /// What it drives, for messages: the block, its pin and the cell
+    pub sink: String,
+    /// The corners whose PLL's `output` reaches it
+    pub corners: Vec<String>,
+}
+
+/// The wire nodes a corner's PLL drives from its output `pin`: its pins sit
+/// one tile into the fabric from the PLL tile at `(x, y)`, beside it or
+/// diagonally, and the network says which of those is the PLL's.
+pub fn output_nodes(
+    network: &super::prjoxide_graph::ClockNetwork,
+    x: u32,
+    y: u32,
+    pin: &str,
+) -> Vec<super::NodeKey> {
+    ["E1", "W1", "S1", "N1", "S1E1", "N1E1", "S1W1", "N1W1"]
+        .into_iter()
+        .filter_map(|step| super::resolve_wire(x, y, &site_wire(step, pin)))
+        .filter(|node| network.drives(node))
+        .collect()
+}
+
+/// The corners (name, tile x, y) of a device's PLLs, in name order.
+pub fn corners(tiles: &[PrjoxideTile]) -> Vec<(&str, u32, u32)> {
     let mut corners: Vec<(&str, u32, u32)> = tiles
         .iter()
         .filter_map(|t| Some((corner_of_tile(&t.tiletype)?, t.x, t.y)))
         .collect();
     corners.sort_unstable();
+    corners
+}
+
+/// The PLL site (tile x, y) of every PLL of a design: the corner its `LOC`
+/// names (`LLC` or `PLL_LLC`), or else the free corner nearest the design's
+/// pins (`pads`) among those that reach what the PLL's outputs must
+/// (`needs`, per PLL). Every port must be one the PLL has.
+pub fn choose_sites(
+    tiles: &[PrjoxideTile],
+    netlist: &GateNetlist,
+    pads: &[(u32, u32)],
+    needs: &HashMap<CellId, Vec<ClockNeed>>,
+) -> Result<HashMap<CellId, (u32, u32)>, String> {
+    let corners = corners(tiles);
     let mut sites = HashMap::new();
+    let no_needs = Vec::new();
+    let needs_of = |cell: &Cell| needs.get(&cell.id).unwrap_or(&no_needs);
+    // Whether a corner's PLL reaches everything a PLL's outputs drive
+    let serves = |corner: &str, cell: &Cell| {
+        needs_of(cell)
+            .iter()
+            .all(|n| n.corners.iter().any(|c| c == corner))
+    };
     let plls: Vec<&Cell> = netlist.cells.iter().filter(|c| is_pll(c)).collect();
-    // PLLs with a corner named take theirs first
+    // PLLs with a corner named take theirs first, then those with the fewest
+    // corners that serve them
     let mut ordered = plls.clone();
-    ordered.sort_by_key(|c| (c.parameters.get("LOC").is_none(), c.id.0));
+    ordered.sort_by_key(|c| {
+        let serving = corners.iter().filter(|k| serves(k.0, c)).count();
+        (c.parameters.get("LOC").is_none(), serving, c.id.0)
+    });
+    // What a PLL's outputs drive that a corner's PLL does not reach
+    let unreached = |corner: &str, cell: &Cell| -> Vec<String> {
+        needs_of(cell)
+            .iter()
+            .filter(|n| !n.corners.iter().any(|c| c == corner))
+            .map(|n| {
+                format!(
+                    "its {} drives {}, which only the {} corner's PLL reaches",
+                    n.output,
+                    n.sink,
+                    n.corners.join(" or ")
+                )
+            })
+            .collect()
+    };
     let mut taken: Vec<&str> = Vec::new();
     for cell in ordered {
         let unknown = unknown_ports(cell);
@@ -196,7 +260,7 @@ pub fn choose_sites(
         let site = match cell.parameters.get("LOC") {
             Some(loc) => {
                 let wanted = loc.strip_prefix("PLL_").unwrap_or(loc);
-                corners
+                let site = corners
                     .iter()
                     .find(|(corner, _, _)| *corner == wanted)
                     .copied()
@@ -207,7 +271,27 @@ pub fn choose_sites(
                             cell.path,
                             known.join(", ")
                         )
-                    })?
+                    })?;
+                let missing = unreached(site.0, cell);
+                if !missing.is_empty() {
+                    let serving: Vec<&str> = corners
+                        .iter()
+                        .filter(|c| serves(c.0, cell))
+                        .map(|c| c.0)
+                        .collect();
+                    return Err(format!(
+                        "PLL '{}' is placed in the {} corner (LOC), but {}; {}",
+                        cell.path,
+                        site.0,
+                        missing.join("; "),
+                        if serving.is_empty() {
+                            "no corner's PLL reaches all of them".to_string()
+                        } else {
+                            format!("set its LOC to {} or leave it out", serving.join(" or "))
+                        }
+                    ));
+                }
+                site
             }
             None => {
                 let (cx, cy) = if pads.is_empty() {
@@ -224,10 +308,39 @@ pub fn choose_sites(
                 };
                 corners
                     .iter()
-                    .filter(|c| !taken.contains(&c.0))
+                    .filter(|c| !taken.contains(&c.0) && serves(c.0, cell))
                     .min_by(|a, b| distance(a).total_cmp(&distance(b)))
                     .copied()
-                    .ok_or_else(|| format!("PLL '{}': no PLL corner left", cell.path))?
+                    .ok_or_else(|| {
+                        let serving: Vec<&str> = corners
+                            .iter()
+                            .filter(|c| serves(c.0, cell))
+                            .map(|c| c.0)
+                            .collect();
+                        if serving.is_empty() {
+                            let missing: Vec<String> = corners
+                                .iter()
+                                .flat_map(|c| unreached(c.0, cell))
+                                .collect::<std::collections::BTreeSet<_>>()
+                                .into_iter()
+                                .collect();
+                            format!(
+                                "PLL '{}': no corner's PLL reaches everything its outputs \
+                                 drive: {}",
+                                cell.path,
+                                missing.join("; ")
+                            )
+                        } else if needs_of(cell).is_empty() {
+                            format!("PLL '{}': no PLL corner left", cell.path)
+                        } else {
+                            format!(
+                                "PLL '{}': only the {} corner's PLL reaches what its outputs \
+                                 drive, and another PLL has it; set the PLLs' LOCs",
+                                cell.path,
+                                serving.join(" or ")
+                            )
+                        }
+                    })?
             }
         };
         if taken.contains(&site.0) {
@@ -555,10 +668,165 @@ mod tests {
         assert!((driven[0].1 - 137.5).abs() < 1e-9);
         assert!(driven_frequencies(&cell, &|_| None).is_empty());
     }
+
+    fn tile(tiletype: &str, x: u32, y: u32) -> PrjoxideTile {
+        PrjoxideTile {
+            name: format!("R{y}C{x}:{tiletype}"),
+            tiletype: tiletype.into(),
+            x,
+            y,
+            start_frame: 0,
+            frames: 0,
+            start_bit: 0,
+            bits: 0,
+            skalp_type: crate::device::TileType::Pll,
+        }
+    }
+
+    /// Four corners on a 100 x 100 grid
+    fn four_corners() -> Vec<PrjoxideTile> {
+        vec![
+            tile("GPLL_ULC", 0, 0),
+            tile("GPLL_URC", 99, 0),
+            tile("GPLL_LLC", 0, 99),
+            tile("GPLL_LRC", 99, 99),
+        ]
+    }
+
+    fn one_pll(loc: Option<&str>) -> (GateNetlist, CellId) {
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        let mut cell = pll(&[]);
+        if let Some(loc) = loc {
+            cell.parameters.insert("LOC".into(), loc.into());
+        }
+        let id = cell.id;
+        netlist.cells.push(cell);
+        (netlist, id)
+    }
+
+    fn need(id: CellId, corners: &[&str]) -> HashMap<CellId, Vec<ClockNeed>> {
+        let mut needs = HashMap::new();
+        needs.insert(
+            id,
+            vec![ClockNeed {
+                output: "CLKOP".into(),
+                sink: "ECLKSYNC4_0 ECLKIN".into(),
+                corners: corners.iter().map(|c| c.to_string()).collect(),
+            }],
+        );
+        needs
+    }
+
+    /// Unconstrained, a PLL goes to the corner nearest the pins; when its
+    /// output drives a clock pin only some corners reach, it goes to the
+    /// nearest of those, however far the pins pull
+    #[test]
+    fn a_pll_goes_where_its_outputs_reach() {
+        let tiles = four_corners();
+        let (netlist, id) = one_pll(None);
+        let pads = [(95, 95), (90, 99)];
+        let free = choose_sites(&tiles, &netlist, &pads, &HashMap::new()).unwrap();
+        assert_eq!(free[&id], (99, 99));
+        let bound = choose_sites(&tiles, &netlist, &pads, &need(id, &["LLC", "ULC"])).unwrap();
+        assert_eq!(bound[&id], (0, 99));
+    }
+
+    /// A LOC whose PLL cannot reach what its outputs drive is refused,
+    /// naming the corners that can
+    #[test]
+    fn a_loc_that_cannot_reach_is_refused() {
+        let tiles = four_corners();
+        let (netlist, id) = one_pll(Some("LRC"));
+        let err = choose_sites(&tiles, &netlist, &[], &need(id, &["LLC"])).unwrap_err();
+        assert!(err.contains("LRC corner (LOC)"), "{err}");
+        assert!(err.contains("ECLKSYNC4_0 ECLKIN"), "{err}");
+        assert!(err.contains("set its LOC to LLC"), "{err}");
+        let (netlist, id) = one_pll(Some("PLL_LLC"));
+        let ok = choose_sites(&tiles, &netlist, &[], &need(id, &["LLC"])).unwrap();
+        assert_eq!(ok[&id], (0, 99));
+    }
+
+    /// Two PLLs that both need the one corner that reaches their sinks
+    /// cannot both have it; a PLL with fewer serving corners chooses first
+    #[test]
+    fn constrained_plls_choose_first() {
+        let tiles = four_corners();
+        let mut netlist = GateNetlist::new("top".into(), "nexus".into());
+        let a = pll(&[]);
+        let mut b = pll(&[]);
+        b.id = CellId(1);
+        b.path = "top.pll_b".into();
+        netlist.cells.push(a);
+        netlist.cells.push(b);
+        // The first PLL would take LLC (nearest the pins) if it chose first
+        let mut needs = need(CellId(1), &["LLC"]);
+        needs.insert(CellId(0), Vec::new());
+        let sites = choose_sites(&tiles, &netlist, &[(1, 98)], &needs).unwrap();
+        assert_eq!(sites[&CellId(1)], (0, 99));
+        assert_ne!(sites[&CellId(0)], (0, 99));
+        // Both bound to LLC: the second is refused, naming it
+        needs.insert(CellId(0), need(CellId(0), &["LLC"])[&CellId(0)].clone());
+        let err = choose_sites(&tiles, &netlist, &[], &needs).unwrap_err();
+        assert!(err.contains("only the LLC corner"), "{err}");
+    }
 }
 
 #[cfg(all(test, feature = "nexus-bitstream"))]
 mod device_tests {
+    /// Over the CertusPro-NX's dedicated clock network, each of the bottom
+    /// middle bank's edge clock synchronizers takes CLKOP from one of the
+    /// two lower PLLs only: synchronizers 0 and 1 from the lower left one,
+    /// 2 and 3 from the lower right one. Neither upper PLL reaches them.
+    #[test]
+    fn certuspro_edge_clocks_take_clkop_from_one_corner() {
+        use crate::device::nexus::ddr;
+        use crate::device::nexus::prjoxide_graph::ClockNetwork;
+        let Some(db) = find_database() else { return };
+        let variant = NexusVariant::Lfcpnx100;
+        let family = variant.prjoxide_family();
+        let tiles = load_tilegrid(&db, variant).unwrap();
+        let network = ClockNetwork::load(&db, family, &tiles).unwrap();
+        let corners = super::corners(&tiles);
+        let reaching = |pin: &str, x: u32, y: u32, wire: &str| -> Vec<&str> {
+            let node = crate::device::nexus::resolve_wire(x, y, wire).unwrap();
+            corners
+                .iter()
+                .filter(|&&(_, cx, cy)| {
+                    network.reaches(&super::output_nodes(&network, cx, cy, pin), &node)
+                })
+                .map(|c| c.0)
+                .collect()
+        };
+        let syncs: Vec<ddr::Site> = ddr::sites(&db, family, &tiles)
+            .into_iter()
+            .filter(|s| s.kind == ddr::SiteKind::Eclksync && s.bank == Some(4))
+            .collect();
+        assert_eq!(syncs.len(), 4, "{syncs:?}");
+        let clkop: Vec<(&str, Vec<&str>)> = syncs
+            .iter()
+            .map(|sync| {
+                let (x, y, wire) = &sync.pins["ECLKIN"];
+                (sync.name.as_str(), reaching("CLKOP", *x, *y, wire))
+            })
+            .collect();
+        assert_eq!(
+            clkop,
+            [
+                ("ECLKSYNC4_0", vec!["LLC"]),
+                ("ECLKSYNC4_1", vec!["LLC"]),
+                ("ECLKSYNC4_2", vec!["LRC"]),
+                ("ECLKSYNC4_3", vec!["LRC"]),
+            ]
+        );
+        // Every corner's PLL drives something on the network
+        for &(corner, x, y) in &corners {
+            assert!(
+                !super::output_nodes(&network, x, y, "CLKOP").is_empty(),
+                "{corner}"
+            );
+        }
+    }
+
     use crate::device::nexus::prjoxide_load::{find_database, load_tilegrid};
     use crate::device::nexus::{NexusDevice, NexusVariant};
     use crate::device::Device;

@@ -30,7 +30,9 @@ entity Lpddr4DfiNexusSim<
     const WR_SKEW0_CLKS: nat = 0,
     const WR_SKEW1_CLKS: nat = 0,
     const WR_DQ_SKEW0_CLKS: nat = 0,
-    const WR_DQ_SKEW1_CLKS: nat = 0
+    const WR_DQ_SKEW1_CLKS: nat = 0,
+    // simulation ticks (117.1875 ps) per edge clock (= tCK); even. 16: 1066 Mbps
+    const CK_TICKS: nat = 16
 > {
     in sim_tick: clock
     out done: bit
@@ -111,7 +113,7 @@ impl Lpddr4DfiNexusSim {
     let exp_data: bit[256] = pattern(g_exp, exp_pass)
 
     inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10,
-        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, 3, 3, 32, 80, 4, 40, 32, 64, 63> {
+        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, 3, 3, 32, 80, 8, 40, 32, 64, 63> {
         clk: phy.dfi_clk,
         req_valid: g_valid,
         req_write: g_write,
@@ -134,21 +136,31 @@ impl Lpddr4DfiNexusSim {
         dfi_wdqlvl_resp: phy.dfi_wdqlvl_resp
     }
 
-    // edge clock: sim_tick / 16
-    signal tk: bit[4] = 0
+    // edge clock: sim_tick / CK_TICKS
+    let tk_half: bit[8] = CK_TICKS / 2 - 1
+    let tk_last: bit[8] = CK_TICKS - 1
+    signal tk: bit[8] = 0
     signal ek: bit = 0
     on(sim_tick.rise) {
-        tk = tk + 1
-        if tk == 7 || tk == 15 {
+        tk = if tk == tk_last { 0 } else { tk + 1 }
+        if tk == tk_half || tk == tk_last {
             ek = !ek
         }
     }
     signal eclk: clock
     eclk = ek
+    // the PHY's free-running sync clock: sim_tick / 64 (133 MHz)
+    signal sk_n: bit[6] = 0
+    on(sim_tick.rise) {
+        sk_n = sk_n + 1
+    }
+    signal sync_clk: clock
+    sync_clk = sk_n[5]
 
     inst phy = DfiLpddr4NexusPhy {
         eclk: eclk,
         pll_lock: 1,
+        sync_clk: sync_clk,
         dfi_cs_p0: ctrl.dfi_cs_p0,
         dfi_cs_p1: ctrl.dfi_cs_p1,
         dfi_cs_p2: ctrl.dfi_cs_p2,

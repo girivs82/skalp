@@ -260,7 +260,14 @@ impl Primitives {
     }
 
     /// The primitive a cell is, if it is one.
+    ///
+    /// A strobe buffer with an input reference generator (`DQSBUF_IVREF`)
+    /// used for its reference level alone is not one: it is a bank
+    /// reference generator ([`super::ivref`]), with no strobe to buffer.
     pub fn of(&self, cell: &Cell) -> Option<&Primitive> {
+        if super::ivref::is_vref_generator(cell) && super::ivref::port_problems(cell).is_none() {
+            return None;
+        }
         self.by_name.get(primitive_name(cell))
     }
 
@@ -904,7 +911,9 @@ pub fn analyze(
 /// - A DLL goes to the one nearest the DQS buffers it feeds.
 ///
 /// `pad_site` gives a pad cell's site, (tile x, y, A = 0 / B = 1);
-/// `strobe_of` the strobe pad tile of a pad tile's DQS group.
+/// `strobe_of` the strobe pad tile of a pad tile's DQS group; `accepts`
+/// whether a synchronizer or DLL may take a site (one its clock reaches,
+/// say): those that have a choice take the first it accepts.
 pub fn choose_sites(
     netlist: &GateNetlist,
     prims: &Primitives,
@@ -912,6 +921,7 @@ pub fn choose_sites(
     sites: &[Site],
     pad_site: PadSiteOf<'_>,
     strobe_of: StrobeOf<'_>,
+    accepts: Accepts<'_>,
 ) -> Result<HashMap<CellId, usize>, String> {
     let mut chosen: HashMap<CellId, usize> = HashMap::new();
     let cell = |id: CellId| {
@@ -1048,18 +1058,32 @@ pub fn choose_sites(
                 ))
             }
         };
-        let site = (0..sites.len())
-            .find(|&i| {
+        let free: Vec<usize> = (0..sites.len())
+            .filter(|&i| {
                 sites[i].kind == SiteKind::Eclksync
                     && sites[i].bank == Some(bank)
                     && !used.contains(&i)
                     && sites[i].pins.contains_key("ECLKIN")
             })
+            .collect();
+        if free.is_empty() {
+            return Err(format!(
+                "'{}': bank {bank} has no free edge clock synchronizer with its input in the \
+                 device data",
+                c.path
+            ));
+        }
+        let site = free
+            .iter()
+            .copied()
+            .find(|&i| accepts(id, i))
             .ok_or_else(|| {
+                let names: Vec<&str> = free.iter().map(|&i| sites[i].name.as_str()).collect();
                 format!(
-                    "'{}': bank {bank} has no free edge clock synchronizer with its input in \
-                     the device data",
-                    c.path
+                    "'{}': none of bank {bank}'s free edge clock synchronizers ({}) can take \
+                     its input clock from where that clock comes",
+                    c.path,
+                    names.join(", ")
                 )
             })?;
         used.insert(site);
@@ -1109,7 +1133,7 @@ pub fn choose_sites(
         let site = sites
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.kind == SiteKind::Ddrdll && !used.contains(i))
+            .filter(|(i, s)| s.kind == SiteKind::Ddrdll && !used.contains(i) && accepts(id, *i))
             .min_by_key(|(_, s)| {
                 fed.iter()
                     .map(|&f| {
@@ -1118,7 +1142,12 @@ pub fn choose_sites(
                     .sum::<u64>()
             })
             .map(|(i, _)| i)
-            .ok_or_else(|| format!("'{}': no free DDR DLL in the device data", c.path))?;
+            .ok_or_else(|| {
+                format!(
+                    "'{}': no free DDR DLL in the device data that its clock reaches",
+                    c.path
+                )
+            })?;
         used.insert(site);
         chosen.insert(id, site);
     }
@@ -1234,6 +1263,10 @@ pub type PadSiteOf<'a> = &'a dyn Fn(&Cell) -> Option<(u32, u32, u32)>;
 /// The strobe pad (column, row) of the DQS group of a pad at (column, row).
 pub type StrobeOf<'a> = &'a dyn Fn(u32, u32) -> Option<(u32, u32)>;
 
+/// Whether a block (cell) may take a site (an index into the device's
+/// [`Site`]s), for [`choose_sites`].
+pub type Accepts<'a> = &'a dyn Fn(CellId, usize) -> bool;
+
 /// A placed primitive's settings: (name, option) enums and (name, value) words.
 pub type CellSettings = (Vec<(String, String)>, Vec<(String, u64)>);
 
@@ -1282,6 +1315,40 @@ mod tests {
             cell.parameters.insert(k.to_string(), v.to_string());
         }
         cell
+    }
+
+    /// A `DQSBUF_IVREF` used only for its input reference level is a bank
+    /// reference generator, not a strobe buffer: its strobe chain is empty,
+    /// so DDR analysis must leave it alone. One that buffers a strobe is
+    /// still a DDR primitive.
+    #[test]
+    fn a_reference_only_dqsbuf_ivref_is_not_a_ddr_primitive() {
+        let data = DATA.replacen(
+            r#""DQSBUF": {"#,
+            r#""DQSBUF_IVREF": {"site": "DQSBUF", "pad": {"role": "strobe", "ports": ["DQSI"]},
+                "pins": {"RST": {"pin": "RST"}}},
+            "DQSBUF": {"#,
+            1,
+        );
+        let prims = Primitives::from_json(&data).unwrap();
+        let level: Vec<String> = (0..7).map(|i| format!("IVREFI[{i}]")).collect();
+        let level: Vec<&str> = level.iter().map(String::as_str).collect();
+        let reference = blackbox("DQSBUF_IVREF", &level, &[], &[]);
+        assert!(prims.of(&reference).is_none());
+
+        let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+        let zero = netlist.add_net(skalp_lir::gate_netlist::GateNet::new(
+            GateNetId(0),
+            "zero".to_string(),
+        ));
+        let mut cell = reference;
+        cell.inputs = vec![zero; 7];
+        netlist.add_cell(cell);
+        let blocks = analyze(&netlist, &prims, &|_| false).unwrap();
+        assert!(blocks.cells.is_empty());
+
+        let strobe = blackbox("DQSBUF_IVREF", &["DQSI", "RST"], &[], &[]);
+        assert!(prims.of(&strobe).is_some());
     }
 
     #[test]

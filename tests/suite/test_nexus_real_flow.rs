@@ -492,6 +492,109 @@ fn ddr_gearing_is_timed_against_its_divided_clock() {
     }
 }
 
+/// `synth --debug` rebuilds the design with the logic analyzer added; the
+/// rebuild must declare the device's primitives as the first build did, or a
+/// design using them fails with "unknown entity"
+#[test]
+fn debug_build_keeps_the_device_primitives() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let dir = tempfile::TempDir::new().unwrap();
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nexus_ddr_debug.sk");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+        .args([
+            "synth",
+            source.to_str().unwrap(),
+            "-d",
+            "nexus-lfcpnx100",
+            "-f",
+            "--debug",
+            "-o",
+            "out",
+        ])
+        .env("PRJOXIDE_DB", &db)
+        .current_dir(dir.path())
+        .output()
+        .expect("skalp runs");
+    assert!(
+        output.status.success(),
+        "skalp synth --debug failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let map: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("out/debug_probes.json")).expect("probe map"),
+    )
+    .expect("the probe map parses");
+    assert_eq!(map["probes"][0]["name"], "n", "{map}");
+    assert!(dir.path().join("out/design.bit").exists());
+}
+
+/// A PLL placed (LOC) in a corner whose outputs cannot reach the edge clock
+/// synchronizer it drives is refused before routing, naming the corners
+/// that can; placed in either corner that can, the design builds (each
+/// takes a synchronizer its CLKOP reaches)
+#[test]
+fn a_pll_corner_must_reach_its_edge_clock() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nexus_ddr_timing.sk");
+    let text = std::fs::read_to_string(&fixture).unwrap();
+    assert!(
+        text.contains("name = \"PLL_CORE\", "),
+        "the fixture's PLL attribute moved"
+    );
+    let build = |loc: &str| {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("design.sk");
+        std::fs::write(
+            &source,
+            text.replace(
+                "name = \"PLL_CORE\", ",
+                &format!("name = \"PLL_CORE\", LOC = \"{loc}\", "),
+            ),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_skalp"))
+            .args([
+                "synth",
+                source.to_str().unwrap(),
+                "-d",
+                "nexus-lfcpnx100",
+                "-f",
+                "-o",
+                "out",
+            ])
+            .env("PRJOXIDE_DB", &db)
+            .current_dir(dir.path())
+            .output()
+            .expect("skalp runs");
+        let log = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success(), log)
+    };
+    let (ok, log) = build("ULC");
+    assert!(
+        !ok,
+        "an upper PLL cannot clock the bottom bank's edge clock:\n{log}"
+    );
+    assert!(log.contains("ULC corner (LOC)"), "{log}");
+    assert!(log.contains("set its LOC to LLC or LRC"), "{log}");
+    for loc in ["LLC", "LRC"] {
+        let (ok, log) = build(loc);
+        assert!(ok, "LOC={loc} should build:\n{log}");
+    }
+}
+
 #[test]
 fn wide_lut_builds_a_bitstream_for_the_real_device() {
     let Some(db) = find_database() else {

@@ -21,13 +21,41 @@ const DEVICE: &str = "lfcpnx-100";
 /// Simulation ticks (117.1875 ps) per tCK at 1066 Mbps
 const TICKS_PER_CK: u64 = 16;
 
-/// Trained settings with no skew: write leveling and the read and write DQ
-/// delays in 12.5 ps steps (read and write: 128 = the DQS buffer's middle), the
-/// gate in eighths of a tCK from the controller's `rddata_en`
-const WL_NOMINAL: f64 = 60.0;
-const GATE_NOMINAL: f64 = 31.0;
-const RD_NOMINAL: f64 = 110.0;
-const WDQ_NOMINAL: f64 = 132.0;
+/// Trained settings with no skew, in 12.5 ps delay steps (a tick is 9.375
+/// steps) and, for the gate, eighths of a tCK from the controller's `rddata_en`.
+struct Nominal {
+    /// write leveling: the DQS delay starts half a tCK before CK, so the
+    /// edge comes half a tCK less this many steps of the models' fixed DQS
+    /// path delay ahead of CK
+    wl_before_half_ck: f64,
+    gate: f64,
+    /// read and write DQ delays (128 = the DQS buffer's middle)
+    rd: f64,
+    wdq: f64,
+    /// the read and write DQ sweeps (128 +- 64 steps, 1.6 ns) reach a failing
+    /// delay: they do while a bit is shorter than the sweep. Where it is longer
+    /// (400 Mbps) the whole sweep passes and training takes its middle
+    sweep_finds_edges: bool,
+}
+
+/// [`Nominal`] at `ck_ticks` per tCK. The DQ delays come from the models'
+/// eye, clipped by the sweep: measured once per rate, they pin training's
+/// result against regressions.
+fn nominal(ck_ticks: u64) -> Nominal {
+    let (rd, wdq, sweep_finds_edges) = match ck_ticks {
+        TICKS_PER_CK => (110.0, 132.0, true),
+        22 => (114.0, 118.0, true),
+        42 => (128.0, 128.0, false),
+        _ => panic!("no nominal settings for {ck_ticks} ticks per tCK"),
+    };
+    Nominal {
+        wl_before_half_ck: 15.0,
+        gate: 31.0,
+        rd,
+        wdq,
+        sweep_finds_edges,
+    }
+}
 
 fn path(rel: &str) -> String {
     format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel)
@@ -72,6 +100,8 @@ struct Variant {
     /// further board delay of each byte lane's DQ behind its DQS, in ticks
     wr_dq_skew: [u64; 2],
     n_bursts: u64,
+    /// simulation ticks per tCK (even); TICKS_PER_CK is 1066 Mbps
+    ck_ticks: u64,
     /// entities simulated at gate level (synthesized for the device, their
     /// vendor primitives running the models); none: all behavioural
     gate_level: &'static [&'static str],
@@ -119,6 +149,7 @@ async fn run(v: Variant) {
         ("WR_SKEW1_CLKS", v.wr_skew[1]),
         ("WR_DQ_SKEW0_CLKS", v.wr_dq_skew[0]),
         ("WR_DQ_SKEW1_CLKS", v.wr_dq_skew[1]),
+        ("CK_TICKS", v.ck_ticks),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -137,7 +168,8 @@ async fn run(v: Variant) {
     let verbose = std::env::var("SKALP_NEXUS_SIM_TRACE").is_ok();
     let mut ticks = 0u64;
     while tb.get_u64("done").await == 0 {
-        if ticks >= 20_000_000 {
+        // init and training take a fixed number of clocks: the bound scales with tCK
+        if ticks >= 20_000_000 * v.ck_ticks / TICKS_PER_CK {
             panic!(
                 "{}: not done after {ticks} ticks:{}",
                 v.name,
@@ -166,7 +198,7 @@ async fn run(v: Variant) {
         get!("m_err_cycle")
     );
     assert_eq!(get!("m_contention"), 0, "{n}: bus contention");
-    assert_eq!(get!("m_t_ck"), TICKS_PER_CK, "{n}: tCK");
+    assert_eq!(get!("m_t_ck"), v.ck_ticks, "{n}: tCK");
 
     assert_eq!(get!("dll_lock"), 1, "{n}: DLL lock");
     assert_eq!(get!("init_done"), 1, "{n}");
@@ -183,9 +215,10 @@ async fn run(v: Variant) {
     assert_eq!(get!("wdq_fail"), 0, "{n}: write DQ training");
 
     // Trained settings against the skews. The nominal settings are those of the
-    // primitive models with no skew; a tick is 117.1875 ps, a delay step 12.5 ps
-    // (9.375 steps per tick) and a gate setting an eighth of a tCK (half a tick).
-    // Write leveling and write DQ move WL_STEP / WDQ_STEP = 4 steps per event.
+    // primitive models with no skew (see [`Nominal`]); a tick is 117.1875 ps, a delay step
+    // 12.5 ps and a gate setting an eighth of a tCK. Write leveling and write DQ move
+    // WL_STEP / WDQ_STEP = 4 steps per event.
+    let nom = nominal(v.ck_ticks);
     let steps = |ticks: u64| ticks as f64 * 117.1875 / 12.5;
     let near = |got: u64, want: f64, tol: f64, what: &str| {
         assert!(
@@ -198,7 +231,7 @@ async fn run(v: Variant) {
         let wl = get!(["wl0", "wl1"][lane]);
         near(
             wl,
-            WL_NOMINAL - steps(v.wr_skew[lane]),
+            steps(v.ck_ticks) / 2.0 - nom.wl_before_half_ck - steps(v.wr_skew[lane]),
             4.0,
             &format!("lane {lane} write leveling"),
         );
@@ -206,7 +239,7 @@ async fn run(v: Variant) {
         let gate = get!(["gate0", "gate1"][lane]);
         near(
             gate,
-            GATE_NOMINAL + v.dqsck as f64 / 2.0,
+            nom.gate + (v.dqsck * 8) as f64 / v.ck_ticks as f64,
             1.0,
             &format!("lane {lane} gate"),
         );
@@ -214,7 +247,7 @@ async fn run(v: Variant) {
         let rd = get!(["rdly0", "rdly1"][lane]);
         near(
             rd,
-            RD_NOMINAL + steps(v.dq_skew),
+            nom.rd + steps(v.dq_skew),
             8.0,
             &format!("lane {lane} read delay"),
         );
@@ -222,15 +255,20 @@ async fn run(v: Variant) {
         let wdq = get!(["wdq0", "wdq1"][lane]);
         near(
             wdq,
-            WDQ_NOMINAL - steps(v.wr_dq_skew[lane]),
+            nom.wdq - steps(v.wr_dq_skew[lane]),
             4.0,
             &format!("lane {lane} write DQ delay"),
         );
     }
 
-    // the write DQ sweep went through failing delays, and nothing failed after it
+    // the write DQ sweep went through failing delays where a bit is shorter than it, and
+    // nothing failed after it
     let viol_init = get!("m_dq_viol_init");
-    assert!(viol_init > 0, "{n}: write DQ sweep saw no failing delay");
+    assert_eq!(
+        viol_init > 0,
+        nom.sweep_finds_edges,
+        "{n}: write DQ sweep saw a failing delay ({viol_init} DQ timing errors)"
+    );
     assert_eq!(
         get!("m_dq_viol"),
         viol_init,
@@ -263,6 +301,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
         n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
         gate_level: &[],
     })
     .await;
@@ -280,6 +319,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         wr_skew: [5, 2],
         wr_dq_skew: [2, 0],
         n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
         gate_level: &[],
     })
     .await;
@@ -299,6 +339,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
         n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
         gate_level: GATE_LEVEL,
     })
     .await;
@@ -315,7 +356,42 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         wr_skew: [5, 2],
         wr_dq_skew: [2, 0],
         n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
         gate_level: GATE_LEVEL,
+    })
+    .await;
+}
+
+/// [`lpddr4_dfi_nexus_nominal`] at about 800 Mbps (tCK 22 ticks, 2.58 ns:
+/// 776 Mbps), the second step of the board ladder
+#[tokio::test]
+async fn lpddr4_dfi_nexus_nominal_800() {
+    run(Variant {
+        name: "nominal_800",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: 22,
+        gate_level: &[],
+    })
+    .await;
+}
+
+/// [`lpddr4_dfi_nexus_nominal`] at about 400 Mbps (tCK 42 ticks, 4.92 ns:
+/// 406 Mbps), the first step of the board ladder
+#[tokio::test]
+async fn lpddr4_dfi_nexus_nominal_400() {
+    run(Variant {
+        name: "nominal_400",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: 42,
+        gate_level: &[],
     })
     .await;
 }

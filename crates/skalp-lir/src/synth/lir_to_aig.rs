@@ -526,6 +526,17 @@ impl<'a> LirToSynthAig<'a> {
         if self.dsp_max_width == 0 {
             return false;
         }
+        // A constant factor with at most two set bits is a shift, or a shift
+        // and one add, in gate logic: the partial products of its zero bits
+        // fold away. A DSP block for it only adds its delay (`i * 8`, an
+        // index scaled to a bit offset, became a 4 ns multiplier).
+        if node.inputs.iter().take(2).any(|&input| {
+            self.leading_zeros
+                .constant_value(input)
+                .is_some_and(|v| v.count_ones() <= 2)
+        }) {
+            return false;
+        }
         match mul_operand_widths(&self.leading_zeros, node) {
             Some((a_bits, b_bits)) => {
                 a_bits > 0

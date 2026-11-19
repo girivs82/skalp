@@ -237,29 +237,37 @@ fn constant_driver(
     })
 }
 
-/// Give an output pad that shows a constant a LUT that outputs it. Nothing
-/// else drives the pad's data input then: left unrouted, the input mux in
-/// front of it passes whatever wire it selects by default (on the
-/// CertusPro-NX, an LED meant to stay on followed a counter bit).
+/// Give each constant input of an output or bidirectional pad (its data, and
+/// a bidirectional pad's tristate control) a LUT that outputs it. Nothing
+/// else drives such an input then: left unrouted, the input mux in front of
+/// it passes whatever wire it selects by default, or its undriven default
+/// (on the CertusPro-NX, an LED meant to stay on followed a counter bit, and
+/// a bidirectional pad with its tristate control tied to "drive" stayed
+/// tristated).
 fn drive_constant_pad_outputs(netlist: &mut GateNetlist, constants: &HashMap<GateNetId, bool>) {
     let mut drivers: HashMap<bool, GateNetId> = HashMap::new();
     for index in 0..netlist.cells.len() {
         let cell = &netlist.cells[index];
-        if cell.function != Some(CellFunction::OutputPad) {
-            continue;
-        }
-        let Some(&value) = cell.inputs.first().and_then(|net| constants.get(net)) else {
-            continue;
+        // Data, then (a bidirectional pad's) tristate control
+        let routed_inputs = match cell.function {
+            Some(CellFunction::OutputPad) => 1,
+            Some(CellFunction::BidirPad) => 2,
+            _ => continue,
         };
+        let tied: Vec<(usize, bool)> = (0..routed_inputs.min(cell.inputs.len()))
+            .filter_map(|i| Some((i, *constants.get(&cell.inputs[i])?)))
+            .collect();
         let library = cell.library.clone();
-        let net = constant_driver(
-            netlist,
-            &mut drivers,
-            &library,
-            "constant_pad_output",
-            value,
-        );
-        netlist.cells[index].inputs[0] = net;
+        for (input, value) in tied {
+            let net = constant_driver(
+                netlist,
+                &mut drivers,
+                &library,
+                "constant_pad_output",
+                value,
+            );
+            netlist.cells[index].inputs[input] = net;
+        }
     }
 }
 
@@ -619,6 +627,51 @@ mod tests {
             .expect("the pad's input has a driver");
         assert_eq!(driver.function, Some(CellFunction::Lut4));
         assert_eq!(driver.lut_init, Some(0xFFFF));
+    }
+
+    /// A bidirectional pad that always drives: its tristate control is tied
+    /// to a constant, which must reach the pad through a LUT like its data
+    #[test]
+    fn constant_bidir_pad_tristate_gets_a_driver() {
+        let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+        let zero = netlist.add_net(GateNet::new(GateNetId(0), "zero".to_string()));
+        let data = netlist.add_net(GateNet::new(GateNetId(0), "data".to_string()));
+        let read = netlist.add_net(GateNet::new(GateNetId(0), "read".to_string()));
+        let mut tie = Cell::new_comb(
+            CellId(0),
+            "TIE0_X1".to_string(),
+            "test".to_string(),
+            0.0,
+            "tie".to_string(),
+            Vec::new(),
+            vec![zero],
+        );
+        tie.function = Some(CellFunction::TieLow);
+        netlist.add_cell(tie);
+        let mut bidir = Cell::new_comb(
+            CellId(0),
+            "SEIO18".to_string(),
+            "test".to_string(),
+            0.0,
+            "dq_iobuf".to_string(),
+            vec![data, zero],
+            vec![read],
+        );
+        bidir.function = Some(CellFunction::BidirPad);
+        netlist.add_cell(bidir);
+
+        let device =
+            crate::device::ice40::Ice40Device::new(crate::device::ice40::Ice40Variant::Hx1k);
+        let driven = drive_constant_inputs(&netlist, &device);
+        let bidir = driven.cells.iter().find(|c| c.path == "dq_iobuf").unwrap();
+        assert_eq!(bidir.inputs[0], data, "the routed data input is kept");
+        let driver = driven
+            .cells
+            .iter()
+            .find(|c| c.outputs.contains(&bidir.inputs[1]))
+            .expect("the pad's tristate control has a driver");
+        assert_eq!(driver.function, Some(CellFunction::Lut4));
+        assert_eq!(driver.lut_init, Some(0));
     }
 
     /// A LUT RAM read at a fixed address: its address pins cannot be held
