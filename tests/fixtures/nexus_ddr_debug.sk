@@ -1,10 +1,10 @@
 // The DDR gearing design of nexus_ddr_timing.sk with a traced counter and a
 // breakpoint, for `synth --debug`: the debug rebuild must still know the
 // device's primitives (ECLKSYNC, ECLKDIV, ODDRX4).
-// The PLL is pinned to the lower-left corner: unpinned, it goes to the corner
-// nearest the design's pins, and the analyzer's UART pin moves that to one
-// whose output does not reach the edge clock (a placement issue of its own).
-#[lattice_ip(name = "PLL_CORE", LOC = "LLC", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
+// The PLL has no LOC: the analyzer's UART pin moves the pins' centre towards
+// the lower right corner, so the PLL and the edge clock synchronizer must be
+// chosen so that the PLL's CLKOP reaches the synchronizer's input.
+#[lattice_ip(name = "PLL_CORE", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
 entity PllCore {
     in REFCK: clock
     in RST: bit
