@@ -106,10 +106,17 @@ pub fn infer_latches(lir: &mut Lir) -> Vec<InferredLatch> {
             Hold::Always => continue,
             Hold::When(hold) => invert(lir, hold, &path, &mut fresh),
         };
-        lir.nodes[root].op = LirOp::Latch { width };
-        lir.nodes[root].inputs = vec![enable, data];
         let mut names: Vec<&LirSignalId> = aliases.iter().collect();
         names.sort_by_key(|a| (lir.signals[a.0 as usize].name.len(), a.0));
+        // Named after the signal it holds, so its cells are too
+        let held = &lir.signals[names[0].0 as usize].name;
+        let latch_path = match path.rsplit_once('.') {
+            Some((scope, _)) => format!("{scope}.{held}"),
+            None => held.clone(),
+        };
+        lir.nodes[root].op = LirOp::Latch { width };
+        lir.nodes[root].inputs = vec![enable, data];
+        lir.nodes[root].path = latch_path;
         made.push(InferredLatch {
             signal: lir.signals[names[0].0 as usize].name.clone(),
             width,

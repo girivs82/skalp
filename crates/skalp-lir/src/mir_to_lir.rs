@@ -696,6 +696,13 @@ impl MirToLirTransform {
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_lir_signal.insert(signal.id, signal_id);
+        // A reset made inside the module (`signal r: reset(active_high)`,
+        // driven by logic) resets registers as a reset port does: without
+        // this, `on(clk.rise | r.active)` lost its asynchronous reset
+        if let DataType::Reset { active_high, .. } = signal.signal_type {
+            self.reset_signals.push(signal_id);
+            self.reset_active_high.insert(signal_id, active_high);
+        }
         // BUG #237 FIX: Track by position for monomorphized module lookups
         self.signal_by_position.push(signal_id);
 
