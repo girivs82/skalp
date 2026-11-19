@@ -260,7 +260,14 @@ impl Primitives {
     }
 
     /// The primitive a cell is, if it is one.
+    ///
+    /// A strobe buffer with an input reference generator (`DQSBUF_IVREF`)
+    /// used for its reference level alone is not one: it is a bank
+    /// reference generator ([`super::ivref`]), with no strobe to buffer.
     pub fn of(&self, cell: &Cell) -> Option<&Primitive> {
+        if super::ivref::is_vref_generator(cell) && super::ivref::port_problems(cell).is_none() {
+            return None;
+        }
         self.by_name.get(primitive_name(cell))
     }
 
@@ -1282,6 +1289,40 @@ mod tests {
             cell.parameters.insert(k.to_string(), v.to_string());
         }
         cell
+    }
+
+    /// A `DQSBUF_IVREF` used only for its input reference level is a bank
+    /// reference generator, not a strobe buffer: its strobe chain is empty,
+    /// so DDR analysis must leave it alone. One that buffers a strobe is
+    /// still a DDR primitive.
+    #[test]
+    fn a_reference_only_dqsbuf_ivref_is_not_a_ddr_primitive() {
+        let data = DATA.replacen(
+            r#""DQSBUF": {"#,
+            r#""DQSBUF_IVREF": {"site": "DQSBUF", "pad": {"role": "strobe", "ports": ["DQSI"]},
+                "pins": {"RST": {"pin": "RST"}}},
+            "DQSBUF": {"#,
+            1,
+        );
+        let prims = Primitives::from_json(&data).unwrap();
+        let level: Vec<String> = (0..7).map(|i| format!("IVREFI[{i}]")).collect();
+        let level: Vec<&str> = level.iter().map(String::as_str).collect();
+        let reference = blackbox("DQSBUF_IVREF", &level, &[], &[]);
+        assert!(prims.of(&reference).is_none());
+
+        let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+        let zero = netlist.add_net(skalp_lir::gate_netlist::GateNet::new(
+            GateNetId(0),
+            "zero".to_string(),
+        ));
+        let mut cell = reference;
+        cell.inputs = vec![zero; 7];
+        netlist.add_cell(cell);
+        let blocks = analyze(&netlist, &prims, &|_| false).unwrap();
+        assert!(blocks.cells.is_empty());
+
+        let strobe = blackbox("DQSBUF_IVREF", &["DQSI", "RST"], &[], &[]);
+        assert!(prims.of(&strobe).is_some());
     }
 
     #[test]
