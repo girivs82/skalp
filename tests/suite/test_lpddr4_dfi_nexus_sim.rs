@@ -202,7 +202,7 @@ async fn run(v: Variant) {
 
     assert_eq!(get!("dll_lock"), 1, "{n}: DLL lock");
     assert_eq!(get!("init_done"), 1, "{n}");
-    assert_eq!(get!("m_n_mrw"), 10, "{n}: MRW count");
+    assert_eq!(get!("m_n_mrw"), 14, "{n}: MRW count");
     assert_eq!(get!("m_n_zq"), 1, "{n}: ZQ calibrations");
     assert_eq!(get!("m_n_mrr"), 2, "{n}: MRR count");
     assert_eq!(get!("mr5"), 0xFF, "{n}: MR5 (manufacturer)");
