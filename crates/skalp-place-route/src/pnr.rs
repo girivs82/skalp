@@ -632,6 +632,60 @@ pub fn place_and_route_nexus_real(
     config: PnrConfig,
     db_root: &std::path::Path,
 ) -> Result<PnrResult> {
+    place_and_route_nexus_real_from(netlist, variant, config, db_root, None).map(|(r, _)| r)
+}
+
+/// What one Nexus place and route ([`place_and_route_nexus_real_from`])
+/// leaves for placing and routing the same netlist again after a small
+/// change: the device it loaded, where each cell went (by path), and each
+/// net's route (by driver and loads).
+#[cfg(feature = "nexus-bitstream")]
+#[derive(Clone)]
+pub struct NexusRerun {
+    region: crate::device::nexus::sites::DesignRegion,
+    device: crate::device::nexus::NexusDevice,
+    cells: crate::collections::HashMap<String, crate::placer::PlacementLoc>,
+    routes: crate::collections::HashMap<NetEnds, crate::router::Route>,
+}
+
+/// A net by its ends: the driver's (path, output pin) and each load's
+/// (path, input pin), sorted. A route connects the same BELs again only
+/// when every one of these kept its place.
+#[cfg(feature = "nexus-bitstream")]
+type NetEnds = ((String, usize), Vec<(String, usize)>);
+
+#[cfg(feature = "nexus-bitstream")]
+fn net_ends(netlist: &GateNetlist, net: &skalp_lir::gate_netlist::GateNet) -> Option<NetEnds> {
+    let driver = netlist.get_cell(net.driver?)?;
+    let mut loads: Vec<(String, usize)> = net
+        .fanout
+        .iter()
+        .map(|&(c, pin)| netlist.get_cell(c).map(|c| (c.path.clone(), pin)))
+        .collect::<Option<_>>()?;
+    loads.sort_unstable();
+    Some(((driver.path.clone(), net.driver_pin.unwrap_or(0)), loads))
+}
+
+/// [`place_and_route_nexus_real`], starting from an earlier run's result
+/// (`previous`) when there is one: on the same device region, every cell
+/// the earlier run placed keeps its BEL and each new cell goes beside the
+/// cells it connects to, and each net whose ends all kept their places
+/// keeps its route, so only the nets the change touched are routed again.
+/// Where that cannot be done (a new cell is not plain logic, or the nets
+/// left to route do not fit around the kept routes) it places or routes
+/// from scratch. Also returns what a later run can start from.
+///
+/// A flow that changes a routed netlist a little to fix what routing
+/// found (matched delays of self-timed blocks, say) converges here: what
+/// it did not change keeps the delays it had.
+#[cfg(feature = "nexus-bitstream")]
+pub fn place_and_route_nexus_real_from(
+    netlist: &GateNetlist,
+    variant: crate::device::nexus::NexusVariant,
+    config: PnrConfig,
+    db_root: &std::path::Path,
+    previous: Option<&NexusRerun>,
+) -> Result<(PnrResult, NexusRerun)> {
     use crate::bitstream::config::{
         generate_bitstream, ConfigTextWriter, FormatWriter, PlacedDesign,
     };
@@ -783,27 +837,40 @@ pub fn place_and_route_nexus_real(
         .iter()
         .filter(|c| c.dsp_ports().is_some())
         .count();
-    let region = sites::design_region(
-        &tiles,
-        &clocks,
-        &pad_sites,
-        netlist.cells.len(),
-        sites::HardBlockCounts {
-            block_rams: ram_count,
-            large_rams: large_ram_count,
-            multipliers: dsp_count,
-        },
-    );
-    let mut device =
-        NexusDevice::from_prjoxide_region(variant, db_root, region.window, Some(region.logic_rows))
-            .map_err(PlaceRouteError::BitstreamFailed)?;
+    let region = match previous {
+        Some(previous) => previous.region,
+        None => sites::design_region(
+            &tiles,
+            &clocks,
+            &pad_sites,
+            netlist.cells.len(),
+            sites::HardBlockCounts {
+                block_rams: ram_count,
+                large_rams: large_ram_count,
+                multipliers: dsp_count,
+            },
+        ),
+    };
     let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
-    let t_delays = std::time::Instant::now();
-    device.set_pip_delays(&timing_db);
-    log::info!(
-        "nexus pnr: PIP delays from the timing database in {:.1} s",
-        t_delays.elapsed().as_secs_f64()
-    );
+    let device = match previous {
+        Some(previous) => previous.device.clone(),
+        None => {
+            let mut device = NexusDevice::from_prjoxide_region(
+                variant,
+                db_root,
+                region.window,
+                Some(region.logic_rows),
+            )
+            .map_err(PlaceRouteError::BitstreamFailed)?;
+            let t_delays = std::time::Instant::now();
+            device.set_pip_delays(&timing_db);
+            log::info!(
+                "nexus pnr: PIP delays from the timing database in {:.1} s",
+                t_delays.elapsed().as_secs_f64()
+            );
+            device
+        }
+    };
 
     // Delays for retiming the `#[pipeline]` and `#[retime]` regions: the
     // cells' own from the timing database, and before placement a
@@ -854,10 +921,22 @@ pub fn place_and_route_nexus_real(
     let packing = packer.pack();
     let mut placer = Placer::new(config.placer.clone(), device.clone());
     let t_place = std::time::Instant::now();
-    let mut placement = if packing.carry_chains.is_empty() {
-        placer.place(&logic)?
-    } else {
-        placer.place_with_carry_chains(&logic, &packing.carry_chains)?
+    // Retiming after placement makes registers the earlier run's paths do
+    // not name: such a design is placed from scratch
+    let around = previous
+        .filter(|_| retime_delays.is_none())
+        .and_then(|previous| placer.place_around(&logic, &previous.cells));
+    let mut placement = match around {
+        Some(around) => {
+            log::info!(
+                "nexus pnr: placed around the earlier placement: {} cells kept their place, {} placed beside them",
+                around.kept,
+                around.added
+            );
+            around.placement
+        }
+        None if packing.carry_chains.is_empty() => placer.place(&logic)?,
+        None => placer.place_with_carry_chains(&logic, &packing.carry_chains)?,
     };
     prepare::place_pads(&device, netlist, &mut placement)?;
     for (&cell, &(x, y)) in &pll_sites {
@@ -1019,14 +1098,60 @@ pub fn place_and_route_nexus_real(
             });
         }
     }
-    let router_device = device.without_wires(&clock_routes.claimed);
     let router_config = if config.router.max_iterations == RouterConfig::default().max_iterations {
         RouterConfig::for_design_size(routable.nets.len())
     } else {
         config.router.clone()
     };
-    let mut router = Router::new(router_config, router_device);
-    let mut routing = router.route(&routable, &placement)?;
+    // The earlier run's route of each net whose ends all kept their
+    // places (and whose wires the clocks did not take this time)
+    let kept_routes: crate::collections::HashMap<GateNetId, crate::router::Route> = previous
+        .map(|previous| {
+            routable
+                .nets
+                .iter()
+                .filter(|net| net.driver.is_some() && !net.fanout.is_empty())
+                .filter_map(|net| {
+                    let ends = net_ends(&routable, net)?;
+                    let route = previous.routes.get(&ends)?;
+                    let clear = route
+                        .wires
+                        .iter()
+                        .all(|w| !clock_routes.claimed.contains(w));
+                    clear.then(|| {
+                        let mut route = route.clone();
+                        route.net_id = net.id;
+                        (net.id, route)
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // The general router starts from the kept routes: it routes the other
+    // nets against them, and reroutes a kept one only where it then
+    // shares a wire
+    let t_route = std::time::Instant::now();
+    let kept = kept_routes.len();
+    let mut routing = Router::new(router_config, device.without_wires(&clock_routes.claimed))
+        .with_initial_routes(kept_routes)
+        .route(&routable, &placement)?;
+    if kept > 0 {
+        log::info!(
+            "nexus pnr: routed from {kept} kept routes in {:.1} s",
+            t_route.elapsed().as_secs_f64()
+        );
+    }
+    // What a later run may keep: the general routes, before the clock
+    // routes join them
+    let rerun_routes: crate::collections::HashMap<NetEnds, crate::router::Route> = routing
+        .routes
+        .iter()
+        .filter(|(_, route)| route.unrouted_sinks == 0)
+        .filter_map(|(id, route)| {
+            let net = routable.nets.get(id.0 as usize)?;
+            Some((net_ends(&routable, net)?, route.clone()))
+        })
+        .collect();
     for clock_route in clock_routes.routes {
         match routing.routes.get_mut(&clock_route.net_id) {
             Some(route) => {
@@ -1161,7 +1286,7 @@ pub fn place_and_route_nexus_real(
         loads: crate::timing::sta::net_loads(&timing_model, netlist, &routing, "slow"),
     };
 
-    Ok(PnrResult {
+    let result = PnrResult {
         placement,
         routing,
         bitstream,
@@ -1169,7 +1294,18 @@ pub fn place_and_route_nexus_real(
         variant: Ice40Variant::Hx1k, // placeholder — PnrResult needs refactoring for multi-family
         wire_delays,
         routed: Some(routed),
-    })
+    };
+    let rerun = NexusRerun {
+        region,
+        device,
+        cells: netlist
+            .cells
+            .iter()
+            .filter_map(|c| Some((c.path.clone(), *result.placement.get(c.id)?)))
+            .collect(),
+        routes: rerun_routes,
+    };
+    Ok((result, rerun))
 }
 
 /// Refuse routes in which two nets share a wire: the clock router and the

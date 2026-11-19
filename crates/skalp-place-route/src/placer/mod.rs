@@ -12,6 +12,7 @@ mod congestion;
 mod constraints;
 pub mod control_sets;
 mod detail;
+mod incremental;
 mod legalization;
 mod retime;
 mod sites;
@@ -24,6 +25,7 @@ pub use constraints::{
     BelConstraint, FrequencyConstraint, IoConstraints, PinConstraint, PlacementRegion,
     PullResistor, PullType, RegionConstraint,
 };
+pub use incremental::PlacedAround;
 pub use legalization::Legalizer;
 pub use retime::{placed_retime_target, PlacedRetimeDelays, PlacedRetiming};
 
