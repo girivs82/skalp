@@ -400,6 +400,7 @@ async fn nexus_byte_lane_loopback() {
     let mut tb = Testbench::behavioral_for_device(NEXUS_LOOP, "NexusLoop", DEVICE)
         .await
         .expect("build");
+    tb.set("pause", 0u8);
     tb.set("rst", 1u8);
     tb.clock_signal("sim_tick", 20).await;
     tb.set("rst", 0u8);
@@ -419,6 +420,31 @@ async fn nexus_byte_lane_loopback() {
     );
     assert_eq!(tb.get_u32("w0").await, 0xA6, "first word of a burst");
     assert_eq!(tb.get_u32("w1").await, 0x3C, "second word of a burst");
+}
+
+/// While the DQS buffer's PAUSE is high its read side ignores READ: the same
+/// looped-back lane detects no burst and returns no word. (A PHY that held
+/// PAUSE high while it moved a delay missed every read gate behind the move.)
+#[tokio::test]
+async fn nexus_dqs_buffer_ignores_read_while_paused() {
+    let mut tb = Testbench::behavioral_for_device(NEXUS_LOOP, "NexusLoop", DEVICE)
+        .await
+        .expect("build");
+    tb.set("pause", 1u8);
+    tb.set("rst", 1u8);
+    tb.clock_signal("sim_tick", 20).await;
+    tb.set("rst", 0u8);
+    tb.clock_signal("sim_tick", 84 * SCLK_TICKS).await;
+
+    assert_eq!(tb.get_u32("locked").await, 1, "DLL locked");
+    assert_eq!(tb.get_u32("bursts").await, 0, "no burst detected");
+    assert_eq!(tb.get_u32("bts").await, 0, "no first pulse detected");
+    assert_eq!(tb.get_u32("valids").await, 0, "no word returned");
+
+    // released, the next bursts are found again
+    tb.set("pause", 0u8);
+    tb.clock_signal("sim_tick", 48 * SCLK_TICKS).await;
+    assert!(tb.get_u32("bursts").await >= 2, "bursts after PAUSE falls");
 }
 
 /// A bare integer (or a choice between bare integers) inside a concatenation
