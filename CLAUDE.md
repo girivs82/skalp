@@ -33,7 +33,8 @@ The project uses GitHub Actions with multiple jobs:
    - Formatting check
    - Clippy with `-D warnings`
    - All test targets, built and run once
-   - Beta and macOS get clippy only on each change; their full test runs
+   - Beta gets clippy only on each change; macOS gets nothing on each
+     change (its runners are the slowest). Their full test runs
      (`full-test-matrix.yml`) happen before every release and on demand
 
 2. **Code Coverage** (informational; runs with the full matrix before releases)
@@ -44,7 +45,7 @@ The project uses GitHub Actions with multiple jobs:
    - Standalone formatting and clippy checks
 
 4. **Build**
-   - Cross-platform builds (Linux, macOS, Windows)
+   - Linux and Windows on each change; macOS before a release (`release.yml`)
 
 5. **Security Audit**
    - Runs `cargo audit`
