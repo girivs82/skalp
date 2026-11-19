@@ -81,7 +81,9 @@ pub enum AsyncState {
     /// Master-slave pairs of latches (two per bit), opened by two enables
     /// made from `go` that are never high together
     MasterSlaveLatch,
-    /// One latch per bit, opened by a short pulse at the start of each step
+    /// One latch per bit, opened by a short pulse at the start of each
+    /// step; a register whose output feeds the block's own state gets a
+    /// slave as well (see [`expand_to_ncl_bridged_with`])
     PulseLatch,
     /// Master-slave pairs whose masters are open only for a short pulse at
     /// the start of each step (closed while the block waits, so they pass
@@ -2953,9 +2955,13 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
 /// With [`AsyncState::PulseLatch`], each register becomes one latch, open
 /// only for a short pulse as `go` rises: `pulse_end = go & delay(go)` and
 /// `pulse = go & !pulse_end`. The pulse must be long enough for every latch
-/// to take its data, and short enough that a latch's new value cannot come
-/// back round to its own input (or another latch's) while it is still open.
-/// `done` follows `pulse_end`.
+/// to take its data, and a latch's new value must not come back round to
+/// a latch of the block while that is still open: so a register whose
+/// output feeds the block's own state (an accumulator, a counter, a shift
+/// register) gets a slave too, opened by `slave_open = go & delay(go)` once
+/// the pulse has closed every latch. The others (pipeline registers, whose
+/// outputs only leave the block) keep one latch. `done` follows
+/// `slave_open`, or `pulse_end` when no register needs a slave.
 ///
 /// With [`AsyncState::PulsedMasterSlave`], the masters take that pulse as
 /// their enable and the slaves `slave_open = go & delay(go)`, rising once
@@ -3330,10 +3336,26 @@ fn latch_registers(lir: &mut Lir, go: LirSignalId, state: AsyncState) -> Option<
     }
     if state == AsyncState::PulseLatch {
         let (pulse_end, pulse) = make_pulse(lir, go);
+        let feedback = registers_feeding_state(lir, &regs, go);
+        let slave_open = (!feedback.is_empty()).then(|| {
+            let slave_open = lir.add_signal("__ncl_slave_open".to_string(), 1);
+            lir.add_node(
+                LirOp::NclMatchedDelay { width: 1 },
+                vec![go],
+                slave_open,
+                crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
+            );
+            slave_open
+        });
         for &idx in &regs {
-            replace_register_with_latches(lir, idx, &[(pulse, "latch")]);
+            match slave_open.filter(|_| feedback.contains(&idx)) {
+                Some(so) => {
+                    replace_register_with_latches(lir, idx, &[(pulse, "master"), (so, "slave")])
+                }
+                None => replace_register_with_latches(lir, idx, &[(pulse, "latch")]),
+            }
         }
-        return Some(pulse_end);
+        return Some(slave_open.unwrap_or(pulse_end));
     }
     if state == AsyncState::PulsedMasterSlave {
         let (_, pulse) = make_pulse(lir, go);
@@ -3446,6 +3468,43 @@ fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignal
         let c = constant(lir, "init_q");
         lir.add_node(LirOp::Xor { width }, vec![data, c], q, format!("{path}.q"));
     }
+}
+
+/// The registers among `regs` (node indices) whose outputs reach, through
+/// logic, an input of a state-holding node of the block (another register,
+/// a latch, a memory) or of something clocked by `go`
+fn registers_feeding_state(
+    lir: &Lir,
+    regs: &[usize],
+    go: LirSignalId,
+) -> std::collections::HashSet<usize> {
+    use std::collections::{HashMap, HashSet};
+    let mut readers: HashMap<LirSignalId, Vec<usize>> = HashMap::new();
+    for (i, node) in lir.nodes.iter().enumerate() {
+        for &input in &node.inputs {
+            readers.entry(input).or_default().push(i);
+        }
+    }
+    let holds_state = |node: &LirNode| node.op.is_sequential() || node.clock == Some(go);
+    let mut result = HashSet::new();
+    for &idx in regs {
+        let mut seen: HashSet<LirSignalId> = HashSet::new();
+        let mut stack = vec![lir.nodes[idx].output];
+        'walk: while let Some(signal) = stack.pop() {
+            if !seen.insert(signal) {
+                continue;
+            }
+            for &reader in readers.get(&signal).map_or(&[][..], |v| v.as_slice()) {
+                let node = &lir.nodes[reader];
+                if holds_state(node) {
+                    result.insert(idx);
+                    break 'walk;
+                }
+                stack.push(node.output);
+            }
+        }
+    }
+    result
 }
 
 /// The pulse `go & !pulse_end` with `pulse_end = go & delay(go)` (see

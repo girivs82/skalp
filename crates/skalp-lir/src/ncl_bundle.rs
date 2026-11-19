@@ -465,10 +465,13 @@ struct LatchBlock<'a> {
     opener: Opener<'a>,
     /// The latches that take the next state (masters, or the only latches)
     takers: Vec<LatchBit>,
-    /// Slaves, if the takers are masters: `slave_open = go & delay(go)`
+    /// Slaves of takers that are masters: `slave_open = go & delay(go)`
     /// opens them once every master has closed, and they close as `go`
     /// falls
     slaves: Option<(&'a MatchedDelay, Vec<LatchBit>)>,
+    /// Pulsed takers without a slave: they launch their new value as the
+    /// pulse opens them
+    singles: Vec<LatchBit>,
 }
 
 /// How a latch block opens the latches that take its next state
@@ -548,6 +551,7 @@ fn latch_blocks<'a>(netlist: &GateNetlist, matched: &'a [MatchedDelay]) -> Vec<L
                 opener: Opener::Transparent { master_open: md },
                 takers: in_block(prefix, md.control),
                 slaves: Some(slaves),
+                singles: Vec::new(),
             });
         } else if path_of(md).contains(PULSE_END_PATH) {
             // `pulse_end`'s source is `go`; the pulse gate reads both
@@ -571,6 +575,17 @@ fn latch_blocks<'a>(netlist: &GateNetlist, matched: &'a [MatchedDelay]) -> Vec<L
                 continue;
             };
             let pulse = gate.outputs[0];
+            let takers = in_block(prefix, pulse);
+            let slaves = slaves_of(prefix, go.control);
+            let slave_inputs: HashSet<GateNetId> = slaves
+                .iter()
+                .flat_map(|(_, s)| s.iter().map(|b| b.d))
+                .collect();
+            let singles = takers
+                .iter()
+                .filter(|b| !slave_inputs.contains(&b.q))
+                .cloned()
+                .collect();
             blocks.push(LatchBlock {
                 prefix,
                 go,
@@ -579,8 +594,9 @@ fn latch_blocks<'a>(netlist: &GateNetlist, matched: &'a [MatchedDelay]) -> Vec<L
                     pulse,
                     gate: gate.id,
                 },
-                takers: in_block(prefix, pulse),
-                slaves: slaves_of(prefix, go.control),
+                takers,
+                slaves,
+                singles,
             });
         }
     }
@@ -697,30 +713,36 @@ impl LatchBlock<'_> {
         })
     }
 
-    /// The latches that launch the new state (the slaves, or else the
-    /// pulsed latches themselves): their enable rises (opening them) `at`
-    /// after `go` rises (earliest arrivals with `early`)
+    /// The latches that launch the new state, by enable: the slaves, and
+    /// the pulsed latches without a slave. Each enable rises (opening them)
+    /// `at` after `go` rises (earliest arrivals with `early`).
     fn launchers(
         &self,
         netlist: &GateNetlist,
         delays: &dyn BundleDelays,
         early: bool,
-    ) -> Option<LatchGroup<'_>> {
-        match (&self.slaves, &self.opener) {
-            (Some((slave_open, slaves)), _) => Some(LatchGroup {
-                en: slave_open.control,
-                at: self
-                    .from_go(netlist, delays, early)
-                    .at(slave_open.control)?,
-                bits: slaves,
-            }),
-            (None, Opener::Pulse { pulse, gate, .. }) => Some(LatchGroup {
-                en: *pulse,
-                at: through_pin(netlist, delays, *gate, self.go.control, 0)?,
-                bits: &self.takers,
-            }),
-            (None, Opener::Transparent { .. }) => None,
+    ) -> Vec<LatchGroup<'_>> {
+        let mut groups = Vec::new();
+        if let Some((slave_open, slaves)) = &self.slaves {
+            if let Some(at) = self.from_go(netlist, delays, early).at(slave_open.control) {
+                groups.push(LatchGroup {
+                    en: slave_open.control,
+                    at,
+                    bits: slaves,
+                });
+            }
         }
+        if let (Opener::Pulse { pulse, gate, .. }, false) = (&self.opener, self.singles.is_empty())
+        {
+            if let Some(at) = through_pin(netlist, delays, *gate, self.go.control, 0) {
+                groups.push(LatchGroup {
+                    en: *pulse,
+                    at,
+                    bits: &self.singles,
+                });
+            }
+        }
+        groups
     }
 }
 
@@ -1058,7 +1080,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                     next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
                 }
             }
-            if let Some(launchers) = lb.launchers(netlist, delays, false) {
+            for launchers in lb.launchers(netlist, delays, false) {
                 for s in launchers.bits {
                     let Some(t) = full.at(s.q) else { continue };
                     endpoints += 1;
@@ -1220,13 +1242,10 @@ fn check_latch_blocks(
                 sender: None,
                 unmeasured_settle: false,
             };
-        let (Some(takers), Some(launchers)) = (
-            lb.takers(netlist, delays),
-            lb.launchers(netlist, delays, false),
-        ) else {
+        let Some(takers) = lb.takers(netlist, delays) else {
             continue;
         };
-        if takers.bits.is_empty() || launchers.bits.is_empty() {
+        if takers.bits.is_empty() {
             continue;
         }
 
@@ -1255,7 +1274,10 @@ fn check_latch_blocks(
         // Masters closed before the slaves open
         if let Some((slave_open, slaves)) = &lb.slaves {
             let closed = closed_at(netlist, delays, takers.bits, takers.en, takers.at);
-            let opens = opens_at(netlist, delays, slaves, launchers.en, launchers.at);
+            let opens = lb
+                .from_go(netlist, delays, false)
+                .at(slave_open.control)
+                .and_then(|at| opens_at(netlist, delays, slaves, slave_open.control, at));
             if let (Some(data_ps), Some(control_ps)) = (closed, opens) {
                 checks.push(check(slave_open, LATCH_OVERLAP, data_ps, control_ps));
             }
@@ -1332,12 +1354,13 @@ fn check_latch_blocks(
                     checks.push(check(pulse_end, PULSE_WIDTH, data_ps, control_ps));
                 }
 
-                // Short enough (without slaves, whose own enable keeps them
-                // closed while the pulse is up): the latches' earliest new
-                // values, round to any latch's data input, after that latch
+                // Short enough: the earliest new values of the latches
+                // without a slave (a slave stays closed while the pulse is
+                // up), round to any latch's data input, after that latch
                 // has closed
-                if lb.slaves.is_none() {
-                    let launched: HashMap<GateNetId, i64> = latches
+                if !lb.singles.is_empty() {
+                    let launched: HashMap<GateNetId, i64> = lb
+                        .singles
                         .iter()
                         .filter_map(|b| {
                             let (lo, _) = latch_path(netlist, delays, b, pulse)?;
@@ -1831,28 +1854,27 @@ fn check_channels(
         // Senders that hold their state in latches: the latches that launch
         // do so when their enable opens them (times from the sender's `go`)
         for lb in latch_blocks.iter().filter(|lb| lb.prefix != md.prefix) {
-            let Some(launchers) = lb.launchers(netlist, delays, false) else {
-                continue;
-            };
             let go = lb.go.control;
-            for s in launchers.bits {
-                if inside(&netlist.cells[s.cells[0].0 as usize])
-                    || !netlist.nets[s.q.0 as usize]
-                        .fanout
-                        .iter()
-                        .any(|&(c, _)| inside(&netlist.cells[c.0 as usize]))
-                {
-                    continue;
-                }
-                let Some((_, through)) = latch_path(netlist, delays, s, launchers.en) else {
-                    continue;
-                };
-                let t = launchers.at + through;
-                match senders.iter_mut().find(|(c, _)| *c == go) {
-                    Some((_, nets)) => {
-                        nets.insert(s.q, t);
+            for launchers in lb.launchers(netlist, delays, false) {
+                for s in launchers.bits {
+                    if inside(&netlist.cells[s.cells[0].0 as usize])
+                        || !netlist.nets[s.q.0 as usize]
+                            .fanout
+                            .iter()
+                            .any(|&(c, _)| inside(&netlist.cells[c.0 as usize]))
+                    {
+                        continue;
                     }
-                    None => senders.push((go, HashMap::from([(s.q, t)]))),
+                    let Some((_, through)) = latch_path(netlist, delays, s, launchers.en) else {
+                        continue;
+                    };
+                    let t = launchers.at + through;
+                    match senders.iter_mut().find(|(c, _)| *c == go) {
+                        Some((_, nets)) => {
+                            nets.insert(s.q, t);
+                        }
+                        None => senders.push((go, HashMap::from([(s.q, t)]))),
+                    }
                 }
             }
         }
@@ -1969,7 +1991,7 @@ fn check_channel_holds(
         // that open after `go` (its slaves, or its pulsed latches),
         // at the earliest after `go` (`clock`) rises
         if let Some(lb) = latch_blocks.iter().find(|lb| lb.go.control == clock) {
-            if let Some(launchers) = lb.launchers(netlist, delays, true) {
+            for launchers in lb.launchers(netlist, delays, true) {
                 for s in launchers.bits {
                     if !netlist.nets[s.q.0 as usize]
                         .fanout
@@ -2010,10 +2032,8 @@ fn check_channel_holds(
         }
         // Blocks holding their state in latches, whose latches feed this one
         for lb in latch_blocks.iter().filter(|lb| lb.prefix != rx.prefix) {
-            let Some(launchers) = lb.launchers(netlist, delays, true) else {
-                continue;
-            };
-            let feeds = launchers.bits.iter().any(|s| {
+            let launchers = lb.launchers(netlist, delays, true);
+            let feeds = launchers.iter().flat_map(|g| g.bits).any(|s| {
                 !inside(&netlist.cells[s.cells[0].0 as usize])
                     && netlist.nets[s.q.0 as usize]
                         .fanout
