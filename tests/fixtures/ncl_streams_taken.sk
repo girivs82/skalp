@@ -94,3 +94,72 @@ impl TkTop {
     nb = f.nb
     even = f.even
 }
+
+// `ready(s)`: sends each value to whichever of two sinks is free, the
+// first one first
+
+async entity RdSplit {
+    in i: stream<bit[8]>
+    out o0: stream<bit[8]>
+    out o1: stream<bit[8]>
+}
+impl RdSplit {
+    signal v: bit[8] = 0
+    signal full: bit = 0
+    on() {
+        if full == 0 {
+            let x: bit[8] = i.recv()
+            v = x
+            full = 1
+        } else if ready(o0) == 1 {
+            o0.send(v)
+            full = 0
+        } else {
+            o1.send(v)
+            full = 0
+        }
+    }
+}
+
+// A sink that takes a value every `slow + 1` steps and adds them up
+async entity RdSink {
+    in o: stream<bit[8]>
+    out count: bit[16]
+    out sum: bit[16]
+}
+impl RdSink {
+    signal c: bit[16] = 0
+    signal s: bit[16] = 0
+    signal wait: bit[2] = 0
+    count = c
+    sum = s
+    on() {
+        if wait == 0 {
+            let v: bit[8] = o.recv()
+            c = c + 16'h0001
+            s = s + {8'h00, v}
+            wait = 3
+        } else {
+            wait = wait - 2'h1
+        }
+    }
+}
+
+entity RdTop {
+    in clk: clock
+    in run: bit
+    out count0: bit[16]
+    out count1: bit[16]
+    out sum: bit[16]
+}
+impl RdTop {
+    signal req: bit = 0
+    inst src = TkSource { ncl_req: req }
+    inst sp = RdSplit { i: src.q, ncl_req: req }
+    inst k0 = RdSink { o: sp.o0, ncl_req: req }
+    inst k1 = RdSink { o: sp.o1, ncl_req: req }
+    on(clk.rise) { req = run }
+    count0 = k0.count
+    count1 = k1.count
+    sum = k0.sum + k1.sum
+}

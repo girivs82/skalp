@@ -579,6 +579,86 @@ async fn taken_forwards_in_the_same_step_gate_level() {
     run_taken(tb, 200).await;
 }
 
+/// A block whose send condition reads the value taken has its "some arm
+/// granted" held back until that condition has settled (the grant settle
+/// delay), and the delay is checked; a block whose conditions read only its
+/// registers has none
+#[tokio::test]
+async fn taken_in_a_send_condition_waits_for_the_grant_to_settle() {
+    use skalp_lir::gate_netlist::GateNetlist;
+    use skalp_lir::ncl_bundle::{
+        check_matched_delays, size_matched_delays, LibraryDelays, GRANT_SETTLE_DELAY_PATH,
+    };
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    let check = |mut netlist: GateNetlist| {
+        let delays = LibraryDelays::new(&library);
+        size_matched_delays(&mut netlist, &delays, 0);
+        let settles: Vec<_> = check_matched_delays(&netlist, &delays)
+            .into_iter()
+            .filter(|c| c.times == "grant settle")
+            .collect();
+        assert_eq!(settles.len(), 1, "one block's grants decide what it sends");
+        assert!(settles[0].prefix.ends_with(".f."), "{}", settles[0].prefix);
+        assert!(settles[0].delay_path.contains(GRANT_SETTLE_DELAY_PATH));
+        assert!(
+            settles[0].control_ps >= settles[0].data_ps,
+            "short: {:?}",
+            settles[0]
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(TAKEN, "TkTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_taken(tb, 200).await;
+    let none = |netlist: GateNetlist| {
+        assert!(
+            !netlist
+                .cells
+                .iter()
+                .any(|c| c.path.contains(GRANT_SETTLE_DELAY_PATH)),
+            "conditions on registers only need no grant settle delay"
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(SHARED_SERVER, "SsTop", "nexus", &none)
+        .await
+        .expect("build gate-level testbench");
+    run_shared_server(tb).await;
+}
+
+/// `ready(s)` decides which channel a step sends to: every value reaches
+/// one of the two sinks, and both get some
+async fn run_ready(mut tb: Testbench, cycles: usize) {
+    tb.set("run", 1u8);
+    tb.clock(cycles).await;
+    tb.set("run", 0u8);
+    tb.clock(STOP_LIMIT).await;
+    let c0 = tb.get_u32("count0").await;
+    let c1 = tb.get_u32("count1").await;
+    assert!(c0 > 2 && c1 > 2, "sinks got {c0} and {c1} values");
+    // the values are 1, 2, 3, ..., each to exactly one sink
+    let n = c0 + c1;
+    let expected: u32 = (1..=n).map(|k| k & 0xff).sum::<u32>() & 0xffff;
+    assert_eq!(tb.get_u32("sum").await, expected, "{n} values");
+}
+
+#[tokio::test]
+async fn ready_picks_a_free_channel_behavioural() {
+    let tb = Testbench::behavioral_with_top(TAKEN, "RdTop")
+        .await
+        .expect("build behavioural testbench");
+    run_ready(tb, 200).await;
+}
+
+#[tokio::test]
+async fn ready_picks_a_free_channel_gate_level() {
+    let tb = Testbench::gate_level_with_top(TAKEN, "RdTop")
+        .await
+        .expect("build gate-level testbench");
+    run_ready(tb, 400).await;
+}
+
 /// `taken(s)` in the condition that decides the grant, or on a stream no
 /// arbiter takes, is refused
 #[tokio::test]

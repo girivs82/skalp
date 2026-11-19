@@ -2983,6 +2983,37 @@ pub fn expand_to_ncl_bridged_with(lir: &Lir, children_have_regs: bool) -> NclExp
         }
     }
 
+    // Grants that the step's send/recv conditions depend on: "some arm
+    // granted" (`__ncl_arb<k>_any`) reaches `ready` only a matched delay
+    // after it rises, once what the grant decides has settled ("grant
+    // settle" check, see `ncl_bundle`), so `ready` never glitches up for a
+    // step whose channel is not ready. It falls at once with the grant.
+    if ready.is_some() {
+        use skalp_frontend::ncl_streams::{NCL_ARBITER_PREFIX, NCL_GRANT_ANY_SUFFIX};
+        for k in 0..arbiters.len() {
+            let Some(any) = new_lir
+                .get_signal(&format!("{NCL_ARBITER_PREFIX}{k}{NCL_GRANT_ANY_SUFFIX}"))
+                .map(|s| s.id)
+            else {
+                continue;
+            };
+            let settled = new_lir.add_signal(format!("__ncl_arb{k}_settled"), 1);
+            for node in new_lir.nodes.iter_mut() {
+                for input in node.inputs.iter_mut() {
+                    if *input == any {
+                        *input = settled;
+                    }
+                }
+            }
+            new_lir.add_node(
+                LirOp::NclMatchedDelay { width: 1 },
+                vec![any],
+                settled,
+                format!("{}{k}", crate::ncl_bundle::GRANT_SETTLE_DELAY_PATH),
+            );
+        }
+    }
+
     // What the arbiters took (`taken(s)`): each stream input read through
     // an `NclTake` gate of its arm's grant, in place of the behavioural mux
     if ready.is_some() {
