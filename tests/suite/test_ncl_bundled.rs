@@ -202,14 +202,16 @@ fn latch_candidates_are_blocks_whose_strobe_would_clock_nothing() {
             .map(|c| (c.path, c.latch_bits))
             .collect();
     // Each accumulator feeds its own state, so each bit is a pulsed latch
-    // and a slave
+    // and a slave; so does each word of the register file (written in
+    // place)
     let names: Vec<&str> = found
         .iter()
         .map(|(p, _)| p.rsplit('.').next().unwrap())
         .collect();
-    assert_eq!(names, ["small", "wide"], "{found:?}");
+    assert_eq!(names, ["small", "wide", "rf"], "{found:?}");
     assert_eq!(found[0].1, 16, "{found:?}");
     assert_eq!(found[1].1, 32, "{found:?}");
+    assert_eq!(found[2].1, 128, "{found:?}");
 
     assert!(skalp_lir::latch_candidates(&hier, skalp_lir::AsyncState::FlipFlop).is_empty());
 

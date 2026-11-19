@@ -1,7 +1,7 @@
 // Async blocks under one clocked parent, for choosing which of them can keep
-// their state in latches: two accumulators of different widths can; a
-// combinational block has no state; a register file keeps a memory clocked
-// by its strobe; a cluster's coalesced child is clocked by its strobe.
+// their state in latches: two accumulators of different widths and a small
+// register file (lowered to registers) can; a combinational block has no
+// state; a cluster's coalesced child is clocked by its strobe.
 
 async entity LcAdd8 {
     in a: bit[8]
