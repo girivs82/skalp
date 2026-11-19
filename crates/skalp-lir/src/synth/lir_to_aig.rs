@@ -40,6 +40,10 @@ pub struct LirToSynthAig<'a> {
     /// Narrowest add/sub/compare mapped onto the target's carry chain
     /// (None = the target has no carry chain; arithmetic stays in the AIG).
     carry_chain_min_width: Option<u32>,
+    /// Outputs of carry-chain candidates that AIG logic reads: if the
+    /// operation stays on the carry chain, its output becomes an AIG
+    /// pseudo-input
+    carry_consumed: HashSet<u32>,
 }
 
 /// Result of LIR-to-AIG conversion
@@ -64,6 +68,7 @@ impl<'a> LirToSynthAig<'a> {
             dsp_max_width: 0,
             leading_zeros: LeadingZeros::new(lir),
             carry_chain_min_width: None,
+            carry_consumed: HashSet::new(),
         }
     }
 
@@ -84,13 +89,19 @@ impl<'a> LirToSynthAig<'a> {
     }
 
     /// Build the AIG from LIR
-    pub fn build(mut self) -> LirToAigResult {
+    pub fn build(self) -> LirToAigResult {
+        self.build_with_signal_lits().0
+    }
+
+    /// [`Self::build`], also returning the AIG literal of each built
+    /// `(signal, bit)`
+    fn build_with_signal_lits(mut self) -> (LirToAigResult, BTreeMap<(u32, u32), AigLit>) {
         // Phase 1: Find register and physical nodes
         let mut register_indices: Vec<usize> = Vec::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
             if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
                 register_indices.push(idx);
-            } else if self.is_physical(node) {
+            } else if self.is_fixed_physical(node) {
                 self.physical_nodes.push(idx);
             }
         }
@@ -113,22 +124,36 @@ impl<'a> LirToSynthAig<'a> {
             .iter()
             .map(|&idx| self.lir.nodes[idx].output.0)
             .collect();
+        // Carry-chain candidates are decided once their operands are built:
+        // arithmetic on constants is folded, the rest goes on the chain
+        let carry_outputs: HashSet<u32> = self
+            .lir
+            .nodes
+            .iter()
+            .filter(|n| self.is_carry_chain_op(&n.op))
+            .map(|n| n.output.0)
+            .collect();
         let mut consumed_phys_outputs: HashSet<u32> = HashSet::new();
+        let mut carry_consumed: HashSet<u32> = HashSet::new();
         for node in &self.lir.nodes {
             // A register's data input counts: `counter <= counter + 1` reads
-            // the carry chain only through the register.
-            if !self.is_physical(node) {
-                for &input_id in &node.inputs {
+            // the carry chain only through the register. So does a carry
+            // candidate's, since it may end up in the AIG.
+            if !self.is_fixed_physical(node) {
+                // A register's clock or reset counts too: a register clocked
+                // by a physical cell's output (the matched delay of an async
+                // block) otherwise had no clock net and was wired to net 0
+                let reads = node
+                    .inputs
+                    .iter()
+                    .copied()
+                    .chain([node.clock, node.reset].into_iter().flatten());
+                for input_id in reads {
                     if phys_output_set.contains(&input_id.0) {
                         consumed_phys_outputs.insert(input_id.0);
                     }
-                }
-                // So does a register's clock or reset: a register clocked by
-                // a physical cell's output (the matched delay of an async
-                // block) otherwise had no clock net and was wired to net 0
-                for control in [node.clock, node.reset].into_iter().flatten() {
-                    if phys_output_set.contains(&control.0) {
-                        consumed_phys_outputs.insert(control.0);
+                    if carry_outputs.contains(&input_id.0) {
+                        carry_consumed.insert(input_id.0);
                     }
                 }
             }
@@ -140,7 +165,11 @@ impl<'a> LirToSynthAig<'a> {
             if phys_output_set.contains(&output_id.0) {
                 consumed_phys_outputs.insert(output_id.0);
             }
+            if carry_outputs.contains(&output_id.0) {
+                carry_consumed.insert(output_id.0);
+            }
         }
+        self.carry_consumed = carry_consumed;
 
         tracing::trace!(
             "[LIR_TO_AIG] physical_nodes={}, consumed_phys={}, phys_output_set={}",
@@ -268,8 +297,28 @@ impl<'a> LirToSynthAig<'a> {
             if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) {
                 continue; // Handled separately
             }
-            if self.is_physical(node) {
+            if self.is_fixed_physical(node) {
                 continue; // Handled by physical partition
+            }
+            if self.is_carry_chain_op(&node.op)
+                && !self.operands_constant(node)
+                && !self.adds_only_zero(node)
+            {
+                // On the carry chain: AIG logic reads its output as an input
+                self.physical_nodes.push(idx);
+                if self.carry_consumed.contains(&node.output.0) {
+                    let signal = &self.lir.signals[node.output.0 as usize];
+                    for bit in 0..signal.width {
+                        let name = if signal.width == 1 {
+                            signal.name.clone()
+                        } else {
+                            format!("{}[{}]", signal.name, bit)
+                        };
+                        let lit = AigLit::new(self.aig.add_physical_input(name));
+                        self.signal_map.insert((node.output.0, bit), lit);
+                    }
+                }
+                continue;
             }
             // Skip combinational nodes that output to a register signal —
             // these are initial-value assignments (e.g., Buffer of constant)
@@ -359,6 +408,19 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
+        // Carry chains decided in phase 4 are physical nodes too
+        let phys_output_set: HashSet<u32> = self
+            .physical_nodes
+            .iter()
+            .map(|&idx| self.lir.nodes[idx].output.0)
+            .collect();
+        for &idx in &self.physical_nodes {
+            let output = self.lir.nodes[idx].output.0;
+            if self.carry_consumed.contains(&output) {
+                consumed_phys_outputs.insert(output);
+            }
+        }
+
         // Phase 6: Add primary outputs
         // Skip outputs that are physical node outputs without pseudo-inputs
         // (they'll be connected by merge_physical_nodes_into_netlist)
@@ -444,11 +506,12 @@ impl<'a> LirToSynthAig<'a> {
             }
         }
 
-        LirToAigResult {
+        let result = LirToAigResult {
             aig: self.aig,
             physical_node_indices: self.physical_nodes.clone(),
             internal_exports,
-        }
+        };
+        (result, self.signal_map)
     }
 
     /// Whether `op` is arithmetic mapped onto the target's carry chain.
@@ -473,11 +536,57 @@ impl<'a> LirToSynthAig<'a> {
         }
     }
 
-    /// Check if a LIR node cannot be represented in AIG
-    fn is_physical(&self, node: &LirNode) -> bool {
-        if self.is_carry_chain_op(&node.op) {
-            return true;
+    /// Whether every operand bit of `node` is built and constant: arithmetic
+    /// on constants (a latency plus an adjustment, both from generics) folds
+    /// in the AIG instead of becoming carry-chain cells
+    fn operands_constant(&self, node: &LirNode) -> bool {
+        node.inputs.iter().all(|&input| {
+            let width = self
+                .lir
+                .signals
+                .get(input.0 as usize)
+                .map_or(0, |s| s.width);
+            (0..width).all(|bit| {
+                self.signal_map
+                    .get(&(input.0, bit))
+                    .is_some_and(|lit| lit.is_const())
+            })
+        })
+    }
+
+    /// Whether an add or subtract leaves its one non-constant operand as it
+    /// is: every other operand is constant 0 (`x + 0`, `x - 0`, the carry-in
+    /// of an adder instance given `carry_in: 0`). Built in the AIG it is a
+    /// copy of that operand, with no carry chain.
+    fn adds_only_zero(&self, node: &LirNode) -> bool {
+        let zero = |input: &LirSignalId| {
+            let width = self
+                .lir
+                .signals
+                .get(input.0 as usize)
+                .map_or(0, |s| s.width);
+            (0..width).all(|bit| {
+                self.signal_map
+                    .get(&(input.0, bit))
+                    .is_some_and(|lit| lit.const_value() == Some(false))
+            })
+        };
+        match node.op {
+            LirOp::Add { const_b, .. } => {
+                node.inputs.len() >= 2
+                    && const_b.unwrap_or(0) == 0
+                    && node.inputs.iter().filter(|i| !zero(i)).count() <= 1
+            }
+            // `a - 0`; `0 - b` negates
+            LirOp::Sub { .. } => node.inputs.iter().skip(1).all(zero),
+            _ => false,
         }
+    }
+
+    /// Whether a LIR node cannot be represented in the AIG whatever its
+    /// operands are (carry-chain arithmetic is decided in phase 4, see
+    /// [`Self::operands_constant`])
+    fn is_fixed_physical(&self, node: &LirNode) -> bool {
         match &node.op {
             LirOp::Mul { .. } => self.mul_uses_dsp(node),
             LirOp::MemBlock { .. }
@@ -589,7 +698,8 @@ impl<'a> LirToSynthAig<'a> {
         // read-modify-write) look like a combinational loop.
         let mut signal_producer: HashMap<u32, usize> = HashMap::new();
         for (idx, node) in self.lir.nodes.iter().enumerate() {
-            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. }) || self.is_physical(node)
+            if matches!(node.op, LirOp::Reg { .. } | LirOp::Latch { .. })
+                || self.is_fixed_physical(node)
             {
                 continue;
             }
@@ -1121,7 +1231,7 @@ impl<'a> LirToSynthAig<'a> {
             LirOp::Reg { .. } | LirOp::Latch { .. } => {}
 
             // Physical ops handled separately
-            _ if self.is_physical(node) => {}
+            _ if self.is_fixed_physical(node) || self.is_carry_chain_op(&node.op) => {}
 
             // Unimplemented ops: create placeholder false outputs
             _ => {
@@ -1400,4 +1510,36 @@ impl<'a> LirToSynthAig<'a> {
 enum ShiftDir {
     Left,
     Right,
+}
+
+/// The value of each of `signals` that is the same whatever the module's
+/// inputs and registers hold: its bits fold to constants when the logic is
+/// built (a signal read before any assignment, or wider than 64 bits, is
+/// `None`). Arithmetic is built in the AIG here, not left to a carry chain,
+/// so it folds too.
+pub fn constant_signal_values(lir: &Lir, signals: &[LirSignalId]) -> Vec<Option<u64>> {
+    // A signal nothing drives reads as 0 while the logic is built; here its
+    // value is unknown, so it becomes an input
+    let mut lir = lir.clone();
+    let driven: HashSet<u32> = lir.nodes.iter().map(|n| n.output.0).collect();
+    let inputs: HashSet<u32> = lir.inputs.iter().map(|s| s.0).collect();
+    let undriven: Vec<LirSignalId> = (0..lir.signals.len() as u32)
+        .filter(|id| !driven.contains(id) && !inputs.contains(id))
+        .map(LirSignalId)
+        .collect();
+    lir.inputs.extend(undriven);
+    let (_, lits) = LirToSynthAig::new(&lir).build_with_signal_lits();
+    signals
+        .iter()
+        .map(|&sig| {
+            let width = lir.signals.get(sig.0 as usize)?.width;
+            if width == 0 || width > 64 {
+                return None;
+            }
+            (0..width).try_fold(0u64, |value, bit| {
+                let bit_value = lits.get(&(sig.0, bit))?.const_value()?;
+                Some(value | (u64::from(bit_value) << bit))
+            })
+        })
+        .collect()
 }

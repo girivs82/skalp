@@ -1,0 +1,45 @@
+// DDR output gearing timed against its own clocks: the 125 MHz board clock
+// through a PLL (100 MHz), an edge clock buffer and a divide-by-4 (SCLK at
+// 25 MHz). A counter on SCLK feeds ODDRX4, whose data inputs are sampled on
+// SCLK; a register on SCLK drives an LED.
+#[lattice_ip(name = "PLL_CORE", REF_MMD_DIG = "5", FBK_MMD_DIG = "4", DIVA = "15", DELA = "15", DIV_DEL = "0b0001111", ENCLK_CLKOP = "ENABLED")]
+entity PllCore {
+    in REFCK: clock
+    in RST: bit
+    out CLKOP: clock
+    out LOCK: bit
+}
+
+entity NexusDdrTiming {
+    in clk: clock @ { pin: "P24", io_standard: "LVCMOS33" }
+    out q: bit @ { pin: "AC19", io_standard: "LVSTL_I" }
+    out led: bit @ { pin: "R4", io_standard: "LVCMOS33" }
+}
+
+impl NexusDdrTiming {
+    inst pll = PllCore { REFCK: clk, RST: 0 }
+    signal fast: clock
+    fast = pll.CLKOP
+
+    inst es = ECLKSYNC { ECLKIN: fast, STOP: 0 }
+    signal eclk: clock
+    eclk = es.ECLKOUT
+    inst ed = ECLKDIV<4> { ECLKIN: eclk, DIVRST: 0, SLIP: 0 }
+    signal sclk: clock
+    sclk = ed.DIVOUT
+
+    signal n: bit[8] = 0
+    on(sclk.rise) {
+        n = n + 1
+    }
+    inst o = ODDRX4 {
+        D0: n[0], D1: n[1], D2: n[2], D3: n[3], D4: n[4], D5: n[5], D6: n[6], D7: n[7],
+        ECLK: eclk, SCLK: sclk, RST: 0
+    }
+    q = o.Q
+    signal seen: bit = 0
+    on(sclk.rise) {
+        seen = n[7]
+    }
+    led = seen
+}

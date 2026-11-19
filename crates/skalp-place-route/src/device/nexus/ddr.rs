@@ -122,6 +122,62 @@ pub struct Pin {
     /// to that value is left unrouted
     #[serde(default)]
     pub unrouted: Option<u8>,
+    /// How the pin is timed against the fabric, if it is
+    #[serde(default)]
+    pub timing: Option<PinTiming>,
+    /// For a clock output: the clock it follows
+    #[serde(default)]
+    pub clock_from: Option<ClockFrom>,
+}
+
+/// How a block pin is timed against the fabric.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct PinTiming {
+    /// The primitive's port whose clock samples (an input) or launches (an
+    /// output) the pin; `None` for a pin with only combinational arcs
+    #[serde(default)]
+    pub clock: Option<String>,
+    /// An input's setup and hold, from the timing tables
+    #[serde(default)]
+    pub setup: Option<SetupRef>,
+    /// An output's clock-to-output delay, from the timing tables
+    #[serde(default)]
+    pub launch: Option<ArcRef>,
+    /// An output's combinational arcs: input port -> the arc
+    #[serde(default)]
+    pub from: BTreeMap<String, ArcRef>,
+}
+
+/// A setup and hold entry of the timing tables.
+#[derive(Deserialize, Clone, Debug)]
+pub struct SetupRef {
+    /// The table's cell type (`IOLOGIC:ODDRXN`)
+    pub cell: String,
+    /// The pin that is checked
+    pub pin: String,
+    /// The clock it is checked against
+    pub clock: String,
+}
+
+/// A delay arc of the timing tables.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ArcRef {
+    /// The table's cell type
+    pub cell: String,
+    /// Where the arc starts
+    pub from: String,
+    /// Where it ends
+    pub to: String,
+}
+
+/// Where a block's clock output comes from.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ClockFrom {
+    /// The input port it follows
+    pub port: String,
+    /// The parameter whose value is the division ratio; `None`: not divided
+    #[serde(default)]
+    pub divide_by: Option<String>,
 }
 
 /// A primitive parameter.
@@ -254,6 +310,76 @@ impl Primitives {
         let port = port_key(cell.blackbox_pin(output, index)?);
         let pin = prim.pins.get(&port);
         Some((port, pin))
+    }
+
+    /// The device data's pin behind a cell's `index`-th input or output
+    pub fn pin_at<'a>(&'a self, cell: &'a Cell, output: bool, index: usize) -> Option<&'a Pin> {
+        self.port(cell, output, index)?.1
+    }
+
+    /// The index of a primitive cell's input port named `port`
+    pub fn input_index(cell: &Cell, port: &str) -> Option<usize> {
+        let mut index = 0;
+        while let Some(name) = cell.blackbox_pin(false, index) {
+            if port_key(name) == port {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// The input whose clock samples (an input) or launches (an output) a
+    /// primitive cell's pin, for a pin timed against a clock
+    pub fn timing_clock(&self, cell: &Cell, output: bool, index: usize) -> Option<usize> {
+        let clock = self
+            .pin_at(cell, output, index)?
+            .timing
+            .as_ref()?
+            .clock
+            .as_ref()?;
+        Self::input_index(cell, clock)
+    }
+
+    /// The frequencies, in MHz, a primitive cell's clock outputs run at,
+    /// given those known on its inputs' nets: a clock output follows the
+    /// input the device data names, divided by the ratio a parameter gives.
+    pub fn driven_frequencies(
+        &self,
+        cell: &Cell,
+        known: &dyn Fn(GateNetId) -> Option<f64>,
+    ) -> Vec<(usize, f64)> {
+        let Some(prim) = self.of(cell) else {
+            return Vec::new();
+        };
+        let mut driven = Vec::new();
+        for output in 0..cell.outputs.len() {
+            let Some(from) = self
+                .pin_at(cell, true, output)
+                .and_then(|p| p.clock_from.as_ref())
+            else {
+                continue;
+            };
+            let Some(mhz) = Self::input_index(cell, &from.port)
+                .and_then(|input| cell.inputs.get(input))
+                .and_then(|&net| known(net))
+            else {
+                continue;
+            };
+            let ratio = match &from.divide_by {
+                None => Some(1.0),
+                Some(param) => cell
+                    .parameters
+                    .get(param)
+                    .or_else(|| prim.parameters.get(param)?.default.as_ref())
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|&ratio| ratio > 0.0),
+            };
+            if let Some(ratio) = ratio {
+                driven.push((output, mhz / ratio));
+            }
+        }
+        driven
     }
 
     /// Router pin of a primitive cell's `index`-th input, if it is routed
@@ -1221,6 +1347,58 @@ mod tests {
         let left = |i: usize| (i > 0).then(|| "DDRDLL_CORE_R68C1".to_string());
         let (enums, _) = cell_settings(&prims, &dqs, &left).unwrap();
         assert!(!enums.iter().any(|(n, _)| n == "DLLCODE"));
+    }
+
+    const TIMED: &str = r#"{"primitives": {
+        "ECLKDIV": {"site": "ECLKDIV",
+            "pins": {"ECLKIN": {"pin": "ECLKIN", "clock": true},
+                     "DIVOUT": {"pin": "DIVOUT", "clock": true,
+                                "clock_from": {"port": "ECLKIN", "divide_by": "ECLK_DIV"}}},
+            "parameters": {"ECLK_DIV": {"default": "DISABLE",
+                "values": {"2": ["ECLK_DIV.2"], "4": ["ECLK_DIV.4"]}}}},
+        "ECLKSYNC": {"site": "ECLKSYNC",
+            "pins": {"ECLKIN": {"pin": "ECLKIN", "clock": true},
+                     "ECLKOUT": {"pin": "ECLKOUT", "clock": true, "clock_from": {"port": "ECLKIN"}}}},
+        "IDDRX4": {"site": "IOLOGIC", "pad": {"role": "input", "ports": ["D"]},
+            "pins": {"Q0": {"pin": "RXDATA0", "timing": {"clock": "SCLK",
+                        "launch": {"cell": "IOLOGIC:IDDRXN", "from": "SCLKIN", "to": "RXDATA"}}},
+                     "RST": {"pin": "LSRIN", "timing": {"clock": "SCLK",
+                        "setup": {"cell": "IOLOGIC:IDDRXN", "pin": "LSRIN", "clock": "SCLKIN"}}},
+                     "SCLK": {"pin": "SCLKIN", "clock": true}}}
+    }}"#;
+
+    /// Clock outputs follow the input the device data names, divided by the
+    /// ratio a parameter sets; a divider that is off drives no known clock
+    #[test]
+    fn clock_outputs_follow_their_inputs() {
+        use skalp_lir::gate_netlist::GateNetId;
+        let prims = Primitives::from_json(TIMED).unwrap();
+        let known = |net: GateNetId| (net == GateNetId(1)).then_some(500.0);
+        let mut div = blackbox("ECLKDIV", &["ECLKIN"], &["DIVOUT"], &[("ECLK_DIV", "4")]);
+        div.inputs = vec![GateNetId(1)];
+        div.outputs = vec![GateNetId(2)];
+        assert_eq!(prims.driven_frequencies(&div, &known), [(0, 125.0)]);
+        div.parameters.shift_remove("ECLK_DIV");
+        assert!(prims.driven_frequencies(&div, &known).is_empty());
+        let mut sync = blackbox("ECLKSYNC", &["ECLKIN"], &["ECLKOUT"], &[]);
+        sync.inputs = vec![GateNetId(1)];
+        sync.outputs = vec![GateNetId(3)];
+        assert_eq!(prims.driven_frequencies(&sync, &known), [(0, 500.0)]);
+        // An input with no known frequency gives none
+        sync.inputs = vec![GateNetId(9)];
+        assert!(prims.driven_frequencies(&sync, &known).is_empty());
+    }
+
+    /// A pin timed against a clock names that clock's input
+    #[test]
+    fn timed_pins_name_their_clock_input() {
+        let prims = Primitives::from_json(TIMED).unwrap();
+        let iddr = blackbox("IDDRX4", &["D", "RST", "SCLK"], &["Q0"], &[]);
+        assert_eq!(prims.timing_clock(&iddr, true, 0), Some(2));
+        assert_eq!(prims.timing_clock(&iddr, false, 1), Some(2));
+        // Pad and clock inputs are not timed against a clock
+        assert_eq!(prims.timing_clock(&iddr, false, 0), None);
+        assert_eq!(prims.timing_clock(&iddr, false, 2), None);
     }
 
     /// The device's DDR blocks come from its tile types: on the LFCPNX-100,

@@ -33,7 +33,8 @@
 // The DQS buffer samples DQ on DQSR90 (DQS delayed a quarter tCK, moved by the lane's read
 // delay) into the I/O logic FIFO; DATAVALID marks each DFI cycle that brings a word, which holds
 // the beats of that cycle's gated slots in place, and the lane packs the words into half bursts
-// (eight beats) from the READ masks it issued. Once both lanes have a half burst it goes back on dfi_rddata_wN (four words, beats 2N
+// (eight beats) from the READ masks it issued; the words, the packing and the check of a
+// training half are a register stage each. Once both lanes have a half burst it goes back on dfi_rddata_wN (four words, beats 2N
 // and 2N+1 of both lanes, the earlier beat in [15:0]) with dfi_rddata_valid_wN. A controller
 // keeps TRDDATA_EN_ADJ = 3; the gate training finds the burst after it.
 //
@@ -375,7 +376,11 @@ impl NexusLpddr4Lane {
         qb7[1], qb6[1], qb5[1], qb4[1], qb3[1], qb2[1], qb1[1], qb0[1],
         qb7[0], qb6[0], qb5[0], qb4[0], qb3[0], qb2[0], qb1[0], qb0[0]
     }
-    let dvalid: bit = dqs.DATAVALID
+    // The gearbox words, their DATAVALID and BURSTDETECT, registered beside the fabric before
+    // anything else uses them: the I/O logic is at the die edge, a routing hop of its own
+    signal hb_r: bit[64] = 0
+    signal dv_r: bit = 0
+    signal bd_r: bit = 0
 
     // ------------------------------------------------------------ half bursts
     // Each SCLK cycle with READ set brings one DATAVALID word, in order, holding the beats of
@@ -394,13 +399,17 @@ impl NexusLpddr4Lane {
     let rm_c: bit[3] = {2'b00, rm[0]} + {2'b00, rm[1]} + {2'b00, rm[2]} + {2'b00, rm[3]}
     // with slots pending, the run continues at slot 0 of this word and takes 4 - pn of them
     let pk_p: bit[64] = match pn {
-        1 => hb[47:0] ++ pv[63:48],
-        2 => hb[31:0] ++ pv[63:32],
-        _ => hb[15:0] ++ pv[63:16]
+        1 => hb_r[47:0] ++ pv[63:48],
+        2 => hb_r[31:0] ++ pv[63:32],
+        _ => hb_r[15:0] ++ pv[63:16]
     }
     let pk_take: bit[3] = 4 - {1'b0, pn}
-    let hv: bit = if dvalid == 1 && wl_en == 0 && ((pn != 0 && rm_c >= pk_take) || (pn == 0 && rm_c == 4)) { 1 } else { 0 }
-    let hh: bit[64] = if pn != 0 { pk_p } else { hb }
+    let hv: bit = if dv_r == 1 && wl_en == 0 && ((pn != 0 && rm_c >= pk_take) || (pn == 0 && rm_c == 4)) { 1 } else { 0 }
+    let hh: bit[64] = if pn != 0 { pk_p } else { hb_r }
+    // each packed half burst, registered: it leaves the PHY and is checked during training
+    // from here
+    signal hv_r: bit = 0
+    signal hh_r: bit[64] = 0
     // slots left pending after this word
     let pn_n: bit[2] = if wl_en == 1 { 0 } else {
         if pn != 0 {
@@ -418,11 +427,13 @@ impl NexusLpddr4Lane {
     } else {
         if nv == 0 { exp_rdc[63:0] } else { exp_rdc[127:64] }
     }
-    let h_bad: bit = if hv == 1 && (nv >= 2 || hh != exp_h) { 1 } else { 0 }
-    let mism_n: bit = if mism == 1 || h_bad == 1 { 1 } else { 0 }
-    let nv_n: bit[2] = if hv == 1 && nv != 3 { nv + 1 } else { nv }
-    let fb_n: bit = if fb == 1 || (dvalid == 1 && hb[15:0] != 0) { 1 } else { 0 }
-    let bd_n: bit = if bd_seen == 1 || dqs.BURSTDETECT == 1 { 1 } else { 0 }
+    // a half's check lands a cycle after the half (the comparison is a stage of its own)
+    signal bad_q: bit = 0
+    let h_bad: bit = if hv_r == 1 && (nv >= 2 || hh_r != exp_h) { 1 } else { 0 }
+    let mism_n: bit = if mism == 1 || bad_q == 1 { 1 } else { 0 }
+    let nv_n: bit[2] = if hv_r == 1 && nv != 3 { nv + 1 } else { nv }
+    let fb_n: bit = if fb == 1 || (dv_r == 1 && hb_r[15:0] != 0) { 1 } else { 0 }
+    let bd_n: bit = if bd_seen == 1 || bd_r == 1 { 1 } else { 0 }
     // the event's result (gate: BURSTDETECT; eye and write DQ: both halves as expected)
     let data_ok: bit = if nv_n == 2 && mism_n == 0 { 1 } else { 0 }
     let pass: bit = if gate_en == 1 { bd_n } else { data_ok }
@@ -434,19 +445,22 @@ impl NexusLpddr4Lane {
     let bl_n: bit[8] = if better == 1 { rl } else { best_ln }
     let bs_n: bit[8] = if better == 1 { rs } else { best_st }
     let be_n: bit[8] = if better == 1 { pos } else { best_end }
+    // the sweep's result, a cycle after its last event, from the best run it kept
     // (positions reach 192, so the sum takes 9 bits)
-    let mid_s: bit[9] = {1'b0, bs_n} + {1'b0, be_n}
+    let mid_s: bit[9] = {1'b0, best_st} + {1'b0, best_end}
     let mid: bit[8] = mid_s[8:1]
     // the gate: settings pass while it opens in the DQS preamble (or before DQS is driven), up
     // to the first rising edge; it goes to the middle of the passing run, but no more than a
     // tCK (8 settings) before that edge, so it stays inside the 2 tCK preamble
-    let g_ok: bit = if bl_n >= 4 && be_n >= 7 { 1 } else { 0 }
+    let g_ok: bit = if best_ln >= 4 && best_end >= 7 { 1 } else { 0 }
+    let g_floor: bit[8] = best_end - 7
+    signal calc: bit = 0
     // the sweep ends with this event
     let gate_last: bit = if gsel + 1 >= gate_n { 1 } else { 0 }
     let eye_last: bit = if rdp_r + eye_step > eye_top { 1 } else { 0 }
     let wdq_last: bit = if wrp_r + wdq_step > wdq_top { 1 } else { 0 }
     let sweeping: bit = if (gate_en == 1 && gate_q == 1 && r_gate == 0) || (eye_en == 1 && eye_q == 1 && r_eye == 0) || (wdq_en == 1 && wdq_q == 1 && r_wdq == 0) { 1 } else { 0 }
-    let evaluate: bit = if last_win == 1 && sweeping == 1 && fin == 0 { 1 } else { 0 }
+    let evaluate: bit = if last_win == 1 && sweeping == 1 && fin == 0 && calc == 0 { 1 } else { 0 }
     // write leveling: this strobe's sample is the feedback of the strobe before it
     let wl_sweep: bit = if wl_en == 1 && wl_q == 1 && r_wl == 0 && fin == 0 { 1 } else { 0 }
     let wl_eval: bit = if last_win == 1 && wl_sweep == 1 { 1 } else { 0 }
@@ -455,6 +469,12 @@ impl NexusLpddr4Lane {
     let any_start: bit = if (wl_en == 1 && wl_q == 0) || (gate_en == 1 && gate_q == 0) || (eye_en == 1 && eye_q == 0) || (wdq_en == 1 && wdq_q == 0) { 1 } else { 0 }
 
     on(sclk.rise) {
+        hb_r = hb
+        dv_r = dqs.DATAVALID
+        bd_r = dqs.BURSTDETECT
+        hv_r = hv
+        hh_r = hh
+        bad_q = h_bad
         // READ masks in flight, and the slots pending for the next half burst
         if rst == 1 {
             rmq_w = 0
@@ -465,10 +485,10 @@ impl NexusLpddr4Lane {
                 rmq[rmq_w] = read_n
                 rmq_w = rmq_w + 1
             }
-            if dvalid == 1 {
+            if dv_r == 1 {
                 rmq_r = rmq_r + 1
                 pn = pn_n
-                pv = hb
+                pv = hb_r
             }
         }
         if pause_n != 0 {
@@ -528,6 +548,7 @@ impl NexusLpddr4Lane {
             best_st = 0
             best_end = 0
             fin = 0
+            calc = 0
             win = 0
             wl_k = 0
             wl_fb_p = 0
@@ -579,9 +600,7 @@ impl NexusLpddr4Lane {
             best_end = be_n
             if gate_en == 1 {
                 if gate_last == 1 {
-                    fin = 1
-                    gsel = if g_ok == 0 { 0 } else { if mid > be_n - 7 { mid } else { be_n - 7 } }
-                    f_gate = if g_ok == 1 { 0 } else { 1 }
+                    calc = 1
                 } else {
                     gsel = gsel + 1
                 }
@@ -589,10 +608,7 @@ impl NexusLpddr4Lane {
             }
             if eye_en == 1 {
                 if eye_last == 1 {
-                    fin = 1
-                    f_eye = if bl_n == 0 { 1 } else { 0 }
-                    rd_dn = 1
-                    rd_n = if bl_n == 0 { rdp_r - 128 } else { rdp_r - mid }
+                    calc = 1
                 } else {
                     rd_dn = 0
                     rd_n = eye_step
@@ -600,14 +616,31 @@ impl NexusLpddr4Lane {
             }
             if wdq_en == 1 {
                 if wdq_last == 1 {
-                    fin = 1
-                    f_wdq = if bl_n == 0 { 1 } else { 0 }
-                    wr_dn = 1
-                    wr_n = if bl_n == 0 { wrp_r - 128 } else { wrp_r - mid }
+                    calc = 1
                 } else {
                     wr_dn = 0
                     wr_n = wdq_step
                 }
+            }
+        }
+        // the sweep's result, from the best run now held
+        if calc == 1 {
+            calc = 0
+            fin = 1
+            if gate_en == 1 {
+                gsel = if g_ok == 0 { 0 } else { if mid > g_floor { mid } else { g_floor } }
+                f_gate = if g_ok == 1 { 0 } else { 1 }
+                pause_n = 4
+            }
+            if eye_en == 1 {
+                f_eye = if best_ln == 0 { 1 } else { 0 }
+                rd_dn = 1
+                rd_n = if best_ln == 0 { rdp_r - 128 } else { rdp_r - mid }
+            }
+            if wdq_en == 1 {
+                f_wdq = if best_ln == 0 { 1 } else { 0 }
+                wr_dn = 1
+                wr_n = if best_ln == 0 { wrp_r - 128 } else { wrp_r - mid }
             }
         }
 
@@ -653,7 +686,7 @@ impl NexusLpddr4Lane {
                 fin = 0
             }
         }
-        if hv == 1 && training == 0 {
+        if hv_r == 1 && training == 0 {
             nburst = nburst + 1
         }
     }
@@ -666,8 +699,8 @@ impl NexusLpddr4Lane {
     dqs_o = dqs_od.Q
     dqs_t = dqs_ts.Q
 
-    dv = if hv == 1 && training == 0 { 1 } else { 0 }
-    half = hh
+    dv = if hv_r == 1 && training == 0 { 1 } else { 0 }
+    half = hh_r
     busy = moving
     resp_wl = if wl_en == 1 && r_wl == 1 { 1 } else { 0 }
     resp_gate = if gate_en == 1 && r_gate == 1 { 1 } else { 0 }
@@ -777,6 +810,7 @@ pub entity DfiLpddr4NexusPhy<
     out dmi_o: bit[2]
     out dmi_t: bit[2]
     // ---------------------------------------------------------------- status
+    // the DLL's lock flag, synchronized to SCLK
     out dll_lock: bit
     out gate_dly0: bit[8]
     out gate_dly1: bit[8]
@@ -855,6 +889,9 @@ impl DfiLpddr4NexusPhy {
     signal wdq_q: bit = 0
     // write slots captured, mod 8 (a beat's place in its burst, for the write DQ pattern)
     signal wcap: bit[3] = 0
+    // per-lane DQ output enables (1 = not driven)
+    signal dq_tt0: bit[4] = 15
+    signal dq_tt1: bit[4] = 15
 
     let wde0: bit[3] = {2'b00, dfi_wrdata_en_p0}
     let wde1: bit[3] = {2'b00, dfi_wrdata_en_p1}
@@ -884,31 +921,34 @@ impl DfiLpddr4NexusPhy {
     // DQS: 2 slots of preamble, the data slots, 1 slot of postamble; DQ: the data slots and one
     // more holding the last beat
     let sdrv0: bit = if em1 == 1 || e0 == 1 || e1 == 1 || e2 == 1 { 1 } else { 0 }
-    let qdrv0: bit = if e0 == 1 || em1 == 1 { 1 } else { 0 }
     let ws0: bit[32] = wd12[127:96]
     let wp0: bit[32] = wd12[95:64]
     let bt0_0: bit[16] = if e0 == 1 { ws0[15:0] } else { wp0[31:16] }
     let bt1_0: bit[16] = if e0 == 1 { ws0[31:16] } else { wp0[31:16] }
     let sdrv1: bit = if e0 == 1 || e1 == 1 || e2 == 1 || e3 == 1 { 1 } else { 0 }
-    let qdrv1: bit = if e1 == 1 || e0 == 1 { 1 } else { 0 }
     let ws1: bit[32] = wd12[159:128]
     let wp1: bit[32] = wd12[127:96]
     let bt0_1: bit[16] = if e1 == 1 { ws1[15:0] } else { wp1[31:16] }
     let bt1_1: bit[16] = if e1 == 1 { ws1[31:16] } else { wp1[31:16] }
     let sdrv2: bit = if e1 == 1 || e2 == 1 || e3 == 1 || e4 == 1 { 1 } else { 0 }
-    let qdrv2: bit = if e2 == 1 || e1 == 1 { 1 } else { 0 }
     let ws2: bit[32] = wd12[191:160]
     let wp2: bit[32] = wd12[159:128]
     let bt0_2: bit[16] = if e2 == 1 { ws2[15:0] } else { wp2[31:16] }
     let bt1_2: bit[16] = if e2 == 1 { ws2[31:16] } else { wp2[31:16] }
     let sdrv3: bit = if e2 == 1 || e3 == 1 || e4 == 1 || e5 == 1 { 1 } else { 0 }
-    let qdrv3: bit = if e3 == 1 || e2 == 1 { 1 } else { 0 }
     let ws3: bit[32] = wd12[223:192]
     let wp3: bit[32] = wd12[191:160]
     let bt0_3: bit[16] = if e3 == 1 { ws3[15:0] } else { wp3[31:16] }
     let bt1_3: bit[16] = if e3 == 1 { ws3[31:16] } else { wp3[31:16] }
     let dqs_tt_w: bit[4] = {~sdrv3, ~sdrv2, ~sdrv1, ~sdrv0}
-    let dq_tt: bit[4] = {~qdrv3, ~qdrv2, ~qdrv1, ~qdrv0}
+    // DQ output enables (1 = not driven): DQ drives in slot j when e(j) or e(j-1) is set.
+    // Registered from the frames they come from (b and c now are a and b next cycle), one
+    // register per lane so each sits by its lane's gearboxes
+    let nqdrv0: bit = if b_we[3] == 1 || b_we[2] == 1 { 1 } else { 0 }
+    let nqdrv1: bit = if c_we[0] == 1 || b_we[3] == 1 { 1 } else { 0 }
+    let nqdrv2: bit = if c_we[1] == 1 || c_we[0] == 1 { 1 } else { 0 }
+    let nqdrv3: bit = if c_we[2] == 1 || c_we[1] == 1 { 1 } else { 0 }
+    let dq_tt_next: bit[4] = {~nqdrv3, ~nqdrv2, ~nqdrv1, ~nqdrv0}
     // DQS rises at the start of each data slot; a write leveling frame has a slot of preamble,
     // two pulses and a slot of postamble
     let dqs_d_w: bit[8] = {1'b0, e3, 1'b0, e2, 1'b0, e1, 1'b0, e0}
@@ -979,7 +1019,7 @@ impl DfiLpddr4NexusPhy {
 
     inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
-        dq_d: dq_d0, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
@@ -988,7 +1028,7 @@ impl DfiLpddr4NexusPhy {
 
     inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, load: load, dllcode: dll.CODE,
-        dq_d: dq_d1, dq_tt: dq_tt, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: b_wls, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
@@ -1011,15 +1051,26 @@ impl DfiLpddr4NexusPhy {
     let have: bit = if qn0 != 0 && qn1 != 0 { 1 } else { 0 }
     let oa0: bit[64] = q0[qr]
     let oa1: bit[64] = q1[qr]
+    // the PLL and DLL lock flags change with no relation to SCLK: two registers each
+    #[cdc]
+    signal pll_lock_m: bit = 0
+    signal pll_lock_s: bit = 0
+    #[cdc]
+    signal dll_lock_m: bit = 0
+    signal dll_lock_s: bit = 0
     let push0: bit = lane0.dv
     let push1: bit = lane1.dv
 
     on(sclk.rise) {
+        pll_lock_m = pll_lock
+        pll_lock_s = pll_lock_m
+        dll_lock_m = dll.LOCK
+        dll_lock_s = dll_lock_m
         // ---------------------------------------------------------- init
         if ist == 0 {
             dll_rst = 1
             dqs_rst = 1
-            if dfi_init_start == 1 && pll_lock == 1 {
+            if dfi_init_start == 1 && pll_lock_s == 1 {
                 ist = 1
                 icnt = 0
             }
@@ -1031,7 +1082,7 @@ impl DfiLpddr4NexusPhy {
                 icnt = 0
             }
         } else if ist == 2 {
-            if dll.LOCK == 1 {
+            if dll_lock_s == 1 {
                 ist = 3
                 icnt = 0
             }
@@ -1091,6 +1142,8 @@ impl DfiLpddr4NexusPhy {
         b_eye_en = c_eye_en
         b_wdq_en = c_wdq_en
         a_we = b_we
+        dq_tt0 = dq_tt_next
+        dq_tt1 = dq_tt_next
         a_wd = b_wd
         a_re = b_re
         rst_n_r = b_rst[0]
@@ -1145,7 +1198,7 @@ impl DfiLpddr4NexusPhy {
     dmi_o = {lane1.dmi_o, lane0.dmi_o}
     dmi_t = {lane1.dmi_t, lane0.dmi_t}
 
-    dll_lock = dll.LOCK
+    dll_lock = dll_lock_s
     gate_dly0 = lane0.gate_set
     gate_dly1 = lane1.gate_set
     rd_dly0 = lane0.rd_pos

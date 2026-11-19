@@ -497,3 +497,92 @@ async fn test_tiled_multiplies_gate_level() {
         }
     }
 }
+
+/// Arithmetic whose operands are all constant once generics are applied
+/// (`latency + adjustment`) folds to a constant instead of becoming
+/// carry-chain cells, so logic that depends on the result simplifies too: a
+/// mask shifted by the constant leaves its low bits constant 0
+#[test]
+fn constant_arithmetic_folds_instead_of_using_the_carry_chain() {
+    check_constant_arithmetic_folds("fpga_carry_constant_fold.sk");
+}
+
+/// The same with the arithmetic in adder instances: the parent's constant
+/// operands reach the first adder, whose constant sum comes back to the
+/// parent and on to the second, and a `carry_in: 0` adds nothing
+#[test]
+fn constants_cross_instance_boundaries() {
+    check_constant_arithmetic_folds("fpga_carry_constant_fold_hier.sk");
+}
+
+/// With the constants propagated, the hierarchy still computes the same:
+/// `off` = 6 + 3, so `mask` = 0xFF << 9 when enabled and `sum` = x + 9
+#[tokio::test]
+async fn constants_across_instances_keep_the_function() {
+    let mut tb = Testbench::gate_level_with_top_and_library(
+        &fixture_path("fpga_carry_constant_fold_hier.sk"),
+        "CarryConstantFoldHierTop",
+        "nexus",
+    )
+    .await
+    .unwrap();
+    for (en, x) in [(1u64, 0u64), (0, 5), (1, 0xFFF0), (1, 0x1234), (0, 0xFFFF)] {
+        tb.set("en", en);
+        tb.set("x", x);
+        tb.step().await;
+        let mask = if en == 1 { (0xFFu64 << 9) & 0xFFFF } else { 0 };
+        assert_eq!(tb.get_u64("mask").await, mask, "mask with en = {en}");
+        assert_eq!(tb.get_u64("sum").await, (x + 9) & 0xFFFF, "{x:#x} + 9");
+    }
+}
+
+fn check_constant_arithmetic_folds(fixture: &str) {
+    let net = synthesize(fixture, "nexus");
+    // Only `x + off` is on the carry chain: a carry-in half and 16 sum halves
+    assert_eq!(ccu2_count(&net), 9, "only the add of the input remains");
+    // Driven by a tie cell, possibly through buffers
+    let tied = |id: &skalp_lir::GateNetId| {
+        let mut id = *id;
+        loop {
+            let Some(cell) = net.nets[id.0 as usize]
+                .driver
+                .map(|d| &net.cells[d.0 as usize])
+            else {
+                return false;
+            };
+            match (cell.inputs.as_slice(), cell.function.as_ref()) {
+                ([], _) => return cell.outputs.len() == 1,
+                ([input], Some(CellFunction::Buf)) => id = *input,
+                _ => return false,
+            }
+        }
+    };
+    for cell in net
+        .cells
+        .iter()
+        .filter(|c| c.function == Some(CellFunction::Ccu2))
+    {
+        assert!(
+            !cell.inputs.iter().all(tied),
+            "{} computes only constants",
+            cell.path
+        );
+    }
+    // MODE 1, ADJ 3: off = 9, so mask = 0xFF << 9 has bits 0..8 constant 0
+    for bit in 0..9 {
+        let name = format!("top.mask[{bit}]");
+        let id = net
+            .outputs
+            .iter()
+            .find(|id| net.nets[id.0 as usize].name == name)
+            .unwrap_or_else(|| panic!("{name} is an output"));
+        let driver = net.nets[id.0 as usize]
+            .driver
+            .map(|d| &net.cells[d.0 as usize]);
+        assert!(
+            tied(id),
+            "{name} is a constant: driven by {:?}",
+            driver.map(|c| (&c.cell_type, &c.lut_init, c.inputs.len()))
+        );
+    }
+}

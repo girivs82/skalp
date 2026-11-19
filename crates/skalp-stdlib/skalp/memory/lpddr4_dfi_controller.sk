@@ -178,33 +178,43 @@ impl Lpddr4BankState {
     let rp_m1: bit[8] = if f_rp == 0 { 0 } else { f_rp - 1 }
     let wr_m1: bit[8] = if f_wr == 0 { 0 } else { f_wr - 1 }
     let rtp_m1: bit[8] = if f_rtp == 0 { 0 } else { f_rtp - 1 }
-    let pre_ld: bit[8] = if wr == 1 { wr_m1 } else { if rd == 1 { rtp_m1 } else { ras_m1 } }
+    // the precharge wait after a write or a read, worked out before the command is known, so
+    // the command only picks one
+    let pre_w: bit[8] = if wr_m1 > pre_d { wr_m1 } else { pre_d }
+    let pre_r: bit[8] = if rtp_m1 > pre_d { rtp_m1 } else { pre_d }
+    // each wait is over when its timer is 0; the flags are registers, set from the value each
+    // timer takes, so the controller's command choice starts from them directly
+    signal act_ok_r: bit = 1
+    signal cas_ok_r: bit = 1
+    signal pre_ok_r: bit = 1
     on(clk.rise) {
         if act == 1 {
             open_r = 1
             row_r = row_in
             t_cas = rcd_m1
             t_pre = ras_m1
+            cas_ok_r = if rcd_m1 == 0 { 1 } else { 0 }
+            pre_ok_r = if ras_m1 == 0 { 1 } else { 0 }
         } else {
             t_cas = cas_d
-            if wr == 1 || rd == 1 {
-                t_pre = if pre_ld > pre_d { pre_ld } else { pre_d }
-            } else {
-                t_pre = pre_d
-            }
+            t_pre = if wr == 1 { pre_w } else { if rd == 1 { pre_r } else { pre_d } }
+            cas_ok_r = if cas_d == 0 { 1 } else { 0 }
+            pre_ok_r = if wr == 1 { if pre_w == 0 { 1 } else { 0 } } else { if rd == 1 { if pre_r == 0 { 1 } else { 0 } } else { if pre_d == 0 { 1 } else { 0 } } }
         }
         if pre == 1 {
             open_r = 0
             t_act = rp_m1
+            act_ok_r = if rp_m1 == 0 { 1 } else { 0 }
         } else {
             t_act = act_d
+            act_ok_r = if act_d == 0 { 1 } else { 0 }
         }
     }
     is_open = open_r
     row = row_r
-    act_ok = if t_act == 0 { 1 } else { 0 }
-    cas_ok = if t_cas == 0 { 1 } else { 0 }
-    pre_ok = if t_pre == 0 { 1 } else { 0 }
+    act_ok = act_ok_r
+    cas_ok = cas_ok_r
+    pre_ok = pre_ok_r
 }
 
 // word i (beats 2i, 2i+1) of a BL16 burst
@@ -227,6 +237,23 @@ fn dec8(x: bit[8]) -> bit[8] {
 
 fn max8(a: bit[8], b: bit[8]) -> bit[8] {
     return if a > b { a } else { b }
+}
+
+fn rsel(a: bit[32], b: bit[32], c: bit[32], d: bit[32], i: bit[2]) -> bit[32] {
+    return match i {
+        0 => a,
+        1 => b,
+        2 => c,
+        _ => d
+    }
+}
+
+fn z8(x: bit[8]) -> bit {
+    return if x == 0 { 1 } else { 0 }
+}
+
+fn le1(x: bit[8]) -> bit {
+    return if x <= 1 { 1 } else { 0 }
 }
 
 // command frames: {p3, p2, p1, p0} CA words; 4-CK commands have CS on p0 and p2, 2-CK on p0
@@ -290,27 +317,59 @@ impl Lpddr4DfiController {
     signal faw2: bit[8] = 0
     signal faw3: bit[8] = 0
     signal fp: bit[2] = 0
+    // Whether each wait above is over (its count is 0), and whether the queues and data rings
+    // have room or are empty. They are registers, set from the value each count takes, so the
+    // command choice starts from them directly instead of from comparisons on the counts.
+    signal cmd_z: bit = 1
+    signal actg_z: bit = 1
+    signal rd_z: bit = 1
+    signal wr_z: bit = 1
+    signal fz0: bit = 1
+    signal fz1: bit = 1
+    signal fz2: bit = 1
+    signal fz3: bit = 1
+    signal wq_room: bit = 1
+    signal wq_z: bit = 1
+    signal tq_room: bit = 1
+    signal tq_z: bit = 1
+    signal wrr_z: bit = 1
+    signal rdr_z: bit = 1
     // the request being served
     signal rq_v: bit = 0
+    // the request's row is the one open in its bank (see q_hit)
+    signal rq_rowm: bit = 0
     signal rq_w: bit = 0
     signal rq_row: bit[17] = 0
     signal rq_ba: bit[3] = 0
+    // rq_ba one-hot, so each bank's command strobe needs only that bank's flags
+    signal rq_sel: bit[8] = 1
     signal rq_col: bit[6] = 0
     signal rq_data: bit[256] = 0
     // data enables, one bit per CK slot ahead (bit 0 = phase p0 of this cycle)
     signal wr_ring: bit[64] = 0
     signal rd_ring: bit[64] = 0
-    // write bursts waiting to go out, and the next word of the head burst
+    // each write slot's beat pair (word of its burst), three bits per slot, beside wr_ring
+    signal wb_ring: bit[192] = 0
+    // write bursts waiting to go out
     signal wq: [bit[256]; 4]
     signal wq_wp: bit[2] = 0
     signal wq_rp: bit[2] = 0
+    // wq_rp + 1, kept in its own register so the second read address is
+    // ready at the clock edge
+    signal wq_rp1: bit[2] = 1
     signal wq_n: bit[3] = 0
-    signal wi: bit[4] = 0
     // reads in flight: 0 user, 1 MR5, 2 MR8
     signal tq: [bit[2]; 8]
     signal tq_wp: bit[3] = 0
     signal tq_rp: bit[3] = 0
     signal tq_n: bit[4] = 0
+    // read words as the PHY returned them, registered before they are assembled
+    signal ri0: bit[32] = 0
+    signal ri1: bit[32] = 0
+    signal ri2: bit[32] = 0
+    signal ri3: bit[32] = 0
+    // how many of ri0..ri3 hold a word (the valid words are packed to the front)
+    signal r_n: bit[3] = 0
     // read words assembled into bursts
     signal rc: bit[4] = 0
     signal rw0: bit[32] = 0
@@ -424,6 +483,9 @@ impl Lpddr4DfiController {
     let wr_off: bit[16] = wl + adj_w
     let rd_off: bit[16] = rl + adj_r
     let wr_mask: bit[64] = 64'h00000000000000FF << wr_off[5:0]
+    // words 0 to 7 of a burst in its eight slots
+    let wb_off: bit[8] = {wr_off[5:0], 2'b00} - {2'b00, wr_off[5:0]}
+    let wb_mask: bit[192] = {168'h0, 24'hFAC688} << wb_off
     let rd_mask: bit[64] = 64'h00000000000000FF << rd_off[5:0]
     let i1_cyc: bit[32] = T_INIT1_CYC
     let i3_cyc: bit[32] = T_INIT3_CYC
@@ -446,7 +508,17 @@ impl Lpddr4DfiController {
     let b_actok: bit[8] = {b7.act_ok, b6.act_ok, b5.act_ok, b4.act_ok, b3.act_ok, b2.act_ok, b1.act_ok, b0.act_ok}
     let b_casok: bit[8] = {b7.cas_ok, b6.cas_ok, b5.cas_ok, b4.cas_ok, b3.cas_ok, b2.cas_ok, b1.cas_ok, b0.cas_ok}
     let b_preok: bit[8] = {b7.pre_ok, b6.pre_ok, b5.pre_ok, b4.pre_ok, b3.pre_ok, b2.pre_ok, b1.pre_ok, b0.pre_ok}
-    let q_row_open: bit[17] = match rq_ba {
+    let req_row_open: bit[17] = match req_ba {
+        0 => b0.row,
+        1 => b1.row,
+        2 => b2.row,
+        3 => b3.row,
+        4 => b4.row,
+        5 => b5.row,
+        6 => b6.row,
+        _ => b7.row
+    }
+    let tr_row_open: bit[17] = match tr_addr[8:6] {
         0 => b0.row,
         1 => b1.row,
         2 => b2.row,
@@ -457,30 +529,45 @@ impl Lpddr4DfiController {
         _ => b7.row
     }
     let q_open: bit = b_open[rq_ba]
-    let q_hit: bit = if q_open == 1 && q_row_open == rq_row { 1 } else { 0 }
-    let faw_now: bit[8] = match fp {
-        0 => faw0,
-        1 => faw1,
-        2 => faw2,
-        _ => faw3
+    // the request's row is the one open in its bank: worked out when the request is taken, and
+    // set when its ACT goes out (an ACT is the only command that changes a bank's row)
+    let q_hit: bit = if q_open == 1 && rq_rowm == 1 { 1 } else { 0 }
+    let faw_ok: bit = match fp {
+        0 => fz0,
+        1 => fz1,
+        2 => fz2,
+        _ => fz3
     }
 
     // ------------------------------------------------------------ what to send this cycle
-    let quiet: bit = if rd_ring == 0 && wr_ring == 0 && tq_n == 0 && wq_n == 0 { 1 } else { 0 }
+    let quiet: bit = if rdr_z == 1 && wrr_z == 1 && tq_z == 1 && wq_z == 1 { 1 } else { 0 }
     let idle: bit = if st == 13 { 1 } else { 0 }
-    let can_cmd: bit = if t_cmd == 0 { 1 } else { 0 }
+    let can_cmd: bit = cmd_z
     let upd_go: bit = if idle == 1 && dfi_phyupd_req == 1 && rq_v == 0 && quiet == 1 { 1 } else { 0 }
     let ref_go: bit = if idle == 1 && ref_due == 1 && upd_go == 0 { 1 } else { 0 }
     // write DQ training goes through the request path (refresh waits until it is over)
     let wdq_st: bit = if st == 19 { 1 } else { 0 }
-    let serve: bit = if ((idle == 1 && ref_due == 0 && upd_go == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
-    let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && t_wr == 0 && wq_n < 4) || (rq_w == 0 && t_rd == 0 && tq_n < 8)) { 1 } else { 0 }
+    // a PHY update is only granted with no request held (upd_go needs rq_v == 0), so it never
+    // stops one being served: the condition leaves it out to keep the command choice shallow
+    let serve: bit = if ((idle == 1 && ref_due == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
+    let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && wr_z == 1 && wq_room == 1) || (rq_w == 0 && rd_z == 1 && tq_room == 1)) { 1 } else { 0 }
     let do_pre: bit = if serve == 1 && q_open == 1 && q_hit == 0 && b_preok[rq_ba] == 1 { 1 } else { 0 }
-    let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && t_actg == 0 && faw_now == 0 { 1 } else { 0 }
+    let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && actg_z == 1 && faw_ok == 1 { 1 } else { 0 }
     let do_wr: bit = if do_cas == 1 && rq_w == 1 { 1 } else { 0 }
     let do_rd: bit = if do_cas == 1 && rq_w == 0 { 1 } else { 0 }
+    // the same commands as strobes for each bank: do_wr && rq_ba == k and so on, from bank k's
+    // own flags, with no choice of bank in front of its timers
+    let cas_w: bit = if serve == 1 && rq_rowm == 1 && rq_w == 1 && wr_z == 1 && wq_room == 1 { 1 } else { 0 }
+    let cas_r: bit = if serve == 1 && rq_rowm == 1 && rq_w == 0 && rd_z == 1 && tq_room == 1 { 1 } else { 0 }
+    let act_q: bit = if serve == 1 && actg_z == 1 && faw_ok == 1 { 1 } else { 0 }
+    let pre_q: bit = if serve == 1 && rq_rowm == 0 { 1 } else { 0 }
+    let cas_k: bit[8] = rq_sel & b_open & b_casok
+    let bk_wr: bit[8] = if cas_w == 1 { cas_k } else { 8'h00 }
+    let bk_rd: bit[8] = if cas_r == 1 { cas_k } else { 8'h00 }
+    let bk_act: bit[8] = if act_q == 1 { rq_sel & ~b_open & b_actok } else { 8'h00 }
     // refresh: precharge all once every bank may close, then REF tRP later
     let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
+    let bk_pre: bit[8] = if do_preab == 1 { 8'hFF } else { if pre_q == 1 { rq_sel & b_open & b_preok } else { 8'h00 } }
     let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
     let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
     // MR2 with WR-LEV set (in) and clear (out)
@@ -495,7 +582,7 @@ impl Lpddr4DfiController {
     let training: bit = if st == 10 || st == 11 { 1 } else { 0 }
     let lvl_done: bit = if (st == 10 && dfi_rdlvl_gate_resp == 2'b11) || (st == 11 && dfi_rdlvl_resp == 2'b11) { 1 } else { 0 }
     // training reads stop for a refresh; one goes in once the gap since the last has passed
-    let train_ref: bit = if training == 1 && ref_due == 1 && can_cmd == 1 && t_actg == 0 && train_gap == 0 { 1 } else { 0 }
+    let train_ref: bit = if training == 1 && ref_due == 1 && can_cmd == 1 && actg_z == 1 && train_gap == 0 { 1 } else { 0 }
     let do_rdc: bit = if training == 1 && lvl_done == 0 && train_ref == 0 && can_cmd == 1 && train_gap == 0 && train_reads < tr_max { 1 } else { 0 }
 
     let mrw_ma: bit[6] = match mi {
@@ -541,48 +628,112 @@ impl Lpddr4DfiController {
     let rd_issue: bit = if do_rd == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
     let wr_mod: bit[64] = if do_wr == 1 { wr_ring | wr_mask } else { wr_ring }
     let rd_mod: bit[64] = if rd_issue == 1 { rd_ring | rd_mask } else { rd_ring }
-    let e0: bit[4] = {3'b000, wr_mod[0]}
-    let e1: bit[4] = {3'b000, wr_mod[1]}
-    let e2: bit[4] = {3'b000, wr_mod[2]}
-    let e3: bit[4] = {3'b000, wr_mod[3]}
-    let wk1: bit[4] = wi + e0
-    let wk2: bit[4] = wk1 + e1
-    let wk3: bit[4] = wk2 + e2
-    let wtot: bit[4] = wk3 + e3
+    // whether each ring is empty after this cycle's shift, with and without a new burst
+    let wr_hi_z: bit = if (wr_ring >> 4) == 0 { 1 } else { 0 }
+    let wrm_hi_z: bit = if ((wr_ring | wr_mask) >> 4) == 0 { 1 } else { 0 }
+    let rd_hi_z: bit = if (rd_ring >> 4) == 0 { 1 } else { 0 }
+    let rdm_hi_z: bit = if ((rd_ring | rd_mask) >> 4) == 0 { 1 } else { 0 }
+    // Each slot carries its word of the burst from the cycle the write was issued, so no count
+    // runs through the frame: a slot after the head burst's last word takes the next burst.
+    let wb_mod: bit[192] = if do_wr == 1 { wb_ring | wb_mask } else { wb_ring }
+    let wb0: bit[3] = wb_mod[2:0]
+    let wb1: bit[3] = wb_mod[5:3]
+    let wb2: bit[3] = wb_mod[8:6]
+    let wb3: bit[3] = wb_mod[11:9]
+    let wend0: bit = if wr_mod[0] == 1 && wb0 == 7 { 1 } else { 0 }
+    let wend1: bit = if wr_mod[1] == 1 && wb1 == 7 { 1 } else { 0 }
+    let wend2: bit = if wr_mod[2] == 1 && wb2 == 7 { 1 } else { 0 }
+    let wend3: bit = if wr_mod[3] == 1 && wb3 == 7 { 1 } else { 0 }
     let wd_head: bit[256] = wq[wq_rp]
-    let wd_next: bit[256] = wq[wq_rp + 1]
-    let wd0: bit[32] = if wi < 8 { burst_word(wd_head, wi[2:0]) } else { burst_word(wd_next, wi[2:0]) }
-    let wd1: bit[32] = if wk1 < 8 { burst_word(wd_head, wk1[2:0]) } else { burst_word(wd_next, wk1[2:0]) }
-    let wd2: bit[32] = if wk2 < 8 { burst_word(wd_head, wk2[2:0]) } else { burst_word(wd_next, wk2[2:0]) }
-    let wd3: bit[32] = if wk3 < 8 { burst_word(wd_head, wk3[2:0]) } else { burst_word(wd_next, wk3[2:0]) }
-    let w_pop: bit = if wtot >= 8 { 1 } else { 0 }
+    let wd_next: bit[256] = wq[wq_rp1]
+    let wd0: bit[32] = burst_word(wd_head, wb0)
+    let wd1: bit[32] = if wend0 == 1 { burst_word(wd_next, wb1) } else { burst_word(wd_head, wb1) }
+    let wd2: bit[32] = if wend0 == 1 || wend1 == 1 { burst_word(wd_next, wb2) } else { burst_word(wd_head, wb2) }
+    let wd3: bit[32] = if wend0 == 1 || wend1 == 1 || wend2 == 1 { burst_word(wd_next, wb3) } else { burst_word(wd_head, wb3) }
+    let w_pop: bit = if wend0 == 1 || wend1 == 1 || wend2 == 1 || wend3 == 1 { 1 } else { 0 }
 
     // ------------------------------------------------------------ read data in
-    let v0: bit[4] = {3'b000, dfi_rddata_valid_w0}
-    let v1: bit[4] = {3'b000, dfi_rddata_valid_w1}
-    let v2: bit[4] = {3'b000, dfi_rddata_valid_w2}
-    let v3: bit[4] = {3'b000, dfi_rddata_valid_w3}
-    let rk1: bit[4] = rc + v0
-    let rk2: bit[4] = rk1 + v1
-    let rk3: bit[4] = rk2 + v2
-    let rtot: bit[4] = rk3 + v3
+    // The PHY's words, valid ones packed to the front before they are registered: word i
+    // goes to the place counting the valid words before it.
+    let iv0: bit = dfi_rddata_valid_w0
+    let iv1: bit = dfi_rddata_valid_w1
+    let iv2: bit = dfi_rddata_valid_w2
+    let iv3: bit = dfi_rddata_valid_w3
+    let ik1: bit[2] = {1'b0, iv0}
+    let ik2: bit[2] = {1'b0, iv0} + {1'b0, iv1}
+    let pk0: bit[32] = if iv0 == 1 { dfi_rddata_w0 } else { if iv1 == 1 { dfi_rddata_w1 } else { if iv2 == 1 { dfi_rddata_w2 } else { dfi_rddata_w3 } } }
+    let pk1: bit[32] = if iv1 == 1 && ik1 == 1 { dfi_rddata_w1 } else { if iv2 == 1 && ik2 == 1 { dfi_rddata_w2 } else { dfi_rddata_w3 } }
+    let pk2: bit[32] = if iv2 == 1 && ik2 == 2 { dfi_rddata_w2 } else { dfi_rddata_w3 }
+    let pk3: bit[32] = dfi_rddata_w3
+    let pk_n: bit[3] = {2'b00, iv0} + {2'b00, iv1} + {2'b00, iv2} + {2'b00, iv3}
+    // The registered words are already packed (valid ones first, r_n of them), so each slot of
+    // the burst being assembled takes word (slot - rc) when that is below r_n.
+    let rtot: bit[4] = rc + {1'b0, r_n}
     let r_emit: bit = if rtot >= 8 { 1 } else { 0 }
-    let re0: bit[32] = if v0 == 1 && rc == 0 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 0 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 0 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 0 { dfi_rddata_w3 } else { rw0 } } } }
-    let re1: bit[32] = if v0 == 1 && rc == 1 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 1 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 1 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 1 { dfi_rddata_w3 } else { rw1 } } } }
-    let re2: bit[32] = if v0 == 1 && rc == 2 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 2 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 2 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 2 { dfi_rddata_w3 } else { rw2 } } } }
-    let re3: bit[32] = if v0 == 1 && rc == 3 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 3 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 3 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 3 { dfi_rddata_w3 } else { rw3 } } } }
-    let re4: bit[32] = if v0 == 1 && rc == 4 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 4 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 4 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 4 { dfi_rddata_w3 } else { rw4 } } } }
-    let re5: bit[32] = if v0 == 1 && rc == 5 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 5 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 5 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 5 { dfi_rddata_w3 } else { rw5 } } } }
-    let re6: bit[32] = if v0 == 1 && rc == 6 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 6 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 6 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 6 { dfi_rddata_w3 } else { rw6 } } } }
-    let re7: bit[32] = if v0 == 1 && rc == 7 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 7 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 7 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 7 { dfi_rddata_w3 } else { rw7 } } } }
-    let rn0: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 8 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 8 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 8 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 8 { dfi_rddata_w3 } else { re0 } } } } } else { re0 }
-    let rn1: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 9 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 9 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 9 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 9 { dfi_rddata_w3 } else { re1 } } } } } else { re1 }
-    let rn2: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 10 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 10 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 10 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 10 { dfi_rddata_w3 } else { re2 } } } } } else { re2 }
-    let rn3: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 11 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 11 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 11 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 11 { dfi_rddata_w3 } else { re3 } } } } } else { re3 }
-    let rn4: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 12 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 12 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 12 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 12 { dfi_rddata_w3 } else { re4 } } } } } else { re4 }
-    let rn5: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 13 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 13 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 13 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 13 { dfi_rddata_w3 } else { re5 } } } } } else { re5 }
-    let rn6: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 14 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 14 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 14 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 14 { dfi_rddata_w3 } else { re6 } } } } } else { re6 }
-    let rn7: bit[32] = if r_emit == 1 { if v0 == 1 && rc == 15 { dfi_rddata_w0 } else { if v1 == 1 && rk1 == 15 { dfi_rddata_w1 } else { if v2 == 1 && rk2 == 15 { dfi_rddata_w2 } else { if v3 == 1 && rk3 == 15 { dfi_rddata_w3 } else { re7 } } } } } else { re7 }
+    let rd0: bit[4] = 0 - rc
+    let rf0: bit = if rd0 < {1'b0, r_n} { 1 } else { 0 }
+    let rp0: bit[32] = rsel(ri0, ri1, ri2, ri3, rd0[1:0])
+    let rd1: bit[4] = 1 - rc
+    let rf1: bit = if rd1 < {1'b0, r_n} { 1 } else { 0 }
+    let rp1: bit[32] = rsel(ri0, ri1, ri2, ri3, rd1[1:0])
+    let rd2: bit[4] = 2 - rc
+    let rf2: bit = if rd2 < {1'b0, r_n} { 1 } else { 0 }
+    let rp2: bit[32] = rsel(ri0, ri1, ri2, ri3, rd2[1:0])
+    let rd3: bit[4] = 3 - rc
+    let rf3: bit = if rd3 < {1'b0, r_n} { 1 } else { 0 }
+    let rp3: bit[32] = rsel(ri0, ri1, ri2, ri3, rd3[1:0])
+    let rd4: bit[4] = 4 - rc
+    let rf4: bit = if rd4 < {1'b0, r_n} { 1 } else { 0 }
+    let rp4: bit[32] = rsel(ri0, ri1, ri2, ri3, rd4[1:0])
+    let rd5: bit[4] = 5 - rc
+    let rf5: bit = if rd5 < {1'b0, r_n} { 1 } else { 0 }
+    let rp5: bit[32] = rsel(ri0, ri1, ri2, ri3, rd5[1:0])
+    let rd6: bit[4] = 6 - rc
+    let rf6: bit = if rd6 < {1'b0, r_n} { 1 } else { 0 }
+    let rp6: bit[32] = rsel(ri0, ri1, ri2, ri3, rd6[1:0])
+    let rd7: bit[4] = 7 - rc
+    let rf7: bit = if rd7 < {1'b0, r_n} { 1 } else { 0 }
+    let rp7: bit[32] = rsel(ri0, ri1, ri2, ri3, rd7[1:0])
+    let rd8: bit[4] = 8 - rc
+    let rf8: bit = if rd8 < {1'b0, r_n} { 1 } else { 0 }
+    let rp8: bit[32] = rsel(ri0, ri1, ri2, ri3, rd8[1:0])
+    let rd9: bit[4] = 9 - rc
+    let rf9: bit = if rd9 < {1'b0, r_n} { 1 } else { 0 }
+    let rp9: bit[32] = rsel(ri0, ri1, ri2, ri3, rd9[1:0])
+    let rd10: bit[4] = 10 - rc
+    let rf10: bit = if rd10 < {1'b0, r_n} { 1 } else { 0 }
+    let rp10: bit[32] = rsel(ri0, ri1, ri2, ri3, rd10[1:0])
+    let rd11: bit[4] = 11 - rc
+    let rf11: bit = if rd11 < {1'b0, r_n} { 1 } else { 0 }
+    let rp11: bit[32] = rsel(ri0, ri1, ri2, ri3, rd11[1:0])
+    let rd12: bit[4] = 12 - rc
+    let rf12: bit = if rd12 < {1'b0, r_n} { 1 } else { 0 }
+    let rp12: bit[32] = rsel(ri0, ri1, ri2, ri3, rd12[1:0])
+    let rd13: bit[4] = 13 - rc
+    let rf13: bit = if rd13 < {1'b0, r_n} { 1 } else { 0 }
+    let rp13: bit[32] = rsel(ri0, ri1, ri2, ri3, rd13[1:0])
+    let rd14: bit[4] = 14 - rc
+    let rf14: bit = if rd14 < {1'b0, r_n} { 1 } else { 0 }
+    let rp14: bit[32] = rsel(ri0, ri1, ri2, ri3, rd14[1:0])
+    let rd15: bit[4] = 15 - rc
+    let rf15: bit = if rd15 < {1'b0, r_n} { 1 } else { 0 }
+    let rp15: bit[32] = rsel(ri0, ri1, ri2, ri3, rd15[1:0])
+    let re0: bit[32] = if rf0 == 1 { rp0 } else { rw0 }
+    let re1: bit[32] = if rf1 == 1 { rp1 } else { rw1 }
+    let re2: bit[32] = if rf2 == 1 { rp2 } else { rw2 }
+    let re3: bit[32] = if rf3 == 1 { rp3 } else { rw3 }
+    let re4: bit[32] = if rf4 == 1 { rp4 } else { rw4 }
+    let re5: bit[32] = if rf5 == 1 { rp5 } else { rw5 }
+    let re6: bit[32] = if rf6 == 1 { rp6 } else { rw6 }
+    let re7: bit[32] = if rf7 == 1 { rp7 } else { rw7 }
+    let rn0: bit[32] = if r_emit == 1 && rf8 == 1 { rp8 } else { re0 }
+    let rn1: bit[32] = if r_emit == 1 && rf9 == 1 { rp9 } else { re1 }
+    let rn2: bit[32] = if r_emit == 1 && rf10 == 1 { rp10 } else { re2 }
+    let rn3: bit[32] = if r_emit == 1 && rf11 == 1 { rp11 } else { re3 }
+    let rn4: bit[32] = if r_emit == 1 && rf12 == 1 { rp12 } else { re4 }
+    let rn5: bit[32] = if r_emit == 1 && rf13 == 1 { rp13 } else { re5 }
+    let rn6: bit[32] = if r_emit == 1 && rf14 == 1 { rp14 } else { re6 }
+    let rn7: bit[32] = if r_emit == 1 && rf15 == 1 { rp15 } else { re7 }
     let r_burst: bit[256] = {re7, re6, re5, re4, re3, re2, re1, re0}
     let r_tag: bit[2] = tq[tq_rp]
     // write DQ training reads are checked by the PHY and return nothing
@@ -591,10 +742,10 @@ impl Lpddr4DfiController {
     // ------------------------------------------------------------ banks
     inst b0 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 0 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 0) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 0 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 0 { 1 } else { 0 },
+        act: bk_act[0],
+        pre: bk_pre[0],
+        rd: bk_rd[0],
+        wr: bk_wr[0],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -604,10 +755,10 @@ impl Lpddr4DfiController {
     }
     inst b1 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 1 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 1) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 1 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 1 { 1 } else { 0 },
+        act: bk_act[1],
+        pre: bk_pre[1],
+        rd: bk_rd[1],
+        wr: bk_wr[1],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -617,10 +768,10 @@ impl Lpddr4DfiController {
     }
     inst b2 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 2 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 2) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 2 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 2 { 1 } else { 0 },
+        act: bk_act[2],
+        pre: bk_pre[2],
+        rd: bk_rd[2],
+        wr: bk_wr[2],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -630,10 +781,10 @@ impl Lpddr4DfiController {
     }
     inst b3 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 3 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 3) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 3 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 3 { 1 } else { 0 },
+        act: bk_act[3],
+        pre: bk_pre[3],
+        rd: bk_rd[3],
+        wr: bk_wr[3],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -643,10 +794,10 @@ impl Lpddr4DfiController {
     }
     inst b4 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 4 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 4) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 4 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 4 { 1 } else { 0 },
+        act: bk_act[4],
+        pre: bk_pre[4],
+        rd: bk_rd[4],
+        wr: bk_wr[4],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -656,10 +807,10 @@ impl Lpddr4DfiController {
     }
     inst b5 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 5 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 5) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 5 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 5 { 1 } else { 0 },
+        act: bk_act[5],
+        pre: bk_pre[5],
+        rd: bk_rd[5],
+        wr: bk_wr[5],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -669,10 +820,10 @@ impl Lpddr4DfiController {
     }
     inst b6 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 6 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 6) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 6 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 6 { 1 } else { 0 },
+        act: bk_act[6],
+        pre: bk_pre[6],
+        rd: bk_rd[6],
+        wr: bk_wr[6],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -682,10 +833,10 @@ impl Lpddr4DfiController {
     }
     inst b7 = Lpddr4BankState {
         clk: clk,
-        act: if do_act == 1 && rq_ba == 7 { 1 } else { 0 },
-        pre: if (do_pre == 1 && rq_ba == 7) || do_preab == 1 { 1 } else { 0 },
-        rd: if do_rd == 1 && rq_ba == 7 { 1 } else { 0 },
-        wr: if do_wr == 1 && rq_ba == 7 { 1 } else { 0 },
+        act: bk_act[7],
+        pre: bk_pre[7],
+        rd: bk_rd[7],
+        wr: bk_wr[7],
         row_in: rq_row,
         f_rcd: f_rcd,
         f_ras: f_ras,
@@ -702,20 +853,28 @@ impl Lpddr4DfiController {
         o_wd = {wd3, wd2, wd1, wd0}
         o_re = rd_mod[3:0]
         wr_ring = wr_mod >> 4
+        wb_ring = wb_mod >> 12
         rd_ring = rd_mod >> 4
         if w_pop == 1 {
-            wq_rp = wq_rp + 1
-            wi = wtot - 8
-        } else {
-            wi = wtot
+            wq_rp = wq_rp1
+            wq_rp1 = wq_rp1 + 1
         }
         if do_wr == 1 {
             wq[wq_wp] = rq_data
             wq_wp = wq_wp + 1
         }
         wq_n = if do_wr == 1 && w_pop == 0 { wq_n + 1 } else { if do_wr == 0 && w_pop == 1 { wq_n - 1 } else { wq_n } }
+        wq_room = if do_wr == 1 && w_pop == 0 { if wq_n < 3 { 1 } else { 0 } } else { if do_wr == 0 && w_pop == 1 { if wq_n < 5 { 1 } else { 0 } } else { if wq_n < 4 { 1 } else { 0 } } }
+        wq_z = if do_wr == 1 && w_pop == 0 { 0 } else { if do_wr == 0 && w_pop == 1 { if wq_n == 1 { 1 } else { 0 } } else { if wq_n == 0 { 1 } else { 0 } } }
+        wrr_z = if do_wr == 1 { wrm_hi_z } else { wr_hi_z }
+        rdr_z = if rd_issue == 1 { rdm_hi_z } else { rd_hi_z }
 
         // ---------------------------------------------------------------- read data in
+        ri0 = pk0
+        ri1 = pk1
+        ri2 = pk2
+        ri3 = pk3
+        r_n = pk_n
         rw0 = rn0
         rw1 = rn1
         rw2 = rn2
@@ -740,6 +899,8 @@ impl Lpddr4DfiController {
             tq_wp = tq_wp + 1
         }
         tq_n = if tq_push == 1 && r_emit == 0 { tq_n + 1 } else { if tq_push == 0 && r_emit == 1 { tq_n - 1 } else { tq_n } }
+        tq_room = if tq_push == 1 && r_emit == 0 { if tq_n < 7 { 1 } else { 0 } } else { if tq_push == 0 && r_emit == 1 { if tq_n < 9 { 1 } else { 0 } } else { if tq_n < 8 { 1 } else { 0 } } }
+        tq_z = if tq_push == 1 && r_emit == 0 { 0 } else { if tq_push == 0 && r_emit == 1 { if tq_n == 1 { 1 } else { 0 } } else { if tq_n == 0 { 1 } else { 0 } } }
 
         // ---------------------------------------------------------------- timers
         t_cmd = if do_mrw == 1 || do_wlmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
@@ -752,6 +913,15 @@ impl Lpddr4DfiController {
         faw2 = if do_act == 1 && fp == 2 { m1_faw } else { dec8(faw2) }
         faw3 = if do_act == 1 && fp == 3 { m1_faw } else { dec8(faw3) }
         if do_act == 1 { fp = fp + 1 }
+        // max8(dec8(t), m) is 0 exactly when t <= 1 and m is 0
+        cmd_z = if do_mrw == 1 || do_wlmrw == 1 { z8(m1_mrw) } else { if do_zql == 1 { z8(m1_zqlat) } else { if do_mrr == 1 { z8(m1_mrr) } else { if do_ref == 1 || train_ref == 1 { z8(m1_rfc) } else { le1(t_cmd) } } } }
+        actg_z = if do_act == 1 { le1(t_actg) & z8(m1_rrd) } else { if do_ref == 1 { le1(t_actg) & z8(m1_rfc) } else { le1(t_actg) } }
+        rd_z = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_rd) & z8(m1_ccd) } else { if do_wr == 1 { le1(t_rd) & z8(m1_wtr) } else { le1(t_rd) } }
+        wr_z = if do_wr == 1 { le1(t_wr) & z8(m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_wr) & z8(m1_rtw) } else { le1(t_wr) } }
+        fz0 = if do_act == 1 && fp == 0 { z8(m1_faw) } else { le1(faw0) }
+        fz1 = if do_act == 1 && fp == 1 { z8(m1_faw) } else { le1(faw1) }
+        fz2 = if do_act == 1 && fp == 2 { z8(m1_faw) } else { le1(faw2) }
+        fz3 = if do_act == 1 && fp == 3 { z8(m1_faw) } else { le1(faw3) }
 
         // ---------------------------------------------------------------- refresh interval
         if ref_on == 1 {
@@ -771,9 +941,12 @@ impl Lpddr4DfiController {
             rq_w = req_write
             rq_row = req_row
             rq_ba = req_ba
+            rq_sel = 8'h01 << req_ba
             rq_col = req_col
             rq_data = req_wdata
+            rq_rowm = if req_row_open == req_row { 1 } else { 0 }
         }
+        if do_act == 1 { rq_rowm = 1 }
         if do_cas == 1 { rq_v = 0 }
 
         // ---------------------------------------------------------------- sequence
@@ -935,8 +1108,10 @@ impl Lpddr4DfiController {
                     rq_w = tw_w
                     rq_row = tr_addr[25:9]
                     rq_ba = tr_addr[8:6]
+                    rq_sel = 8'h01 << tr_addr[8:6]
                     rq_col = tr_addr[5:0]
                     rq_data = 0
+                    rq_rowm = if tr_row_open == tr_addr[25:9] { 1 } else { 0 }
                     tw_w = ~tw_w
                 }
                 if (wdq_done == 1 || train_reads >= tr_max) && rq_v == 0 && quiet == 1 && train_gap == 0 {

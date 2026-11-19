@@ -7,6 +7,7 @@
 //! NOTE: Legacy Lir-based Verilog generation has been removed.
 //! Use MIR-based SystemVerilog generation instead.
 
+pub mod lattice_pdc;
 pub mod systemverilog;
 
 // Re-export main function for convenient access

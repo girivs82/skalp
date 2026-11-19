@@ -206,9 +206,15 @@ pub fn generate_systemverilog_from_mir(mir: &Mir) -> Result<String> {
         }
     }
 
+    let model_only = model_only_modules(mir);
     for mir_module in mir.modules.iter() {
         // Skip modules with unresolved/generic types - these cannot be converted to SystemVerilog
         if has_generic_types(mir_module) {
+            continue;
+        }
+        // A part of a vendor primitive's simulation model is not hardware:
+        // the wrapper instantiates the vendor's own primitive instead
+        if model_only.contains(&mir_module.id) {
             continue;
         }
 
@@ -218,6 +224,37 @@ pub fn generate_systemverilog_from_mir(mir: &Mir) -> Result<String> {
     }
 
     Ok(sv)
+}
+
+/// Modules instantiated only inside vendor primitives' simulation models
+/// (directly, or through other such modules). A vendor IP module is written as
+/// a wrapper around the vendor's primitive, so nothing in the output
+/// instantiates them.
+fn model_only_modules(mir: &Mir) -> std::collections::HashSet<skalp_mir::ModuleId> {
+    let mut model_only = std::collections::HashSet::new();
+    loop {
+        let mut changed = false;
+        for module in &mir.modules {
+            if model_only.contains(&module.id) {
+                continue;
+            }
+            let mut parents = mir
+                .modules
+                .iter()
+                .filter(|m| m.instances.iter().any(|i| i.module == module.id))
+                .peekable();
+            if parents.peek().is_none() {
+                continue;
+            }
+            if parents.all(|p| p.vendor_ip_config.is_some() || model_only.contains(&p.id)) {
+                model_only.insert(module.id);
+                changed = true;
+            }
+        }
+        if !changed {
+            return model_only;
+        }
+    }
 }
 
 /// Check if a module has any generic/expression-based types in its ports
@@ -615,7 +652,7 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     sv.push_str(&generate_typedefs(mir_module, &struct_types, &enum_types));
 
     // Module header with parameters
-    sv.push_str(&format!("module {} ", mir_module.name));
+    sv.push_str(&format!("module {} ", sv_module_name(mir_module)));
 
     // Generate parameter list if any
     if !mir_module.parameters.is_empty() {
@@ -1025,7 +1062,7 @@ fn generate_instance(
         })?;
 
     // Start with module name
-    sv.push_str(&format!("    {} ", instantiated_module.name));
+    sv.push_str(&format!("    {} ", sv_module_name(instantiated_module)));
 
     // Add parameter overrides if any
     if !instance.parameters.is_empty() {
@@ -1513,6 +1550,11 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
                 .unwrap_or_else(|| format!("port_{}", id.0))
         }
         skalp_mir::LValue::BitSelect { base, index } => {
+            // A one-bit signal is declared as a scalar, which cannot be indexed:
+            // its bit 0 is the signal itself
+            if is_scalar_bit_zero(base, &[index], module) {
+                return format_lvalue_with_context(base, module);
+            }
             // `x[31:0][7]` is not legal SystemVerilog: select from the slice's base instead.
             if let skalp_mir::LValue::RangeSelect {
                 base: inner,
@@ -1530,6 +1572,11 @@ fn format_lvalue_with_context(lvalue: &skalp_mir::LValue, module: &Module) -> St
                 format_lvalue_with_context(base, module),
                 format_expression_with_context(index, module)
             )
+        }
+        skalp_mir::LValue::RangeSelect { base, high, low }
+            if is_scalar_bit_zero(base, &[high, low], module) =>
+        {
+            format_lvalue_with_context(base, module)
         }
         skalp_mir::LValue::RangeSelect { base, high, low } => {
             if let skalp_mir::LValue::RangeSelect {
@@ -1581,6 +1628,27 @@ fn offset_select_index(
         (Some(l), Some(i)) => (l + i).to_string(),
         _ => format!("({}) + ({})", fmt(low), fmt(index)),
     }
+}
+
+/// Whether `base` names a one-bit signal, port or variable (declared as a
+/// scalar) and every index selecting from it is the constant 0
+fn is_scalar_bit_zero(
+    base: &skalp_mir::LValue,
+    indices: &[&skalp_mir::Expression],
+    module: &Module,
+) -> bool {
+    let named = matches!(
+        base,
+        skalp_mir::LValue::Signal(_) | skalp_mir::LValue::Port(_) | skalp_mir::LValue::Variable(_)
+    );
+    let zero = |e: &skalp_mir::Expression| match &e.kind {
+        skalp_mir::ExpressionKind::Literal(skalp_mir::Value::Integer(0)) => true,
+        skalp_mir::ExpressionKind::Literal(skalp_mir::Value::BitVector { value, .. }) => {
+            *value == 0
+        }
+        _ => false,
+    };
+    named && compute_lvalue_width(base, module) == Some(1) && indices.iter().all(|e| zero(e))
 }
 
 /// Format an lvalue (fallback without context)
@@ -3313,6 +3381,33 @@ fn generate_isolation_logic(
 ///
 /// For vendor IP entities, we generate a module that wraps the vendor IP core
 /// with the entity's ports connected directly to the IP.
+/// The vendor's own module that a vendor IP wrapper instantiates
+fn vendor_ip_module_name(vendor_config: &VendorIpConfig) -> String {
+    // For Xilinx IP, add XPM library prefix if applicable
+    if vendor_config.vendor == VendorType::Xilinx {
+        if let Some(ref lib) = vendor_config.library {
+            if lib == "xpm" && !vendor_config.ip_name.starts_with("xpm_") {
+                return format!("xpm_{}", vendor_config.ip_name);
+            }
+        }
+    }
+    vendor_config.ip_name.clone()
+}
+
+/// The name a module is written out under. A vendor primitive declared under
+/// its own name (`ODDRX4`, so a design instantiates it by that name) wraps the
+/// vendor's module of the same name; the wrapper takes a suffix so it does not
+/// define, and then instantiate, itself, and the vendor library still
+/// provides the primitive.
+fn sv_module_name(module: &Module) -> String {
+    match &module.vendor_ip_config {
+        Some(config) if !config.black_box && vendor_ip_module_name(config) == module.name => {
+            format!("{}_wrap", module.name)
+        }
+        _ => module.name.clone(),
+    }
+}
+
 fn generate_vendor_ip_wrapper(
     mir_module: &Module,
     vendor_config: &VendorIpConfig,
@@ -3340,7 +3435,7 @@ fn generate_vendor_ip_wrapper(
     sv.push_str("// Generated by Skalp - do not edit manually\n\n");
 
     // Module header with parameters
-    sv.push_str(&format!("module {} ", mir_module.name));
+    sv.push_str(&format!("module {} ", sv_module_name(mir_module)));
 
     // Generate parameter list if any
     if !mir_module.parameters.is_empty() {
@@ -3412,30 +3507,33 @@ fn generate_vendor_ip_wrapper(
             vendor_config.ip_name
         ));
 
-        // For Xilinx IP, add XPM library prefix if applicable
-        let ip_module_name = if vendor_config.vendor == VendorType::Xilinx {
-            if let Some(ref lib) = vendor_config.library {
-                if lib == "xpm" && !vendor_config.ip_name.starts_with("xpm_") {
-                    format!("xpm_{}", vendor_config.ip_name)
-                } else {
-                    vendor_config.ip_name.clone()
-                }
-            } else {
-                vendor_config.ip_name.clone()
-            }
-        } else {
-            vendor_config.ip_name.clone()
-        };
+        let ip_module_name = vendor_ip_module_name(vendor_config);
+
+        // `LOC` on a Lattice primitive is SKALP's placement of it (a PLL's
+        // corner), not a parameter of the vendor's module
+        let is_placement = |key: &str| vendor_config.vendor == VendorType::Lattice && key == "LOC";
+        if let Some((_, loc)) = vendor_config
+            .parameters
+            .iter()
+            .find(|(k, _)| is_placement(k))
+        {
+            sv.push_str(&format!("    // placed by SKALP at {}\n", loc));
+        }
 
         sv.push_str(&format!("    {} ", ip_module_name));
 
         // Add IP-specific parameters from vendor_ip attribute
         // These are passed through as-is to the vendor IP (e.g., FIFO_DEPTH = 1024)
-        if !vendor_config.parameters.is_empty() {
+        if vendor_config
+            .parameters
+            .iter()
+            .any(|(k, _)| !is_placement(k))
+        {
             sv.push_str("#(\n");
             let param_connections: Vec<String> = vendor_config
                 .parameters
                 .iter()
+                .filter(|(key, _)| !is_placement(key))
                 .map(|(key, value)| format!("        .{}({})", key, value))
                 .collect();
             sv.push_str(&param_connections.join(",\n"));

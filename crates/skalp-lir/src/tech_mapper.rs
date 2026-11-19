@@ -4525,7 +4525,7 @@ pub fn synthesize_hierarchical_cached(
     }
     let mut jobs: Vec<Cow<'_, Lir>> = Vec::new();
     let mut job_of_key: HashMap<blake3::Hash, usize> = HashMap::new();
-    let mut planned = Vec::with_capacity(sorted_paths.len());
+    let mut sources = Vec::with_capacity(sorted_paths.len());
     for path in sorted_paths {
         let inst_lir = hier_lir.instances.get(path).unwrap();
 
@@ -4590,6 +4590,38 @@ pub fn synthesize_hierarchical_cached(
             Source::Lir(Box::new(Cow::Owned(lir)))
         } else {
             Source::Lir(Box::new(Cow::Borrowed(&inst_lir.lir_result.lir)))
+        };
+        sources.push((path, source, internal_outputs));
+    }
+
+    // Constants that cross instance boundaries: each synchronous instance's
+    // logic reads the constants its parent and children compute
+    let lirs: IndexMap<String, &Lir> = sources
+        .iter()
+        .filter(|(path, _, _)| !hier_lir.instances[path.as_str()].is_async)
+        .filter_map(|(path, source, _)| match source {
+            Source::Lir(lir) => Some(((*path).clone(), lir.as_ref().as_ref())),
+            Source::Ready(_) => None,
+        })
+        .collect();
+    let ties = crate::hier_constants::propagate(hier_lir, &lirs);
+    drop(lirs);
+    if !ties.is_empty() {
+        tracing::info!(
+            "[SYNTH_HIER] constants cross into {} instance(s)",
+            ties.len()
+        );
+    }
+
+    let mut planned = Vec::with_capacity(sources.len());
+    for (path, source, internal_outputs) in sources {
+        let source = match (source, ties.get(path.as_str())) {
+            (Source::Lir(lir), Some(tied)) => {
+                let mut lir = (*lir).into_owned();
+                crate::hier_constants::tie_readers(&mut lir, tied);
+                Source::Lir(Box::new(Cow::Owned(lir)))
+            }
+            (source, _) => source,
         };
         let job = match source {
             Source::Ready(netlist) => Job::Ready(netlist),

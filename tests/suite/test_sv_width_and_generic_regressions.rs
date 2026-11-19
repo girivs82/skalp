@@ -406,3 +406,28 @@ async fn test_flattened_array_instance_simulates() {
         );
     }
 }
+
+/// A one-bit signal (`bit[1]`) is declared as a scalar, so `s[0]` must be
+/// written as `s`: SystemVerilog cannot select part of a scalar
+#[test]
+fn bit_zero_of_a_one_bit_signal_is_the_signal() {
+    let source = r#"
+entity OneBit {
+    in clk: clock
+    in d: bit
+    out q: bit[4]
+}
+
+impl OneBit {
+    signal s: bit[1] = 0
+    on(clk.rise) {
+        s = d
+    }
+    q = {3'b000, s[0]}
+}
+"#;
+    let sv = compile_to_sv(source);
+    assert!(!sv.contains("s[0]"), "scalar indexed:\n{sv}");
+    assert!(!sv.contains("s[0:0]"), "scalar indexed:\n{sv}");
+    assert!(sv.contains("{3'b000, s}"), "{sv}");
+}
