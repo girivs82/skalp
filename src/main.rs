@@ -5160,7 +5160,7 @@ fn run_nexus_pnr_on_netlist(
     println!("Running placement and routing...");
     let mut netlist = gate_netlist.clone();
     // Each placement after the first starts from the one before
-    let mut rerun = NexusRerun::default();
+    let mut rerun = first_nexus_run();
     let result = fit_matched_delays_to_routing(&mut netlist, |n| {
         place_and_route_nexus_for_cli(n, nexus, config.clone(), &mut rerun)
     })?;
@@ -5459,9 +5459,19 @@ fn nexus_reference_voltage_pins(
 /// netlist, changed a little
 #[cfg(feature = "nexus-real")]
 type NexusRerun = Option<skalp_place_route::pnr::NexusRerun>;
-/// Without real device data each placement starts over
+/// Without real device data each placement starts over: nothing to carry
 #[cfg(not(feature = "nexus-real"))]
-type NexusRerun = ();
+struct NexusRerun;
+
+/// What the first Nexus place and route starts from: nothing
+#[cfg(feature = "nexus-real")]
+fn first_nexus_run() -> NexusRerun {
+    None
+}
+#[cfg(not(feature = "nexus-real"))]
+fn first_nexus_run() -> NexusRerun {
+    NexusRerun
+}
 
 /// Use the real device data when this build and machine have it. `rerun`
 /// holds what the previous call left; this one starts from it and leaves
