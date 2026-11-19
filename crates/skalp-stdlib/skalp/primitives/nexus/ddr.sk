@@ -483,12 +483,14 @@ impl DDRDLL {
 // the first rising edge; a pulse that started inside the gate finishes. BURSTDETECT goes high for
 // two SCLK cycles when a gate passed one pulse per enabled cycle after a preamble; BTDETECT for
 // one SCLK cycle when it passed its first pulse after a preamble.
-// Model: the data of each enabled cycle is read out of the input FIFO eight edge clock cycles
-// after the gate cycle; IDDRX4DQ's Q and DATAVALID carry an SCLK cycle's reads in the SCLK cycle
-// after next. The FIFO pointers realign whenever no read is in flight. PAUSE stops the read
-// side: READ taken while it is high opens no gate (on the device its internal clocks stop, so
-// no burst is detected). The write clocks keep running; SELCLK is not modelled and DQSWRD stays
-// low.
+// Words (as measured on a CertusPro-NX): DATAVALID marks a word of eight beats, four FIFO
+// entries counted from the first entry the gate passed: a BL16 read whose gate passes all its
+// pulses brings two words, one that passes four to seven pulses one word, and a partial group of
+// entries brings none. Model: each completed group is read out in the next SCLK frame of the edge
+// clock (RDPNTR its base, then one entry a cycle); IDDRX4DQ's Q and DATAVALID carry it in the SCLK
+// cycle after next. PAUSE stops the read side: READ taken while it is high opens no gate (on the
+// device its internal clocks stop, so no burst is detected). The write clocks keep running;
+// SELCLK is not modelled and DQSWRD stays low.
 // Mode (as the device's LPDDR4 interface sets it): FIFO, x4 gearing, read and write paths on,
 // FORCE_READ, and the MOVE/DIR adjustment (MT_EN_*) on for the read, write and write leveling
 // delays.
@@ -532,6 +534,13 @@ impl DQSBUF {
     // the read gate is open (tick side), and the FIFO write pointer
     signal sess: bit = 0
     signal wp: bit[3] = 0
+    // FIFO entries written in this gate session (mod 4), groups of four written, and the
+    // base entry of each
+    signal gc: bit[2] = 0
+    #[cdc]
+    signal ng_w: bit[2] = 0
+    #[cdc]
+    signal bq: [bit[3]; 4]
     let clr: bit = if RST == 1 || RSTSMCNT == 1 { 1 } else { 0 }
 
     // ------------------------------------------------ settings (SCLK)
@@ -618,10 +627,12 @@ impl DQSBUF {
     signal p: bit[2] = 0
     signal gw: bit[4] = 0
     signal ge: bit = 0
-    // gate cycles of the last eight edge clock cycles, newest in bit 0
-    signal gh8: bit[9] = 0
+    // words read out: groups taken, the read pointer, whether the frame now being read (fr)
+    // and the one before it (fr_done) take a group
+    signal ng_r: bit[2] = 0
     signal rp: bit[3] = 0
-    signal dvacc: bit = 0
+    signal fr: bit = 0
+    signal fr_done: bit = 0
     signal dv_e: bit = 0
     let start: bit = if SCLK == 0 && s_prev == 0 { 1 } else { 0 }
     let p_n: bit[2] = if start == 1 { 0 } else { p + 1 }
@@ -632,34 +643,38 @@ impl DQSBUF {
         2 => gw_n[2],
         _ => gw_n[3]
     }
-    let gh8_n: bit[9] = {gh8[7:0], ge_n}
-    let rd_now: bit = gh8_n[8]
-    let in_flight: bit = if gh8_n != 0 || sess == 1 { 1 } else { 0 }
+    let have: bit = if ng_w != ng_r { 1 } else { 0 }
     on(ECLKIN.rise) {
         s_prev = SCLK
         if clr == 1 {
             p = 0
             gw = 0
             ge = 0
-            gh8 = 0
+            ng_r = 0
             rp = 0
-            dvacc = 0
+            fr = 0
+            fr_done = 0
             dv_e = 0
         } else {
             p = p_n
             gw = gw_n
             ge = ge_n
-            gh8 = gh8_n
             if start == 1 {
-                dv_e = dvacc
-                dvacc = rd_now
-            } else if rd_now == 1 {
-                dvacc = 1
+                dv_e = fr_done
             }
-            if rd_now == 1 {
+            // the edge before a frame starts: a written group, if one waits, is read in that
+            // frame, an entry an edge clock cycle from its base
+            if p_n == 3 {
+                fr_done = fr
+                if have == 1 {
+                    fr = 1
+                    rp = bq[ng_r]
+                    ng_r = ng_r + 1
+                } else {
+                    fr = 0
+                }
+            } else if fr == 1 {
                 rp = rp + 1
-            } else if in_flight == 0 {
-                rp = wp
             }
         }
     }
@@ -710,6 +725,7 @@ impl DQSBUF {
     // one mark per gate cycle, in its first half
     let mark: bit = if ge == 1 && ECLKIN == 1 { 1 } else { 0 }
     let closing: bit = if sess_n == 1 && req == 0 && passing_n == 0 { 1 } else { 0 }
+    let gc_o: bit[2] = if opening == 1 { 0 } else { gc }
     on(tick.rise) {
         eh = {eh[126:0], ECLKIN}
         gh = {gh[126:0], ge}
@@ -735,6 +751,8 @@ impl DQSBUF {
             n_pass = 0
             n_mark = 0
             wp = 0
+            gc = 0
+            ng_w = 0
             dh = 0
             q90 = 0
         } else {
@@ -755,9 +773,18 @@ impl DQSBUF {
             }
             dh = {dh[126:0], passing_n}
             q90 = if rd_ld == 1 { dh[d_rd[6:0]] } else { 0 }
-            // a DQSR90 fall has written the FIFO entry at the pointer
+            // a DQSR90 fall has written the FIFO entry at the pointer; each fourth entry of a
+            // session completes a group (a word of eight beats), counted from the session's
+            // first entry
             if q90_p == 1 && q90 == 0 {
                 wp = wp + 1
+                if gc_o == 3 {
+                    bq[ng_w] = wp - 3
+                    ng_w = ng_w + 1
+                }
+                gc = gc_o + 1
+            } else {
+                gc = gc_o
             }
         }
     }

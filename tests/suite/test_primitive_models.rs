@@ -413,13 +413,60 @@ async fn nexus_byte_lane_loopback() {
     let bursts = tb.get_u32("bursts").await;
     assert!(bursts >= 4, "{bursts} bursts detected");
     assert_eq!(tb.get_u32("bts").await, bursts, "one BTDETECT per burst");
-    let valids = tb.get_u32("valids").await;
-    assert!(
-        valids <= 2 * bursts && valids + 2 >= 2 * bursts,
-        "{valids} words for {bursts} bursts"
+    assert_eq!(
+        tb.get_u32("valids").await,
+        2 * bursts,
+        "two words (eight beats each) per burst"
     );
     assert_eq!(tb.get_u32("w0").await, 0xA6, "first word of a burst");
     assert_eq!(tb.get_u32("w1").await, 0x3C, "second word of a burst");
+}
+
+/// DATAVALID marks a word of eight beats counted from the first strobe pulse
+/// the gate passed, as on the device: a gate that passes only the first four
+/// pulses of a burst brings one word, its first, and the burst's second half
+/// never comes back (the old model returned a word per SCLK cycle of READ)
+#[tokio::test]
+async fn nexus_dqs_buffer_returns_a_word_per_eight_captured_beats() {
+    // the lane with the read gate a whole SCLK cycle early: it opens in the preamble's SCLK
+    // cycle and closes after the first four strobe pulses (a wrapper in a file of its own: the
+    // fixture's NexusLoop stays the top of the other tests with its default generics)
+    let wrapper = r#"
+entity NexusLoopEarlyGate {
+    in sim_tick: clock
+    in rst: bit
+    in pause: bit
+    out valids: bit[8]
+    out w0: bit[8]
+    out w1: bit[8]
+}
+
+impl NexusLoopEarlyGate {
+    inst l = NexusLoop<0, 0, 2> { sim_tick: sim_tick, rst: rst, pause: pause }
+    valids = l.valids
+    w0 = l.w0
+    w1 = l.w1
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("skalp_prim_early_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("nexus_loop_early.sk");
+    let loop_src = std::fs::read_to_string(NEXUS_LOOP).expect("read fixture");
+    std::fs::write(&path, format!("{loop_src}\n{wrapper}")).expect("write design");
+    let mut tb =
+        Testbench::behavioral_for_device(path.to_str().unwrap(), "NexusLoopEarlyGate", DEVICE)
+            .await
+            .expect("build");
+    tb.set("pause", 0u8);
+    tb.set("rst", 1u8);
+    tb.clock_signal("sim_tick", 20).await;
+    tb.set("rst", 0u8);
+    tb.clock_signal("sim_tick", 84 * SCLK_TICKS).await;
+
+    assert_eq!(tb.get_u32("valids").await, 4, "one word per burst");
+    assert_eq!(tb.get_u32("w0").await, 0xA6, "the first half of each burst");
+    assert_eq!(tb.get_u32("w1").await, 0xA6, "the first half of each burst");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// While the DQS buffer's PAUSE is high its read side ignores READ: the same
