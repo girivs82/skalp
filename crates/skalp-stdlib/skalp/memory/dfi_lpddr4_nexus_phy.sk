@@ -51,6 +51,12 @@
 // both lanes have a half burst it goes back on dfi_rddata_wN (four words, beats 2N and 2N+1 of
 // both lanes, the earlier beat in [15:0]) with dfi_rddata_valid_wN. A controller
 // keeps TRDDATA_EN_ADJ = 3; the gate training finds the burst after it.
+// The DQS buffer also sees the PHY's own write strobes on its input. On a CertusPro-NX, with its
+// gate shut, it still took part of a write's strobe into its read FIFO (one DATAVALID word
+// after each write instead of two), which left the next read's beats a strobe pulse out of
+// place in the words (the read after it came back right). So the gate is also opened around
+// every write strobe, as for a write leveling strobe: the buffer then takes the write as a whole
+// burst and stays in step; the words are never taken.
 //
 // Reset (as the device's LPDDR4 interface wants it): sync_clk, a free-running clock, runs the DDR
 // reset sequence once the PLL locks: DLL reset and lock, DLL frozen, edge clocks stopped, the DQS
@@ -187,7 +193,8 @@ impl NexusLpddr4DqPin {
 //
 // Inputs per DFI cycle, for the frame being sent: dq_d (pin b's D0..D7 in [8b+7:8b]), dq_tt and
 // dqs_tt (one tristate bit per slot), dqs_d; rd_win: dfi_rddata_en of the last 12 slots, the
-// newest (captured) frame in [11:8], the frame being sent in [7:4]; wl_frame: the frame carries a write leveling pulse; tr_start: a
+// newest (captured) frame in [11:8], the frame being sent in [7:4]; wl_frame: the frame carries a write leveling pulse; wr_gate:
+// the read gate's slots around the frame's write strobe pulses; tr_start: a
 // training event (strobe or read burst) is in the frame being sent.
 pub entity NexusLpddr4Lane<
     const IN_DELAY: nat = 0,
@@ -215,6 +222,7 @@ pub entity NexusLpddr4Lane<
     in dqs_tt: bit[4]
     in rd_win: bit[12]
     in wl_frame: bit[3]
+    in wr_gate: bit[4]
     in tr_start: bit
     in wl_en: bit
     in gate_en: bit
@@ -356,7 +364,7 @@ impl NexusLpddr4Lane {
     // past the four pulses, which the leveling delay moves later
     let read_n: bit[4] = if wl_frame[0] == 1 { 4'b1000 } else {
         if wl_frame[1] == 1 { 4'b1111 } else {
-            if wl_frame[2] == 1 { 4'b0011 } else { {rd_win[ri3], rd_win[ri2], rd_win[ri1], rd_win[ri0]} }
+            if wl_frame[2] == 1 { 4'b0011 } else { {rd_win[ri3], rd_win[ri2], rd_win[ri1], rd_win[ri0]} | wr_gate }
         }
     }
     let sel_n: bit[4] = if wl_en == 1 { 4'b0000 } else { {1'b0, gsel[2:0]} }
@@ -1168,6 +1176,13 @@ impl DfiLpddr4NexusPhy {
     let wl_any: bit = if b_wls == 1 || b_wls1 == 1 || b_wls2 == 1 { 1 } else { 0 }
     let dqs_d: bit[8] = if b_wls1 == 1 { 8'b01010101 } else { if wl_any == 1 { 8'b00000000 } else { dqs_d_w } }
     let dqs_tt: bit[4] = if wl_any == 1 { 4'b0000 } else { dqs_tt_w }
+    // the read gate around a write strobe, as around a write leveling strobe: from the last
+    // preamble slot to two slots past the last pulse (slot j: e(j + 1), e(j), e(j - 1), e(j - 2))
+    let wg0: bit = if we12[4] == 1 || e0 == 1 || em1 == 1 || we12[1] == 1 { 1 } else { 0 }
+    let wg1: bit = if e2 == 1 || e1 == 1 || e0 == 1 || em1 == 1 { 1 } else { 0 }
+    let wg2: bit = if e3 == 1 || e2 == 1 || e1 == 1 || e0 == 1 { 1 } else { 0 }
+    let wg3: bit = if e4 == 1 || e3 == 1 || e2 == 1 || e1 == 1 { 1 } else { 0 }
+    let wr_gate: bit[4] = if wl_any == 1 { 4'b0000 } else { {wg3, wg2, wg1, wg0} }
     let dq_d0: bit[64] = {bt1_3[7], bt0_3[7], bt1_2[7], bt0_2[7], bt1_1[7], bt0_1[7], bt1_0[7], bt0_0[7], bt1_3[6], bt0_3[6], bt1_2[6], bt0_2[6], bt1_1[6], bt0_1[6], bt1_0[6], bt0_0[6], bt1_3[5], bt0_3[5], bt1_2[5], bt0_2[5], bt1_1[5], bt0_1[5], bt1_0[5], bt0_0[5], bt1_3[4], bt0_3[4], bt1_2[4], bt0_2[4], bt1_1[4], bt0_1[4], bt1_0[4], bt0_0[4], bt1_3[3], bt0_3[3], bt1_2[3], bt0_2[3], bt1_1[3], bt0_1[3], bt1_0[3], bt0_0[3], bt1_3[2], bt0_3[2], bt1_2[2], bt0_2[2], bt1_1[2], bt0_1[2], bt1_0[2], bt0_0[2], bt1_3[1], bt0_3[1], bt1_2[1], bt0_2[1], bt1_1[1], bt0_1[1], bt1_0[1], bt0_0[1], bt1_3[0], bt0_3[0], bt1_2[0], bt0_2[0], bt1_1[0], bt0_1[0], bt1_0[0], bt0_0[0]}
     let dq_d1: bit[64] = {bt1_3[15], bt0_3[15], bt1_2[15], bt0_2[15], bt1_1[15], bt0_1[15], bt1_0[15], bt0_0[15], bt1_3[14], bt0_3[14], bt1_2[14], bt0_2[14], bt1_1[14], bt0_1[14], bt1_0[14], bt0_0[14], bt1_3[13], bt0_3[13], bt1_2[13], bt0_2[13], bt1_1[13], bt0_1[13], bt1_0[13], bt0_0[13], bt1_3[12], bt0_3[12], bt1_2[12], bt0_2[12], bt1_1[12], bt0_1[12], bt1_0[12], bt0_0[12], bt1_3[11], bt0_3[11], bt1_2[11], bt0_2[11], bt1_1[11], bt0_1[11], bt1_0[11], bt0_0[11], bt1_3[10], bt0_3[10], bt1_2[10], bt0_2[10], bt1_1[10], bt0_1[10], bt1_0[10], bt0_0[10], bt1_3[9], bt0_3[9], bt1_2[9], bt0_2[9], bt1_1[9], bt0_1[9], bt1_0[9], bt0_0[9], bt1_3[8], bt0_3[8], bt1_2[8], bt0_2[8], bt1_1[8], bt0_1[8], bt1_0[8], bt0_0[8]}
 
@@ -1239,7 +1254,7 @@ impl DfiLpddr4NexusPhy {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, b_wls1, b_wls}, tr_start: tr_start,
+        wl_frame: {b_wls2, b_wls1, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
         dq_i: dq_i[7:0], dqs_i: dqs_i[0]
@@ -1249,7 +1264,7 @@ impl DfiLpddr4NexusPhy {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, b_wls1, b_wls}, tr_start: tr_start,
+        wl_frame: {b_wls2, b_wls1, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
         dq_i: dq_i[15:8], dqs_i: dqs_i[1]
