@@ -37,7 +37,14 @@
 // The DQS buffer samples DQ on DQSR90 (DQS delayed a quarter tCK, moved by the lane's read
 // delay) into the I/O logic FIFO and returns a DATAVALID word per eight beats, counted from the
 // first strobe pulse its gate passed (as the device does): a BL16 read brings two, the half
-// bursts in order. The words and the check of a training half are a register stage each. Once
+// bursts in order. On a CertusPro-NX DATAVALID marks a lone burst's words, but in a run of
+// back-to-back bursts it was seen to run a burst ahead of the words and later fall back, so a
+// PHY that paired words by it shifted whole bursts and lost responses. So DATAVALID is used only
+// by the gate training, which pairs words by it; the read eye training first measures the read
+// return latency (from a half burst's end in dfi_rddata_en to the DFI cycle its word comes out
+// of the gearing) on a lone burst, from the cycles whose words are the Read DQ Calibration
+// pattern's halves, and from then on each half's word is taken at that latency.
+// The words and the check of a training half are a register stage each. Once
 // both lanes have a half burst it goes back on dfi_rddata_wN (four words, beats 2N and 2N+1 of
 // both lanes, the earlier beat in [15:0]) with dfi_rddata_valid_wN. A controller
 // keeps TRDDATA_EN_ADJ = 3; the gate training finds the burst after it.
@@ -79,7 +86,10 @@
 //         misses pulses and returns one word). The longest passing run ends where the gate would open
 //         after the first DQS rise; each lane takes the middle of the run but no more than a tCK
 //         before its end, inside the 2 tCK preamble (gate_fail if no run of 4).
-//   read eye (dfi_rdlvl_en): each burst is captured with the next read delay (EYE_STEP steps
+//   read eye (dfi_rdlvl_en): the first burst whose words are the pattern's two halves, with
+//         the read delay where the gate training left it, sets the read return latency (see
+//         Reads); then
+//         each burst is captured with the next read delay (EYE_STEP steps
 //         apart, from EYE_HALF below the middle to EYE_HALF above) and compared with the Read DQ
 //         Calibration pattern (RDC_PATTERN = {MR40, MR32}, per-lane inversion RDC_INV0/1 = MR15,
 //         MR20); the lane takes the middle of the longest passing run (lvl_fail if none).
@@ -300,6 +310,24 @@ impl NexusLpddr4Lane {
     signal nburst: bit[16] = 0
     signal load_q: bit = 0
 
+    // ------------------------------------------------------------ read return latency
+    // Where each half burst ends, from the read enables: rd_win's newest cycle (slots 8-11) is
+    // followed slot by slot, counting enabled slots in a run (mod 4) and which half the next end
+    // is; a run's half ends are its 4th, 8th, ... enabled slots
+    signal run_c: bit[2] = 0
+    signal run_h: bit = 0
+    // half ends of the 16 cycles before this one, by age in slots (bit 0: 4 slots old)
+    signal mh: bit[64] = 0
+    // age in slots of the last first-half end (saturating), the trained latency in slots from a
+    // half's end to the cycle its word is taken in, and whether it holds / is being measured
+    signal age0: bit[8] = 255
+    signal rd_lat: bit[8] = 0
+    signal have_lat: bit = 0
+    signal meas: bit = 0
+    // a first-half word was seen in the last cycle while measuring, and its latency
+    signal lat_p: bit = 0
+    signal lat_c: bit[8] = 0
+
     let training: bit = if wl_en == 1 || gate_en == 1 || eye_en == 1 || wdq_en == 1 { 1 } else { 0 }
     let gate_n: bit[8] = GATE_SLOTS * 8
     let train_win: bit[8] = TRAIN_WIN
@@ -326,6 +354,38 @@ impl NexusLpddr4Lane {
         }
     }
     let sel_n: bit[4] = if wl_en == 1 { 4'b0000 } else { {1'b0, gsel[2:0]} }
+
+    // the half ends among this cycle's slots (slot 0 first), each with the half it ends
+    let e0: bit = rd_win[8]
+    let e1: bit = rd_win[9]
+    let e2: bit = rd_win[10]
+    let e3: bit = rd_win[11]
+    let k0: bit[2] = run_c
+    let h0: bit = run_h
+    let m0: bit = if e0 == 1 && k0 == 3 { 1 } else { 0 }
+    let k1: bit[2] = if e0 == 1 { k0 + 1 } else { 0 }
+    let h1: bit = if e0 == 0 { 0 } else { if m0 == 1 { ~h0 } else { h0 } }
+    let m1: bit = if e1 == 1 && k1 == 3 { 1 } else { 0 }
+    let k2: bit[2] = if e1 == 1 { k1 + 1 } else { 0 }
+    let h2: bit = if e1 == 0 { 0 } else { if m1 == 1 { ~h1 } else { h1 } }
+    let m2: bit = if e2 == 1 && k2 == 3 { 1 } else { 0 }
+    let k3: bit[2] = if e2 == 1 { k2 + 1 } else { 0 }
+    let h3: bit = if e2 == 0 { 0 } else { if m2 == 1 { ~h2 } else { h2 } }
+    let m3: bit = if e3 == 1 && k3 == 3 { 1 } else { 0 }
+    let k4: bit[2] = if e3 == 1 { k3 + 1 } else { 0 }
+    let h4: bit = if e3 == 0 { 0 } else { if m3 == 1 { ~h3 } else { h3 } }
+    // first-half ends (a read's first word)
+    let z0: bit = if m0 == 1 && h0 == 0 { 1 } else { 0 }
+    let z1: bit = if m1 == 1 && h1 == 0 { 1 } else { 0 }
+    let z2: bit = if m2 == 1 && h2 == 0 { 1 } else { 0 }
+    let z3: bit = if m3 == 1 && h3 == 0 { 1 } else { 0 }
+    // every half end by age in slots: 0 is this cycle's slot 3
+    let hist: bit[68] = {mh, m0, m1, m2, m3}
+    let age0_n: bit[8] = if z3 == 1 { 0 } else { if z2 == 1 { 1 } else { if z1 == 1 { 2 } else {
+        if z0 == 1 { 3 } else { if age0 > 251 { 255 } else { age0 + 4 } } } } }
+    // a half's word is taken in the cycle its end, rd_lat slots on, falls in
+    let lat_win: bit[68] = hist >> rd_lat
+    let take: bit = if lat_win[3:0] != 0 { 1 } else { 0 }
 
     inst dqs = DQSBUF {
         DQSI: dqs_i, ECLKIN: eclk, SCLK: sclk, RST: io_rst,
@@ -429,8 +489,23 @@ impl NexusLpddr4Lane {
 
     // ------------------------------------------------------------ half bursts
     // Each DATAVALID word holds eight beats counted from the first strobe pulse the gate passed:
-    // a half burst, the two of a BL16 read in order
-    let hv: bit = if dv_r == 1 && wl_en == 0 { 1 } else { 0 }
+    // a half burst, the two of a BL16 read in order. On the device DATAVALID marks the words of
+    // a lone burst, but in a run of back-to-back bursts it can move a burst ahead of the words
+    // and back again, so once the read return latency is trained (at the start of the read eye
+    // training, from a lone burst's words) each half's word is taken at that latency
+    // from the half's end in the read enables; the gate training (whose setting the latency
+    // depends on) uses DATAVALID
+    let lat_on: bit = if have_lat == 1 && gate_en == 0 { 1 } else { 0 }
+    let hv: bit = if wl_en == 1 { 0 } else { if lat_on == 1 { take } else { dv_r } }
+    // The latency is measured on a lone read DQ calibration burst with the delays settled, from
+    // its data rather than its DATAVALID (on the device DATAVALID can rise a cycle before the
+    // burst's first word): the cycle whose word is the pattern's first half, followed by a cycle
+    // whose word is its second half. That burst's first half ended age0_n slots before the first
+    // of the two cycles, and a latency of 0 to 3 slots less takes its word in that cycle; the
+    // middle of that range is kept (64 slots at most, the history's reach)
+    let lat_h0: bit = if meas == 1 && moving == 0 && pause == 0 && age0_n <= 66 && hb_r == exp_rdc[63:0] { 1 } else { 0 }
+    let lat_meas: bit = if lat_p == 1 && hb_r == exp_rdc[127:64] { 1 } else { 0 }
+    let lat_n: bit[8] = if age0_n >= 2 { age0_n - 2 } else { 0 }
     let hh: bit[64] = hb_r
     // each half burst, registered: it leaves the PHY and is checked during training from here
     signal hv_r: bit = 0
@@ -488,6 +563,10 @@ impl NexusLpddr4Lane {
     on(sclk.rise) {
         hb_r = hb
         dv_r = dqs.DATAVALID
+        run_c = k4
+        run_h = h4
+        mh = hist[63:0]
+        age0 = age0_n
         hv_r = hv
         hh_r = hh
         bad_q = h_bad
@@ -557,13 +636,26 @@ impl NexusLpddr4Lane {
             r_gate = 0
             f_gate = 0
             gsel = 0
+            have_lat = 0
             pause_n = 4
             rd_dn = if rdp_r > 128 { 1 } else { 0 }
             rd_n = if rdp_r > 128 { rdp_r - 128 } else { 128 - rdp_r }
         }
+        // the read eye first measures the read return latency, with the read delay where the
+        // gate training left it, and then moves to the bottom of its sweep
         if eye_en == 1 && eye_q == 0 {
             r_eye = 0
             f_eye = 0
+            meas = 1
+            have_lat = 0
+        }
+        lat_p = lat_h0
+        lat_c = lat_n
+        if lat_meas == 1 {
+            meas = 0
+            lat_p = 0
+            have_lat = 1
+            rd_lat = lat_c
             rd_dn = if rdp_r > eye_bot { 1 } else { 0 }
             rd_n = if rdp_r > eye_bot { rdp_r - eye_bot } else { eye_bot - rdp_r }
         }
@@ -577,7 +669,7 @@ impl NexusLpddr4Lane {
         // ---------------------------------------------------------- an event's window
         if tr_start == 1 && training == 1 {
             win = train_win
-            ev_ok = if moving == 0 && pause == 0 { 1 } else { 0 }
+            ev_ok = if moving == 0 && pause == 0 && meas == 0 { 1 } else { 0 }
             nv = 0
             mism = 0
             fb = 0

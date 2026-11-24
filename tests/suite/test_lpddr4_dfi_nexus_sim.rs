@@ -105,6 +105,10 @@ struct Variant {
     /// entities simulated at gate level (synthesized for the device, their
     /// vendor primitives running the models); none: all behavioural
     gate_level: &'static [&'static str],
+    /// board delay of CK and the command pins behind the PHY's pins, in ticks
+    ca_late: u64,
+    /// the controller's TPHY_WRLAT_ADJ
+    wr_adj: u64,
 }
 
 const STATUS: [&str; 22] = [
@@ -150,6 +154,8 @@ async fn run(v: Variant) {
         ("WR_DQ_SKEW0_CLKS", v.wr_dq_skew[0]),
         ("WR_DQ_SKEW1_CLKS", v.wr_dq_skew[1]),
         ("CK_TICKS", v.ck_ticks),
+        ("CA_LATE_TICKS", v.ca_late),
+        ("WR_ADJ", v.wr_adj),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -235,11 +241,11 @@ async fn run(v: Variant) {
             4.0,
             &format!("lane {lane} write leveling"),
         );
-        // the gate follows tDQSCK
+        // the gate follows tDQSCK and the command delay
         let gate = get!(["gate0", "gate1"][lane]);
         near(
             gate,
-            nom.gate + (v.dqsck * 8) as f64 / v.ck_ticks as f64,
+            nom.gate + ((v.dqsck + v.ca_late) * 8) as f64 / v.ck_ticks as f64,
             1.0,
             &format!("lane {lane} gate"),
         );
@@ -303,6 +309,8 @@ async fn lpddr4_dfi_nexus_nominal() {
         n_bursts: 16,
         ck_ticks: TICKS_PER_CK,
         gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
     })
     .await;
 }
@@ -321,6 +329,8 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         n_bursts: 16,
         ck_ticks: TICKS_PER_CK,
         gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
     })
     .await;
 }
@@ -341,6 +351,8 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         n_bursts: 16,
         ck_ticks: TICKS_PER_CK,
         gate_level: GATE_LEVEL,
+        ca_late: 0,
+        wr_adj: 3,
     })
     .await;
 }
@@ -358,6 +370,8 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         n_bursts: 16,
         ck_ticks: TICKS_PER_CK,
         gate_level: GATE_LEVEL,
+        ca_late: 0,
+        wr_adj: 3,
     })
     .await;
 }
@@ -375,6 +389,8 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         n_bursts: 16,
         ck_ticks: 22,
         gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
     })
     .await;
 }
@@ -392,6 +408,30 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         n_bursts: 16,
         ck_ticks: 42,
         gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+    })
+    .await;
+}
+
+/// CK and the command pins a whole tCK late on the board (as the FPGA's
+/// output paths make them on the device, relative to the models), so the
+/// controller sends write data a slot later (TPHY_WRLAT_ADJ = 4) and the
+/// read data comes a tCK later: writes on their own (the rewrite phase) and
+/// in runs must land the same as with no delay
+#[tokio::test]
+async fn lpddr4_dfi_nexus_command_tck_late() {
+    run(Variant {
+        name: "command_late",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: TICKS_PER_CK,
+        wr_adj: 4,
     })
     .await;
 }

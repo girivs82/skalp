@@ -32,7 +32,12 @@ entity Lpddr4DfiNexusSim<
     const WR_DQ_SKEW0_CLKS: nat = 0,
     const WR_DQ_SKEW1_CLKS: nat = 0,
     // simulation ticks (117.1875 ps) per edge clock (= tCK); even. 16: 1066 Mbps
-    const CK_TICKS: nat = 16
+    const CK_TICKS: nat = 16,
+    // board delay of CK, CA, CS and CKE behind the PHY's pins, in ticks (at most 64); a whole
+    // tCK of it needs the controller's write data a slot later (WR_ADJ = 4)
+    const CA_LATE_TICKS: nat = 0,
+    // the controller's TPHY_WRLAT_ADJ
+    const WR_ADJ: nat = 3
 > {
     in sim_tick: clock
     out done: bit
@@ -113,7 +118,7 @@ impl Lpddr4DfiNexusSim {
     let exp_data: bit[256] = pattern(g_exp, exp_pass)
 
     inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10,
-        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, 3, 3, 32, 80, 8, 40, 32, 64, 63> {
+        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, WR_ADJ, 3, 32, 80, 8, 40, 32, 64, 63> {
         clk: phy.dfi_clk,
         req_valid: g_valid,
         req_write: g_write,
@@ -205,13 +210,23 @@ impl Lpddr4DfiNexusSim {
         dqs_i: bus_dqs
     }
 
+    // CK and the command pins at the DRAM, CA_LATE_TICKS ticks behind the PHY's pins
+    let cmd_pins: bit[9] = {phy.ck_t, phy.cke, phy.cs, phy.ca}
+    signal cmd_sh: bit[576] = 0
+    on(sim_tick.rise) {
+        cmd_sh = {cmd_sh[566:0], cmd_pins}
+    }
+    let ca_late: bit[16] = CA_LATE_TICKS
+    let cmd_sh_at: bit[576] = cmd_sh >> ((ca_late - 1) * 9)
+    let cmd_at_dram: bit[9] = if ca_late == 0 { cmd_pins } else { cmd_sh_at[8:0] }
+
     inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8> {
         clk: sim_tick,
         reset_n: phy.reset_n,
-        ck_t: phy.ck_t,
-        cke: phy.cke,
-        cs: phy.cs,
-        ca: phy.ca,
+        ck_t: cmd_at_dram[8],
+        cke: cmd_at_dram[7],
+        cs: cmd_at_dram[6],
+        ca: cmd_at_dram[5:0],
         dq_in: bus_dq,
         dq_driven: drv_dq,
         dqs_t_in: bus_dqs,
