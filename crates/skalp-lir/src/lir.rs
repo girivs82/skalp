@@ -945,7 +945,11 @@ pub enum LirOp {
         async_reset: bool,
         reset_value: Option<u64>,
     },
-    /// Latch array
+    /// Latch array, `q = en ? d : q` per bit; inputs `[en, d]`, or
+    /// `[en, d, rst]` for a latch with an asynchronous reset (one bit):
+    /// `q = rst ? 0 : (en ? d : q)`. Storage has no defined power-up value
+    /// (an ASIC latch, a LUT fed back into itself), so a latch whose start
+    /// value matters takes a reset.
     Latch { width: u32 },
 
     // === Memory ===
@@ -1222,7 +1226,7 @@ impl LirOp {
                 1 + if *has_enable { 1 } else { 0 } + if *has_reset { 1 } else { 0 }
                 // d + optional en + optional rst
             }
-            LirOp::Latch { .. } => 2,    // en, d
+            LirOp::Latch { .. } => 2,    // en, d (and an optional rst)
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
             LirOp::MemBlock {

@@ -50,8 +50,8 @@
 
 use crate::gate_netlist::{
     Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, EXCLUSIVE_OP, LATCH_D_PIN,
-    LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN, MATCHED_DELAY_OP, STEP_CONTROL_OP,
-    STEP_LATCH_READY_PIN,
+    LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN, LATCH_RST_LUT_INIT, LATCH_RST_PIN,
+    MATCHED_DELAY_OP, STEP_CONTROL_OP, STEP_LATCH_READY_PIN,
 };
 use crate::tech_library::{CellFunction, TechLibrary};
 use std::collections::{HashMap, HashSet};
@@ -339,7 +339,14 @@ fn latch_bits(netlist: &GateNetlist) -> Vec<LatchBit> {
             });
             continue;
         }
-        if cell.lut_init == Some(LATCH_LUT_INIT) && cell.inputs.get(LATCH_Q_PIN) == Some(&q) {
+        // A plain latch LUT, or one with a reset (held at 0 while the
+        // block's reset is high, which it never is once the block runs)
+        let latch_lut = match cell.lut_init {
+            Some(LATCH_LUT_INIT) => true,
+            Some(LATCH_RST_LUT_INIT) => cell.inputs.len() > LATCH_RST_PIN,
+            _ => false,
+        };
+        if latch_lut && cell.inputs.get(LATCH_Q_PIN) == Some(&q) {
             bits.push(LatchBit {
                 en: cell.inputs[LATCH_EN_PIN],
                 d: cell.inputs[LATCH_D_PIN],

@@ -113,16 +113,24 @@ pub const LATCH_OP: &str = "Latch";
 
 /// Inputs of a single-LUT latch bit (`<latch>.lat<i>`): `[d, en, q]`, input
 /// `k` being bit `k` of the LUT address, `q` its own output fed back. The
-/// fourth input is unused.
+/// fourth input, when connected, is the latch's reset (see
+/// [`LATCH_RST_LUT_INIT`]).
 pub const LATCH_D_PIN: usize = 0;
 /// See [`LATCH_D_PIN`]
 pub const LATCH_EN_PIN: usize = 1;
 /// See [`LATCH_D_PIN`]
 pub const LATCH_Q_PIN: usize = 2;
+/// See [`LATCH_D_PIN`]
+pub const LATCH_RST_PIN: usize = 3;
 
 /// Truth table of a single-LUT latch bit, `q = en ? d : q` over the inputs
 /// `[d, en, q, -]`
 pub const LATCH_LUT_INIT: u64 = latch_lut_init();
+
+/// Truth table of a single-LUT latch bit with a reset, `q = rst ? 0 : (en ?
+/// d : q)` over the inputs `[d, en, q, rst]`: 0 while `rst` is high,
+/// whatever the loop held before, then a plain latch
+pub const LATCH_RST_LUT_INIT: u64 = latch_rst_lut_init();
 
 const fn latch_lut_init() -> u64 {
     let mut init = 0u64;
@@ -133,6 +141,18 @@ const fn latch_lut_init() -> u64 {
         let q = (a >> LATCH_Q_PIN) & 1;
         if (en == 1 && d == 1) || (en == 0 && q == 1) {
             init |= 1 << a;
+        }
+        a += 1;
+    }
+    init
+}
+
+const fn latch_rst_lut_init() -> u64 {
+    let mut init = 0u64;
+    let mut a = 0;
+    while a < 16 {
+        if (a >> LATCH_RST_PIN) & 1 == 0 {
+            init |= ((LATCH_LUT_INIT >> a) & 1) << a;
         }
         a += 1;
     }
@@ -2817,6 +2837,24 @@ mod tests {
             let bit = |k: usize| (a >> k) & 1 == 1;
             let (d, en, q) = (bit(LATCH_D_PIN), bit(LATCH_EN_PIN), bit(LATCH_Q_PIN));
             assert_eq!((LATCH_LUT_INIT >> a) & 1 == 1, if en { d } else { q });
+        }
+    }
+
+    /// With `rst` high a latch bit is 0 whatever its other inputs; with it
+    /// low, the plain latch
+    #[test]
+    fn latch_rst_lut_init_is_a_resettable_latch() {
+        assert_eq!(LATCH_RST_LUT_INIT, 0x00b8);
+        for a in 0..16u64 {
+            let bit = |k: usize| (a >> k) & 1 == 1;
+            let (d, en, q, rst) = (
+                bit(LATCH_D_PIN),
+                bit(LATCH_EN_PIN),
+                bit(LATCH_Q_PIN),
+                bit(LATCH_RST_PIN),
+            );
+            let want = !rst && if en { d } else { q };
+            assert_eq!((LATCH_RST_LUT_INIT >> a) & 1 == 1, want, "address {a:04b}");
         }
     }
 

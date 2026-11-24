@@ -2974,11 +2974,16 @@ pub fn expand_to_ncl_bridged(lir: &Lir) -> NclExpandResult {
 /// while they are open, so nothing races through, and they are closed
 /// while the logic in front of them settles. `done` follows `slave_open`.
 ///
-/// A latch built from logic has no power-up
-/// value of its own: the device starts its feedback loops at 0 (as it does
-/// the step control's), so a bit that must start at 1 is stored inverted.
-/// Registers with an enable or reset, and blocks whose coalesced children
-/// have registers (clocked by `go` themselves), keep flip-flops.
+/// Storage has no defined power-up value (an ASIC latch or flip-flop, a
+/// LUT fed back into itself), so a block whose parent drives its reset
+/// (`NCL_RST_PORT`, held high from power-up until the block is idle, its
+/// request low meanwhile) gives every latch that reset, which clears it: a
+/// bit that must start at 1 is stored inverted. The flip-flops left take
+/// the reset asynchronously, to their start values. A step the step control
+/// came up deciding runs out while the reset holds the state, and the
+/// reset is only released once the block is idle. Registers with an enable
+/// or reset, and blocks whose coalesced children have registers (clocked by
+/// `go` themselves), keep flip-flops.
 ///
 /// `child_inputs` names the block's signals that its child instances read
 /// (a library adder, say). What a child does with them is not visible here,
@@ -2990,7 +2995,7 @@ pub fn expand_to_ncl_bridged_with(
     child_inputs: &[String],
     async_state: AsyncState,
 ) -> NclExpandResult {
-    use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
+    use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT, NCL_RST_PORT};
 
     let mut new_lir = lir.clone();
     new_lir.is_ncl = true;
@@ -3012,6 +3017,9 @@ pub fn expand_to_ncl_bridged_with(
             stage_completions: Vec::new(),
         };
     };
+
+    // The block's reset (see `NCL_RST_PORT`), when its parent drives one
+    let rst = find(&new_lir.inputs, NCL_RST_PORT);
 
     // A block with stream ports is self-timed (`skalp_frontend::ncl_streams`):
     // it steps whenever `__ncl_ready` says the channels of its next step are
@@ -3218,10 +3226,16 @@ pub fn expand_to_ncl_bridged_with(
     // Registers as latches: `done` then times from the strobe that opens
     // them last
     let state_strobe = if async_state != AsyncState::FlipFlop && !children_have_regs {
-        latch_registers(&mut new_lir, go, child_inputs, async_state).unwrap_or(go)
+        latch_registers(&mut new_lir, go, rst, child_inputs, async_state).unwrap_or(go)
     } else {
         go
     };
+
+    // The registers left (flip-flops clocked by `go`) take the reset
+    // asynchronously, to their start values
+    if let Some(rst) = rst {
+        reset_registers(&mut new_lir, go, rst);
+    }
 
     // done = go & delay(go): the registers' new outputs have settled
     let done = if has_regs || ready.is_some() {
@@ -3375,6 +3389,7 @@ pub fn expand_to_ncl_bridged_with(
 fn latch_registers(
     lir: &mut Lir,
     go: LirSignalId,
+    rst: Option<LirSignalId>,
     child_inputs: &[String],
     state: AsyncState,
 ) -> Option<LirSignalId> {
@@ -3411,10 +3426,13 @@ fn latch_registers(
         });
         for &idx in &regs {
             match slave_open.filter(|_| feedback.contains(&idx)) {
-                Some(so) => {
-                    replace_register_with_latches(lir, idx, &[(pulse, "master"), (so, "slave")])
-                }
-                None => replace_register_with_latches(lir, idx, &[(pulse, "latch")]),
+                Some(so) => replace_register_with_latches(
+                    lir,
+                    idx,
+                    &[(pulse, "master"), (so, "slave")],
+                    rst,
+                ),
+                None => replace_register_with_latches(lir, idx, &[(pulse, "latch")], rst),
             }
         }
         return Some(slave_open.unwrap_or(pulse_end));
@@ -3429,7 +3447,12 @@ fn latch_registers(
             crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
         );
         for &idx in &regs {
-            replace_register_with_latches(lir, idx, &[(pulse, "master"), (slave_open, "slave")]);
+            replace_register_with_latches(
+                lir,
+                idx,
+                &[(pulse, "master"), (slave_open, "slave")],
+                rst,
+            );
         }
         return Some(slave_open);
     }
@@ -3455,16 +3478,27 @@ fn latch_registers(
         crate::ncl_bundle::SLAVE_OPEN_PATH.to_string(),
     );
     for idx in regs {
-        replace_register_with_latches(lir, idx, &[(master_open, "master"), (slave_open, "slave")]);
+        replace_register_with_latches(
+            lir,
+            idx,
+            &[(master_open, "master"), (slave_open, "slave")],
+            rst,
+        );
     }
     Some(slave_open)
 }
 
 /// Turn the plain register at node `idx` into a chain of latches, one per
 /// `(enable, name)` in `stages`: the first takes the register's data, the
-/// last drives its output. A latch built from logic starts at 0, so bits
-/// that start at 1 are stored inverted.
-fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignalId, &str)]) {
+/// last drives its output. Every latch takes the reset `rst` (see
+/// `LirOp::Latch`), which clears it: bits that start at 1 are stored
+/// inverted, so the reset gives each bit its start value.
+fn replace_register_with_latches(
+    lir: &mut Lir,
+    idx: usize,
+    stages: &[(LirSignalId, &str)],
+    rst: Option<LirSignalId>,
+) {
     let q = lir.nodes[idx].output;
     let d = lir.nodes[idx].inputs[0];
     let path = lir.nodes[idx].path.clone();
@@ -3510,7 +3544,7 @@ fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignal
             // The register's node becomes the first latch
             let node = &mut lir.nodes[idx];
             node.op = LirOp::Latch { width };
-            node.inputs = vec![enable, data];
+            node.inputs = [enable, data].into_iter().chain(rst).collect();
             node.output = out;
             node.clock = None;
             node.reset = None;
@@ -3519,7 +3553,7 @@ fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignal
         } else {
             lir.add_node(
                 LirOp::Latch { width },
-                vec![enable, data],
+                [enable, data].into_iter().chain(rst).collect(),
                 out,
                 format!("{path}.{stage}"),
             );
@@ -3529,6 +3563,67 @@ fn replace_register_with_latches(lir: &mut Lir, idx: usize, stages: &[(LirSignal
     if init != 0 {
         let c = constant(lir, "init_q");
         lir.add_node(LirOp::Xor { width }, vec![data, c], q, format!("{path}.q"));
+    }
+}
+
+/// Give the registers clocked by `go` the asynchronous reset `rst`, to
+/// their start values (the power-up values the source gives them; 0 where
+/// it gives none). A register that has an asynchronous reset already takes
+/// either. Storage has no defined value at power-up (an ASIC flip-flop, or
+/// any flip-flop where the start values come from a reset), so the block's
+/// reset sets every bit of its state.
+fn reset_registers(lir: &mut Lir, go: LirSignalId, rst: LirSignalId) {
+    for idx in 0..lir.nodes.len() {
+        if lir.nodes[idx].clock != Some(go) {
+            continue;
+        }
+        let LirOp::Reg {
+            width,
+            has_enable,
+            has_reset,
+            async_reset,
+            ..
+        } = lir.nodes[idx].op
+        else {
+            continue;
+        };
+        let q = lir.nodes[idx].output;
+        if has_reset {
+            if !async_reset {
+                // A synchronous reset is part of the register's data; the
+                // block's reset still has to reach it
+                continue;
+            }
+            let Some(old) = lir.nodes[idx].reset else {
+                continue;
+            };
+            let path = lir.nodes[idx].path.clone();
+            let name = lir.signals[q.0 as usize].name.clone();
+            let either = lir.add_signal(format!("{name}__rst_any"), 1);
+            lir.add_node(
+                LirOp::Or { width: 1 },
+                vec![old, rst],
+                either,
+                format!("{path}.rst_any"),
+            );
+            lir.nodes[idx].reset = Some(either);
+            continue;
+        }
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let init = lir.signals[q.0 as usize].initial.unwrap_or(0) & mask;
+        let node = &mut lir.nodes[idx];
+        node.op = LirOp::Reg {
+            width,
+            has_enable,
+            has_reset: true,
+            async_reset: true,
+            reset_value: Some(init),
+        };
+        node.reset = Some(rst);
     }
 }
 
@@ -4278,7 +4373,7 @@ mod tests {
             lir.nodes[idx].clock = Some(go);
         }
 
-        let strobe = latch_registers(&mut lir, go, &[], AsyncState::PulseLatch);
+        let strobe = latch_registers(&mut lir, go, None, &[], AsyncState::PulseLatch);
         let latches = |prefix: &str| -> Vec<String> {
             lir.nodes
                 .iter()
@@ -4292,6 +4387,64 @@ mod tests {
         let strobe = strobe.expect("registers turned into latches");
         assert_eq!(lir.signals[strobe.0 as usize].name, "__ncl_slave_open");
         assert!(lir.nodes.iter().all(|n| n.clock.is_none()));
+    }
+
+    /// With a reset, every latch of a register takes it, and a bit that
+    /// starts at 1 is stored inverted (the reset clears the latches); the
+    /// flip-flops left reset asynchronously to their start values
+    #[test]
+    fn latches_and_registers_take_the_block_reset() {
+        let mut lir = crate::lir::Lir::new("rst".to_string());
+        let go = lir.add_input("go".to_string(), 1);
+        let rst = lir.add_input("ncl_rst".to_string(), 1);
+        let a = lir.add_input("a".to_string(), 4);
+        let en = lir.add_input("en".to_string(), 1);
+        let out = lir.add_output("out".to_string(), 4);
+        let kept = lir.add_output("kept".to_string(), 4);
+        lir.signals[out.0 as usize].initial = Some(0b0101);
+        lir.signals[kept.0 as usize].initial = Some(0b0011);
+        let reg = |has_enable| LirOp::Reg {
+            width: 4,
+            has_enable,
+            has_reset: false,
+            async_reset: false,
+            reset_value: None,
+        };
+        lir.add_node(reg(false), vec![a], out, "out_reg".into());
+        lir.add_node(reg(true), vec![a, en], kept, "kept_reg".into());
+        for node in lir.nodes.iter_mut() {
+            node.clock = Some(go);
+        }
+
+        latch_registers(&mut lir, go, Some(rst), &[], AsyncState::PulseLatch);
+        reset_registers(&mut lir, go, rst);
+
+        // The plain register became a reset latch, stored inverted where it
+        // starts at 1: q = latch ^ 0b0101
+        let latch = lir
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, LirOp::Latch { .. }))
+            .expect("a latch");
+        assert_eq!(latch.inputs.len(), 3);
+        assert_eq!(latch.inputs[2], rst);
+        let q_driver = &lir.nodes[lir.signals[out.0 as usize].driver.unwrap().0 as usize];
+        assert!(matches!(q_driver.op, LirOp::Xor { width: 4 }));
+
+        // The register with an enable stays a flip-flop, reset to 0b0011
+        let ff = &lir.nodes[lir.signals[kept.0 as usize].driver.unwrap().0 as usize];
+        assert_eq!(ff.clock, Some(go));
+        assert_eq!(ff.reset, Some(rst));
+        assert!(matches!(
+            ff.op,
+            LirOp::Reg {
+                has_enable: true,
+                has_reset: true,
+                async_reset: true,
+                reset_value: Some(0b0011),
+                ..
+            }
+        ));
     }
 
     /// A register whose value goes into a child instance (a library adder,
