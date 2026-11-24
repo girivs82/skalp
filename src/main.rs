@@ -9331,7 +9331,11 @@ struct Stimulus {
 #[derive(clap::Args, Debug, Clone, Default)]
 struct TimedOptions {
     /// Delay corner to simulate, such as slow or fast; by default the
-    /// first the build has (slow where there are several)
+    /// first the build has (slow where there are several). `between:K`
+    /// takes every delay a fraction K (0 to 1) of the way from the fast to
+    /// the slow corner, where real silicon usually sits: measure K with a
+    /// ring oscillator on the chip against the same ring simulated at both
+    /// corners, in delay (period), not frequency.
     #[arg(long)]
     corner: Option<String>,
     /// What nets hold at power-up, before cells drive them: zero (the
@@ -9569,7 +9573,25 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         serde_json::from_reader(read(&netlist_path)?).context("reading the routed netlist")?;
     let corners: Vec<DelayAnnotation> =
         serde_json::from_reader(read(&delays_path)?).context("reading the routed delays")?;
+    let mixed;
     let delays = match args.timed.corner.as_deref() {
+        Some(corner) if corner.starts_with("between:") => {
+            let k: f64 = corner["between:".len()..]
+                .parse()
+                .context("--corner between:K needs a number")?;
+            if !(0.0..=1.0).contains(&k) {
+                anyhow::bail!("--corner between:K needs K from 0 (fast) to 1 (slow)");
+            }
+            let named = |name: &str| {
+                corners
+                    .iter()
+                    .find(|d| d.corner == name)
+                    .with_context(|| format!("--corner between:K needs a '{name}' corner"))
+            };
+            mixed = DelayAnnotation::between(named("fast")?, named("slow")?, k)
+                .map_err(anyhow::Error::msg)?;
+            &mixed
+        }
         Some(corner) => corners
             .iter()
             .find(|d| d.corner == corner)

@@ -719,6 +719,73 @@ pub struct CellDelays {
 }
 
 impl DelayAnnotation {
+    /// The delays a fraction `k` of the way from `from` to `to`, each delay
+    /// on its own: `from + k * (to - from)`. Silicon sits somewhere between
+    /// the vendor's fast and slow corners, depending on its process, supply
+    /// and temperature; a ring oscillator on the chip measured against the
+    /// same ring at both corners gives `k` (in delay, not frequency).
+    /// The two must be of the same netlist; a delay either one lacks is
+    /// left out.
+    pub fn between(from: &Self, to: &Self, k: f64) -> Result<Self, String> {
+        if from.cells.len() != to.cells.len() {
+            return Err(format!(
+                "the {} and {} corners have {} and {} cells",
+                from.corner,
+                to.corner,
+                from.cells.len(),
+                to.cells.len()
+            ));
+        }
+        let mix = |a: i64, b: i64| a + ((b - a) as f64 * k).round() as i64;
+        let mix_all = |a: &[i64], b: &[i64]| -> Vec<i64> {
+            a.iter().zip(b).map(|(&a, &b)| mix(a, b)).collect()
+        };
+        let cells = from
+            .cells
+            .iter()
+            .zip(&to.cells)
+            .enumerate()
+            .map(|(i, (a, b))| {
+                if a.wire_ps.len() != b.wire_ps.len()
+                    || a.arcs.len() != b.arcs.len()
+                    || a.setup_ps.len() != b.setup_ps.len()
+                    || a.hold_ps.len() != b.hold_ps.len()
+                {
+                    return Err(format!(
+                        "cell {i} has different pins at the {} and {} corners",
+                        from.corner, to.corner
+                    ));
+                }
+                Ok(CellDelays {
+                    wire_ps: mix_all(&a.wire_ps, &b.wire_ps),
+                    clock_wire_ps: mix(a.clock_wire_ps, b.clock_wire_ps),
+                    arcs: a
+                        .arcs
+                        .iter()
+                        .zip(&b.arcs)
+                        .map(|(x, y)| {
+                            x.iter()
+                                .zip(y)
+                                .map(|(&x, &y)| match (x, y) {
+                                    (Some(x), Some(y)) => Some(mix(x, y)),
+                                    _ => None,
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                    clock_to_out_ps: mix(a.clock_to_out_ps, b.clock_to_out_ps),
+                    launches: a.launches.clone(),
+                    setup_ps: mix_all(&a.setup_ps, &b.setup_ps),
+                    hold_ps: mix_all(&a.hold_ps, &b.hold_ps),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            corner: format!("{} to {} at {k}", from.corner, to.corner),
+            cells,
+        })
+    }
+
     /// Capture every delay of `netlist` that a timed simulation uses
     pub fn capture(netlist: &GateNetlist, delays: &dyn BundleDelays, corner: &str) -> Self {
         let cells = netlist
@@ -2769,6 +2836,42 @@ fn dist_ram_init(cell: &Cell) -> Option<Vec<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Delays between two corners are each mixed on their own, and a
+    /// delay one corner lacks is left out
+    #[test]
+    fn delays_between_corners_mix_each_delay() {
+        let cell = |wire: i64, arc: Option<i64>| CellDelays {
+            wire_ps: vec![wire],
+            clock_wire_ps: 2 * wire,
+            arcs: vec![vec![arc]],
+            clock_to_out_ps: wire,
+            launches: vec![true],
+            setup_ps: vec![wire],
+            hold_ps: vec![wire],
+        };
+        let fast = DelayAnnotation {
+            corner: "fast".into(),
+            cells: vec![cell(100, Some(200)), cell(10, None)],
+        };
+        let slow = DelayAnnotation {
+            corner: "slow".into(),
+            cells: vec![cell(300, Some(600)), cell(30, Some(5))],
+        };
+        let mid = DelayAnnotation::between(&fast, &slow, 0.25).unwrap();
+        assert_eq!(mid.cells[0], cell(150, Some(300)));
+        assert_eq!(mid.cells[1].wire_ps, vec![15]);
+        assert_eq!(mid.cells[1].arcs, vec![vec![None]]);
+        assert_eq!(
+            DelayAnnotation::between(&fast, &slow, 0.0).unwrap().cells,
+            fast.cells
+        );
+        let short = DelayAnnotation {
+            corner: "slow".into(),
+            cells: vec![cell(1, None)],
+        };
+        assert!(DelayAnnotation::between(&fast, &short, 0.5).is_err());
+    }
     use crate::gate_netlist::GateNet;
 
     /// Delays for tests: one arc and wire delay for every cell, with
