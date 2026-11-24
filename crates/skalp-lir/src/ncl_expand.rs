@@ -3020,6 +3020,11 @@ pub fn expand_to_ncl_bridged_with(
 
     // The block's reset (see `NCL_RST_PORT`), when its parent drives one
     let rst = find(&new_lir.inputs, NCL_RST_PORT);
+    if let Some(rst) = rst {
+        if !new_lir.resets.contains(&rst) {
+            new_lir.resets.push(rst);
+        }
+    }
 
     // A block with stream ports is self-timed (`skalp_frontend::ncl_streams`):
     // it steps whenever `__ncl_ready` says the channels of its next step are
@@ -3569,7 +3574,7 @@ fn replace_register_with_latches(
 /// Give the registers clocked by `go` the asynchronous reset `rst`, to
 /// their start values (the power-up values the source gives them; 0 where
 /// it gives none). A register that has an asynchronous reset already takes
-/// either. Storage has no defined value at power-up (an ASIC flip-flop, or
+/// either; a synchronous reset becomes logic in front of the register. Storage has no defined value at power-up (an ASIC flip-flop, or
 /// any flip-flop where the start values come from a reset), so the block's
 /// reset sets every bit of its state.
 fn reset_registers(lir: &mut Lir, go: LirSignalId, rst: LirSignalId) {
@@ -3579,7 +3584,6 @@ fn reset_registers(lir: &mut Lir, go: LirSignalId, rst: LirSignalId) {
         }
         let LirOp::Reg {
             width,
-            has_enable,
             has_reset,
             async_reset,
             ..
@@ -3588,12 +3592,22 @@ fn reset_registers(lir: &mut Lir, go: LirSignalId, rst: LirSignalId) {
             continue;
         };
         let q = lir.nodes[idx].output;
+        if has_reset && !async_reset {
+            // A synchronous reset acts only on a step, and no step runs
+            // while the block is held in reset: make it part of the data
+            // (the register loads its reset value on a step that sees it),
+            // and give the register the block's reset below
+            fold_sync_reset(lir, idx);
+        }
+        let LirOp::Reg {
+            has_enable,
+            has_reset,
+            ..
+        } = lir.nodes[idx].op
+        else {
+            continue;
+        };
         if has_reset {
-            if !async_reset {
-                // A synchronous reset is part of the register's data; the
-                // block's reset still has to reach it
-                continue;
-            }
             let Some(old) = lir.nodes[idx].reset else {
                 continue;
             };
@@ -3625,6 +3639,67 @@ fn reset_registers(lir: &mut Lir, go: LirSignalId, rst: LirSignalId) {
         };
         node.reset = Some(rst);
     }
+}
+
+/// Turn the synchronous reset of register node `idx` into logic in front
+/// of it: the data is the reset value while the reset is asserted, and a
+/// register with an enable also loads while it is. The register is left with
+/// no reset.
+fn fold_sync_reset(lir: &mut Lir, idx: usize) {
+    let LirOp::Reg {
+        width,
+        has_enable,
+        reset_value,
+        ..
+    } = lir.nodes[idx].op
+    else {
+        return;
+    };
+    let Some(srst) = lir.nodes[idx].reset else {
+        return;
+    };
+    let path = lir.nodes[idx].path.clone();
+    let name = lir.signals[lir.nodes[idx].output.0 as usize].name.clone();
+    let value = lir.add_signal(format!("{name}__srst_value"), width);
+    lir.add_node(
+        LirOp::Constant {
+            width,
+            value: reset_value.unwrap_or(0),
+        },
+        Vec::new(),
+        value,
+        format!("{path}.srst_value"),
+    );
+    let d = lir.nodes[idx].inputs[0];
+    let data = lir.add_signal(format!("{name}__srst_d"), width);
+    lir.add_node(
+        LirOp::Mux2 { width },
+        vec![srst, d, value],
+        data,
+        format!("{path}.srst_d"),
+    );
+    lir.nodes[idx].inputs[0] = data;
+    if has_enable {
+        if let Some(&en) = lir.nodes[idx].inputs.get(1) {
+            let load = lir.add_signal(format!("{name}__srst_en"), 1);
+            lir.add_node(
+                LirOp::Or { width: 1 },
+                vec![en, srst],
+                load,
+                format!("{path}.srst_en"),
+            );
+            lir.nodes[idx].inputs[1] = load;
+        }
+    }
+    let node = &mut lir.nodes[idx];
+    node.op = LirOp::Reg {
+        width,
+        has_enable,
+        has_reset: false,
+        async_reset: false,
+        reset_value,
+    };
+    node.reset = None;
 }
 
 /// The registers among `regs` (node indices) whose outputs reach, through
@@ -4445,6 +4520,66 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A register with a synchronous reset loads its reset value on a step
+    /// that sees that reset, and takes the block's reset asynchronously, to
+    /// its start value
+    #[test]
+    fn a_synchronous_reset_becomes_data_and_the_block_reset_is_added() {
+        let mut lir = crate::lir::Lir::new("srst".to_string());
+        let go = lir.add_input("go".to_string(), 1);
+        let rst = lir.add_input("ncl_rst".to_string(), 1);
+        let clear = lir.add_input("clear".to_string(), 1);
+        let a = lir.add_input("a".to_string(), 4);
+        let en = lir.add_input("en".to_string(), 1);
+        let out = lir.add_output("out".to_string(), 4);
+        lir.signals[out.0 as usize].initial = Some(0b1001);
+        lir.add_seq_node(
+            LirOp::Reg {
+                width: 4,
+                has_enable: true,
+                has_reset: true,
+                async_reset: false,
+                reset_value: Some(0b0110),
+            },
+            vec![a, en],
+            out,
+            "out_reg".into(),
+            go,
+            Some(clear),
+        );
+
+        reset_registers(&mut lir, go, rst);
+
+        let ff = &lir.nodes[lir.signals[out.0 as usize].driver.unwrap().0 as usize];
+        assert_eq!(ff.reset, Some(rst));
+        assert!(matches!(
+            ff.op,
+            LirOp::Reg {
+                has_enable: true,
+                has_reset: true,
+                async_reset: true,
+                reset_value: Some(0b1001),
+                ..
+            }
+        ));
+        // d = clear ? 0b0110 : a, loaded when en or clear
+        let mux = &lir.nodes[lir.signals[ff.inputs[0].0 as usize].driver.unwrap().0 as usize];
+        assert!(matches!(mux.op, LirOp::Mux2 { width: 4 }));
+        assert_eq!(mux.inputs[0], clear);
+        assert_eq!(mux.inputs[1], a);
+        let value = &lir.nodes[lir.signals[mux.inputs[2].0 as usize].driver.unwrap().0 as usize];
+        assert!(matches!(
+            value.op,
+            LirOp::Constant {
+                width: 4,
+                value: 0b0110
+            }
+        ));
+        let load = &lir.nodes[lir.signals[ff.inputs[1].0 as usize].driver.unwrap().0 as usize];
+        assert!(matches!(load.op, LirOp::Or { width: 1 }));
+        assert_eq!(load.inputs, vec![en, clear]);
     }
 
     /// A register whose value goes into a child instance (a library adder,
