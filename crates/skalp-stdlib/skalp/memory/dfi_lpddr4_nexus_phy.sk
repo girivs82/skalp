@@ -260,6 +260,8 @@ pub entity NexusLpddr4Lane<
     out rd_pos: bit[8]
     out wr_pos: bit[8]
     out sweep_map: bit[64]
+    // the read latency the read eye step measured, in slots
+    out rd_lat_o: bit[8]
     out bursts: bit[16]
 }
 
@@ -826,6 +828,7 @@ impl NexusLpddr4Lane {
     rd_pos = rdp_r
     wr_pos = wrp_r
     sweep_map = sw_map
+    rd_lat_o = rd_lat
     bursts = nburst
 }
 
@@ -950,6 +953,9 @@ pub entity DfiLpddr4NexusPhy<
     // evaluated position from the bottom up, the top in bit 0 (1 = passed)
     out sweep_map0: bit[64]
     out sweep_map1: bit[64]
+    // each lane's read latency (slots from READ to its words), as the read eye step measured it
+    out rd_lat0: bit[8]
+    out rd_lat1: bit[8]
     out ctrlupd_count: bit[16]
 }
 
@@ -1449,6 +1455,8 @@ impl DfiLpddr4NexusPhy {
     bursts0 = lane0.bursts
     bursts1 = lane1.bursts
     sweep_map0 = lane0.sweep_map
+    rd_lat0 = lane0.rd_lat_o
+    rd_lat1 = lane1.rd_lat_o
     sweep_map1 = lane1.sweep_map
     ctrlupd_count = ctrlupd_n
 }

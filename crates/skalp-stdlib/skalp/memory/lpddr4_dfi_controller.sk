@@ -17,14 +17,16 @@
 //   read gate, then read eye: Read DQ Calibration reads (at most TRAIN_MAX_READS);
 //   write DQ: dfi_wdqlvl_en with a write and a read-back of TRAIN_ADDR in turn (at most
 //     TRAIN_MAX_READS pairs; the bank is left open);
-//   VREF(DQ) (VREF_TRAIN = 1): MR14 is swept from VREF_LO_CODE to VREF_HI_CODE in VREF_STEP
-//     steps, in the range MR14 OP6 gives. Each setting: all banks closed (and a refresh when one
-//     is due), MRW MR14, TVREF_NCK to settle, then three bursts written to TRAIN_ADDR and the
+//   VREF(DQ) (VREF_TRAIN = 1): the reference is swept from level VREF_LO_LEVEL to VREF_HI_LEVEL
+//     in VREF_STEP steps. A level is in 0.4 % of VDDQ (25 = 10 %, 105 = 42 %), across both MR14
+//     ranges: levels up to 75 are range 0 (OP6 = 0, code = level - 25), higher ones range 1
+//     (code = level - 55). Each setting: all banks closed (and a refresh when one is due), MRW
+//     MR14, TVREF_NCK to settle, then VREF_REPS times three bursts written to TRAIN_ADDR and the
 //     two columns below it and read back: isolated ones (beat k drives DQ k and DQ k+8 only,
 //     what a reference set too high loses), isolated zeros (the inverse, lost to one too low)
 //     and every line toggling. MR14 is set to the middle of the longest run of settings whose
-//     three bursts all came back right (none: train_fail, and MR14 as the generic gives), and
-//     write DQ training runs again at it, as its eye depends on the reference;
+//     bursts all came back right (none: train_fail, and MR14 as the generic gives), and write
+//     DQ training runs again at it, as its eye depends on the reference;
 // then MRR of MR5 and MR8, then normal operation. A step that runs out sets train_fail.
 //
 // Normal operation: one request at a time, in order, open-page per bank (row hit: CAS; other row
@@ -86,13 +88,14 @@ pub entity Lpddr4DfiController<
     const MR20: nat = 0,
     const MR32: nat = 90,
     const MR40: nat = 60,
-    // VREF(DQ) training (see above): on (1) or off (0), the MR14 codes swept (OP5:0, 0 to 50),
-    // the step between them, and the settling time after each MR14 write (tVREF_LONG, 250 ns:
-    // 134 nCK at 1066 Mbps)
+    // VREF(DQ) training (see above): on (1) or off (0), the levels swept (25 to 105, both MR14
+    // ranges), the step between them, the write/read-back rounds per level (1 to 255), and the
+    // settling time after each MR14 write (tVREF_LONG, 250 ns: 134 nCK at 1066 Mbps)
     const VREF_TRAIN: nat = 1,
-    const VREF_LO_CODE: nat = 0,
-    const VREF_HI_CODE: nat = 50,
+    const VREF_LO_LEVEL: nat = 25,
+    const VREF_HI_LEVEL: nat = 105,
     const VREF_STEP: nat = 2,
+    const VREF_REPS: nat = 4,
     const TVREF_NCK: nat = 134
 > {
     in clk: clock
@@ -111,9 +114,9 @@ pub entity Lpddr4DfiController<
     out state: bit[5]
     // MR14 as written after training (the generic when VREF training is off)
     out vref: bit[8]
-    // VREF training: the longest passing run's first and last codes {last, first}, and one bit
-    // per code swept (1 = its bursts came back right), the last code in bit 0
-    out vref_win: bit[12]
+    // VREF training: the longest passing run's first and last levels {last, first}, and one bit
+    // per level swept (1 = its bursts came back right), the last level in bit 0
+    out vref_win: bit[14]
     out vref_map: bit[64]
     // ---------------------------------------------------------------- DFI
     out dfi_cs_p0: bit
@@ -339,20 +342,29 @@ impl Lpddr4DfiController {
     // VREF(DQ) training: step 0 close banks, 1 refresh if due, 2 MRW MR14, 3 settle, 4 the
     // writes and reads, 5 wait for the reads and judge the code
     signal vr_ph: bit[3] = 0
-    // the code being tried (the chosen one once vr_fin is set)
-    signal vr_c: bit[6] = 0
+    // the level being tried (the chosen one once vr_fin is set); MR14 as the generic gives it
+    // when none passed
+    signal vr_c: bit[7] = 0
     signal vr_fin: bit = 0
+    signal vr_keep: bit = 0
     // VREF training is over (write DQ training's second run is after it)
     signal vr_done: bit = 0
-    // requests issued for this code (3 writes, then 3 reads), reads compared, any wrong
+    // requests issued in this round (3 writes, then 3 reads), rounds done for this level, the
+    // next read-back's pattern, read-backs compared for this level, any wrong
     signal vr_k: bit[3] = 0
-    signal vr_got: bit[2] = 0
+    signal vr_r: bit[8] = 0
+    signal vr_gi: bit[2] = 0
+    signal vr_got: bit[10] = 0
     signal vr_bad: bit = 0
+    // a read-back and its pattern, held a cycle so the comparison starts from registers
+    signal vr_rb: bit[256] = 0
+    signal vr_rbi: bit[2] = 0
+    signal vr_rbv: bit = 0
     // the passing run being counted, and the longest so far
-    signal vr_rs: bit[6] = 0
+    signal vr_rs: bit[7] = 0
     signal vr_cl: bit[7] = 0
-    signal vr_bs: bit[6] = 0
-    signal vr_be: bit[6] = 0
+    signal vr_bs: bit[7] = 0
+    signal vr_be: bit[7] = 0
     signal vr_bl: bit[7] = 0
     signal vr_map: bit[64] = 0
     signal vref_r: bit[8] = MR14
@@ -564,9 +576,12 @@ impl Lpddr4DfiController {
     let tr_addr: bit[26] = TRAIN_ADDR
     let vr_on_c: bit[8] = VREF_TRAIN
     let vr_on: bit = if vr_on_c == 0 { 0 } else { 1 }
-    let vr_lo: bit[6] = VREF_LO_CODE
-    let vr_hi7: bit[7] = VREF_HI_CODE
+    let vr_lo: bit[7] = VREF_LO_LEVEL
+    let vr_hi7: bit[7] = VREF_HI_LEVEL
     let vr_step7: bit[7] = VREF_STEP
+    let vr_reps: bit[8] = VREF_REPS
+    // read-backs per level: three per round
+    let vr_nrd: bit[10] = {2'b00, vr_reps} + {2'b00, vr_reps} + {2'b00, vr_reps}
     let n_tvref: bit[16] = TVREF_NCK
     // from the MRW's last edge
     let tvref32: bit[32] = {16'h0000, (n_tvref + 3) >> 2}
@@ -648,21 +663,24 @@ impl Lpddr4DfiController {
     let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 12 { 1 } else { 0 }
     // VREF training's MR14 writes
     let do_vrmrw: bit = if vr_st == 1 && vr_ph == 2 && can_cmd == 1 { 1 } else { 0 }
-    let vr_op: bit[8] = {mr14_c[7:6], vr_c}
-    // the next code, and the best run once this code's result is in
-    let vr_nxt: bit[7] = {1'b0, vr_c} + vr_step7
+    // the level as MR14: range 0 up to level 75, range 1 above
+    let vr_c0: bit[7] = vr_c - 25
+    let vr_c1: bit[7] = vr_c - 55
+    let vr_op: bit[8] = if vr_keep == 1 { mr14_c } else { if vr_c <= 75 { {mr14_c[7], 1'b0, vr_c0[5:0]} } else { {mr14_c[7], 1'b1, vr_c1[5:0]} } }
+    // the next level, and the best run once this level's result is in
+    let vr_nxt: bit[7] = vr_c + vr_step7
     let vr_last: bit = if vr_nxt > vr_hi7 { 1 } else { 0 }
     let vr_pass: bit = if vr_bad == 0 { 1 } else { 0 }
-    let vr_rs_n: bit[6] = if vr_cl == 0 { vr_c } else { vr_rs }
+    let vr_rs_n: bit[7] = if vr_cl == 0 { vr_c } else { vr_rs }
     let vr_cl_n: bit[7] = vr_cl + 1
     let vr_better: bit = if vr_pass == 1 && vr_cl_n > vr_bl { 1 } else { 0 }
-    let vr_bs_n: bit[6] = if vr_better == 1 { vr_rs_n } else { vr_bs }
-    let vr_be_n: bit[6] = if vr_better == 1 { vr_c } else { vr_be }
+    let vr_bs_n: bit[7] = if vr_better == 1 { vr_rs_n } else { vr_bs }
+    let vr_be_n: bit[7] = if vr_better == 1 { vr_c } else { vr_be }
     let vr_bl_n: bit[7] = if vr_better == 1 { vr_cl_n } else { vr_bl }
-    let vr_sum: bit[7] = {1'b0, vr_bs_n} + {1'b0, vr_be_n}
-    let vr_mid: bit[6] = vr_sum[6:1]
+    let vr_sum: bit[8] = {1'b0, vr_bs_n} + {1'b0, vr_be_n}
+    let vr_mid: bit[7] = vr_sum[7:1]
     // this code's reads are all back and judged
-    let vr_judge: bit = if vr_st == 1 && vr_ph == 5 && rq_v == 0 && quiet == 1 && vr_got == 3 { 1 } else { 0 }
+    let vr_judge: bit = if vr_st == 1 && vr_ph == 5 && rq_v == 0 && quiet == 1 && vr_got == vr_nrd { 1 } else { 0 }
     // this code's requests: three writes, then the three reads, TRAIN_ADDR's column and the
     // two below it
     let vr_ci: bit[3] = if vr_k < 3 { vr_k } else { vr_k - 3 }
@@ -998,11 +1016,17 @@ impl Lpddr4DfiController {
             }
             if r_tag == 1 { mr5_r = re0[7:0] }
             if r_tag == 2 { mr8_r = re0[7:0] }
-            // VREF training's read-backs, in the order written
+            // VREF training's read-backs, in the order written, compared the next cycle
             if r_tag == 3 {
-                if r_burst != vr_pat(vr_got) { vr_bad = 1 }
-                vr_got = vr_got + 1
+                vr_rb = r_burst
+                vr_rbi = vr_gi
+                vr_gi = if vr_gi == 2 { 2'd0 } else { vr_gi + 1 }
             }
+        }
+        vr_rbv = if r_emit == 1 && r_tag == 3 { 1 } else { 0 }
+        if vr_rbv == 1 {
+            if vr_rb != vr_pat(vr_rbi) { vr_bad = 1 }
+            vr_got = vr_got + 1
         }
         if tq_push == 1 {
             tq[tq_wp] = if do_mrr == 1 { if mi == 0 { 2'd1 } else { 2'd2 } } else { if vr_st == 1 { 2'd3 } else { 2'd0 } }
@@ -1233,6 +1257,8 @@ impl Lpddr4DfiController {
                         vr_ph = 0
                         vr_c = vr_lo
                         vr_fin = 0
+                        vr_keep = 0
+                        vr_gi = 0
                         vr_got = 0
                         vr_bad = 0
                         vr_cl = 0
@@ -1272,6 +1298,7 @@ impl Lpddr4DfiController {
                             } else {
                                 vr_ph = 4
                                 vr_k = 0
+                                vr_r = 0
                             }
                         }
                     },
@@ -1288,7 +1315,12 @@ impl Lpddr4DfiController {
                                 rq_rowm = if tr_row_open == tr_addr[25:9] { 1 } else { 0 }
                                 vr_k = vr_k + 1
                             } else {
-                                vr_ph = 5
+                                if vr_r + 1 < vr_reps {
+                                    vr_r = vr_r + 1
+                                    vr_k = 0
+                                } else {
+                                    vr_ph = 5
+                                }
                             }
                         }
                     },
@@ -1300,6 +1332,7 @@ impl Lpddr4DfiController {
                             vr_bs = vr_bs_n
                             vr_be = vr_be_n
                             vr_bl = vr_bl_n
+                            vr_gi = 0
                             vr_got = 0
                             vr_bad = 0
                             vr_ph = 0
@@ -1307,12 +1340,12 @@ impl Lpddr4DfiController {
                                 vr_fin = 1
                                 if vr_bl_n == 0 {
                                     train_fail_r = 1
-                                    vr_c = mr14_c[5:0]
+                                    vr_keep = 1
                                 } else {
                                     vr_c = vr_mid
                                 }
                             } else {
-                                vr_c = vr_nxt[5:0]
+                                vr_c = vr_nxt
                             }
                         }
                     }

@@ -67,6 +67,8 @@ struct Variant {
     wr_dq_skew: [u64; 2],
     /// MR14 levels (0.4 % of VDDQ) the DRAM's write receivers work at
     vref_ok: (u64, u64),
+    /// the controller's VREF training write/read-back rounds per level
+    vref_reps: u64,
 }
 
 async fn run(v: Variant) {
@@ -80,6 +82,7 @@ async fn run(v: Variant) {
         ("WR_DQ_SKEW1_CLKS", v.wr_dq_skew[1]),
         ("VREF_OK_LO", v.vref_ok.0),
         ("VREF_OK_HI", v.vref_ok.1),
+        ("VREF_REPS", v.vref_reps),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_dfi_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -240,6 +243,7 @@ async fn lpddr4_dfi_nominal() {
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
         vref_ok: (0, 255),
+        vref_reps: 1,
     })
     .await;
 }
@@ -254,12 +258,14 @@ async fn lpddr4_dfi_dqsck_board_skew_and_phy_updates() {
         wr_skew: [3, 1],
         wr_dq_skew: [1, 0],
         vref_ok: (0, 255),
+        vref_reps: 1,
     })
     .await;
 }
 
 /// The DRAM's write receivers work only at MR14 levels 70 to 95 (28 to 38 %
-/// of VDDQ), and MR14 as configured (42 %) is above them: VREF training finds
+/// of VDDQ), and MR14 as configured (42 %) is above them (two rounds per
+/// level): VREF training finds
 /// the window and sets the middle of it, and write DQ training passes again
 /// there after failing at the configured reference
 #[tokio::test]
@@ -272,6 +278,7 @@ async fn lpddr4_dfi_vref_training() {
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
         vref_ok: (70, 95),
+        vref_reps: 2,
     })
     .await;
 }

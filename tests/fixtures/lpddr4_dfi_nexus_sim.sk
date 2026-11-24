@@ -42,9 +42,11 @@ entity Lpddr4DfiNexusSim<
     // 64); they turn off at once. An undriven DQ reads 0 (the DRAM's ODT pulls it low)
     const DQ_OE_LATE_TICKS: nat = 0,
     // the MR14 levels the DRAM's write receivers work at (0.4 % of VDDQ steps; the controller's
-    // VREF training sweeps range 1, levels 55 to 105)
+    // VREF training sweeps levels 25 to 105, both MR14 ranges)
     const VREF_OK_LO: nat = 0,
-    const VREF_OK_HI: nat = 255
+    const VREF_OK_HI: nat = 255,
+    // the controller's VREF training rounds per level
+    const VREF_REPS: nat = 1
 > {
     in sim_tick: clock
     out done: bit
@@ -92,7 +94,7 @@ entity Lpddr4DfiNexusSim<
     out m_n_zq: bit[16]
     out m_t_ck: bit[8]
     out vref: bit[8]
-    out vref_win: bit[12]
+    out vref_win: bit[14]
     out vref_map: bit[64]
 }
 
@@ -128,7 +130,8 @@ impl Lpddr4DfiNexusSim {
     let exp_data: bit[256] = pattern(g_exp, exp_pass)
 
     inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10,
-        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, WR_ADJ, 3, 32, 80, 8, 40, 32, 64, 63> {
+        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, WR_ADJ, 3, 32, 80, 8, 40, 32, 64, 63,
+        0, 0, 90, 60, 1, 25, 105, 2, VREF_REPS> {
         clk: phy.dfi_clk,
         req_valid: g_valid,
         req_write: g_write,

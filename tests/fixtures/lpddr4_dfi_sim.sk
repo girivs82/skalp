@@ -33,9 +33,11 @@ entity Lpddr4DfiSim<
     const WR_DQ_SKEW0_CLKS: nat = 0,
     const WR_DQ_SKEW1_CLKS: nat = 0,
     // the MR14 levels the DRAM's write receivers work at (0.4 % of VDDQ steps; the controller's
-    // VREF training sweeps range 1, levels 55 to 105)
+    // VREF training sweeps levels 25 to 105, both MR14 ranges)
     const VREF_OK_LO: nat = 0,
-    const VREF_OK_HI: nat = 255
+    const VREF_OK_HI: nat = 255,
+    // the controller's VREF training rounds per level
+    const VREF_REPS: nat = 1
 > {
     in clk: clock
     out done: bit
@@ -82,7 +84,7 @@ entity Lpddr4DfiSim<
     out m_n_zq: bit[16]
     out m_t_ck: bit[8]
     out vref: bit[8]
-    out vref_win: bit[12]
+    out vref_win: bit[14]
     out vref_map: bit[64]
 }
 
@@ -117,7 +119,9 @@ impl Lpddr4DfiSim {
     let exp_pass: bit[8] = if chk_n >= n_bursts { chk_pass + 1 } else { chk_pass }
     let exp_data: bit[256] = pattern(g_exp, exp_pass)
 
-    inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10> {
+    inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10,
+        10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, 3, 3, 16, 64, 4, 40, 16, 40, 63,
+        0, 0, 90, 60, 1, 25, 105, 2, VREF_REPS> {
         clk: phy.dfi_clk,
         req_valid: g_valid,
         req_write: g_write,
