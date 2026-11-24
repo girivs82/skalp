@@ -40,7 +40,11 @@ entity Lpddr4DfiNexusSim<
     const WR_ADJ: nat = 3,
     // ticks the DQ drivers take to turn on at the pins after the PHY's output enable (at most
     // 64); they turn off at once. An undriven DQ reads 0 (the DRAM's ODT pulls it low)
-    const DQ_OE_LATE_TICKS: nat = 0
+    const DQ_OE_LATE_TICKS: nat = 0,
+    // the MR14 levels the DRAM's write receivers work at (0.4 % of VDDQ steps; the controller's
+    // VREF training sweeps range 1, levels 55 to 105)
+    const VREF_OK_LO: nat = 0,
+    const VREF_OK_HI: nat = 255
 > {
     in sim_tick: clock
     out done: bit
@@ -87,6 +91,9 @@ entity Lpddr4DfiNexusSim<
     out m_n_ref: bit[32]
     out m_n_zq: bit[16]
     out m_t_ck: bit[8]
+    out vref: bit[8]
+    out vref_win: bit[12]
+    out vref_map: bit[64]
 }
 
 impl Lpddr4DfiNexusSim {
@@ -223,7 +230,7 @@ impl Lpddr4DfiNexusSim {
     let cmd_sh_at: bit[576] = cmd_sh >> ((ca_late - 1) * 9)
     let cmd_at_dram: bit[9] = if ca_late == 0 { cmd_pins } else { cmd_sh_at[8:0] }
 
-    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8> {
+    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8, VREF_OK_LO, VREF_OK_HI> {
         clk: sim_tick,
         reset_n: phy.reset_n,
         ck_t: cmd_at_dram[8],
@@ -361,4 +368,7 @@ impl Lpddr4DfiNexusSim {
     m_n_ref = dram.n_ref
     m_n_zq = dram.n_zq
     m_t_ck = dram.t_ck_clks
+    vref = ctrl.vref
+    vref_win = ctrl.vref_win
+    vref_map = ctrl.vref_map
 }

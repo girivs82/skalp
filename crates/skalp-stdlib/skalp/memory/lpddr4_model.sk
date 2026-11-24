@@ -21,6 +21,12 @@
 // inverted, and the clock counts in `dq_viol` rather than in `errors`, so that write DQ training
 // can sweep through failing delays. A design must show no `dq_viol` once trained.
 //
+// VREF(DQ): MR14 sets the DQ input reference, at level 25 + OP5:0 (range 0, OP6 = 0) or
+// 55 + OP5:0 (range 1) in 0.4 % of VDDQ steps. Outside VREF_OK_LO..VREF_OK_HI the write
+// receivers lose a beat that differs from the one before it on its line: above the window a 1
+// after a 0 is taken as 0, below it a 0 after a 1 is taken as 1 (the line is still 0 before a
+// burst's first beat). The captured data is simply wrong; it counts in no error.
+//
 // Write leveling (MR2 OP7 = 1): on each DQS_t rising edge a lane samples CK_t and drives the
 // sample on all its DQ TWLO_NCK tCK later; DQ is driven for as long as the mode is on.
 //
@@ -83,6 +89,9 @@ pub entity Lpddr4WriteLane<
     in dqs_t_in: bit
     in dqs_c_in: bit
     in dqs_driven: bit
+    // the reference is above (vref_hi) or below (vref_lo) the receivers' window (see VREF(DQ))
+    in vref_hi: bit
+    in vref_lo: bit
     // a write CAS: the window for its first DQS rise, and its line and row
     in push: bit
     in push_lo: bit[32]
@@ -132,6 +141,8 @@ impl Lpddr4WriteLane {
     signal cor: bit = 0
     signal dq_prev: bit[8] = 0
     signal dqs_prev: bit = 0
+    // the line levels of the burst's previous beat (0 before its first)
+    signal pb: bit[8] = 0
 
     let sk: bit[4] = SKEW_CLKS
     let dqk: bit[4] = DQ_SKEW_CLKS
@@ -159,6 +170,8 @@ impl Lpddr4WriteLane {
         else { if st == 2 && since_edge > tck32 { 24 }
         else { 0 } } } }
     let idx: bit[4] = if st == 1 { 4'h0 } else { beat[3:0] }
+    // what the receivers take with the reference outside their window
+    let dq_v: bit[8] = if vref_hi == 1 { dq & pb } else { if vref_lo == 1 { dq | pb } else { dq } }
     let q_tail: bit[2] = q_head + q_n[1:0]
     let push_ok: bit = if push == 1 && q_n != 4 { 1 } else { 0 }
     let load: bit = if (st == 0 || st == 3) && q_n != 0 { 1 } else { 0 }
@@ -169,7 +182,10 @@ impl Lpddr4WriteLane {
         dqs_prev = dqs
         hold = take
         hold_dq = dq
-        if take == 1 { mem[{line, idx}] = dq }
+        if take == 1 {
+            mem[{line, idx}] = dq_v
+            pb = dq
+        }
         if setup_v == 1 || hold_v == 1 { cor = 1 }
         if push_ok == 1 {
             q_lo[q_tail] = push_lo
@@ -214,6 +230,7 @@ impl Lpddr4WriteLane {
             row = q_row[q_head]
             q_head = q_head + 1
             cor = 0
+            pb = 0
         }
     }
 
@@ -253,7 +270,10 @@ pub entity Lpddr4ChannelModel<
     const WR_SKEW1_CLKS: nat = 0,
     const WR_DQ_SKEW0_CLKS: nat = 0,
     const WR_DQ_SKEW1_CLKS: nat = 0,
-    const TWLO_NCK: nat = 8
+    const TWLO_NCK: nat = 8,
+    // the MR14 levels (see VREF(DQ)) the write receivers work at
+    const VREF_OK_LO: nat = 0,
+    const VREF_OK_HI: nat = 255
 > {
     in clk: clock
     in reset_n: bit
@@ -655,6 +675,13 @@ impl Lpddr4ChannelModel {
     let rq_due: bit = if rq_n != 0 && cyc + 1 == h_t0 { 1 } else { 0 }
     let rq_pre_due: bit = if rq_n != 0 && cyc + 1 + tck32 + tck32 >= h_t0 { 1 } else { 0 }
 
+    // VREF(DQ) level and whether it is in the receivers' window
+    let vref_ok_lo: bit[8] = VREF_OK_LO
+    let vref_ok_hi: bit[8] = VREF_OK_HI
+    let vref_lvl: bit[8] = if mr14[6] == 1 { 8'd55 + {2'b00, mr14[5:0]} } else { 8'd25 + {2'b00, mr14[5:0]} }
+    let vref_hi: bit = if vref_lvl > vref_ok_hi { 1 } else { 0 }
+    let vref_lo: bit = if vref_lvl < vref_ok_lo { 1 } else { 0 }
+
     inst lane0 = Lpddr4WriteLane<WR_SKEW0_CLKS, WR_DQ_SKEW0_CLKS> {
         clk: clk,
         cyc: cyc,
@@ -665,6 +692,8 @@ impl Lpddr4ChannelModel {
         dqs_t_in: dqs_t_in[0],
         dqs_c_in: dqs_c_in[0],
         dqs_driven: dqs_driven[0],
+        vref_hi: vref_hi,
+        vref_lo: vref_lo,
         push: wr_push,
         push_lo: wr_lo,
         push_hi: wr_hi,
@@ -684,6 +713,8 @@ impl Lpddr4ChannelModel {
         dqs_t_in: dqs_t_in[1],
         dqs_c_in: dqs_c_in[1],
         dqs_driven: dqs_driven[1],
+        vref_hi: vref_hi,
+        vref_lo: vref_lo,
         push: wr_push,
         push_lo: wr_lo,
         push_hi: wr_hi,

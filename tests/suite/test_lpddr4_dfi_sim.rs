@@ -1,7 +1,7 @@
 //! LPDDR4 DFI controller (`skalp::memory::lpddr4_dfi_controller`) with the
 //! behavioural DFI PHY and the LPDDR4 channel model, run end to end:
 //! init, mode registers, ZQ calibration, write leveling, gate and read-eye
-//! training and write DQ training through DFI, refresh, PHY and controller updates, and two passes of 64 bursts
+//! training, write DQ and VREF(DQ) training through DFI, refresh, PHY and controller updates, and two passes of 64 bursts
 //! (writes, reads, write-to-read and read-to-write turnarounds) compared
 //! against their data. The channel model checks JEDEC command timing and
 //! reports any cycle where both ends drive DQ or DQS.
@@ -65,6 +65,8 @@ struct Variant {
     wr_skew: [u64; 2],
     /// further board delay of each byte lane's DQ behind its DQS
     wr_dq_skew: [u64; 2],
+    /// MR14 levels (0.4 % of VDDQ) the DRAM's write receivers work at
+    vref_ok: (u64, u64),
 }
 
 async fn run(v: Variant) {
@@ -76,6 +78,8 @@ async fn run(v: Variant) {
         ("WR_SKEW1_CLKS", v.wr_skew[1]),
         ("WR_DQ_SKEW0_CLKS", v.wr_dq_skew[0]),
         ("WR_DQ_SKEW1_CLKS", v.wr_dq_skew[1]),
+        ("VREF_OK_LO", v.vref_ok.0),
+        ("VREF_OK_HI", v.vref_ok.1),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_dfi_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -141,7 +145,12 @@ async fn run(v: Variant) {
     // init: 8 mode-register writes and 2 more for write leveling, ZQ start +
     // latch, MR5/MR8 read back
     assert_eq!(get!("init_done"), 1, "{n}");
-    assert_eq!(get!("m_n_mrw"), 14, "{n}: MRW count");
+    // VREF(DQ) training: one MR14 write per code swept and one for the code chosen
+    let vx = crate::lpddr4_vref::expected(v.vref_ok.0, v.vref_ok.1);
+    assert_eq!(get!("m_n_mrw"), 14 + vx.n_codes + 1, "{n}: MRW count");
+    assert_eq!(get!("vref_map"), vx.map, "{n}: VREF codes passed");
+    assert_eq!(get!("vref_win"), vx.win, "{n}: VREF passing run");
+    assert_eq!(get!("vref"), vx.mr14, "{n}: MR14 after VREF training");
     assert_eq!(get!("m_n_zq"), 1, "{n}: ZQ calibrations");
     assert_eq!(get!("m_n_mrr"), 2, "{n}: MRR count");
     assert_eq!(get!("mr5"), 0xFF, "{n}: MR5 (manufacturer)");
@@ -230,6 +239,7 @@ async fn lpddr4_dfi_nominal() {
         phyupd_every: 0,
         wr_skew: [0, 0],
         wr_dq_skew: [0, 0],
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -243,6 +253,25 @@ async fn lpddr4_dfi_dqsck_board_skew_and_phy_updates() {
         phyupd_every: 200,
         wr_skew: [3, 1],
         wr_dq_skew: [1, 0],
+        vref_ok: (0, 255),
+    })
+    .await;
+}
+
+/// The DRAM's write receivers work only at MR14 levels 70 to 95 (28 to 38 %
+/// of VDDQ), and MR14 as configured (42 %) is above them: VREF training finds
+/// the window and sets the middle of it, and write DQ training passes again
+/// there after failing at the configured reference
+#[tokio::test]
+async fn lpddr4_dfi_vref_training() {
+    run(Variant {
+        name: "vref",
+        dqsck_clks: 0,
+        dq_skew_clks: 0,
+        phyupd_every: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        vref_ok: (70, 95),
     })
     .await;
 }

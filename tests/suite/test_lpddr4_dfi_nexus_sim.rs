@@ -3,7 +3,7 @@
 //! device so the PHY's DDR primitives (ECLKSYNC, ECLKDIV, DDRDLL, DQSBUF,
 //! x4 gearing, delays) come from the family's simulation models, and the
 //! LPDDR4 channel model, run end to end at 1066 Mbps: init, training
-//! through DFI (write leveling, read gate, read eye, write DQ) and two passes
+//! through DFI (write leveling, read gate, read eye, write DQ, VREF(DQ)) and two passes
 //! of traffic compared against their data. The channel model checks JEDEC
 //! command timing and reports any tick where both ends drive DQ or DQS.
 
@@ -112,6 +112,8 @@ struct Variant {
     /// ticks the DQ drivers take to turn on at the pins after the PHY's
     /// output enable (undriven DQ reads 0 at the DRAM, as its ODT pulls it low)
     dq_oe_late: u64,
+    /// MR14 levels (0.4 % of VDDQ) the DRAM's write receivers work at
+    vref_ok: (u64, u64),
 }
 
 const STATUS: [&str; 22] = [
@@ -160,6 +162,8 @@ async fn run(v: Variant) {
         ("CA_LATE_TICKS", v.ca_late),
         ("WR_ADJ", v.wr_adj),
         ("DQ_OE_LATE_TICKS", v.dq_oe_late),
+        ("VREF_OK_LO", v.vref_ok.0),
+        ("VREF_OK_HI", v.vref_ok.1),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -212,7 +216,12 @@ async fn run(v: Variant) {
 
     assert_eq!(get!("dll_lock"), 1, "{n}: DLL lock");
     assert_eq!(get!("init_done"), 1, "{n}");
-    assert_eq!(get!("m_n_mrw"), 14, "{n}: MRW count");
+    // VREF(DQ) training: one MR14 write per code swept and one for the code chosen
+    let vx = crate::lpddr4_vref::expected(v.vref_ok.0, v.vref_ok.1);
+    assert_eq!(get!("m_n_mrw"), 14 + vx.n_codes + 1, "{n}: MRW count");
+    assert_eq!(get!("vref_map"), vx.map, "{n}: VREF codes passed");
+    assert_eq!(get!("vref_win"), vx.win, "{n}: VREF passing run");
+    assert_eq!(get!("vref"), vx.mr14, "{n}: MR14 after VREF training");
     assert_eq!(get!("m_n_zq"), 1, "{n}: ZQ calibrations");
     assert_eq!(get!("m_n_mrr"), 2, "{n}: MRR count");
     assert_eq!(get!("mr5"), 0xFF, "{n}: MR5 (manufacturer)");
@@ -293,9 +302,9 @@ async fn run(v: Variant) {
     assert_eq!(get!("m_n_wr") - train_writes, bursts * 2 * 2, "{n}: writes");
     assert_eq!(get!("m_aliased"), 0, "{n}: aliased lines");
     assert_eq!(get!("m_unwritten"), 0, "{n}: unwritten reads");
-    // every read came back through both lanes' DQS buffers: the traffic and the two mode
-    // register reads (MR5, MR8), two half bursts each
-    let halves = (bursts * 2 * 2 + 2) * 2;
+    // every read came back through both lanes' DQS buffers: the traffic, VREF training's three
+    // read-backs per code and the two mode register reads (MR5, MR8), two half bursts each
+    let halves = (bursts * 2 * 2 + vx.n_codes * 3 + 2) * 2;
     assert_eq!(get!("bursts0"), halves, "{n}: lane 0 half bursts");
     assert_eq!(get!("bursts1"), halves, "{n}: lane 1 half bursts");
 
@@ -316,6 +325,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -337,6 +347,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -360,6 +371,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -380,6 +392,7 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -400,6 +413,7 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -420,6 +434,7 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -443,6 +458,7 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         ca_late: TICKS_PER_CK,
         wr_adj: 4,
         dq_oe_late: 0,
+        vref_ok: (0, 255),
     })
     .await;
 }
@@ -465,6 +481,30 @@ async fn lpddr4_dfi_nexus_dq_enable_late() {
         ca_late: 0,
         wr_adj: 3,
         dq_oe_late: TICKS_PER_CK * 3 / 4,
+        vref_ok: (0, 255),
+    })
+    .await;
+}
+
+/// The DRAM's write receivers work only at MR14 levels 70 to 95 (28 to 38 %
+/// of VDDQ), and MR14 as configured (42 %) is above them: write DQ training
+/// fails at it, VREF training finds the window and sets its middle, and write
+/// DQ training passes when it runs again there
+#[tokio::test]
+async fn lpddr4_dfi_nexus_vref_training() {
+    run(Variant {
+        name: "vref",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (70, 95),
     })
     .await;
 }

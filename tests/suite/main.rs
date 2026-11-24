@@ -20,6 +20,7 @@ mod debug_range_parsing;
 mod debug_sequential_after_if;
 mod e2e_examples_test;
 mod golden_file_tests;
+mod lpddr4_vref;
 mod test_32bit_match;
 mod test_64bit_reg_metal;
 mod test_assertions;
