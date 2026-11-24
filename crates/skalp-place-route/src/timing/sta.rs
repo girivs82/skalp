@@ -17,7 +17,7 @@ use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
 use skalp_lir::gate_netlist::{Cell, CellId, GateNetId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PS_PER_NS: f64 = 1000.0;
 
@@ -63,6 +63,14 @@ pub const STEP_LATCH_ELEMENT: &str = "lut4_feedback_latch";
 pub trait TimingModel {
     /// Delay through a routing switch, in picoseconds.
     fn interconnect_ps(&self, pip: PipId) -> i64;
+
+    /// The delay class of a routing switch the model has no delay for, which
+    /// [`interconnect_ps`](Self::interconnect_ps) then times as 0 ps: its
+    /// class name, or its wire names where it has no class. `None` where the
+    /// model times the switch.
+    fn untimed_pip(&self, _pip: PipId) -> Option<String> {
+        None
+    }
 
     /// When an output is launched by a clock edge or is a pad's: the
     /// clock-to-output delay, or 0 for pads. `None` if the output is a
@@ -525,6 +533,7 @@ pub fn analyze<D: Device + ?Sized>(
         hold: None,
         bundles: Vec::new(),
         failing_by_instance,
+        untimed_switches: Vec::new(),
     }
 }
 
@@ -818,6 +827,46 @@ pub fn net_loads(
     }
 }
 
+/// The routed switches `model` has no delay for (timed as 0 ps), one entry
+/// per delay class with how many switches and nets use it and one net for an
+/// example, most-used first. A routed path through such a switch is faster
+/// in timing than on silicon by however long the switch really takes.
+pub fn untimed_switches(
+    model: &dyn TimingModel,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    routing: &crate::router::RoutingResult,
+) -> Vec<super::UntimedSwitches> {
+    let mut by_class: BTreeMap<String, (usize, BTreeSet<u32>)> = BTreeMap::new();
+    for (&net, route) in &routing.routes {
+        let mut pips = route.pips.clone();
+        pips.sort_unstable_by_key(|p| p.0);
+        pips.dedup();
+        for pip in pips {
+            if let Some(class) = model.untimed_pip(pip) {
+                let entry = by_class.entry(class).or_default();
+                entry.0 += 1;
+                entry.1.insert(net.0);
+            }
+        }
+    }
+    let mut out: Vec<super::UntimedSwitches> = by_class
+        .into_iter()
+        .map(|(class, (switches, nets))| super::UntimedSwitches {
+            class,
+            switches,
+            nets: nets.len(),
+            example_net: nets
+                .iter()
+                .next()
+                .and_then(|&n| netlist.nets.get(n as usize))
+                .map(|n| n.name.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    out.sort_by(|a, b| b.nets.cmp(&a.nets).then(a.class.cmp(&b.class)));
+    out
+}
+
 /// Worst-corner summary of bundle checks made at several named corners
 pub fn summarize_bundles(
     corners: &[(&str, Vec<skalp_lir::ncl_bundle::BundleCheck>)],
@@ -974,5 +1023,62 @@ mod tests {
         assert_eq!(path.source, "q", "{path:?}");
         assert!((path.delay - 0.2).abs() < 1e-9, "{path:?}");
         assert!(report.meets_timing);
+    }
+
+    /// Times every switch but numbers 7 and 8, which it has no delay for
+    struct PartlyTimed;
+
+    impl TimingModel for PartlyTimed {
+        fn interconnect_ps(&self, pip: PipId) -> i64 {
+            if self.untimed_pip(pip).is_some() {
+                0
+            } else {
+                100
+            }
+        }
+        fn untimed_pip(&self, pip: PipId) -> Option<String> {
+            match pip.0 {
+                7 => Some("entry -> mid".into()),
+                8 => Some("A -> B (no class)".into()),
+                _ => None,
+            }
+        }
+        fn launch_ps(&self, _cell: &Cell, _output: usize) -> Option<i64> {
+            None
+        }
+        fn arc_ps(&self, _cell: &Cell, _input: usize, _output: usize) -> Option<i64> {
+            None
+        }
+        fn endpoints(&self, _cell: &Cell) -> Vec<TimingEndpoint> {
+            Vec::new()
+        }
+    }
+
+    /// Routed switches the model can't time are reported by class, each
+    /// switch once per net, with the nets that use them, most-used first;
+    /// timed switches are not
+    #[test]
+    fn untimed_switches_are_reported_by_class() {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let a = netlist.add_net(GateNet::new(GateNetId(0), "a".into()));
+        let b = netlist.add_net(GateNet::new(GateNetId(0), "b".into()));
+        let c = netlist.add_net(GateNet::new(GateNetId(0), "c".into()));
+        let mut routing = RoutingResult::default();
+        for (net, pips) in [(a, vec![7, 7, 3]), (b, vec![7, 8]), (c, vec![1, 2])] {
+            let mut route = crate::router::Route::new(net);
+            route.pips = pips.into_iter().map(PipId).collect();
+            routing.routes.insert(net, route);
+        }
+        let untimed = untimed_switches(&PartlyTimed, &netlist, &routing);
+        let got: Vec<(&str, usize, usize)> = untimed
+            .iter()
+            .map(|u| (u.class.as_str(), u.switches, u.nets))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("entry -> mid", 2, 2), ("A -> B (no class)", 1, 1)]
+        );
+        assert_eq!(untimed[0].example_net, "a");
+        assert_eq!(untimed[1].example_net, "b");
     }
 }

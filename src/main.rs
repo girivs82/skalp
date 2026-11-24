@@ -5400,6 +5400,7 @@ fn run_nexus_pnr_on_netlist(
             }
         }
         print_matched_delays(timing, gate_netlist.settle_wait_ps);
+        print_untimed_switches(timing);
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -5813,6 +5814,32 @@ fn run_pnr_on_netlist(
 
 /// Report the matched delays of bundled-data async blocks, checked with
 /// routed delays
+/// Routed switches the device's timing data has no delay for: every timing
+/// figure above (and a timed simulation of the build) counts them as 0 ps
+fn print_untimed_switches(timing: &skalp_place_route::timing::TimingReport) {
+    if timing.untimed_switches.is_empty() {
+        return;
+    }
+    let nets: usize = timing.untimed_switches.iter().map(|u| u.nets).sum();
+    println!(
+        "  ⚠️ Untimed switches: {} delay classes routed with no delay in the device data, timed as 0 ps (paths through them run slower on silicon than reported):",
+        timing.untimed_switches.len()
+    );
+    for u in timing.untimed_switches.iter().take(20) {
+        println!(
+            "      {}: {} switches on {} nets (e.g. {})",
+            u.class, u.switches, u.nets, u.example_net
+        );
+    }
+    if timing.untimed_switches.len() > 20 {
+        println!(
+            "      ... and {} more classes ({} net uses in all)",
+            timing.untimed_switches.len() - 20,
+            nets
+        );
+    }
+}
+
 fn print_matched_delays(
     timing: &skalp_place_route::timing::TimingReport,
     settle_wait_ps: Option<i64>,

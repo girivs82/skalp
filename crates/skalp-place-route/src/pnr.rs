@@ -1296,6 +1296,19 @@ pub fn place_and_route_nexus_real_from(
         );
     }
     timing.meets_timing &= timing.bundles.iter().all(|b| b.slack_ns >= 0.0);
+    // Switches the delay tables don't time: the analysis above counted them
+    // as 0 ps (the corners share their delay classes)
+    timing.untimed_switches =
+        crate::timing::sta::untimed_switches(&timing_model, netlist, &routing);
+    for u in &timing.untimed_switches {
+        log::warn!(
+            "nexus pnr: no delay for switch class {} ({} switches on {} nets, e.g. {})",
+            u.class,
+            u.switches,
+            u.nets,
+            u.example_net
+        );
+    }
 
     let bit_writer = NexusBitWriter {
         db_root,
