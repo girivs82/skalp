@@ -37,7 +37,10 @@ entity Lpddr4DfiNexusSim<
     // tCK of it needs the controller's write data a slot later (WR_ADJ = 4)
     const CA_LATE_TICKS: nat = 0,
     // the controller's TPHY_WRLAT_ADJ
-    const WR_ADJ: nat = 3
+    const WR_ADJ: nat = 3,
+    // ticks the DQ drivers take to turn on at the pins after the PHY's output enable (at most
+    // 64); they turn off at once. An undriven DQ reads 0 (the DRAM's ODT pulls it low)
+    const DQ_OE_LATE_TICKS: nat = 0
 > {
     in sim_tick: clock
     out done: bit
@@ -245,9 +248,18 @@ impl Lpddr4DfiNexusSim {
     signal drv_dqs: bit[2]
     drv_dq = {if phy.dq_t[15:8] != 8'hFF { 1'b1 } else { 1'b0 }, if phy.dq_t[7:0] != 8'hFF { 1'b1 } else { 1'b0 }}
     drv_dqs = ~phy.dqs_t
+    // the PHY's DQ output disables (1 = not driven), DQ_OE_LATE_TICKS ticks ago: a pin drives
+    // once it has been enabled now and then
+    signal dqt_sh: bit[1024] = 0
+    on(sim_tick.rise) {
+        dqt_sh = {dqt_sh[1007:0], phy.dq_t}
+    }
+    let oe_late: bit[16] = DQ_OE_LATE_TICKS
+    let dqt_sh_at: bit[1024] = dqt_sh >> ((oe_late - 1) * 16)
+    let dq_off: bit[16] = if oe_late == 0 { phy.dq_t } else { phy.dq_t | dqt_sh_at[15:0] }
     bus_dq = {
-        if dram.dq_oe == 1 { dram.dq_out[15:8] } else { (phy.dq_o[15:8] & ~phy.dq_t[15:8]) },
-        if dram.dq_oe == 1 { dram.dq_out[7:0] } else { (phy.dq_o[7:0] & ~phy.dq_t[7:0]) }
+        if dram.dq_oe == 1 { dram.dq_out[15:8] } else { (phy.dq_o[15:8] & ~dq_off[15:8]) },
+        if dram.dq_oe == 1 { dram.dq_out[7:0] } else { (phy.dq_o[7:0] & ~dq_off[7:0]) }
     }
     bus_dqs = {
         if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_t[1] == 0 { phy.dqs_o[1] } else { 1'b0 } },

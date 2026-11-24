@@ -29,7 +29,10 @@
 // a slot with dfi_wrdata_en is sent in the next slot at the pins; DQS rises at that slot's start
 // plus the lane's write leveling delay and falls half a tCK later, with a 2 tCK static preamble
 // and a 1 tCK postamble (driven low); DQ is centred on DQS (DQSW270 is three quarters of a tCK
-// after DQSW, plus the lane's write DQ delay) and holds its last beat one more slot. So, as with
+// after DQSW, plus the lane's write DQ delay) and holds its last beat one more slot; DQ's drivers
+// turn on a slot before the first data slot (inside the DQS preamble), as on a CertusPro-NX the
+// first beat of a write that follows no other write otherwise reached the DRAM undriven (its ODT
+// pulled it low: lone writes stored beat 0 with ones cleared). So, as with
 // the behavioural PHY, a controller sets TPHY_WRLAT_ADJ = 3.
 //
 // Reads: each lane's read gate (the DQS buffer's READ) follows dfi_rddata_en, delayed by the
@@ -248,6 +251,7 @@ pub entity NexusLpddr4Lane<
     out gate_set: bit[8]
     out rd_pos: bit[8]
     out wr_pos: bit[8]
+    out sweep_map: bit[64]
     out bursts: bit[16]
 }
 
@@ -284,6 +288,8 @@ impl NexusLpddr4Lane {
     // sweep: setting index or position of the event being evaluated, run and best run
     signal idx: bit[8] = 0
     signal run_st: bit[8] = 0
+    // the last sweep's results, one bit per evaluated position (the latest in bit 0)
+    signal sw_map: bit[64] = 0
     signal run_ln: bit[8] = 0
     signal best_st: bit[8] = 0
     signal best_end: bit[8] = 0
@@ -615,6 +621,7 @@ impl NexusLpddr4Lane {
         eye_q = eye_en
         wdq_q = wdq_en
         if any_start == 1 {
+            sw_map = 0
             run_ln = 0
             best_ln = 0
             best_st = 0
@@ -682,6 +689,7 @@ impl NexusLpddr4Lane {
 
         // ---------------------------------------------------------- gate, eye, write DQ sweeps
         if evaluate == 1 {
+            sw_map = {sw_map[62:0], pass}
             if pass == 1 {
                 run_st = rs
                 run_ln = rl
@@ -809,6 +817,7 @@ impl NexusLpddr4Lane {
     gate_set = gsel
     rd_pos = rdp_r
     wr_pos = wrp_r
+    sweep_map = sw_map
     bursts = nburst
 }
 
@@ -929,6 +938,10 @@ pub entity DfiLpddr4NexusPhy<
     // half bursts each lane has returned outside training
     out bursts0: bit[16]
     out bursts1: bit[16]
+    // each lane's last training sweep (after training: the write DQ sweep), one bit per
+    // evaluated position from the bottom up, the top in bit 0 (1 = passed)
+    out sweep_map0: bit[64]
+    out sweep_map1: bit[64]
     out ctrlupd_count: bit[16]
 }
 
@@ -1114,8 +1127,8 @@ impl DfiLpddr4NexusPhy {
     let em1: bit = we12[2]
     let e4: bit = we12[7]
     let e5: bit = we12[8]
-    // DQS: 2 slots of preamble, the data slots, 1 slot of postamble; DQ: the data slots and one
-    // more holding the last beat
+    // DQS: 2 slots of preamble, the data slots, 1 slot of postamble; DQ: a slot of lead, the data
+    // slots and one more holding the last beat
     let sdrv0: bit = if em1 == 1 || e0 == 1 || e1 == 1 || e2 == 1 { 1 } else { 0 }
     let ws0: bit[32] = wd12[127:96]
     let wp0: bit[32] = wd12[95:64]
@@ -1137,13 +1150,16 @@ impl DfiLpddr4NexusPhy {
     let bt0_3: bit[16] = if e3 == 1 { ws3[15:0] } else { wp3[31:16] }
     let bt1_3: bit[16] = if e3 == 1 { ws3[31:16] } else { wp3[31:16] }
     let dqs_tt_w: bit[4] = {~sdrv3, ~sdrv2, ~sdrv1, ~sdrv0}
-    // DQ output enables (1 = not driven): DQ drives in slot j when e(j) or e(j-1) is set.
+    // DQ output enables (1 = not driven): DQ drives in slot j when e(j + 1), e(j) or e(j - 1) is
+    // set. The slot of lead (inside the DQS preamble, so no wider than the strobe's drive) turns
+    // the drivers on before the first beat: without it a lone write's first beat reached the
+    // DRAM undriven on silicon.
     // Registered from the frames they come from (b and c now are a and b next cycle), one
     // register per lane so each sits by its lane's gearboxes
-    let nqdrv0: bit = if b_we[3] == 1 || b_we[2] == 1 { 1 } else { 0 }
-    let nqdrv1: bit = if c_we[0] == 1 || b_we[3] == 1 { 1 } else { 0 }
-    let nqdrv2: bit = if c_we[1] == 1 || c_we[0] == 1 { 1 } else { 0 }
-    let nqdrv3: bit = if c_we[2] == 1 || c_we[1] == 1 { 1 } else { 0 }
+    let nqdrv0: bit = if c_we[0] == 1 || b_we[3] == 1 || b_we[2] == 1 { 1 } else { 0 }
+    let nqdrv1: bit = if c_we[1] == 1 || c_we[0] == 1 || b_we[3] == 1 { 1 } else { 0 }
+    let nqdrv2: bit = if c_we[2] == 1 || c_we[1] == 1 || c_we[0] == 1 { 1 } else { 0 }
+    let nqdrv3: bit = if c_we[3] == 1 || c_we[2] == 1 || c_we[1] == 1 { 1 } else { 0 }
     let dq_tt_next: bit[4] = {~nqdrv3, ~nqdrv2, ~nqdrv1, ~nqdrv0}
     // DQS rises at the start of each data slot. A write leveling strobe takes three frames: a
     // frame of preamble (driven low), four pulses (the DQS buffer returns a word per four
@@ -1417,5 +1433,7 @@ impl DfiLpddr4NexusPhy {
     wdq_fail = {lane1.wdq_fail, lane0.wdq_fail}
     bursts0 = lane0.bursts
     bursts1 = lane1.bursts
+    sweep_map0 = lane0.sweep_map
+    sweep_map1 = lane1.sweep_map
     ctrlupd_count = ctrlupd_n
 }

@@ -109,6 +109,9 @@ struct Variant {
     ca_late: u64,
     /// the controller's TPHY_WRLAT_ADJ
     wr_adj: u64,
+    /// ticks the DQ drivers take to turn on at the pins after the PHY's
+    /// output enable (undriven DQ reads 0 at the DRAM, as its ODT pulls it low)
+    dq_oe_late: u64,
 }
 
 const STATUS: [&str; 22] = [
@@ -156,6 +159,7 @@ async fn run(v: Variant) {
         ("CK_TICKS", v.ck_ticks),
         ("CA_LATE_TICKS", v.ca_late),
         ("WR_ADJ", v.wr_adj),
+        ("DQ_OE_LATE_TICKS", v.dq_oe_late),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -311,6 +315,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         gate_level: &[],
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -331,6 +336,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         gate_level: &[],
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -353,6 +359,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         gate_level: GATE_LEVEL,
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -372,6 +379,7 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         gate_level: GATE_LEVEL,
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -391,6 +399,7 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         gate_level: &[],
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -410,6 +419,7 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         gate_level: &[],
         ca_late: 0,
         wr_adj: 3,
+        dq_oe_late: 0,
     })
     .await;
 }
@@ -432,6 +442,29 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         gate_level: &[],
         ca_late: TICKS_PER_CK,
         wr_adj: 4,
+        dq_oe_late: 0,
+    })
+    .await;
+}
+
+/// The DQ drivers turning on most of a tCK after the PHY's output enable (as
+/// on a CertusPro-NX, where a lone write's first beat reached the DRAM
+/// undriven): the PHY turns them on a slot ahead of the first beat, so writes
+/// on their own (the rewrite phase) store every beat
+#[tokio::test]
+async fn lpddr4_dfi_nexus_dq_enable_late() {
+    run(Variant {
+        name: "dq_enable_late",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: TICKS_PER_CK * 3 / 4,
     })
     .await;
 }
