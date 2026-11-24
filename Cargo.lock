@@ -2479,7 +2479,7 @@ dependencies = [
 [[package]]
 name = "prjoxide"
 version = "0.1.0"
-source = "git+https://github.com/girivs82/prjoxide?rev=50a462a7e609ab3ea94670cc9d01e921c6c2f7a9#50a462a7e609ab3ea94670cc9d01e921c6c2f7a9"
+source = "git+https://github.com/girivs82/prjoxide?rev=7422589893dfd5f86437d84fb467a880a555d486#7422589893dfd5f86437d84fb467a880a555d486"
 dependencies = [
  "clap 3.2.25",
  "include_dir",
