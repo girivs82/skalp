@@ -355,6 +355,10 @@ fn latch_bits(netlist: &GateNetlist) -> Vec<LatchBit> {
             });
             continue;
         }
+        if holds_a_constant(cell, q) {
+            // A latch whose data folded to a constant: no data path to time
+            continue;
+        }
         let Some((latch, part)) = cell.path.rsplit_once('.') else {
             continue;
         };
@@ -380,6 +384,46 @@ fn latch_bits(netlist: &GateNetlist) -> Vec<LatchBit> {
         }
     }
     bits
+}
+
+/// Whether `cell` is a latch LUT whose data input synthesis folded to a
+/// constant: its output `q` feeds back into it, and with some input as the
+/// enable (and perhaps another as the block reset, which clears it) it loads
+/// a fixed value while enabled and holds while not. Such a bit has no data
+/// to time.
+fn holds_a_constant(cell: &crate::gate_netlist::Cell, q: GateNetId) -> bool {
+    let Some(init) = cell.lut_init else {
+        return false;
+    };
+    let n = cell.inputs.len();
+    if !(2..=3).contains(&n) {
+        return false;
+    }
+    let Some(q_pin) = cell.inputs.iter().position(|&i| i == q) else {
+        return false;
+    };
+    let bit = |a: usize| (init >> a) & 1 == 1;
+    let others: Vec<usize> = (0..n).filter(|&i| i != q_pin).collect();
+    for &en in &others {
+        let rst = others.iter().copied().find(|&i| i != en);
+        for value in [false, true] {
+            let matches = (0..1usize << n).all(|a| {
+                let pin = |i: usize| (a >> i) & 1 == 1;
+                let want = if rst.is_some_and(pin) {
+                    false
+                } else if pin(en) {
+                    value
+                } else {
+                    pin(q_pin)
+                };
+                bit(a) == want
+            });
+            if matches {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Shortest and longest delay from `from` (an input of the latch) to its
@@ -2538,6 +2582,42 @@ pub fn size_matched_delays(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A latch bit whose data synthesis folded to a constant (a LUT over
+    /// [en, q, rst] that clears while enabled) is known as one with nothing
+    /// to time; a LUT that does not hold its value is not
+    #[test]
+    fn a_latch_with_constant_data_is_known() {
+        let (en, q, rst) = (GateNetId(1), GateNetId(2), GateNetId(3));
+        let lut = |inputs: Vec<GateNetId>, init| {
+            Cell::new_lut(
+                CellId(0),
+                "LUT4".into(),
+                "t".into(),
+                0.0,
+                "top.u.x.master.lat1".into(),
+                inputs,
+                vec![q],
+                init,
+            )
+        };
+        // q' = rst ? 0 : (en ? 0 : q), inputs [en, q, rst]: only a = 0b010
+        assert!(holds_a_constant(&lut(vec![en, q, rst], 0x04), q));
+        // q' = rst ? 0 : (en ? 1 : q), pins in another order [q, rst, en]
+        let init = (0..8u64)
+            .filter(|a| {
+                let (qv, rv, ev) = (a & 1 == 1, a & 2 == 2, a & 4 == 4);
+                !rv && (ev || qv)
+            })
+            .fold(0, |acc, a| acc | (1 << a));
+        assert!(holds_a_constant(&lut(vec![q, rst, en], init), q));
+        // Without a reset: q' = en ? 1 : q over [en, q]
+        assert!(holds_a_constant(&lut(vec![en, q], 0b1110), q));
+        // An AND of en and q is not a latch
+        assert!(!holds_a_constant(&lut(vec![en, q], 0b1000), q));
+        // No feedback, no latch
+        assert!(!holds_a_constant(&lut(vec![en, rst], 0x4), q));
+    }
 
     /// Every cell 100 ps, connections free, setup free
     /// After the release rises, a request it drops clears a deferral chain
