@@ -9335,7 +9335,10 @@ struct TimedOptions {
     /// takes every delay a fraction K (0 to 1) of the way from the fast to
     /// the slow corner, where real silicon usually sits: measure K with a
     /// ring oscillator on the chip against the same ring simulated at both
-    /// corners, in delay (period), not frequency.
+    /// corners, in delay (period), not frequency. `between:K,clock:C`
+    /// puts the clock network's wires at C and every other delay at K
+    /// (a ring through the clock network, measured beside a logic ring,
+    /// gives C).
     #[arg(long)]
     corner: Option<String>,
     /// What nets hold at power-up, before cells drive them: zero (the
@@ -9576,19 +9579,34 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     let mixed;
     let delays = match args.timed.corner.as_deref() {
         Some(corner) if corner.starts_with("between:") => {
-            let k: f64 = corner["between:".len()..]
-                .parse()
-                .context("--corner between:K needs a number")?;
-            if !(0.0..=1.0).contains(&k) {
-                anyhow::bail!("--corner between:K needs K from 0 (fast) to 1 (slow)");
-            }
+            let spec = &corner["between:".len()..];
+            let (k, clock_k) = match spec.split_once(',') {
+                Some((k, clock)) => (
+                    k,
+                    Some(clock.strip_prefix("clock:").with_context(|| {
+                        format!("--corner between:K,clock:C: '{clock}' is not clock:C")
+                    })?),
+                ),
+                None => (spec, None),
+            };
+            let fraction = |text: &str| -> Result<f64> {
+                let k: f64 = text
+                    .parse()
+                    .with_context(|| format!("--corner between: '{text}' is not a number"))?;
+                if !(0.0..=1.0).contains(&k) {
+                    anyhow::bail!("--corner between: {k} is not from 0 (fast) to 1 (slow)");
+                }
+                Ok(k)
+            };
+            let k = fraction(k)?;
+            let clock_k = clock_k.map(fraction).transpose()?.unwrap_or(k);
             let named = |name: &str| {
                 corners
                     .iter()
                     .find(|d| d.corner == name)
                     .with_context(|| format!("--corner between:K needs a '{name}' corner"))
             };
-            mixed = DelayAnnotation::between(named("fast")?, named("slow")?, k)
+            mixed = DelayAnnotation::between_with_clock(named("fast")?, named("slow")?, k, clock_k)
                 .map_err(anyhow::Error::msg)?;
             &mixed
         }

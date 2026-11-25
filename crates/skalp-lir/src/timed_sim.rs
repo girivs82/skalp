@@ -727,6 +727,21 @@ impl DelayAnnotation {
     /// The two must be of the same netlist; a delay either one lacks is
     /// left out.
     pub fn between(from: &Self, to: &Self, k: f64) -> Result<Self, String> {
+        Self::between_with_clock(from, to, k, k)
+    }
+
+    /// As [`between`](Self::between), with the clock wires (from a clock
+    /// net's driver through the clock network to each clock pin) a fraction
+    /// `clock_k` of the way and every other delay `k`. A device's clock
+    /// network need not sit where its logic and routing do between the
+    /// corners: a ring that passes the clock network, measured beside a
+    /// ring of logic, gives the two apart.
+    pub fn between_with_clock(
+        from: &Self,
+        to: &Self,
+        k: f64,
+        clock_k: f64,
+    ) -> Result<Self, String> {
         if from.cells.len() != to.cells.len() {
             return Err(format!(
                 "the {} and {} corners have {} and {} cells",
@@ -736,7 +751,8 @@ impl DelayAnnotation {
                 to.cells.len()
             ));
         }
-        let mix = |a: i64, b: i64| a + ((b - a) as f64 * k).round() as i64;
+        let mix_by = |a: i64, b: i64, k: f64| a + ((b - a) as f64 * k).round() as i64;
+        let mix = |a: i64, b: i64| mix_by(a, b, k);
         let mix_all = |a: &[i64], b: &[i64]| -> Vec<i64> {
             a.iter().zip(b).map(|(&a, &b)| mix(a, b)).collect()
         };
@@ -758,7 +774,7 @@ impl DelayAnnotation {
                 }
                 Ok(CellDelays {
                     wire_ps: mix_all(&a.wire_ps, &b.wire_ps),
-                    clock_wire_ps: mix(a.clock_wire_ps, b.clock_wire_ps),
+                    clock_wire_ps: mix_by(a.clock_wire_ps, b.clock_wire_ps, clock_k),
                     arcs: a
                         .arcs
                         .iter()
@@ -780,8 +796,13 @@ impl DelayAnnotation {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let at = if clock_k == k {
+            format!("{k}")
+        } else {
+            format!("{k}, clock network at {clock_k}")
+        };
         Ok(Self {
-            corner: format!("{} to {} at {k}", from.corner, to.corner),
+            corner: format!("{} to {} at {at}", from.corner, to.corner),
             cells,
         })
     }
@@ -2871,6 +2892,30 @@ mod tests {
             cells: vec![cell(1, None)],
         };
         assert!(DelayAnnotation::between(&fast, &short, 0.5).is_err());
+    }
+
+    #[test]
+    fn the_clock_network_can_sit_elsewhere_between_corners() {
+        let cell = |wire: i64, clock: i64| CellDelays {
+            wire_ps: vec![wire],
+            clock_wire_ps: clock,
+            arcs: vec![vec![Some(wire)]],
+            clock_to_out_ps: wire,
+            launches: vec![true],
+            setup_ps: vec![wire],
+            hold_ps: vec![wire],
+        };
+        let fast = DelayAnnotation {
+            corner: "fast".into(),
+            cells: vec![cell(100, 1000)],
+        };
+        let slow = DelayAnnotation {
+            corner: "slow".into(),
+            cells: vec![cell(300, 2000)],
+        };
+        let mixed = DelayAnnotation::between_with_clock(&fast, &slow, 0.25, 0.9).unwrap();
+        assert_eq!(mixed.cells[0], cell(150, 1900));
+        assert!(mixed.corner.contains("clock network at 0.9"));
     }
     use crate::gate_netlist::GateNet;
 
