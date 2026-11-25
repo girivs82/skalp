@@ -718,6 +718,32 @@ pub struct CellDelays {
     pub hold_ps: Vec<i64>,
 }
 
+/// Where each kind of delay sits between two corners, as fractions from
+/// the first (0) to the second (1): see [`DelayAnnotation::mixed`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CornerMix {
+    /// Every delay no other entry covers
+    pub k: f64,
+    /// The clock wires
+    pub clock: f64,
+    /// Per cell (by index; empty for none): its own delays' fraction
+    pub cells: Vec<Option<f64>>,
+    /// How the corner is named, such as `0.29, clock network at 0.96`
+    pub label: String,
+}
+
+impl CornerMix {
+    /// Every delay at `k`
+    pub fn uniform(k: f64) -> Self {
+        Self {
+            k,
+            clock: k,
+            cells: Vec::new(),
+            label: format!("{k}"),
+        }
+    }
+}
+
 impl DelayAnnotation {
     /// The delays a fraction `k` of the way from `from` to `to`, each delay
     /// on its own: `from + k * (to - from)`. Silicon sits somewhere between
@@ -727,21 +753,19 @@ impl DelayAnnotation {
     /// The two must be of the same netlist; a delay either one lacks is
     /// left out.
     pub fn between(from: &Self, to: &Self, k: f64) -> Result<Self, String> {
-        Self::between_with_clock(from, to, k, k)
+        Self::mixed(from, to, &CornerMix::uniform(k))
     }
 
-    /// As [`between`](Self::between), with the clock wires (from a clock
-    /// net's driver through the clock network to each clock pin) a fraction
-    /// `clock_k` of the way and every other delay `k`. A device's clock
-    /// network need not sit where its logic and routing do between the
-    /// corners: a ring that passes the clock network, measured beside a
-    /// ring of logic, gives the two apart.
-    pub fn between_with_clock(
-        from: &Self,
-        to: &Self,
-        k: f64,
-        clock_k: f64,
-    ) -> Result<Self, String> {
+    /// As [`between`](Self::between), each delay at its own fraction from
+    /// `from` to `to` as `mix` gives it: the clock wires (from a clock net's
+    /// driver through the clock network to each clock pin) at `mix.clock`,
+    /// a cell's own delays (arcs, clock to out, setup and hold) at its
+    /// entry in `mix.cells` where it has one, and every other delay (the
+    /// wires to the cells' pins, the other cells) at `mix.k`. A device's
+    /// clock network and hard blocks need not sit where its logic and
+    /// routing do between the corners: rings through each, measured side
+    /// by side on the chip, give them apart.
+    pub fn mixed(from: &Self, to: &Self, mix: &CornerMix) -> Result<Self, String> {
         if from.cells.len() != to.cells.len() {
             return Err(format!(
                 "the {} and {} corners have {} and {} cells",
@@ -751,10 +775,16 @@ impl DelayAnnotation {
                 to.cells.len()
             ));
         }
+        if !mix.cells.is_empty() && mix.cells.len() != from.cells.len() {
+            return Err(format!(
+                "a corner mix for {} cells, of a netlist with {}",
+                mix.cells.len(),
+                from.cells.len()
+            ));
+        }
         let mix_by = |a: i64, b: i64, k: f64| a + ((b - a) as f64 * k).round() as i64;
-        let mix = |a: i64, b: i64| mix_by(a, b, k);
-        let mix_all = |a: &[i64], b: &[i64]| -> Vec<i64> {
-            a.iter().zip(b).map(|(&a, &b)| mix(a, b)).collect()
+        let mix_all = |a: &[i64], b: &[i64], k: f64| -> Vec<i64> {
+            a.iter().zip(b).map(|(&a, &b)| mix_by(a, b, k)).collect()
         };
         let cells = from
             .cells
@@ -772,9 +802,10 @@ impl DelayAnnotation {
                         from.corner, to.corner
                     ));
                 }
+                let own = mix.cells.get(i).copied().flatten().unwrap_or(mix.k);
                 Ok(CellDelays {
-                    wire_ps: mix_all(&a.wire_ps, &b.wire_ps),
-                    clock_wire_ps: mix_by(a.clock_wire_ps, b.clock_wire_ps, clock_k),
+                    wire_ps: mix_all(&a.wire_ps, &b.wire_ps, mix.k),
+                    clock_wire_ps: mix_by(a.clock_wire_ps, b.clock_wire_ps, mix.clock),
                     arcs: a
                         .arcs
                         .iter()
@@ -783,26 +814,21 @@ impl DelayAnnotation {
                             x.iter()
                                 .zip(y)
                                 .map(|(&x, &y)| match (x, y) {
-                                    (Some(x), Some(y)) => Some(mix(x, y)),
+                                    (Some(x), Some(y)) => Some(mix_by(x, y, own)),
                                     _ => None,
                                 })
                                 .collect()
                         })
                         .collect(),
-                    clock_to_out_ps: mix(a.clock_to_out_ps, b.clock_to_out_ps),
+                    clock_to_out_ps: mix_by(a.clock_to_out_ps, b.clock_to_out_ps, own),
                     launches: a.launches.clone(),
-                    setup_ps: mix_all(&a.setup_ps, &b.setup_ps),
-                    hold_ps: mix_all(&a.hold_ps, &b.hold_ps),
+                    setup_ps: mix_all(&a.setup_ps, &b.setup_ps, own),
+                    hold_ps: mix_all(&a.hold_ps, &b.hold_ps, own),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let at = if clock_k == k {
-            format!("{k}")
-        } else {
-            format!("{k}, clock network at {clock_k}")
-        };
         Ok(Self {
-            corner: format!("{} to {} at {at}", from.corner, to.corner),
+            corner: format!("{} to {} at {}", from.corner, to.corner, mix.label),
             cells,
         })
     }
@@ -2913,9 +2939,59 @@ mod tests {
             corner: "slow".into(),
             cells: vec![cell(300, 2000)],
         };
-        let mixed = DelayAnnotation::between_with_clock(&fast, &slow, 0.25, 0.9).unwrap();
+        let mix = CornerMix {
+            k: 0.25,
+            clock: 0.9,
+            cells: Vec::new(),
+            label: "0.25, clock network at 0.9".into(),
+        };
+        let mixed = DelayAnnotation::mixed(&fast, &slow, &mix).unwrap();
         assert_eq!(mixed.cells[0], cell(150, 1900));
         assert!(mixed.corner.contains("clock network at 0.9"));
+    }
+
+    #[test]
+    fn a_kind_of_cell_can_sit_elsewhere_between_corners() {
+        let cell = |d: i64| CellDelays {
+            wire_ps: vec![d],
+            clock_wire_ps: d,
+            arcs: vec![vec![Some(d), None]],
+            clock_to_out_ps: d,
+            launches: vec![true],
+            setup_ps: vec![d],
+            hold_ps: vec![d],
+        };
+        let fast = DelayAnnotation {
+            corner: "fast".into(),
+            cells: vec![cell(100), cell(100)],
+        };
+        let slow = DelayAnnotation {
+            corner: "slow".into(),
+            cells: vec![cell(200), cell(200)],
+        };
+        let mix = CornerMix {
+            k: 0.5,
+            clock: 0.5,
+            cells: vec![None, Some(1.0)],
+            label: "test".into(),
+        };
+        let mixed = DelayAnnotation::mixed(&fast, &slow, &mix).unwrap();
+        assert_eq!(mixed.cells[0], cell(150));
+        // The second cell's own delays at 1, the wires to it at 0.5
+        let second = &mixed.cells[1];
+        assert_eq!(second.wire_ps, vec![150]);
+        assert_eq!(second.clock_wire_ps, 150);
+        assert_eq!(second.arcs, vec![vec![Some(200), None]]);
+        assert_eq!(second.clock_to_out_ps, 200);
+        assert_eq!(
+            (second.setup_ps.clone(), second.hold_ps.clone()),
+            (vec![200], vec![200])
+        );
+        let short = CornerMix {
+            cells: vec![None],
+            ..mix
+        };
+        assert!(DelayAnnotation::mixed(&fast, &slow, &short).is_err());
     }
     use crate::gate_netlist::GateNet;
 

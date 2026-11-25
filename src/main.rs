@@ -9338,7 +9338,8 @@ struct TimedOptions {
     /// corners, in delay (period), not frequency. `between:K,clock:C`
     /// puts the clock network's wires at C and every other delay at K
     /// (a ring through the clock network, measured beside a logic ring,
-    /// gives C).
+    /// gives C); `,CELL:F` (repeatable, CELL a cell type such as CCU2)
+    /// puts those cells' own delays at F.
     #[arg(long)]
     corner: Option<String>,
     /// What nets hold at power-up, before cells drive them: zero (the
@@ -9553,6 +9554,53 @@ fn port_prefix(netlist: &skalp_lir::gate_netlist::GateNetlist) -> Option<String>
         .then(|| prefix.to_string())
 }
 
+/// The fractions of `--corner between:K[,clock:C][,CELL:F]...`: every
+/// delay at K, the clock wires at C, and the own delays (arcs, clock to out,
+/// setup, hold) of each cell of type CELL (such as CCU2) at F.
+fn parse_corner_mix(
+    spec: &str,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+) -> Result<skalp_lir::timed_sim::CornerMix> {
+    let fraction = |text: &str| -> Result<f64> {
+        let k: f64 = text
+            .parse()
+            .with_context(|| format!("--corner between: '{text}' is not a number"))?;
+        if !(0.0..=1.0).contains(&k) {
+            anyhow::bail!("--corner between: {k} is not from 0 (fast) to 1 (slow)");
+        }
+        Ok(k)
+    };
+    let mut parts = spec.split(',');
+    let k = fraction(parts.next().unwrap_or_default())?;
+    let mut mix = skalp_lir::timed_sim::CornerMix::uniform(k);
+    let mut label = vec![format!("{k}")];
+    for part in parts {
+        let (kind, value) = part.split_once(':').with_context(|| {
+            format!("--corner between:K,...: '{part}' is not clock:C or CELL:F")
+        })?;
+        let value = fraction(value)?;
+        if kind == "clock" {
+            mix.clock = value;
+            label.push(format!("clock network at {value}"));
+            continue;
+        }
+        let mut found = false;
+        mix.cells.resize(netlist.cells.len(), None);
+        for (slot, cell) in mix.cells.iter_mut().zip(&netlist.cells) {
+            if cell.cell_type == kind {
+                *slot = Some(value);
+                found = true;
+            }
+        }
+        if !found {
+            anyhow::bail!("--corner between: the netlist has no {kind} cell");
+        }
+        label.push(format!("{kind} at {value}"));
+    }
+    mix.label = label.join(", ");
+    Ok(mix)
+}
+
 /// Simulate a routed design in time with its routed delays
 fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     use skalp_lir::timed_sim::{
@@ -9579,34 +9627,14 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     let mixed;
     let delays = match args.timed.corner.as_deref() {
         Some(corner) if corner.starts_with("between:") => {
-            let spec = &corner["between:".len()..];
-            let (k, clock_k) = match spec.split_once(',') {
-                Some((k, clock)) => (
-                    k,
-                    Some(clock.strip_prefix("clock:").with_context(|| {
-                        format!("--corner between:K,clock:C: '{clock}' is not clock:C")
-                    })?),
-                ),
-                None => (spec, None),
-            };
-            let fraction = |text: &str| -> Result<f64> {
-                let k: f64 = text
-                    .parse()
-                    .with_context(|| format!("--corner between: '{text}' is not a number"))?;
-                if !(0.0..=1.0).contains(&k) {
-                    anyhow::bail!("--corner between: {k} is not from 0 (fast) to 1 (slow)");
-                }
-                Ok(k)
-            };
-            let k = fraction(k)?;
-            let clock_k = clock_k.map(fraction).transpose()?.unwrap_or(k);
+            let mix = parse_corner_mix(&corner["between:".len()..], &netlist)?;
             let named = |name: &str| {
                 corners
                     .iter()
                     .find(|d| d.corner == name)
                     .with_context(|| format!("--corner between:K needs a '{name}' corner"))
             };
-            mixed = DelayAnnotation::between_with_clock(named("fast")?, named("slow")?, k, clock_k)
+            mixed = DelayAnnotation::mixed(named("fast")?, named("slow")?, &mix)
                 .map_err(anyhow::Error::msg)?;
             &mixed
         }
