@@ -187,6 +187,52 @@ impl<D: Device + ?Sized> Engine<'_, D> {
         total
     }
 
+    /// The routing delay of [`route_delay`](Self::route_delay) split by
+    /// the delay class `model` gives each switch on the way, summed per
+    /// class in the order met from the pin back; empty where the device
+    /// cannot name the pin's wire or the model names no classes
+    fn route_classes(&mut self, net: GateNetId, cell: CellId, pin: usize) -> Vec<(String, i64)> {
+        let Some(loc) = self.design.placement.placements.get(&cell) else {
+            return Vec::new();
+        };
+        let Some(route) = self.design.routing.routes.get(&net) else {
+            return Vec::new();
+        };
+        let Some(mut wire) =
+            self.device
+                .bel_pin_wire(loc.tile_x, loc.tile_y, loc.bel_index, CellPin::Input(pin))
+        else {
+            return Vec::new();
+        };
+        let device = self.device;
+        let drivers = self.drivers.entry(net).or_insert_with(|| {
+            route
+                .pips
+                .iter()
+                .filter_map(|&p| device.pip(p).map(|info| (info.dst_wire, p)))
+                .collect()
+        });
+        let mut classes: Vec<(String, i64)> = Vec::new();
+        let mut hops = 0;
+        while let Some(&pip) = drivers.get(&wire) {
+            let Some(class) = self.model.pip_class(pip) else {
+                return Vec::new();
+            };
+            let ps = self.model.interconnect_ps(pip);
+            match classes.iter_mut().find(|(c, _)| *c == class) {
+                Some((_, total)) => *total += ps,
+                None => classes.push((class, ps)),
+            }
+            let Some(info) = device.pip(pip) else { break };
+            wire = info.src_wire;
+            hops += 1;
+            if hops > 10_000 {
+                break;
+            }
+        }
+        classes
+    }
+
     /// Arrival time where nothing timed launches a path: time zero for
     /// setup, which times such inputs from the clock source; none for hold.
     fn untimed(&self) -> i64 {
@@ -701,6 +747,29 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
             .map(|pin| engine.route_delay(net, cell.id, pin))
             .max()
             .unwrap_or(0)
+    }
+
+    fn wire_classes_ps(
+        &self,
+        _netlist: &skalp_lir::gate_netlist::GateNetlist,
+        net: GateNetId,
+        cell: &Cell,
+        input: usize,
+    ) -> Vec<(String, i64)> {
+        if self.model.is_dedicated(cell, input) {
+            return Vec::new();
+        }
+        // The pin whose delay `wire_ps` gives: the slowest of the input's
+        let mut engine = self.engine.borrow_mut();
+        let Some(pin) = self
+            .model
+            .input_pins(cell, input)
+            .into_iter()
+            .max_by_key(|&pin| engine.route_delay(net, cell.id, pin))
+        else {
+            return Vec::new();
+        };
+        engine.route_classes(net, cell.id, pin)
     }
 
     fn clock_wire_ps(

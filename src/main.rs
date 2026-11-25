@@ -926,7 +926,7 @@ fn main() -> Result<()> {
             }
             if timed.any() {
                 anyhow::bail!(
-                    "--corner, --power-up and --metastability are for timed simulation of a \
+                    "--corner, --derate, --power-up and --metastability are for timed simulation of a \
                      place-and-route build directory"
                 );
             }
@@ -9440,9 +9440,16 @@ struct TimedOptions {
     /// puts the clock network's wires at C and every other delay at K
     /// (a ring through the clock network, measured beside a logic ring,
     /// gives C); `,CELL:F` (repeatable, CELL a cell type such as CCU2)
-    /// puts those cells' own delays at F.
+    /// puts those cells' own delays at F. `calibrated:FILE` scales one
+    /// corner's delays by switch class and cell type as a delay calibration
+    /// file gives (factors fitted from rings measured on the chip; see
+    /// skalp_lir::delay_calibration).
     #[arg(long)]
     corner: Option<String>,
+    /// Multiply every delay of the corner by this factor, as when the whole
+    /// die runs slower under load (1.02: 2% slower, from supply droop)
+    #[arg(long)]
+    derate: Option<f64>,
     /// What nets hold at power-up, before cells drive them: zero (the
     /// default), one, x (unknown), or random[:SEED] (a different pick per
     /// net). A loop of gates keeps its power-up value until its inputs
@@ -9480,6 +9487,7 @@ struct TimedOptions {
 impl TimedOptions {
     fn any(&self) -> bool {
         self.corner.is_some()
+            || self.derate.is_some()
             || self.power_up.is_some()
             || self.metastability.is_some()
             || self.violations.is_some()
@@ -9750,6 +9758,47 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
                 .map_err(anyhow::Error::msg)?;
             &mixed
         }
+        Some(corner) if corner.starts_with("calibrated:") => {
+            let path = &corner["calibrated:".len()..];
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("reading the delay calibration {path}"))?;
+            let calibration = skalp_lir::delay_calibration::DelayCalibration::from_toml(&text)
+                .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
+            let named = |name: &str| corners.iter().find(|d| d.corner == name);
+            let base = named(&calibration.corner).with_context(|| {
+                format!(
+                    "delay calibration {path}: the build has no '{}' corner",
+                    calibration.corner
+                )
+            })?;
+            if base.classes.is_empty() {
+                eprintln!(
+                    "⚠️  The {} corner has no wire delays split by switch class (an older \
+                     build, or a model without classes): every wire takes the factor of class \
+                     \"\"",
+                    base.corner
+                );
+            }
+            let (delays, report) =
+                DelayAnnotation::calibrated(base, named(&calibration.from), &calibration, &netlist)
+                    .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
+            if !report.unmatched_classes.is_empty() {
+                eprintln!(
+                    "⚠️  Switch classes no wire pattern matches (kept at the {} corner): {}",
+                    base.corner,
+                    report.unmatched_classes.join(", ")
+                );
+            }
+            if !report.unmatched_cells.is_empty() {
+                eprintln!(
+                    "⚠️  Cell types no cell pattern matches (kept at the {} corner): {}",
+                    base.corner,
+                    report.unmatched_cells.join(", ")
+                );
+            }
+            mixed = delays;
+            &mixed
+        }
         Some(corner) => corners
             .iter()
             .find(|d| d.corner == corner)
@@ -9758,6 +9807,17 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
                 format!("no '{}' corner (have {})", corner, names.join(", "))
             })?,
         None => corners.first().context("the build has no delays")?,
+    };
+    let derated;
+    let delays = match args.timed.derate {
+        Some(factor) if !(factor.is_finite() && factor > 0.0) => {
+            anyhow::bail!("--derate {factor}: give a factor above 0, such as 1.02")
+        }
+        Some(factor) => {
+            derated = delays.derated(factor);
+            &derated
+        }
+        None => delays,
     };
     if delays.cells.len() != netlist.cells.len() {
         anyhow::bail!(

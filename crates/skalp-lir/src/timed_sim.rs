@@ -697,6 +697,10 @@ pub struct DelayAnnotation {
     pub corner: String,
     /// Delays of each cell, by cell index
     pub cells: Vec<CellDelays>,
+    /// The delay classes of the routing switches, as the cells' wire class
+    /// splits number them (empty where the model names no classes)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
 }
 
 /// The delays of one cell, in picoseconds
@@ -705,6 +709,11 @@ pub struct CellDelays {
     /// Wire delay to each pin: the inputs, then a clocked cell's own reset
     /// when it is not one of them
     pub wire_ps: Vec<i64>,
+    /// Each pin's wire delay split by the delay class of its routing
+    /// switches, as (class index into [`DelayAnnotation::classes`], delay);
+    /// empty where the model names no classes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wire_classes: Vec<Vec<(u32, i64)>>,
     /// Wire delay to the clock pin
     pub clock_wire_ps: i64,
     /// Arc delays, by input then output; `None` where an input does not
@@ -810,6 +819,8 @@ impl DelayAnnotation {
                 }
                 let own = mix.cells.get(i).copied().flatten().unwrap_or(mix.k);
                 Ok(CellDelays {
+                    // A mix of two corners has no single split by class
+                    wire_classes: Vec::new(),
                     wire_ps: a
                         .wire_ps
                         .iter()
@@ -844,11 +855,14 @@ impl DelayAnnotation {
         Ok(Self {
             corner: format!("{} to {} at {}", from.corner, to.corner, mix.label),
             cells,
+            classes: Vec::new(),
         })
     }
 
     /// Capture every delay of `netlist` that a timed simulation uses
     pub fn capture(netlist: &GateNetlist, delays: &dyn BundleDelays, corner: &str) -> Self {
+        let mut classes: Vec<String> = Vec::new();
+        let mut class_index: HashMap<String, u32> = HashMap::new();
         let cells = netlist
             .cells
             .iter()
@@ -856,7 +870,29 @@ impl DelayAnnotation {
                 let clocked = cell.clock.is_some();
                 let pins = cell.inputs.len() + usize::from(clocked && cell.reset.is_some());
                 let pin_net = |pin: usize| cell.inputs.get(pin).copied().or(cell.reset);
+                let mut wire_classes: Vec<Vec<(u32, i64)>> = (0..pins)
+                    .map(|pin| {
+                        pin_net(pin).map_or_else(Vec::new, |net| {
+                            delays
+                                .wire_classes_ps(netlist, net, cell, pin)
+                                .into_iter()
+                                .map(|(class, ps)| {
+                                    let index =
+                                        *class_index.entry(class).or_insert_with_key(|class| {
+                                            classes.push(class.clone());
+                                            (classes.len() - 1) as u32
+                                        });
+                                    (index, ps)
+                                })
+                                .collect()
+                        })
+                    })
+                    .collect();
+                if wire_classes.iter().all(Vec::is_empty) {
+                    wire_classes.clear();
+                }
                 CellDelays {
+                    wire_classes,
                     wire_ps: (0..pins)
                         .map(|pin| {
                             pin_net(pin).map_or(0, |net| delays.wire_ps(netlist, net, cell, pin))
@@ -896,6 +932,7 @@ impl DelayAnnotation {
         Self {
             corner: corner.to_string(),
             cells,
+            classes,
         }
     }
 
@@ -2903,6 +2940,7 @@ mod tests {
     #[test]
     fn delays_between_corners_mix_each_delay() {
         let cell = |wire: i64, arc: Option<i64>| CellDelays {
+            wire_classes: Vec::new(),
             wire_ps: vec![wire],
             clock_wire_ps: 2 * wire,
             arcs: vec![vec![arc]],
@@ -2912,10 +2950,12 @@ mod tests {
             hold_ps: vec![wire],
         };
         let fast = DelayAnnotation {
+            classes: Vec::new(),
             corner: "fast".into(),
             cells: vec![cell(100, Some(200)), cell(10, None)],
         };
         let slow = DelayAnnotation {
+            classes: Vec::new(),
             corner: "slow".into(),
             cells: vec![cell(300, Some(600)), cell(30, Some(5))],
         };
@@ -2928,6 +2968,7 @@ mod tests {
             fast.cells
         );
         let short = DelayAnnotation {
+            classes: Vec::new(),
             corner: "slow".into(),
             cells: vec![cell(1, None)],
         };
@@ -2937,6 +2978,7 @@ mod tests {
     #[test]
     fn the_clock_network_can_sit_elsewhere_between_corners() {
         let cell = |wire: i64, clock: i64| CellDelays {
+            wire_classes: Vec::new(),
             wire_ps: vec![wire],
             clock_wire_ps: clock,
             arcs: vec![vec![Some(wire)]],
@@ -2946,10 +2988,12 @@ mod tests {
             hold_ps: vec![wire],
         };
         let fast = DelayAnnotation {
+            classes: Vec::new(),
             corner: "fast".into(),
             cells: vec![cell(100, 1000)],
         };
         let slow = DelayAnnotation {
+            classes: Vec::new(),
             corner: "slow".into(),
             cells: vec![cell(300, 2000)],
         };
@@ -2968,6 +3012,7 @@ mod tests {
     #[test]
     fn long_wires_can_sit_nearer_the_slow_corner() {
         let cell = |wires: Vec<i64>| CellDelays {
+            wire_classes: Vec::new(),
             wire_ps: wires,
             clock_wire_ps: 0,
             arcs: vec![vec![Some(100)], vec![Some(100)], vec![Some(100)]],
@@ -2977,10 +3022,12 @@ mod tests {
             hold_ps: vec![0, 0, 0],
         };
         let fast = DelayAnnotation {
+            classes: Vec::new(),
             corner: "fast".into(),
             cells: vec![cell(vec![0, 1000, 4000])],
         };
         let slow = DelayAnnotation {
+            classes: Vec::new(),
             corner: "slow".into(),
             cells: vec![cell(vec![0, 2000, 8000])],
         };
@@ -2998,6 +3045,7 @@ mod tests {
     #[test]
     fn a_kind_of_cell_can_sit_elsewhere_between_corners() {
         let cell = |d: i64| CellDelays {
+            wire_classes: Vec::new(),
             wire_ps: vec![d],
             clock_wire_ps: d,
             arcs: vec![vec![Some(d), None]],
@@ -3007,10 +3055,12 @@ mod tests {
             hold_ps: vec![d],
         };
         let fast = DelayAnnotation {
+            classes: Vec::new(),
             corner: "fast".into(),
             cells: vec![cell(100), cell(100)],
         };
         let slow = DelayAnnotation {
+            classes: Vec::new(),
             corner: "slow".into(),
             cells: vec![cell(200), cell(200)],
         };
@@ -3576,6 +3626,67 @@ mod tests {
             assert_eq!(model.hold_ps(reg, 0), 13, "{name}");
         }
         assert_eq!(back.corner, "slow");
+    }
+
+    /// A model that splits each wire by switch class: `a` into "long" and
+    /// "short" switches, anything else all "short"
+    struct ClassedDelays;
+
+    impl BundleDelays for ClassedDelays {
+        fn wire_ps(&self, nl: &GateNetlist, net: GateNetId, cell: &Cell, input: usize) -> i64 {
+            self.wire_classes_ps(nl, net, cell, input)
+                .iter()
+                .map(|(_, ps)| ps)
+                .sum()
+        }
+        fn wire_classes_ps(
+            &self,
+            nl: &GateNetlist,
+            net: GateNetId,
+            _: &Cell,
+            _: usize,
+        ) -> Vec<(String, i64)> {
+            if nl.nets[net.0 as usize].name == "a" {
+                vec![("long".into(), 300), ("short".into(), 20)]
+            } else {
+                vec![("short".into(), 40)]
+            }
+        }
+        fn clock_wire_ps(&self, _: &GateNetlist, _: GateNetId, _: &Cell) -> i64 {
+            0
+        }
+        fn arc_ps(&self, _: &Cell, _: usize, _: usize) -> Option<i64> {
+            Some(100)
+        }
+        fn clock_to_out_ps(&self, _: &Cell) -> i64 {
+            0
+        }
+        fn setup_ps(&self, _: &Cell, _: usize) -> i64 {
+            0
+        }
+    }
+
+    /// The annotation keeps each pin's wire delay split by switch class,
+    /// each class named once, and the split survives a save and load
+    #[test]
+    fn annotation_keeps_wire_delays_by_switch_class() {
+        let mut nl = GateNetlist::new("t".into(), "test".into());
+        let a = nl.add_input("a".into());
+        let b = net(&mut nl, "b");
+        let c = nl.add_output("c".into());
+        gate(&mut nl, "first", CellFunction::Buf, vec![a], b);
+        gate(&mut nl, "second", CellFunction::Buf, vec![b], c);
+        let annotation = DelayAnnotation::capture(&nl, &ClassedDelays, "slow");
+        let json = serde_json::to_string(&annotation).unwrap();
+        let back: DelayAnnotation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.classes, vec!["long".to_string(), "short".to_string()]);
+        assert_eq!(back.cells[0].wire_ps, vec![320]);
+        assert_eq!(back.cells[0].wire_classes, vec![vec![(0, 300), (1, 20)]]);
+        assert_eq!(back.cells[1].wire_classes, vec![vec![(1, 40)]]);
+        // A model without classes leaves no split
+        let plain = DelayAnnotation::capture(&nl, &TestDelays::default(), "slow");
+        assert!(plain.classes.is_empty());
+        assert!(plain.cells.iter().all(|c| c.wire_classes.is_empty()));
     }
 
     /// A latch made of two gates keeps an unknown power-up value until an
