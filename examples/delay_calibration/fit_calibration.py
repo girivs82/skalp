@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fit a device's delay calibration from ring oscillators measured on a chip.
 
-  python3 fit_calibration.py --skalp skalp --groups groups_nexus.json \\
+  python3 fit_calibration.py --skalp skalp --groups <db>/<family>/timing/calibration_groups.json \\
       --run BUILD delay_probe.json capture.txt [capture2.txt ...] [--run ...] \\
       --out silicon_delays.json
 
@@ -19,7 +19,9 @@ build once more with the fitted file.
 
 `--check FILE` skips the fit and only compares the chip with the simulation under FILE.
 
-The groups file says which delays share a factor (see groups_nexus.json): `wires` and `cells`
+The groups file says which delays share a factor. It names the family's switch classes and cell
+types, so it is device data and lives in the device database beside the calibration (for a
+Nexus family, `<family>/timing/calibration_groups.json`): `wires` and `cells`
 are ordered lists of [pattern, group] (the first matching pattern wins, as in the calibration
 file), and `clock` names the group of the clock network's wires. Groups that no ring tells
 apart from each other cannot be fitted separately; the script says so.
@@ -214,10 +216,10 @@ def report(rows, title):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--skalp", default="skalp", help="the skalp binary (with the nexus-real feature)")
+    ap.add_argument("--skalp", default="skalp", help="the skalp binary (built with the device family's backend)")
     ap.add_argument("--run", action="append", nargs="+", required=True, metavar="ARG",
                     help="BUILD MANIFEST CAPTURE [CAPTURE ...] (repeatable)")
-    ap.add_argument("--groups", help="groups file (see groups_nexus.json); needed to fit")
+    ap.add_argument("--groups", help="the family's groups file (from the device database); needed to fit")
     ap.add_argument("--corner", default="slow", help="the corner the factors scale (default slow)")
     ap.add_argument("--check", help="only compare the chip with the simulation under this calibration")
     ap.add_argument("--out", help="where to write the fitted calibration (JSON)")
