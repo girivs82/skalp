@@ -365,6 +365,12 @@ fn build_compilation_context(
         );
     }
 
+    // Every generic argument must bind a generic the entity has: a named
+    // argument whose name the entity lacks (a typo, or a generic that lives on
+    // another entity) was dropped and the default used, silently building
+    // different hardware from what the source asks for
+    check_instance_generic_args(&hir)?;
+
     // Ports bound to a board's pins take their pins from it, and every pin
     // of an entity on a board is checked against it
     boards::resolve_board_bindings(&mut hir)
@@ -443,6 +449,58 @@ fn build_compilation_context(
 
 /// Drop `#[pipeline]` / `#[retime]` from the async entities of `hir`,
 /// returning their names
+/// Fail on an instance whose generic arguments name a generic its entity
+/// does not have, or give more positional arguments than it has generics.
+fn check_instance_generic_args(hir: &Hir) -> Result<()> {
+    let mut errors = Vec::new();
+    for imp in &hir.implementations {
+        let parent = hir
+            .entities
+            .iter()
+            .find(|e| e.id == imp.entity)
+            .map(|e| e.name.as_str())
+            .unwrap_or("?");
+        for inst in &imp.instances {
+            let Some(entity) = hir.entities.iter().find(|e| e.id == inst.entity) else {
+                continue;
+            };
+            for name in inst.named_generic_args.keys() {
+                if !entity.generics.iter().any(|g| &g.name == name) {
+                    let known = entity
+                        .generics
+                        .iter()
+                        .map(|g| g.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    errors.push(format!(
+                        "instance `{}` in `{}`: `{}` has no generic `{}` (its generics: {})",
+                        inst.name,
+                        parent,
+                        entity.name,
+                        name,
+                        if known.is_empty() { "none" } else { &known }
+                    ));
+                }
+            }
+            if inst.generic_args.len() > entity.generics.len() {
+                errors.push(format!(
+                    "instance `{}` in `{}`: {} generic arguments for `{}`, which has {}",
+                    inst.name,
+                    parent,
+                    inst.generic_args.len(),
+                    entity.name,
+                    entity.generics.len()
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("bad generic arguments:\n  {}", errors.join("\n  "))
+    }
+}
+
 fn strip_async_pipelining(hir: &mut Hir) -> Vec<String> {
     hir.entities
         .iter_mut()
