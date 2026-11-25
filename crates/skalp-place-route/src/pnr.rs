@@ -136,6 +136,11 @@ pub struct RoutedNetlist {
     pub delays: Vec<skalp_lir::timed_sim::DelayAnnotation>,
     /// The routing load of each net, for switching energy
     pub loads: skalp_lir::switching_energy::NetLoads,
+    /// Where each cell went
+    pub placements: Vec<crate::timing::PlacedCell>,
+    /// Each net's routed switches, with their delay classes and their
+    /// delays at the slowest corner annotated
+    pub routes: Vec<crate::timing::RoutedNetSwitches>,
 }
 
 impl PnrResult {
@@ -326,12 +331,16 @@ fn routed_from_tables<D: crate::device::Device + ?Sized>(
         report.bundles = bundles;
         report
     });
+    let (placements, routes) =
+        crate::timing::sta::routed_switches(device, &model, netlist, placement, routing);
     let routed = RoutedNetlist {
         netlist: netlist.clone(),
         delays: vec![crate::timing::sta::annotate_delays(
             device, &model, &design, "typical",
         )],
         loads: crate::timing::sta::net_loads(&model, netlist, routing, "typical"),
+        placements,
+        routes,
     };
     (routed, timing)
 }
@@ -1351,6 +1360,8 @@ pub fn place_and_route_nexus_real_from(
         .map(|(&net_id, route)| (net_id, route.delay as f64))
         .collect();
     // Every routed delay at both corners, for timed simulation
+    let (placements, routes) =
+        crate::timing::sta::routed_switches(&device, &timing_model, netlist, &placement, &routing);
     let routed = RoutedNetlist {
         netlist: netlist.clone(),
         delays: vec![
@@ -1358,6 +1369,8 @@ pub fn place_and_route_nexus_real_from(
             crate::timing::sta::annotate_delays(&device, &fast_model, &design, "fast"),
         ],
         loads: crate::timing::sta::net_loads(&timing_model, netlist, &routing, "slow"),
+        placements,
+        routes,
     };
 
     let result = PnrResult {

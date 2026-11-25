@@ -497,6 +497,14 @@ impl TimingDb {
         self.pip_delay(source, destination).unwrap_or(0)
     }
 
+    /// The delay class of the switch from wire `source` to wire
+    /// `destination`, where it has one
+    pub fn pip_class(&self, source: &str, destination: &str) -> Option<String> {
+        let (sx, sy, source) = wire_parts(source);
+        let (dx, dy, destination) = wire_parts(destination);
+        prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination)
+    }
+
     /// Delay of the switch from wire `source` to wire `destination`, or the
     /// delay class the tables have no entry for (the wires' base names where
     /// the switch has no class)
@@ -673,6 +681,13 @@ impl TimingModel for NexusTiming<'_> {
         let src = self.device.wire(info.src_wire)?;
         let dst = self.device.wire(info.dst_wire)?;
         self.db.pip_delay(&src.name, &dst.name).err()
+    }
+
+    fn pip_class(&self, pip: PipId) -> Option<String> {
+        let info = self.device.pip(pip)?;
+        let src = self.device.wire(info.src_wire)?;
+        let dst = self.device.wire(info.dst_wire)?;
+        self.db.pip_class(&src.name, &dst.name)
     }
 
     fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {

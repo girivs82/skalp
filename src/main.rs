@@ -5975,6 +5975,13 @@ fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrRes
     let loads_path = output_dir.join(ROUTED_LOADS_FILE);
     let file = std::io::BufWriter::new(fs::File::create(&loads_path)?);
     serde_json::to_writer(file, &routed.loads)?;
+    // Placement and routed switches, for analysis outside the flow
+    let routes_path = output_dir.join(ROUTED_SWITCHES_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&routes_path)?);
+    serde_json::to_writer(
+        file,
+        &serde_json::json!({ "cells": routed.placements, "nets": routed.routes }),
+    )?;
     println!(
         "Routed netlist and delays: {:?}, {:?}",
         netlist_path, delays_path
@@ -9376,6 +9383,9 @@ fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
 const ROUTED_NETLIST_FILE: &str = "design_routed.json";
 /// Its delays at each corner
 const ROUTED_DELAYS_FILE: &str = "design_delays.json";
+/// Where `write_routed` puts every cell's placement and every net's routed
+/// switches with their delay classes
+const ROUTED_SWITCHES_FILE: &str = "design_routes.json";
 /// The routing load of each net (`skalp_lir::switching_energy::NetLoads`),
 /// for `skalp sim --energy`
 const ROUTED_LOADS_FILE: &str = "design_loads.json";
