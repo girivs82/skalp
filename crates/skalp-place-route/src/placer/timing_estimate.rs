@@ -62,6 +62,18 @@ fn analyse(
     model: &DelayModel,
     wire_delay: &impl Fn(CellId, CellId, usize) -> f64,
 ) -> Analysis {
+    analyse_ending(netlist, model, wire_delay, None)
+}
+
+/// [`analyse`], with each path end (a register or pad input) required by
+/// `end_required(cell)` ns after the launching edge when given, and by the
+/// worst path's delay otherwise
+fn analyse_ending(
+    netlist: &GateNetlist,
+    model: &DelayModel,
+    wire_delay: &impl Fn(CellId, CellId, usize) -> f64,
+    end_required: Option<&dyn Fn(&Cell) -> f64>,
+) -> Analysis {
     let nets = &netlist.nets;
     let cell_index: HashMap<CellId, usize> =
         HashMap::from_iter(netlist.cells.iter().enumerate().map(|(i, c)| (c.id, i)));
@@ -148,7 +160,7 @@ fn analyse(
     let mut input_required = vec![f64::INFINITY; netlist.cells.len()];
     for (i, cell) in netlist.cells.iter().enumerate() {
         if is_path_boundary(cell) {
-            input_required[i] = worst - model.dff_setup;
+            input_required[i] = end_required.map_or(worst, |f| f(cell)) - model.dff_setup;
             for (pin, &input) in cell.inputs.iter().enumerate() {
                 let r = input_required[i] - wire(input, cell, pin);
                 let slot = &mut required[input.0 as usize];
@@ -179,6 +191,44 @@ fn analyse(
         required,
         input_required,
         worst,
+    }
+}
+
+/// Arrival and required times on a placement, against each path end's own
+/// clock period ([`estimate_slacks`])
+pub struct SlackEstimate {
+    /// Latest arrival at each net's driver output (ns), by net index
+    pub arrival: Vec<f64>,
+    /// Latest time each cell may see its inputs (ns), by cell index;
+    /// infinite for a cell that ends no timing path
+    pub input_required: Vec<f64>,
+}
+
+impl SlackEstimate {
+    /// Slack (ns) of the connection from a driver whose output switches at
+    /// `arrival` to cell index `sink`, the wire taking `wire` ns
+    pub fn slack(&self, arrival: f64, wire: f64, sink: usize) -> f64 {
+        self.input_required
+            .get(sink)
+            .map_or(f64::INFINITY, |&required| required - arrival - wire)
+    }
+}
+
+/// Static timing of `netlist` with cells at `position` and each connection
+/// taking [`DelayModel::connection_delay`] for its ends' tile offset (0 when
+/// either is unplaced). A register or pad input must see its data
+/// `period(cell)` ns (less setup) after the launching edge: the period of
+/// the clock that captures it.
+pub fn estimate_slacks(
+    netlist: &GateNetlist,
+    model: &DelayModel,
+    position: impl Fn(CellId) -> Option<(f64, f64)>,
+    period: impl Fn(&Cell) -> f64,
+) -> SlackEstimate {
+    let a = analyse_ending(netlist, model, &by_position(model, position), Some(&period));
+    SlackEstimate {
+        arrival: a.arrival,
+        input_required: a.input_required,
     }
 }
 
