@@ -579,7 +579,7 @@ fn driver_slack(
         let arrival = estimate.arrival[input.0 as usize];
         let into = netlist.nets[input.0 as usize]
             .driver
-            .and_then(&position)
+            .and_then(position)
             .map_or(0.0, |from| wire(from, at));
         inputs_at = inputs_at.max(arrival + into);
         if registered {
