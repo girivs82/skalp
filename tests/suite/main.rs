@@ -41,6 +41,7 @@ mod test_child_memory_sim;
 mod test_clock_enable;
 mod test_compiled_cpu_parts;
 mod test_complete_hardware_flow;
+mod test_computed_clock;
 mod test_cone_extraction;
 mod test_const_eval;
 mod test_core_bringup_regressions;
