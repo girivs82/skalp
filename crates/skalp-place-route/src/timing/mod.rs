@@ -179,6 +179,44 @@ pub struct TimingReport {
     pub untimed_switches: Vec<UntimedSwitches>,
 }
 
+/// The switches one routed net goes through, in route order (each branch
+/// from its source wire), for analysis outside place and route: fitting
+/// the timing data's switch delays to silicon, for example
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutedNetSwitches {
+    /// The net's name
+    pub net: String,
+    /// Its switches
+    pub switches: Vec<RoutedSwitch>,
+}
+
+/// One routed switch (PIP)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoutedSwitch {
+    /// The wire it drives from
+    pub from: String,
+    /// The wire it drives
+    pub to: String,
+    /// Its delay class in the timing data, where the device has classes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// Its delay at the corner the list was made for, in picoseconds
+    pub ps: i64,
+}
+
+/// Where a cell was placed
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlacedCell {
+    /// The cell's path
+    pub cell: String,
+    /// Tile column
+    pub x: u32,
+    /// Tile row
+    pub y: u32,
+    /// Site index within the tile
+    pub bel: usize,
+}
+
 /// Routed switches of one delay class that the timing data has no delay for
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UntimedSwitches {

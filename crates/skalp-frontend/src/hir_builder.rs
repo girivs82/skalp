@@ -1056,6 +1056,15 @@ impl HirBuilderContext {
     /// never lowered — the bank/VCCIO compatibility check needs them.)
     fn build_global_constraints(&mut self, node: &SyntaxNode, hir: &mut Hir) {
         use crate::hir::{BankConstraint, GlobalConstraint};
+        for floorplan in node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::FloorplanBlock)
+        {
+            let regions = self.build_floorplan(&floorplan);
+            hir.global_constraints.push(GlobalConstraint::Floorplan(
+                crate::hir::FloorplanConstraint { regions },
+            ));
+        }
         for bank_node in node
             .children()
             .filter(|n| n.kind() == SyntaxKind::BankBlock)
@@ -1112,6 +1121,172 @@ impl HirBuilderContext {
                     domain,
                 }));
         }
+    }
+
+    /// Lower a `floorplan { region "name" { area: (...), instances: [...] } }`
+    /// block. A region's area is four percentages of the die (`5%`), so it
+    /// fits any device; anything this cannot honour is an error rather than
+    /// being dropped.
+    fn build_floorplan(&mut self, node: &SyntaxNode) -> Vec<crate::hir::RegionConstraint> {
+        let mut regions: Vec<crate::hir::RegionConstraint> = Vec::new();
+        for child in node.children() {
+            if child.kind() != SyntaxKind::RegionBlock {
+                self.errors.push(HirError {
+                    message: "floorplan: only `region` blocks are supported".to_string(),
+                    span: self.make_span(&child),
+                });
+                continue;
+            }
+            let Some(name) = child
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| t.kind() == SyntaxKind::StringLiteral)
+                .map(|t| t.text().trim_matches('"').to_string())
+            else {
+                continue;
+            };
+            let mut area = None;
+            let mut instances = Vec::new();
+            for pair in child
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::ConstraintPair)
+            {
+                let Some(key) = pair
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia())
+                    .map(|t| t.text().to_string())
+                else {
+                    continue;
+                };
+                match key.as_str() {
+                    "area" => match self.region_area(&pair) {
+                        Ok(a) => area = Some(a),
+                        Err(message) => self.errors.push(HirError {
+                            message: format!("floorplan region \"{name}\": {message}"),
+                            span: self.make_span(&pair),
+                        }),
+                    },
+                    "instances" => {
+                        let Some(list) = pair.first_child_of_kind(SyntaxKind::PinArray) else {
+                            self.errors.push(HirError {
+                                message: format!(
+                                    "floorplan region \"{name}\": instances must be a list, such as [counter, core.alu]"
+                                ),
+                                span: self.make_span(&pair),
+                            });
+                            continue;
+                        };
+                        let mut current = String::new();
+                        for token in list
+                            .children_with_tokens()
+                            .filter_map(|e| e.into_token())
+                            .filter(|t| !t.kind().is_trivia())
+                        {
+                            match token.kind() {
+                                SyntaxKind::Ident | SyntaxKind::Dot => current.push_str(token.text()),
+                                SyntaxKind::StringLiteral => {
+                                    current.push_str(token.text().trim_matches('"'))
+                                }
+                                SyntaxKind::Comma | SyntaxKind::RBracket
+                                    if !current.is_empty() =>
+                                {
+                                    instances.push(std::mem::take(&mut current));
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !current.is_empty() {
+                            instances.push(current);
+                        }
+                    }
+                    other => self.errors.push(HirError {
+                        message: format!(
+                            "floorplan region \"{name}\": `{other}` is not supported (expected area or instances)"
+                        ),
+                        span: self.make_span(&pair),
+                    }),
+                }
+            }
+            let span = self.make_span(&child);
+            let Some(area) = area else {
+                self.errors.push(HirError {
+                    message: format!("floorplan region \"{name}\" has no area"),
+                    span,
+                });
+                continue;
+            };
+            if instances.is_empty() {
+                self.errors.push(HirError {
+                    message: format!("floorplan region \"{name}\" places no instances"),
+                    span,
+                });
+                continue;
+            }
+            if regions.iter().any(|r| r.name == name) {
+                self.errors.push(HirError {
+                    message: format!("floorplan region \"{name}\" is declared twice"),
+                    span,
+                });
+                continue;
+            }
+            regions.push(crate::hir::RegionConstraint {
+                name,
+                area,
+                instances,
+            });
+        }
+        regions
+    }
+
+    /// A region's `area: (x0%, y0%, x1%, y1%)`
+    fn region_area(&self, pair: &SyntaxNode) -> Result<(f64, f64, f64, f64), String> {
+        let tuple = pair
+            .first_child_of_kind(SyntaxKind::ConstraintTuple)
+            .ok_or("area must be (x0%, y0%, x1%, y1%) in percent of the die")?;
+        let tokens: Vec<_> = tuple
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let mut values = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            let t = &tokens[i];
+            if matches!(t.kind(), SyntaxKind::IntLiteral | SyntaxKind::FloatLiteral) {
+                let value: f64 = t
+                    .text()
+                    .replace('_', "")
+                    .parse()
+                    .map_err(|_| format!("`{}` is not a number", t.text()))?;
+                if tokens.get(i + 1).map(|u| u.kind()) != Some(SyntaxKind::Percent) {
+                    return Err(format!(
+                        "area value {} needs a unit: a percentage of the die, such as {}%",
+                        t.text(),
+                        t.text()
+                    ));
+                }
+                if !(0.0..=100.0).contains(&value) {
+                    return Err(format!("area value {value}% is not from 0% to 100%"));
+                }
+                values.push(value);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        let [x0, y0, x1, y1] = values[..] else {
+            return Err(format!(
+                "area must have 4 values (x0%, y0%, x1%, y1%), not {}",
+                values.len()
+            ));
+        };
+        if x0 > x1 || y0 > y1 {
+            return Err(format!(
+                "area ({x0}%, {y0}%, {x1}%, {y1}%) must give its low corner first"
+            ));
+        }
+        Ok((x0, y0, x1, y1))
     }
 
     /// Build the system power state table from a PowerStatesDecl node.

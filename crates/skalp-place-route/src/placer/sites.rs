@@ -313,9 +313,47 @@ impl SiteMap {
         set: Option<&ControlSet>,
         compatible: &impl Fn(BelType, BelType) -> bool,
     ) -> Option<(u32, u32, usize)> {
+        self.find_nearest_within(x, y, required, set, compatible, None)
+    }
+
+    /// As [`take_nearest`](Self::take_nearest), only in the tiles of
+    /// `region`: (x_min, y_min, x_max, y_max), both corners included.
+    #[allow(clippy::too_many_arguments)]
+    pub fn take_nearest_within(
+        &mut self,
+        x: f64,
+        y: f64,
+        required: BelType,
+        set: Option<ControlSet>,
+        compatible: impl Fn(BelType, BelType) -> bool,
+        region: (u32, u32, u32, u32),
+    ) -> Option<(u32, u32, usize)> {
+        let found =
+            self.find_nearest_within(x, y, required, set.as_ref(), &compatible, Some(region))?;
+        self.take(found.0, found.1, found.2, set);
+        Some(found)
+    }
+
+    /// The free BEL nearest to (x, y) that can hold `required`, inside
+    /// `region` (x_min, y_min, x_max, y_max, corners included) when given,
+    /// without taking it.
+    pub fn find_nearest_within(
+        &self,
+        x: f64,
+        y: f64,
+        required: BelType,
+        set: Option<&ControlSet>,
+        compatible: &impl Fn(BelType, BelType) -> bool,
+        region: Option<(u32, u32, u32, u32)>,
+    ) -> Option<(u32, u32, usize)> {
         if self.width == 0 || self.height == 0 {
             return None;
         }
+        let inside = |tx: i64, ty: i64| {
+            region.is_none_or(|(x0, y0, x1, y1)| {
+                tx >= x0 as i64 && tx <= x1 as i64 && ty >= y0 as i64 && ty <= y1 as i64
+            })
+        };
         let cx = (x.max(0.0) as u32).min(self.width - 1) as i64;
         let cy = (y.max(0.0) as u32).min(self.height - 1) as i64;
         let max_radius = self.width.max(self.height) as i64;
@@ -326,7 +364,7 @@ impl SiteMap {
             // Euclidean distance so the result does not depend on scan order.
             let mut best: Option<(i64, u32, u32, usize)> = None;
             let consider = |tx: i64, ty: i64, best: &mut Option<(i64, u32, u32, usize)>| {
-                if tx < 0 || ty < 0 || tx >= w || ty >= h {
+                if tx < 0 || ty < 0 || tx >= w || ty >= h || !inside(tx, ty) {
                     return;
                 }
                 let d2 = (tx - cx) * (tx - cx) + (ty - cy) * (ty - cy);

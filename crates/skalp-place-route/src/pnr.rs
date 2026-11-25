@@ -136,6 +136,14 @@ pub struct RoutedNetlist {
     pub delays: Vec<skalp_lir::timed_sim::DelayAnnotation>,
     /// The routing load of each net, for switching energy
     pub loads: skalp_lir::switching_energy::NetLoads,
+    /// Where each cell went
+    pub placements: Vec<crate::timing::PlacedCell>,
+    /// Each net's routed switches, with their delay classes and their
+    /// delays at the slowest corner annotated
+    pub routes: Vec<crate::timing::RoutedNetSwitches>,
+    /// The device's delay calibration against silicon, where its database
+    /// has one, for timing the delays as silicon runs
+    pub calibration: Option<skalp_lir::delay_calibration::DelayCalibration>,
 }
 
 impl PnrResult {
@@ -326,12 +334,17 @@ fn routed_from_tables<D: crate::device::Device + ?Sized>(
         report.bundles = bundles;
         report
     });
+    let (placements, routes) =
+        crate::timing::sta::routed_switches(device, &model, netlist, placement, routing);
     let routed = RoutedNetlist {
         netlist: netlist.clone(),
         delays: vec![crate::timing::sta::annotate_delays(
             device, &model, &design, "typical",
         )],
         loads: crate::timing::sta::net_loads(&model, netlist, routing, "typical"),
+        placements,
+        routes,
+        calibration: None,
     };
     (routed, timing)
 }
@@ -710,6 +723,14 @@ pub fn place_and_route_nexus_real_from(
     let ddr_blocks = crate::device::nexus::ddr::analyze(netlist, &ddr_primitives, &prepare::is_pad)
         .map_err(PlaceRouteError::PlacementFailed)?;
     let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
+    // The source's floorplan, in the die's tiles: the device window loaded
+    // below must cover its regions
+    let mut config = config;
+    let (width, height) = variant.grid_size();
+    config
+        .placer
+        .io_constraints
+        .add_floorplan(&netlist.floorplan, width, height);
     let packages =
         sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
     let pad_sites: Vec<(u32, u32)> = netlist
@@ -881,6 +902,12 @@ pub fn place_and_route_nexus_real_from(
                 large_rams: large_ram_count,
                 multipliers: dsp_count,
             },
+            &config
+                .placer
+                .io_constraints
+                .regions()
+                .flat_map(|r| [(r.x_min, r.y_min), (r.x_max, r.y_max)])
+                .collect::<Vec<_>>(),
         ),
     };
     let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
@@ -1337,6 +1364,8 @@ pub fn place_and_route_nexus_real_from(
         .map(|(&net_id, route)| (net_id, route.delay as f64))
         .collect();
     // Every routed delay at both corners, for timed simulation
+    let (placements, routes) =
+        crate::timing::sta::routed_switches(&device, &timing_model, netlist, &placement, &routing);
     let routed = RoutedNetlist {
         netlist: netlist.clone(),
         delays: vec![
@@ -1344,6 +1373,9 @@ pub fn place_and_route_nexus_real_from(
             crate::timing::sta::annotate_delays(&device, &fast_model, &design, "fast"),
         ],
         loads: crate::timing::sta::net_loads(&timing_model, netlist, &routing, "slow"),
+        placements,
+        routes,
+        calibration: crate::device::nexus::timing::silicon_delays(db_root, variant)?,
     };
 
     let result = PnrResult {
@@ -2255,6 +2287,127 @@ mod tests {
             luts_per_tile(&placement).values().sum::<usize>(),
             total_luts * 85 / 100
         );
+    }
+
+    /// Cells constrained to a region are placed inside it and stay there
+    /// through refinement; a region on an algorithm that cannot honour it,
+    /// or a pattern naming no cell, is an error
+    #[test]
+    fn test_region_constraints_hold_cells_in_their_regions() {
+        let netlist = create_mesh_netlist(60);
+        let regions = [("nw", (1, 1, 2, 2)), ("se", (11, 15, 12, 16))];
+        let constrained = |config: &mut PlacerConfig| {
+            for (name, (x0, y0, x1, y1)) in regions {
+                config.io_constraints.create_region(name, x0, y0, x1, y1);
+            }
+            for i in 0..4 {
+                let region = if i % 2 == 0 { "nw" } else { "se" };
+                config
+                    .io_constraints
+                    .constrain_to_region(format!("mesh.lut{i}"), region);
+            }
+        };
+        for algorithm in [
+            crate::placer::PlacementAlgorithm::AnalyticalWithRefinement,
+            crate::placer::PlacementAlgorithm::AnalyticalTimingDriven,
+        ] {
+            let mut config = PlacerConfig {
+                algorithm: algorithm.clone(),
+                ..Default::default()
+            };
+            constrained(&mut config);
+            let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+            let placement = placer.place(&netlist).unwrap();
+            for i in 0..4 {
+                let cell = netlist
+                    .cells
+                    .iter()
+                    .find(|c| c.path == format!("mesh.lut{i}"))
+                    .unwrap();
+                let loc = &placement.placements[&cell.id];
+                let (x0, y0, x1, y1) = regions[i % 2].1;
+                assert!(
+                    (x0..=x1).contains(&loc.tile_x) && (y0..=y1).contains(&loc.tile_y),
+                    "{algorithm:?}: mesh.lut{i} at ({}, {}) outside {}",
+                    loc.tile_x,
+                    loc.tile_y,
+                    regions[i % 2].0
+                );
+            }
+        }
+
+        let mut config = PlacerConfig {
+            algorithm: crate::placer::PlacementAlgorithm::SimulatedAnnealing,
+            ..Default::default()
+        };
+        constrained(&mut config);
+        let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+        assert!(placer.place(&netlist).is_err());
+
+        let mut config = PlacerConfig::default();
+        constrained(&mut config);
+        config
+            .io_constraints
+            .constrain_to_region("nothing.here", "nw");
+        let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+        assert!(placer.place(&netlist).is_err());
+    }
+
+    /// The netlist's own floorplan (regions in percent of the die) holds
+    /// the cells it names inside the tiles its percentages cover, and a
+    /// member with no cells of its own is an error
+    #[test]
+    fn test_netlist_floorplan_holds_cells_in_its_regions() {
+        use crate::device::Device;
+        use skalp_lir::floorplan::{FloorplanMember, FloorplanRegion};
+        let mut netlist = create_mesh_netlist(60);
+        for (i, cell) in netlist.cells.iter_mut().take(4).enumerate() {
+            cell.path = format!("top.Mesh.ring_{i}.lat0");
+        }
+        let ring = |i: usize| FloorplanMember::Signal {
+            instance: "top".into(),
+            entity: "Mesh".into(),
+            signal: format!("ring_{i}"),
+        };
+        netlist.floorplan = vec![
+            FloorplanRegion {
+                name: "low".into(),
+                area: (0.0, 0.0, 20.0, 20.0),
+                members: vec![ring(0), ring(2)],
+            },
+            FloorplanRegion {
+                name: "high".into(),
+                area: (80.0, 80.0, 100.0, 100.0),
+                members: vec![ring(1), ring(3)],
+            },
+        ];
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let (width, height) = device.grid_size();
+        let mut placer = Placer::new(PlacerConfig::default(), device);
+        let placement = placer.place(&netlist).unwrap();
+        for i in 0..4 {
+            let loc = &placement.placements[&netlist.cells[i].id];
+            let (x, y) = (loc.tile_x as f64, loc.tile_y as f64);
+            let (lo, hi) = if i % 2 == 0 { (0.0, 0.2) } else { (0.8, 1.0) };
+            let span = |n: u32| (n - 1) as f64;
+            assert!(
+                x >= (lo * span(width)).floor()
+                    && x <= (hi * span(width)).ceil()
+                    && y >= (lo * span(height)).floor()
+                    && y <= (hi * span(height)).ceil(),
+                "ring_{i} at ({x}, {y})"
+            );
+        }
+
+        netlist.floorplan[0]
+            .members
+            .push(FloorplanMember::Instance("top.nothing".into()));
+        let mut placer = Placer::new(
+            PlacerConfig::default(),
+            Ice40Device::new(Ice40Variant::Hx1k),
+        );
+        let err = placer.place(&netlist).unwrap_err().to_string();
+        assert!(err.contains("top.nothing"), "{err}");
     }
 
     /// The placer's seed reaches its random choices: a different seed gives

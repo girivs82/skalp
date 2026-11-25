@@ -95,6 +95,14 @@ pub fn decompose_latches(aig: &mut Aig) -> HashMap<AigNodeId, LatchDecomp> {
             }
             _ => (form.enable, form.data, data, reset),
         };
+        // The data is read only where the enable is 1: where the enable
+        // implies a constant there, the data is that constant (else the
+        // writer builds the same function twice, as enable and as data)
+        let new_data = match loaded_constant(aig, enable, new_data) {
+            Some(true) => AigLit::true_lit(),
+            Some(false) => AigLit::false_lit(),
+            None => new_data,
+        };
         let rebuilt = build_mux(aig, enable, new_data, q);
         if !verify_equivalence(aig, reference, rebuilt, latch, released) {
             // The algebra is exact; a mismatch is a bug, never a reason to
@@ -296,15 +304,19 @@ impl Peeler {
         let polarity = merge_polarity(fl.polarity, fr.polarity)?;
         // l & r: where one operand is a constant 0 the AND loads 0; where
         // both load, it loads both data ANDed; elsewhere it passes Q ^ p.
+        // An operand that does not see Q is its own data: the AND loads
+        // where it is 0 or where the other operand loads. When the other
+        // never loads (it is Q ^ p), the AND loads only zeros, so its data
+        // is 0 (`Q | x` loads 1 where x is 1, not x itself: the same
+        // function as the enable, which would be built twice).
         let (enable, data) = match (fl.polarity, fr.polarity) {
-            // One side does not see Q: it is its own data
             (None, _) => (
                 aig.add_or(fl.data.invert(), fr.enable),
-                aig.add_and(fl.data, fr.data),
+                and_where_loading(aig, fl.data, fr),
             ),
             (_, None) => (
                 aig.add_or(fr.data.invert(), fl.enable),
-                aig.add_and(fr.data, fl.data),
+                and_where_loading(aig, fr.data, fl),
             ),
             _ => {
                 let both = aig.add_and(fl.enable, fr.enable);
@@ -319,6 +331,17 @@ impl Peeler {
             data,
             polarity,
         })
+    }
+}
+
+/// The data `own & other.data` of an AND of `own` (an operand without `Q`)
+/// and `other`, read only where the AND loads: where `other` never loads,
+/// the AND loads only where `own` is 0, so the data is 0.
+fn and_where_loading(aig: &mut Aig, own: AigLit, other: HoldForm) -> AigLit {
+    if other.enable.const_value() == Some(false) {
+        AigLit::false_lit()
+    } else {
+        aig.add_and(own, other.data)
     }
 }
 
@@ -417,6 +440,72 @@ fn verify_equivalence(
     }
 
     true
+}
+
+/// Most inputs (primary inputs and latches) of an enable and data pair
+/// whose truth tables `loaded_constant` compares: 2^14 patterns.
+const MAX_EXHAUSTIVE_INPUTS: usize = 14;
+
+/// The value `data` has wherever `enable` is 1, when it is the same at every
+/// such input pattern (and `enable` is 1 at one at least). Exact: it tries
+/// every pattern of their inputs, so a pair with more than
+/// `MAX_EXHAUSTIVE_INPUTS` inputs is not compared.
+fn loaded_constant(aig: &Aig, enable: AigLit, data: AigLit) -> Option<bool> {
+    if data.is_const() {
+        return None;
+    }
+    let mut inputs = HashSet::new();
+    let mut visited = HashSet::new();
+    collect_inputs(aig, enable.node, &mut inputs, &mut visited);
+    collect_inputs(aig, data.node, &mut inputs, &mut visited);
+    if inputs.len() > MAX_EXHAUSTIVE_INPUTS {
+        return None;
+    }
+    let mut inputs: Vec<AigNodeId> = inputs.into_iter().collect();
+    inputs.sort_by_key(|n| n.0);
+    // 64 patterns per word: the first six inputs vary inside a word, the
+    // rest with the word number
+    const LANES: [u64; 6] = [
+        0xAAAA_AAAA_AAAA_AAAA,
+        0xCCCC_CCCC_CCCC_CCCC,
+        0xF0F0_F0F0_F0F0_F0F0,
+        0xFF00_FF00_FF00_FF00,
+        0xFFFF_0000_FFFF_0000,
+        0xFFFF_FFFF_0000_0000,
+    ];
+    let words = 1usize << inputs.len().saturating_sub(6);
+    let valid = if inputs.len() >= 6 {
+        u64::MAX
+    } else {
+        (1u64 << (1 << inputs.len())) - 1
+    };
+    let (mut can_be_one, mut can_be_zero) = (false, false);
+    for word in 0..words {
+        let mut values: HashMap<AigNodeId, u64> = HashMap::new();
+        values.insert(AigNodeId::FALSE, 0);
+        for (i, &input) in inputs.iter().enumerate() {
+            let value = if i < 6 {
+                LANES[i]
+            } else if (word >> (i - 6)) & 1 == 1 {
+                u64::MAX
+            } else {
+                0
+            };
+            values.insert(input, value);
+        }
+        let loads = eval_lit(aig, enable, &mut values) & valid;
+        let value = eval_lit(aig, data, &mut values);
+        can_be_one |= loads & value != 0;
+        can_be_zero |= loads & !value != 0;
+        if can_be_one && can_be_zero {
+            return None;
+        }
+    }
+    match (can_be_one, can_be_zero) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
 }
 
 /// Collect all primary input and latch nodes in the transitive fanin of a node.
@@ -799,5 +888,53 @@ mod tests {
         let expected = !rst & ((en & d) | (!en & q));
         assert_eq!((e & dd) | (!e & q), expected);
         assert_ne!(e, en, "the reset must load even when en is low");
+    }
+
+    #[test]
+    fn a_sticky_flag_loads_a_one() {
+        // F = Q | x: E = x, and where it loads the data is 1, not x again
+        let mut aig = Aig::new("test".to_string());
+        let x = AigLit::new(aig.add_input("x".to_string(), None));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let f = aig.add_or(AigLit::new(q_node), x);
+        aig.update_latch_data(q_node, f);
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(x));
+        assert_eq!(decomp.data, AigLit::true_lit());
+    }
+
+    #[test]
+    fn data_equal_to_its_enable_becomes_a_constant() {
+        // E = a | (!a & b) and D = a | b are one function built two ways:
+        // wherever the register loads, it loads 1
+        let mut aig = Aig::new("test".to_string());
+        let a = AigLit::new(aig.add_input("a".to_string(), None));
+        let b = AigLit::new(aig.add_input("b".to_string(), None));
+        let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+        let not_a_and_b = aig.add_and(a.invert(), b);
+        let e = aig.add_or(a, not_a_and_b);
+        let d = aig.add_or(a, b);
+        assert_ne!(e, d, "the two must differ structurally");
+        let f = build_mux(&mut aig, e, d, AigLit::new(q_node));
+        aig.update_latch_data(q_node, f);
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(e));
+        assert_eq!(decomp.data, AigLit::true_lit());
+    }
+
+    #[test]
+    fn data_the_enable_does_not_fix_is_kept() {
+        let (mut aig, q_node, [en, d]) = {
+            let mut aig = Aig::new("test".to_string());
+            let en = AigLit::new(aig.add_input("en".to_string(), None));
+            let d = AigLit::new(aig.add_input("d".to_string(), None));
+            let q_node = aig.add_latch(AigLit::false_lit(), None, None, None);
+            let f = build_mux(&mut aig, en, d, AigLit::new(q_node));
+            aig.update_latch_data(q_node, f);
+            (aig, q_node, [en, d])
+        };
+        let decomp = &decompose_latches(&mut aig)[&q_node];
+        assert_eq!(decomp.enable, Some(en));
+        assert_eq!(decomp.data, d);
     }
 }

@@ -145,6 +145,29 @@ pub fn measured_metastability(
     Ok(load_metastability(db_root, variant)?.remove(element))
 }
 
+/// The family's delay calibration against silicon
+/// (`<family>/timing/silicon_delays.json`, hand-maintained from board
+/// measurements; see [`skalp_lir::delay_calibration`]), if its database
+/// has one
+pub fn silicon_delays(
+    db_root: &Path,
+    variant: NexusVariant,
+) -> Result<Option<skalp_lir::delay_calibration::DelayCalibration>> {
+    let path = db_root
+        .join(variant.prjoxide_family())
+        .join("timing")
+        .join("silicon_delays.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        PlaceRouteError::BitstreamFailed(format!("reading silicon_delays.json: {e}"))
+    })?;
+    skalp_lir::delay_calibration::DelayCalibration::from_json(&text)
+        .map(Some)
+        .map_err(|e| PlaceRouteError::BitstreamFailed(format!("parsing silicon_delays.json: {e}")))
+}
+
 /// Read the family's metastability figures, if its database has them
 fn load_metastability(
     db_root: &Path,
@@ -447,6 +470,7 @@ impl NexusRetimeDelays {
             &[],
             1000,
             super::sites::HardBlockCounts::default(),
+            &[],
         );
         let mut device = NexusDevice::from_prjoxide_region(
             variant,
@@ -494,6 +518,14 @@ impl TimingDb {
     /// timing data)
     pub fn pip_delay_ps(&self, source: &str, destination: &str) -> i64 {
         self.pip_delay(source, destination).unwrap_or(0)
+    }
+
+    /// The delay class of the switch from wire `source` to wire
+    /// `destination`, where it has one
+    pub fn pip_class(&self, source: &str, destination: &str) -> Option<String> {
+        let (sx, sy, source) = wire_parts(source);
+        let (dx, dy, destination) = wire_parts(destination);
+        prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination)
     }
 
     /// Delay of the switch from wire `source` to wire `destination`, or the
@@ -672,6 +704,13 @@ impl TimingModel for NexusTiming<'_> {
         let src = self.device.wire(info.src_wire)?;
         let dst = self.device.wire(info.dst_wire)?;
         self.db.pip_delay(&src.name, &dst.name).err()
+    }
+
+    fn pip_class(&self, pip: PipId) -> Option<String> {
+        let info = self.device.pip(pip)?;
+        let src = self.device.wire(info.src_wire)?;
+        let dst = self.device.wire(info.dst_wire)?;
+        self.db.pip_class(&src.name, &dst.name)
     }
 
     fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {

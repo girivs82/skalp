@@ -171,6 +171,7 @@ fn main() {
         &[],
         netlist.cells.len(),
         sites::HardBlockCounts::default(),
+        &[],
     );
     println!("region {:?}", region);
     let device =

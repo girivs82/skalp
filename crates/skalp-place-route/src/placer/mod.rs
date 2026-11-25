@@ -348,6 +348,11 @@ impl<D: Device + Clone> Placer<D> {
     ) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        // The source's floorplan, in this device's tiles
+        let (width, height) = self.device.grid_size();
+        self.config
+            .io_constraints
+            .add_floorplan(&netlist.floorplan, width, height);
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",
@@ -376,6 +381,8 @@ impl<D: Device + Clone> Placer<D> {
             HashMap::new()
         };
 
+        let regions = self.cell_regions(netlist)?;
+
         // Run placement with carry chain awareness
         let mut result = match self.config.algorithm {
             PlacementAlgorithm::AnalyticalWithRefinement
@@ -403,7 +410,9 @@ impl<D: Device + Clone> Placer<D> {
                 Self::log_hard_blocks("analytical", &initial, netlist);
 
                 // Legalize with carry chain consecutive-row constraints
-                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
+                let legalizer = Legalizer::new(&self.device)
+                    .with_fill_limit(fill_limit)
+                    .with_regions(regions.clone());
                 let t_stage = std::time::Instant::now();
                 let legalized =
                     legalizer.legalize_with_carry_chains(initial, netlist, carry_chains)?;
@@ -447,7 +456,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_seed(self.config.seed)
                 .with_fill_limit(fill_limit)
                 .with_delay_model(self.delay_model())
-                .with_carry_chains(carry_chains.to_vec());
+                .with_carry_chains(carry_chains.to_vec())
+                .with_fixed_cells(regions.keys().copied().collect());
 
                 let t_stage = std::time::Instant::now();
                 let annealed = annealer.optimize(legalized, netlist)?;
@@ -470,6 +480,7 @@ impl<D: Device + Clone> Placer<D> {
             self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
         }
         Self::check_control_sets(&self.device, &result, netlist)?;
+        Self::check_regions(&result, netlist, &regions)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
@@ -477,6 +488,51 @@ impl<D: Device + Clone> Placer<D> {
         result.cost = self.calculate_cost(&result, netlist);
 
         Ok(result)
+    }
+
+    /// The region each region-constrained cell must be placed in, checked
+    /// against the device's grid
+    fn cell_regions(
+        &self,
+        netlist: &GateNetlist,
+    ) -> Result<HashMap<CellId, constraints::PlacementRegion>> {
+        if !self.config.io_constraints.has_region_constraints() {
+            return Ok(HashMap::new());
+        }
+        let regions = self.config.io_constraints.cell_regions(netlist)?;
+        let (width, height) = self.device.grid_size();
+        if let Some(region) = regions
+            .values()
+            .find(|r| r.x_max >= width || r.y_max >= height)
+        {
+            return Err(PlaceRouteError::InvalidConstraint(format!(
+                "region '{}' (tiles {}..={}, {}..={}) is not inside the device's {}x{} tiles",
+                region.name, region.x_min, region.x_max, region.y_min, region.y_max, width, height
+            )));
+        }
+        log::info!("placer: {} cells constrained to regions", regions.len());
+        Ok(regions)
+    }
+
+    /// Refuse a placement that leaves a region-constrained cell outside its
+    /// region
+    fn check_regions(
+        result: &PlacementResult,
+        netlist: &GateNetlist,
+        regions: &HashMap<CellId, constraints::PlacementRegion>,
+    ) -> Result<()> {
+        for (cell, region) in regions {
+            if let Some(loc) = result.placements.get(cell) {
+                if !region.contains(loc.tile_x, loc.tile_y) {
+                    let name = netlist.get_cell(*cell).map_or("?", |c| c.path.as_str());
+                    return Err(PlaceRouteError::PlacementFailed(format!(
+                        "{name} is at tile ({}, {}), outside its region '{}'",
+                        loc.tile_x, loc.tile_y, region.name
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a placement that puts flip-flops with different clock, reset
@@ -512,6 +568,11 @@ impl<D: Device + Clone> Placer<D> {
     pub fn place(&mut self, netlist: &GateNetlist) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        // The source's floorplan, in this device's tiles
+        let (width, height) = self.device.grid_size();
+        self.config
+            .io_constraints
+            .add_floorplan(&netlist.floorplan, width, height);
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",
@@ -539,6 +600,21 @@ impl<D: Device + Clone> Placer<D> {
         } else {
             HashMap::new()
         };
+
+        let regions = self.cell_regions(netlist)?;
+        if !regions.is_empty()
+            && !matches!(
+                self.config.algorithm,
+                PlacementAlgorithm::AnalyticalWithRefinement
+                    | PlacementAlgorithm::AnalyticalTimingDriven
+            )
+        {
+            return Err(PlaceRouteError::InvalidConstraint(format!(
+                "region constraints need a placement that legalizes (analytical with \
+                 refinement, or analytical timing-driven), not {:?}",
+                self.config.algorithm
+            )));
+        }
 
         // Run placement algorithm
         let mut result = match self.config.algorithm {
@@ -579,7 +655,9 @@ impl<D: Device + Clone> Placer<D> {
                 let initial = analytical.place(netlist)?;
 
                 // Legalize
-                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
+                let legalizer = Legalizer::new(&self.device)
+                    .with_fill_limit(fill_limit)
+                    .with_regions(regions.clone());
                 let legalized = legalizer.legalize(initial, netlist)?;
 
                 // SA refinement
@@ -593,7 +671,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_refinement(true)
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
-                .with_fill_limit(fill_limit);
+                .with_fill_limit(fill_limit)
+                .with_fixed_cells(regions.keys().copied().collect());
                 annealer.optimize(legalized, netlist)?
             }
             PlacementAlgorithm::TimingDriven => {
@@ -621,7 +700,9 @@ impl<D: Device + Clone> Placer<D> {
                 let initial = analytical.place(netlist)?;
 
                 // Legalize
-                let legalizer = Legalizer::new(&self.device).with_fill_limit(fill_limit);
+                let legalizer = Legalizer::new(&self.device)
+                    .with_fill_limit(fill_limit)
+                    .with_regions(regions.clone());
                 let legalized = legalizer.legalize(initial, netlist)?;
 
                 // Timing-driven SA refinement
@@ -637,7 +718,8 @@ impl<D: Device + Clone> Placer<D> {
                 .with_batch_size(self.config.parallel_batch_size)
                 .with_seed(self.config.seed)
                 .with_fill_limit(fill_limit)
-                .with_delay_model(self.delay_model());
+                .with_delay_model(self.delay_model())
+                .with_fixed_cells(regions.keys().copied().collect());
                 annealer.optimize(legalized, netlist)?
             }
         };
@@ -648,6 +730,7 @@ impl<D: Device + Clone> Placer<D> {
         }
 
         Self::check_control_sets(&self.device, &result, netlist)?;
+        Self::check_regions(&result, netlist, &regions)?;
 
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);

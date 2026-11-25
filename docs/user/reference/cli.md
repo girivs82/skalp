@@ -291,7 +291,16 @@ skalp sim [OPTIONS] <DESIGN>
   `skalp uart --text` prints what a board sends
 - `--uart-lines <N>` - Stop once the `--uart` line has sent this many lines
 - `--corner`, `--power-up`, `--metastability` - Timed simulation only (see
-  `skalp timed-sim --help`)
+  `skalp timed-sim --help`). `--corner calibrated` scales the build's
+  delays to what a chip of the family measured, by routing switch class
+  and cell type, from the device database's
+  `<family>/timing/silicon_delays.json` (place and route keeps a copy in
+  the build as `design_calibration.json`); `--corner calibrated:FILE`
+  takes the calibration from a file instead. `examples/delay_calibration`
+  measures a chip and fits such a file
+- `--derate <F>` - Timed simulation only: multiply every delay by `F`,
+  as when a large design slows the whole die while it runs (supply droop):
+  `1.02` is 2% slower
 - `--violations <N>` - Timed simulation only: how many timing violations to
   list (20 unless given), first the earliest, then grouped by cell (setup
   first, then the most often violated) with the net each reads, and as

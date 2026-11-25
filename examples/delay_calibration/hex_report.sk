@@ -1,0 +1,147 @@
+// UART line reporter for board probes: on `send` (while idle) it latches sixteen 32-bit words
+// and transmits them as one text line, "w0 w1 ... w15\r\n", each word as 8 lower-case hex
+// digits, 8N1 at the board clock / DIV baud (125 MHz / 125 = 1 Mbaud, `skalp uart`'s
+// default). `busy` is high from the clock after `send` is taken until the line is out, so a
+// parent holds its request until it sees `busy` low.
+
+fn hex_char(n: bit[4]) -> bit[8] {
+    return if n < 10 { {4'h3, n} } else { 8'h57 + {4'h0, n} }
+}
+
+entity HexReport {
+    in clk: clock
+    in send: bit
+    in w0: bit[32]
+    in w1: bit[32]
+    in w2: bit[32]
+    in w3: bit[32]
+    in w4: bit[32]
+    in w5: bit[32]
+    in w6: bit[32]
+    in w7: bit[32]
+    in w8: bit[32]
+    in w9: bit[32]
+    in w10: bit[32]
+    in w11: bit[32]
+    in w12: bit[32]
+    in w13: bit[32]
+    in w14: bit[32]
+    in w15: bit[32]
+    out tx: bit
+    out busy: bit
+}
+
+impl HexReport {
+    // clocks per bit, less one (125 MHz / 1 Mbaud)
+    signal div_m1: bit[8]
+    div_m1 = 124
+
+    signal words: bit[32][16]
+    signal running: bit = 0
+    signal widx: bit[4] = 0
+    // 0..7 = hex digit (most significant first), 8 = the space after the word
+    signal pos: bit[4] = 0
+    // 0 = words, 1 = CR, 2 = LF
+    signal tail: bit[2] = 0
+    // a character is being sent
+    signal loaded: bit = 0
+    signal baud: bit[8] = 0
+    // bits still to send after the one on the line
+    signal nbit: bit[4] = 0
+    signal sh: bit[9] = 9'h1FF
+    signal txr: bit = 1
+
+    // the next character is worked out through two registers (the word, then the
+    // character), so the board clock only crosses a small step of logic at a time; `prep`
+    // counts the clocks they take before each character starts
+    signal prep: bit[2] = 0
+    signal cur: bit[32] = 0
+    signal chr: bit[8] = 0
+    signal nib: bit[4]
+    nib = match pos {
+        0 => cur[31:28],
+        1 => cur[27:24],
+        2 => cur[23:20],
+        3 => cur[19:16],
+        4 => cur[15:12],
+        5 => cur[11:8],
+        6 => cur[7:4],
+        _ => cur[3:0]
+    }
+    signal ch: bit[8]
+    ch = if tail == 1 { 8'h0D } else if tail == 2 { 8'h0A } else if pos == 8 { 8'h20 } else { hex_char(nib) }
+
+    on(clk.rise) {
+        cur = words[widx]
+        chr = ch
+        if running == 0 {
+            txr = 1
+            if send == 1 {
+                words[0] = w0
+                words[1] = w1
+                words[2] = w2
+                words[3] = w3
+                words[4] = w4
+                words[5] = w5
+                words[6] = w6
+                words[7] = w7
+                words[8] = w8
+                words[9] = w9
+                words[10] = w10
+                words[11] = w11
+                words[12] = w12
+                words[13] = w13
+                words[14] = w14
+                words[15] = w15
+                running = 1
+                widx = 0
+                pos = 0
+                tail = 0
+                loaded = 0
+                prep = 0
+            }
+        } else if loaded == 0 {
+            if prep != 2 {
+                prep = prep + 1
+            } else {
+                // start bit now, then the eight data bits (LSB first) and the stop bit
+                txr = 0
+                sh = {1'b1, chr}
+                nbit = 9
+                baud = 0
+                loaded = 1
+                prep = 0
+            }
+        } else if baud != div_m1 {
+            baud = baud + 1
+        } else {
+            baud = 0
+            if nbit != 0 {
+                txr = sh[0]
+                sh = {1'b1, sh[8:1]}
+                nbit = nbit - 1
+            } else {
+                // stop bit done: the next character
+                loaded = 0
+                if tail == 2 {
+                    running = 0
+                    tail = 0
+                } else if tail == 1 {
+                    tail = 2
+                } else if pos == 8 {
+                    pos = 0
+                    if widx == 15 {
+                        tail = 1
+                    } else {
+                        widx = widx + 1
+                    }
+                } else {
+                    pos = pos + 1
+                }
+            }
+        }
+    }
+
+    tx = txr
+    busy = running
+}

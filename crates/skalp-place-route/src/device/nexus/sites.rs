@@ -294,12 +294,17 @@ pub struct HardBlockCounts {
     pub multipliers: usize,
 }
 
+///
+/// `logic_tiles` are tiles logic must be placeable in (corners of the
+/// regions placement constraints name): the window and the logic rows
+/// cover them.
 pub fn design_region(
     tiles: &[PrjoxideTile],
     clocks: &ClockRegions,
     sites: &[(u32, u32)],
     lut_count: usize,
     hard_blocks: HardBlockCounts,
+    logic_tiles: &[(u32, u32)],
 ) -> DesignRegion {
     let clock_tiles = tiles
         .iter()
@@ -316,9 +321,26 @@ pub fn design_region(
         .unwrap_or((0, last_clock_row));
     let all_spines = clocks.all_spine_rows().unwrap_or((0, last_row));
 
-    let site_x0 = sites.iter().map(|s| s.0).min().unwrap_or(first_col);
-    let site_x1 = sites.iter().map(|s| s.0).max().unwrap_or(first_col);
-    let site_y1 = sites.iter().map(|s| s.1).max().unwrap_or(0);
+    // Logic stays off the window's inner edges: the window takes a column
+    // either side of each logic tile
+    let site_x0 = sites
+        .iter()
+        .map(|s| s.0)
+        .chain(logic_tiles.iter().map(|t| t.0.saturating_sub(1)))
+        .min()
+        .unwrap_or(first_col);
+    let site_x1 = sites
+        .iter()
+        .map(|s| s.0)
+        .chain(logic_tiles.iter().map(|t| (t.0 + 1).min(last_col)))
+        .max()
+        .unwrap_or(first_col);
+    let site_y1 = sites
+        .iter()
+        .chain(logic_tiles)
+        .map(|s| s.1)
+        .max()
+        .unwrap_or(0);
 
     let build = |rows: (u32, u32), x0: u32, x1: u32| DesignRegion {
         window: (
@@ -361,7 +383,9 @@ pub fn design_region(
             .filter(|t| t.x > x0 && t.x <= x1 && t.y < region.window.3)
             .filter(|t| super::lram::site_of_tile(&t.tiletype).is_some())
             .count();
-        lut_count as f64 <= capacity as f64 * MAX_REGION_FILL
+        let logic_covered = logic_tiles.iter().all(|&(_, y)| y >= from && y <= to);
+        logic_covered
+            && lut_count as f64 <= capacity as f64 * MAX_REGION_FILL
             && hard_blocks.block_rams <= ram_sites
             && hard_blocks.large_rams <= large_ram_sites
             && hard_blocks.multipliers <= dsp_sites
@@ -455,6 +479,7 @@ mod tests {
             &[(159, 31)],
             100,
             HardBlockCounts::default(),
+            &[],
         );
         let large = design_region(
             &tiles,
@@ -462,10 +487,34 @@ mod tests {
             &[(159, 31)],
             45_000,
             HardBlockCounts::default(),
+            &[],
         );
         assert_eq!(small.logic_rows, (1, 37));
         assert_eq!(large.logic_rows, (1, 73));
         assert!(large.window.3 > small.window.3);
+    }
+
+    #[test]
+    fn the_region_covers_constrained_logic() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let tiles = load_tilegrid(&db, NexusVariant::Lfcpnx100).unwrap();
+        let clocks = ClockRegions::load(&db, "LFCPNX", "LFCPNX-100").unwrap();
+        // A small design whose constrained logic sits at two far corners
+        let region = design_region(
+            &tiles,
+            &clocks,
+            &[(159, 31)],
+            100,
+            HardBlockCounts::default(),
+            &[(5, 5), (154, 69)],
+        );
+        let (x0, _, x1, y1) = region.window;
+        assert!(x0 < 5 && x1 > 154 && y1 >= 69, "window {:?}", region.window);
+        let (from, to) = region.logic_rows;
+        assert!(from <= 5 && to >= 69, "logic rows {:?}", region.logic_rows);
     }
 
     #[test]
@@ -589,6 +638,7 @@ mod tests {
             &[(159, 31)],
             100,
             HardBlockCounts::default(),
+            &[],
         );
         assert_eq!(region.window, (73, 0, 159, 40));
         assert_eq!(region.logic_rows, (1, 37));
