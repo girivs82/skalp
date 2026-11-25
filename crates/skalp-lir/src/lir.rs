@@ -945,7 +945,11 @@ pub enum LirOp {
         async_reset: bool,
         reset_value: Option<u64>,
     },
-    /// Latch array
+    /// Latch array, `q = en ? d : q` per bit; inputs `[en, d]`, or
+    /// `[en, d, rst]` for a latch with an asynchronous reset (one bit):
+    /// `q = rst ? 0 : (en ? d : q)`. Storage has no defined power-up value
+    /// (an ASIC latch, a LUT fed back into itself), so a latch whose start
+    /// value matters takes a reset.
     Latch { width: u32 },
 
     // === Memory ===
@@ -1083,6 +1087,14 @@ pub enum LirOp {
     /// kept AND per bit, so no optimization merges the data into logic in
     /// which its changes could glitch while the grant is low.
     NclTake { width: u32 },
+    /// Exclusive merge of a self-timed block (`match exclusive(..)` in
+    /// `skalp_frontend::ncl_streams`): the design promises that at most one
+    /// of the merged channels holds a value at a time, so no arbiter is
+    /// needed and each grant is its request. Input: the requests. Output:
+    /// the grants, same width. Physical: one kept buffer per bit, so the
+    /// grants stay visible (the timed simulation reports any moment two of
+    /// them are high: the promise broken).
+    NclExclusive { width: u32 },
 }
 
 impl LirOp {
@@ -1148,6 +1160,7 @@ impl LirOp {
             LirOp::NclStepControl => 1,
             LirOp::NclArbiter { width } => *width,
             LirOp::NclTake { width } => *width,
+            LirOp::NclExclusive { width } => *width,
             // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
@@ -1213,7 +1226,7 @@ impl LirOp {
                 1 + if *has_enable { 1 } else { 0 } + if *has_reset { 1 } else { 0 }
                 // d + optional en + optional rst
             }
-            LirOp::Latch { .. } => 2,    // en, d
+            LirOp::Latch { .. } => 2,    // en, d (and an optional rst)
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
             LirOp::MemBlock {
@@ -1236,6 +1249,7 @@ impl LirOp {
             LirOp::NclStepControl => 3,
             LirOp::NclArbiter { .. } => 3,
             LirOp::NclTake { .. } => 2,
+            LirOp::NclExclusive { .. } => 1,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }

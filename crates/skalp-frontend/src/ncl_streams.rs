@@ -81,6 +81,14 @@ pub const NCL_TICK_PORT: &str = "__ncl_tick";
 /// (grants). Behaviourally the grant is a fixed-priority pick; synthesis
 /// drives it from a mutual-exclusion element instead.
 pub const NCL_ARBITER_PREFIX: &str = "__ncl_arb";
+/// Name prefix of the signals of an exclusive merge
+/// (`match exclusive(a, b, ..)`): `__ncl_excl<k>_req` (one request per arm)
+/// and `__ncl_excl<k>_gnt` (grants). The design promises that at most one
+/// of the merged channels holds a value at a time, so no arbiter decides:
+/// each grant is its request. Behaviourally the grant is a fixed-priority
+/// pick; synthesis passes each request straight through (`NclExclusive`),
+/// and the timed simulation reports any moment two grants are high.
+pub const NCL_EXCLUSIVE_PREFIX: &str = "__ncl_excl";
 /// Suffix of an arbiter's "some arm granted" signal (`__ncl_arb<k>_any`),
 /// named when the block's send/recv conditions depend on its grants (see
 /// [`grant_settle_needed`]): synthesis delays it until they have settled.
@@ -311,15 +319,20 @@ struct Lowering<'a> {
     arbiters: Vec<Arbiter>,
 }
 
-/// One `match arbitrate(a, b, ..) { .. }` of a self-timed block
+/// One `match arbitrate(a, b, ..) { .. }` (or `match exclusive(..)`) of a
+/// self-timed block
 struct Arbiter {
+    /// An exclusive merge: the grants are the requests (see
+    /// [`NCL_EXCLUSIVE_PREFIX`])
+    exclusive: bool,
     /// `__ncl_arb<k>_req`: one request per arm, in arm order
     req: SignalId,
     /// `__ncl_arb<k>_gnt`: the grants, one-hot (see [`NCL_ARBITER_PREFIX`])
     gnt: SignalId,
     /// `__ncl_arb<k>_last`: the arm granted last, one-hot (behavioural
-    /// round-robin only; unused once synthesis puts in the mutex)
-    last: SignalId,
+    /// round-robin only; unused once synthesis puts in the mutex). None for
+    /// an exclusive merge.
+    last: Option<SignalId>,
     /// Request expression of each arm
     requests: Vec<HirExpression>,
     /// The stream of each arm, in arm order (for `taken(s)`)
@@ -465,15 +478,23 @@ impl Lowering<'_> {
     /// grants it rather than a stream. The grant is decided once per step
     /// and stays until that step has taken its value, so the step sees one
     /// arm even when values arrive at nearly the same time.
+    ///
+    /// `match exclusive(s0, s1, ..) { .. }` (`exclusive` set) lowers the
+    /// same way without an arbiter: the design promises that at most one of
+    /// the streams holds a value at a time, so arm `k` is taken as soon as
+    /// `k` holds one (see [`NCL_EXCLUSIVE_PREFIX`]). It has no `_ if` arm:
+    /// a step without a value would race with a value arriving.
     fn lower_arbitrate(
         &mut self,
         m: &crate::hir::HirMatchStatement,
         conds: &[HirExpression],
+        exclusive: bool,
     ) -> Option<Vec<HirStatement>> {
         let HirExpression::Call(call) = &m.expr else {
             return None;
         };
         let entity = self.entity.to_string();
+        let what = if exclusive { "exclusive" } else { "arbitrate" };
         let mut streams = Vec::new();
         for arg in &call.args {
             match arg {
@@ -482,7 +503,7 @@ impl Lowering<'_> {
                 }
                 _ => {
                     self.errors.push(format!(
-                        "`arbitrate(..)` in async entity `{entity}` takes stream inputs of the block"
+                        "`{what}(..)` in async entity `{entity}` takes stream inputs of the block"
                     ));
                     return None;
                 }
@@ -490,7 +511,7 @@ impl Lowering<'_> {
         }
         if streams.is_empty() {
             self.errors.push(format!(
-                "`arbitrate()` in async entity `{entity}` needs at least one stream"
+                "`{what}()` in async entity `{entity}` needs at least one stream"
             ));
             return None;
         }
@@ -503,10 +524,16 @@ impl Lowering<'_> {
                     let k = *k as usize;
                     if arms[k].is_some() {
                         self.errors.push(format!(
-                            "`arbitrate(..)` in async entity `{entity}` has two arms for stream {k}"
+                            "`{what}(..)` in async entity `{entity}` has two arms for stream {k}"
                         ));
                     }
                     arms[k] = Some(arm.statements.clone());
+                }
+                (HirPattern::Wildcard | HirPattern::Variable(_), Some(_)) if exclusive => {
+                    self.errors.push(format!(
+                        "`exclusive(..)` in async entity `{entity}` has no `_ if cond` arm: a step without a value could start while a value arrives; use `arbitrate(..)` for that"
+                    ));
+                    return None;
                 }
                 (HirPattern::Wildcard | HirPattern::Variable(_), Some(guard))
                     if default.is_none() =>
@@ -515,13 +542,13 @@ impl Lowering<'_> {
                 }
                 (HirPattern::Wildcard | HirPattern::Variable(_), None) => {
                     self.errors.push(format!(
-                        "the `_` arm of `arbitrate(..)` in async entity `{entity}` needs a condition (`_ if cond =>`): without one the block would never wait"
+                        "the `_` arm of `{what}(..)` in async entity `{entity}` needs a condition (`_ if cond =>`): without one the block would never wait"
                     ));
                     return None;
                 }
                 _ => {
                     self.errors.push(format!(
-                        "arms of `arbitrate(..)` in async entity `{entity}` are the stream numbers 0..{n} and one `_ if cond`"
+                        "arms of `{what}(..)` in async entity `{entity}` are the stream numbers 0..{n} and one `_ if cond`"
                     ));
                     return None;
                 }
@@ -531,7 +558,7 @@ impl Lowering<'_> {
             match &arms[k] {
                 None => {
                     self.errors.push(format!(
-                        "`arbitrate(..)` in async entity `{entity}` has no arm for stream {k} (`{}`)",
+                        "`{what}(..)` in async entity `{entity}` has no arm for stream {k} (`{}`)",
                         self.port_name(*stream)
                     ));
                     return None;
@@ -546,7 +573,7 @@ impl Lowering<'_> {
                     });
                     if !receives {
                         self.errors.push(format!(
-                            "arm {k} of `arbitrate(..)` in async entity `{entity}` must receive from `{}`",
+                            "arm {k} of `{what}(..)` in async entity `{entity}` must receive from `{}`",
                             self.port_name(*stream)
                         ));
                     }
@@ -556,7 +583,7 @@ impl Lowering<'_> {
 
         let req = self.ids.signal();
         let gnt = self.ids.signal();
-        let last = self.ids.signal();
+        let last = (!exclusive).then(|| self.ids.signal());
         let reached = all(conds);
         let mut requests: Vec<HirExpression> = streams
             .iter()
@@ -581,13 +608,17 @@ impl Lowering<'_> {
         // if gnt[0] { arm 0 } else if gnt[1] { .. } else if gnt[n] { default }
         // Each arm records that it was granted, for the round-robin
         // behavioural grant
+        // (an exclusive merge has no round-robin to record)
         let mut mark = |k: usize, body: Vec<HirStatement>| {
-            let mut out = vec![HirStatement::Assignment(assign(
-                self.ids,
-                HirLValue::Signal(last),
-                HirExpression::Literal(HirLiteral::Integer(1u64 << k)),
-                HirAssignmentType::NonBlocking,
-            ))];
+            let mut out = Vec::new();
+            if let Some(last) = last {
+                out.push(HirStatement::Assignment(assign(
+                    self.ids,
+                    HirLValue::Signal(last),
+                    HirExpression::Literal(HirLiteral::Integer(1u64 << k)),
+                    HirAssignmentType::NonBlocking,
+                )));
+            }
             out.extend(body);
             out
         };
@@ -610,11 +641,12 @@ impl Lowering<'_> {
         }
         if requests.len() > 63 {
             self.errors.push(format!(
-                "`arbitrate(..)` in async entity `{entity}` takes at most 63 arms"
+                "`{what}(..)` in async entity `{entity}` takes at most 63 arms"
             ));
             return None;
         }
         self.arbiters.push(Arbiter {
+            exclusive,
             req,
             gnt,
             last,
@@ -666,9 +698,15 @@ impl Lowering<'_> {
                 }
             }
             // `match arbitrate(a, b, ..) { 0 => .., 1 => .., _ if cond => .. }`
+            // or `match exclusive(a, b, ..) { 0 => .., 1 => .. }`
             if let HirStatement::Match(m) = &stmt {
-                if matches!(&m.expr, HirExpression::Call(c) if c.function == "arbitrate") {
-                    if let Some(mut chain) = self.lower_arbitrate(m, conds) {
+                let merge = match &m.expr {
+                    HirExpression::Call(c) if c.function == "arbitrate" => Some(false),
+                    HirExpression::Call(c) if c.function == "exclusive" => Some(true),
+                    _ => None,
+                };
+                if let Some(exclusive) = merge {
+                    if let Some(mut chain) = self.lower_arbitrate(m, conds, exclusive) {
                         self.rewrite_block(&mut chain, conds);
                         out.extend(chain);
                     }
@@ -951,7 +989,7 @@ fn lower_taken(
         }
         if uses_taken {
             errors.push(format!(
-                "`taken(..)` in async entity `{entity}` decides whether a `match arbitrate(..)` is reached or which arm requests; it can only be used after the grant"
+                "`taken(..)` in async entity `{entity}` decides whether a `match arbitrate(..)` (or `exclusive(..)`) is reached or which arm requests; it can only be used after the grant"
             ));
         }
     }
@@ -1012,7 +1050,7 @@ fn lower_taken(
                 Some(g) => *g,
                 None => {
                     errors.push(format!(
-                        "`taken({n})` in async entity `{entity}`: `{n}` is not an arm of a `match arbitrate(..)`",
+                        "`taken({n})` in async entity `{entity}`: `{n}` is not an arm of a `match arbitrate(..)` or `match exclusive(..)`",
                         n = streams[p].name
                     ));
                     return;
@@ -1529,18 +1567,31 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
         // fair round-robin: the arm after the one granted last wins. A
         // design must not rely on that order. Synthesis replaces the grant
         // with a mutual-exclusion element (see `skalp_lir::ncl_expand`).
+        // An exclusive merge has no arbiter: its grant is a fixed-priority
+        // pick, which only matters when the design breaks its promise that
+        // one channel at a time holds a value; synthesis passes the
+        // requests straight through.
         // A step that reaches an arbiter waits for one of its grants.
-        for (k, arb) in arbiters.iter().enumerate() {
+        let (mut arbiter_count, mut exclusive_count) = (0usize, 0usize);
+        for arb in &arbiters {
+            // each kind numbered on its own, from 0
+            let (prefix, k) = if arb.exclusive {
+                exclusive_count += 1;
+                (NCL_EXCLUSIVE_PREFIX, exclusive_count - 1)
+            } else {
+                arbiter_count += 1;
+                (NCL_ARBITER_PREFIX, arbiter_count - 1)
+            };
             let width = arb.requests.len() as u32;
             implementation.signals.push(new_signal(
                 arb.req,
-                format!("{NCL_ARBITER_PREFIX}{k}_req"),
+                format!("{prefix}{k}_req"),
                 HirType::Bit(width),
                 None,
             ));
             implementation.signals.push(new_signal(
                 arb.gnt,
-                format!("{NCL_ARBITER_PREFIX}{k}_gnt"),
+                format!("{prefix}{k}_gnt"),
                 HirType::Bit(width),
                 None,
             ));
@@ -1563,33 +1614,47 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
                 HirAssignmentType::Combinational,
             ));
             let n = arb.requests.len();
-            implementation.signals.push(new_signal(
-                arb.last,
-                format!("{NCL_ARBITER_PREFIX}{k}_last"),
-                HirType::Bit(width),
-                // as if the last arm had been granted: arm 0 goes first
-                Some(1u64 << (n - 1)),
-            ));
-            // Arm i wins when it requests and, for the arm l granted last,
-            // none of the arms after l and before i (going round) requests
-            let gnt_bits: Vec<HirExpression> = (0..n)
-                .rev()
-                .map(|i| {
-                    let after_last = (0..n)
-                        .map(|l| {
-                            let mut terms = vec![bit(arb.last, l)];
-                            let mut j = (l + 1) % n;
-                            while j != i {
-                                terms.push(not(bit(arb.req, j)));
-                                j = (j + 1) % n;
-                            }
-                            all(&terms)
+            let gnt_bits: Vec<HirExpression> = match arb.last {
+                Some(last) => {
+                    implementation.signals.push(new_signal(
+                        last,
+                        format!("{prefix}{k}_last"),
+                        HirType::Bit(width),
+                        // as if the last arm had been granted: arm 0 goes first
+                        Some(1u64 << (n - 1)),
+                    ));
+                    // Arm i wins when it requests and, for the arm l granted
+                    // last, none of the arms after l and before i (going
+                    // round) requests
+                    (0..n)
+                        .rev()
+                        .map(|i| {
+                            let after_last = (0..n)
+                                .map(|l| {
+                                    let mut terms = vec![bit(last, l)];
+                                    let mut j = (l + 1) % n;
+                                    while j != i {
+                                        terms.push(not(bit(arb.req, j)));
+                                        j = (j + 1) % n;
+                                    }
+                                    all(&terms)
+                                })
+                                .reduce(|a, b| bin(a, HirBinaryOp::LogicalOr, b))
+                                .unwrap_or_else(truth);
+                            bin(bit(arb.req, i), HirBinaryOp::LogicalAnd, after_last)
                         })
-                        .reduce(|a, b| bin(a, HirBinaryOp::LogicalOr, b))
-                        .unwrap_or_else(truth);
-                    bin(bit(arb.req, i), HirBinaryOp::LogicalAnd, after_last)
-                })
-                .collect();
+                        .collect()
+                }
+                // Exclusive: arm i wins when it requests and no earlier arm does
+                None => (0..n)
+                    .rev()
+                    .map(|i| {
+                        let mut terms = vec![bit(arb.req, i)];
+                        terms.extend((0..i).map(|j| not(bit(arb.req, j))));
+                        all(&terms)
+                    })
+                    .collect(),
+            };
             implementation.assignments.push(assign(
                 &mut ids,
                 HirLValue::Signal(arb.gnt),
@@ -1610,7 +1675,7 @@ pub fn lower_async_streams(hir: &mut Hir, others: &[&Hir]) -> StreamLowering {
                 let id = ids.signal();
                 implementation.signals.push(new_signal(
                     id,
-                    format!("{NCL_ARBITER_PREFIX}{k}{NCL_GRANT_ANY_SUFFIX}"),
+                    format!("{prefix}{k}{NCL_GRANT_ANY_SUFFIX}"),
                     HirType::Bit(1),
                     None,
                 ));

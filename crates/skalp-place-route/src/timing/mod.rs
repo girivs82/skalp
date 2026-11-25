@@ -173,6 +173,24 @@ pub struct TimingReport {
     /// where the design misses its target, beyond the few paths listed
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing_by_instance: Vec<FailingInstance>,
+    /// Routed switches the device's timing data has no delay for, timed as
+    /// 0 ps: every path through one is faster here than on silicon
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untimed_switches: Vec<UntimedSwitches>,
+}
+
+/// Routed switches of one delay class that the timing data has no delay for
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UntimedSwitches {
+    /// The delay class (`jpclkcibl0 -> jhpf_mid`), or the switch's wire names
+    /// where the device has no class for it
+    pub class: String,
+    /// Routed switches of the class
+    pub switches: usize,
+    /// Nets routed through them
+    pub nets: usize,
+    /// One of those nets
+    pub example_net: String,
 }
 
 /// The failing endpoints of one instance
@@ -241,6 +259,7 @@ impl Default for TimingReport {
             hold: None,
             bundles: Vec::new(),
             failing_by_instance: Vec::new(),
+            untimed_switches: Vec::new(),
         }
     }
 }

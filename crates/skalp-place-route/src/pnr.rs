@@ -1125,7 +1125,18 @@ pub fn place_and_route_nexus_real_from(
             net.fanout.clear();
         }
     }
-    let clock_routes = crate::clock_routing::route_clock_nets(&device, &routable, &placement)?;
+    // Clocks made in the fabric enter the clock network where the timing
+    // data times every switch, when such an entry exists
+    let clock_timing = crate::device::nexus::timing::NexusTiming {
+        device: &device,
+        db: &timing_db,
+    };
+    let is_untimed = |pip| {
+        use crate::timing::sta::TimingModel;
+        clock_timing.untimed_pip(pip).is_some()
+    };
+    let clock_routes =
+        crate::clock_routing::route_clock_nets(&device, &routable, &placement, &is_untimed)?;
     for net in &mut routable.nets {
         if !clock_routes.general.contains(&net.id) {
             net.fanout.retain(|&(cell, pin)| {
@@ -1296,6 +1307,19 @@ pub fn place_and_route_nexus_real_from(
         );
     }
     timing.meets_timing &= timing.bundles.iter().all(|b| b.slack_ns >= 0.0);
+    // Switches the delay tables don't time: the analysis above counted them
+    // as 0 ps (the corners share their delay classes)
+    timing.untimed_switches =
+        crate::timing::sta::untimed_switches(&timing_model, netlist, &routing);
+    for u in &timing.untimed_switches {
+        log::warn!(
+            "nexus pnr: no delay for switch class {} ({} switches on {} nets, e.g. {})",
+            u.class,
+            u.switches,
+            u.nets,
+            u.example_net
+        );
+    }
 
     let bit_writer = NexusBitWriter {
         db_root,

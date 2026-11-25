@@ -683,3 +683,145 @@ async fn taken_misuse_is_refused() {
         assert!(error.contains(says), "{error}");
     }
 }
+
+const EXCLUSIVE: &str = "tests/fixtures/ncl_streams_exclusive.sk";
+
+/// A client with one request out at a time takes each answer through
+/// `match exclusive(..)`, from whichever server sent it, with `taken(..)`
+/// picking between answers of different widths
+async fn run_exclusive(mut tb: Testbench, cycles: usize) {
+    tb.set("run", 1u8);
+    tb.clock(cycles).await;
+    tb.set("run", 0u8);
+    tb.clock(STOP_LIMIT).await;
+    let count = tb.get_u32("count").await;
+    assert!(count > 8, "only {count} answers");
+    assert_eq!(
+        tb.get_u32("bad").await,
+        0,
+        "a wrong answer, or from the wrong server"
+    );
+    // requests 1, 2, 3, ...: odd ones answered n + 1, even ones n + 256
+    let expected: u32 = (1..=count)
+        .map(|k| {
+            let n = k & 0xff;
+            if n % 2 == 1 {
+                (n + 1) & 0xff
+            } else {
+                n + 0x100
+            }
+        })
+        .sum::<u32>()
+        & 0xffff;
+    assert_eq!(tb.get_u32("sum").await, expected, "sum of {count} answers");
+}
+
+#[tokio::test]
+async fn exclusive_merge_behavioural() {
+    let tb = Testbench::behavioral_with_top(EXCLUSIVE, "ExTop")
+        .await
+        .expect("build behavioural testbench");
+    run_exclusive(tb, 200).await;
+}
+
+/// At gate level the merge has no arbiter: each grant is its request,
+/// through one kept buffer per arm
+#[tokio::test]
+async fn exclusive_merge_gate_level() {
+    use skalp_lir::gate_netlist::{GateNetlist, ARBITER_OP, EXCLUSIVE_OP};
+    let check = |netlist: GateNetlist| {
+        assert!(
+            !netlist
+                .cells
+                .iter()
+                .any(|c| c.source_op.as_deref() == Some(ARBITER_OP)),
+            "an exclusive merge needs no arbiter"
+        );
+        let grants: Vec<_> = netlist
+            .cells
+            .iter()
+            .filter(|c| c.source_op.as_deref() == Some(EXCLUSIVE_OP))
+            .collect();
+        assert_eq!(grants.len(), 2, "one grant buffer per arm");
+        let paths: Vec<&str> = grants.iter().map(|c| c.path.as_str()).collect();
+        assert!(
+            grants
+                .iter()
+                .all(|c| c.is_kept() && c.inputs.len() == 1 && c.path.starts_with("top.c.")),
+            "{paths:?}"
+        );
+        netlist
+    };
+    let tb = Testbench::gate_level_with_netlist_pass(EXCLUSIVE, "ExTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    run_exclusive(tb, 400).await;
+}
+
+/// The timed simulation reports two channels of one exclusive merge full at
+/// once: never for the client with one request out, often for two
+/// free-running sources
+#[tokio::test]
+async fn exclusive_merge_clashes_show_in_the_timed_simulation() {
+    use skalp_lir::gate_netlist::GateNetlist;
+    use skalp_lir::ncl_bundle::{size_matched_delays, LibraryDelays};
+    use skalp_lir::timed_sim::{Logic, PowerUp, TimedSim};
+    let library = skalp_lir::get_stdlib_library("nexus").unwrap();
+    // (clashes, values merged) after 20 us of running
+    let timed = |netlist: &GateNetlist| -> (u64, u64) {
+        let delays = LibraryDelays::new(&library);
+        let mut netlist = netlist.clone();
+        size_matched_delays(&mut netlist, &delays, 0);
+        let mut sim = TimedSim::with_power_up(&netlist, &delays, PowerUp::Zero).expect("timed sim");
+        assert_eq!(sim.exclusive_merge_count(), 1);
+        // the top's ports, under the top instance's name
+        let clk = sim.net("top.clk").expect("clk");
+        let run = sim.net("top.run").expect("run");
+        sim.set(run, Logic::One);
+        sim.add_clock(clk, 20_000);
+        sim.run_until(20_000_000).unwrap();
+        let count = sim.bus("top.count");
+        assert_eq!(count.len(), 16, "count bits");
+        let merged = sim.bus_value(&count).expect("count known");
+        (sim.exclusive_clash_count(), merged)
+    };
+    let result = std::sync::Mutex::new(None);
+    let check = |netlist: GateNetlist| {
+        *result.lock().unwrap() = Some(timed(&netlist));
+        netlist
+    };
+    Testbench::gate_level_with_netlist_pass(EXCLUSIVE, "ExTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    let (clashes, merged) = result.lock().unwrap().take().unwrap();
+    assert!(merged > 8, "only {merged} answers");
+    assert_eq!(
+        clashes, 0,
+        "one request out: one answer channel full at a time"
+    );
+    Testbench::gate_level_with_netlist_pass(EXCLUSIVE, "ExClashTop", "nexus", &check)
+        .await
+        .expect("build gate-level testbench");
+    let (clashes, merged) = result.lock().unwrap().take().unwrap();
+    assert!(merged > 8, "only {merged} values merged");
+    assert!(
+        clashes > 0,
+        "two free-running sources, but no clash reported"
+    );
+}
+
+/// `match exclusive(..)` with a `_ if` arm is refused
+#[tokio::test]
+async fn exclusive_merge_with_a_default_arm_is_refused() {
+    let error = match Testbench::behavioral_with_top(
+        "tests/fixtures/ncl_streams_exclusive_bad.sk",
+        "ExbTop",
+    )
+    .await
+    {
+        Ok(_) => panic!("built, but `exclusive(..)` has a `_ if` arm"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(error.contains("ExbDefault"), "{error}");
+    assert!(error.contains("has no `_ if cond` arm"), "{error}");
+}

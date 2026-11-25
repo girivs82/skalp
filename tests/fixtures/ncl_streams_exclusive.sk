@@ -1,0 +1,166 @@
+// `match exclusive(..)`: a block merges answers from channels of which at
+// most one holds a value at a time, without an arbiter
+
+// Sends a request to one of two servers at a time and waits for the
+// answer: odd numbers to `qa`, even ones to `qb`. Only one request is ever
+// out, so only one answer channel is ever full. The answers differ in
+// width; `taken(..)` picks the one the step took.
+async entity ExClient {
+    out qa: stream<bit[8]>
+    out qb: stream<bit[8]>
+    in ra: stream<bit[8]>
+    in rb: stream<bit[16]>
+    out count: bit[16]
+    out sum: bit[16]
+    out bad: bit
+}
+impl ExClient {
+    signal n: bit[8] = 1
+    signal waiting: bit = 0
+    signal c: bit[16] = 0
+    signal s: bit[16] = 0
+    signal bd: bit = 0
+    count = c
+    sum = s
+    bad = bd
+    // the answer the step took, widened
+    signal got: bit[16]
+    got = if taken(ra) == 1 { {8'h00, ra} } else { rb }
+    // what the server of `n` answers
+    signal expected: bit[16]
+    expected = if n[0] == 1 { {8'h00, n + 8'h01} } else { {8'h00, n} + 16'h0100 }
+    on() {
+        if waiting == 0 {
+            if n[0] == 1 {
+                qa.send(n)
+            } else {
+                qb.send(n)
+            }
+            waiting = 1
+        } else {
+            match exclusive(ra, rb) {
+                0 => {
+                    let x: bit[8] = ra.recv()
+                }
+                1 => {
+                    let y: bit[16] = rb.recv()
+                }
+            }
+            if got != expected || taken(ra) != n[0] {
+                bd = 1
+            }
+            s = s + got
+            c = c + 16'h0001
+            n = n + 8'h01
+            waiting = 0
+        }
+    }
+}
+
+// Answers `q + 1`
+async entity ExServerA {
+    in q: stream<bit[8]>
+    out r: stream<bit[8]>
+}
+impl ExServerA {
+    signal v: bit[8] = 0
+    signal full: bit = 0
+    on() {
+        if full == 0 {
+            let x: bit[8] = q.recv()
+            v = x + 8'h01
+            full = 1
+        } else {
+            r.send(v)
+            full = 0
+        }
+    }
+}
+
+// Answers `q + 256`, two steps later
+async entity ExServerB {
+    in q: stream<bit[8]>
+    out r: stream<bit[16]>
+}
+impl ExServerB {
+    signal v: bit[16] = 0
+    signal st: bit[2] = 0
+    on() {
+        if st == 0 {
+            let x: bit[8] = q.recv()
+            v = {8'h00, x} + 16'h0100
+            st = 1
+        } else if st == 1 {
+            st = 2
+        } else {
+            r.send(v)
+            st = 0
+        }
+    }
+}
+
+entity ExTop {
+    in clk: clock
+    in run: bit
+    out count: bit[16]
+    out sum: bit[16]
+    out bad: bit
+}
+impl ExTop {
+    signal req: bit = 0
+    inst c = ExClient { ra: sa.r, rb: sb.r, ncl_req: req }
+    inst sa = ExServerA { q: c.qa, ncl_req: req }
+    inst sb = ExServerB { q: c.qb, ncl_req: req }
+    on(clk.rise) { req = run }
+    count = c.count
+    sum = c.sum
+    bad = c.bad
+}
+
+// Breaks the promise: two free-running sources into one exclusive merge
+
+async entity ExSource {
+    out q: stream<bit[8]>
+}
+impl ExSource {
+    signal n: bit[8] = 1
+    on() {
+        q.send(n)
+        n = n + 8'h01
+    }
+}
+
+async entity ExBoth {
+    in a: stream<bit[8]>
+    in b: stream<bit[8]>
+    out count: bit[16]
+}
+impl ExBoth {
+    signal c: bit[16] = 0
+    count = c
+    on() {
+        match exclusive(a, b) {
+            0 => {
+                let x: bit[8] = a.recv()
+            }
+            1 => {
+                let y: bit[8] = b.recv()
+            }
+        }
+        c = c + 16'h0001
+    }
+}
+
+entity ExClashTop {
+    in clk: clock
+    in run: bit
+    out count: bit[16]
+}
+impl ExClashTop {
+    signal req: bit = 0
+    inst sa = ExSource { ncl_req: req }
+    inst sb = ExSource { ncl_req: req }
+    inst m = ExBoth { a: sa.q, b: sb.q, ncl_req: req }
+    on(clk.rise) { req = run }
+    count = m.count
+}

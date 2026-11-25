@@ -49,8 +49,9 @@
 //! one of those inputs.
 
 use crate::gate_netlist::{
-    Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, MATCHED_DELAY_OP, STEP_CONTROL_OP,
-    STEP_LATCH_READY_PIN,
+    Cell, CellId, GateNet, GateNetId, GateNetlist, ARBITER_OP, EXCLUSIVE_OP, LATCH_D_PIN,
+    LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN, LATCH_RST_LUT_INIT, LATCH_RST_PIN,
+    MATCHED_DELAY_OP, STEP_CONTROL_OP, STEP_LATCH_READY_PIN,
 };
 use crate::tech_library::{CellFunction, TechLibrary};
 use std::collections::{HashMap, HashSet};
@@ -291,6 +292,515 @@ pub fn find_matched_delays(netlist: &GateNetlist) -> Vec<MatchedDelay> {
     result
 }
 
+/// Path of the matched delay that reopens a block's master latches after
+/// its step strobe falls (see `ncl_expand::expand_to_ncl_bridged_with`)
+pub const MASTER_OPEN_PATH: &str = "ncl_bundle.master_open";
+/// Path of the matched delay that opens a block's slave latches after its
+/// step strobe rises (see `ncl_expand::expand_to_ncl_bridged_with`)
+pub const SLAVE_OPEN_PATH: &str = "ncl_bundle.slave_open";
+
+/// One bit held by a latch built from logic (`LATCH_OP`, see
+/// `tech_mapper::map_latch_bit`): a library latch cell, one LUT whose
+/// output feeds back into it, or kept gates with the consensus term
+#[derive(Debug, Clone)]
+struct LatchBit {
+    en: GateNetId,
+    d: GateNetId,
+    q: GateNetId,
+    cells: Vec<CellId>,
+}
+
+/// Every latch bit of `netlist`
+fn latch_bits(netlist: &GateNetlist) -> Vec<LatchBit> {
+    let mut bits = Vec::new();
+    // Gate-built latches, by the latch's path: (en, d, q, cells)
+    type Parts = (
+        Option<GateNetId>,
+        Option<GateNetId>,
+        Option<GateNetId>,
+        Vec<CellId>,
+    );
+    let mut gates: HashMap<&str, Parts> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for cell in netlist
+        .cells
+        .iter()
+        .filter(|c| c.source_op.as_deref() == Some(LATCH_OP))
+    {
+        let (Some(&q), true) = (cell.outputs.first(), cell.outputs.len() == 1) else {
+            continue;
+        };
+        if cell.function == Some(CellFunction::Latch) && cell.inputs.len() == 2 {
+            bits.push(LatchBit {
+                en: cell.inputs[0],
+                d: cell.inputs[1],
+                q,
+                cells: vec![cell.id],
+            });
+            continue;
+        }
+        // A plain latch LUT, or one with a reset (held at 0 while the
+        // block's reset is high, which it never is once the block runs)
+        let latch_lut = match cell.lut_init {
+            Some(LATCH_LUT_INIT) => true,
+            Some(LATCH_RST_LUT_INIT) => cell.inputs.len() > LATCH_RST_PIN,
+            _ => false,
+        };
+        if latch_lut && cell.inputs.get(LATCH_Q_PIN) == Some(&q) {
+            bits.push(LatchBit {
+                en: cell.inputs[LATCH_EN_PIN],
+                d: cell.inputs[LATCH_D_PIN],
+                q,
+                cells: vec![cell.id],
+            });
+            continue;
+        }
+        if holds_a_constant(cell, q) {
+            // A latch whose data folded to a constant: no data path to time
+            continue;
+        }
+        let Some((latch, part)) = cell.path.rsplit_once('.') else {
+            continue;
+        };
+        let entry = gates.entry(latch).or_insert_with(|| {
+            order.push(latch);
+            (None, None, None, Vec::new())
+        });
+        entry.3.push(cell.id);
+        match part {
+            "inv" => entry.0 = cell.inputs.first().copied(),
+            "load_and" => entry.1 = cell.inputs.first().copied(),
+            "or_b" => entry.2 = Some(q),
+            _ => {}
+        }
+    }
+    for latch in order {
+        match gates.remove(latch) {
+            Some((Some(en), Some(d), Some(q), cells)) => bits.push(LatchBit { en, d, q, cells }),
+            _ => tracing::warn!(
+                "NCL bundle: latch cells under {} are not a latch the timing checks know; not timed",
+                latch
+            ),
+        }
+    }
+    bits
+}
+
+/// Whether `cell` is a latch LUT whose data input synthesis folded to a
+/// constant: its output `q` feeds back into it, and with some input as the
+/// enable (and perhaps another as the block reset, which clears it) it loads
+/// a fixed value while enabled and holds while not. Such a bit has no data
+/// to time.
+fn holds_a_constant(cell: &crate::gate_netlist::Cell, q: GateNetId) -> bool {
+    let Some(init) = cell.lut_init else {
+        return false;
+    };
+    let n = cell.inputs.len();
+    if !(2..=3).contains(&n) {
+        return false;
+    }
+    let Some(q_pin) = cell.inputs.iter().position(|&i| i == q) else {
+        return false;
+    };
+    let bit = |a: usize| (init >> a) & 1 == 1;
+    let others: Vec<usize> = (0..n).filter(|&i| i != q_pin).collect();
+    for &en in &others {
+        let rst = others.iter().copied().find(|&i| i != en);
+        for value in [false, true] {
+            let matches = (0..1usize << n).all(|a| {
+                let pin = |i: usize| (a >> i) & 1 == 1;
+                let want = if rst.is_some_and(pin) {
+                    false
+                } else if pin(en) {
+                    value
+                } else {
+                    pin(q_pin)
+                };
+                bit(a) == want
+            });
+            if matches {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Shortest and longest delay from `from` (an input of the latch) to its
+/// output, through the latch's own cells and the connections into them;
+/// the feedback from the output is not a path
+fn latch_path(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    bit: &LatchBit,
+    from: GateNetId,
+) -> Option<(i64, i64)> {
+    fn walk(
+        netlist: &GateNetlist,
+        delays: &dyn BundleDelays,
+        bit: &LatchBit,
+        from: GateNetId,
+        net: GateNetId,
+        depth: usize,
+    ) -> Option<(i64, i64)> {
+        if net == from {
+            return Some((0, 0));
+        }
+        let n = &netlist.nets[net.0 as usize];
+        let driver = n.driver?;
+        if depth > bit.cells.len() || !bit.cells.contains(&driver) {
+            return None;
+        }
+        let cell = &netlist.cells[driver.0 as usize];
+        let output = n.driver_pin.unwrap_or(0);
+        let mut best: Option<(i64, i64)> = None;
+        for (i, &input) in cell.inputs.iter().enumerate() {
+            if input == bit.q {
+                continue;
+            }
+            let Some(arc) = delays.arc_ps(cell, i, output) else {
+                continue;
+            };
+            if let Some((lo, hi)) = walk(netlist, delays, bit, from, input, depth + 1) {
+                let step = delays.wire_ps(netlist, input, cell, i) + arc;
+                best = Some(match best {
+                    None => (lo + step, hi + step),
+                    Some((l, h)) => (l.min(lo + step), h.max(hi + step)),
+                });
+            }
+        }
+        best
+    }
+    walk(netlist, delays, bit, from, bit.q, 0)
+}
+
+/// Shortest and longest connection from `net` into the latch's own cells
+fn latch_wires(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    bit: &LatchBit,
+    net: GateNetId,
+) -> Option<(i64, i64)> {
+    netlist.nets[net.0 as usize]
+        .fanout
+        .iter()
+        .filter(|(c, _)| bit.cells.contains(c))
+        .map(|&(c, pin)| delays.wire_ps(netlist, net, &netlist.cells[c.0 as usize], pin))
+        .fold(None, |acc, w| match acc {
+            None => Some((w, w)),
+            Some((l, h)) => Some((l.min(w), h.max(w))),
+        })
+}
+
+/// How long a latch needs its data stable before its enable falls: the new
+/// value must have gone through the latch and back to its own input, so
+/// that the latch holds it once closed
+fn latch_setup(netlist: &GateNetlist, delays: &dyn BundleDelays, bit: &LatchBit) -> Option<i64> {
+    let (_, through) = latch_path(netlist, delays, bit, bit.d)?;
+    let feedback = latch_wires(netlist, delays, bit, bit.q).map_or(0, |(_, h)| h);
+    Some(through + feedback)
+}
+
+/// A block whose state is held in latches built from logic (see
+/// `ncl_expand::expand_to_ncl_bridged_with`), opened from its step strobe
+/// `go`.
+///
+/// A latch is taken to be closed once its enable's fall has gone through
+/// it to its output: from then on its own feedback holds the value
+/// whatever the data does (a latch built from logic keeps its consensus
+/// term, so the data changing then cannot glitch it). That is its hold
+/// time.
+struct LatchBlock<'a> {
+    prefix: &'a str,
+    go: &'a MatchedDelay,
+    /// How the latches that take the next state are opened
+    opener: Opener<'a>,
+    /// The latches that take the next state (masters, or the only latches)
+    takers: Vec<LatchBit>,
+    /// Slaves of takers that are masters: `slave_open = go & delay(go)`
+    /// opens them once every master has closed, and they close as `go`
+    /// falls
+    slaves: Option<(&'a MatchedDelay, Vec<LatchBit>)>,
+    /// Pulsed takers without a slave: they launch their new value as the
+    /// pulse opens them
+    singles: Vec<LatchBit>,
+}
+
+/// How a latch block opens the latches that take its next state
+enum Opener<'a> {
+    /// Open while the block waits: `master_open = !go & delay(!go)` falls
+    /// as `go` rises and rises a matched delay after `go` falls
+    Transparent { master_open: &'a MatchedDelay },
+    /// Open only for `pulse = go & !pulse_end` as `go` rises, with
+    /// `pulse_end = go & delay(go)`
+    Pulse {
+        pulse_end: &'a MatchedDelay,
+        pulse: GateNetId,
+        /// The gate that makes the pulse
+        gate: CellId,
+    },
+}
+
+/// The latches of a block that take the next state or launch the new one,
+/// with their enable and when it changes after `go` rises (at the enable's
+/// own net)
+struct LatchGroup<'b> {
+    en: GateNetId,
+    at: i64,
+    bits: &'b [LatchBit],
+}
+
+/// Path of the matched delay that ends a pulsed-latch block's pulse (see
+/// `ncl_expand::expand_to_ncl_bridged_with`)
+pub const PULSE_END_PATH: &str = "ncl_bundle.pulse_end";
+/// Path of the gate that makes a pulsed-latch block's pulse
+pub const PULSE_PATH: &str = "ncl_bundle.pulse";
+
+/// Every latch block of `netlist`
+fn latch_blocks<'a>(netlist: &GateNetlist, matched: &'a [MatchedDelay]) -> Vec<LatchBlock<'a>> {
+    let bits = latch_bits(netlist);
+    let in_block = |prefix: &str, en: GateNetId| -> Vec<LatchBit> {
+        bits.iter()
+            .filter(|b| {
+                b.en == en
+                    && b.cells
+                        .first()
+                        .is_some_and(|&c| netlist.cells[c.0 as usize].path.starts_with(prefix))
+            })
+            .cloned()
+            .collect()
+    };
+    let path_of = |m: &MatchedDelay| netlist.cells[m.and_cell.0 as usize].path.as_str();
+    // The slaves of the block whose `go` is `go`, if it has any
+    let slaves_of = |prefix: &str, go: GateNetId| {
+        matched
+            .iter()
+            .find(|m| m.prefix == prefix && m.source == go && path_of(m).contains(SLAVE_OPEN_PATH))
+            .map(|so| (so, in_block(prefix, so.control)))
+    };
+    let mut blocks = Vec::new();
+    for md in matched {
+        let prefix = md.prefix.as_str();
+        if path_of(md).contains(MASTER_OPEN_PATH) {
+            // `master_open`'s source is `!go`
+            let go_net = netlist.nets[md.source.0 as usize]
+                .driver
+                .map(|d| &netlist.cells[d.0 as usize])
+                .filter(|c| c.inputs.len() == 1 && c.path.starts_with(prefix))
+                .map(|c| c.inputs[0]);
+            let go = matched.iter().find(|m| Some(m.control) == go_net);
+            let slaves = go.and_then(|go| slaves_of(prefix, go.control));
+            let (Some(go), Some(slaves)) = (go, slaves) else {
+                tracing::warn!(
+                    "NCL bundle {}: master latch enable without its step strobe or slave enable; latches not timed",
+                    prefix.trim_end_matches('.')
+                );
+                continue;
+            };
+            blocks.push(LatchBlock {
+                prefix,
+                go,
+                opener: Opener::Transparent { master_open: md },
+                takers: in_block(prefix, md.control),
+                slaves: Some(slaves),
+                singles: Vec::new(),
+            });
+        } else if path_of(md).contains(PULSE_END_PATH) {
+            // `pulse_end`'s source is `go`; the pulse gate reads both
+            let go = matched.iter().find(|m| m.control == md.source);
+            let gate = netlist.nets[md.control.0 as usize]
+                .fanout
+                .iter()
+                .map(|&(c, _)| &netlist.cells[c.0 as usize])
+                .find(|c| {
+                    // (a LUT may read an input on more than one pin)
+                    c.path.starts_with(prefix)
+                        && c.inputs.contains(&md.source)
+                        && c.inputs.iter().all(|&n| n == md.source || n == md.control)
+                        && c.outputs.len() == 1
+                });
+            let (Some(go), Some(gate)) = (go, gate) else {
+                tracing::warn!(
+                    "NCL bundle {}: pulse end without its step strobe or pulse gate; latches not timed",
+                    prefix.trim_end_matches('.')
+                );
+                continue;
+            };
+            let pulse = gate.outputs[0];
+            let takers = in_block(prefix, pulse);
+            let slaves = slaves_of(prefix, go.control);
+            let slave_inputs: HashSet<GateNetId> = slaves
+                .iter()
+                .flat_map(|(_, s)| s.iter().map(|b| b.d))
+                .collect();
+            let singles = takers
+                .iter()
+                .filter(|b| !slave_inputs.contains(&b.q))
+                .cloned()
+                .collect();
+            blocks.push(LatchBlock {
+                prefix,
+                go,
+                opener: Opener::Pulse {
+                    pulse_end: md,
+                    pulse,
+                    gate: gate.id,
+                },
+                takers,
+                slaves,
+                singles,
+            });
+        }
+    }
+    blocks
+}
+
+/// When a matched delay's output falls after its source does (at
+/// `source_at`): straight through its AND
+fn falls_through(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    md: &MatchedDelay,
+    source_at: i64,
+) -> Option<i64> {
+    through_pin(netlist, delays, md.and_cell, md.source, source_at)
+}
+
+/// When `cell`'s output changes after its input `net` does (at `at`):
+/// the latest of the pins `net` reaches
+fn through_pin(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    cell: CellId,
+    net: GateNetId,
+    at: i64,
+) -> Option<i64> {
+    let cell = &netlist.cells[cell.0 as usize];
+    cell.inputs
+        .iter()
+        .enumerate()
+        .filter(|&(_, &n)| n == net)
+        .filter_map(|(pin, _)| {
+            Some(at + delays.wire_ps(netlist, net, cell, pin) + delays.arc_ps(cell, pin, 0)?)
+        })
+        .max()
+}
+
+/// Earliest arrival of `en` at any of `bits`' enable pins, after `at` at
+/// its own net
+fn opens_at(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    bits: &[LatchBit],
+    en: GateNetId,
+    at: i64,
+) -> Option<i64> {
+    bits.iter()
+        .filter_map(|b| latch_wires(netlist, delays, b, en).map(|(lo, _)| at + lo))
+        .min()
+}
+
+/// Latest time any of `bits` has closed (its enable's fall gone through
+/// it), the enable falling at `at` at its own net
+fn closed_at(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    bits: &[LatchBit],
+    en: GateNetId,
+    at: i64,
+) -> Option<i64> {
+    bits.iter()
+        .filter_map(|b| latch_path(netlist, delays, b, en).map(|(_, hi)| at + hi))
+        .max()
+}
+
+impl LatchBlock<'_> {
+    /// Times from `go` (at its own net, time 0) to the nets of this block
+    fn arrivals_from_go<'n>(
+        &self,
+        netlist: &'n GateNetlist,
+        delays: &'n dyn BundleDelays,
+        early: bool,
+    ) -> Arrivals<'n>
+    where
+        Self: 'n,
+    {
+        let arrivals = Arrivals::new(netlist, delays, self.prefix, false)
+            .with_sources(HashMap::from([(self.go.control, 0)]));
+        if early {
+            arrivals.earliest()
+        } else {
+            arrivals
+        }
+    }
+
+    /// The takers' enable: it falls (closing them) `at` after `go` rises
+    fn takers(&self, netlist: &GateNetlist, delays: &dyn BundleDelays) -> Option<LatchGroup<'_>> {
+        let mut from_go = self.arrivals_from_go(netlist, delays, false);
+        let (en, at) = match self.opener {
+            Opener::Transparent { master_open } => {
+                // `!go` changes the inverter's delay after `go`
+                let not_go = from_go.at(master_open.source)?;
+                (
+                    master_open.control,
+                    falls_through(netlist, delays, master_open, not_go)?,
+                )
+            }
+            Opener::Pulse {
+                pulse_end,
+                pulse,
+                gate,
+            } => {
+                let end = from_go.at(pulse_end.control)?;
+                (
+                    pulse,
+                    through_pin(netlist, delays, gate, pulse_end.control, end)?,
+                )
+            }
+        };
+        Some(LatchGroup {
+            en,
+            at,
+            bits: &self.takers,
+        })
+    }
+
+    /// The latches that launch the new state, by enable: the slaves, and
+    /// the pulsed latches without a slave. Each enable rises (opening them)
+    /// `at` after `go` rises (earliest arrivals with `early`).
+    fn launchers(
+        &self,
+        netlist: &GateNetlist,
+        delays: &dyn BundleDelays,
+        early: bool,
+    ) -> Vec<LatchGroup<'_>> {
+        let mut groups = Vec::new();
+        if let Some((slave_open, slaves)) = &self.slaves {
+            if let Some(at) = self
+                .arrivals_from_go(netlist, delays, early)
+                .at(slave_open.control)
+            {
+                groups.push(LatchGroup {
+                    en: slave_open.control,
+                    at,
+                    bits: slaves,
+                });
+            }
+        }
+        if let (Opener::Pulse { pulse, gate, .. }, false) = (&self.opener, self.singles.is_empty())
+        {
+            if let Some(at) = through_pin(netlist, delays, *gate, self.go.control, 0) {
+                groups.push(LatchGroup {
+                    en: *pulse,
+                    at,
+                    bits: &self.singles,
+                });
+            }
+        }
+        groups
+    }
+}
+
 /// Arrival-time propagation inside one block
 struct Arrivals<'a> {
     netlist: &'a GateNetlist,
@@ -318,6 +828,18 @@ struct Arrivals<'a> {
     /// delay still takes its latest input: it times a rising edge, which
     /// needs both the source and the end of its chain.
     early: bool,
+    /// Latch bits by their output: like a register's, a latch's output is
+    /// timed from its enable (the latches of a block are never open while
+    /// their data changes; the latch checks see to that)
+    latches: HashMap<GateNetId, LatchBit>,
+    /// Sources of matched delays. A gate that makes one purely from
+    /// controls (the `!go` of a latch block's `master_open`) is part of
+    /// the timing, not data, and so is a plain buffer of a control (the
+    /// acknowledge output of a block, buffered on its way out).
+    delay_sources: HashSet<GateNetId>,
+    /// Enables of latches: a gate that makes one purely from controls (a
+    /// pulsed-latch block's pulse) is part of the timing too
+    latch_enables: HashSet<GateNetId>,
 }
 
 impl<'a> Arrivals<'a> {
@@ -327,6 +849,8 @@ impl<'a> Arrivals<'a> {
         prefix: &'a str,
         through_registers: bool,
     ) -> Self {
+        let matched = find_matched_delays(netlist);
+        let bits = latch_bits(netlist);
         Self {
             netlist,
             delays,
@@ -337,11 +861,11 @@ impl<'a> Arrivals<'a> {
             from: HashMap::new(),
             loop_cuts: 0,
             sources: None,
-            controls: find_matched_delays(netlist)
-                .into_iter()
-                .map(|m| m.control)
-                .collect(),
+            controls: matched.iter().map(|m| m.control).collect(),
             early: false,
+            latch_enables: bits.iter().map(|b| b.en).collect(),
+            latches: bits.into_iter().map(|b| (b.q, b)).collect(),
+            delay_sources: matched.iter().map(|m| m.source).collect(),
         }
     }
 
@@ -407,64 +931,79 @@ impl<'a> Arrivals<'a> {
             return None;
         }
         let netlist = self.netlist;
-        let result = match netlist.nets.get(net.0 as usize).and_then(|n| n.driver) {
-            None => match &self.sources {
-                Some(sources) => sources.get(&net).copied(),
-                None => Some(0),
-            },
-            Some(driver) => {
-                let cell = &netlist.cells[driver.0 as usize];
-                if !self.inside(cell) {
-                    // A block input: held stable by the parent, or one of
-                    // the timed sources
-                    match &self.sources {
-                        Some(sources) => sources.get(&net).copied(),
-                        None => Some(0),
-                    }
-                } else if let Some(clock) = cell.clock.filter(|_| {
-                    self.delays
-                        .launches(cell, netlist.nets[net.0 as usize].driver_pin.unwrap_or(0))
-                }) {
-                    if self.through_registers {
-                        self.at(clock).map(|t| {
-                            t + self.delays.clock_wire_ps(netlist, clock, cell)
-                                + self.delays.clock_to_out_ps(cell)
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    let output = netlist.nets[net.0 as usize].driver_pin.unwrap_or(0);
-                    let timing_cell = matches!(
-                        cell.source_op.as_deref(),
-                        Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
-                    );
-                    let latest = !self.early || cell.source_op.as_deref() == Some(MATCHED_DELAY_OP);
-                    let mut best: Option<i64> = None;
-                    for (i, &input) in cell.inputs.iter().enumerate() {
-                        if !timing_cell && self.controls.contains(&input) {
-                            continue;
+        let result =
+            match netlist.nets.get(net.0 as usize).and_then(|n| n.driver) {
+                None => match &self.sources {
+                    Some(sources) => sources.get(&net).copied(),
+                    None => Some(0),
+                },
+                Some(driver) => {
+                    let cell = &netlist.cells[driver.0 as usize];
+                    if !self.inside(cell) {
+                        // A block input: held stable by the parent, or one of
+                        // the timed sources
+                        match &self.sources {
+                            Some(sources) => sources.get(&net).copied(),
+                            None => Some(0),
                         }
-                        let Some(arc) = self.delays.arc_ps(cell, i, output) else {
-                            continue;
-                        };
-                        if let Some(t) = self.at(input) {
-                            let t = t + self.delays.wire_ps(netlist, input, cell, i) + arc;
-                            let better = if latest {
-                                best.is_none_or(|b| t > b)
-                            } else {
-                                best.is_none_or(|b| t < b)
+                    } else if let Some(en) = self.latches.get(&net).map(|b| b.en) {
+                        if self.through_registers {
+                            let bit = self.latches[&net].clone();
+                            let through = latch_path(netlist, self.delays, &bit, en)
+                                .map(|(lo, hi)| if self.early { lo } else { hi });
+                            self.at(en).zip(through).map(|(t, p)| t + p)
+                        } else {
+                            None
+                        }
+                    } else if let Some(clock) = cell.clock.filter(|_| {
+                        self.delays
+                            .launches(cell, netlist.nets[net.0 as usize].driver_pin.unwrap_or(0))
+                    }) {
+                        if self.through_registers {
+                            self.at(clock).map(|t| {
+                                t + self.delays.clock_wire_ps(netlist, clock, cell)
+                                    + self.delays.clock_to_out_ps(cell)
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        let output = netlist.nets[net.0 as usize].driver_pin.unwrap_or(0);
+                        let timing_cell = matches!(
+                            cell.source_op.as_deref(),
+                            Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
+                        ) || ((self.delay_sources.contains(&net)
+                            || self.latch_enables.contains(&net)
+                            || cell.function == Some(CellFunction::Buf))
+                            && !cell.inputs.is_empty()
+                            && cell.inputs.iter().all(|i| self.controls.contains(i)));
+                        let latest =
+                            !self.early || cell.source_op.as_deref() == Some(MATCHED_DELAY_OP);
+                        let mut best: Option<i64> = None;
+                        for (i, &input) in cell.inputs.iter().enumerate() {
+                            if !timing_cell && self.controls.contains(&input) {
+                                continue;
+                            }
+                            let Some(arc) = self.delays.arc_ps(cell, i, output) else {
+                                continue;
                             };
-                            if better {
-                                self.from.insert(net, input);
-                                best = Some(t);
+                            if let Some(t) = self.at(input) {
+                                let t = t + self.delays.wire_ps(netlist, input, cell, i) + arc;
+                                let better = if latest {
+                                    best.is_none_or(|b| t > b)
+                                } else {
+                                    best.is_none_or(|b| t < b)
+                                };
+                                if better {
+                                    self.from.insert(net, input);
+                                    best = Some(t);
+                                }
                             }
                         }
+                        best
                     }
-                    best
                 }
-            }
-        };
+            };
         self.visiting.remove(&net);
         self.memo.insert(net, result);
         result
@@ -476,6 +1015,7 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
     let mut checks = Vec::new();
     let matched = find_matched_delays(netlist);
     let controls: HashSet<GateNetId> = matched.iter().map(|m| m.control).collect();
+    let latch_blocks = latch_blocks(netlist, &matched);
 
     for md in &matched {
         let and_cell = &netlist.cells[md.and_cell.0 as usize];
@@ -520,8 +1060,14 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
         // delay time registers only. In a self-timed block (stream ports)
         // the step's `done` (the matched delay after `go`) plays that part:
         // it ends the step, and the next one can start right after.
-        let self_timed_done =
-            controls.contains(&md.source) && step_control_ready(netlist, &md.prefix).is_some();
+        // (The enables of a block's latches also follow `go` but open or
+        // close latches: they end nothing.)
+        let latch_enable = [MASTER_OPEN_PATH, SLAVE_OPEN_PATH, PULSE_END_PATH]
+            .iter()
+            .any(|p| and_cell.path.contains(p));
+        let self_timed_done = controls.contains(&md.source)
+            && !latch_enable
+            && step_control_ready(netlist, &md.prefix).is_some();
         let ack = match block_output_driven_by(netlist, md.control, &md.prefix) {
             Some(ack) => ack,
             None if self_timed_done => md.control,
@@ -571,6 +1117,37 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
                     let t = t + delays.wire_ps(netlist, input, cell, i) + delays.setup_ps(cell, i);
                     if next_ps.is_none_or(|d| t > d) {
                         worst = Some((cell, input));
+                    }
+                    next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
+                }
+            }
+        }
+        // Latch state: the masters' data inputs (with the latch's setup:
+        // the next state goes into a master, which then holds it, while
+        // the block waits), and the slaves' own feedback (a slave holds
+        // its new value only once it has gone round)
+        for lb in latch_blocks.iter().filter(|lb| lb.prefix == md.prefix) {
+            if let Some(takers) = lb.takers(netlist, delays) {
+                for m in takers.bits {
+                    let (Some(t), Some(setup)) = (full.at(m.d), latch_setup(netlist, delays, m))
+                    else {
+                        continue;
+                    };
+                    endpoints += 1;
+                    let t = t + setup;
+                    if next_ps.is_none_or(|d| t > d) {
+                        worst = Some((&netlist.cells[m.cells[0].0 as usize], m.d));
+                    }
+                    next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
+                }
+            }
+            for launchers in lb.launchers(netlist, delays, false) {
+                for s in launchers.bits {
+                    let Some(t) = full.at(s.q) else { continue };
+                    endpoints += 1;
+                    let t = t + latch_wires(netlist, delays, s, s.q).map_or(0, |(_, h)| h);
+                    if next_ps.is_none_or(|d| t > d) {
+                        worst = Some((&netlist.cells[s.cells[0].0 as usize], s.q));
                     }
                     next_ps = Some(next_ps.map_or(t, |d: i64| d.max(t)));
                 }
@@ -633,12 +1210,266 @@ pub fn check_matched_delays(netlist: &GateNetlist, delays: &dyn BundleDelays) ->
             });
         }
     }
-    checks.extend(check_channels(netlist, delays, &matched));
-    checks.extend(check_channel_holds(netlist, delays, &matched));
+    checks.extend(check_latch_blocks(netlist, delays, &latch_blocks));
+    checks.extend(check_channels(netlist, delays, &matched, &latch_blocks));
+    checks.extend(check_channel_holds(
+        netlist,
+        delays,
+        &matched,
+        &latch_blocks,
+    ));
     checks.extend(check_register_holds(netlist, delays, &matched));
     checks.extend(check_arbiters(netlist, delays, &matched));
     checks.extend(check_releases(netlist, delays, &matched));
     checks.extend(check_grant_settles(netlist, delays, &matched));
+    checks
+}
+
+/// `times` of the check that a latch block's slaves open only once its
+/// masters have closed (see [`check_latch_blocks`])
+pub const LATCH_OVERLAP: &str = "latch overlap";
+/// `times` of the check that a latch block's masters reopen only once its
+/// slaves have closed (see [`check_latch_blocks`])
+pub const LATCH_REOPEN: &str = "latch reopen";
+/// `times` of the check that a latch block's masters have reopened and
+/// taken their data before the next step closes them (see
+/// [`check_latch_blocks`])
+pub const MASTER_OPEN: &str = "master open";
+/// `times` of the check that a pulsed-latch block's pulse is long enough
+/// for every latch to take its data (see [`check_latch_blocks`])
+pub const PULSE_WIDTH: &str = "pulse width";
+/// `times` of the check that a pulsed latch's new value does not come back
+/// round to a latch of the same pulse while it is still open (see
+/// [`check_latch_blocks`])
+pub const LATCH_RACE: &str = "latch race";
+/// `times` of the check that a pulsed-latch block's pulse gate sees `go`
+/// fall no later than the pulse's end (see [`check_latch_blocks`])
+pub const PULSE_RETURN: &str = "pulse return";
+
+/// Checks that a longer matched delay does not fix (holds and races): they
+/// are reported, and [`size_matched_delays`] leaves them alone
+pub fn is_report_only(times: &str) -> bool {
+    times == REGISTER_HOLD || times == LATCH_RACE || times == PULSE_RETURN
+}
+
+/// The timing of blocks whose state is held in latches (see
+/// [`LatchBlock`]). For every scheme:
+///
+/// * "registers" (sized by `go`): the next state, computed from the block's
+///   inputs, has gone through each latch that takes it and back to its own
+///   input before that latch's enable falls at it.
+///
+/// Master-slave pairs:
+///
+/// * [`LATCH_OVERLAP`] (sized by `slave_open`): every master has closed
+///   before any slave opens, so no value passes a master and its slave at
+///   once (the slaves' new outputs only reach the masters' inputs after
+///   that, so this is the masters' hold too);
+/// * [`LATCH_REOPEN`] (sized by `master_open`): when `go` falls, every slave
+///   has closed before any master reopens;
+/// * [`MASTER_OPEN`] (sized by `go`): a master that reopens after `go`
+///   falls has passed its data and back to its own input before the next
+///   step closes it. The next `go` can rise as soon as its matched delay
+///   after the request returns, which can be at once.
+///
+/// Pulsed latches:
+///
+/// * [`PULSE_WIDTH`] (sized by `pulse_end`): the pulse stays up at every
+///   latch until the latch has passed its data and back to its own input;
+/// * [`LATCH_RACE`] (reported): the earliest new value of any latch reaches
+///   no latch's data input before that latch has closed. A longer pulse
+///   only makes it worse;
+/// * [`PULSE_RETURN`] (reported): when `go` falls, its fall reaches the
+///   pulse gate no later than the pulse end's own fall (which follows it),
+///   or the gate would pulse again.
+///
+/// The next state the latches launch is checked against `done` with the
+/// other "next state" paths.
+fn check_latch_blocks(
+    netlist: &GateNetlist,
+    delays: &dyn BundleDelays,
+    blocks: &[LatchBlock],
+) -> Vec<BundleCheck> {
+    let mut checks = Vec::new();
+    for lb in blocks {
+        let check =
+            |md: &MatchedDelay, times: &'static str, data_ps: i64, control_ps: i64| BundleCheck {
+                prefix: lb.prefix.to_string(),
+                delay_path: netlist.cells[md.and_cell.0 as usize].path.clone(),
+                times,
+                data_ps,
+                control_ps,
+                chain_len: md.chain.len(),
+                sender: None,
+                unmeasured_settle: false,
+            };
+        let Some(takers) = lb.takers(netlist, delays) else {
+            continue;
+        };
+        if takers.bits.is_empty() {
+            continue;
+        }
+
+        // Setup of the latches that take the next state
+        let mut data_only = Arrivals::new(netlist, delays, lb.prefix, false);
+        let mut full = Arrivals::new(netlist, delays, lb.prefix, true);
+        if let Some(go_at) = full.at(lb.go.control) {
+            let mut data_ps: Option<i64> = None;
+            let mut control_ps: Option<i64> = None;
+            for m in takers.bits {
+                if let Some((lo, _)) = latch_wires(netlist, delays, m, takers.en) {
+                    let t = go_at + takers.at + lo;
+                    control_ps = Some(control_ps.map_or(t, |c: i64| c.min(t)));
+                }
+                if let (Some(t), Some(setup)) = (data_only.at(m.d), latch_setup(netlist, delays, m))
+                {
+                    let t = t + setup;
+                    data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
+                }
+            }
+            if let (Some(data_ps), Some(control_ps)) = (data_ps, control_ps) {
+                checks.push(check(lb.go, "registers", data_ps, control_ps));
+            }
+        }
+
+        // Masters closed before the slaves open
+        if let Some((slave_open, slaves)) = &lb.slaves {
+            let closed = closed_at(netlist, delays, takers.bits, takers.en, takers.at);
+            let opens = lb
+                .arrivals_from_go(netlist, delays, false)
+                .at(slave_open.control)
+                .and_then(|at| opens_at(netlist, delays, slaves, slave_open.control, at));
+            if let (Some(data_ps), Some(control_ps)) = (closed, opens) {
+                checks.push(check(slave_open, LATCH_OVERLAP, data_ps, control_ps));
+            }
+        }
+
+        match lb.opener {
+            Opener::Transparent { master_open } => {
+                let Some((slave_open, slaves)) = &lb.slaves else {
+                    continue;
+                };
+                let (mo, so) = (master_open.control, slave_open.control);
+                let masters = takers.bits;
+                // After `go` falls: the slaves close straight through
+                // `slave_open`'s AND, the masters reopen through
+                // `master_open`'s chain
+                let mut from_go = lb.arrivals_from_go(netlist, delays, false);
+                let (Some(slave_close), Some(master_reopen)) = (
+                    falls_through(netlist, delays, slave_open, 0),
+                    from_go.at(mo),
+                ) else {
+                    continue;
+                };
+                let closed = closed_at(netlist, delays, slaves, so, slave_close);
+                let opens = opens_at(netlist, delays, masters, mo, master_reopen);
+                if let (Some(data_ps), Some(control_ps)) = (closed, opens) {
+                    checks.push(check(master_open, LATCH_REOPEN, data_ps, control_ps));
+                }
+
+                // Masters open long enough before the next step: from `go`
+                // falling, the next `go` rises at the earliest its chain's
+                // rise (beyond the direct path through its AND) later
+                let Some(chain) = Arrivals::new(netlist, delays, lb.prefix, false)
+                    .with_sources(HashMap::from([(lb.go.source, 0)]))
+                    .at(lb.go.control)
+                else {
+                    continue;
+                };
+                let Some(direct) = falls_through(netlist, delays, lb.go, 0) else {
+                    continue;
+                };
+                let taken = masters
+                    .iter()
+                    .filter_map(|m| {
+                        let (_, open) = latch_path(netlist, delays, m, mo)?;
+                        let feedback = latch_wires(netlist, delays, m, m.q).map_or(0, |(_, h)| h);
+                        Some(master_reopen + open + feedback)
+                    })
+                    .max();
+                let closes = opens_at(netlist, delays, masters, mo, chain - direct + takers.at);
+                if let (Some(data_ps), Some(control_ps)) = (taken, closes) {
+                    checks.push(check(lb.go, MASTER_OPEN, data_ps, control_ps));
+                }
+            }
+            Opener::Pulse {
+                pulse_end,
+                pulse,
+                gate,
+            } => {
+                let latches = takers.bits;
+                let Some(opens) = through_pin(netlist, delays, gate, lb.go.control, 0) else {
+                    continue;
+                };
+                // Long enough: every latch has passed its data and back
+                let passed = latches
+                    .iter()
+                    .filter_map(|b| {
+                        let (_, open) = latch_path(netlist, delays, b, pulse)?;
+                        let feedback = latch_wires(netlist, delays, b, b.q).map_or(0, |(_, h)| h);
+                        Some(opens + open + feedback)
+                    })
+                    .max();
+                let closes = opens_at(netlist, delays, latches, pulse, takers.at);
+                if let (Some(data_ps), Some(control_ps)) = (passed, closes) {
+                    checks.push(check(pulse_end, PULSE_WIDTH, data_ps, control_ps));
+                }
+
+                // Short enough: the earliest new values of the latches
+                // without a slave (a slave stays closed while the pulse is
+                // up), round to any latch's data input, after that latch
+                // has closed
+                if !lb.singles.is_empty() {
+                    let launched: HashMap<GateNetId, i64> = lb
+                        .singles
+                        .iter()
+                        .filter_map(|b| {
+                            let (lo, _) = latch_path(netlist, delays, b, pulse)?;
+                            Some((b.q, opens + lo))
+                        })
+                        .collect();
+                    let mut round = Arrivals::new(netlist, delays, lb.prefix, false)
+                        .earliest()
+                        .with_sources(launched);
+                    let mut worst: Option<(i64, i64)> = None;
+                    for b in latches.iter() {
+                        let (Some(t), Some((wire, _)), Some((_, close))) = (
+                            round.at(b.d),
+                            latch_wires(netlist, delays, b, b.d),
+                            latch_path(netlist, delays, b, pulse),
+                        ) else {
+                            continue;
+                        };
+                        let (until, changes) = (takers.at + close, t + wire);
+                        if worst.is_none_or(|(u, c)| changes - until < c - u) {
+                            worst = Some((until, changes));
+                        }
+                    }
+                    if let Some((until, changes)) = worst {
+                        checks.push(check(pulse_end, LATCH_RACE, until, changes));
+                    }
+                }
+
+                // The pulse gate sees `go` fall no later than the pulse end
+                let gate_cell = &netlist.cells[gate.0 as usize];
+                let at_pins = |net: GateNetId| {
+                    gate_cell
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .filter(move |&(_, &n)| n == net)
+                        .map(move |(pin, _)| delays.wire_ps(netlist, net, gate_cell, pin))
+                };
+                let go_at = at_pins(lb.go.control).max();
+                let end_at = falls_through(netlist, delays, pulse_end, 0)
+                    .zip(at_pins(pulse_end.control).min())
+                    .map(|(falls, wire)| falls + wire);
+                if let (Some(go_at), Some(end_at)) = (go_at, end_at) {
+                    checks.push(check(pulse_end, PULSE_RETURN, go_at, end_at));
+                }
+            }
+        }
+    }
     checks
 }
 
@@ -706,7 +1537,7 @@ impl<'a> ReleaseArrivals<'a> {
             || cell.clock.is_some()
             || matches!(
                 cell.source_op.as_deref(),
-                Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP)
+                Some(MATCHED_DELAY_OP) | Some(STEP_CONTROL_OP) | Some(LATCH_OP)
             )
         {
             return None;
@@ -806,7 +1637,8 @@ pub const GRANT_SETTLE_DELAY_PATH: &str = "ncl_bundle.grant_settle";
 /// delayed signal arrives, or `ready` can glitch up for a step whose
 /// channel is not ready. Data: from the grants (every output of the
 /// block's arbiter cells, at time 0) to the step latch's `ready` input,
-/// leaving out the delayed signal itself. Control: from the grants through
+/// leaving out the delayed signal itself (an exclusive merge's grants are
+/// its kept buffers). Control: from the grants through
 /// "some arm granted" and the delay.
 fn check_grant_settles(
     netlist: &GateNetlist,
@@ -823,7 +1655,10 @@ fn check_grant_settles(
             .cells
             .iter()
             .filter(|c| {
-                c.source_op.as_deref() == Some(ARBITER_OP) && c.path.starts_with(&md.prefix)
+                matches!(
+                    c.source_op.as_deref(),
+                    Some(ARBITER_OP) | Some(EXCLUSIVE_OP)
+                ) && c.path.starts_with(&md.prefix)
             })
             .flat_map(|c| c.outputs.iter().map(|&o| (o, 0)))
             .collect();
@@ -1043,6 +1878,7 @@ fn check_channels(
     netlist: &GateNetlist,
     delays: &dyn BundleDelays,
     matched: &[MatchedDelay],
+    latch_blocks: &[LatchBlock],
 ) -> Vec<BundleCheck> {
     let mut checks = Vec::new();
     let control_prefix: HashMap<GateNetId, &str> = matched
@@ -1080,6 +1916,39 @@ fn check_channels(
                 None => senders.push((clock, HashMap::from([(GateNetId(id as u32), t)]))),
             }
         }
+        // Senders that hold their state in latches: the latches that launch
+        // do so when their enable opens them (times from the sender's `go`)
+        for lb in latch_blocks.iter().filter(|lb| lb.prefix != md.prefix) {
+            let go = lb.go.control;
+            for launchers in lb.launchers(netlist, delays, false) {
+                for s in launchers.bits {
+                    if inside(&netlist.cells[s.cells[0].0 as usize])
+                        || !netlist.nets[s.q.0 as usize]
+                            .fanout
+                            .iter()
+                            .any(|&(c, _)| inside(&netlist.cells[c.0 as usize]))
+                    {
+                        continue;
+                    }
+                    let Some((_, through)) = latch_path(netlist, delays, s, launchers.en) else {
+                        continue;
+                    };
+                    let t = launchers.at + through;
+                    match senders.iter_mut().find(|(c, _)| *c == go) {
+                        Some((_, nets)) => {
+                            nets.insert(s.q, t);
+                        }
+                        None => senders.push((go, HashMap::from([(s.q, t)]))),
+                    }
+                }
+            }
+        }
+        // This block's own latches that take the values, if it holds its
+        // state in latches
+        let receiver = latch_blocks
+            .iter()
+            .find(|lb| lb.go.control == md.control)
+            .and_then(|lb| lb.takers(netlist, delays));
         for (clock, sources) in senders {
             let mut data =
                 Arrivals::new(netlist, delays, &md.prefix, false).with_sources(sources.clone());
@@ -1103,6 +1972,19 @@ fn check_channels(
                     if let Some(t) = data.at(input) {
                         let t =
                             t + delays.wire_ps(netlist, input, cell, i) + delays.setup_ps(cell, i);
+                        data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
+                    }
+                }
+            }
+            if let Some(takers) = &receiver {
+                for m in takers.bits {
+                    if let Some((lo, _)) = latch_wires(netlist, delays, m, takers.en) {
+                        let clk = control_at + takers.at + lo;
+                        clock_ps = Some(clock_ps.map_or(clk, |c: i64| c.min(clk)));
+                    }
+                    if let (Some(t), Some(setup)) = (data.at(m.d), latch_setup(netlist, delays, m))
+                    {
+                        let t = t + setup;
                         data_ps = Some(data_ps.map_or(t, |d: i64| d.max(t)));
                     }
                 }
@@ -1144,6 +2026,7 @@ fn check_channel_holds(
     netlist: &GateNetlist,
     delays: &dyn BundleDelays,
     matched: &[MatchedDelay],
+    latch_blocks: &[LatchBlock],
 ) -> Vec<BundleCheck> {
     let mut checks = Vec::new();
     let by_control: HashMap<GateNetId, &MatchedDelay> =
@@ -1169,6 +2052,25 @@ fn check_channel_holds(
             let t = at + delays.clock_wire_ps(netlist, clock, cell) + delays.clock_to_out_ps(cell);
             out.insert(GateNetId(id as u32), t);
         }
+        // A block holding its state in latches launches from the latches
+        // that open after `go` (its slaves, or its pulsed latches),
+        // at the earliest after `go` (`clock`) rises
+        if let Some(lb) = latch_blocks.iter().find(|lb| lb.go.control == clock) {
+            for launchers in lb.launchers(netlist, delays, true) {
+                for s in launchers.bits {
+                    if !netlist.nets[s.q.0 as usize]
+                        .fanout
+                        .iter()
+                        .any(|&(c, _)| netlist.cells[c.0 as usize].path.starts_with(into))
+                    {
+                        continue;
+                    }
+                    if let Some((lo, _)) = latch_path(netlist, delays, s, launchers.en) {
+                        out.insert(s.q, at + launchers.at + lo);
+                    }
+                }
+            }
+        }
         out
     };
     for rx in matched.iter().filter(|m| fed_by_step(netlist, m)) {
@@ -1193,6 +2095,26 @@ fn check_channel_holds(
             }
             senders.push(tx);
         }
+        // Blocks holding their state in latches, whose latches feed this one
+        for lb in latch_blocks.iter().filter(|lb| lb.prefix != rx.prefix) {
+            let launchers = lb.launchers(netlist, delays, true);
+            let feeds = launchers.iter().flat_map(|g| g.bits).any(|s| {
+                !inside(&netlist.cells[s.cells[0].0 as usize])
+                    && netlist.nets[s.q.0 as usize]
+                        .fanout
+                        .iter()
+                        .any(|&(c, _)| inside(&netlist.cells[c.0 as usize]))
+            });
+            if feeds && !senders.iter().any(|s| s.control == lb.go.control) {
+                senders.push(lb.go);
+            }
+        }
+        // This block's own latches that take values, if it holds its state
+        // in latches: each holds until its enable's fall has gone through it
+        let receiver = latch_blocks
+            .iter()
+            .find(|lb| lb.go.control == rx.control)
+            .and_then(|lb| lb.takers(netlist, delays));
         for tx in senders {
             // The receiver's registers that the sender reads (its phase bit)
             let back = launches(rx.control, &rx.prefix, &tx.prefix, 0);
@@ -1223,6 +2145,22 @@ fn check_channel_holds(
                     let Some(t) = data.at(input) else { continue };
                     let changes = t + delays.wire_ps(netlist, input, cell, i);
                     let until = held + delays.hold_ps(cell, i);
+                    if worst.is_none_or(|(u, c)| changes - until < c - u) {
+                        worst = Some((until, changes));
+                    }
+                }
+            }
+            if let Some(takers) = &receiver {
+                for m in takers.bits {
+                    let (Some(t), Some((wire, _)), Some((_, close))) = (
+                        data.at(m.d),
+                        latch_wires(netlist, delays, m, m.d),
+                        latch_path(netlist, delays, m, takers.en),
+                    ) else {
+                        continue;
+                    };
+                    let changes = t + wire;
+                    let until = takers.at + close;
                     if worst.is_none_or(|(u, c)| changes - until < c - u) {
                         worst = Some((until, changes));
                     }
@@ -1571,7 +2509,7 @@ pub fn size_matched_delays(
             let path = &netlist.cells[md.and_cell.0 as usize].path;
             let worst = checks
                 .iter()
-                .filter(|c| &c.delay_path == path && c.times != REGISTER_HOLD)
+                .filter(|c| &c.delay_path == path && !is_report_only(c.times))
                 .map(|c| {
                     let required = c.data_ps + c.data_ps.abs() * margin_percent / 100;
                     required - c.control_ps
@@ -1627,12 +2565,59 @@ pub fn size_matched_delays(
     if report.checks.is_empty() {
         report.checks = check_matched_delays(netlist, delays);
     }
+    for c in &report.checks {
+        tracing::debug!(
+            "NCL check {} {}: data {} ps, control {} ps, slack {} ps, {} stages",
+            c.delay_path,
+            c.times,
+            c.data_ps,
+            c.control_ps,
+            c.slack_ps(),
+            c.chain_len
+        );
+    }
     report
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A latch bit whose data synthesis folded to a constant (a LUT over
+    /// [en, q, rst] that clears while enabled) is known as one with nothing
+    /// to time; a LUT that does not hold its value is not
+    #[test]
+    fn a_latch_with_constant_data_is_known() {
+        let (en, q, rst) = (GateNetId(1), GateNetId(2), GateNetId(3));
+        let lut = |inputs: Vec<GateNetId>, init| {
+            Cell::new_lut(
+                CellId(0),
+                "LUT4".into(),
+                "t".into(),
+                0.0,
+                "top.u.x.master.lat1".into(),
+                inputs,
+                vec![q],
+                init,
+            )
+        };
+        // q' = rst ? 0 : (en ? 0 : q), inputs [en, q, rst]: only a = 0b010
+        assert!(holds_a_constant(&lut(vec![en, q, rst], 0x04), q));
+        // q' = rst ? 0 : (en ? 1 : q), pins in another order [q, rst, en]
+        let init = (0..8u64)
+            .filter(|a| {
+                let (qv, rv, ev) = (a & 1 == 1, a & 2 == 2, a & 4 == 4);
+                !rv && (ev || qv)
+            })
+            .fold(0, |acc, a| acc | (1 << a));
+        assert!(holds_a_constant(&lut(vec![q, rst, en], init), q));
+        // Without a reset: q' = en ? 1 : q over [en, q]
+        assert!(holds_a_constant(&lut(vec![en, q], 0b1110), q));
+        // An AND of en and q is not a latch
+        assert!(!holds_a_constant(&lut(vec![en, q], 0b1000), q));
+        // No feedback, no latch
+        assert!(!holds_a_constant(&lut(vec![en, rst], 0x4), q));
+    }
 
     /// Every cell 100 ps, connections free, setup free
     /// After the release rises, a request it drops clears a deferral chain
@@ -1841,6 +2826,350 @@ mod tests {
         assert_eq!(next.data_ps, 800);
         assert_eq!(next.slack_ps(), -400);
         assert!(next.delay_path.ends_with("done_and"));
+    }
+
+    /// The acknowledge leaves the block through a plain buffer (synthesis
+    /// adds one where a kept cell's output is renamed to the port): it is
+    /// still timed, as the buffered control
+    #[test]
+    fn a_buffered_acknowledge_is_timed() {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let req = netlist.add_input("req".into());
+        let x = netlist.add_input("x".into());
+        let ack = netlist.add_output("ack".into());
+        let y = netlist.add_output("y".into());
+        let go = netlist.add_net(GateNet::new(GateNetId(0), "top.u.__ncl_go".into()));
+        matched_delay(&mut netlist, "go", req, go);
+        let mut buf = Cell::new_comb(
+            CellId(0),
+            "BUF".into(),
+            "test".into(),
+            0.0,
+            "top.u.aig.phys_buf_ack".into(),
+            vec![go],
+            vec![ack],
+        );
+        buf.function = Some(CellFunction::Buf);
+        netlist.add_cell(buf);
+        let mut net = x;
+        for k in 0..4 {
+            let next = if k == 3 {
+                y
+            } else {
+                netlist.add_net(GateNet::new(GateNetId(0), format!("top.u.n{k}")))
+            };
+            comb(&mut netlist, &format!("top.u.f{k}"), vec![net], next, false);
+            net = next;
+        }
+        netlist.rebuild_net_connectivity();
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let ack_check = checks
+            .iter()
+            .find(|c| c.times == "acknowledge")
+            .expect("an acknowledge check");
+        // go at 200, the buffer 100 later; y settles four gates after x
+        assert_eq!((ack_check.data_ps, ack_check.control_ps), (400, 300));
+    }
+
+    /// A block holding its state in a master-slave pair of LUT latches
+    /// (as `ncl_expand` builds with latch state): `go = req & delay(req)`,
+    /// `master_open = !go & delay(!go)`, `slave_open = go & delay(go)`,
+    /// `done = slave_open & delay(slave_open)`. The next state is the
+    /// slave's output and the input `x` through five gates.
+    fn latch_block() -> GateNetlist {
+        use crate::gate_netlist::{
+            LATCH_D_PIN, LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN,
+        };
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let req = netlist.add_input("req".into());
+        let x = netlist.add_input("x".into());
+        let ack = netlist.add_output("ack".into());
+        let net =
+            |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
+        let go = net(&mut netlist, "top.u.__ncl_go");
+        let go_n = net(&mut netlist, "top.u.__ncl_go_n");
+        let mo = net(&mut netlist, "top.u.__ncl_master_open");
+        let so = net(&mut netlist, "top.u.__ncl_slave_open");
+        matched_delay(&mut netlist, "go", req, go);
+        comb(&mut netlist, "top.u.go_n", vec![go], go_n, false);
+        matched_delay(&mut netlist, "master_open", go_n, mo);
+        matched_delay(&mut netlist, "slave_open", go, so);
+        matched_delay(&mut netlist, "done", so, ack);
+
+        let d = net(&mut netlist, "top.u.d");
+        let mq = net(&mut netlist, "top.u.s__master");
+        let sq = net(&mut netlist, "top.u.s");
+        for (path, data, en, q) in [
+            ("top.u.s.master.lat0", d, mo, mq),
+            ("top.u.s.slave.lat0", mq, so, sq),
+        ] {
+            let mut inputs = vec![GateNetId(0); 3];
+            inputs[LATCH_D_PIN] = data;
+            inputs[LATCH_EN_PIN] = en;
+            inputs[LATCH_Q_PIN] = q;
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                "LUT4".into(),
+                "test".into(),
+                0.0,
+                path.into(),
+                inputs,
+                vec![q],
+            );
+            cell.lut_init = Some(LATCH_LUT_INIT);
+            cell.source_op = Some(LATCH_OP.to_string());
+            netlist.add_cell(cell);
+        }
+        let mut prev = net(&mut netlist, "top.u.n0");
+        comb(&mut netlist, "top.u.mix", vec![sq, x], prev, false);
+        for k in 1..5 {
+            let next = if k == 4 {
+                d
+            } else {
+                net(&mut netlist, &format!("top.u.n{k}"))
+            };
+            comb(
+                &mut netlist,
+                &format!("top.u.inc{k}"),
+                vec![prev],
+                next,
+                false,
+            );
+            prev = next;
+        }
+        netlist.rebuild_net_connectivity();
+        netlist
+    }
+
+    #[test]
+    fn latch_blocks_are_timed_from_their_enables() {
+        let netlist = latch_block();
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let find = |times: &str| {
+            checks
+                .iter()
+                .find(|c| c.times == times)
+                .unwrap_or_else(|| panic!("a {times} check in {checks:#?}"))
+        };
+        // go rises at 200; !go falls at 300 and master_open at 400. The next
+        // state from `x` settles at 500, plus 100 through the master.
+        let setup = find("registers");
+        assert!(setup.delay_path.ends_with("go_and"));
+        assert_eq!((setup.data_ps, setup.control_ps), (600, 400));
+        // After go rises: the master has closed at 300 (master_open falls
+        // at 200, then 100 through the LUT); slave_open rises at 200
+        let overlap = find(LATCH_OVERLAP);
+        assert!(overlap.delay_path.ends_with("slave_open_and"));
+        assert_eq!((overlap.data_ps, overlap.control_ps), (300, 200));
+        // After go falls: slave_open falls at 100, the slave has closed at
+        // 200; master_open rises at 300
+        let reopen = find(LATCH_REOPEN);
+        assert!(reopen.delay_path.ends_with("master_open_and"));
+        assert_eq!((reopen.data_ps, reopen.control_ps), (200, 300));
+        // The master has taken its data 100 after it reopens; the next go
+        // can rise 100 after go falls (its chain), closing the master 200
+        // after that
+        let open = find(MASTER_OPEN);
+        assert!(open.delay_path.ends_with("go_and"));
+        assert_eq!((open.data_ps, open.control_ps), (400, 300));
+        // The slave launches at 500 (slave_open at 400 + 100); the next
+        // state reaches the master's input five gates later, plus 100
+        // through it; done rises at 600
+        let next = find("next state");
+        assert!(next.delay_path.ends_with("done_and"));
+        assert_eq!((next.data_ps, next.control_ps), (1100, 600));
+    }
+
+    #[test]
+    fn sizing_makes_a_latch_block_meet_every_check() {
+        let mut netlist = latch_block();
+        let report = size_matched_delays(&mut netlist, &UnitDelays, 0);
+        assert!(report.buffers_added > 0);
+        for times in [
+            "registers",
+            LATCH_OVERLAP,
+            LATCH_REOPEN,
+            MASTER_OPEN,
+            "next state",
+        ] {
+            let c = report
+                .checks
+                .iter()
+                .find(|c| c.times == times)
+                .unwrap_or_else(|| panic!("a {times} check"));
+            assert!(c.slack_ps() >= 0, "{c:?}");
+        }
+    }
+
+    /// A latch for a test block: `q = latch(en, d)` as one LUT
+    fn test_latch(
+        netlist: &mut GateNetlist,
+        path: &str,
+        d: GateNetId,
+        en: GateNetId,
+        q: GateNetId,
+    ) {
+        use crate::gate_netlist::{
+            LATCH_D_PIN, LATCH_EN_PIN, LATCH_LUT_INIT, LATCH_OP, LATCH_Q_PIN,
+        };
+        let mut inputs = vec![GateNetId(0); 3];
+        inputs[LATCH_D_PIN] = d;
+        inputs[LATCH_EN_PIN] = en;
+        inputs[LATCH_Q_PIN] = q;
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            path.into(),
+            inputs,
+            vec![q],
+        );
+        cell.lut_init = Some(LATCH_LUT_INIT);
+        cell.source_op = Some(LATCH_OP.to_string());
+        netlist.add_cell(cell);
+    }
+
+    /// A block whose state is pulsed latches (`pulse_end = go & delay(go)`,
+    /// `pulse = go & !pulse_end`): one latch per bit, or with `slaves`
+    /// pulsed masters copied by slaves (`slave_open = go & delay(go)`).
+    /// The next state is the state and the input `x` through five gates.
+    fn pulse_block(slaves: bool) -> GateNetlist {
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let req = netlist.add_input("req".into());
+        let x = netlist.add_input("x".into());
+        let ack = netlist.add_output("ack".into());
+        let net =
+            |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
+        let go = net(&mut netlist, "top.u.__ncl_go");
+        let end = net(&mut netlist, "top.u.__ncl_pulse_end");
+        let pulse = net(&mut netlist, "top.u.__ncl_pulse");
+        matched_delay(&mut netlist, "go", req, go);
+        matched_delay(&mut netlist, "pulse_end", go, end);
+        comb(&mut netlist, "top.u.pulse", vec![go, end], pulse, false);
+        let d = net(&mut netlist, "top.u.d");
+        let q = net(&mut netlist, "top.u.s");
+        if slaves {
+            let so = net(&mut netlist, "top.u.__ncl_slave_open");
+            matched_delay(&mut netlist, "slave_open", go, so);
+            matched_delay(&mut netlist, "done", so, ack);
+            let mq = net(&mut netlist, "top.u.s__master");
+            test_latch(&mut netlist, "top.u.s.master.lat0", d, pulse, mq);
+            test_latch(&mut netlist, "top.u.s.slave.lat0", mq, so, q);
+        } else {
+            matched_delay(&mut netlist, "done", end, ack);
+            test_latch(&mut netlist, "top.u.s.latch.lat0", d, pulse, q);
+        }
+        let mut prev = net(&mut netlist, "top.u.n0");
+        comb(&mut netlist, "top.u.mix", vec![q, x], prev, false);
+        for k in 1..5 {
+            let next = if k == 4 {
+                d
+            } else {
+                net(&mut netlist, &format!("top.u.n{k}"))
+            };
+            comb(
+                &mut netlist,
+                &format!("top.u.inc{k}"),
+                vec![prev],
+                next,
+                false,
+            );
+            prev = next;
+        }
+        netlist.rebuild_net_connectivity();
+        netlist
+    }
+
+    fn find_check<'c>(checks: &'c [BundleCheck], times: &str) -> &'c BundleCheck {
+        checks
+            .iter()
+            .find(|c| c.times == times)
+            .unwrap_or_else(|| panic!("a {times} check in {checks:#?}"))
+    }
+
+    #[test]
+    fn pulsed_latches_are_timed_from_their_pulse() {
+        let netlist = pulse_block(false);
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        // go at 200; the pulse rises 100 after it and falls 100 after
+        // pulse_end (at 400), so at 500
+        let setup = find_check(&checks, "registers");
+        assert_eq!((setup.data_ps, setup.control_ps), (600, 500));
+        // Open at 300, the latch passes its data by 400
+        let width = find_check(&checks, PULSE_WIDTH);
+        assert!(width.delay_path.ends_with("pulse_end_and"));
+        assert_eq!((width.data_ps, width.control_ps), (200, 300));
+        // The new value (from 200 after go) is back at the latch's input
+        // five gates later; the latch has closed at 400
+        let race = find_check(&checks, LATCH_RACE);
+        assert_eq!((race.data_ps, race.control_ps), (400, 700));
+        // go's fall reaches the gate at once, pulse_end's 100 later
+        let ret = find_check(&checks, PULSE_RETURN);
+        assert_eq!((ret.data_ps, ret.control_ps), (0, 100));
+        // The latch launches (at the latest) as the pulse ends; done at 600
+        let next = find_check(&checks, "next state");
+        assert_eq!((next.data_ps, next.control_ps), (1200, 600));
+        assert!(checks.iter().all(|c| c.times != LATCH_OVERLAP));
+    }
+
+    #[test]
+    fn pulsed_masters_close_before_their_slaves_open() {
+        let netlist = pulse_block(true);
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        // Masters closed at 400 after go (pulse falls at 300, then 100
+        // through), slaves open at 200
+        let overlap = find_check(&checks, LATCH_OVERLAP);
+        assert!(overlap.delay_path.ends_with("slave_open_and"));
+        assert_eq!((overlap.data_ps, overlap.control_ps), (400, 200));
+        // The masters read the slaves, closed while the pulse is up
+        assert!(checks.iter().all(|c| c.times != LATCH_RACE));
+        let mut netlist = netlist;
+        let report = size_matched_delays(&mut netlist, &UnitDelays, 0);
+        for times in [
+            "registers",
+            LATCH_OVERLAP,
+            PULSE_WIDTH,
+            PULSE_RETURN,
+            "next state",
+        ] {
+            let c = find_check(&report.checks, times);
+            assert!(c.slack_ps() >= 0, "{c:?}");
+        }
+    }
+
+    /// In a self-timed block (one with a step control) the matched delay
+    /// that ends the step is `done`; the latch enables that also follow
+    /// `go` time no acknowledge or next state of their own
+    #[test]
+    fn latch_enables_are_not_the_step_end() {
+        let mut netlist = pulse_block(true);
+        let net =
+            |n: &mut GateNetlist, name: &str| n.add_net(GateNet::new(GateNetId(0), name.into()));
+        let req = netlist.inputs[0];
+        let ready = netlist.inputs[1];
+        let ack = netlist.outputs[0];
+        let out = net(&mut netlist, "top.u.st_out");
+        let mut st = Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "top.u.ncl_bundle.st_latch".into(),
+            vec![req, ack, ready, out],
+            vec![out],
+        );
+        st.source_op = Some(STEP_CONTROL_OP.to_string());
+        netlist.add_cell(st);
+        netlist.rebuild_net_connectivity();
+        let checks = check_matched_delays(&netlist, &UnitDelays);
+        let ends: Vec<&str> = checks
+            .iter()
+            .filter(|c| c.times == "acknowledge" || c.times == "next state")
+            .map(|c| c.delay_path.as_str())
+            .collect();
+        assert!(!ends.is_empty());
+        assert!(ends.iter().all(|p| p.ends_with("done_and")), "{ends:?}");
     }
 
     /// In-block hold: the register's new value comes back to its own input

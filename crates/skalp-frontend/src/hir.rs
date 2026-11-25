@@ -369,9 +369,18 @@ pub const NCL_REQ_PORT: &str = "ncl_req";
 /// is withdrawn. A clocked parent reads it synchronised to its own clock.
 pub const NCL_ACK_PORT: &str = "ncl_ack";
 
+/// Implicit reset input of an `async` instance (added by MIR lowering to
+/// every instantiated `async` module): high from power-up until the instance
+/// is idle, before its first request. Every state element of the block
+/// (latch, flip-flop) is held at its start value while it is high, since
+/// storage has no defined value of its own at power-up. A clocked parent
+/// drives it from its own clock domain; a coalesced child shares its
+/// parent's.
+pub const NCL_RST_PORT: &str = "ncl_rst";
+
 /// Whether `name` is one of the implicit handshake ports of an `async` entity
 pub fn is_ncl_handshake_port(name: &str) -> bool {
-    name == NCL_REQ_PORT || name == NCL_ACK_PORT
+    name == NCL_REQ_PORT || name == NCL_ACK_PORT || name == NCL_RST_PORT
 }
 
 /// Port in HIR
