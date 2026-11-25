@@ -2343,8 +2343,8 @@ mod tests {
         use crate::device::Device;
         use skalp_lir::floorplan::{FloorplanMember, FloorplanRegion};
         let mut netlist = create_mesh_netlist(60);
-        for i in 0..4 {
-            netlist.cells[i].path = format!("top.Mesh.ring_{i}.lat0");
+        for (i, cell) in netlist.cells.iter_mut().take(4).enumerate() {
+            cell.path = format!("top.Mesh.ring_{i}.lat0");
         }
         let ring = |i: usize| FloorplanMember::Signal {
             instance: "top".into(),
