@@ -11,6 +11,9 @@
 //! 4. `inst d = M<P: 1> {..}` (a named generic argument) was pointed at the
 //!    all-defaults specialization, and a partial positional list (`M<5>` on
 //!    `M<A = 2, B = 4>`) at the unspecialised template.
+//!    A named argument that names the enclosing entity's own generic
+//!    (`inst c = M<B: P>` inside `Parent<P>`) was never substituted when
+//!    `Parent` was specialized, so `c` got `M`'s default for `B`.
 //!
 //! Each case is checked on the generated SystemVerilog and, where it computes
 //! a value, in behavioral simulation.
@@ -303,6 +306,77 @@ async fn test_named_generic_instance_simulates() {
                 "{output}, a={a}"
             );
         }
+    }
+}
+
+/// Named arguments that pass the enclosing entity's generic on, directly
+/// and inside a generate-for.
+const NAMED_GENERIC_FORWARDED: &str = r#"
+entity AddConsts<A: nat = 2, B: nat = 4> {
+    in a: bit[8]
+    out q: bit[8]
+}
+impl AddConsts {
+    q = a + A + B
+}
+entity Forwards<P: nat = 3> {
+    in a: bit[8]
+    out q: bit[8]
+    out q_gen: bit[8]
+}
+impl Forwards {
+    inst c = AddConsts<B: P> { a: a }
+    signal g: bit[8][2]
+    generate for i in 0..2 {
+        inst gc = AddConsts<A: P, B: 0> { a: a }
+        g[i] = gc.q
+    }
+    q = c.q
+    q_gen = g[1]
+}
+entity ForwardsTop {
+    in a: bit[8]
+    out q: bit[8]
+    out q_gen: bit[8]
+}
+impl ForwardsTop {
+    inst f = Forwards<P: 9> { a: a }
+    q = f.q
+    q_gen = f.q_gen
+}
+"#;
+
+#[test]
+fn test_named_generic_forwarding_parent_generic_is_substituted() {
+    let sv = squash(&compile_to_sv(NAMED_GENERIC_FORWARDED));
+    assert!(
+        sv.contains("AddConsts_2_9c("),
+        "`c` must instantiate `AddConsts_2_9`:\n{sv}"
+    );
+    for i in 0..2 {
+        assert!(
+            sv.contains(&format!("AddConsts_9_0gc__g{i}(")),
+            "`gc` in iteration {i} must instantiate `AddConsts_9_0`:\n{sv}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_named_generic_forwarding_parent_generic_simulates() {
+    let mut sim = simulator(NAMED_GENERIC_FORWARDED, "ForwardsTop").await;
+    for a in [0u64, 10, 100] {
+        sim.set_input("a", a).await;
+        sim.step().await;
+        assert_eq!(
+            sim.get_output("q").await.unwrap_or(u64::MAX),
+            a + 11,
+            "q, a={a}"
+        );
+        assert_eq!(
+            sim.get_output("q_gen").await.unwrap_or(u64::MAX),
+            a + 9,
+            "q_gen, a={a}"
+        );
     }
 }
 

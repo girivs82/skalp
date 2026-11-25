@@ -772,8 +772,12 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         self.substitute_expr(&connection.expr, &instantiation.const_args);
                     connection.expr = self.remap_expr_ports(&connection.expr, port_id_map);
                 }
-                // Also remap port IDs in named generic args (they may reference ports)
+                // Named generic args get the same const substitution as
+                // positional ones (`Child<P: P>` inside `Parent<P>` must pass
+                // the parent's value, not fall back to the child's default),
+                // and their port IDs remapped (they may reference ports)
                 for arg in new_instance.named_generic_args.values_mut() {
+                    *arg = self.substitute_expr(arg, &instantiation.const_args);
                     *arg = self.remap_expr_ports(arg, port_id_map);
                 }
                 new_instance
@@ -1100,6 +1104,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
                             )
                         })
                         .collect();
+                    for arg in ni.named_generic_args.values_mut() {
+                        let e = self.substitute_expr(arg, &instantiation.const_args);
+                        *arg = HirBuilderContext::substitute_in_expr(
+                            &e,
+                            gf.iterator_var_id,
+                            &gf.iterator,
+                            i as i64,
+                        );
+                    }
                     instances.push(ni);
                 }
 
