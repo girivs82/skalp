@@ -726,6 +726,11 @@ pub struct CornerMix {
     pub k: f64,
     /// The clock wires
     pub clock: f64,
+    /// How much further toward the slow corner a routing wire sits per
+    /// nanosecond of its fast-corner delay: a wire of fast delay `d` sits at
+    /// `k + wire_per_ns * d` (at most 1). Long wires on silicon can sit
+    /// nearer the slow corner than short ones.
+    pub wire_per_ns: f64,
     /// Per cell (by index; empty for none): its own delays' fraction
     pub cells: Vec<Option<f64>>,
     /// How the corner is named, such as `0.29, clock network at 0.96`
@@ -738,6 +743,7 @@ impl CornerMix {
         Self {
             k,
             clock: k,
+            wire_per_ns: 0.0,
             cells: Vec::new(),
             label: format!("{k}"),
         }
@@ -804,7 +810,15 @@ impl DelayAnnotation {
                 }
                 let own = mix.cells.get(i).copied().flatten().unwrap_or(mix.k);
                 Ok(CellDelays {
-                    wire_ps: mix_all(&a.wire_ps, &b.wire_ps, mix.k),
+                    wire_ps: a
+                        .wire_ps
+                        .iter()
+                        .zip(&b.wire_ps)
+                        .map(|(&a, &b)| {
+                            let k = mix.k + mix.wire_per_ns * a as f64 / 1000.0;
+                            mix_by(a, b, k.min(1.0))
+                        })
+                        .collect(),
                     clock_wire_ps: mix_by(a.clock_wire_ps, b.clock_wire_ps, mix.clock),
                     arcs: a
                         .arcs
@@ -2942,12 +2956,43 @@ mod tests {
         let mix = CornerMix {
             k: 0.25,
             clock: 0.9,
+            wire_per_ns: 0.0,
             cells: Vec::new(),
             label: "0.25, clock network at 0.9".into(),
         };
         let mixed = DelayAnnotation::mixed(&fast, &slow, &mix).unwrap();
         assert_eq!(mixed.cells[0], cell(150, 1900));
         assert!(mixed.corner.contains("clock network at 0.9"));
+    }
+
+    #[test]
+    fn long_wires_can_sit_nearer_the_slow_corner() {
+        let cell = |wires: Vec<i64>| CellDelays {
+            wire_ps: wires,
+            clock_wire_ps: 0,
+            arcs: vec![vec![Some(100)], vec![Some(100)], vec![Some(100)]],
+            clock_to_out_ps: 0,
+            launches: vec![true],
+            setup_ps: vec![0, 0, 0],
+            hold_ps: vec![0, 0, 0],
+        };
+        let fast = DelayAnnotation {
+            corner: "fast".into(),
+            cells: vec![cell(vec![0, 1000, 4000])],
+        };
+        let slow = DelayAnnotation {
+            corner: "slow".into(),
+            cells: vec![cell(vec![0, 2000, 8000])],
+        };
+        let mix = CornerMix {
+            wire_per_ns: 0.25,
+            ..CornerMix::uniform(0.25)
+        };
+        let mixed = DelayAnnotation::mixed(&fast, &slow, &mix).unwrap();
+        // 1 ns sits at 0.5, 4 ns at 1.25 capped at the slow corner; the
+        // cell's own delays stay at k
+        assert_eq!(mixed.cells[0].wire_ps, vec![0, 1500, 8000]);
+        assert_eq!(mixed.cells[0].arcs[0], vec![Some(100)]);
     }
 
     #[test]
@@ -2972,6 +3017,7 @@ mod tests {
         let mix = CornerMix {
             k: 0.5,
             clock: 0.5,
+            wire_per_ns: 0.0,
             cells: vec![None, Some(1.0)],
             label: "test".into(),
         };

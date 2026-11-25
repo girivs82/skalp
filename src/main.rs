@@ -9654,8 +9654,19 @@ fn parse_corner_mix(
     let mut label = vec![format!("{k}")];
     for part in parts {
         let (kind, value) = part.split_once(':').with_context(|| {
-            format!("--corner between:K,...: '{part}' is not clock:C or CELL:F")
+            format!("--corner between:K,...: '{part}' is not clock:C, wire_per_ns:S or CELL:F")
         })?;
+        if kind == "wire_per_ns" {
+            let slope: f64 = value.parse().with_context(|| {
+                format!("--corner between: wire_per_ns '{value}' is not a number")
+            })?;
+            if slope < 0.0 {
+                anyhow::bail!("--corner between: wire_per_ns {slope} is negative");
+            }
+            mix.wire_per_ns = slope;
+            label.push(format!("wires {slope} further per ns"));
+            continue;
+        }
         let value = fraction(value)?;
         if kind == "clock" {
             mix.clock = value;
