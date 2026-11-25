@@ -2,7 +2,7 @@
 """Generate the delay-calibration probe: ring oscillators of each kind of delay, counted on the
 board clock and reported over a UART.
 
-  python3 gen_probe.py --clk-pin P24 --clk-mhz 125 --uart-pin M9 [--io-standard LVCMOS33]
+  python3 gen_probe.py --clk-pin <pin> --clk-mhz <MHz> --uart-pin <pin> [--io-standard LVCMOS33]
 
 writes `delay_probe.sk` (the design), `hex_report.sk` (the UART reporter, its baud divider set
 for the clock) and `delay_probe.json` (the manifest `fit_calibration.py` reads: which UART word
