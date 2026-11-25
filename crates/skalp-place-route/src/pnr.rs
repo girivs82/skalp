@@ -1144,6 +1144,22 @@ pub fn place_and_route_nexus_real_from(
         }
         _ => (netlist, placement),
     };
+    // Copy the flip-flops and LUTs whose loads are too many and too far
+    // apart for their paths to meet their clocks
+    let replicated;
+    let (netlist, placement) = match replicate_placed_drivers(
+        &placer,
+        netlist,
+        &placement,
+        &clock_targets,
+        "nexus pnr",
+    )? {
+        Some(found) => {
+            replicated = found;
+            (&replicated.netlist, replicated.placement.clone())
+        }
+        None => (netlist, placement),
+    };
 
     let (mut routable, tied) = prepare::prepare_for_routing(netlist, &device);
     // Connections inside an I/O (a gearbox to its pad) are not routed
@@ -1398,6 +1414,45 @@ pub fn place_and_route_nexus_real_from(
         routes: rerun_routes,
     };
     Ok((result, rerun))
+}
+
+/// Replicate the drivers of a placed `netlist` that have many loads on
+/// paths failing `clocks` by the placement estimate
+/// ([`Placer::replicate_high_fanout`]), logging what was copied under `flow`
+#[cfg(feature = "nexus-bitstream")]
+fn replicate_placed_drivers<D: crate::device::Device + Clone>(
+    placer: &Placer<D>,
+    netlist: &GateNetlist,
+    placement: &crate::placer::PlacementResult,
+    clocks: &crate::timing::clock_targets::ClockTargets,
+    flow: &str,
+) -> Result<Option<crate::placer::Replication>> {
+    let t_replicate = std::time::Instant::now();
+    let period = |clock: Option<GateNetId>| match clock {
+        Some(clock) => clocks.required_ns(clock),
+        None => 1000.0 / clocks.default_mhz - clocks.uncertainty_ns,
+    };
+    let found = placer.replicate_high_fanout(netlist, placement, period)?;
+    if let Some(found) = &found {
+        log::info!(
+            "{flow}: replicated {} high-fanout drivers in {:.1} s ({} copies)",
+            found.drivers.len(),
+            t_replicate.elapsed().as_secs_f64(),
+            found.drivers.iter().map(|r| r.copies).sum::<usize>()
+        );
+        for r in &found.drivers {
+            log::info!(
+                "{flow}: replicated the driver of {} ({}, {} loads) into {} copies: estimated slack {:.3} -> {:.3} ns",
+                r.net,
+                r.path,
+                r.loads,
+                r.copies + 1,
+                r.slack_before_ns,
+                r.slack_after_ns
+            );
+        }
+    }
+    Ok(found)
 }
 
 /// Refuse routes in which two nets share a wire: the clock router and the

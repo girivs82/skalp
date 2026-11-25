@@ -80,7 +80,7 @@ pub use error::{PlaceRouteError, Result};
 pub use placer::{
     BelConstraint, FrequencyConstraint, IoConstraints, PinConstraint, PlacementAlgorithm,
     PlacementLoc, PlacementRegion, PlacementResult, Placer, PlacerConfig, PullResistor, PullType,
-    RegionConstraint,
+    RegionConstraint, ReplicatedDriver, Replication, ReplicationConfig, REPLICA_OF_PARAM,
 };
 pub use pnr::{
     auto_configure_pll, place_and_route, place_and_route_ecp5, place_and_route_hx1k,
