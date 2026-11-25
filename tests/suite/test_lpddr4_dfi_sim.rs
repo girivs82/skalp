@@ -69,6 +69,14 @@ struct Variant {
     vref_ok: (u64, u64),
     /// the controller's VREF training write/read-back rounds per level
     vref_reps: u64,
+    /// the controller's RETRAIN_REFS (write DQ training repeated in traffic; 0 = never)
+    retrain_refs: u64,
+    /// the controller's MR4_POLL_REFS (MR4 read every N refreshes; 0 = never)
+    mr4_poll_refs: u64,
+    /// the DRAM's MR4: before, after, and the CK clock it changes at (0 = never)
+    mr4: (u64, u64, u64),
+    /// the model error code expected (0 = none)
+    expect_err: u64,
 }
 
 async fn run(v: Variant) {
@@ -83,6 +91,11 @@ async fn run(v: Variant) {
         ("VREF_OK_LO", v.vref_ok.0),
         ("VREF_OK_HI", v.vref_ok.1),
         ("VREF_REPS", v.vref_reps),
+        ("RETRAIN_REFS", v.retrain_refs),
+        ("MR4_POLL_REFS", v.mr4_poll_refs),
+        ("MR4_COLD", v.mr4.0),
+        ("MR4_HOT", v.mr4.1),
+        ("MR4_HOT_AT_NCK", v.mr4.2),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_dfi_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -101,6 +114,7 @@ async fn run(v: Variant) {
             let mut state = String::new();
             for s in [
                 "ctrl_state",
+                "retrains",
                 "gen_state",
                 "init_done",
                 "train_fail",
@@ -133,15 +147,24 @@ async fn run(v: Variant) {
         };
     }
 
-    // the channel model saw no timing or protocol error and no contention
+    // the channel model saw no timing or protocol error (or only the one
+    // expected) and no contention
     let errors = get!("m_errors");
-    assert_eq!(
-        errors,
-        0,
-        "{n}: model error code {} at clock {}",
-        get!("m_err_code"),
-        get!("m_err_cycle")
-    );
+    if v.expect_err == 0 {
+        assert_eq!(
+            errors,
+            0,
+            "{n}: model error code {} at clock {} (refreshes {}, MR4 {} read {} times)",
+            get!("m_err_code"),
+            get!("m_err_cycle"),
+            get!("m_n_ref"),
+            get!("mr4"),
+            get!("mr4_polls")
+        );
+    } else {
+        assert!(errors > 0, "{n}: model error {} expected", v.expect_err);
+        assert_eq!(get!("m_err_code"), v.expect_err, "{n}: model error code");
+    }
     assert_eq!(get!("m_contention"), 0, "{n}: bus contention");
     assert_eq!(get!("m_t_ck"), CLK_PER_CK, "{n}: tCK");
 
@@ -155,7 +178,33 @@ async fn run(v: Variant) {
     assert_eq!(get!("vref_win"), vx.win, "{n}: VREF passing run");
     assert_eq!(get!("vref"), vx.mr14, "{n}: MR14 after VREF training");
     assert_eq!(get!("m_n_zq"), 1, "{n}: ZQ calibrations");
-    assert_eq!(get!("m_n_mrr"), 2, "{n}: MRR count");
+    // each repeated write DQ training reads MR5/MR8 back again afterwards
+    let retrains = get!("retrains");
+    if v.retrain_refs != 0 {
+        assert!(
+            retrains >= 2,
+            "{n}: write DQ trainings repeated, got {retrains}"
+        );
+    } else {
+        assert_eq!(retrains, 0, "{n}: no write DQ training repeated");
+    }
+    // (the last one may still be running when the traffic ends, before its
+    // MRRs); MR4 reads come on top
+    let polls = get!("mr4_polls");
+    let mrr = get!("m_n_mrr") - polls;
+    assert!(
+        mrr == 2 + 2 * retrains || (retrains > 0 && mrr == 2 * retrains),
+        "{n}: MRR count {mrr} after {retrains} repeated trainings"
+    );
+    if v.mr4_poll_refs == 0 {
+        assert_eq!(polls, 0, "{n}: MR4 reads");
+        assert_eq!(get!("mr4"), 0, "{n}: MR4 never read");
+    } else {
+        assert!(polls >= 3, "{n}: MR4 reads, got {polls}");
+        let hot = v.mr4.2 != 0;
+        let want = if hot { v.mr4.1 } else { v.mr4.0 };
+        assert_eq!(get!("mr4"), want, "{n}: MR4 read last");
+    }
     assert_eq!(get!("mr5"), 0xFF, "{n}: MR5 (manufacturer)");
     assert_eq!(get!("mr8"), 0x10, "{n}: MR8 (density/IO)");
 
@@ -200,11 +249,15 @@ async fn run(v: Variant) {
     // the sweep went through failing delays, and nothing failed after it
     let viol_init = get!("m_dq_viol_init");
     assert!(viol_init > 0, "{n}: write DQ sweep saw no failing delay");
-    assert_eq!(
-        get!("m_dq_viol"),
-        viol_init,
-        "{n}: DQ timing after training"
-    );
+    // (a repeated training sweeps through failing delays again: the traffic's
+    // data checks below show that what it settles on works)
+    if v.retrain_refs == 0 {
+        assert_eq!(
+            get!("m_dq_viol"),
+            viol_init,
+            "{n}: DQ timing after training"
+        );
+    }
 
     // traffic: every read returned the data written, nothing timed out
     let bursts = 64;
@@ -214,12 +267,23 @@ async fn run(v: Variant) {
     assert_eq!(get!("gate_timeouts"), 0, "{n}: gate timeouts");
     let train_writes = get!("m_n_wr_init");
     assert!(train_writes >= half, "{n}: write DQ training writes");
-    assert_eq!(get!("m_n_wr") - train_writes, bursts * 2 * 2, "{n}: writes");
+    let traffic_writes = get!("m_n_wr") - train_writes;
+    if v.retrain_refs == 0 {
+        assert_eq!(traffic_writes, bursts * 2 * 2, "{n}: writes");
+    } else {
+        // the repeated trainings' writes come on top
+        assert!(traffic_writes > bursts * 2 * 2, "{n}: writes");
+    }
     assert_eq!(get!("m_aliased"), 0, "{n}: aliased lines");
     assert_eq!(get!("m_unwritten"), 0, "{n}: unwritten reads");
 
-    // refresh ran at tREFI through the traffic
-    assert!(get!("m_n_ref") >= 5, "{n}: refreshes");
+    // refresh ran at tREFI through the traffic, at a quarter of it once MR4
+    // asked for that (the model checks the rate too: error 21)
+    let refs = get!("m_n_ref");
+    assert!(refs >= 5, "{n}: refreshes");
+    if v.mr4_poll_refs != 0 && v.mr4.1 >= 5 {
+        assert!(refs >= 20, "{n}: refreshes at 4x, got {refs}");
+    }
 
     // updates: no command inside a PHY update window
     assert_eq!(get!("upd_violations"), 0, "{n}: update windows");
@@ -244,6 +308,10 @@ async fn lpddr4_dfi_nominal() {
         wr_dq_skew: [0, 0],
         vref_ok: (0, 255),
         vref_reps: 1,
+        retrain_refs: 0,
+        mr4_poll_refs: 0,
+        mr4: (3, 3, 0),
+        expect_err: 0,
     })
     .await;
 }
@@ -259,6 +327,10 @@ async fn lpddr4_dfi_dqsck_board_skew_and_phy_updates() {
         wr_dq_skew: [1, 0],
         vref_ok: (0, 255),
         vref_reps: 1,
+        retrain_refs: 0,
+        mr4_poll_refs: 0,
+        mr4: (3, 3, 0),
+        expect_err: 0,
     })
     .await;
 }
@@ -279,6 +351,76 @@ async fn lpddr4_dfi_vref_training() {
         wr_dq_skew: [0, 0],
         vref_ok: (70, 95),
         vref_reps: 2,
+        retrain_refs: 0,
+        mr4_poll_refs: 0,
+        mr4: (3, 3, 0),
+        expect_err: 0,
+    })
+    .await;
+}
+
+/// The controller repeats the write DQ training every 2 refreshes during the
+/// traffic test (RETRAIN_REFS): each one finishes, the controller goes back to
+/// serving requests, and the traffic still passes
+#[tokio::test]
+async fn lpddr4_dfi_write_training_repeated_in_traffic() {
+    run(Variant {
+        name: "retrain",
+        dqsck_clks: 0,
+        dq_skew_clks: 0,
+        phyupd_every: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        retrain_refs: 2,
+        mr4_poll_refs: 0,
+        mr4: (3, 3, 0),
+        expect_err: 0,
+    })
+    .await;
+}
+
+/// The DRAM heats up once the traffic has started, after training (MR4 goes
+/// from 1x to 0.25x tREFI with AC timing derating): the controller reads MR4 after every refresh, refreshes
+/// four times as often from then on and derates tRCD/tRAS/tRP/tRRD, and the
+/// traffic still passes with no timing error
+#[tokio::test]
+async fn lpddr4_dfi_mr4_refresh_rate() {
+    run(Variant {
+        name: "mr4",
+        dqsck_clks: 0,
+        dq_skew_clks: 0,
+        phyupd_every: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        retrain_refs: 0,
+        mr4_poll_refs: 1,
+        mr4: (3, 6, 17_000),
+        expect_err: 0,
+    })
+    .await;
+}
+
+/// The same DRAM with MR4 never read: the controller keeps refreshing at 1x
+/// tREFI and the model reports refresh overdue (21) at the 0.25x rate
+#[tokio::test]
+async fn lpddr4_dfi_mr4_ignored_is_caught() {
+    run(Variant {
+        name: "mr4_ignored",
+        dqsck_clks: 0,
+        dq_skew_clks: 0,
+        phyupd_every: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        retrain_refs: 0,
+        mr4_poll_refs: 0,
+        mr4: (3, 5, 17_000),
+        expect_err: 21,
     })
     .await;
 }

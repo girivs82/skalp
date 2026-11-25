@@ -37,7 +37,15 @@ entity Lpddr4DfiSim<
     const VREF_OK_LO: nat = 0,
     const VREF_OK_HI: nat = 255,
     // the controller's VREF training rounds per level
-    const VREF_REPS: nat = 1
+    const VREF_REPS: nat = 1,
+    // the controller's write DQ training repeated every RETRAIN_REFS refreshes in traffic (0 = never)
+    const RETRAIN_REFS: nat = 0,
+    // the controller reads MR4 every MR4_POLL_REFS refreshes (0 = never); the DRAM reports
+    // MR4_COLD, then MR4_HOT from clock MR4_HOT_AT_NCK (0 = never)
+    const MR4_POLL_REFS: nat = 0,
+    const MR4_COLD: nat = 3,
+    const MR4_HOT: nat = 3,
+    const MR4_HOT_AT_NCK: nat = 0
 > {
     in clk: clock
     out done: bit
@@ -48,6 +56,9 @@ entity Lpddr4DfiSim<
     out init_done: bit
     out train_fail: bit
     out ctrl_state: bit[5]
+    out retrains: bit[16]
+    out mr4: bit[8]
+    out mr4_polls: bit[16]
     out mr5: bit[8]
     out mr8: bit[8]
     out gate0: bit[8]
@@ -81,6 +92,7 @@ entity Lpddr4DfiSim<
     out m_n_mrw: bit[16]
     out m_n_mrr: bit[16]
     out m_n_ref: bit[32]
+    out m_ref_owed: bit[8]
     out m_n_zq: bit[16]
     out m_t_ck: bit[8]
     out vref: bit[8]
@@ -121,7 +133,7 @@ impl Lpddr4DfiSim {
 
     inst ctrl = Lpddr4DfiController<20, 9, 49, 0, 114, 32, 114, 0, 20, 40, 10,
         10, 12, 23, 6, 22, 70, 2080, 10, 8, 8, 10, 534, 16, 2, 2, 3, 3, 16, 64, 4, 40, 16, 40, 63,
-        0, 0, 90, 60, 1, 25, 105, 2, VREF_REPS> {
+        0, 0, 90, 60, 1, 25, 105, 2, VREF_REPS, 134, 0, RETRAIN_REFS, MR4_POLL_REFS> {
         clk: phy.dfi_clk,
         req_valid: g_valid,
         req_write: g_write,
@@ -190,7 +202,7 @@ impl Lpddr4DfiSim {
         dqs_t_i: bus_dqs
     }
 
-    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8, VREF_OK_LO, VREF_OK_HI> {
+    inst dram = Lpddr4ChannelModel<255, 0, 0, 16, DQSCK_CLKS, DQ_SKEW_CLKS, 10, 12, 23, 6, 22, 70, 10, 2080, 10, 8, 8, 8, 534, 16, WR_SKEW0_CLKS, WR_SKEW1_CLKS, WR_DQ_SKEW0_CLKS, WR_DQ_SKEW1_CLKS, 8, VREF_OK_LO, VREF_OK_HI, MR4_COLD, MR4_HOT, MR4_HOT_AT_NCK> {
         clk: clk,
         reset_n: phy.reset_n,
         ck_t: phy.ck_t,
@@ -278,6 +290,9 @@ impl Lpddr4DfiSim {
     init_done = ctrl.init_done
     train_fail = ctrl.train_fail
     ctrl_state = ctrl.state
+    retrains = ctrl.retrain_count
+    mr4 = ctrl.mr4
+    mr4_polls = ctrl.mr4_polls
     mr5 = ctrl.mr5
     mr8 = ctrl.mr8
     gate0 = phy.gate_dly0
@@ -310,6 +325,7 @@ impl Lpddr4DfiSim {
     m_n_mrw = dram.n_mrw
     m_n_mrr = dram.n_mrr
     m_n_ref = dram.n_ref
+    m_ref_owed = dram.ref_owed
     m_n_zq = dram.n_zq
     m_t_ck = dram.t_ck_clks
     vref = ctrl.vref

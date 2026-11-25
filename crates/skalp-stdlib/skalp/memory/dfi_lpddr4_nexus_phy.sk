@@ -103,16 +103,46 @@
 //         Calibration pattern (RDC_PATTERN = {MR40, MR32}, per-lane inversion RDC_INV0/1 = MR15,
 //         MR20); the lane takes the middle of the longest passing run (lvl_fail if none).
 //   write DQ (dfi_wdqlvl_en): the PHY sends its own data on every write (byte k of a lane-0 burst
-//         is {k, k}, inverted on odd beats; lane 1 is the inverse) and compares each read-back
+//         is nx_wdq_byte(k), in which every pin toggles; lane 1 is the inverse) and compares each read-back
 //         with it; the write delay sweeps as the read delay does (WDQ_STEP, WDQ_HALF), and each
 //         lane takes the middle of the longest passing run (wdq_fail if none).
+//         With BIT_DESKEW the write delay stays at the bottom of that sweep and each DQ pin's
+//         output delay sweeps instead (0 to BIT_TOP, BIT_STEP apart, all pins together), each
+//         pin judged on its own bits; a pin goes to the middle of its longest passing run, or,
+//         when that run starts at 0 or ends at BIT_TOP (so may go on past it), half the lane's
+//         widest whole run in from its other end (wdq_fail if a pin never passes); DMI then
+//         goes to the mean of the pins' settings. DQS and its complement go through output
+//         delays too, matching the DQ's insertion, set DQS_OUT_DELAY steps up when the delays
+//         load (before write leveling, which aligns the strobe to CK again): the DQ sweep can
+//         only add delay, so this puts the strobe mid-way in it and the pins' eyes inside it.
 // No read data comes back on DFI while any training enable is set.
 //
 // PHY updates: the PHY acknowledges controller updates and does not request any.
 
-// write DQ training data: byte k of a lane-0 burst is {k, k}, inverted on odd beats
+// write DQ training data: byte k of a lane-0 burst. Pin p carries bit (k + 3p) mod 16 of the
+// sequence 0110100110010111, so every pin toggles 4 or 5 times in each half burst and no two
+// pins carry the same bits: the per-bit deskew sees each pin's own edges. (A pattern in which a
+// pin holds still, as {k, k} inverted on odd beats does for pins 0 and 4, passes that pin at
+// every delay.)
 fn nx_wdq_byte(k: bit[4]) -> bit[8] {
-    return if k[0] == 1 { ~{k, k} } else { {k, k} }
+    return match k {
+        0 => 8'h60,
+        1 => 8'h17,
+        2 => 8'hFD,
+        3 => 8'hB0,
+        4 => 8'h0B,
+        5 => 8'h7E,
+        6 => 8'hD8,
+        7 => 8'h05,
+        8 => 8'hBF,
+        9 => 8'hEC,
+        10 => 8'h82,
+        11 => 8'h5F,
+        12 => 8'hF6,
+        13 => 8'hC1,
+        14 => 8'h2F,
+        _ => 8'hFB
+    }
 }
 
 // word i of a write DQ training burst: beats 2i and 2i+1 of both lanes, the earlier in [15:0]
@@ -145,9 +175,10 @@ fn nx_rdc_lane(pat: bit[16], inv: bit[8]) -> bit[128] {
     }
 }
 
-// One DQ pin: x4 output and tristate gearing on DQSW270, delayed input into x4 input gearing on
-// DQSR90. d: D0..D7 (D0 first); t: one tristate bit per edge clock cycle (1 = not driven);
-// q: Q0..Q7 (Q0 = the first beat).
+// One DQ pin: x4 output and tristate gearing on DQSW270 through the pad's output delay (the
+// write per-bit deskew: wt_ld_n low puts it at 0, each wt_mv pulse a step, up unless wt_dn),
+// delayed input into x4 input gearing on DQSR90. d: D0..D7 (D0 first); t: one tristate bit per
+// edge clock cycle (1 = not driven); q: Q0..Q7 (Q0 = the first beat).
 pub entity NexusLpddr4DqPin<const IN_DELAY: nat = 0> {
     in eclk: clock
     in sclk: clock
@@ -159,6 +190,9 @@ pub entity NexusLpddr4DqPin<const IN_DELAY: nat = 0> {
     in t: bit[4]
     in rdp: bit[3]
     in wrp: bit[3]
+    in wt_ld_n: bit
+    in wt_mv: bit
+    in wt_dn: bit
     out o: bit
     out ot: bit
     in i: bit
@@ -174,6 +208,10 @@ impl NexusLpddr4DqPin {
         T0: t[0], T1: t[1], T2: t[2], T3: t[3],
         DQSW270: dqsw270, ECLK: eclk, SCLK: sclk, RST: rst
     }
+    inst odl = OUTDELAYA {
+        DOUTI: od.Q, TOUTI: ts.Q,
+        LOAD_N_LPDDR4_WT: wt_ld_n, MOVE_LPDDR4_WT: wt_mv, DIRECTION_LPDDR4_WT: wt_dn
+    }
     inst dl = DELAYA<IN_DELAY> {
         A: i, LOAD_N: load_n, MOVE: 0, DIRECTION: 0, COARSE0: 0, COARSE1: 0,
         RANKSELECT: 0, RANKENABLE: 0, RANK0UPDATE: 0, RANK1UPDATE: 0
@@ -183,8 +221,8 @@ impl NexusLpddr4DqPin {
         RDPNTR0: rdp[0], RDPNTR1: rdp[1], RDPNTR2: rdp[2],
         WRPNTR0: wrp[0], WRPNTR1: wrp[1], WRPNTR2: wrp[2]
     }
-    o = od.Q
-    ot = ts.Q
+    o = odl.DOUT
+    ot = odl.TOUT
     q = {id.Q7, id.Q6, id.Q5, id.Q4, id.Q3, id.Q2, id.Q1, id.Q0}
 }
 
@@ -205,7 +243,13 @@ pub entity NexusLpddr4Lane<
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,
-    const WDQ_HALF: nat = 64
+    const WDQ_HALF: nat = 64,
+    const RD_PUSH: nat = 0,
+    const RD_PUSH_DN: nat = 0,
+    const BIT_DESKEW: nat = 0,
+    const BIT_STEP: nat = 4,
+    const BIT_TOP: nat = 124,
+    const DQS_OUT_DELAY: nat = 0
 > {
     in eclk: clock
     in sclk: clock
@@ -262,7 +306,30 @@ pub entity NexusLpddr4Lane<
     out sweep_map: bit[64]
     // the read latency the read eye step measured, in slots
     out rd_lat_o: bit[8]
+    // DATAVALID words outside training (diagnostic: compare with bursts)
+    out dv_count: bit[16]
+    // DIAGNOSTIC: DATAVALID words around the PHY's own writes, per write window (wr_gate open,
+    // and 8 cycles after): dvw_hist[16k+15:16k] counts windows with k words (3: 3 or more), and
+    // dvr_hist the same for the words between that window and the next one
+    out dvw_hist: bit[64]
+    out dvr_hist: bit[64]
+    // DIAGNOSTIC: per write DQ training event, where the first word of the read-back sits in the
+    // burst (3 bits, latest event in [2:0]): 0 in place, 1-3 starting 2/4/6 beats into the burst,
+    // 5-7 with 2/4/6 stale beats before the burst's start, 4 none of these
+    out slip_map: bit[64]
     out bursts: bit[16]
+    // DIAGNOSTIC: the DQS buffer's delay-limit flags seen high (sticky): [0] READCOUT during the
+    // read eye sweep, [1] WRCOUT during the write DQ sweep, [2] WRLVCOUT during write leveling,
+    // [3..5] the same three at any time
+    out cout_seen: bit[6]
+    // DIAGNOSTIC: the lowest and highest positions (as the PHY counts them, 128 = loaded) at
+    // which READCOUT / WRCOUT was low during the read eye / write DQ sweeps: {wr hi, wr lo, rd hi,
+    // rd lo}; all 0 if the flag never went low
+    out cout_pos: bit[32]
+    // write per-bit deskew (BIT_DESKEW): each DQ's output delay (pin k in [8k+7:8k]) and the
+    // pins whose sweep found no passing setting
+    out bit_pos: bit[64]
+    out bit_fail: bit[8]
 }
 
 impl NexusLpddr4Lane {
@@ -271,6 +338,18 @@ impl NexusLpddr4Lane {
     signal rdp_r: bit[8] = 128
     signal wrp_r: bit[8] = 128
     signal wlp_r: bit[8] = 0
+    signal cflags: bit[6] = 0
+    signal push_n: bit[16] = 0
+    signal push_mv: bit = 0
+    signal pushed: bit = 0
+    signal rc_lo: bit[8] = 0
+    signal rc_hi: bit[8] = 0
+    signal wc_lo: bit[8] = 0
+    signal wc_hi: bit[8] = 0
+    signal rcl_v: bit = 0
+    signal rch_v: bit = 0
+    signal wcl_v: bit = 0
+    signal wch_v: bit = 0
     // steps still to move, the direction (1 = down) and the MOVE outputs
     signal rd_n: bit[8] = 0
     signal wr_n: bit[8] = 0
@@ -281,10 +360,119 @@ impl NexusLpddr4Lane {
     signal rd_mv: bit = 0
     signal wr_mv: bit = 0
     signal wl_mv: bit = 0
-    let moving: bit = if rd_n != 0 || wr_n != 0 || wl_n != 0 || rd_mv == 1 || wr_mv == 1 || wl_mv == 1 { 1 } else { 0 }
     // after a gate setting changes, the DQS buffer pauses a few cycles
     signal pause_n: bit[3] = 0
     let pause: bit = if pause_n != 0 { 1 } else { 0 }
+
+    // ------------------------------------------------------------ write per-bit deskew
+    // each DQ pin's output delay setting, the steps it still has to move (all in direction bdn,
+    // 1 = down) and its MOVE output; bsw: the write DQ training sweeps the pins' delays
+    signal bdn: bit = 0
+    signal bsw: bit = 0
+    // the result is worked out over six clocks (bcalc 1-6): the pins' whole-run widths, the
+    // widest's half, each pin's target, the moves, then DMI's setting (the pins' mean)
+    signal bcalc: bit[3] = 0
+    signal bwr0: bit[8] = 0
+    signal bwr1: bit[8] = 0
+    signal bwr2: bit[8] = 0
+    signal bwr3: bit[8] = 0
+    signal bwr4: bit[8] = 0
+    signal bwr5: bit[8] = 0
+    signal bwr6: bit[8] = 0
+    signal bwr7: bit[8] = 0
+    signal bwv_r: bit = 0
+    signal bwh_r: bit[8] = 0
+    signal btr0: bit[8] = 0
+    signal btr1: bit[8] = 0
+    signal btr2: bit[8] = 0
+    signal btr3: bit[8] = 0
+    signal btr4: bit[8] = 0
+    signal btr5: bit[8] = 0
+    signal btr6: bit[8] = 0
+    signal btr7: bit[8] = 0
+    signal bfail: bit[8] = 0
+    signal bmism: bit[8] = 0
+    signal bbad_q: bit[8] = 0
+    signal bp0: bit[8] = 0
+    signal bn0: bit[8] = 0
+    signal bmv0: bit = 0
+    signal brs0: bit[8] = 0
+    signal brl0: bit[8] = 0
+    signal bbs0: bit[8] = 0
+    signal bbe0: bit[8] = 0
+    signal bbl0: bit[8] = 0
+    signal bp1: bit[8] = 0
+    signal bn1: bit[8] = 0
+    signal bmv1: bit = 0
+    signal brs1: bit[8] = 0
+    signal brl1: bit[8] = 0
+    signal bbs1: bit[8] = 0
+    signal bbe1: bit[8] = 0
+    signal bbl1: bit[8] = 0
+    signal bp2: bit[8] = 0
+    signal bn2: bit[8] = 0
+    signal bmv2: bit = 0
+    signal brs2: bit[8] = 0
+    signal brl2: bit[8] = 0
+    signal bbs2: bit[8] = 0
+    signal bbe2: bit[8] = 0
+    signal bbl2: bit[8] = 0
+    signal bp3: bit[8] = 0
+    signal bn3: bit[8] = 0
+    signal bmv3: bit = 0
+    signal brs3: bit[8] = 0
+    signal brl3: bit[8] = 0
+    signal bbs3: bit[8] = 0
+    signal bbe3: bit[8] = 0
+    signal bbl3: bit[8] = 0
+    signal bp4: bit[8] = 0
+    signal bn4: bit[8] = 0
+    signal bmv4: bit = 0
+    signal brs4: bit[8] = 0
+    signal brl4: bit[8] = 0
+    signal bbs4: bit[8] = 0
+    signal bbe4: bit[8] = 0
+    signal bbl4: bit[8] = 0
+    signal bp5: bit[8] = 0
+    signal bn5: bit[8] = 0
+    signal bmv5: bit = 0
+    signal brs5: bit[8] = 0
+    signal brl5: bit[8] = 0
+    signal bbs5: bit[8] = 0
+    signal bbe5: bit[8] = 0
+    signal bbl5: bit[8] = 0
+    signal bp6: bit[8] = 0
+    signal bn6: bit[8] = 0
+    signal bmv6: bit = 0
+    signal brs6: bit[8] = 0
+    signal brl6: bit[8] = 0
+    signal bbs6: bit[8] = 0
+    signal bbe6: bit[8] = 0
+    signal bbl6: bit[8] = 0
+    signal bp7: bit[8] = 0
+    signal bn7: bit[8] = 0
+    signal bmv7: bit = 0
+    signal brs7: bit[8] = 0
+    signal brl7: bit[8] = 0
+    signal bbs7: bit[8] = 0
+    signal bbe7: bit[8] = 0
+    signal bbl7: bit[8] = 0
+
+    // DQS (and DQS_c) output delay moves still to make, and their MOVE; DMI's output delay
+    // setting, moves still to make (direction dm_dn, 1 = down) and MOVE
+    signal dq_n: bit[8] = 0
+    signal dq_mv: bit = 0
+    signal dm_p: bit[8] = 0
+    signal dm_n: bit[8] = 0
+    signal dm_dn: bit = 0
+    signal dm_mv: bit = 0
+    signal bsum: bit[11] = 0
+    signal bs01: bit[9] = 0
+    signal bs23: bit[9] = 0
+    signal bs45: bit[9] = 0
+    signal bs67: bit[9] = 0
+    let b_moving: bit = if dq_n != 0 || dq_mv == 1 || dm_n != 0 || dm_mv == 1 || bn0 != 0 || bn1 != 0 || bn2 != 0 || bn3 != 0 || bn4 != 0 || bn5 != 0 || bn6 != 0 || bn7 != 0 || bmv0 == 1 || bmv1 == 1 || bmv2 == 1 || bmv3 == 1 || bmv4 == 1 || bmv5 == 1 || bmv6 == 1 || bmv7 == 1 { 1 } else { 0 }
+    let moving: bit = if rd_n != 0 || wr_n != 0 || wl_n != 0 || rd_mv == 1 || wr_mv == 1 || wl_mv == 1 || b_moving == 1 { 1 } else { 0 }
 
     // ------------------------------------------------------------ training state
     signal gsel: bit[8] = 0
@@ -325,6 +513,21 @@ impl NexusLpddr4Lane {
     signal wdq_q: bit = 0
     signal nburst: bit[16] = 0
     signal load_q: bit = 0
+    // DATAVALID words the DQS buffer gave outside training, whatever the PHY took
+    signal ndv: bit[16] = 0
+    signal wwin: bit[4] = 0
+    signal nw: bit[2] = 0
+    signal nr: bit[2] = 0
+    signal seen_w: bit = 0
+    signal hw0: bit[16] = 0
+    signal hw1: bit[16] = 0
+    signal hw2: bit[16] = 0
+    signal hw3: bit[16] = 0
+    signal hr0: bit[16] = 0
+    signal hr1: bit[16] = 0
+    signal hr2: bit[16] = 0
+    signal hr3: bit[16] = 0
+    signal slp: bit[64] = 0
 
     // ------------------------------------------------------------ read return latency
     // Where each half burst ends, from the read enables: rd_win's newest cycle (slots 8-11) is
@@ -344,6 +547,7 @@ impl NexusLpddr4Lane {
     signal lat_p: bit = 0
     signal lat_c: bit[8] = 0
 
+    let rd_dir: bit = if push_n != 0 || push_mv == 1 { if RD_PUSH_DN != 0 { 1 } else { 0 } } else { rd_dn }
     let training: bit = if wl_en == 1 || gate_en == 1 || eye_en == 1 || wdq_en == 1 { 1 } else { 0 }
     let gate_n: bit[8] = GATE_SLOTS * 8
     let train_win: bit[8] = TRAIN_WIN
@@ -407,7 +611,7 @@ impl NexusLpddr4Lane {
         DQSI: dqs_i, ECLKIN: eclk, SCLK: sclk, RST: io_rst,
         PAUSE: pause | io_pause,
         RSTSMCNT: io_rst, RDCLKSEL: sel_n, READ: read_n,
-        RDDIR: rd_dn, RDLOADN: ~load, READMOVE: rd_mv, SELCLK: 0,
+        RDDIR: rd_dir, RDLOADN: ~load, READMOVE: rd_mv | push_mv, SELCLK: 0,
         WRDIR: wr_dn, WRLOAD_N: ~load, WRMOVE: wr_mv,
         WRLVDIR: wl_dn, WRLVLOAD_N: ~load, WRLVMOVE: wl_mv,
         DLLCODE: dllcode
@@ -434,41 +638,60 @@ impl NexusLpddr4Lane {
         T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
+    // DQS, its complement and DMI go through output delays too, so the DQ's output delay
+    // insertion is matched (as the device's LPDDR4 interface does): DQS's is set DQS_OUT_DELAY
+    // steps up at load, DMI's follows the DQ pins (per-bit deskew)
+    inst dqs_odl = OUTDELAYA {
+        DOUTI: dqs_od.Q, TOUTI: dqs_ts.Q,
+        LOAD_N_LPDDR4_WT: ~load, MOVE_LPDDR4_WT: dq_mv, DIRECTION_LPDDR4_WT: 0
+    }
+    inst dqsc_odl = OUTDELAYA {
+        DOUTI: dqsc_od.Q, TOUTI: dqsc_ts.Q,
+        LOAD_N_LPDDR4_WT: ~load, MOVE_LPDDR4_WT: dq_mv, DIRECTION_LPDDR4_WT: 0
+    }
     signal w270: clock
     signal r90: clock
     w270 = dqs.DQSW270
     r90 = dqs.DQSR90
     inst p0 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[7:0], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[0]
+        d: dq_d[7:0], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[0],
+        wt_ld_n: ~load, wt_mv: bmv0, wt_dn: bdn
     }
     inst p1 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[15:8], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[1]
+        d: dq_d[15:8], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[1],
+        wt_ld_n: ~load, wt_mv: bmv1, wt_dn: bdn
     }
     inst p2 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[23:16], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[2]
+        d: dq_d[23:16], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[2],
+        wt_ld_n: ~load, wt_mv: bmv2, wt_dn: bdn
     }
     inst p3 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[31:24], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[3]
+        d: dq_d[31:24], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[3],
+        wt_ld_n: ~load, wt_mv: bmv3, wt_dn: bdn
     }
     inst p4 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[39:32], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[4]
+        d: dq_d[39:32], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[4],
+        wt_ld_n: ~load, wt_mv: bmv4, wt_dn: bdn
     }
     inst p5 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[47:40], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[5]
+        d: dq_d[47:40], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[5],
+        wt_ld_n: ~load, wt_mv: bmv5, wt_dn: bdn
     }
     inst p6 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[55:48], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[6]
+        d: dq_d[55:48], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[6],
+        wt_ld_n: ~load, wt_mv: bmv6, wt_dn: bdn
     }
     inst p7 = NexusLpddr4DqPin<IN_DELAY> {
         eclk: eclk, sclk: sclk, dqsw270: w270, dqsr90: r90, rst: io_rst, load_n: ~load,
-        d: dq_d[63:56], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[7]
+        d: dq_d[63:56], t: dq_tt, rdp: dqs.RDPNTR, wrp: dqs.WRPNTR, i: dq_i[7],
+        wt_ld_n: ~load, wt_mv: bmv7, wt_dn: bdn
     }
     inst dmi_od = ODDRX4DQ {
         D0: 0, D1: 0, D2: 0, D3: 0, D4: 0, D5: 0, D6: 0, D7: 0,
@@ -477,6 +700,10 @@ impl NexusLpddr4Lane {
     inst dmi_ts = TSHX4DQ {
         T0: dq_tt[0], T1: dq_tt[1], T2: dq_tt[2], T3: dq_tt[3],
         DQSW270: w270, ECLK: eclk, SCLK: sclk, RST: io_rst
+    }
+    inst dmi_odl = OUTDELAYA {
+        DOUTI: dmi_od.Q, TOUTI: dmi_ts.Q,
+        LOAD_N_LPDDR4_WT: ~load, MOVE_LPDDR4_WT: dm_mv, DIRECTION_LPDDR4_WT: dm_dn
     }
 
     // eight beats of the lane, beat k in [8k+7:8k]
@@ -535,12 +762,22 @@ impl NexusLpddr4Lane {
     } else {
         if nv == 0 { exp_rdc[63:0] } else { exp_rdc[127:64] }
     }
+    // DIAGNOSTIC: the first word of a write DQ read-back against the burst, shifted
+    let sl_code: bit[3] = if hh_r == exp_wdq[63:0] { 0 } else {
+        if hh_r == exp_wdq[79:16] { 1 } else { if hh_r == exp_wdq[95:32] { 2 } else {
+        if hh_r == exp_wdq[111:48] { 3 } else { if hh_r[63:16] == exp_wdq[47:0] { 5 } else {
+        if hh_r[63:32] == exp_wdq[31:0] { 6 } else { if hh_r[63:48] == exp_wdq[15:0] { 7 } else { 4 } } } } } } }
     // a half's check lands a cycle after the half (the comparison is a stage of its own)
     signal bad_q: bit = 0
     let h_bad: bit = if hv_r == 1 && (nv >= 2 || hh_r != exp_h) { 1 } else { 0 }
     let mism_n: bit = if mism == 1 || bad_q == 1 { 1 } else { 0 }
     let nv_n: bit[2] = if hv_r == 1 && nv != 3 { nv + 1 } else { nv }
-    let fb_n: bit = if fb == 1 || (dv_r == 1 && hb_r[15:0] != 0) { 1 } else { 0 }
+    // write leveling feedback: the DRAM holds DQ at its last sample of CK, so the input
+    // gearing's newest word, read at the end of the event's window, is the feedback level;
+    // on silicon from 937 Mbps the DQS buffer gives no DATAVALID for the leveling strobe at
+    // all, although the gearing does take the feedback
+    let fb_n: bit = if wl_en == 1 { if hb_r != 0 { 1 } else { 0 } } else {
+        if fb == 1 || (dv_r == 1 && hb_r[15:0] != 0) { 1 } else { 0 } }
     // the event's result: both halves came back, as expected (gate: the setting passes when
     // the gate opened in the preamble and so took the whole burst, two words, in order)
     let data_ok: bit = if nv_n == 2 && mism_n == 0 { 1 } else { 0 }
@@ -568,17 +805,178 @@ impl NexusLpddr4Lane {
     let eye_last: bit = if rdp_r + eye_step > eye_top { 1 } else { 0 }
     let wdq_last: bit = if wrp_r + wdq_step > wdq_top { 1 } else { 0 }
     let sweeping: bit = if (gate_en == 1 && gate_q == 1 && r_gate == 0) || (eye_en == 1 && eye_q == 1 && r_eye == 0) || (wdq_en == 1 && wdq_q == 1 && r_wdq == 0) { 1 } else { 0 }
-    let evaluate: bit = if last_win == 1 && ev_ok == 1 && sweeping == 1 && fin == 0 && calc == 0 { 1 } else { 0 }
+    let evaluate: bit = if last_win == 1 && ev_ok == 1 && sweeping == 1 && fin == 0 && calc == 0 && bcalc == 0 { 1 } else { 0 }
     // write leveling: this strobe's sample is the feedback of the strobe before it
     let wl_sweep: bit = if wl_en == 1 && wl_q == 1 && r_wl == 0 && fin == 0 { 1 } else { 0 }
     let wl_eval: bit = if last_win == 1 && ev_ok == 1 && wl_sweep == 1 { 1 } else { 0 }
     let wl_hit: bit = if wl_k >= 2 && wl_fb_p == 0 && fb_n == 1 { 1 } else { 0 }
     let wl_end: bit = if wlp_r + wl_step > wl_max { 1 } else { 0 }
+
+    // ------------------------------------------------------------ write per-bit deskew sweep
+    // a half's mismatches per pin (pin k: bits 8b+k of the half, every beat b)
+    let hdiff: bit[64] = hh_r ^ exp_h
+    let hd_pin: bit[8] = hdiff[7:0] | hdiff[15:8] | hdiff[23:16] | hdiff[31:24] | hdiff[39:32] | hdiff[47:40] | hdiff[55:48] | hdiff[63:56]
+    let bbad: bit[8] = if hv_r == 1 { hd_pin } else { 8'h00 }
+    let bmism_n: bit[8] = bmism | bbad_q
+    let bit_step: bit[8] = BIT_STEP
+    let bit_top: bit[8] = BIT_TOP
+    // the pins' common setting while sweeping, and whether this event is the sweep's last
+    let bcur: bit[8] = bp0
+    let b_last: bit = if bcur + bit_step > bit_top { 1 } else { 0 }
+    let b_on: bit = if BIT_DESKEW != 0 { 1 } else { 0 }
+    let bpass0: bit = if nv_n == 2 && bmism_n[0] == 0 { 1 } else { 0 }
+    let brl1_0: bit[8] = brl0 + 1
+    let brs1_0: bit[8] = if brl0 == 0 { bcur } else { brs0 }
+    let bbet0: bit = if bpass0 == 1 && brl1_0 > bbl0 { 1 } else { 0 }
+    let bpass1: bit = if nv_n == 2 && bmism_n[1] == 0 { 1 } else { 0 }
+    let brl1_1: bit[8] = brl1 + 1
+    let brs1_1: bit[8] = if brl1 == 0 { bcur } else { brs1 }
+    let bbet1: bit = if bpass1 == 1 && brl1_1 > bbl1 { 1 } else { 0 }
+    let bpass2: bit = if nv_n == 2 && bmism_n[2] == 0 { 1 } else { 0 }
+    let brl1_2: bit[8] = brl2 + 1
+    let brs1_2: bit[8] = if brl2 == 0 { bcur } else { brs2 }
+    let bbet2: bit = if bpass2 == 1 && brl1_2 > bbl2 { 1 } else { 0 }
+    let bpass3: bit = if nv_n == 2 && bmism_n[3] == 0 { 1 } else { 0 }
+    let brl1_3: bit[8] = brl3 + 1
+    let brs1_3: bit[8] = if brl3 == 0 { bcur } else { brs3 }
+    let bbet3: bit = if bpass3 == 1 && brl1_3 > bbl3 { 1 } else { 0 }
+    let bpass4: bit = if nv_n == 2 && bmism_n[4] == 0 { 1 } else { 0 }
+    let brl1_4: bit[8] = brl4 + 1
+    let brs1_4: bit[8] = if brl4 == 0 { bcur } else { brs4 }
+    let bbet4: bit = if bpass4 == 1 && brl1_4 > bbl4 { 1 } else { 0 }
+    let bpass5: bit = if nv_n == 2 && bmism_n[5] == 0 { 1 } else { 0 }
+    let brl1_5: bit[8] = brl5 + 1
+    let brs1_5: bit[8] = if brl5 == 0 { bcur } else { brs5 }
+    let bbet5: bit = if bpass5 == 1 && brl1_5 > bbl5 { 1 } else { 0 }
+    let bpass6: bit = if nv_n == 2 && bmism_n[6] == 0 { 1 } else { 0 }
+    let brl1_6: bit[8] = brl6 + 1
+    let brs1_6: bit[8] = if brl6 == 0 { bcur } else { brs6 }
+    let bbet6: bit = if bpass6 == 1 && brl1_6 > bbl6 { 1 } else { 0 }
+    let bpass7: bit = if nv_n == 2 && bmism_n[7] == 0 { 1 } else { 0 }
+    let brl1_7: bit[8] = brl7 + 1
+    let brs1_7: bit[8] = if brl7 == 0 { bcur } else { brs7 }
+    let bbet7: bit = if bpass7 == 1 && brl1_7 > bbl7 { 1 } else { 0 }
+    // the sweep's result: each pin goes to the middle of its longest passing run. A run that
+    // starts at the sweep's first setting (or ends at its last) may go on past it, so such a pin
+    // goes half the lane's widest whole run in from its other end, when some pin has a whole one
+    let bwhole0: bit = if bbl0 != 0 && bbs0 != 0 && bbe0 != bcur { 1 } else { 0 }
+    let bwid0: bit[8] = if bwhole0 == 1 { bbe0 - bbs0 } else { 0 }
+    let bwhole1: bit = if bbl1 != 0 && bbs1 != 0 && bbe1 != bcur { 1 } else { 0 }
+    let bwid1: bit[8] = if bwhole1 == 1 { bbe1 - bbs1 } else { 0 }
+    let bwhole2: bit = if bbl2 != 0 && bbs2 != 0 && bbe2 != bcur { 1 } else { 0 }
+    let bwid2: bit[8] = if bwhole2 == 1 { bbe2 - bbs2 } else { 0 }
+    let bwhole3: bit = if bbl3 != 0 && bbs3 != 0 && bbe3 != bcur { 1 } else { 0 }
+    let bwid3: bit[8] = if bwhole3 == 1 { bbe3 - bbs3 } else { 0 }
+    let bwhole4: bit = if bbl4 != 0 && bbs4 != 0 && bbe4 != bcur { 1 } else { 0 }
+    let bwid4: bit[8] = if bwhole4 == 1 { bbe4 - bbs4 } else { 0 }
+    let bwhole5: bit = if bbl5 != 0 && bbs5 != 0 && bbe5 != bcur { 1 } else { 0 }
+    let bwid5: bit[8] = if bwhole5 == 1 { bbe5 - bbs5 } else { 0 }
+    let bwhole6: bit = if bbl6 != 0 && bbs6 != 0 && bbe6 != bcur { 1 } else { 0 }
+    let bwid6: bit[8] = if bwhole6 == 1 { bbe6 - bbs6 } else { 0 }
+    let bwhole7: bit = if bbl7 != 0 && bbs7 != 0 && bbe7 != bcur { 1 } else { 0 }
+    let bwid7: bit[8] = if bwhole7 == 1 { bbe7 - bbs7 } else { 0 }
+    let bz0: bit = if bbl0 == 0 { 1 } else { 0 }
+    let bz1: bit = if bbl1 == 0 { 1 } else { 0 }
+    let bz2: bit = if bbl2 == 0 { 1 } else { 0 }
+    let bz3: bit = if bbl3 == 0 { 1 } else { 0 }
+    let bz4: bit = if bbl4 == 0 { 1 } else { 0 }
+    let bz5: bit = if bbl5 == 0 { 1 } else { 0 }
+    let bz6: bit = if bbl6 == 0 { 1 } else { 0 }
+    let bz7: bit = if bbl7 == 0 { 1 } else { 0 }
+    let bf_n: bit[8] = {bz7, bz6, bz5, bz4, bz3, bz2, bz1, bz0}
+    let bw01: bit[8] = if bwr0 > bwr1 { bwr0 } else { bwr1 }
+    let bw23: bit[8] = if bwr2 > bwr3 { bwr2 } else { bwr3 }
+    let bw45: bit[8] = if bwr4 > bwr5 { bwr4 } else { bwr5 }
+    let bw67: bit[8] = if bwr6 > bwr7 { bwr6 } else { bwr7 }
+    let bw03: bit[8] = if bw01 > bw23 { bw01 } else { bw23 }
+    let bw47: bit[8] = if bw45 > bw67 { bw45 } else { bw67 }
+    let bwmax: bit[8] = if bw03 > bw47 { bw03 } else { bw47 }
+    let bwv: bit = if bwhole0 == 1 || bwhole1 == 1 || bwhole2 == 1 || bwhole3 == 1 || bwhole4 == 1 || bwhole5 == 1 || bwhole6 == 1 || bwhole7 == 1 { 1 } else { 0 }
+    let bwh: bit[8] = bwh_r
+    let bt_sum: bit[11] = {2'b00, bs01} + {2'b00, bs23} + {2'b00, bs45} + {2'b00, bs67}
+    let dm_tgt: bit[8] = bsum[10:3]
+    let dqs_ofs: bit[8] = DQS_OUT_DELAY
+    let bmid_s0: bit[9] = {1'b0, bbs0} + {1'b0, bbe0}
+    let blo0: bit = if bbs0 == 0 && bbe0 != bcur { 1 } else { 0 }
+    let bhi0: bit = if bbe0 == bcur && bbs0 != 0 { 1 } else { 0 }
+    let bt_lo0: bit[8] = if bwv_r == 0 { 0 } else { if bbe0 > bwh { bbe0 - bwh } else { 0 } }
+    let bt_hi_s0: bit[9] = {1'b0, bbs0} + {1'b0, bwh}
+    let bt_hi0: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s0[7:0] < bcur && bt_hi_s0[8] == 0 { bt_hi_s0[7:0] } else { bcur } }
+    let btgt0: bit[8] = if bbl0 == 0 { 0 } else { if blo0 == 1 { bt_lo0 } else { if bhi0 == 1 { bt_hi0 } else { bmid_s0[8:1] } } }
+    let bmid_s1: bit[9] = {1'b0, bbs1} + {1'b0, bbe1}
+    let blo1: bit = if bbs1 == 0 && bbe1 != bcur { 1 } else { 0 }
+    let bhi1: bit = if bbe1 == bcur && bbs1 != 0 { 1 } else { 0 }
+    let bt_lo1: bit[8] = if bwv_r == 0 { 0 } else { if bbe1 > bwh { bbe1 - bwh } else { 0 } }
+    let bt_hi_s1: bit[9] = {1'b0, bbs1} + {1'b0, bwh}
+    let bt_hi1: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s1[7:0] < bcur && bt_hi_s1[8] == 0 { bt_hi_s1[7:0] } else { bcur } }
+    let btgt1: bit[8] = if bbl1 == 0 { 0 } else { if blo1 == 1 { bt_lo1 } else { if bhi1 == 1 { bt_hi1 } else { bmid_s1[8:1] } } }
+    let bmid_s2: bit[9] = {1'b0, bbs2} + {1'b0, bbe2}
+    let blo2: bit = if bbs2 == 0 && bbe2 != bcur { 1 } else { 0 }
+    let bhi2: bit = if bbe2 == bcur && bbs2 != 0 { 1 } else { 0 }
+    let bt_lo2: bit[8] = if bwv_r == 0 { 0 } else { if bbe2 > bwh { bbe2 - bwh } else { 0 } }
+    let bt_hi_s2: bit[9] = {1'b0, bbs2} + {1'b0, bwh}
+    let bt_hi2: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s2[7:0] < bcur && bt_hi_s2[8] == 0 { bt_hi_s2[7:0] } else { bcur } }
+    let btgt2: bit[8] = if bbl2 == 0 { 0 } else { if blo2 == 1 { bt_lo2 } else { if bhi2 == 1 { bt_hi2 } else { bmid_s2[8:1] } } }
+    let bmid_s3: bit[9] = {1'b0, bbs3} + {1'b0, bbe3}
+    let blo3: bit = if bbs3 == 0 && bbe3 != bcur { 1 } else { 0 }
+    let bhi3: bit = if bbe3 == bcur && bbs3 != 0 { 1 } else { 0 }
+    let bt_lo3: bit[8] = if bwv_r == 0 { 0 } else { if bbe3 > bwh { bbe3 - bwh } else { 0 } }
+    let bt_hi_s3: bit[9] = {1'b0, bbs3} + {1'b0, bwh}
+    let bt_hi3: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s3[7:0] < bcur && bt_hi_s3[8] == 0 { bt_hi_s3[7:0] } else { bcur } }
+    let btgt3: bit[8] = if bbl3 == 0 { 0 } else { if blo3 == 1 { bt_lo3 } else { if bhi3 == 1 { bt_hi3 } else { bmid_s3[8:1] } } }
+    let bmid_s4: bit[9] = {1'b0, bbs4} + {1'b0, bbe4}
+    let blo4: bit = if bbs4 == 0 && bbe4 != bcur { 1 } else { 0 }
+    let bhi4: bit = if bbe4 == bcur && bbs4 != 0 { 1 } else { 0 }
+    let bt_lo4: bit[8] = if bwv_r == 0 { 0 } else { if bbe4 > bwh { bbe4 - bwh } else { 0 } }
+    let bt_hi_s4: bit[9] = {1'b0, bbs4} + {1'b0, bwh}
+    let bt_hi4: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s4[7:0] < bcur && bt_hi_s4[8] == 0 { bt_hi_s4[7:0] } else { bcur } }
+    let btgt4: bit[8] = if bbl4 == 0 { 0 } else { if blo4 == 1 { bt_lo4 } else { if bhi4 == 1 { bt_hi4 } else { bmid_s4[8:1] } } }
+    let bmid_s5: bit[9] = {1'b0, bbs5} + {1'b0, bbe5}
+    let blo5: bit = if bbs5 == 0 && bbe5 != bcur { 1 } else { 0 }
+    let bhi5: bit = if bbe5 == bcur && bbs5 != 0 { 1 } else { 0 }
+    let bt_lo5: bit[8] = if bwv_r == 0 { 0 } else { if bbe5 > bwh { bbe5 - bwh } else { 0 } }
+    let bt_hi_s5: bit[9] = {1'b0, bbs5} + {1'b0, bwh}
+    let bt_hi5: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s5[7:0] < bcur && bt_hi_s5[8] == 0 { bt_hi_s5[7:0] } else { bcur } }
+    let btgt5: bit[8] = if bbl5 == 0 { 0 } else { if blo5 == 1 { bt_lo5 } else { if bhi5 == 1 { bt_hi5 } else { bmid_s5[8:1] } } }
+    let bmid_s6: bit[9] = {1'b0, bbs6} + {1'b0, bbe6}
+    let blo6: bit = if bbs6 == 0 && bbe6 != bcur { 1 } else { 0 }
+    let bhi6: bit = if bbe6 == bcur && bbs6 != 0 { 1 } else { 0 }
+    let bt_lo6: bit[8] = if bwv_r == 0 { 0 } else { if bbe6 > bwh { bbe6 - bwh } else { 0 } }
+    let bt_hi_s6: bit[9] = {1'b0, bbs6} + {1'b0, bwh}
+    let bt_hi6: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s6[7:0] < bcur && bt_hi_s6[8] == 0 { bt_hi_s6[7:0] } else { bcur } }
+    let btgt6: bit[8] = if bbl6 == 0 { 0 } else { if blo6 == 1 { bt_lo6 } else { if bhi6 == 1 { bt_hi6 } else { bmid_s6[8:1] } } }
+    let bmid_s7: bit[9] = {1'b0, bbs7} + {1'b0, bbe7}
+    let blo7: bit = if bbs7 == 0 && bbe7 != bcur { 1 } else { 0 }
+    let bhi7: bit = if bbe7 == bcur && bbs7 != 0 { 1 } else { 0 }
+    let bt_lo7: bit[8] = if bwv_r == 0 { 0 } else { if bbe7 > bwh { bbe7 - bwh } else { 0 } }
+    let bt_hi_s7: bit[9] = {1'b0, bbs7} + {1'b0, bwh}
+    let bt_hi7: bit[8] = if bwv_r == 0 { bcur } else { if bt_hi_s7[7:0] < bcur && bt_hi_s7[8] == 0 { bt_hi_s7[7:0] } else { bcur } }
+    let btgt7: bit[8] = if bbl7 == 0 { 0 } else { if blo7 == 1 { bt_lo7 } else { if bhi7 == 1 { bt_hi7 } else { bmid_s7[8:1] } } }
     let any_start: bit = if (wl_en == 1 && wl_q == 0) || (gate_en == 1 && gate_q == 0) || (eye_en == 1 && eye_q == 0) || (wdq_en == 1 && wdq_q == 0) { 1 } else { 0 }
 
     on(sclk.rise) {
         hb_r = hb
         dv_r = dqs.DATAVALID
+        if dv_r == 1 && training == 0 {
+            ndv = ndv + 1
+        }
+        // a new write window: bin the last one's counts
+        if wr_gate != 0 && wwin == 0 && training == 0 {
+            if seen_w == 1 {
+                if nw == 0 { hw0 = hw0 + 1 } else if nw == 1 { hw1 = hw1 + 1 } else if nw == 2 { hw2 = hw2 + 1 } else { hw3 = hw3 + 1 }
+                if nr == 0 { hr0 = hr0 + 1 } else if nr == 1 { hr1 = hr1 + 1 } else if nr == 2 { hr2 = hr2 + 1 } else { hr3 = hr3 + 1 }
+            }
+            seen_w = 1
+            nw = if dv_r == 1 { 1 } else { 0 }
+            nr = 0
+        } else if training == 0 && dv_r == 1 {
+            if wwin != 0 {
+                nw = if nw == 3 { 3 } else { nw + 1 }
+            } else {
+                nr = if nr == 3 { 3 } else { nr + 1 }
+            }
+        }
+        wwin = if wr_gate != 0 { 8 } else if wwin != 0 { wwin - 1 } else { 0 }
         run_c = k4
         run_h = h4
         mh = hist[63:0]
@@ -586,11 +984,32 @@ impl NexusLpddr4Lane {
         hv_r = hv
         hh_r = hh
         bad_q = h_bad
+        bbad_q = bbad
         if pause_n != 0 {
             pause_n = pause_n - 1
         }
+        // the lowest and highest positions with the limit flag low, during the sweeps
+        if eye_en == 1 && dqs.READCOUT == 0 {
+            if rcl_v == 0 || rdp_r < rc_lo { rc_lo = rdp_r }
+            if rch_v == 0 || rdp_r > rc_hi { rc_hi = rdp_r }
+            rcl_v = 1
+            rch_v = 1
+        }
+        if wdq_en == 1 && dqs.WRCOUT == 0 {
+            if wcl_v == 0 || wrp_r < wc_lo { wc_lo = wrp_r }
+            if wch_v == 0 || wrp_r > wc_hi { wc_hi = wrp_r }
+            wcl_v = 1
+            wch_v = 1
+        }
+        cflags = cflags | {dqs.WRLVCOUT, dqs.WRCOUT, dqs.READCOUT,
+            dqs.WRLVCOUT & wl_en, dqs.WRCOUT & wdq_en, dqs.READCOUT & eye_en}
         // ---------------------------------------------------------- moves
         if load == 1 {
+            dq_n = dqs_ofs
+            dq_mv = 0
+            dm_p = 0
+            dm_n = 0
+            dm_mv = 0
             rdp_r = 128
             wrp_r = 128
             wlp_r = 0
@@ -600,7 +1019,37 @@ impl NexusLpddr4Lane {
             rd_mv = 0
             wr_mv = 0
             wl_mv = 0
+            bp0 = 0
+            bn0 = 0
+            bmv0 = 0
+            bp1 = 0
+            bn1 = 0
+            bmv1 = 0
+            bp2 = 0
+            bn2 = 0
+            bmv2 = 0
+            bp3 = 0
+            bn3 = 0
+            bmv3 = 0
+            bp4 = 0
+            bn4 = 0
+            bmv4 = 0
+            bp5 = 0
+            bn5 = 0
+            bmv5 = 0
+            bp6 = 0
+            bn6 = 0
+            bmv6 = 0
+            bp7 = 0
+            bn7 = 0
+            bmv7 = 0
         } else {
+            if push_mv == 1 {
+                push_mv = 0
+            } else if push_n != 0 {
+                push_mv = 1
+                push_n = push_n - 1
+            }
             if rd_mv == 1 {
                 rd_mv = 0
             } else if rd_n != 0 {
@@ -622,6 +1071,75 @@ impl NexusLpddr4Lane {
                 wl_n = wl_n - 1
                 wlp_r = if wl_dn == 1 { wlp_r - 1 } else { wlp_r + 1 }
             }
+            if dq_mv == 1 {
+                dq_mv = 0
+            } else if dq_n != 0 {
+                dq_mv = 1
+                dq_n = dq_n - 1
+            }
+            if dm_mv == 1 {
+                dm_mv = 0
+            } else if dm_n != 0 {
+                dm_mv = 1
+                dm_n = dm_n - 1
+                dm_p = if dm_dn == 1 { dm_p - 1 } else { dm_p + 1 }
+            }
+            if bmv0 == 1 {
+                bmv0 = 0
+            } else if bn0 != 0 {
+                bmv0 = 1
+                bn0 = bn0 - 1
+                bp0 = if bdn == 1 { bp0 - 1 } else { bp0 + 1 }
+            }
+            if bmv1 == 1 {
+                bmv1 = 0
+            } else if bn1 != 0 {
+                bmv1 = 1
+                bn1 = bn1 - 1
+                bp1 = if bdn == 1 { bp1 - 1 } else { bp1 + 1 }
+            }
+            if bmv2 == 1 {
+                bmv2 = 0
+            } else if bn2 != 0 {
+                bmv2 = 1
+                bn2 = bn2 - 1
+                bp2 = if bdn == 1 { bp2 - 1 } else { bp2 + 1 }
+            }
+            if bmv3 == 1 {
+                bmv3 = 0
+            } else if bn3 != 0 {
+                bmv3 = 1
+                bn3 = bn3 - 1
+                bp3 = if bdn == 1 { bp3 - 1 } else { bp3 + 1 }
+            }
+            if bmv4 == 1 {
+                bmv4 = 0
+            } else if bn4 != 0 {
+                bmv4 = 1
+                bn4 = bn4 - 1
+                bp4 = if bdn == 1 { bp4 - 1 } else { bp4 + 1 }
+            }
+            if bmv5 == 1 {
+                bmv5 = 0
+            } else if bn5 != 0 {
+                bmv5 = 1
+                bn5 = bn5 - 1
+                bp5 = if bdn == 1 { bp5 - 1 } else { bp5 + 1 }
+            }
+            if bmv6 == 1 {
+                bmv6 = 0
+            } else if bn6 != 0 {
+                bmv6 = 1
+                bn6 = bn6 - 1
+                bp6 = if bdn == 1 { bp6 - 1 } else { bp6 + 1 }
+            }
+            if bmv7 == 1 {
+                bmv7 = 0
+            } else if bn7 != 0 {
+                bmv7 = 1
+                bn7 = bn7 - 1
+                bp7 = if bdn == 1 { bp7 - 1 } else { bp7 + 1 }
+            }
         }
         load_q = load
 
@@ -629,6 +1147,10 @@ impl NexusLpddr4Lane {
         wl_q = wl_en
         gate_q = gate_en
         eye_q = eye_en
+        if RD_PUSH != 0 && wdq_q == 1 && wdq_en == 0 && pushed == 0 {
+            pushed = 1
+            push_n = RD_PUSH
+        }
         wdq_q = wdq_en
         if any_start == 1 {
             sw_map = 0
@@ -681,6 +1203,54 @@ impl NexusLpddr4Lane {
             f_wdq = 0
             wr_dn = if wrp_r > wdq_bot { 1 } else { 0 }
             wr_n = if wrp_r > wdq_bot { wrp_r - wdq_bot } else { wdq_bot - wrp_r }
+            // write per-bit deskew: the write delay stays at the bottom of its sweep and the
+            // pins' output delays sweep from 0 instead
+            if b_on == 1 {
+                bsw = 1
+                bcalc = 0
+                bfail = 0
+                bdn = 1
+                bn0 = bp0
+                brl0 = 0
+                bbl0 = 0
+                bbs0 = 0
+                bbe0 = 0
+                bn1 = bp1
+                brl1 = 0
+                bbl1 = 0
+                bbs1 = 0
+                bbe1 = 0
+                bn2 = bp2
+                brl2 = 0
+                bbl2 = 0
+                bbs2 = 0
+                bbe2 = 0
+                bn3 = bp3
+                brl3 = 0
+                bbl3 = 0
+                bbs3 = 0
+                bbe3 = 0
+                bn4 = bp4
+                brl4 = 0
+                bbl4 = 0
+                bbs4 = 0
+                bbe4 = 0
+                bn5 = bp5
+                brl5 = 0
+                bbl5 = 0
+                bbs5 = 0
+                bbe5 = 0
+                bn6 = bp6
+                brl6 = 0
+                bbl6 = 0
+                bbs6 = 0
+                bbe6 = 0
+                bn7 = bp7
+                brl7 = 0
+                bbl7 = 0
+                bbs7 = 0
+                bbe7 = 0
+            }
         }
 
         // ---------------------------------------------------------- an event's window
@@ -689,11 +1259,16 @@ impl NexusLpddr4Lane {
             ev_ok = if moving == 0 && pause == 0 && meas == 0 { 1 } else { 0 }
             nv = 0
             mism = 0
+            bmism = 0
             fb = 0
         } else if in_win == 1 {
+            if wdq_en == 1 && ev_ok == 1 && hv_r == 1 && nv == 0 {
+                slp = {slp[60:0], sl_code}
+            }
             win = win - 1
             nv = nv_n
             mism = mism_n
+            bmism = bmism_n
             fb = fb_n
         }
 
@@ -726,11 +1301,115 @@ impl NexusLpddr4Lane {
                 }
             }
             if wdq_en == 1 {
-                if wdq_last == 1 {
-                    calc = 1
+                if bsw == 1 {
+                    if bpass0 == 1 {
+                        brs0 = brs1_0
+                        brl0 = brl1_0
+                    } else {
+                        brl0 = 0
+                    }
+                    if bbet0 == 1 {
+                        bbl0 = brl1_0
+                        bbs0 = brs1_0
+                        bbe0 = bcur
+                    }
+                    if bpass1 == 1 {
+                        brs1 = brs1_1
+                        brl1 = brl1_1
+                    } else {
+                        brl1 = 0
+                    }
+                    if bbet1 == 1 {
+                        bbl1 = brl1_1
+                        bbs1 = brs1_1
+                        bbe1 = bcur
+                    }
+                    if bpass2 == 1 {
+                        brs2 = brs1_2
+                        brl2 = brl1_2
+                    } else {
+                        brl2 = 0
+                    }
+                    if bbet2 == 1 {
+                        bbl2 = brl1_2
+                        bbs2 = brs1_2
+                        bbe2 = bcur
+                    }
+                    if bpass3 == 1 {
+                        brs3 = brs1_3
+                        brl3 = brl1_3
+                    } else {
+                        brl3 = 0
+                    }
+                    if bbet3 == 1 {
+                        bbl3 = brl1_3
+                        bbs3 = brs1_3
+                        bbe3 = bcur
+                    }
+                    if bpass4 == 1 {
+                        brs4 = brs1_4
+                        brl4 = brl1_4
+                    } else {
+                        brl4 = 0
+                    }
+                    if bbet4 == 1 {
+                        bbl4 = brl1_4
+                        bbs4 = brs1_4
+                        bbe4 = bcur
+                    }
+                    if bpass5 == 1 {
+                        brs5 = brs1_5
+                        brl5 = brl1_5
+                    } else {
+                        brl5 = 0
+                    }
+                    if bbet5 == 1 {
+                        bbl5 = brl1_5
+                        bbs5 = brs1_5
+                        bbe5 = bcur
+                    }
+                    if bpass6 == 1 {
+                        brs6 = brs1_6
+                        brl6 = brl1_6
+                    } else {
+                        brl6 = 0
+                    }
+                    if bbet6 == 1 {
+                        bbl6 = brl1_6
+                        bbs6 = brs1_6
+                        bbe6 = bcur
+                    }
+                    if bpass7 == 1 {
+                        brs7 = brs1_7
+                        brl7 = brl1_7
+                    } else {
+                        brl7 = 0
+                    }
+                    if bbet7 == 1 {
+                        bbl7 = brl1_7
+                        bbs7 = brs1_7
+                        bbe7 = bcur
+                    }
+                    if b_last == 1 {
+                        bcalc = 1
+                    } else {
+                        bdn = 0
+                        bn0 = bit_step
+                        bn1 = bit_step
+                        bn2 = bit_step
+                        bn3 = bit_step
+                        bn4 = bit_step
+                        bn5 = bit_step
+                        bn6 = bit_step
+                        bn7 = bit_step
+                    }
                 } else {
-                    wr_dn = 0
-                    wr_n = wdq_step
+                    if wdq_last == 1 {
+                        calc = 1
+                    } else {
+                        wr_dn = 0
+                        wr_n = wdq_step
+                    }
                 }
             }
         }
@@ -753,6 +1432,64 @@ impl NexusLpddr4Lane {
                 wr_dn = 1
                 wr_n = if best_ln == 0 { wrp_r - 128 } else { wrp_r - mid }
             }
+        }
+
+        // the per-bit sweep's result: each pin moves down to its setting
+        if bcalc == 1 {
+            bcalc = 2
+            bwr0 = bwid0
+            bwr1 = bwid1
+            bwr2 = bwid2
+            bwr3 = bwid3
+            bwr4 = bwid4
+            bwr5 = bwid5
+            bwr6 = bwid6
+            bwr7 = bwid7
+            bwv_r = bwv
+        }
+        if bcalc == 2 {
+            bcalc = 3
+            bwh_r = bwmax >> 1
+        }
+        if bcalc == 3 {
+            bcalc = 4
+            btr0 = btgt0
+            btr1 = btgt1
+            btr2 = btgt2
+            btr3 = btgt3
+            btr4 = btgt4
+            btr5 = btgt5
+            btr6 = btgt6
+            btr7 = btgt7
+        }
+        if bcalc == 4 {
+            bcalc = 5
+            bdn = 1
+            bs01 = {1'b0, btr0} + {1'b0, btr1}
+            bs23 = {1'b0, btr2} + {1'b0, btr3}
+            bs45 = {1'b0, btr4} + {1'b0, btr5}
+            bs67 = {1'b0, btr6} + {1'b0, btr7}
+            bn0 = bcur - btr0
+            bn1 = bcur - btr1
+            bn2 = bcur - btr2
+            bn3 = bcur - btr3
+            bn4 = bcur - btr4
+            bn5 = bcur - btr5
+            bn6 = bcur - btr6
+            bn7 = bcur - btr7
+            bfail = bf_n
+            f_wdq = if bf_n != 0 { 1 } else { 0 }
+        }
+        // DMI goes to the mean of the pins' settings
+        if bcalc == 5 {
+            bcalc = 6
+            bsum = bt_sum
+        }
+        if bcalc == 6 {
+            bcalc = 0
+            fin = 1
+            dm_dn = if dm_p > dm_tgt { 1 } else { 0 }
+            dm_n = if dm_p > dm_tgt { dm_p - dm_tgt } else { dm_tgt - dm_p }
         }
 
         // ---------------------------------------------------------- write leveling
@@ -795,6 +1532,7 @@ impl NexusLpddr4Lane {
             if wdq_en == 1 && r_wdq == 0 {
                 r_wdq = 1
                 fin = 0
+                bsw = 0
             }
         }
         if hv_r == 1 && training == 0 {
@@ -805,12 +1543,12 @@ impl NexusLpddr4Lane {
     // pins
     dq_o = {p7.o, p6.o, p5.o, p4.o, p3.o, p2.o, p1.o, p0.o}
     dq_t = {p7.ot, p6.ot, p5.ot, p4.ot, p3.ot, p2.ot, p1.ot, p0.ot}
-    dmi_o = dmi_od.Q
-    dmi_t = dmi_ts.Q
-    dqs_o = dqs_od.Q
-    dqs_t = dqs_ts.Q
-    dqs_c_o = dqsc_od.Q
-    dqs_c_t = dqsc_ts.Q
+    dmi_o = dmi_odl.DOUT
+    dmi_t = dmi_odl.TOUT
+    dqs_o = dqs_odl.DOUT
+    dqs_t = dqs_odl.TOUT
+    dqs_c_o = dqsc_odl.DOUT
+    dqs_c_t = dqsc_odl.TOUT
 
     dv = if hv_r == 1 && training == 0 { 1 } else { 0 }
     half = hh_r
@@ -828,8 +1566,16 @@ impl NexusLpddr4Lane {
     rd_pos = rdp_r
     wr_pos = wrp_r
     sweep_map = sw_map
+    bit_pos = {bp7, bp6, bp5, bp4, bp3, bp2, bp1, bp0}
+    bit_fail = bfail
     rd_lat_o = rd_lat
+    dv_count = ndv
+    dvw_hist = {hw3, hw2, hw1, hw0}
+    dvr_hist = {hr3, hr2, hr1, hr0}
+    slip_map = slp
     bursts = nburst
+    cout_seen = cflags
+    cout_pos = {wc_hi, wc_lo, rc_hi, rc_lo}
 }
 
 // The PHY: DFI 1:4 to one x16 LPDDR4 channel (see the top of this file).
@@ -846,7 +1592,20 @@ pub entity DfiLpddr4NexusPhy<
     const EYE_STEP: nat = 4,
     const EYE_HALF: nat = 64,
     const WDQ_STEP: nat = 4,
-    const WDQ_HALF: nat = 64
+    const WDQ_HALF: nat = 64,
+    const WR_GATE_EXT: nat = 0,
+    // EXPERIMENT: after the first write DQ training, RD_PUSH more read delay moves (down if
+    // RD_PUSH_DN) that the PHY does not count: shows on silicon whether the read delay moves
+    const RD_PUSH: nat = 0,
+    const RD_PUSH_DN: nat = 0,
+    // write per-bit deskew (1): the write DQ training sweeps each DQ pin's output delay from 0
+    // to BIT_TOP in BIT_STEP steps, with the write delay at the bottom of its sweep, and sets
+    // each pin to the middle of its own passing run
+    const BIT_DESKEW: nat = 0,
+    const BIT_STEP: nat = 4,
+    const BIT_TOP: nat = 124,
+    // DQS and DQS_c output delay setting (steps), set when the delays load
+    const DQS_OUT_DELAY: nat = 0
 > {
     // the edge clock (CK rate) and its PLL's lock
     in eclk: clock
@@ -955,6 +1714,24 @@ pub entity DfiLpddr4NexusPhy<
     out sweep_map1: bit[64]
     // each lane's read latency (slots from READ to its words), as the read eye step measured it
     out rd_lat0: bit[8]
+    // each lane's DATAVALID words outside training, taken or not (diagnostic)
+    out dv_count0: bit[16]
+    out dv_count1: bit[16]
+    out dvw_hist0: bit[64]
+    out dvr_hist0: bit[64]
+    out dvw_hist1: bit[64]
+    out dvr_hist1: bit[64]
+    out slip_map0: bit[64]
+    out slip_map1: bit[64]
+    out cout_seen0: bit[6]
+    out cout_seen1: bit[6]
+    out cout_pos0: bit[32]
+    out cout_pos1: bit[32]
+    // write per-bit deskew: each lane's DQ output delays (pin k in [8k+7:8k]) and failed pins
+    out bit_pos0: bit[64]
+    out bit_pos1: bit[64]
+    out bit_fail0: bit[8]
+    out bit_fail1: bit[8]
     out rd_lat1: bit[8]
     out ctrlupd_count: bit[16]
 }
@@ -1095,6 +1872,7 @@ impl DfiLpddr4NexusPhy {
     signal b_wls: bit = 0
     // the frames after a write leveling strobe's first
     signal b_wls1: bit = 0
+    signal b_wls1b: bit = 0
     signal b_wls2: bit = 0
     signal a_we: bit[4] = 0
     signal a_wd: bit[128] = 0
@@ -1175,12 +1953,15 @@ impl DfiLpddr4NexusPhy {
     let nqdrv2: bit = if c_we[2] == 1 || c_we[1] == 1 || c_we[0] == 1 { 1 } else { 0 }
     let nqdrv3: bit = if c_we[3] == 1 || c_we[2] == 1 || c_we[1] == 1 { 1 } else { 0 }
     let dq_tt_next: bit[4] = {~nqdrv3, ~nqdrv2, ~nqdrv1, ~nqdrv0}
-    // DQS rises at the start of each data slot. A write leveling strobe takes three frames: a
-    // frame of preamble (driven low), four pulses (the DQS buffer returns a word per four
-    // strobe pulses, so the feedback needs at least four) and a frame of postamble
+    // DQS rises at the start of each data slot. A write leveling strobe takes four frames: a
+    // frame of preamble (driven low), two frames of four pulses (the DQS buffer returns a word
+    // per four strobe pulses, so the feedback needs at least four; eight leave a whole word
+    // when the buffer's count is off by a pulse, as seen on silicon from 937 Mbps) and a frame
+    // of postamble
     let dqs_d_w: bit[8] = {1'b0, e3, 1'b0, e2, 1'b0, e1, 1'b0, e0}
-    let wl_any: bit = if b_wls == 1 || b_wls1 == 1 || b_wls2 == 1 { 1 } else { 0 }
-    let dqs_d: bit[8] = if b_wls1 == 1 { 8'b01010101 } else { if wl_any == 1 { 8'b00000000 } else { dqs_d_w } }
+    let wl_pulse: bit = if b_wls1 == 1 || b_wls1b == 1 { 1 } else { 0 }
+    let wl_any: bit = if b_wls == 1 || wl_pulse == 1 || b_wls2 == 1 { 1 } else { 0 }
+    let dqs_d: bit[8] = if wl_pulse == 1 { 8'b01010101 } else { if wl_any == 1 { 8'b00000000 } else { dqs_d_w } }
     let dqs_tt: bit[4] = if wl_any == 1 { 4'b0000 } else { dqs_tt_w }
     // the read gate around a write strobe, as around a write leveling strobe: from the last
     // preamble slot to two slots past the last pulse (slot j: e(j + 1), e(j), e(j - 1), e(j - 2))
@@ -1188,7 +1969,15 @@ impl DfiLpddr4NexusPhy {
     let wg1: bit = if e2 == 1 || e1 == 1 || e0 == 1 || em1 == 1 { 1 } else { 0 }
     let wg2: bit = if e3 == 1 || e2 == 1 || e1 == 1 || e0 == 1 { 1 } else { 0 }
     let wg3: bit = if e4 == 1 || e3 == 1 || e2 == 1 || e1 == 1 { 1 } else { 0 }
-    let wr_gate: bit[4] = if wl_any == 1 { 4'b0000 } else { {wg3, wg2, wg1, wg0} }
+    // EXPERIMENT (WR_GATE_EXT = 1): one more slot on each side of the write window
+    // (WR_GATE_EXT = 2: no write window at all, the gate shut through writes)
+    let wgx_on: bit = if WR_GATE_EXT == 1 { 1 } else { 0 }
+    let wg_off: bit = if WR_GATE_EXT == 2 { 1 } else { 0 }
+    let wgx0: bit = if wgx_on == 1 && (we12[5] == 1 || we12[0] == 1) { 1 } else { 0 }
+    let wgx1: bit = if wgx_on == 1 && (we12[6] == 1 || we12[1] == 1) { 1 } else { 0 }
+    let wgx2: bit = if wgx_on == 1 && (we12[7] == 1 || we12[2] == 1) { 1 } else { 0 }
+    let wgx3: bit = if wgx_on == 1 && (we12[8] == 1 || we12[3] == 1) { 1 } else { 0 }
+    let wr_gate: bit[4] = if wl_any == 1 || wg_off == 1 { 4'b0000 } else { {wg3 | wgx3, wg2 | wgx2, wg1 | wgx1, wg0 | wgx0} }
     let dq_d0: bit[64] = {bt1_3[7], bt0_3[7], bt1_2[7], bt0_2[7], bt1_1[7], bt0_1[7], bt1_0[7], bt0_0[7], bt1_3[6], bt0_3[6], bt1_2[6], bt0_2[6], bt1_1[6], bt0_1[6], bt1_0[6], bt0_0[6], bt1_3[5], bt0_3[5], bt1_2[5], bt0_2[5], bt1_1[5], bt0_1[5], bt1_0[5], bt0_0[5], bt1_3[4], bt0_3[4], bt1_2[4], bt0_2[4], bt1_1[4], bt0_1[4], bt1_0[4], bt0_0[4], bt1_3[3], bt0_3[3], bt1_2[3], bt0_2[3], bt1_1[3], bt0_1[3], bt1_0[3], bt0_0[3], bt1_3[2], bt0_3[2], bt1_2[2], bt0_2[2], bt1_1[2], bt0_1[2], bt1_0[2], bt0_0[2], bt1_3[1], bt0_3[1], bt1_2[1], bt0_2[1], bt1_1[1], bt0_1[1], bt1_0[1], bt0_0[1], bt1_3[0], bt0_3[0], bt1_2[0], bt0_2[0], bt1_1[0], bt0_1[0], bt1_0[0], bt0_0[0]}
     let dq_d1: bit[64] = {bt1_3[15], bt0_3[15], bt1_2[15], bt0_2[15], bt1_1[15], bt0_1[15], bt1_0[15], bt0_0[15], bt1_3[14], bt0_3[14], bt1_2[14], bt0_2[14], bt1_1[14], bt0_1[14], bt1_0[14], bt0_0[14], bt1_3[13], bt0_3[13], bt1_2[13], bt0_2[13], bt1_1[13], bt0_1[13], bt1_0[13], bt0_0[13], bt1_3[12], bt0_3[12], bt1_2[12], bt0_2[12], bt1_1[12], bt0_1[12], bt1_0[12], bt0_0[12], bt1_3[11], bt0_3[11], bt1_2[11], bt0_2[11], bt1_1[11], bt0_1[11], bt1_0[11], bt0_0[11], bt1_3[10], bt0_3[10], bt1_2[10], bt0_2[10], bt1_1[10], bt0_1[10], bt1_0[10], bt0_0[10], bt1_3[9], bt0_3[9], bt1_2[9], bt0_2[9], bt1_1[9], bt0_1[9], bt1_0[9], bt0_0[9], bt1_3[8], bt0_3[8], bt1_2[8], bt0_2[8], bt1_1[8], bt0_1[8], bt1_0[8], bt0_0[8]}
 
@@ -1256,21 +2045,21 @@ impl DfiLpddr4NexusPhy {
     }
     inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
 
-    inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
+    inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, b_wls1, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
+        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
         dq_i: dq_i[7:0], dqs_i: dqs_i[0]
     }
 
-    inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF> {
+    inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, b_wls1, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
+        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
         wl_en: b_wl_en, gate_en: b_gate_en, eye_en: b_eye_en, wdq_en: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
         dq_i: dq_i[15:8], dqs_i: dqs_i[1]
@@ -1302,7 +2091,16 @@ impl DfiLpddr4NexusPhy {
     let push0: bit = lane0.dv
     let push1: bit = lane1.dv
 
+    // the training responses, registered: the controller's training steps hang off them
+    signal resp_gate_r: bit[2] = 0
+    signal resp_eye_r: bit[2] = 0
+    signal resp_wl_r: bit[2] = 0
+    signal resp_wdq_r: bit[2] = 0
     on(sclk.rise) {
+        resp_gate_r = {lane1.resp_gate, lane0.resp_gate}
+        resp_eye_r = {lane1.resp_eye, lane0.resp_eye}
+        resp_wl_r = {lane1.resp_wl, lane0.resp_wl}
+        resp_wdq_r = {lane1.resp_wdq, lane0.resp_wdq}
         pll_lock_m = pll_lock
         pll_lock_s = pll_lock_m
         dll_lock_m = dll.LOCK
@@ -1372,7 +2170,8 @@ impl DfiLpddr4NexusPhy {
         b_we = c_we
         b_wd = c_wd
         b_re = c_re
-        b_wls2 = b_wls1
+        b_wls2 = b_wls1b
+        b_wls1b = b_wls1
         b_wls1 = b_wls
         b_wls = c_wls
         b_wl_en = c_wl_en
@@ -1419,10 +2218,10 @@ impl DfiLpddr4NexusPhy {
     dfi_init_complete = init_done_r
     dfi_ctrlupd_ack = ctrlupd_ack_r
     dfi_phyupd_req = 0
-    dfi_rdlvl_gate_resp = {lane1.resp_gate, lane0.resp_gate}
-    dfi_rdlvl_resp = {lane1.resp_eye, lane0.resp_eye}
-    dfi_wrlvl_resp = {lane1.resp_wl, lane0.resp_wl}
-    dfi_wdqlvl_resp = {lane1.resp_wdq, lane0.resp_wdq}
+    dfi_rdlvl_gate_resp = resp_gate_r
+    dfi_rdlvl_resp = resp_eye_r
+    dfi_wrlvl_resp = resp_wl_r
+    dfi_wdqlvl_resp = resp_wdq_r
 
     ck_t = ck_od.Q
     ck_c = ckc_od.Q
@@ -1456,6 +2255,22 @@ impl DfiLpddr4NexusPhy {
     bursts1 = lane1.bursts
     sweep_map0 = lane0.sweep_map
     rd_lat0 = lane0.rd_lat_o
+    dv_count0 = lane0.dv_count
+    dv_count1 = lane1.dv_count
+    dvw_hist0 = lane0.dvw_hist
+    dvr_hist0 = lane0.dvr_hist
+    dvw_hist1 = lane1.dvw_hist
+    dvr_hist1 = lane1.dvr_hist
+    slip_map0 = lane0.slip_map
+    slip_map1 = lane1.slip_map
+    cout_seen0 = lane0.cout_seen
+    cout_seen1 = lane1.cout_seen
+    cout_pos0 = lane0.cout_pos
+    cout_pos1 = lane1.cout_pos
+    bit_pos0 = lane0.bit_pos
+    bit_pos1 = lane1.bit_pos
+    bit_fail0 = lane0.bit_fail
+    bit_fail1 = lane1.bit_fail
     rd_lat1 = lane1.rd_lat_o
     sweep_map1 = lane1.sweep_map
     ctrlupd_count = ctrlupd_n

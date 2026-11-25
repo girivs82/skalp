@@ -46,7 +46,15 @@ entity Lpddr4DfiNexusSim<
     const VREF_OK_LO: nat = 0,
     const VREF_OK_HI: nat = 255,
     // the controller's VREF training rounds per level
-    const VREF_REPS: nat = 1
+    const VREF_REPS: nat = 1,
+    // the PHY's write per-bit deskew (BIT_DESKEW)
+    const BIT_DESKEW: nat = 0,
+    // the PHY's DQS output delay (DQS_OUT_DELAY)
+    const DQS_OUT_DELAY: nat = 0,
+    // board delay of the DQ pins in DQ_LATE_MASK (bit k: DQ k) behind the others, on writes, in
+    // ticks (at most 64)
+    const DQ_LATE_MASK: nat = 0,
+    const DQ_LATE_TICKS: nat = 0
 > {
     in sim_tick: clock
     out done: bit
@@ -96,6 +104,10 @@ entity Lpddr4DfiNexusSim<
     out vref: bit[8]
     out vref_win: bit[14]
     out vref_map: bit[64]
+    out bit_pos0: bit[64]
+    out bit_pos1: bit[64]
+    out bit_fail0: bit[8]
+    out bit_fail1: bit[8]
 }
 
 impl Lpddr4DfiNexusSim {
@@ -175,7 +187,7 @@ impl Lpddr4DfiNexusSim {
     signal sync_clk: clock
     sync_clk = sk_n[5]
 
-    inst phy = DfiLpddr4NexusPhy {
+    inst phy = DfiLpddr4NexusPhy<BIT_DESKEW: BIT_DESKEW, DQS_OUT_DELAY: DQS_OUT_DELAY> {
         eclk: eclk,
         pll_lock: 1,
         sync_clk: sync_clk,
@@ -267,9 +279,18 @@ impl Lpddr4DfiNexusSim {
     let oe_late: bit[16] = DQ_OE_LATE_TICKS
     let dqt_sh_at: bit[1024] = dqt_sh >> ((oe_late - 1) * 16)
     let dq_off: bit[16] = if oe_late == 0 { phy.dq_t } else { phy.dq_t | dqt_sh_at[15:0] }
+    // the PHY's DQ outputs DQ_LATE_TICKS ticks ago, for the late pins
+    signal dqo_sh: bit[1024] = 0
+    on(sim_tick.rise) {
+        dqo_sh = {dqo_sh[1007:0], phy.dq_o}
+    }
+    let dq_late: bit[16] = DQ_LATE_TICKS
+    let dq_late_mask: bit[16] = DQ_LATE_MASK
+    let dqo_sh_at: bit[1024] = dqo_sh >> ((dq_late - 1) * 16)
+    let dq_out_b: bit[16] = if dq_late == 0 { phy.dq_o } else { (phy.dq_o & ~dq_late_mask) | (dqo_sh_at[15:0] & dq_late_mask) }
     bus_dq = {
-        if dram.dq_oe == 1 { dram.dq_out[15:8] } else { (phy.dq_o[15:8] & ~dq_off[15:8]) },
-        if dram.dq_oe == 1 { dram.dq_out[7:0] } else { (phy.dq_o[7:0] & ~dq_off[7:0]) }
+        if dram.dq_oe == 1 { dram.dq_out[15:8] } else { (dq_out_b[15:8] & ~dq_off[15:8]) },
+        if dram.dq_oe == 1 { dram.dq_out[7:0] } else { (dq_out_b[7:0] & ~dq_off[7:0]) }
     }
     bus_dqs = {
         if dram.dqs_oe == 1 { dram.dqs_out } else { if phy.dqs_t[1] == 0 { phy.dqs_o[1] } else { 1'b0 } },
@@ -346,6 +367,10 @@ impl Lpddr4DfiNexusSim {
     wl0 = phy.wl_dly0
     wl1 = phy.wl_dly1
     wdq0 = phy.wdq_dly0
+    bit_pos0 = phy.bit_pos0
+    bit_pos1 = phy.bit_pos1
+    bit_fail0 = phy.bit_fail0
+    bit_fail1 = phy.bit_fail1
     wdq1 = phy.wdq_dly1
     wrlvl_fail = phy.wrlvl_fail
     wdq_fail = phy.wdq_fail

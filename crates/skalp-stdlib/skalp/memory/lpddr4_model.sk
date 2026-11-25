@@ -16,10 +16,11 @@
 // Writes, per byte lane (Lpddr4WriteLane): the first data DQS_t rising edge must land in WL +
 // tDQSS (0.75 to 1.25 tCK) after the CAS-2 edge, then 16 edges half a tCK (+-1 clock) apart with
 // DQS_c the complement of DQS_t. Bursts may follow each other seamlessly (CAS-to-CAS = 8 tCK); up
-// to four writes may be in flight. DQ must be driven and stable one clock either side of every
-// edge; when it is not, the beat is taken anyway, the lane's data of that burst reads back
-// inverted, and the clock counts in `dq_viol` rather than in `errors`, so that write DQ training
-// can sweep through failing delays. A design must show no `dq_viol` once trained.
+// to four writes may be in flight. Each DQ must be driven and stable one clock either side of
+// every edge; when one is not, the beat is taken anyway with that DQ's bit stored inverted (every
+// bit when DQ is not driven), and the clock counts in `dq_viol` rather than in `errors`, so that
+// write DQ training can sweep through failing delays, per lane or per DQ. A design must show no
+// `dq_viol` once trained.
 //
 // VREF(DQ): MR14 sets the DQ input reference, at level 25 + OP5:0 (range 0, OP6 = 0) or
 // 55 + OP5:0 (range 1) in 0.4 % of VDDQ steps. Outside VREF_OK_LO..VREF_OK_HI the write
@@ -60,7 +61,7 @@
 //  14 tRP                                       15 tRFCab
 //  16 tMRW                                      17 WR-1/RD-1/MRR-1/MPC-1 not followed by CAS-2
 //  18 MRW-1 not followed by MRW-2               19 ACT to an open bank
-//  20 DQS_c not the complement of DQS_t         21 refresh overdue (9 x tREFI)
+//  20 DQS_c not the complement of DQS_t         21 refresh overdue (9 tREFI owed at the MR4 rate)
 //  22 CA/CS changed in the clock before CK rose 23 CA/CS changed in the clock after CK rose
 //  24 write burst stopped early                 25 MPC opcode the model does not have
 //  26 both sides drive DQ or DQS                27 tZQCAL (ZQ latch too early)
@@ -104,7 +105,7 @@ pub entity Lpddr4WriteLane<
     in tag_line: bit[9]
     out rd_a: bit[8]
     out rd_b: bit[8]
-    // {inverted (DQ timing violated), written, row}
+    // {0 (a DQ timing violation is in the stored bits instead), written, row}
     out tag_out: bit[19]
     // the lane at the DRAM, after the board delay
     out dqs_seen: bit
@@ -138,7 +139,11 @@ impl Lpddr4WriteLane {
     signal last: bit[32] = 0
     signal hold: bit = 0
     signal hold_dq: bit[8] = 0
-    signal cor: bit = 0
+    // the beat taken in the last clock, stored once its hold is checked: where, its value, and
+    // the bits that changed in its clock
+    signal h_addr: bit[13] = 0
+    signal h_val: bit[8] = 0
+    signal h_sv: bit[8] = 0
     signal dq_prev: bit[8] = 0
     signal dqs_prev: bit = 0
     // the line levels of the burst's previous beat (0 before its first)
@@ -163,6 +168,10 @@ impl Lpddr4WriteLane {
     let take: bit = if first == 1 || (st == 2 && dqs_edge == 1) { 1 } else { 0 }
     let setup_v: bit = if take == 1 && (dq != dq_prev || dq_drv == 0) { 1 } else { 0 }
     let hold_v: bit = if hold == 1 && dq != hold_dq { 1 } else { 0 }
+    // the DQ bits taken in violation: those that changed in the clock of the edge (all when DQ is
+    // not driven) and those that change in the clock after it
+    let sv_bits: bit[8] = if dq_drv == 0 { 8'hFF } else { dq ^ dq_prev }
+    let hv_bits: bit[8] = if hold == 1 { dq ^ hold_dq } else { 8'h00 }
     let err_now: bit[8] =
         if st == 1 && cyc > hi { 8 }
         else { if st == 2 && dqs_edge == 1 && (since_edge + 1 < half_ck || since_edge > half_ck + 1) { 11 }
@@ -182,11 +191,17 @@ impl Lpddr4WriteLane {
         dqs_prev = dqs
         hold = take
         hold_dq = dq
+        // a beat is stored the clock after it is taken (edges are at least two clocks apart),
+        // with the bits taken in violation inverted
+        if hold == 1 {
+            mem[h_addr] = h_val ^ h_sv ^ hv_bits
+        }
         if take == 1 {
-            mem[{line, idx}] = dq_v
+            h_addr = {line, idx}
+            h_val = dq_v
+            h_sv = sv_bits
             pb = dq
         }
-        if setup_v == 1 || hold_v == 1 { cor = 1 }
         if push_ok == 1 {
             q_lo[q_tail] = push_lo
             q_hi[q_tail] = push_hi
@@ -218,8 +233,9 @@ impl Lpddr4WriteLane {
             }
         }
         if st == 3 {
-            // the burst counts as written only once all 16 beats are in and held
-            tag[line] = {cor | hold_v, 1'b1, row}
+            // the burst counts as written only once all 16 beats are in and held (a violation
+            // is in the stored bits, so nothing reads back inverted as a whole)
+            tag[line] = {1'b0, 1'b1, row}
             st = 0
         }
         if load == 1 {
@@ -229,7 +245,6 @@ impl Lpddr4WriteLane {
             line = q_line[q_head]
             row = q_row[q_head]
             q_head = q_head + 1
-            cor = 0
             pb = 0
         }
     }
@@ -273,7 +288,13 @@ pub entity Lpddr4ChannelModel<
     const TWLO_NCK: nat = 8,
     // the MR14 levels (see VREF(DQ)) the write receivers work at
     const VREF_OK_LO: nat = 0,
-    const VREF_OK_HI: nat = 255
+    const VREF_OK_HI: nat = 255,
+    // MR4 (refresh rate, OP[2:0]) the device reports: MR4_COLD, then MR4_HOT from clock
+    // MR4_HOT_AT_NCK (0 = never). 3 = 1x tREFI, 4 = 0.5x, 5 and up = 0.25x (6 and 7 derate AC
+    // timings too, which this model does not check); refresh is checked against the current rate
+    const MR4_COLD: nat = 3,
+    const MR4_HOT: nat = 3,
+    const MR4_HOT_AT_NCK: nat = 0
 > {
     in clk: clock
     in reset_n: bit
@@ -304,6 +325,8 @@ pub entity Lpddr4ChannelModel<
     out n_mrw: bit[16]
     out n_mrr: bit[16]
     out n_ref: bit[32]
+    // refreshes owed at the current MR4 rate (error 21 past 8)
+    out ref_owed: bit[8]
     out n_zq: bit[16]
     out t_ck_clks: bit[8]
     out mr2_o: bit[8]
@@ -370,6 +393,9 @@ impl Lpddr4ChannelModel {
     signal act_cnt: bit[3] = 0
     signal ref_at: bit[32] = 0
     signal ref_seen: bit = 0
+    // refresh owed: one per tREFI (at the MR4 rate) since the first REF, less one per REF
+    signal ref_acc: bit[32] = 0
+    signal ref_debt: bit[8] = 0
     signal zq_start_at: bit[32] = 0
     signal zq_started: bit = 0
     signal zq_lat_at: bit[32] = 0
@@ -525,10 +551,19 @@ impl Lpddr4ChannelModel {
     let mr6_c: bit[8] = MR6
     let mr7_c: bit[8] = MR7
     let mr8_c: bit[8] = MR8
+    let mr4_cold_c: bit[8] = MR4_COLD
+    let mr4_hot_c: bit[8] = MR4_HOT
+    let mr4_hot_at: bit[32] = MR4_HOT_AT_NCK
+    let mr4_now: bit[8] = if mr4_hot_at != 0 && nck >= mr4_hot_at { mr4_hot_c } else { mr4_cold_c }
+    let ref_sh: bit[32] = if mr4_now[2:0] == 4 { 1 } else { if mr4_now[2:0] >= 5 { 2 } else { 0 } }
+    let trefi32: bit[32] = TREFI_NCK
+    let refi_req: bit[32] = trefi32 >> ref_sh
+    let ref_tick: bit = if ck_rise == 1 && ref_seen == 1 && ref_acc + 1 >= refi_req { 1 } else { 0 }
     let mr_read: bit[8] = match p_ma {
         1 => mr1,
         2 => mr2,
         3 => mr3,
+        4 => mr4_now,
         5 => mr5_c,
         6 => mr6_c,
         7 => mr7_c,
@@ -611,7 +646,8 @@ impl Lpddr4ChannelModel {
     let dq_skewed: bit[16] = if skew3 == 0 { dq_out_r } else { skew_dq[skew_at] }
     let oe_skewed: bit = if skew3 == 0 { dq_oe_r } else { skew_oe[skew_at] }
     let hold_err: bit[8] = if hold_chk == 1 && (ca != hold_ca || cs != hold_cs) { 23 } else { 0 }
-    let ref_err: bit[8] = if ck_rise == 1 && ref_seen == 1 && since_ref == TREFI_NCK * 9 { 21 } else { 0 }
+    // more than 8 refreshes postponed (JEDEC): the ninth tREFI with nothing refreshed
+    let ref_err: bit[8] = if ref_tick == 1 && ref_debt >= 9 && is_ref == 0 { 21 } else { 0 }
     // write leveling: MR2 OP7; DQ carries each lane's CK sample
     let wl_mode: bit = mr2[7]
     let twlo32: bit[32] = TWLO_NCK
@@ -782,6 +818,8 @@ impl Lpddr4ChannelModel {
         // ---------------------------------------------------------------- commands
         if ck_rise == 1 {
             nck = nck + 1
+            if ref_tick == 1 { ref_acc = 0 } else { if ref_seen == 1 { ref_acc = ref_acc + 1 } }
+            ref_debt = if ref_tick == 1 && is_ref == 0 { if ref_debt == 255 { 255 } else { ref_debt + 1 } } else { if ref_tick == 0 && is_ref == 1 && ref_debt != 0 { ref_debt - 1 } else { ref_debt } }
             if last_rise != 0 { t_ck = rise_gap[7:0] }
             last_rise = cyc
             if dev_on == 0 {
@@ -1044,6 +1082,7 @@ impl Lpddr4ChannelModel {
     n_mrw = n_mrw_r
     n_mrr = n_mrr_r
     n_ref = n_ref_r
+    ref_owed = ref_debt
     n_zq = n_zq_r
     t_ck_clks = t_ck
     mr2_o = mr2

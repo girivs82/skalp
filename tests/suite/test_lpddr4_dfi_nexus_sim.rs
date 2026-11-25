@@ -116,6 +116,13 @@ struct Variant {
     vref_ok: (u64, u64),
     /// the controller's VREF training write/read-back rounds per level
     vref_reps: u64,
+    /// the PHY's write per-bit deskew (BIT_DESKEW)
+    bit_deskew: u64,
+    /// the PHY's DQS output delay (DQS_OUT_DELAY), in steps
+    dqs_out_delay: u64,
+    /// the DQ pins (bit k: DQ k) whose writes reach the DRAM later than the
+    /// others, and by how many ticks
+    dq_late: (u64, u64),
 }
 
 const STATUS: [&str; 22] = [
@@ -167,6 +174,10 @@ async fn run(v: Variant) {
         ("VREF_OK_LO", v.vref_ok.0),
         ("VREF_OK_HI", v.vref_ok.1),
         ("VREF_REPS", v.vref_reps),
+        ("BIT_DESKEW", v.bit_deskew),
+        ("DQS_OUT_DELAY", v.dqs_out_delay),
+        ("DQ_LATE_MASK", v.dq_late.0),
+        ("DQ_LATE_TICKS", v.dq_late.1),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -249,11 +260,16 @@ async fn run(v: Variant) {
         );
     };
     for lane in 0..2 {
-        // write leveling takes the board delay of the lane's DQS out
+        // write leveling takes the board delay of the lane's DQS out, and the
+        // DQS output delay (whole ticks in the model: nexus_sim_ticks)
         let wl = get!(["wl0", "wl1"][lane]);
+        let dqs_out_ticks = (v.dqs_out_delay * 109) >> 10;
         near(
             wl,
-            steps(v.ck_ticks) / 2.0 - nom.wl_before_half_ck - steps(v.wr_skew[lane]),
+            steps(v.ck_ticks) / 2.0
+                - nom.wl_before_half_ck
+                - steps(v.wr_skew[lane])
+                - steps(dqs_out_ticks),
             4.0,
             &format!("lane {lane} write leveling"),
         );
@@ -273,14 +289,40 @@ async fn run(v: Variant) {
             8.0,
             &format!("lane {lane} read delay"),
         );
-        // write DQ takes the lane's board DQ delay behind its DQS out
+        // write DQ takes the lane's board DQ delay behind its DQS out: with the
+        // lane's write delay or, with per-bit deskew, with each pin's output
+        // delay, the lane's write delay staying at the bottom of its sweep (64
+        // steps below the middle), the DQS output delay added and each pin's
+        // late board delay taken out
         let wdq = get!(["wdq0", "wdq1"][lane]);
-        near(
-            wdq,
-            nom.wdq - steps(v.wr_dq_skew[lane]),
-            4.0,
-            &format!("lane {lane} write DQ delay"),
-        );
+        if v.bit_deskew == 0 {
+            near(
+                wdq,
+                nom.wdq - steps(v.wr_dq_skew[lane]),
+                4.0,
+                &format!("lane {lane} write DQ delay"),
+            );
+        } else {
+            assert_eq!(wdq, 64, "{n}: lane {lane} write DQ delay");
+            assert_eq!(
+                get!(["bit_fail0", "bit_fail1"][lane]),
+                0,
+                "{n}: lane {lane} per-bit deskew"
+            );
+            let pos = get!(["bit_pos0", "bit_pos1"][lane]);
+            for pin in 0..8 {
+                let late = (v.dq_late.0 >> (8 * lane + pin)) & 1 == 1;
+                let want = nom.wdq - 64.0 + v.dqs_out_delay as f64
+                    - steps(v.wr_dq_skew[lane])
+                    - if late { steps(v.dq_late.1) } else { 0.0 };
+                near(
+                    (pos >> (8 * pin)) & 0xFF,
+                    want,
+                    6.0,
+                    &format!("lane {lane} DQ {pin} output delay"),
+                );
+            }
+        }
     }
 
     // the write DQ sweep went through failing delays where a bit is shorter than it, and
@@ -331,6 +373,9 @@ async fn lpddr4_dfi_nexus_nominal() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -354,6 +399,9 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -379,6 +427,9 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -401,6 +452,9 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -423,6 +477,9 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -445,6 +502,9 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -470,6 +530,9 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         dq_oe_late: 0,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -494,6 +557,9 @@ async fn lpddr4_dfi_nexus_dq_enable_late() {
         dq_oe_late: TICKS_PER_CK * 3 / 4,
         vref_ok: (0, 255),
         vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
     })
     .await;
 }
@@ -519,6 +585,38 @@ async fn lpddr4_dfi_nexus_vref_training() {
         dq_oe_late: 0,
         vref_ok: (70, 95),
         vref_reps: 2,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dq_late: (0, 0),
+    })
+    .await;
+}
+
+/// Write per-bit deskew: DQ0, DQ3 and DQ12 reach the DRAM 3 ticks (28 steps)
+/// after the other DQ on writes, and lane 0's DQ are a tick behind its
+/// DQS, which leaves 32 steps late (DQS_OUT_DELAY). DQ0 and DQ12 are pins 0
+/// and 4 of their lanes, which held still in the old training pattern and so
+/// passed at every delay. The write DQ training sweeps each pin's output delay and gives the
+/// late pins that much less than the others, so the traffic passes
+#[tokio::test]
+async fn lpddr4_dfi_nexus_write_bit_deskew() {
+    run(Variant {
+        name: "bit_deskew",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [1, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        bit_deskew: 1,
+        dqs_out_delay: 32,
+        dq_late: (0x1009, 3),
     })
     .await;
 }

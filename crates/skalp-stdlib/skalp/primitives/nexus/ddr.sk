@@ -397,6 +397,58 @@ impl DELAYA {
     CFLAG = if v == 0 || v == 127 { 1 } else { 0 }
 }
 
+// Dynamic output delay of an LPDDR4 DQ / DMI / DQS pad (write per-bit deskew), between the output
+// gearing (DOUTI from ODDRX4DQ(S), TOUTI from TSHX4DQ(S)) and the pad: DOUT and TOUT are DOUTI and
+// TOUTI, a setting of 0..127 steps later. The setting starts at 0; LOAD_N_LPDDR4_WT low puts it
+// back there; each rising MOVE_LPDDR4_WT takes one step, up when DIRECTION_LPDDR4_WT is low and
+// down when it is high, stopping at 0 and 127. COUT_LPDDR4_WT is high at either end.
+// Model: the range, the step and the direction sense are DELAYA's (Lattice does not publish
+// them for this block); MARGIN_TEST_ENABLE (the training pins work) is on.
+#[lattice_ip(name = "OUTDELAYA", sim_clock = "tick", MARGIN_TEST_ENABLE = "ENABLED")]
+pub entity OUTDELAYA {
+    in tick: clock
+    in DOUTI: bit
+    in TOUTI: bit
+    in LOAD_N_LPDDR4_WT: bit
+    in MOVE_LPDDR4_WT: bit
+    in DIRECTION_LPDDR4_WT: bit
+    out DOUT: bit
+    out TOUT: bit
+    out COUT_LPDDR4_WT: bit
+}
+
+impl OUTDELAYA {
+    signal v: bit[7] = 0
+    signal mv_p: bit = 0
+    signal hd: bit[32] = 0
+    signal ht: bit[32] = 0
+    on(tick.rise) {
+        mv_p = MOVE_LPDDR4_WT
+        hd = {hd[30:0], DOUTI}
+        ht = {ht[30:0], TOUTI}
+        if LOAD_N_LPDDR4_WT == 0 {
+            v = 0
+        } else if MOVE_LPDDR4_WT == 1 && mv_p == 0 {
+            if DIRECTION_LPDDR4_WT == 0 {
+                if v != 127 {
+                    v = v + 1
+                }
+            } else {
+                if v != 0 {
+                    v = v - 1
+                }
+            }
+        }
+    }
+    // at 0 the pad sees the gearing's output as it is (the block's insertion delay, which DQ,
+    // DQS and DMI share, is not modelled)
+    let n: bit[8] = nexus_sim_ticks({1'b0, v})
+    let n1: bit[5] = n[4:0] - 1
+    DOUT = if n == 0 { DOUTI } else { hd[n1] }
+    TOUT = if n == 0 { TOUTI } else { ht[n1] }
+    COUT_LPDDR4_WT = if v == 0 || v == 127 { 1 } else { 0 }
+}
+
 // ---------------------------------------------------------------------------- DLL
 
 // DDR DLL: measures the period of CLKIN. CODE is the delay of a quarter period (90 degrees),
@@ -494,7 +546,7 @@ impl DDRDLL {
 // Mode (as the device's LPDDR4 interface sets it): FIFO, x4 gearing, read and write paths on,
 // FORCE_READ, and the MOVE/DIR adjustment (MT_EN_*) on for the read, write and write leveling
 // delays.
-#[lattice_ip(name = "DQSBUF", sim_clock = "tick", GSR = "DISABLED", ENABLE_FIFO = "ENABLED", MODX = "MDDRX4", READ_ENABLE = "ENABLED", WRITE_ENABLE = "ENABLED", FORCE_READ = "ENABLED", MT_EN_READ = "ENABLED", MT_EN_WRITE = "ENABLED", MT_EN_WRITE_LEVELING = "ENABLED")]
+#[lattice_ip(name = "DQSBUF", sim_clock = "tick", GSR = "DISABLED", LPDDR4_BL16_EN = "ENABLED", ENABLE_FIFO = "ENABLED", MODX = "MDDRX4", READ_ENABLE = "ENABLED", WRITE_ENABLE = "ENABLED", FORCE_READ = "ENABLED", MT_EN_READ = "ENABLED", MT_EN_WRITE = "ENABLED", MT_EN_WRITE_LEVELING = "ENABLED")]
 pub entity DQSBUF {
     in tick: clock
     in DQSI: bit
