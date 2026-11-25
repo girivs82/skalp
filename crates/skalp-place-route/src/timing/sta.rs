@@ -78,6 +78,12 @@ pub trait TimingModel {
         None
     }
 
+    /// The delay class of a routing switch, where the model times switches
+    /// by class
+    fn pip_class(&self, _pip: PipId) -> Option<String> {
+        None
+    }
+
     /// When an output is launched by a clock edge or is a pad's: the
     /// clock-to-output delay, or 0 for pads. `None` if the output is a
     /// combinational function of the cell's inputs, or a constant (a cell
@@ -225,6 +231,52 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             }
         }
         total
+    }
+
+    /// The routing delay of [`route_delay`](Self::route_delay) split by
+    /// the delay class `model` gives each switch on the way, summed per
+    /// class in the order met from the pin back; empty where the device
+    /// cannot name the pin's wire or the model names no classes
+    fn route_classes(&mut self, net: GateNetId, cell: CellId, pin: usize) -> Vec<(String, i64)> {
+        let Some(loc) = self.design.placement.placements.get(&cell) else {
+            return Vec::new();
+        };
+        let Some(route) = self.design.routing.routes.get(&net) else {
+            return Vec::new();
+        };
+        let Some(mut wire) =
+            self.device
+                .bel_pin_wire(loc.tile_x, loc.tile_y, loc.bel_index, CellPin::Input(pin))
+        else {
+            return Vec::new();
+        };
+        let device = self.device;
+        let drivers = self.drivers.entry(net).or_insert_with(|| {
+            route
+                .pips
+                .iter()
+                .filter_map(|&p| device.pip(p).map(|info| (info.dst_wire, p)))
+                .collect()
+        });
+        let mut classes: Vec<(String, i64)> = Vec::new();
+        let mut hops = 0;
+        while let Some(&pip) = drivers.get(&wire) {
+            let Some(class) = self.model.pip_class(pip) else {
+                return Vec::new();
+            };
+            let ps = self.model.interconnect_ps(pip);
+            match classes.iter_mut().find(|(c, _)| *c == class) {
+                Some((_, total)) => *total += ps,
+                None => classes.push((class, ps)),
+            }
+            let Some(info) = device.pip(pip) else { break };
+            wire = info.src_wire;
+            hops += 1;
+            if hops > 10_000 {
+                break;
+            }
+        }
+        classes
     }
 
     /// Arrival time where nothing timed launches a path: time zero for
@@ -804,6 +856,29 @@ impl<D: Device + ?Sized> skalp_lir::ncl_bundle::BundleDelays for RoutedBundleDel
             .unwrap_or(0)
     }
 
+    fn wire_classes_ps(
+        &self,
+        _netlist: &skalp_lir::gate_netlist::GateNetlist,
+        net: GateNetId,
+        cell: &Cell,
+        input: usize,
+    ) -> Vec<(String, i64)> {
+        if self.model.is_dedicated(cell, input) {
+            return Vec::new();
+        }
+        // The pin whose delay `wire_ps` gives: the slowest of the input's
+        let mut engine = self.engine.borrow_mut();
+        let Some(pin) = self
+            .model
+            .input_pins(cell, input)
+            .into_iter()
+            .max_by_key(|&pin| engine.route_delay(net, cell.id, pin))
+        else {
+            return Vec::new();
+        };
+        engine.route_classes(net, cell.id, pin)
+    }
+
     fn clock_wire_ps(
         &self,
         _netlist: &skalp_lir::gate_netlist::GateNetlist,
@@ -974,6 +1049,64 @@ pub fn untimed_switches(
         .collect();
     out.sort_by(|a, b| b.nets.cmp(&a.nets).then(a.class.cmp(&b.class)));
     out
+}
+
+/// Every routed net's switches with their wires, delay classes and delays
+/// at `model`'s corner, and every cell's placement (`design_routes.json`)
+pub fn routed_switches<D: Device + ?Sized>(
+    device: &D,
+    model: &dyn TimingModel,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    placement: &crate::placer::PlacementResult,
+    routing: &crate::router::RoutingResult,
+) -> (Vec<super::PlacedCell>, Vec<super::RoutedNetSwitches>) {
+    let wire_name = |wire: WireId| {
+        device
+            .wire(wire)
+            .map_or_else(|| format!("wire{}", wire.0), |w| w.name.clone())
+    };
+    let mut cells: Vec<super::PlacedCell> = placement
+        .placements
+        .iter()
+        .filter_map(|(id, loc)| {
+            netlist
+                .cells
+                .get(id.0 as usize)
+                .map(|cell| super::PlacedCell {
+                    cell: cell.path.clone(),
+                    x: loc.tile_x,
+                    y: loc.tile_y,
+                    bel: loc.bel_index,
+                })
+        })
+        .collect();
+    cells.sort_by(|a, b| a.cell.cmp(&b.cell).then(a.bel.cmp(&b.bel)));
+    let mut nets: Vec<super::RoutedNetSwitches> = routing
+        .routes
+        .iter()
+        .filter(|(_, route)| !route.pips.is_empty())
+        .map(|(net, route)| super::RoutedNetSwitches {
+            net: netlist
+                .nets
+                .get(net.0 as usize)
+                .map_or_else(|| format!("net{}", net.0), |n| n.name.clone()),
+            switches: route
+                .pips
+                .iter()
+                .filter_map(|&pip| {
+                    let info = device.pip(pip)?;
+                    Some(super::RoutedSwitch {
+                        from: wire_name(info.src_wire),
+                        to: wire_name(info.dst_wire),
+                        class: model.pip_class(pip),
+                        ps: model.interconnect_ps(pip),
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+    nets.sort_by(|a, b| a.net.cmp(&b.net));
+    (cells, nets)
 }
 
 /// Worst-corner summary of bundle checks made at several named corners
@@ -1286,5 +1419,86 @@ mod tests {
         );
         assert_eq!(untimed[0].example_net, "a");
         assert_eq!(untimed[1].example_net, "b");
+    }
+
+    /// Times switch 7 by its class "entry -> mid" at 250 ps, others 100 ps
+    /// with no class
+    struct Classed;
+
+    impl TimingModel for Classed {
+        fn interconnect_ps(&self, pip: PipId) -> i64 {
+            if pip.0 == 7 {
+                250
+            } else {
+                100
+            }
+        }
+        fn pip_class(&self, pip: PipId) -> Option<String> {
+            (pip.0 == 7).then(|| "entry -> mid".into())
+        }
+        fn launch_ps(&self, _cell: &Cell, _output: usize) -> Option<i64> {
+            None
+        }
+        fn arc_ps(&self, _cell: &Cell, _input: usize, _output: usize) -> Option<i64> {
+            None
+        }
+        fn endpoints(&self, _cell: &Cell) -> Vec<TimingEndpoint> {
+            Vec::new()
+        }
+    }
+
+    /// The route dump names each switch's wires as the device does, keeps
+    /// the route's switch order and gives each switch its class and delay;
+    /// nets without switches are left out, cells carry their placement
+    #[test]
+    fn routed_switches_name_wires_classes_and_delays() {
+        use crate::device::BelType;
+        use crate::device::Device;
+        use crate::placer::PlacementLoc;
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let mut netlist = GateNetlist::new("top".into(), "test".into());
+        let a = netlist.add_net(GateNet::new(GateNetId(0), "a".into()));
+        let b = netlist.add_net(GateNet::new(GateNetId(0), "b".into()));
+        let cell = netlist.add_cell(Cell::new_comb(
+            CellId(0),
+            "LUT4".into(),
+            "test".into(),
+            0.0,
+            "top.lut".into(),
+            vec![b],
+            vec![a],
+        ));
+        let mut placement = PlacementResult::default();
+        placement
+            .placements
+            .insert(cell, PlacementLoc::new(3, 5, 2, BelType::Lut4));
+        let mut routing = RoutingResult::default();
+        for (net, pips) in [(a, vec![7, 3]), (b, vec![])] {
+            let mut route = crate::router::Route::new(net);
+            route.pips = pips.into_iter().map(PipId).collect();
+            routing.routes.insert(net, route);
+        }
+        let (cells, nets) = routed_switches(&device, &Classed, &netlist, &placement, &routing);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            (cells[0].cell.as_str(), cells[0].x, cells[0].y, cells[0].bel),
+            ("top.lut", 3, 5, 2)
+        );
+        assert_eq!(nets.len(), 1, "net b has no switches");
+        assert_eq!(nets[0].net, "a");
+        let wire = |w| device.wire(w).expect("a device wire").name.clone();
+        let got: Vec<_> = nets[0]
+            .switches
+            .iter()
+            .map(|s| (s.from.clone(), s.to.clone(), s.class.clone(), s.ps))
+            .collect();
+        let want: Vec<_> = [(7, Some("entry -> mid".to_string()), 250), (3, None, 100)]
+            .into_iter()
+            .map(|(pip, class, ps)| {
+                let info = device.pip(PipId(pip)).expect("a device pip");
+                (wire(info.src_wire), wire(info.dst_wire), class, ps)
+            })
+            .collect();
+        assert_eq!(got, want);
     }
 }

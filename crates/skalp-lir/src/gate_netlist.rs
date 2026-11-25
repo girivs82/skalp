@@ -950,6 +950,12 @@ pub struct GateNetlist {
     /// stores netlists in a format that cannot skip fields.)
     #[serde(default)]
     pub settle_wait_ps: Option<i64>,
+    /// The source's floorplan regions and what each holds
+    /// (`constraint physical { floorplan { ... } }`). Kept with the netlist
+    /// so a later place and route of it places the same. (Always written,
+    /// as above.)
+    #[serde(default)]
+    pub floorplan: Vec<crate::floorplan::FloorplanRegion>,
 }
 
 impl GateNetlist {
@@ -966,6 +972,7 @@ impl GateNetlist {
             resets: Vec::new(),
             is_ncl: false,
             settle_wait_ps: None,
+            floorplan: Vec::new(),
             ncl_constraints: None,
             ncl_wire_delays: None,
             net_map: IndexMap::new(),

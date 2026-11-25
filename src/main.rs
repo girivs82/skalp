@@ -302,6 +302,14 @@ enum Commands {
         #[arg(long, value_name = "TIME")]
         settle_wait: Option<String>,
 
+        /// Placement constraint file: `set_region NAME X_MIN Y_MIN X_MAX
+        /// Y_MAX` names a rectangle of tiles, and `set_cell_region PATTERN
+        /// NAME` places every cell whose name (or the name of a net it
+        /// drives) matches PATTERN (`*` for any run of characters) inside
+        /// it; `set_io SIGNAL PIN` and `set_frequency NET MHZ` as in a PCF
+        #[arg(long, value_name = "FILE")]
+        constraints: Option<PathBuf>,
+
         /// Where a bundled-data async block keeps its state: `ff`, flip-flops
         /// clocked by the block's step strobe (on FPGAs whose flip-flop clock
         /// pins only the clock network reaches, one network entry per block);
@@ -336,6 +344,14 @@ enum Commands {
         /// Target frequency in MHz (for timing analysis)
         #[arg(long)]
         frequency: Option<f64>,
+
+        /// Placement constraint file: `set_region NAME X_MIN Y_MIN X_MAX
+        /// Y_MAX` names a rectangle of tiles, and `set_cell_region PATTERN
+        /// NAME` places every cell whose name (or the name of a net it
+        /// drives) matches PATTERN (`*` for any run of characters) inside
+        /// it; `set_io SIGNAL PIN` and `set_frequency NET MHZ` as in a PCF
+        #[arg(long, value_name = "FILE")]
+        constraints: Option<PathBuf>,
     },
 
     /// Program the FPGA device
@@ -910,7 +926,7 @@ fn main() -> Result<()> {
             }
             if timed.any() {
                 anyhow::bail!(
-                    "--corner, --power-up and --metastability are for timed simulation of a \
+                    "--corner, --derate, --power-up and --metastability are for timed simulation of a \
                      place-and-route build directory"
                 );
             }
@@ -945,6 +961,7 @@ fn main() -> Result<()> {
             power_stub,
             debug,
             settle_wait,
+            constraints,
             async_state,
         } => {
             let fixed = match async_state.as_str() {
@@ -971,6 +988,7 @@ fn main() -> Result<()> {
                     power_stub,
                     debug,
                     settle_wait.as_deref(),
+                    constraints.as_deref(),
                     &mut plan,
                 );
                 match result {
@@ -989,8 +1007,16 @@ fn main() -> Result<()> {
             output,
             preset,
             frequency,
+            constraints,
         } => {
-            run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
+            run_place_and_route(
+                &netlist,
+                &device,
+                &output,
+                &preset,
+                frequency,
+                constraints.as_deref(),
+            )?;
         }
 
         Commands::TimedSim {
@@ -4911,6 +4937,7 @@ fn synthesize_design(
     power_stub: bool,
     debug: bool,
     settle_wait: Option<&str>,
+    constraints: Option<&std::path::Path>,
     plan: &mut AsyncStatePlan,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context_for_device;
@@ -5115,6 +5142,19 @@ fn synthesize_design(
         synth_cache.as_ref(),
     );
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
+    gate_netlist.floorplan = skalp_lir::floorplan::resolve_floorplan(&hir, &mir, &hier_lir)
+        .map_err(anyhow::Error::msg)?;
+    for region in &gate_netlist.floorplan {
+        println!(
+            "Floorplan: region \"{}\" ({}%, {}%)..({}%, {}%): {} item(s)",
+            region.name,
+            region.area.0,
+            region.area.1,
+            region.area.2,
+            region.area.3,
+            region.members.len()
+        );
+    }
     let latch_timing = if family == "nexus" {
         nexus_latch_timing(variant)?
     } else {
@@ -5156,13 +5196,27 @@ fn synthesize_design(
     if full_flow && family == "ice40" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        run_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            pnr_preset,
+            None,
+            constraints,
+        )?;
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
         // The frequency latencies were chosen for is also what place and
         // route times unknown clocks against and retimes for
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, frequency)?;
+        run_nexus_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            pnr_preset,
+            frequency,
+            constraints,
+        )?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -5180,6 +5234,7 @@ fn run_place_and_route(
     output_dir: &PathBuf,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     println!("🔧 Place & Route");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -5219,9 +5274,23 @@ fn run_place_and_route(
 
     // Run P&R
     if family == "nexus" {
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+        run_nexus_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            preset,
+            frequency,
+            constraints,
+        )?;
     } else {
-        run_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+        run_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            preset,
+            frequency,
+            constraints,
+        )?;
     }
 
     println!();
@@ -5290,6 +5359,20 @@ fn add_nexus_io_pads(
     }
 }
 
+/// Read a `--constraints` file (see the option's help)
+fn read_placement_constraints(path: &std::path::Path) -> Result<skalp_place_route::IoConstraints> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading the constraint file {}", path.display()))?;
+    let constraints = skalp_place_route::IoConstraints::from_pcf(&text)
+        .with_context(|| format!("in the constraint file {}", path.display()))?;
+    println!(
+        "Constraints: {} ({} in all)",
+        path.display(),
+        constraints.total_constraints()
+    );
+    Ok(constraints)
+}
+
 /// Place and route a gate-level netlist on a Lattice Nexus device.
 fn run_nexus_pnr_on_netlist(
     gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
@@ -5297,6 +5380,7 @@ fn run_nexus_pnr_on_netlist(
     output_dir: &std::path::Path,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     use skalp_place_route::{PnrConfig, TimingConfig};
 
@@ -5316,6 +5400,9 @@ fn run_nexus_pnr_on_netlist(
             ..TimingConfig::default()
         });
         config.placer.retime_target_mhz = Some(freq);
+    }
+    if let Some(path) = constraints {
+        config.placer.io_constraints = read_placement_constraints(path)?;
     }
 
     println!("Variant: {:?}", nexus);
@@ -5702,6 +5789,7 @@ fn run_pnr_on_netlist(
     output_dir: &std::path::Path,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig, TimingConfig};
 
@@ -5737,6 +5825,9 @@ fn run_pnr_on_netlist(
             target_frequency: freq,
             ..TimingConfig::default()
         });
+    }
+    if let Some(path) = constraints {
+        config.placer.io_constraints = read_placement_constraints(path)?;
     }
 
     println!("Variant: {:?}", ice40_variant);
@@ -5884,6 +5975,24 @@ fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrRes
     let loads_path = output_dir.join(ROUTED_LOADS_FILE);
     let file = std::io::BufWriter::new(fs::File::create(&loads_path)?);
     serde_json::to_writer(file, &routed.loads)?;
+    // Placement and routed switches, for analysis outside the flow
+    let routes_path = output_dir.join(ROUTED_SWITCHES_FILE);
+    let file = std::io::BufWriter::new(fs::File::create(&routes_path)?);
+    serde_json::to_writer(
+        file,
+        &serde_json::json!({ "cells": routed.placements, "nets": routed.routes }),
+    )?;
+    // The device's delay calibration against silicon, for `sim --corner
+    // calibrated`
+    let calibration_path = output_dir.join(ROUTED_CALIBRATION_FILE);
+    match &routed.calibration {
+        Some(calibration) => {
+            let file = std::io::BufWriter::new(fs::File::create(&calibration_path)?);
+            serde_json::to_writer_pretty(file, calibration)?;
+        }
+        None if calibration_path.exists() => fs::remove_file(&calibration_path)?,
+        None => {}
+    }
     println!(
         "Routed netlist and delays: {:?}, {:?}",
         netlist_path, delays_path
@@ -9285,6 +9394,11 @@ fn check_net_drivers(netlist: &skalp_lir::GateNetlist) -> Result<()> {
 const ROUTED_NETLIST_FILE: &str = "design_routed.json";
 /// Its delays at each corner
 const ROUTED_DELAYS_FILE: &str = "design_delays.json";
+/// Where `write_routed` puts every cell's placement and every net's routed
+/// switches with their delay classes
+const ROUTED_SWITCHES_FILE: &str = "design_routes.json";
+/// The device's delay calibration against silicon, from its database
+const ROUTED_CALIBRATION_FILE: &str = "design_calibration.json";
 /// The routing load of each net (`skalp_lir::switching_energy::NetLoads`),
 /// for `skalp sim --energy`
 const ROUTED_LOADS_FILE: &str = "design_loads.json";
@@ -9335,9 +9449,22 @@ struct TimedOptions {
     /// takes every delay a fraction K (0 to 1) of the way from the fast to
     /// the slow corner, where real silicon usually sits: measure K with a
     /// ring oscillator on the chip against the same ring simulated at both
-    /// corners, in delay (period), not frequency.
+    /// corners, in delay (period), not frequency. `between:K,clock:C`
+    /// puts the clock network's wires at C and every other delay at K
+    /// (a ring through the clock network, measured beside a logic ring,
+    /// gives C); `,CELL:F` (repeatable, CELL a cell type such as CCU2)
+    /// puts those cells' own delays at F. `calibrated` scales one corner's
+    /// delays by switch class and cell type as the device database's delay
+    /// calibration against silicon gives (kept with the build), and
+    /// `calibrated:FILE` as a calibration file (JSON, or TOML for .toml)
+    /// gives: factors fitted from rings measured on a chip; see
+    /// skalp_lir::delay_calibration.
     #[arg(long)]
     corner: Option<String>,
+    /// Multiply every delay of the corner by this factor, as when the whole
+    /// die runs slower under load (1.02: 2% slower, from supply droop)
+    #[arg(long)]
+    derate: Option<f64>,
     /// What nets hold at power-up, before cells drive them: zero (the
     /// default), one, x (unknown), or random[:SEED] (a different pick per
     /// net). A loop of gates keeps its power-up value until its inputs
@@ -9375,6 +9502,7 @@ struct TimedOptions {
 impl TimedOptions {
     fn any(&self) -> bool {
         self.corner.is_some()
+            || self.derate.is_some()
             || self.power_up.is_some()
             || self.metastability.is_some()
             || self.violations.is_some()
@@ -9550,6 +9678,64 @@ fn port_prefix(netlist: &skalp_lir::gate_netlist::GateNetlist) -> Option<String>
         .then(|| prefix.to_string())
 }
 
+/// The fractions of `--corner between:K[,clock:C][,CELL:F]...`: every
+/// delay at K, the clock wires at C, and the own delays (arcs, clock to out,
+/// setup, hold) of each cell of type CELL (such as CCU2) at F.
+fn parse_corner_mix(
+    spec: &str,
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+) -> Result<skalp_lir::timed_sim::CornerMix> {
+    let fraction = |text: &str| -> Result<f64> {
+        let k: f64 = text
+            .parse()
+            .with_context(|| format!("--corner between: '{text}' is not a number"))?;
+        if !(0.0..=1.0).contains(&k) {
+            anyhow::bail!("--corner between: {k} is not from 0 (fast) to 1 (slow)");
+        }
+        Ok(k)
+    };
+    let mut parts = spec.split(',');
+    let k = fraction(parts.next().unwrap_or_default())?;
+    let mut mix = skalp_lir::timed_sim::CornerMix::uniform(k);
+    let mut label = vec![format!("{k}")];
+    for part in parts {
+        let (kind, value) = part.split_once(':').with_context(|| {
+            format!("--corner between:K,...: '{part}' is not clock:C, wire_per_ns:S or CELL:F")
+        })?;
+        if kind == "wire_per_ns" {
+            let slope: f64 = value.parse().with_context(|| {
+                format!("--corner between: wire_per_ns '{value}' is not a number")
+            })?;
+            if slope < 0.0 {
+                anyhow::bail!("--corner between: wire_per_ns {slope} is negative");
+            }
+            mix.wire_per_ns = slope;
+            label.push(format!("wires {slope} further per ns"));
+            continue;
+        }
+        let value = fraction(value)?;
+        if kind == "clock" {
+            mix.clock = value;
+            label.push(format!("clock network at {value}"));
+            continue;
+        }
+        let mut found = false;
+        mix.cells.resize(netlist.cells.len(), None);
+        for (slot, cell) in mix.cells.iter_mut().zip(&netlist.cells) {
+            if cell.cell_type == kind {
+                *slot = Some(value);
+                found = true;
+            }
+        }
+        if !found {
+            anyhow::bail!("--corner between: the netlist has no {kind} cell");
+        }
+        label.push(format!("{kind} at {value}"));
+    }
+    mix.label = label.join(", ");
+    Ok(mix)
+}
+
 /// Simulate a routed design in time with its routed delays
 fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     use skalp_lir::timed_sim::{
@@ -9576,20 +9762,73 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
     let mixed;
     let delays = match args.timed.corner.as_deref() {
         Some(corner) if corner.starts_with("between:") => {
-            let k: f64 = corner["between:".len()..]
-                .parse()
-                .context("--corner between:K needs a number")?;
-            if !(0.0..=1.0).contains(&k) {
-                anyhow::bail!("--corner between:K needs K from 0 (fast) to 1 (slow)");
-            }
+            let mix = parse_corner_mix(&corner["between:".len()..], &netlist)?;
             let named = |name: &str| {
                 corners
                     .iter()
                     .find(|d| d.corner == name)
                     .with_context(|| format!("--corner between:K needs a '{name}' corner"))
             };
-            mixed = DelayAnnotation::between(named("fast")?, named("slow")?, k)
+            mixed = DelayAnnotation::mixed(named("fast")?, named("slow")?, &mix)
                 .map_err(anyhow::Error::msg)?;
+            &mixed
+        }
+        Some(corner) if corner == "calibrated" || corner.starts_with("calibrated:") => {
+            let path = match corner.strip_prefix("calibrated:") {
+                Some(file) => std::path::PathBuf::from(file),
+                None => args.dir.join(ROUTED_CALIBRATION_FILE),
+            };
+            let path_text = path.display().to_string();
+            let path = path_text.as_str();
+            let text = fs::read_to_string(path).with_context(|| {
+                if corner == "calibrated" {
+                    format!(
+                        "{path} not found: the device's database has no delay calibration \
+                         (give one with --corner calibrated:FILE)"
+                    )
+                } else {
+                    format!("reading the delay calibration {path}")
+                }
+            })?;
+            let calibration = if path.ends_with(".toml") {
+                skalp_lir::delay_calibration::DelayCalibration::from_toml(&text)
+            } else {
+                skalp_lir::delay_calibration::DelayCalibration::from_json(&text)
+            }
+            .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
+            let named = |name: &str| corners.iter().find(|d| d.corner == name);
+            let base = named(&calibration.corner).with_context(|| {
+                format!(
+                    "delay calibration {path}: the build has no '{}' corner",
+                    calibration.corner
+                )
+            })?;
+            if base.classes.is_empty() {
+                eprintln!(
+                    "⚠️  The {} corner has no wire delays split by switch class (an older \
+                     build, or a model without classes): every wire takes the factor of class \
+                     \"\"",
+                    base.corner
+                );
+            }
+            let (delays, report) =
+                DelayAnnotation::calibrated(base, named(&calibration.from), &calibration, &netlist)
+                    .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
+            if !report.unmatched_classes.is_empty() {
+                eprintln!(
+                    "⚠️  Switch classes no wire pattern matches (kept at the {} corner): {}",
+                    base.corner,
+                    report.unmatched_classes.join(", ")
+                );
+            }
+            if !report.unmatched_cells.is_empty() {
+                eprintln!(
+                    "⚠️  Cell types no cell pattern matches (kept at the {} corner): {}",
+                    base.corner,
+                    report.unmatched_cells.join(", ")
+                );
+            }
+            mixed = delays;
             &mixed
         }
         Some(corner) => corners
@@ -9600,6 +9839,17 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
                 format!("no '{}' corner (have {})", corner, names.join(", "))
             })?,
         None => corners.first().context("the build has no delays")?,
+    };
+    let derated;
+    let delays = match args.timed.derate {
+        Some(factor) if !(factor.is_finite() && factor > 0.0) => {
+            anyhow::bail!("--derate {factor}: give a factor above 0, such as 1.02")
+        }
+        Some(factor) => {
+            derated = delays.derated(factor);
+            &derated
+        }
+        None => delays,
     };
     if delays.cells.len() != netlist.cells.len() {
         anyhow::bail!(

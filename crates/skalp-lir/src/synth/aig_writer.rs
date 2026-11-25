@@ -437,7 +437,15 @@ impl AigWriterState<'_> {
             while let Some((id, list, next)) = stack.last_mut() {
                 if let Some(&child) = list.get(*next) {
                     *next += 1;
-                    if (child.0 as usize) < visited.len() && !visited[child.0 as usize] {
+                    // A latch read by logic is a leaf here: its output net
+                    // exists from the start (`pre_create_latch_nets`), and
+                    // writing it before that logic would leave it without a
+                    // clock or reset computed from it (a flip-flop clocked by
+                    // logic of its own output). Each latch is written as a
+                    // root below, after its clock, reset and data.
+                    let is_latch = matches!(aig.get_node(child), Some(AigNode::Latch { .. }));
+                    if !is_latch && (child.0 as usize) < visited.len() && !visited[child.0 as usize]
+                    {
                         visited[child.0 as usize] = true;
                         let grand = fanins(child);
                         stack.push((child, grand, 0));

@@ -1249,6 +1249,39 @@ iCE40 synthesis and place-and-route flow (`skalp synth`).
 A global `constraint physical { ... }` block (device selection, bank
 voltages, `io_defaults`, floorplan regions) is parsed at top level.
 
+#### Floorplan regions
+
+A `floorplan` block in the global constraint block keeps parts of the
+design inside rectangles of the die:
+
+```skalp
+constraint physical {
+    floorplan {
+        region "west" {
+            area: (0%, 10%, 15%, 40%)
+            instances: [ring, core, core.acc]
+        }
+    }
+}
+```
+
+- `area` is `(x0, y0, x1, y1)` in percent of the die's width (x, from its
+  first column) and height (y, from its first row), corners included. Each
+  value needs its `%`. Being relative, a floorplan carries over to any
+  device or die size: the backend turns it into its own grid, rounding
+  the low corner down and the high corner up.
+- `instances` names what goes in the region: an instance of the top entity
+  (all of its cells), a signal or port of the top entity (the registers
+  and latches built for it, and any cell driving a net of its name), or
+  either of those below the top by hierarchical path (`core.acc`).
+- A name the design does not have is an error, and so is one whose logic
+  leaves no cells of its own to place (it was merged into other logic or
+  removed).
+- The place-and-route constraint file (`--constraints`) can also pin cells
+  to regions in device tiles (`set_region`, `set_cell_region`), for
+  floorplans that do not belong in the source; its regions win where both
+  name a cell.
+
 #### Input reference levels
 
 Some I/O standards compare an input against an internal reference rather

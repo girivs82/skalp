@@ -3573,19 +3573,21 @@ pub struct FloorplanConstraint {
     pub regions: Vec<RegionConstraint>,
 }
 
-/// Placement region constraint
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Placement region constraint: `region "name" { area: (x0%, y0%, x1%,
+/// y1%), instances: [a, b.c] }` in a `constraint physical { floorplan {
+/// ... } }` block
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegionConstraint {
     /// Region name
     pub name: String,
-    /// Physical area (x1, y1, x2, y2)
-    pub area: (u32, u32, u32, u32),
-    /// Instances to place in this region
+    /// The rectangle `(x0, y0, x1, y1)`, in percent of the die's width (x,
+    /// from its first column) and height (y, from its first row), corners
+    /// included. Being relative, it carries over to any device or die
+    /// size; the backend turns it into its own placement grid.
+    pub area: (f64, f64, f64, f64),
+    /// What goes in the region: signals and instances of the top entity,
+    /// by name, or below it by hierarchical path (`core.alu`)
     pub instances: Vec<String>,
-    /// Whether this is a boundary region
-    pub boundary: bool,
-    /// Keep instances together
-    pub keep_together: bool,
 }
 
 /// Global I/O defaults

@@ -76,6 +76,19 @@ pub struct MatchedDelay {
 pub trait BundleDelays {
     /// Routing delay of `net` to data input `input` of `cell`
     fn wire_ps(&self, netlist: &GateNetlist, net: GateNetId, cell: &Cell, input: usize) -> i64;
+    /// Routing delay of `net` to data input `input` of `cell` (as
+    /// [`wire_ps`](Self::wire_ps)) split by the delay class of the routing
+    /// switches on the way, as (class, delay) pairs; empty where the model
+    /// names no classes
+    fn wire_classes_ps(
+        &self,
+        _netlist: &GateNetlist,
+        _net: GateNetId,
+        _cell: &Cell,
+        _input: usize,
+    ) -> Vec<(String, i64)> {
+        Vec::new()
+    }
     /// Routing delay of `net` to the clock pin of `cell`
     fn clock_wire_ps(&self, netlist: &GateNetlist, net: GateNetId, cell: &Cell) -> i64;
     /// Delay through `cell` from `input` to `output`, `None` if no path

@@ -407,6 +407,8 @@ pub enum SyntaxKind {
     ConstraintPair,
     PinLocation,
     PinArray,
+    /// `(a, b, ...)` constraint value: numbers, each with an optional unit
+    ConstraintTuple,
     DriveStrength,
     SlewRate,
     Termination,

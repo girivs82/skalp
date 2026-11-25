@@ -91,13 +91,13 @@ impl Pass for Dce {
                     for fanin in node.fanins() {
                         mark_live(aig, fanin.node, &mut live);
                     }
-                    // The clock is a node and the reset a literal; mark both cones
+                    // The clock is a node and the reset a literal; mark both
+                    // cones (marking a node live first would stop `mark_live`
+                    // at it, leaving the logic that computes it dead)
                     if let Some(clk) = clock {
-                        live.insert(*clk);
                         mark_live(aig, *clk, &mut live);
                     }
                     if let Some(rst) = reset {
-                        live.insert(rst.node);
                         mark_live(aig, rst.node, &mut live);
                     }
                 }
@@ -107,11 +107,9 @@ impl Pass for Dce {
                         mark_live(aig, fanin.node, &mut live);
                     }
                     if let Some(clk) = clock {
-                        live.insert(*clk);
                         mark_live(aig, *clk, &mut live);
                     }
                     if let Some(rst) = reset {
-                        live.insert(rst.node);
                         mark_live(aig, rst.node, &mut live);
                     }
                 }
@@ -348,6 +346,52 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flip-flop clocked by logic of its own output (and of another
+    /// flip-flop), reset by logic too: the logic computing the clock and the
+    /// reset stays, all of it, though no output reads it. Marking the clock
+    /// node live before walking its cone used to stop the walk there, and
+    /// the rebuild then met a gate whose inputs had been removed.
+    #[test]
+    fn dce_keeps_the_logic_of_a_computed_clock_and_reset() {
+        let mut aig = Aig::new("ring".to_string());
+        let go = aig.add_input("go".to_string(), None);
+        let a = aig.add_latch(AigLit::false_lit(), Some(false), None, None);
+        let b = aig.add_latch(AigLit::false_lit(), Some(false), None, None);
+        // clock = !(a ^ b) & go, built from three gates
+        let x1 = aig.add_and(AigLit::new(a), AigLit::new(b).invert());
+        let x2 = aig.add_and(AigLit::new(a).invert(), AigLit::new(b));
+        let xnor = aig.add_and(x1.invert(), x2.invert());
+        let clock = aig.add_and(xnor, AigLit::new(go));
+        // reset = a & go
+        let reset = aig.add_and(AigLit::new(a), AigLit::new(go));
+        aig.update_latch_data(a, AigLit::new(a).invert());
+        aig.set_sequential_controls(a, Some(clock.node), Some(reset));
+        aig.update_latch_data(b, AigLit::new(b).invert());
+        aig.set_sequential_controls(b, Some(clock.node), None);
+        // A gate nothing reads
+        aig.add_and(AigLit::new(go), AigLit::new(b));
+        let ands = aig.and_count();
+
+        let mut pass = Dce::new();
+        pass.run(&mut aig);
+
+        // Only the unread gate goes; the clock is still the same function
+        assert_eq!(aig.and_count(), ands - 1);
+        let latches: Vec<_> = aig
+            .iter_nodes()
+            .filter_map(|(_, n)| match n {
+                AigNode::Latch { clock, reset, .. } => Some((*clock, *reset)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(latches.len(), 2);
+        let (Some(clk), Some(_)) = latches[0] else {
+            panic!("the first latch lost its clock or reset: {latches:?}");
+        };
+        assert_eq!(latches[1].0, Some(clk));
+        assert!(matches!(aig.get_node(clk), Some(AigNode::And { .. })));
+    }
 
     #[test]
     fn test_dce_removes_dead_nodes() {

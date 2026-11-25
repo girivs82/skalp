@@ -101,7 +101,7 @@ constraint physical {
 
     floorplan {
         region "fast_logic" {
-            area: (10, 10, 30, 30)
+            area: (10%, 10%, 30%, 30%)   // percent of the die
             instances: [counter_reg, adder_logic]
         }
     }
