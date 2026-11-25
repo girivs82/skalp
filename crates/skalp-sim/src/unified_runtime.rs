@@ -467,8 +467,14 @@ impl UnifiedSimulator {
             .seq_blocks
             .iter()
             .any(|b| !input_ids.contains(&b.clock.0) && !buffered_inputs.contains(&b.clock.0));
+        // It updates registers on rising edges only
+        let has_falling_edge = top
+            .seq_blocks
+            .iter()
+            .any(|b| !matches!(b.clock_edge, crate::sir::EdgeType::Rising));
         let use_gpu = !has_memory
             && !has_internal_clock
+            && !has_falling_edge
             && match self.config.hw_accel {
                 HwAccel::Cpu => false,
                 HwAccel::Gpu => true,

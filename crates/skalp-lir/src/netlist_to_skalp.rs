@@ -338,7 +338,11 @@ impl<'a> Writer<'a> {
                         .clock
                         .ok_or_else(|| format!("flip-flop '{}' has no clock", cell.path))?;
                     let clock = self.canon(clock);
-                    let rising = !matches!(ptype, PrimitiveType::DffN | PrimitiveType::DffNeg);
+                    // DffN is a rising-edge flip-flop (its reset is active
+                    // low); DffNeg and a flip-flop marked as falling-edge
+                    // load on the falling edge
+                    let rising = matches!(ptype, PrimitiveType::DffNeg)
+                        == crate::gate_netlist::ff_clock_falling(cell);
                     let q = out(0)?;
                     let d = pin(0)?;
                     let enable = if matches!(ptype, PrimitiveType::DffE) {

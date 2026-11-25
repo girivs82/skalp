@@ -123,10 +123,8 @@ impl<'a> AigBuilder<'a> {
             if is_dff {
                 // Pre-create latch node with placeholder input
                 // The real input will be connected when the cell is processed
-                let clock = cell
-                    .clock
-                    .and_then(|c| self.net_map[c.0 as usize])
-                    .map(|l| l.node);
+                let clock_lit = cell.clock.and_then(|c| self.net_map[c.0 as usize]);
+                let clock = clock_lit.map(|l| l.node);
                 let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
 
                 // A flip-flop that powers up high keeps doing so through
@@ -139,6 +137,12 @@ impl<'a> AigBuilder<'a> {
                 .then_some(true);
                 // Create latch with false_lit as placeholder - will be updated later
                 let latch_id = self.aig.add_latch(AigLit::false_lit(), init, clock, reset);
+                // A falling-edge flip-flop (or one on an inverted clock net)
+                if crate::gate_netlist::ff_clock_falling(cell)
+                    != clock_lit.is_some_and(|l| l.inverted)
+                {
+                    self.aig.mark_latch_clock_falling(latch_id);
+                }
                 let latch_lit = AigLit::new(latch_id);
 
                 // Map all output nets to this latch
@@ -599,15 +603,18 @@ impl<'a> AigBuilder<'a> {
                 }
 
                 // Fallback: create new latch if not pre-created
-                let clock = cell
-                    .clock
-                    .and_then(|c| self.net_map[c.0 as usize])
-                    .map(|l| l.node);
+                let clock_lit = cell.clock.and_then(|c| self.net_map[c.0 as usize]);
+                let clock = clock_lit.map(|l| l.node);
                 let reset = cell.reset.and_then(|r| self.net_map[r.0 as usize]);
 
                 let latch_id =
                     self.aig
                         .add_latch_with_safety(d, None, clock, reset, safety.clone());
+                if crate::gate_netlist::ff_clock_falling(cell)
+                    != clock_lit.is_some_and(|l| l.inverted)
+                {
+                    self.aig.mark_latch_clock_falling(latch_id);
+                }
                 AigLit::new(latch_id)
             }
 

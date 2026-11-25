@@ -1,0 +1,22 @@
+// A counter on the rising edge feeding registers on the falling edge, for
+// the real-device flow: the falling-edge registers take the slice clock
+// inverted, and the paths between them get half a period.
+entity NexusFallingEdge {
+    in clk: clock @ { pin: "OSC" }
+    out led: bit[8] @ { pins: ["R5", "R4", "R8", "R9", "U8", "R7", "R6", "P8"], io_standard: "LVCMOS33" }
+}
+
+impl NexusFallingEdge {
+    signal tick: nat[24] = 0
+    signal half: bit[8] = 0
+
+    on(clk.rise) {
+        tick = tick + 1
+    }
+
+    on(clk.fall) {
+        half = tick[23:16] ^ tick[7:0]
+    }
+
+    led = half
+}

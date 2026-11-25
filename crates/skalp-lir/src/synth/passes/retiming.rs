@@ -427,6 +427,7 @@ impl Retiming {
                 clock,
                 reset,
                 sync_reset,
+                ..
             }) => (*data, *init, *clock, *reset, *sync_reset),
             _ => return false,
         };

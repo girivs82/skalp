@@ -368,9 +368,23 @@ impl AigWriterState<'_> {
                     clock,
                     reset,
                     sync_reset: _,
+                    clock_falling,
                 } => {
+                    let first_cell = self.netlist.cells.len();
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
                     self.mark_power_up_high(aig, id, *init, *reset);
+                    if *clock_falling {
+                        // The flip-flops just built for this latch load on
+                        // the clock's falling edge
+                        for cell in &mut self.netlist.cells[first_cell..] {
+                            if cell.clock.is_some() {
+                                cell.parameters.insert(
+                                    crate::gate_netlist::FF_CLOCK_EDGE_PARAM.to_string(),
+                                    crate::gate_netlist::FF_CLOCK_FALLING.to_string(),
+                                );
+                            }
+                        }
+                    }
                 }
                 AigNode::Barrier {
                     barrier_type,

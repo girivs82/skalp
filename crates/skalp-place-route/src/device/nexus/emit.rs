@@ -646,7 +646,15 @@ fn emit_bits(
                     .is_some_and(|wire| used_wires.contains(&wire));
                 let select = if from_lut { "DL" } else { "DF" };
                 config.set_enum(&tile, &format!("{prefix}.SEL"), select)?;
-                config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), "CLK")?;
+                // A falling-edge flip-flop takes the slice's clock inverted;
+                // its slice pair holds only flip-flops on that edge (see
+                // ControlSet)
+                let clock_mux = if skalp_lir::gate_netlist::ff_clock_falling(cell) {
+                    "INV"
+                } else {
+                    "CLK"
+                };
+                config.set_enum(&tile, &format!("SLICE{slice}.CLKMUX"), clock_mux)?;
                 let set = control_sets
                     .get(&cell.id)
                     .copied()

@@ -10,13 +10,19 @@
 //! [`analyze_hold`] checks hold with a fast-corner one. Paths between clocks
 //! are not timed. Setup times paths from input pads as launched at the clock
 //! source; hold does not time them.
+//!
+//! A flip-flop on the falling edge of its clock (see
+//! [`skalp_lir::gate_netlist::ff_clock_falling`]) launches and captures half
+//! a period from the rising edge. Where a design has any, each analysis runs
+//! once per launching edge, and a path between opposite edges gets half a
+//! period for setup and half a period more for hold.
 
 use super::clock_targets::ClockTargets;
 use super::{ClockSummary, CriticalPath, FailingInstance, HoldReport, PathStep, TimingReport};
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
-use skalp_lir::gate_netlist::{Cell, CellId, GateNetId};
+use skalp_lir::gate_netlist::{ff_clock_falling, Cell, CellId, GateNetId};
 use std::collections::BTreeMap;
 
 const PS_PER_NS: f64 = 1000.0;
@@ -132,6 +138,46 @@ struct Engine<'a, D: Device + ?Sized> {
     /// Only registers on this clock launch paths (hold inside one async
     /// block, whose registers share its step clock)
     launch_clock: Option<GateNetId>,
+    /// Only registers on this edge of their clock launch paths (`true`:
+    /// the falling edge); `None`: every register, in a design that has no
+    /// falling-edge flip-flops. Untimed inputs count as rising-edge launches.
+    launch_edge: Option<bool>,
+}
+
+/// Whether `cell` samples (or launches) on the falling edge of the clock on
+/// its input `clock_input` (`None`: its own clock)
+fn on_falling_edge(cell: &Cell, clock_input: Option<usize>) -> bool {
+    clock_input.is_none() && cell.clock.is_some() && ff_clock_falling(cell)
+}
+
+/// The launching edges to analyze `netlist` for: each edge on its own where
+/// it has falling-edge flip-flops, else all registers at once
+fn launch_edges(netlist: &skalp_lir::gate_netlist::GateNetlist) -> Vec<Option<bool>> {
+    if netlist
+        .cells
+        .iter()
+        .any(|c| c.clock.is_some() && ff_clock_falling(c))
+    {
+        vec![Some(false), Some(true)]
+    } else {
+        vec![None]
+    }
+}
+
+/// Half a period of `clock` where a path launched on edge `launch_edge`
+/// (see [`Engine::launch_edge`]) is captured on the other edge, else zero:
+/// what such a path loses for setup and gains for hold, in ns
+fn half_period_between(
+    targets: &ClockTargets,
+    clock: GateNetId,
+    launch_edge: Option<bool>,
+    capture_falling: bool,
+) -> f64 {
+    if launch_edge.unwrap_or(false) != capture_falling {
+        500.0 / targets.mhz(clock)
+    } else {
+        0.0
+    }
 }
 
 impl<D: Device + ?Sized> Engine<'_, D> {
@@ -176,7 +222,7 @@ impl<D: Device + ?Sized> Engine<'_, D> {
     /// Arrival time where nothing timed launches a path: time zero for
     /// setup, which times such inputs from the clock source; none for hold.
     fn untimed(&self) -> i64 {
-        if self.early {
+        if self.early || self.launch_edge == Some(true) {
             NO_PATH
         } else {
             0
@@ -280,7 +326,10 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             let other_clock = self
                 .launch_clock
                 .is_some_and(|clock| clock_net != Some(clock));
-            if self.early && (clock_net.is_none() || other_clock) {
+            let other_edge = self
+                .launch_edge
+                .is_some_and(|falling| falling != on_falling_edge(cell, clock_input));
+            if other_edge || (self.early && (clock_net.is_none() || other_clock)) {
                 return Arrival {
                     time: NO_PATH,
                     from: None,
@@ -298,8 +347,10 @@ impl<D: Device + ?Sized> Engine<'_, D> {
                 cell_ps: launch,
             };
         }
+        // Setup takes the latest timed input, from time zero; hold the
+        // earliest
         let mut best = Arrival {
-            time: self.untimed(),
+            time: if self.early { NO_PATH } else { 0 },
             from: None,
             route_ps: 0,
             cell_ps: 0,
@@ -331,8 +382,12 @@ impl<D: Device + ?Sized> Engine<'_, D> {
                 }
             }
         }
-        if timed == 0 && (cell.inputs.is_empty() || arcs > 0) {
-            best.time = NO_PATH;
+        if timed == 0 {
+            best.time = if cell.inputs.is_empty() || arcs > 0 {
+                NO_PATH
+            } else {
+                self.untimed()
+            };
         }
         best
     }
@@ -386,72 +441,100 @@ pub fn analyze<D: Device + ?Sized>(
     design: &PlacedDesign<'_>,
     targets: &ClockTargets,
 ) -> TimingReport {
-    let mut engine = Engine {
-        device,
-        model,
-        design,
-        drivers: HashMap::new(),
-        arrivals: HashMap::new(),
-        visiting: HashSet::new(),
-        early: false,
-        async_cells: async_block_cells(design.netlist),
-        launch_clock: None,
-    };
-
     let netlist = design.netlist;
-    let mut per_clock: BTreeMap<u32, (usize, f64)> = BTreeMap::new();
+    let async_cells = async_block_cells(netlist);
+    // Per clock: registers, the longest path as a whole-period one (for the
+    // frequency it allows), and the worst slack
+    let mut per_clock: BTreeMap<u32, (usize, f64, f64)> = BTreeMap::new();
     let mut paths = Vec::new();
+    let mut engines = Vec::new();
 
-    for cell in &netlist.cells {
-        if engine.async_cells.contains(&cell.id) {
-            continue;
-        }
-        let endpoints = model.endpoints(cell);
-        // Each clock the cell samples on, counted once
-        let mut clocks: Vec<GateNetId> = Vec::new();
-        for endpoint in &endpoints {
-            if let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) {
-                if !clocks.contains(&clock) {
-                    clocks.push(clock);
+    for (pass, launch_edge) in launch_edges(netlist).into_iter().enumerate() {
+        let mut engine = Engine {
+            device,
+            model,
+            design,
+            drivers: HashMap::new(),
+            arrivals: HashMap::new(),
+            visiting: HashSet::new(),
+            early: false,
+            async_cells: async_cells.clone(),
+            launch_clock: None,
+            launch_edge,
+        };
+        for cell in &netlist.cells {
+            if engine.async_cells.contains(&cell.id) {
+                continue;
+            }
+            let endpoints = model.endpoints(cell);
+            if pass == 0 {
+                // Each clock the cell samples on, counted once
+                let mut clocks: Vec<GateNetId> = Vec::new();
+                for endpoint in &endpoints {
+                    if let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) {
+                        if !clocks.contains(&clock) {
+                            clocks.push(clock);
+                        }
+                    }
+                }
+                for clock in &clocks {
+                    per_clock
+                        .entry(clock.0)
+                        .or_insert((0, 0.0, f64::INFINITY))
+                        .0 += 1;
                 }
             }
+            for endpoint in endpoints {
+                let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
+                    continue;
+                };
+                let half = half_period_between(
+                    targets,
+                    clock,
+                    launch_edge,
+                    on_falling_edge(cell, endpoint.clock),
+                );
+                let target_ns = targets.required_ns(clock) - half;
+                let capture = engine.clock_arrival_on(cell, endpoint.clock);
+                let Some(routed) = engine.input_time_at(cell, endpoint) else {
+                    continue;
+                };
+                let (time, net) = routed;
+                // From the capturing edge at the clock's source
+                let delay_ns = (time + endpoint.setup_ps - capture) as f64 / PS_PER_NS;
+                let worst = per_clock.entry(clock.0).or_insert((0, 0.0, f64::INFINITY));
+                // A half-period path allows the period that is twice its
+                // delay and uncertainty
+                let whole = if half > 0.0 {
+                    2.0 * delay_ns + targets.uncertainty_ns
+                } else {
+                    delay_ns
+                };
+                worst.1 = worst.1.max(whole);
+                worst.2 = worst.2.min(target_ns - delay_ns);
+                let nets = engine.nets_through(net);
+                let path = nets
+                    .iter()
+                    .map(|n| netlist.nets[n.0 as usize].name.clone())
+                    .collect::<Vec<_>>();
+                paths.push((
+                    CriticalPath {
+                        delay: delay_ns,
+                        required: target_ns,
+                        slack: target_ns - delay_ns,
+                        source: path.first().cloned().unwrap_or_default(),
+                        destination: cell.path.clone(),
+                        path,
+                        steps: Vec::new(),
+                    },
+                    nets,
+                    clock,
+                    whole,
+                    engines.len(),
+                ));
+            }
         }
-        for clock in &clocks {
-            per_clock.entry(clock.0).or_insert((0, 0.0)).0 += 1;
-        }
-        for endpoint in endpoints {
-            let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
-                continue;
-            };
-            let target_ns = targets.required_ns(clock);
-            let capture = engine.clock_arrival_on(cell, endpoint.clock);
-            let Some(routed) = engine.input_time_at(cell, endpoint) else {
-                continue;
-            };
-            let (time, net) = routed;
-            // From the capturing edge at the clock's source
-            let delay_ns = (time + endpoint.setup_ps - capture) as f64 / PS_PER_NS;
-            let worst = per_clock.get_mut(&clock.0).expect("present");
-            worst.1 = worst.1.max(delay_ns);
-            let nets = engine.nets_through(net);
-            let path = nets
-                .iter()
-                .map(|n| netlist.nets[n.0 as usize].name.clone())
-                .collect::<Vec<_>>();
-            paths.push((
-                CriticalPath {
-                    delay: delay_ns,
-                    required: target_ns,
-                    slack: target_ns - delay_ns,
-                    source: path.first().cloned().unwrap_or_default(),
-                    destination: cell.path.clone(),
-                    path,
-                    steps: Vec::new(),
-                },
-                nets,
-                clock,
-            ));
-        }
+        engines.push(engine);
     }
 
     // Worst slack first: with clocks at different frequencies, the longest
@@ -459,7 +542,7 @@ pub fn analyze<D: Device + ?Sized>(
     paths.sort_by(|a, b| a.0.slack.total_cmp(&b.0.slack));
     let failing_paths = paths.iter().filter(|p| p.0.slack < 0.0).count();
     let mut by_instance: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
-    for (path, _, _) in paths.iter().filter(|p| p.0.slack < 0.0) {
+    for (path, ..) in paths.iter().filter(|p| p.0.slack < 0.0) {
         let instance = path
             .destination
             .rsplit_once('.')
@@ -477,19 +560,19 @@ pub fn analyze<D: Device + ?Sized>(
         })
         .collect();
     failing_by_instance.sort_by(|a, b| a.worst_slack.total_cmp(&b.worst_slack));
-    let worst = paths.first().map(|p| (p.0.delay, p.0.slack, p.2));
+    let worst = paths.first().map(|p| (p.3, p.0.slack, p.2));
     paths.truncate(10);
     let paths: Vec<CriticalPath> = paths
         .into_iter()
-        .map(|(mut path, nets, _)| {
-            path.steps = engine.path_steps(&nets);
+        .map(|(mut path, nets, _, _, pass)| {
+            path.steps = engines[pass].path_steps(&nets);
             path
         })
         .collect();
 
     let clock_summaries = per_clock
         .iter()
-        .map(|(&net, &(registers, delay))| {
+        .map(|(&net, &(registers, delay, slack))| {
             let clock = GateNetId(net);
             ClockSummary {
                 name: netlist.nets[net as usize].name.clone(),
@@ -499,7 +582,11 @@ pub fn analyze<D: Device + ?Sized>(
                     targets.mhz(clock)
                 },
                 register_count: registers,
-                worst_slack: targets.required_ns(clock) - delay,
+                worst_slack: if slack.is_finite() {
+                    slack
+                } else {
+                    targets.required_ns(clock)
+                },
             }
         })
         .collect();
@@ -538,7 +625,7 @@ pub fn analyze_hold<D: Device + ?Sized>(
     targets: &ClockTargets,
 ) -> HoldReport {
     let async_cells = async_block_cells(design.netlist);
-    let engine = |launch_clock, async_cells| Engine {
+    let engine = |launch_clock, async_cells, launch_edge| Engine {
         device,
         model,
         design,
@@ -548,6 +635,7 @@ pub fn analyze_hold<D: Device + ?Sized>(
         early: true,
         async_cells,
         launch_clock,
+        launch_edge,
     };
     let margin_ps = targets.hold_margin_ns * PS_PER_NS;
     // Synchronous registers, timed through everything but async blocks;
@@ -572,30 +660,49 @@ pub fn analyze_hold<D: Device + ?Sized>(
     );
     let mut engines = Vec::new();
     let mut paths = Vec::new();
+    // Synchronous registers once per launching edge (see launch_edges); an
+    // async block's registers all load on its step clock's rising edge
+    let edges = launch_edges(design.netlist);
     for (launch_clock, cells) in groups {
-        let mut e = engine(
-            launch_clock,
-            if launch_clock.is_some() {
-                HashSet::new()
-            } else {
-                async_cells.clone()
-            },
-        );
-        for cell in cells {
-            for endpoint in model.endpoints(cell) {
-                if Engine::<D>::clock_net(cell, endpoint.clock).is_none() {
-                    continue;
+        let group_edges = if launch_clock.is_some() {
+            vec![None]
+        } else {
+            edges.clone()
+        };
+        for launch_edge in group_edges {
+            let mut e = engine(
+                launch_clock,
+                if launch_clock.is_some() {
+                    HashSet::new()
+                } else {
+                    async_cells.clone()
+                },
+                launch_edge,
+            );
+            for cell in &cells {
+                for endpoint in model.endpoints(cell) {
+                    let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
+                        continue;
+                    };
+                    let capture = e.clock_arrival_on(cell, endpoint.clock);
+                    let Some((time, net)) = e.input_time_at(cell, endpoint) else {
+                        continue;
+                    };
+                    // Data launched on the other edge changes half a period
+                    // after the capturing edge it must hold for
+                    let half = half_period_between(
+                        targets,
+                        clock,
+                        launch_edge,
+                        on_falling_edge(cell, endpoint.clock),
+                    );
+                    let delay = (time - capture) as f64 / PS_PER_NS + half;
+                    let required = (endpoint.hold_ps as f64 + margin_ps) / PS_PER_NS;
+                    paths.push((delay, required, net, *cell, engines.len()));
                 }
-                let capture = e.clock_arrival_on(cell, endpoint.clock);
-                let Some((time, net)) = e.input_time_at(cell, endpoint) else {
-                    continue;
-                };
-                let delay = (time - capture) as f64 / PS_PER_NS;
-                let required = (endpoint.hold_ps as f64 + margin_ps) / PS_PER_NS;
-                paths.push((delay, required, net, cell, engines.len()));
             }
+            engines.push(e);
         }
-        engines.push(e);
     }
     paths.sort_by(|a, b| (a.0 - a.1).total_cmp(&(b.0 - b.1)));
     let violations = paths.iter().filter(|p| p.0 < p.1).count();
@@ -756,6 +863,7 @@ pub fn check_bundles<D: Device + ?Sized>(
         early: false,
         async_cells: HashSet::new(),
         launch_clock: None,
+        launch_edge: None,
     };
     let delays = RoutedBundleDelays {
         engine: std::cell::RefCell::new(&mut engine),
@@ -782,6 +890,7 @@ pub fn annotate_delays<D: Device + ?Sized>(
         early: false,
         async_cells: HashSet::new(),
         launch_clock: None,
+        launch_edge: None,
     };
     let delays = RoutedBundleDelays {
         engine: std::cell::RefCell::new(&mut engine),
@@ -974,5 +1083,102 @@ mod tests {
         assert_eq!(path.source, "q", "{path:?}");
         assert!((path.delay - 0.2).abs() < 1e-9, "{path:?}");
         assert!(report.meets_timing);
+    }
+
+    /// Two registers feeding each other through a 9 ns arc: with one on the
+    /// falling edge both paths are half-period ones and fail at 100 MHz, as
+    /// both on the rising edge they meet the period. Hold gains the half
+    /// period.
+    #[test]
+    fn paths_between_clock_edges_get_half_a_period() {
+        let build = |falling: bool| {
+            let mut netlist = GateNetlist::new("top".into(), "test".into());
+            let net = |netlist: &mut GateNetlist, name: &str| {
+                netlist.add_net(GateNet::new(GateNetId(0), name.to_string()))
+            };
+            let clk = net(&mut netlist, "clk");
+            let (qa, da, qb, db) = (
+                net(&mut netlist, "qa"),
+                net(&mut netlist, "da"),
+                net(&mut netlist, "qb"),
+                net(&mut netlist, "db"),
+            );
+            for (name, input, output) in [("la", qb, da), ("lb", qa, db)] {
+                netlist.add_cell(Cell::new_comb(
+                    CellId(0),
+                    "LUT4".into(),
+                    "test".into(),
+                    0.0,
+                    name.into(),
+                    vec![input],
+                    vec![output],
+                ));
+            }
+            for (name, d, q, on_fall) in [("ra", da, qa, false), ("rb", db, qb, falling)] {
+                let id = netlist.add_cell(Cell::new_seq(
+                    CellId(0),
+                    "DFF".into(),
+                    "test".into(),
+                    0.0,
+                    name.into(),
+                    vec![d],
+                    vec![q],
+                    clk,
+                    None,
+                ));
+                if on_fall {
+                    netlist.cells[id.0 as usize].parameters.insert(
+                        skalp_lir::gate_netlist::FF_CLOCK_EDGE_PARAM.to_string(),
+                        skalp_lir::gate_netlist::FF_CLOCK_FALLING.to_string(),
+                    );
+                }
+            }
+            netlist
+        };
+        let (placement, routing, tied) = (
+            PlacementResult::default(),
+            RoutingResult::default(),
+            TiedInputs::default(),
+        );
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let targets = ClockTargets::uniform(100.0);
+        for falling in [false, true] {
+            let netlist = build(falling);
+            let design = PlacedDesign {
+                netlist: &netlist,
+                placement: &placement,
+                routing: &routing,
+                tied: &tied,
+            };
+            let report = analyze(&device, &Stub, &design, &targets);
+            assert_eq!(
+                report.critical_paths.len(),
+                2,
+                "{falling}: {:#?}",
+                report.critical_paths
+            );
+            for path in &report.critical_paths {
+                assert!((path.delay - 9.1).abs() < 1e-9, "{path:?}");
+                let required = if falling { 5.0 } else { 10.0 } - targets.uncertainty_ns;
+                assert!(
+                    (path.required - required).abs() < 1e-9,
+                    "{falling}: {path:?}"
+                );
+            }
+            assert_eq!(report.meets_timing, !falling);
+            // The pair needs twice the half-period path's delay
+            let period = if falling { 2.0 * 9.1 } else { 9.1 } + targets.uncertainty_ns;
+            assert!(
+                (report.design_frequency - 1000.0 / period).abs() < 1e-6,
+                "{falling}: {}",
+                report.design_frequency
+            );
+            let hold = analyze_hold(&device, &Stub, &design, &targets);
+            let gain = if falling { 5.0 } else { 0.0 };
+            assert!(
+                (hold.worst_slack - (9.1 + gain - targets.hold_margin_ns)).abs() < 1e-9,
+                "{falling}: {hold:?}"
+            );
+        }
     }
 }

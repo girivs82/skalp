@@ -348,6 +348,7 @@ impl<D: Device + Clone> Placer<D> {
     ) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        self.check_clock_edges(netlist)?;
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",
@@ -512,6 +513,7 @@ impl<D: Device + Clone> Placer<D> {
     pub fn place(&mut self, netlist: &GateNetlist) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        self.check_clock_edges(netlist)?;
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",
@@ -782,6 +784,26 @@ impl<D: Device + Clone> Placer<D> {
     }
 
     /// Check if design fits on device
+    /// Refuse falling-edge flip-flops where the device's backend cannot
+    /// build them
+    fn check_clock_edges(&self, netlist: &GateNetlist) -> Result<()> {
+        if self.device.falling_edge_ffs() {
+            return Ok(());
+        }
+        match netlist
+            .cells
+            .iter()
+            .find(|c| c.clock.is_some() && skalp_lir::gate_netlist::ff_clock_falling(c))
+        {
+            Some(cell) => Err(PlaceRouteError::PlacementFailed(format!(
+                "flip-flop '{}' loads on the falling edge of its clock, which this \
+                 device's backend does not support yet",
+                cell.path
+            ))),
+            None => Ok(()),
+        }
+    }
+
     fn check_capacity(&self, netlist: &GateNetlist) -> Result<()> {
         let stats = self.device.stats();
 
