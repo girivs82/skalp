@@ -141,6 +141,9 @@ pub struct RoutedNetlist {
     /// Each net's routed switches, with their delay classes and their
     /// delays at the slowest corner annotated
     pub routes: Vec<crate::timing::RoutedNetSwitches>,
+    /// The device's delay calibration against silicon, where its database
+    /// has one, for timing the delays as silicon runs
+    pub calibration: Option<skalp_lir::delay_calibration::DelayCalibration>,
 }
 
 impl PnrResult {
@@ -341,6 +344,7 @@ fn routed_from_tables<D: crate::device::Device + ?Sized>(
         loads: crate::timing::sta::net_loads(&model, netlist, routing, "typical"),
         placements,
         routes,
+        calibration: None,
     };
     (routed, timing)
 }
@@ -1371,6 +1375,7 @@ pub fn place_and_route_nexus_real_from(
         loads: crate::timing::sta::net_loads(&timing_model, netlist, &routing, "slow"),
         placements,
         routes,
+        calibration: crate::device::nexus::timing::silicon_delays(db_root, variant)?,
     };
 
     let result = PnrResult {

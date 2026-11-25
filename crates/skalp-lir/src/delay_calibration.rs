@@ -7,7 +7,9 @@
 //! below it, and medium wires at it. A calibration file gives each kind its
 //! own factor, fitted from rings measured on the chip, and
 //! [`DelayAnnotation::calibrated`] turns a routed design's delays at one
-//! corner into delays at the silicon so measured. It reads TOML:
+//! corner into delays at the silicon so measured. A device database can
+//! hold one for its family (place and route then keeps it with the build),
+//! or a file can be given. It reads JSON, or TOML such as:
 //!
 //! ```toml
 //! # the corner the factors scale
@@ -57,6 +59,12 @@ pub struct DelayCalibration {
     /// The clock wires
     #[serde(default)]
     pub clock: Option<Scale>,
+    /// What the calibration is, for people
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// How and on what it was measured, for people
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<serde_json::Value>,
 }
 
 fn fast_corner() -> String {
@@ -132,23 +140,36 @@ impl Rule {
 }
 
 impl DelayCalibration {
-    /// Read a calibration file's text
+    /// Read a calibration in TOML
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        let calibration: Self = toml::from_str(text).map_err(|e| e.to_string())?;
-        for wire in &calibration.wires {
+        toml::from_str::<Self>(text)
+            .map_err(|e| e.to_string())?
+            .checked()
+    }
+
+    /// Read a calibration in JSON
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        serde_json::from_str::<Self>(text)
+            .map_err(|e| e.to_string())?
+            .checked()
+    }
+
+    /// Check every rule gives one usable number
+    fn checked(self) -> Result<Self, String> {
+        for wire in &self.wires {
             Rule::new(
                 Some(wire.factor),
                 None,
                 &format!("wire class {}", wire.class),
             )?;
         }
-        for cell in &calibration.cells {
+        for cell in &self.cells {
             Rule::new(cell.factor, cell.between, &format!("cell {}", cell.cell))?;
         }
-        if let Some(clock) = calibration.clock {
+        if let Some(clock) = self.clock {
             Rule::new(clock.factor, clock.between, "clock")?;
         }
-        Ok(calibration)
+        Ok(self)
     }
 
     /// Whether any rule is a fraction from the `from` corner, which then
@@ -479,5 +500,12 @@ mod tests {
         let calibration = DelayCalibration::from_toml(FILE).unwrap();
         assert_eq!(calibration.from, "fast");
         assert!(calibration.needs_from_corner());
+        // JSON, as a device database holds it, with notes for people
+        let json = r#"{ "comment": "one chip", "corner": "slow",
+            "wires": [{ "class": "*", "factor": 0.8 }],
+            "measured": { "date": "2026-11-25" } }"#;
+        let calibration = DelayCalibration::from_json(json).unwrap();
+        assert_eq!(calibration.wires[0].factor, 0.8);
+        assert!(DelayCalibration::from_json(r#"{ "corner": "slow", "clock": {} }"#).is_err());
     }
 }

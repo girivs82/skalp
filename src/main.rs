@@ -5982,6 +5982,17 @@ fn write_routed(output_dir: &std::path::Path, result: &skalp_place_route::PnrRes
         file,
         &serde_json::json!({ "cells": routed.placements, "nets": routed.routes }),
     )?;
+    // The device's delay calibration against silicon, for `sim --corner
+    // calibrated`
+    let calibration_path = output_dir.join(ROUTED_CALIBRATION_FILE);
+    match &routed.calibration {
+        Some(calibration) => {
+            let file = std::io::BufWriter::new(fs::File::create(&calibration_path)?);
+            serde_json::to_writer_pretty(file, calibration)?;
+        }
+        None if calibration_path.exists() => fs::remove_file(&calibration_path)?,
+        None => {}
+    }
     println!(
         "Routed netlist and delays: {:?}, {:?}",
         netlist_path, delays_path
@@ -9386,6 +9397,8 @@ const ROUTED_DELAYS_FILE: &str = "design_delays.json";
 /// Where `write_routed` puts every cell's placement and every net's routed
 /// switches with their delay classes
 const ROUTED_SWITCHES_FILE: &str = "design_routes.json";
+/// The device's delay calibration against silicon, from its database
+const ROUTED_CALIBRATION_FILE: &str = "design_calibration.json";
 /// The routing load of each net (`skalp_lir::switching_energy::NetLoads`),
 /// for `skalp sim --energy`
 const ROUTED_LOADS_FILE: &str = "design_loads.json";
@@ -9440,10 +9453,12 @@ struct TimedOptions {
     /// puts the clock network's wires at C and every other delay at K
     /// (a ring through the clock network, measured beside a logic ring,
     /// gives C); `,CELL:F` (repeatable, CELL a cell type such as CCU2)
-    /// puts those cells' own delays at F. `calibrated:FILE` scales one
-    /// corner's delays by switch class and cell type as a delay calibration
-    /// file gives (factors fitted from rings measured on the chip; see
-    /// skalp_lir::delay_calibration).
+    /// puts those cells' own delays at F. `calibrated` scales one corner's
+    /// delays by switch class and cell type as the device database's delay
+    /// calibration against silicon gives (kept with the build), and
+    /// `calibrated:FILE` as a calibration file (JSON, or TOML for .toml)
+    /// gives: factors fitted from rings measured on a chip; see
+    /// skalp_lir::delay_calibration.
     #[arg(long)]
     corner: Option<String>,
     /// Multiply every delay of the corner by this factor, as when the whole
@@ -9758,12 +9773,29 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
                 .map_err(anyhow::Error::msg)?;
             &mixed
         }
-        Some(corner) if corner.starts_with("calibrated:") => {
-            let path = &corner["calibrated:".len()..];
-            let text = fs::read_to_string(path)
-                .with_context(|| format!("reading the delay calibration {path}"))?;
-            let calibration = skalp_lir::delay_calibration::DelayCalibration::from_toml(&text)
-                .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
+        Some(corner) if corner == "calibrated" || corner.starts_with("calibrated:") => {
+            let path = match corner.strip_prefix("calibrated:") {
+                Some(file) => std::path::PathBuf::from(file),
+                None => args.dir.join(ROUTED_CALIBRATION_FILE),
+            };
+            let path_text = path.display().to_string();
+            let path = path_text.as_str();
+            let text = fs::read_to_string(path).with_context(|| {
+                if corner == "calibrated" {
+                    format!(
+                        "{path} not found: the device's database has no delay calibration \
+                         (give one with --corner calibrated:FILE)"
+                    )
+                } else {
+                    format!("reading the delay calibration {path}")
+                }
+            })?;
+            let calibration = if path.ends_with(".toml") {
+                skalp_lir::delay_calibration::DelayCalibration::from_toml(&text)
+            } else {
+                skalp_lir::delay_calibration::DelayCalibration::from_json(&text)
+            }
+            .map_err(|e| anyhow::anyhow!("delay calibration {path}: {e}"))?;
             let named = |name: &str| corners.iter().find(|d| d.corner == name);
             let base = named(&calibration.corner).with_context(|| {
                 format!(

@@ -145,6 +145,29 @@ pub fn measured_metastability(
     Ok(load_metastability(db_root, variant)?.remove(element))
 }
 
+/// The family's delay calibration against silicon
+/// (`<family>/timing/silicon_delays.json`, hand-maintained from board
+/// measurements; see [`skalp_lir::delay_calibration`]), if its database
+/// has one
+pub fn silicon_delays(
+    db_root: &Path,
+    variant: NexusVariant,
+) -> Result<Option<skalp_lir::delay_calibration::DelayCalibration>> {
+    let path = db_root
+        .join(variant.prjoxide_family())
+        .join("timing")
+        .join("silicon_delays.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        PlaceRouteError::BitstreamFailed(format!("reading silicon_delays.json: {e}"))
+    })?;
+    skalp_lir::delay_calibration::DelayCalibration::from_json(&text)
+        .map(Some)
+        .map_err(|e| PlaceRouteError::BitstreamFailed(format!("parsing silicon_delays.json: {e}")))
+}
+
 /// Read the family's metastability figures, if its database has them
 fn load_metastability(
     db_root: &Path,
