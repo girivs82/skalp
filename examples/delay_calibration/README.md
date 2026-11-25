@@ -3,8 +3,7 @@
 Timed simulation (`skalp sim <build dir>`) runs a placed and routed design with
 its routed delays, at one of the vendor's corners. The fast and slow corners
 bracket silicon, but a real part does not sit at one place between them. On
-the one family measured so far (Lattice CertusPro-NX, one chip at room
-temperature), logic ran at about half the slow corner's delay, short and
+the one device measured so far (one chip at room temperature), logic ran at about half the slow corner's delay, short and
 long wires well below the slow corner, and medium wires right at it. A single
 fraction between the corners was off by 5 to 10% on designs whose routes used
 more of one kind of wire than the rings it was fitted on.
@@ -25,8 +24,8 @@ format is described in `skalp_lir::delay_calibration`; in short:
 ```json
 {
   "corner": "slow",
-  "wires": [ { "class": "*span6*", "factor": 0.76 }, { "class": "*", "factor": 0.54 } ],
-  "cells": [ { "cell": "CCU2", "factor": 0.62 }, { "cell": "*", "factor": 0.54 } ],
+  "wires": [ { "class": "*long*", "factor": 0.76 }, { "class": "*", "factor": 0.54 } ],
+  "cells": [ { "cell": "CARRY*", "factor": 0.62 }, { "cell": "*", "factor": 0.54 } ],
   "clock": { "factor": 0.95 },
   "measured": { "device": "...", "date": "...", "method": "...", "results": "..." }
 }
@@ -43,12 +42,15 @@ This directory measures a chip and fits such a file:
 - `hex_report.sk` is the UART reporter it uses.
 - `fit_calibration.py` takes a probe build and its captures, and fits the
   factors with the timed simulation of the same build.
-- `groups_nexus.json` lists which delays share a factor, for Lattice Nexus.
+- A groups file says which delays share a factor. It names the family's switch
+  classes and cell types, so it lives in the device database beside the
+  calibration, not here (for a Nexus family in prjoxide-db:
+  `<family>/timing/calibration_groups.json`).
 
 ## The probe
 
 ```
-python3 gen_probe.py --clk-pin P24 --clk-mhz 125 --uart-pin M9 --out probe
+python3 gen_probe.py --clk-pin <clock pin> --clk-mhz <clock MHz> --uart-pin <UART TX pin> --out probe
 ```
 
 This writes `delay_probe.sk`, `hex_report.sk` (with its baud divider set for
@@ -89,12 +91,13 @@ different mixes, which is what lets the fit tell them apart.
    latch ring sometimes came up in a faster mode (12 to 28% faster) on one
    load and not on another. The fit warns where loads disagree.
 3. **Fit**, with a skalp binary built with the device's feature
-   (`--features nexus-real` for Nexus):
+   (the family's backend feature, such as `nexus-real`):
 
    ```
-   python3 fit_calibration.py --skalp skalp --groups groups_nexus.json \
+   python3 fit_calibration.py --skalp skalp \
+       --groups $DB/<family>/timing/calibration_groups.json \
        --run build probe/delay_probe.json uart1.txt uart2.txt \
-       --note "LFCPNX-100-9, Versa board, room temperature, nominal supply" \
+       --note "<part, board, temperature, supply>" \
        --out silicon_delays.json
    ```
 
@@ -121,26 +124,33 @@ different mixes, which is what lets the fit tell them apart.
 
 ## Groups
 
-`groups_nexus.json` maps every switch class and cell type to a group. All
-delays in a group share one factor. The groups are:
+A family's groups file maps every switch class and cell type to a group, as
+ordered `[pattern, group]` lists for `wires` and `cells` (the first match
+wins, as in the calibration file), plus the group of the clock network's
+wires:
 
-- **`stage`**: the LUT's own delay and the switches into and out of it. Every
-  latch ring passes these three equally often, so separate factors could not
-  be fitted.
-- **`span0`, `span1`, `span2`, `span6`**: the routing wires by length.
-- **`carry`, `mult`, `dram`**: the hard blocks' own delays.
-- **`clocked`**: the clock network's wires and the flip-flops' own delays. Only
-  the clock ring passes either, so they share a factor.
+```json
+{
+  "wires": [ ["*long*", "long"], ["*", "local"] ],
+  "cells": [ ["CARRY*", "carry"], ["*", "local"] ],
+  "clock": "clocked"
+}
+```
 
-The fit warns when the rings do not tell two groups apart. Then either merge
-the groups or add a ring that passes one of them more than the other. For
-another family, write its groups from the switch classes its builds list (the
-`classes` of `design_delays.json`) and the cell types its netlists use.
+All delays in a group share one factor. Put delays in one group when no ring
+can tell them apart: a LUT's own delay and the switches into and out of it,
+which every latch ring passes equally often, or the clock network and the
+flip-flops, which only the clock ring passes. The fit warns when the rings do
+not tell two groups apart. Then either merge the groups or add a ring that
+passes one of them more than the other. To write the file for a new family,
+take its switch classes from a build's `design_delays.json` (`classes`) and
+its cell types from the netlist, and keep the file in the family's device
+database.
 
 ## What the probe does not see
 
 The rings run on a quiet die. A large design running at full rate draws
-enough current to slow the whole die. On the family measured so far, about
+enough current to slow the whole die. On the device measured so far, about
 50 thousand busy cells slowed every ring by 1.85%, in the same way all over
 the die, and at once rather than as it warmed. Measure that for your own
 design with a ring placed beside it, with the design running and stopped, and

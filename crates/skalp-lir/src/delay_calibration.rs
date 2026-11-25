@@ -16,12 +16,12 @@
 //! corner = "slow"
 //! # routing switches by delay class: the first pattern that matches wins
 //! wires = [
-//!     { class = "*span6*", factor = 0.76 },
+//!     { class = "*long*", factor = 0.76 },
 //!     { class = "*", factor = 0.8 },
 //! ]
 //! # each cell type's own delays (arcs, clock to out, setup, hold)
 //! cells = [
-//!     { cell = "CCU2", between = 0.49 },
+//!     { cell = "CARRY*", between = 0.49 },
 //!     { cell = "*", factor = 0.54 },
 //! ]
 //! # the clock wires
