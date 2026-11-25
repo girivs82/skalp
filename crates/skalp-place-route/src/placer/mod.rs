@@ -14,6 +14,7 @@ pub mod control_sets;
 mod detail;
 mod incremental;
 mod legalization;
+mod replicate;
 mod retime;
 mod sites;
 mod spreading;
@@ -27,6 +28,7 @@ pub use constraints::{
 };
 pub use incremental::PlacedAround;
 pub use legalization::Legalizer;
+pub use replicate::{ReplicatedDriver, Replication, ReplicationConfig, REPLICA_OF_PARAM};
 pub use retime::{placed_retime_target, PlacedRetimeDelays, PlacedRetiming};
 
 use crate::collections::{HashMap, HashMapExt};
@@ -181,6 +183,9 @@ pub struct PlacerConfig {
     /// faster than what the regions' clock is timed at (the frequency
     /// `#[pipeline]` latencies were chosen for, say)
     pub retime_target_mhz: Option<f64>,
+    /// Copy registers whose many loads make them start failing paths, once
+    /// cells are placed ([`Placer::replicate_high_fanout`])
+    pub replication: ReplicationConfig,
 }
 
 /// How full placement fills a tile's BELs of each type when the design
@@ -210,6 +215,7 @@ impl Default for PlacerConfig {
             max_tile_fill: None,
             retime_after_placement: true,
             retime_target_mhz: None,
+            replication: ReplicationConfig::default(),
         }
     }
 }

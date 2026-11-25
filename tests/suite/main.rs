@@ -59,6 +59,7 @@ mod test_equivalence_mwe;
 mod test_ergonomic_testbench;
 mod test_error_span_accuracy;
 mod test_falling_edge_ff;
+mod test_fanout_replication;
 mod test_fi_driven_fmea;
 mod test_floorplan;
 mod test_flow_blocks;

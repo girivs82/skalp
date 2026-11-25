@@ -396,6 +396,17 @@ family's measured settle time from its device database
 (`<family>/timing/metastability.json`). A family without one gets a slow
 assumed figure and a warning that its async timing is not signed off.
 
+Nexus place and route copies high-fanout drivers once cells are placed: a
+flip-flop, LUT or gate with 32 or more loads whose paths miss (or come within
+0.3 ns of) their clock by the placement's timing estimate gets copies, each
+driving a group of its loads split by where they sit and placed where its
+group's paths gain most. Loads that share a slice's clock enable or set/reset
+stay on one copy. A driver is split no more than it takes, and only when its
+worst path improves. Copies are named `<original>__repN` and carry a
+`REPLICA_OF` parameter; the log line `replicated the driver of` lists each
+one with its estimated slack before and after. Replication happens after
+synthesis, so equivalent-register merging never folds the copies back.
+
 ### Supported Devices
 
 | Device | Family | Tools Used |
