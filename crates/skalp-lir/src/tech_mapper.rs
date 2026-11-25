@@ -3038,6 +3038,143 @@ fn decompose_memblock_to_dffs(
     }
 }
 
+/// One bit of a transparent latch, `q = en ? d : q`, with `q` its own output.
+///
+/// The library's latch cell where it has one. Otherwise a 4-input LUT whose
+/// output feeds back into it (one LUT and its own feedback wire: a LUT reads
+/// each input once, so changing one input with the output already at the
+/// value it keeps does not glitch it, which is what holds the value when the
+/// enable falls). Without either, kept gates with the consensus term
+/// `d & q`, which holds the output through the enable's fall whatever the
+/// gates' delays.
+///
+/// With `rst`, the latch is 0 while `rst` is high: the LUT takes it as its
+/// fourth input ([`crate::gate_netlist::LATCH_RST_LUT_INIT`]); a latch cell
+/// or gates load 0 then, through `en | rst` and `d & !rst`.
+fn map_latch_bit(
+    netlist: &mut GateNetlist,
+    library: &TechLibrary,
+    en: GateNetId,
+    d: GateNetId,
+    q: GateNetId,
+    rst: Option<GateNetId>,
+    path: &str,
+) {
+    let kept = |cell: &mut Cell| {
+        cell.source_op = Some(crate::gate_netlist::LATCH_OP.to_string());
+    };
+    let lut4 = library.find_best_cell(&CellFunction::Lut4);
+    let (en, d) = match rst {
+        Some(rst) if lut4.is_none() => {
+            let inv = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
+            let and2 = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+            let or2 = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+            let net = |netlist: &mut GateNetlist, name: &str| {
+                netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{name}")))
+            };
+            let run = net(netlist, "rst_n");
+            let rst_en = net(netlist, "rst_en");
+            let rst_d = net(netlist, "rst_d");
+            for (info, name, inputs, output) in [
+                (&inv, "rst_inv", vec![rst], run),
+                (&or2, "rst_en_or", vec![en, rst], rst_en),
+                (&and2, "rst_d_and", vec![d, run], rst_d),
+            ] {
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    info.name.clone(),
+                    library.name.clone(),
+                    info.fit,
+                    format!("{path}.{name}"),
+                    inputs,
+                    vec![output],
+                );
+                info.apply_to_cell(&mut cell);
+                netlist.add_cell(cell);
+            }
+            (rst_en, rst_d)
+        }
+        _ => (en, d),
+    };
+    if let Some(latch) = library.find_best_cell(&CellFunction::Latch) {
+        let latch = LibraryCellInfo::from_library_cell(latch);
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            latch.name.clone(),
+            library.name.clone(),
+            latch.fit,
+            path.to_string(),
+            vec![en, d],
+            vec![q],
+        );
+        latch.apply_to_cell(&mut cell);
+        kept(&mut cell);
+        netlist.add_cell(cell);
+        return;
+    }
+    if let Some(lut) = lut4 {
+        let lut = LibraryCellInfo::from_library_cell(lut);
+        let mut inputs = vec![GateNetId(0); if rst.is_some() { 4 } else { 3 }];
+        inputs[crate::gate_netlist::LATCH_D_PIN] = d;
+        inputs[crate::gate_netlist::LATCH_EN_PIN] = en;
+        inputs[crate::gate_netlist::LATCH_Q_PIN] = q;
+        if let Some(rst) = rst {
+            inputs[crate::gate_netlist::LATCH_RST_PIN] = rst;
+        }
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            lut.name.clone(),
+            library.name.clone(),
+            lut.fit,
+            path.to_string(),
+            inputs,
+            vec![q],
+        );
+        lut.apply_to_cell(&mut cell);
+        cell.lut_init = Some(if rst.is_some() {
+            crate::gate_netlist::LATCH_RST_LUT_INIT
+        } else {
+            crate::gate_netlist::LATCH_LUT_INIT
+        });
+        kept(&mut cell);
+        netlist.add_cell(cell);
+        return;
+    }
+    // q = (d & en) | (q & !en) | (d & q)
+    let inv = lookup_cell(library, CellFunction::Inv, "INV_X1", 0.1);
+    let and2 = lookup_cell(library, CellFunction::And2, "AND2", 0.2);
+    let or2 = lookup_cell(library, CellFunction::Or2, "OR2", 0.2);
+    let net = |netlist: &mut GateNetlist, name: &str| {
+        netlist.add_net(GateNet::new(GateNetId(0), format!("{path}.{name}")))
+    };
+    let not_en = net(netlist, "not_en");
+    let load = net(netlist, "load");
+    let keep = net(netlist, "keep");
+    let both = net(netlist, "both");
+    let either = net(netlist, "either");
+    for (info, name, inputs, output) in [
+        (&inv, "inv", vec![en], not_en),
+        (&and2, "load_and", vec![d, en], load),
+        (&and2, "keep_and", vec![q, not_en], keep),
+        (&and2, "both_and", vec![d, q], both),
+        (&or2, "or_a", vec![load, keep], either),
+        (&or2, "or_b", vec![either, both], q),
+    ] {
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            info.name.clone(),
+            library.name.clone(),
+            info.fit,
+            format!("{path}.{name}"),
+            inputs,
+            vec![output],
+        );
+        info.apply_to_cell(&mut cell);
+        kept(&mut cell);
+        netlist.add_cell(cell);
+    }
+}
+
 /// Merge physical LIR nodes (NCL, BRAM) into an AIG-derived GateNetlist.
 ///
 /// Physical ops were represented as pseudo-inputs (`__phys_*`) during
@@ -3443,6 +3580,34 @@ fn merge_physical_nodes_into_netlist(
                 }
             }
 
+            LirOp::Latch { width } => {
+                // q = en ? d : q per bit: a transparent latch, built without
+                // a clock pin (see `LirOp::Latch`)
+                let enable = input_nets
+                    .first()
+                    .and_then(|v| v.first())
+                    .copied()
+                    .unwrap_or(GateNetId(0));
+                let rst = input_nets.get(2).and_then(|v| v.first()).copied();
+                for i in 0..*width as usize {
+                    let d = input_nets
+                        .get(1)
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let q = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    map_latch_bit(
+                        netlist,
+                        library,
+                        enable,
+                        d,
+                        q,
+                        rst,
+                        &format!("{path}.lat{i}"),
+                    );
+                }
+            }
+
             LirOp::NclTake { width } => {
                 // out = data & grant, one kept AND per bit (see
                 // `LirOp::NclTake`)
@@ -3470,6 +3635,31 @@ fn merge_physical_nodes_into_netlist(
                     and2_cell.apply_to_cell(&mut and);
                     and.source_op = Some(crate::gate_netlist::TAKE_OP.to_string());
                     netlist.add_cell(and);
+                }
+            }
+
+            LirOp::NclExclusive { width } => {
+                // grant = request, one kept buffer per bit (see
+                // `LirOp::NclExclusive`)
+                for i in 0..*width as usize {
+                    let request = input_nets
+                        .first()
+                        .and_then(|v| v.get(i))
+                        .copied()
+                        .unwrap_or(GateNetId(0));
+                    let out = output_nets.get(i).copied().unwrap_or(GateNetId(0));
+                    let mut buf = Cell::new_comb(
+                        CellId(0),
+                        buf_cell.name.clone(),
+                        library.name.clone(),
+                        buf_cell.fit,
+                        format!("{path}.excl{i}"),
+                        vec![request],
+                        vec![out],
+                    );
+                    buf_cell.apply_to_cell(&mut buf);
+                    buf.source_op = Some(crate::gate_netlist::EXCLUSIVE_OP.to_string());
+                    netlist.add_cell(buf);
                 }
             }
 

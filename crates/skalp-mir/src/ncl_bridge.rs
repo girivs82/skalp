@@ -24,7 +24,7 @@ use crate::mir::{
     Expression, ExpressionKind, LValue, Mir, Module, ModuleId, PortDirection, Process, ProcessId,
     ProcessKind, SensitivityList, Signal, SignalId, Statement, Value,
 };
-use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT};
+use skalp_frontend::hir::{NCL_ACK_PORT, NCL_REQ_PORT, NCL_RST_PORT};
 use skalp_frontend::ncl_streams::{NCL_READY_SIGNAL, NCL_TICK_PORT};
 use std::collections::HashMap;
 
@@ -32,6 +32,11 @@ use std::collections::HashMap;
 const REQ_REG_SUFFIX: &str = "__ncl_req_q";
 const ACK_RAW_SUFFIX: &str = "__ncl_ack_raw";
 const ACK_SYNC_SUFFIX: &str = "__ncl_ack_s1";
+const RST_A_SUFFIX: &str = "__ncl_rst_a";
+const RST_B_SUFFIX: &str = "__ncl_rst_b";
+const RST_ACK_S1_SUFFIX: &str = "__ncl_rst_ack_s1";
+const RST_ACK_S2_SUFFIX: &str = "__ncl_rst_ack_s2";
+const RST_SUFFIX: &str = "__ncl_rst";
 
 /// Apply the handshake bridge to every module of `mir`.
 ///
@@ -57,6 +62,7 @@ pub fn apply_ncl_bridges(
         return errors;
     }
 
+    add_reset_ports(mir);
     for module in mir.modules.iter_mut().filter(|m| m.is_async) {
         share_parent_request(module, &async_modules);
     }
@@ -105,6 +111,65 @@ fn share_parent_request(module: &mut Module, async_modules: &HashMap<ModuleId, S
             .or_insert_with(|| {
                 Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(req)))
             });
+    }
+}
+
+/// Give every instantiated async module the reset input `NCL_RST_PORT` (a
+/// top-level async entity has none: it has no clocked parent to drive it),
+/// and connect each async instance of an async module to its parent's
+fn add_reset_ports(mir: &mut Mir) {
+    let instantiated: std::collections::HashSet<ModuleId> = mir
+        .modules
+        .iter()
+        .flat_map(|m| m.instances.iter().map(|i| i.module))
+        .collect();
+    let mut next_port = mir
+        .modules
+        .iter()
+        .flat_map(|m| m.ports.iter().map(|p| p.id.0 + 1))
+        .max()
+        .unwrap_or(0);
+    for module in mir
+        .modules
+        .iter_mut()
+        .filter(|m| m.is_async && instantiated.contains(&m.id))
+    {
+        if module.ports.iter().any(|p| p.name == NCL_RST_PORT) {
+            continue;
+        }
+        let Some(mut port) = module
+            .ports
+            .iter()
+            .find(|p| p.name == NCL_REQ_PORT && p.direction == PortDirection::Input)
+            .cloned()
+        else {
+            continue;
+        };
+        port.id = crate::mir::PortId(next_port);
+        next_port += 1;
+        port.name = NCL_RST_PORT.to_string();
+        port.port_type = DataType::Bit(1);
+        module.ports.push(port);
+    }
+    let with_reset: std::collections::HashSet<ModuleId> = mir
+        .modules
+        .iter()
+        .filter(|m| m.ports.iter().any(|p| p.name == NCL_RST_PORT))
+        .map(|m| m.id)
+        .collect();
+    for module in mir.modules.iter_mut().filter(|m| m.is_async) {
+        let Some(rst) = port_ref(module, NCL_RST_PORT) else {
+            continue;
+        };
+        for inst in module
+            .instances
+            .iter_mut()
+            .filter(|i| with_reset.contains(&i.module))
+        {
+            inst.connections
+                .entry(NCL_RST_PORT.to_string())
+                .or_insert_with(|| rst.clone());
+        }
     }
 }
 
@@ -577,17 +642,68 @@ fn bridge_module(
                 });
         }
 
-        // Request: one more register stage in the parent's domain
-        let req_q = new_signal(module, REQ_REG_SUFFIX);
-        statements.push(nonblocking(LValue::Signal(req_q), req_expr));
+        // Acknowledge, as the instance drives it
+        let ack_raw = new_signal(module, ACK_RAW_SUFFIX);
+        let read_ack = module.instances[idx].connections.get(NCL_ACK_PORT).cloned();
         module.instances[idx].connections.insert(
-            NCL_REQ_PORT.to_string(),
-            Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(req_q))),
+            NCL_ACK_PORT.to_string(),
+            Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(ack_raw))),
         );
+
+        // Reset (see `NCL_RST_PORT`): high from power-up until the instance
+        // has been seen idle (its acknowledge low, through two flip-flops),
+        // two clocks at least; it never rises again
+        let rst_a = new_signal(module, RST_A_SUFFIX);
+        let rst_b = new_signal(module, RST_B_SUFFIX);
+        let idle_s1 = new_signal(module, RST_ACK_S1_SUFFIX);
+        let idle_s2 = new_signal(module, RST_ACK_S2_SUFFIX);
+        let rst = new_signal(module, RST_SUFFIX);
+        for id in [rst_a, rst_b, rst] {
+            if let Some(signal) = module.signals.iter_mut().find(|s| s.id == id) {
+                signal.initial = Some(Value::Integer(1));
+            }
+        }
+        statements.push(nonblocking(
+            LValue::Signal(rst_a),
+            Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))),
+        ));
+        statements.push(nonblocking(LValue::Signal(rst_b), signal_ref(rst_a)));
+        statements.push(nonblocking(LValue::Signal(idle_s1), signal_ref(ack_raw)));
+        statements.push(nonblocking(LValue::Signal(idle_s2), signal_ref(idle_s1)));
+        statements.push(nonblocking(
+            LValue::Signal(rst),
+            binary(
+                crate::mir::BinaryOp::LogicalOr,
+                signal_ref(rst_b),
+                binary(
+                    crate::mir::BinaryOp::LogicalAnd,
+                    signal_ref(rst),
+                    signal_ref(idle_s2),
+                ),
+            ),
+        ));
+        module.instances[idx]
+            .connections
+            .insert(NCL_RST_PORT.to_string(), signal_ref(rst));
+
+        // Request: one more register stage in the parent's domain, held low
+        // while the instance is in reset and for the clock after it leaves
+        let req_q = new_signal(module, REQ_REG_SUFFIX);
+        let not_rst = Expression::with_unknown_type(ExpressionKind::Unary {
+            op: crate::mir::UnaryOp::Not,
+            operand: Box::new(signal_ref(rst)),
+        });
+        statements.push(nonblocking(
+            LValue::Signal(req_q),
+            binary(crate::mir::BinaryOp::LogicalAnd, req_expr, not_rst),
+        ));
+        module.instances[idx]
+            .connections
+            .insert(NCL_REQ_PORT.to_string(), signal_ref(req_q));
 
         // Acknowledge: two-flop synchroniser into the parent's domain, only
         // when the parent reads it
-        if let Some(read) = module.instances[idx].connections.get(NCL_ACK_PORT).cloned() {
+        if let Some(read) = read_ack {
             let ExpressionKind::Ref(read_lv) = read.kind else {
                 errors.push(format!(
                     "in `{}`: `{}.{}` is connected to an expression; read it as a signal",
@@ -595,20 +711,9 @@ fn bridge_module(
                 ));
                 continue;
             };
-            let raw = new_signal(module, ACK_RAW_SUFFIX);
             let s1 = new_signal(module, ACK_SYNC_SUFFIX);
-            module.instances[idx].connections.insert(
-                NCL_ACK_PORT.to_string(),
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(raw))),
-            );
-            statements.push(nonblocking(
-                LValue::Signal(s1),
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(raw))),
-            ));
-            statements.push(nonblocking(
-                read_lv,
-                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(s1))),
-            ));
+            statements.push(nonblocking(LValue::Signal(s1), signal_ref(ack_raw)));
+            statements.push(nonblocking(read_lv, signal_ref(s1)));
         }
     }
 
@@ -638,6 +743,18 @@ fn bridge_module(
     } else {
         Err(errors)
     }
+}
+
+fn signal_ref(id: SignalId) -> Expression {
+    Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(id)))
+}
+
+fn binary(op: crate::mir::BinaryOp, left: Expression, right: Expression) -> Expression {
+    Expression::with_unknown_type(ExpressionKind::Binary {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
 }
 
 fn nonblocking(lhs: LValue, rhs: Expression) -> Statement {

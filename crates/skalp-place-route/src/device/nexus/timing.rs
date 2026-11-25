@@ -493,11 +493,19 @@ impl TimingDb {
     /// `destination`, by its prjoxide PIP class (0 for a class with no
     /// timing data)
     pub fn pip_delay_ps(&self, source: &str, destination: &str) -> i64 {
+        self.pip_delay(source, destination).unwrap_or(0)
+    }
+
+    /// Delay of the switch from wire `source` to wire `destination`, or the
+    /// delay class the tables have no entry for (the wires' base names where
+    /// the switch has no class)
+    pub fn pip_delay(&self, source: &str, destination: &str) -> std::result::Result<i64, String> {
         let (sx, sy, source) = wire_parts(source);
         let (dx, dy, destination) = wire_parts(destination);
-        prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination)
-            .and_then(|class| self.pip_classes.get(&class).copied())
-            .unwrap_or(0)
+        match prjoxide::pip_classes::classify_pip(0, 0, &source, dx - sx, dy - sy, &destination) {
+            Some(class) => self.pip_classes.get(&class).copied().ok_or(class),
+            None => Err(format!("{source} -> {destination} (no class)")),
+        }
     }
 }
 
@@ -657,6 +665,13 @@ impl TimingModel for NexusTiming<'_> {
             return 0;
         };
         self.db.pip_delay_ps(&src.name, &dst.name)
+    }
+
+    fn untimed_pip(&self, pip: PipId) -> Option<String> {
+        let info = self.device.pip(pip)?;
+        let src = self.device.wire(info.src_wire)?;
+        let dst = self.device.wire(info.dst_wire)?;
+        self.db.pip_delay(&src.name, &dst.name).err()
     }
 
     fn launch_ps(&self, cell: &Cell, output: usize) -> Option<i64> {

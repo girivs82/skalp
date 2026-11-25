@@ -1,0 +1,49 @@
+// `match exclusive(..)` with a `_ if` arm: refused
+
+async entity ExbSource {
+    out q: stream<bit[8]>
+}
+impl ExbSource {
+    signal n: bit[8] = 1
+    on() {
+        q.send(n)
+        n = n + 8'h01
+    }
+}
+
+async entity ExbDefault {
+    in a: stream<bit[8]>
+    in b: stream<bit[8]>
+    out count: bit[16]
+}
+impl ExbDefault {
+    signal c: bit[16] = 0
+    count = c
+    on() {
+        match exclusive(a, b) {
+            0 => {
+                let x: bit[8] = a.recv()
+            }
+            1 => {
+                let y: bit[8] = b.recv()
+            }
+            _ if c[0] == 1 => {
+                c = c + 16'h0001
+            }
+        }
+    }
+}
+
+entity ExbTop {
+    in clk: clock
+    in run: bit
+    out count: bit[16]
+}
+impl ExbTop {
+    signal req: bit = 0
+    inst sa = ExbSource { ncl_req: req }
+    inst sb = ExbSource { ncl_req: req }
+    inst m = ExbDefault { a: sa.q, b: sb.q, ncl_req: req }
+    on(clk.rise) { req = run }
+    count = m.count
+}

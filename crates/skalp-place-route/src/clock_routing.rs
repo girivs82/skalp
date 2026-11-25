@@ -219,11 +219,18 @@ enum NoEntry {
 /// the nearest one the fabric reaches is taken, however many entries other
 /// clocks hold. A sink with no free entry above it is reported at once:
 /// general routing could not reach it either.
+///
+/// The nearest entry whose whole route (fabric path and the dedicated paths
+/// to every sink) uses only switches the timing data has a delay for wins
+/// over a nearer one that does not: a switch with no delay is timed as 0 ps,
+/// so every clock edge through it would arrive later on silicon than the
+/// analysis says. Only when no entry is fully timed is the nearest taken.
 fn enter_network<D: Device + ?Sized>(
     device: &D,
     source: WireId,
     sinks: &[WireId],
     other_nets: &HashMap<WireId, GateNetId>,
+    is_untimed: &dyn Fn(PipId) -> bool,
 ) -> std::result::Result<NetworkEntry, NoEntry> {
     // Wires that reach each sink on their own reach them all together:
     // the paths belong to one net, so they may share wires.
@@ -249,8 +256,13 @@ fn enter_network<D: Device + ?Sized>(
     let mut came_from: HashMap<WireId, PipId> = HashMap::new();
     let mut seen: HashSet<WireId> = HashSet::from_iter([source]);
     let mut queue = VecDeque::from([source]);
+    // The nearest entry, kept in case no entry is timed all the way
+    let mut nearest: Option<NetworkEntry> = None;
+    // Entries not yet looked at: once all have been, the search can stop
+    let mut left = common.len();
     while let Some(wire) = queue.pop_front() {
         if wire != source && common.contains(&wire) {
+            left -= 1;
             let reached = reach_from(device, wire, other_nets);
             if !sinks.iter().all(|s| *s == wire || reached.contains_key(s)) {
                 // Cannot happen: each sink was reached from this wire
@@ -269,10 +281,19 @@ fn enter_network<D: Device + ?Sized>(
                     .ok_or(NoEntry::NoCommonEntry)?;
             }
             path.reverse();
-            return Ok((path, wire, reached));
+            let entry = (path, wire, reached);
+            if entry_is_timed(device, &entry, sinks, is_untimed) {
+                return Ok(entry);
+            }
+            if nearest.is_none() {
+                nearest = Some(entry);
+            }
+            if left == 0 {
+                break;
+            }
         }
         if seen.len() > MAX_ENTRY_SEARCH {
-            return Err(NoEntry::NoCommonEntry);
+            break;
         }
         for &pip_id in device.wire_src_pips(wire) {
             let Some(pip) = device.pip(pip_id) else {
@@ -285,14 +306,50 @@ fn enter_network<D: Device + ?Sized>(
             queue.push_back(pip.dst_wire);
         }
     }
-    Err(NoEntry::NoCommonEntry)
+    nearest.ok_or(NoEntry::NoCommonEntry)
+}
+
+/// Whether every switch of a way into the network (its fabric path, and
+/// the dedicated paths from its entry to each of `sinks`) has a delay in
+/// the timing data
+fn entry_is_timed<D: Device + ?Sized>(
+    device: &D,
+    (path, entry, reached): &NetworkEntry,
+    sinks: &[WireId],
+    is_untimed: &dyn Fn(PipId) -> bool,
+) -> bool {
+    if path.iter().any(|&pip| is_untimed(pip)) {
+        return false;
+    }
+    let mut checked: HashSet<WireId> = HashSet::from_iter([*entry]);
+    for &sink in sinks {
+        let mut cursor = sink;
+        while checked.insert(cursor) {
+            let Some(&pip) = reached.get(&cursor) else {
+                break;
+            };
+            if is_untimed(pip) {
+                return false;
+            }
+            let Some(info) = device.pip(pip) else {
+                break;
+            };
+            cursor = info.src_wire;
+        }
+    }
+    true
 }
 
 /// Route every clock pin of a design prepared for routing.
+///
+/// `is_untimed` tells the switches the timing data has no delay for; a clock
+/// made in the fabric enters the network where it avoids them, if it can
+/// (see [`enter_network`]).
 pub fn route_clock_nets<D: Device + ?Sized>(
     device: &D,
     netlist: &GateNetlist,
     placement: &PlacementResult,
+    is_untimed: &dyn Fn(PipId) -> bool,
 ) -> Result<ClockRouting> {
     let mut routing = ClockRouting::default();
     let mut owners: HashMap<WireId, GateNetId> = HashMap::new();
@@ -352,15 +409,16 @@ pub fn route_clock_nets<D: Device + ?Sized>(
             // No dedicated path from the source itself: enter the network
             // through the fabric.
             let (entry_path, entry, entry_reached) = match enter_network(
-                device, source, &sinks, &owners,
+                device, source, &sinks, &owners, is_untimed,
             ) {
                 Ok(entry) => entry,
                 Err(NoEntry::Unreachable(sink)) => {
-                    stranded.push(format!(
-                        "'{}' (clock pin {})",
+                    log::info!(
+                        "clock net '{}' cannot reach clock pin {}",
                         net.name,
                         device.wire(sink).map_or("?", |w| w.name.as_str())
-                    ));
+                    );
+                    stranded.push(net.name.clone());
                     continue;
                 }
                 Err(NoEntry::NoCommonEntry) => {
@@ -503,16 +561,10 @@ pub fn route_clock_nets<D: Device + ?Sized>(
         // General routing would search for these until it gave up: on this
         // device the pins take their clock from the dedicated network only,
         // and every way onto it that leads to them is in use.
-        return Err(PlaceRouteError::RoutingFailed(format!(
-            "{} clock net(s) cannot reach their clock pins: {}. Those pins take their clock \
-             from the dedicated clock network only, and every entry to it that leads there \
-             already carries one of the {} clocks routed before them. Use fewer clocks \
-             (clock enables on a shared clock, say), or give the clock a source on the \
-             network (a clock pin or a PLL output)",
-            stranded.len(),
-            stranded.join(", "),
-            routing.routes.len()
-        )));
+        return Err(PlaceRouteError::ClockEntriesExhausted {
+            nets: stranded,
+            routed: routing.routes.len(),
+        });
     }
     Ok(routing)
 }
@@ -659,7 +711,8 @@ mod tests {
             .expect("a left-edge pad with no dedicated clock path");
 
         let (path, entry, reached) =
-            enter_network(&device, pad, &sinks, &HashMap::new()).expect("an entry point");
+            enter_network(&device, pad, &sinks, &HashMap::new(), &|_| false)
+                .expect("an entry point");
         assert!(path.len() <= 8, "{} fabric PIPs", path.len());
         assert!(!device.is_general_routing_wire(entry));
         for sink in sinks {
@@ -716,7 +769,7 @@ mod tests {
             "{} entries reach both sinks",
             common.len()
         );
-        let (_, nearest, _) = enter_network(&device, source, &sinks, &free).unwrap();
+        let (_, nearest, _) = enter_network(&device, source, &sinks, &free, &|_| false).unwrap();
 
         // Another clock holds every entry but the one farthest from the
         // nearest (by tile), so the search passes all the others first
@@ -741,7 +794,7 @@ mod tests {
             .map(|&w| (w, other))
             .collect();
         let (path, entry, reached) =
-            enter_network(&device, source, &sinks, &taken).expect("the free entry");
+            enter_network(&device, source, &sinks, &taken, &|_| false).expect("the free entry");
         assert_eq!(entry, farthest);
         assert!(path
             .iter()
@@ -749,6 +802,39 @@ mod tests {
         for sink in sinks {
             assert!(reached.contains_key(&sink));
         }
+    }
+
+    /// A clock made in the fabric enters the network past a nearer entry
+    /// whose switches the timing data has no delay for, and takes the
+    /// nearest entry only when no entry is timed all the way.
+    #[test]
+    fn a_clock_enters_where_every_switch_is_timed() {
+        let Some(db) = find_database() else {
+            eprintln!("PRJOXIDE_DB not found — skipping");
+            return;
+        };
+        let device = NexusDevice::from_prjoxide_bbox(NexusVariant::Lfcpnx100, &db, (0, 0, 80, 60))
+            .expect("build device");
+        let wire = |x, y, name: &str| {
+            device
+                .wire_by_name(&node_name(&resolve_wire(x, y, name).unwrap()))
+                .unwrap()
+        };
+        let source = wire(30, 30, "JF0");
+        let sinks = [wire(40, 20, "JCLK_SLICEA"), wire(60, 50, "JCLK_SLICEB")];
+        let free = HashMap::new();
+        let (_, nearest, _) = enter_network(&device, source, &sinks, &free, &|_| false).unwrap();
+
+        // Every switch out of the nearest entry has no delay
+        let untimed = |pip: PipId| device.pip(pip).is_some_and(|p| p.src_wire == nearest);
+        let entry = enter_network(&device, source, &sinks, &free, &untimed).unwrap();
+        assert_ne!(entry.1, nearest);
+        assert!(entry_is_timed(&device, &entry, &sinks, &untimed));
+        assert!(!entry.0.iter().any(|&p| untimed(p)));
+
+        // Nothing timed anywhere: the nearest entry still routes the clock
+        let (_, fallback, _) = enter_network(&device, source, &sinks, &free, &|_| true).unwrap();
+        assert_eq!(fallback, nearest);
     }
 
     /// With every entry above a clock pin held by other clocks, the pin
@@ -775,7 +861,7 @@ mod tests {
             .map(|w| (w, other))
             .collect();
         assert!(entries_to(&device, sinks[1], &taken).is_empty());
-        match enter_network(&device, source, &sinks, &taken) {
+        match enter_network(&device, source, &sinks, &taken, &|_| false) {
             Err(NoEntry::Unreachable(sink)) => assert!(sinks.contains(&sink)),
             other => panic!("expected an unreachable sink, got {:?}", other.map(|r| r.1)),
         }

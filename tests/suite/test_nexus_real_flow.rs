@@ -103,6 +103,7 @@ fn async_block_registers_are_hold_checked() {
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true,
+            ..Default::default()
         },
     );
     let library = skalp_lir::get_stdlib_library("nexus").unwrap();

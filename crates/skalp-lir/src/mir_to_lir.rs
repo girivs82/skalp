@@ -346,6 +346,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -429,6 +430,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -578,6 +580,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
@@ -693,6 +696,13 @@ impl MirToLirTransform {
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_lir_signal.insert(signal.id, signal_id);
+        // A reset made inside the module (`signal r: reset(active_high)`,
+        // driven by logic) resets registers as a reset port does: without
+        // this, `on(clk.rise | r.active)` lost its asynchronous reset
+        if let DataType::Reset { active_high, .. } = signal.signal_type {
+            self.reset_signals.push(signal_id);
+            self.reset_active_high.insert(signal_id, active_high);
+        }
         // BUG #237 FIX: Track by position for monomorphized module lookups
         self.signal_by_position.push(signal_id);
 
@@ -5358,6 +5368,29 @@ impl MirToLirTransform {
     }
 
     /// Record each register's power-up value on its LIR signal.
+    /// Turn self-referencing assignments (`l = if g { d } else { l }`) into
+    /// latches, and report any other combinational loop: synthesis cannot
+    /// order one, so it would not be built as written.
+    fn infer_latches(&mut self) {
+        for latch in crate::latch_inference::infer_latches(&mut self.lir) {
+            if latch.initial.is_some() {
+                // A latch built from logic has no power-up value: it holds
+                // whatever its loop settles to until it is first opened
+                self.warnings.push(format!(
+                    "latch '{}' has an initial value, but a latch has no power-up value: \
+                     open it to load one",
+                    latch.signal
+                ));
+            }
+        }
+        for signals in crate::latch_inference::combinational_loops(&self.lir) {
+            self.warnings.push(format!(
+                "combinational loop through {signals}: it holds no register or latch, \
+                 so synthesis cannot build it as written"
+            ));
+        }
+    }
+
     fn record_initial_values(&mut self, module: &Module) {
         for signal in &module.signals {
             let value = match signal.initial {

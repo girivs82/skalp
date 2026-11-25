@@ -64,6 +64,7 @@ async fn test_boundary_ncl_lir_expansion() {
         completion_tree_depth: None,
         generate_null_wavefront: true,
         use_opaque_arithmetic: true,
+        ..Default::default()
     };
 
     println!("\nExpanding to NCL with boundary_only=true...");
@@ -141,6 +142,7 @@ async fn test_boundary_ncl_gate_level() {
         completion_tree_depth: None,
         generate_null_wavefront: true,
         use_opaque_arithmetic: true,
+        ..Default::default()
     };
 
     println!("Step 1: Expanding to boundary-only NCL...");

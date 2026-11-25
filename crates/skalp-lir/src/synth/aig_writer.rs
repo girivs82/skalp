@@ -2188,8 +2188,20 @@ pub fn push_inverters_into_producing_luts(netlist: &mut GateNetlist) -> usize {
             continue;
         };
 
-        // Producer must be a LUT whose table can be complemented
-        if netlist.cells[producer_idx].lut_variables().is_none() {
+        // Producer must be a LUT whose table can be complemented, and not an
+        // inverter itself: that one may be removed into its own producer in
+        // this same pass, leaving the net this inverter's readers would be
+        // moved to without a driver (a double inversion, `!!x`, in front of
+        // a register)
+        let producer = &netlist.cells[producer_idx];
+        let producer_is_inv = producer
+            .function
+            .as_ref()
+            .is_some_and(|f| matches!(f, CellFunction::Inv))
+            || (producer.cell_type.contains("INV")
+                && producer.inputs.len() == 1
+                && producer.outputs.len() == 1);
+        if producer.lut_variables().is_none() || producer_is_inv {
             continue;
         }
 
@@ -2720,6 +2732,76 @@ mod tests {
         assert_eq!(n.cells[0].lut_init, Some(0x7777));
         assert_eq!(n.outputs, vec![y]);
         assert_eq!(n.nets[y.0 as usize].name, "y");
+    }
+
+    /// `!!x` in front of a register, the inverters LUTs: the first folds
+    /// into the LUT that drives it, and the second stays, so the register
+    /// still has a driven input (it used to fold into the first and leave
+    /// the register reading a net nothing drove)
+    #[test]
+    fn double_inversion_before_a_register_keeps_its_driver() {
+        let mut n = GateNetlist::new("t".to_string(), "ice40".to_string());
+        let clk = n.add_input("clk".to_string());
+        let a = n.add_input("a".to_string());
+        let b = n.add_input("b".to_string());
+        let q = n.add_output("q".to_string());
+        let out = n.add_net(GateNet::new(GateNetId(0), "out".to_string()));
+        let once = n.add_net(GateNet::new(GateNetId(0), "once".to_string()));
+        let twice = n.add_net(GateNet::new(GateNetId(0), "twice".to_string()));
+        n.add_cell(Cell::new_lut(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "lut".to_string(),
+            vec![a, b],
+            vec![out],
+            0x8888,
+        ));
+        for (name, from, to) in [("inv1", out, once), ("inv2", once, twice)] {
+            let mut not = Cell::new_lut(
+                CellId(0),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                name.to_string(),
+                vec![from],
+                vec![to],
+                0x5555,
+            );
+            not.function = Some(CellFunction::Inv);
+            n.add_cell(not);
+        }
+        let mut ff = Cell::new_comb(
+            CellId(0),
+            "SB_DFF".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "ff".to_string(),
+            vec![twice],
+            vec![q],
+        );
+        ff.clock = Some(clk);
+        n.add_cell(ff);
+
+        push_inverters_into_producing_luts(&mut n);
+        n.rebuild_net_connectivity();
+        assert!(n.undriven_nets_with_fanout().is_empty());
+        // The register still reads `a & b`: the LUT and whatever inverters
+        // are left between it and the register
+        let mut net = n.cells.iter().find(|c| c.path == "ff").unwrap().inputs[0];
+        let mut inversions = 0;
+        loop {
+            let driver = n.cells.iter().find(|c| c.outputs.contains(&net)).unwrap();
+            if driver.path == "lut" {
+                let flipped = driver.lut_init == Some(0x7777);
+                assert_eq!((inversions + usize::from(flipped)) % 2, 0);
+                break;
+            }
+            assert_eq!(driver.function, Some(CellFunction::Inv));
+            inversions += 1;
+            net = driver.inputs[0];
+        }
     }
 
     #[test]

@@ -301,6 +301,19 @@ enum Commands {
         /// not safe to use
         #[arg(long, value_name = "TIME")]
         settle_wait: Option<String>,
+
+        /// Where a bundled-data async block keeps its state: `ff`, flip-flops
+        /// clocked by the block's step strobe (on FPGAs whose flip-flop clock
+        /// pins only the clock network reaches, one network entry per block);
+        /// `latch`, master-slave pairs of latches built from logic; `pulse`,
+        /// one latch per bit opened by a short pulse; or `pulsed-ms`,
+        /// master-slave pairs whose masters open only for that pulse
+        /// (latches need no clock network). `auto` (the default) uses
+        /// flip-flops while the clock network has room for the strobes, and
+        /// when it runs out moves the blocks with the least state to `pulse`
+        /// latches, a round at a time, until the strobes fit
+        #[arg(long, value_name = "KIND", default_value = "auto", value_parser = ["auto", "ff", "latch", "pulse", "pulsed-ms"])]
+        async_state: String,
     },
 
     /// Run place and route on an existing gate-level netlist
@@ -932,20 +945,42 @@ fn main() -> Result<()> {
             power_stub,
             debug,
             settle_wait,
+            async_state,
         } => {
-            synthesize_design(
-                &source,
-                &device,
-                full_flow,
-                &output,
-                &optimize,
-                &pnr_preset,
-                frequency,
-                emit.as_deref(),
-                power_stub,
-                debug,
-                settle_wait.as_deref(),
-            )?;
+            let fixed = match async_state.as_str() {
+                "latch" => Some(skalp_lir::AsyncState::MasterSlaveLatch),
+                "pulse" => Some(skalp_lir::AsyncState::PulseLatch),
+                "pulsed-ms" => Some(skalp_lir::AsyncState::PulsedMasterSlave),
+                "ff" => Some(skalp_lir::AsyncState::FlipFlop),
+                _ => None,
+            };
+            let mut plan = match fixed {
+                Some(state) => AsyncStatePlan::fixed(state),
+                None => AsyncStatePlan::auto(),
+            };
+            loop {
+                let result = synthesize_design(
+                    &source,
+                    &device,
+                    full_flow,
+                    &output,
+                    &optimize,
+                    &pnr_preset,
+                    frequency,
+                    emit.as_deref(),
+                    power_stub,
+                    debug,
+                    settle_wait.as_deref(),
+                    &mut plan,
+                );
+                match result {
+                    Err(e) => match plan.after_failure(&e) {
+                        Some(note) => println!("\n{note}\n"),
+                        None => return Err(e),
+                    },
+                    Ok(()) => break,
+                }
+            }
         }
 
         Commands::Pnr {
@@ -1659,6 +1694,8 @@ fn build_design(
                         completion_tree_depth: None,
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
+                        async_state: skalp_lir::AsyncState::FlipFlop,
+                        latch_blocks: None,
                     };
                     skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
                 } else {
@@ -1719,6 +1756,8 @@ fn build_design(
                         completion_tree_depth: None,
                         generate_null_wavefront: true,
                         use_opaque_arithmetic: true,
+                        async_state: skalp_lir::AsyncState::FlipFlop,
+                        latch_blocks: None,
                     };
                     let ncl_result =
                         skalp_lir::expand_to_ncl_boundary(&lir_result.lir, &ncl_config);
@@ -4781,6 +4820,83 @@ fn synthesis_cache() -> Option<skalp_lir::synth_cache::SynthCache> {
     skalp_lir::synth_cache::SynthCache::new(dir)
 }
 
+/// Where `skalp synth` keeps the state of bundled-data async blocks, and
+/// how `--async-state auto` changes that between attempts
+struct AsyncStatePlan {
+    /// The latch kind for the blocks in `latch_blocks`
+    state: skalp_lir::AsyncState,
+    /// The blocks that keep their state as `state`; `None`: all of them
+    latch_blocks: Option<std::collections::BTreeSet<String>>,
+    /// Whether to move blocks to latches when the clock network runs out
+    auto: bool,
+    /// The blocks that could move, fewest latch bits first (filled by the
+    /// first attempt)
+    candidates: Option<Vec<skalp_lir::LatchCandidate>>,
+}
+
+impl AsyncStatePlan {
+    /// Every block keeps its state as `state`
+    fn fixed(state: skalp_lir::AsyncState) -> Self {
+        Self {
+            state,
+            latch_blocks: None,
+            auto: false,
+            candidates: None,
+        }
+    }
+
+    /// Flip-flops until the clock network runs out, then pulsed latches
+    fn auto() -> Self {
+        Self {
+            state: skalp_lir::AsyncState::PulseLatch,
+            latch_blocks: Some(Default::default()),
+            auto: true,
+            candidates: None,
+        }
+    }
+
+    /// After a failed attempt: when strobes found no way onto the clock
+    /// network, move as many more blocks to latches as strobes were left
+    /// over, those with the least state first, and say what moved. `None`:
+    /// the failure is final.
+    fn after_failure(&mut self, error: &anyhow::Error) -> Option<String> {
+        if !self.auto {
+            return None;
+        }
+        let stranded = error.chain().find_map(|cause| match cause
+            .downcast_ref::<skalp_place_route::PlaceRouteError>()
+        {
+            Some(skalp_place_route::PlaceRouteError::ClockEntriesExhausted { nets, .. }) => {
+                Some(nets.len())
+            }
+            _ => None,
+        })?;
+        let latched = self.latch_blocks.get_or_insert_with(Default::default);
+        let moved: Vec<&skalp_lir::LatchCandidate> = self
+            .candidates
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| !latched.contains(&c.path))
+            .take(stranded)
+            .collect();
+        if moved.is_empty() {
+            return None;
+        }
+        let names: Vec<String> = moved
+            .iter()
+            .map(|c| format!("{} ({} latch bits)", c.path, c.latch_bits))
+            .collect();
+        latched.extend(moved.iter().map(|c| c.path.clone()));
+        Some(format!(
+            "⚠️  {stranded} async step strobe(s) found no room on the clock network; \
+             keeping the state of {} as pulsed latches and building again \
+             (--async-state ff turns this off)",
+            names.join(", ")
+        ))
+    }
+}
+
 /// Synthesize design for FPGA target
 #[allow(clippy::too_many_arguments)]
 fn synthesize_design(
@@ -4795,6 +4911,7 @@ fn synthesize_design(
     power_stub: bool,
     debug: bool,
     settle_wait: Option<&str>,
+    plan: &mut AsyncStatePlan,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context_for_device;
     use skalp_lir::get_stdlib_library;
@@ -4945,7 +5062,12 @@ fn synthesize_design(
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true,
+            async_state: plan.state,
+            latch_blocks: plan.latch_blocks.clone(),
         };
+        if plan.auto && plan.candidates.is_none() {
+            plan.candidates = Some(skalp_lir::latch_candidates(&hier_lir, plan.state));
+        }
         skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
     } else {
         hier_lir
@@ -5278,6 +5400,7 @@ fn run_nexus_pnr_on_netlist(
             }
         }
         print_matched_delays(timing, gate_netlist.settle_wait_ps);
+        print_untimed_switches(timing);
         let timing_path = output_dir.join("timing_report.json");
         fs::write(&timing_path, serde_json::to_string_pretty(timing)?)?;
         println!("Timing report: {:?}", timing_path);
@@ -5378,7 +5501,7 @@ fn shorten_long_matched_delays(
         let checks: Vec<_> = timing
             .bundles
             .iter()
-            .filter(|b| &b.delay == path && b.times != skalp_lir::ncl_bundle::REGISTER_HOLD)
+            .filter(|b| &b.delay == path && !skalp_lir::ncl_bundle::is_report_only(&b.times))
             .collect();
         if checks.is_empty() || md.chain.len() <= 1 {
             continue;
@@ -5445,11 +5568,12 @@ fn lengthen_short_matched_delays(
     };
     let matched = skalp_lir::ncl_bundle::find_matched_delays(netlist);
     let mut changed = false;
-    // A longer delay cannot fix an in-block hold: that is reported only
+    // A longer delay cannot fix an in-block hold or a latch race: those are
+    // reported only
     for b in timing
         .bundles
         .iter()
-        .filter(|b| b.slack_ns < 0.0 && b.times != skalp_lir::ncl_bundle::REGISTER_HOLD)
+        .filter(|b| b.slack_ns < 0.0 && !skalp_lir::ncl_bundle::is_report_only(&b.times))
     {
         let Some(md) = matched
             .iter()
@@ -5690,6 +5814,32 @@ fn run_pnr_on_netlist(
 
 /// Report the matched delays of bundled-data async blocks, checked with
 /// routed delays
+/// Routed switches the device's timing data has no delay for: every timing
+/// figure above (and a timed simulation of the build) counts them as 0 ps
+fn print_untimed_switches(timing: &skalp_place_route::timing::TimingReport) {
+    if timing.untimed_switches.is_empty() {
+        return;
+    }
+    let nets: usize = timing.untimed_switches.iter().map(|u| u.nets).sum();
+    println!(
+        "  ⚠️ Untimed switches: {} delay classes routed with no delay in the device data, timed as 0 ps (paths through them run slower on silicon than reported):",
+        timing.untimed_switches.len()
+    );
+    for u in timing.untimed_switches.iter().take(20) {
+        println!(
+            "      {}: {} switches on {} nets (e.g. {})",
+            u.class, u.switches, u.nets, u.example_net
+        );
+    }
+    if timing.untimed_switches.len() > 20 {
+        println!(
+            "      ... and {} more classes ({} net uses in all)",
+            timing.untimed_switches.len() - 20,
+            nets
+        );
+    }
+}
+
 fn print_matched_delays(
     timing: &skalp_place_route::timing::TimingReport,
     settle_wait_ps: Option<i64>,
@@ -9181,7 +9331,11 @@ struct Stimulus {
 #[derive(clap::Args, Debug, Clone, Default)]
 struct TimedOptions {
     /// Delay corner to simulate, such as slow or fast; by default the
-    /// first the build has (slow where there are several)
+    /// first the build has (slow where there are several). `between:K`
+    /// takes every delay a fraction K (0 to 1) of the way from the fast to
+    /// the slow corner, where real silicon usually sits: measure K with a
+    /// ring oscillator on the chip against the same ring simulated at both
+    /// corners, in delay (period), not frequency.
     #[arg(long)]
     corner: Option<String>,
     /// What nets hold at power-up, before cells drive them: zero (the
@@ -9419,7 +9573,25 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
         serde_json::from_reader(read(&netlist_path)?).context("reading the routed netlist")?;
     let corners: Vec<DelayAnnotation> =
         serde_json::from_reader(read(&delays_path)?).context("reading the routed delays")?;
+    let mixed;
     let delays = match args.timed.corner.as_deref() {
+        Some(corner) if corner.starts_with("between:") => {
+            let k: f64 = corner["between:".len()..]
+                .parse()
+                .context("--corner between:K needs a number")?;
+            if !(0.0..=1.0).contains(&k) {
+                anyhow::bail!("--corner between:K needs K from 0 (fast) to 1 (slow)");
+            }
+            let named = |name: &str| {
+                corners
+                    .iter()
+                    .find(|d| d.corner == name)
+                    .with_context(|| format!("--corner between:K needs a '{name}' corner"))
+            };
+            mixed = DelayAnnotation::between(named("fast")?, named("slow")?, k)
+                .map_err(anyhow::Error::msg)?;
+            &mixed
+        }
         Some(corner) => corners
             .iter()
             .find(|d| d.corner == corner)
@@ -9881,6 +10053,31 @@ fn run_timed_sim(args: &TimedSimArgs) -> Result<()> {
                 *worst as f64 / 1e3,
                 first.time_ps as f64 / 1e3
             );
+        }
+    }
+
+    // Exclusive merges whose promise broke: two channels full at once
+    if sim.exclusive_merge_count() > 0 {
+        let clashes = sim.exclusive_clash_count();
+        if clashes == 0 {
+            println!(
+                "Exclusive merges: ✅ {} merges, never two grants at once",
+                sim.exclusive_merge_count()
+            );
+        } else {
+            println!(
+                "Exclusive merges: ❌ {clashes} times two channels of one merge held a value at once"
+            );
+            const DEFAULT_SHOWN: usize = 20;
+            let shown = args.timed.violations.unwrap_or(DEFAULT_SHOWN);
+            for c in sim.exclusive_clashes().iter().take(shown) {
+                println!(
+                    "  {:>14.3} ns  {} arms {:?}",
+                    c.time_ps as f64 / 1e3,
+                    c.merge,
+                    c.arms
+                );
+            }
         }
     }
 
