@@ -6421,6 +6421,10 @@ impl<'a> ParseState<'a> {
             | Some(SyntaxKind::DiffTermKw)
             | Some(SyntaxKind::SchmittKw)
             | Some(SyntaxKind::BankKw)
+            | Some(SyntaxKind::InstancesKw)
+            | Some(SyntaxKind::BoundaryKw)
+            | Some(SyntaxKind::KeepTogetherKw)
+            | Some(SyntaxKind::PreferredRegionKw)
             | Some(SyntaxKind::Ident) => {
                 // Accept identifiers as constraint keys (e.g., "voltage")
                 self.bump();
@@ -6495,8 +6499,39 @@ impl<'a> ParseState<'a> {
                 self.bump();
                 self.finish_node();
             }
+            Some(SyntaxKind::LParen) => {
+                // Tuple of numbers, each with an optional unit:
+                // `area: (5%, 10%, 30%, 40%)`
+                self.start_node(SyntaxKind::ConstraintTuple);
+                self.bump(); // '('
+
+                while !self.at(SyntaxKind::RParen) && !self.is_at_end() {
+                    self.skip_trivia();
+
+                    if self.at(SyntaxKind::RParen) {
+                        break;
+                    }
+
+                    if !self.at(SyntaxKind::IntLiteral) && !self.at(SyntaxKind::FloatLiteral) {
+                        self.error_and_bump("expected a number");
+                        continue;
+                    }
+                    self.bump();
+                    if self.at(SyntaxKind::Percent) || self.at(SyntaxKind::Ident) {
+                        self.bump(); // optional unit
+                    }
+
+                    if self.at(SyntaxKind::Comma) {
+                        self.bump();
+                    }
+                }
+
+                self.expect(SyntaxKind::RParen);
+                self.finish_node();
+            }
             Some(SyntaxKind::LBracket) => {
-                // Array of pins: ["A1", "A2", "A3"]
+                // Array of pins (`["A1", "A2", "A3"]`) or of names, which
+                // may be hierarchical (`[counter, core.alu]`)
                 self.start_node(SyntaxKind::PinArray);
                 self.bump(); // '['
 
@@ -6507,7 +6542,15 @@ impl<'a> ParseState<'a> {
                         break;
                     }
 
-                    self.expect(SyntaxKind::StringLiteral);
+                    if self.at(SyntaxKind::Ident) {
+                        self.bump();
+                        while self.at(SyntaxKind::Dot) {
+                            self.bump();
+                            self.expect(SyntaxKind::Ident);
+                        }
+                    } else {
+                        self.expect(SyntaxKind::StringLiteral);
+                    }
 
                     if self.at(SyntaxKind::Comma) {
                         self.bump();
@@ -6598,7 +6641,7 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
-    /// Parse region block: region "name" { area: (10, 10, 30, 30), ... }
+    /// Parse region block: region "name" { area: (10%, 10%, 30%, 30%), ... }
     fn parse_region_block(&mut self) {
         self.start_node(SyntaxKind::RegionBlock);
 
@@ -6614,10 +6657,15 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            let before = self.current;
             self.parse_constraint_pair();
 
             if self.at(SyntaxKind::Comma) {
                 self.bump();
+            }
+            // A pair that consumed nothing would loop forever; force progress.
+            if self.current == before {
+                self.error_and_bump("expected region constraint");
             }
         }
 

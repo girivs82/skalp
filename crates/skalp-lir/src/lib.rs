@@ -30,6 +30,7 @@ pub mod async_sta;
 pub mod async_sta_fix;
 pub mod carry_chain;
 pub mod compiled_ip;
+pub mod floorplan;
 pub mod gate_lut_opt;
 pub mod gate_netlist;
 pub mod gate_optimizer;

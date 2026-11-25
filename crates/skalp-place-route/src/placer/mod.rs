@@ -348,6 +348,11 @@ impl<D: Device + Clone> Placer<D> {
     ) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        // The source's floorplan, in this device's tiles
+        let (width, height) = self.device.grid_size();
+        self.config
+            .io_constraints
+            .add_floorplan(&netlist.floorplan, width, height);
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",
@@ -563,6 +568,11 @@ impl<D: Device + Clone> Placer<D> {
     pub fn place(&mut self, netlist: &GateNetlist) -> Result<PlacementResult> {
         // Check device capacity
         self.check_capacity(netlist)?;
+        // The source's floorplan, in this device's tiles
+        let (width, height) = self.device.grid_size();
+        self.config
+            .io_constraints
+            .add_floorplan(&netlist.floorplan, width, height);
         let fill_limit = self.fill_limit(netlist);
         log::info!(
             "placer: filling tiles to at most {:.0}%",

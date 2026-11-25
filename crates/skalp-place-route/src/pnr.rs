@@ -710,6 +710,14 @@ pub fn place_and_route_nexus_real_from(
     let ddr_blocks = crate::device::nexus::ddr::analyze(netlist, &ddr_primitives, &prepare::is_pad)
         .map_err(PlaceRouteError::PlacementFailed)?;
     let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
+    // The source's floorplan, in the die's tiles: the device window loaded
+    // below must cover its regions
+    let mut config = config;
+    let (width, height) = variant.grid_size();
+    config
+        .placer
+        .io_constraints
+        .add_floorplan(&netlist.floorplan, width, height);
     let packages =
         sites::package_pins(db_root, variant, &tiles).map_err(PlaceRouteError::BitstreamFailed)?;
     let pad_sites: Vec<(u32, u32)> = netlist
@@ -2325,6 +2333,63 @@ mod tests {
             .constrain_to_region("nothing.here", "nw");
         let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
         assert!(placer.place(&netlist).is_err());
+    }
+
+    /// The netlist's own floorplan (regions in percent of the die) holds
+    /// the cells it names inside the tiles its percentages cover, and a
+    /// member with no cells of its own is an error
+    #[test]
+    fn test_netlist_floorplan_holds_cells_in_its_regions() {
+        use crate::device::Device;
+        use skalp_lir::floorplan::{FloorplanMember, FloorplanRegion};
+        let mut netlist = create_mesh_netlist(60);
+        for i in 0..4 {
+            netlist.cells[i].path = format!("top.Mesh.ring_{i}.lat0");
+        }
+        let ring = |i: usize| FloorplanMember::Signal {
+            instance: "top".into(),
+            entity: "Mesh".into(),
+            signal: format!("ring_{i}"),
+        };
+        netlist.floorplan = vec![
+            FloorplanRegion {
+                name: "low".into(),
+                area: (0.0, 0.0, 20.0, 20.0),
+                members: vec![ring(0), ring(2)],
+            },
+            FloorplanRegion {
+                name: "high".into(),
+                area: (80.0, 80.0, 100.0, 100.0),
+                members: vec![ring(1), ring(3)],
+            },
+        ];
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let (width, height) = device.grid_size();
+        let mut placer = Placer::new(PlacerConfig::default(), device);
+        let placement = placer.place(&netlist).unwrap();
+        for i in 0..4 {
+            let loc = &placement.placements[&netlist.cells[i].id];
+            let (x, y) = (loc.tile_x as f64, loc.tile_y as f64);
+            let (lo, hi) = if i % 2 == 0 { (0.0, 0.2) } else { (0.8, 1.0) };
+            let span = |n: u32| (n - 1) as f64;
+            assert!(
+                x >= (lo * span(width)).floor()
+                    && x <= (hi * span(width)).ceil()
+                    && y >= (lo * span(height)).floor()
+                    && y <= (hi * span(height)).ceil(),
+                "ring_{i} at ({x}, {y})"
+            );
+        }
+
+        netlist.floorplan[0]
+            .members
+            .push(FloorplanMember::Instance("top.nothing".into()));
+        let mut placer = Placer::new(
+            PlacerConfig::default(),
+            Ice40Device::new(Ice40Variant::Hx1k),
+        );
+        let err = placer.place(&netlist).unwrap_err().to_string();
+        assert!(err.contains("top.nothing"), "{err}");
     }
 
     /// The placer's seed reaches its random choices: a different seed gives

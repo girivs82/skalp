@@ -5142,6 +5142,19 @@ fn synthesize_design(
         synth_cache.as_ref(),
     );
     let mut gate_netlist = hier_netlist.flatten_for_library(&library);
+    gate_netlist.floorplan = skalp_lir::floorplan::resolve_floorplan(&hir, &mir, &hier_lir)
+        .map_err(anyhow::Error::msg)?;
+    for region in &gate_netlist.floorplan {
+        println!(
+            "Floorplan: region \"{}\" ({}%, {}%)..({}%, {}%): {} item(s)",
+            region.name,
+            region.area.0,
+            region.area.1,
+            region.area.2,
+            region.area.3,
+            region.members.len()
+        );
+    }
     let latch_timing = if family == "nexus" {
         nexus_latch_timing(variant)?
     } else {

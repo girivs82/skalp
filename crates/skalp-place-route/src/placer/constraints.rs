@@ -303,6 +303,9 @@ pub struct IoConstraints {
     regions: HashMap<String, PlacementRegion>,
     /// Region constraints for cells
     region_constraints: Vec<RegionConstraint>,
+    /// The netlist's own floorplan regions (from the source), in this
+    /// device's tiles, with what each holds
+    floorplan: Vec<(PlacementRegion, Vec<skalp_lir::floorplan::FloorplanMember>)>,
 }
 
 impl IoConstraints {
@@ -320,6 +323,7 @@ impl IoConstraints {
             bel_constraints: HashMap::new(),
             regions: HashMap::new(),
             region_constraints: Vec::new(),
+            floorplan: Vec::new(),
         }
     }
 
@@ -446,14 +450,49 @@ impl IoConstraints {
         None
     }
 
-    /// Get all regions
+    /// Get all regions, the constraint file's and the netlist floorplan's
     pub fn regions(&self) -> impl Iterator<Item = &PlacementRegion> {
-        self.regions.values()
+        self.regions
+            .values()
+            .chain(self.floorplan.iter().map(|(region, _)| region))
     }
 
     /// Whether any cell is constrained to a region
     pub fn has_region_constraints(&self) -> bool {
-        !self.region_constraints.is_empty()
+        !self.region_constraints.is_empty() || !self.floorplan.is_empty()
+    }
+
+    /// Take in a netlist's floorplan (regions in percent of the die, see
+    /// [`skalp_lir::floorplan`]) for a device of `width` x `height` tiles:
+    /// each region becomes the tiles it covers, its low corner rounded
+    /// down and its high corner up. A region already taken in (by name) is
+    /// skipped, so taking in the same floorplan again changes nothing.
+    pub fn add_floorplan(
+        &mut self,
+        floorplan: &[skalp_lir::floorplan::FloorplanRegion],
+        width: u32,
+        height: u32,
+    ) {
+        let tile = |percent: f64, tiles: u32, up: bool| -> u32 {
+            let at = percent / 100.0 * tiles.saturating_sub(1) as f64;
+            (if up { at.ceil() } else { at.floor() }) as u32
+        };
+        for region in floorplan {
+            if self.floorplan.iter().any(|(r, _)| r.name == region.name) {
+                continue;
+            }
+            let (x0, y0, x1, y1) = region.area;
+            self.floorplan.push((
+                PlacementRegion::new(
+                    region.name.clone(),
+                    tile(x0, width, false),
+                    tile(y0, height, false),
+                    tile(x1, width, true),
+                    tile(y1, height, true),
+                ),
+                region.members.clone(),
+            ));
+        }
     }
 
     /// The region each region-constrained cell of `netlist` must be placed
@@ -495,6 +534,26 @@ impl IoConstraints {
                 "no cell or net matches '{}' (constrained to region '{}')",
                 self.region_constraints[k].cell_pattern, self.region_constraints[k].region_name
             )));
+        }
+        // The source's floorplan, for cells the constraint file left free
+        for (region, members) in &self.floorplan {
+            for member in members {
+                let mut held = 0;
+                for cell in &netlist.cells {
+                    if member.holds(netlist, cell) {
+                        held += 1;
+                        regions.entry(cell.id).or_insert_with(|| region.clone());
+                    }
+                }
+                if held == 0 {
+                    return Err(PlaceRouteError::InvalidConstraint(format!(
+                        "floorplan region '{}': {} has no cells of its own to place \
+                         (its logic may have been merged into others' or removed)",
+                        region.name,
+                        member.describe()
+                    )));
+                }
+            }
         }
         Ok(regions)
     }
