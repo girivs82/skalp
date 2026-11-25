@@ -120,6 +120,8 @@ struct Variant {
     bit_deskew: u64,
     /// the PHY's DQS output delay (DQS_OUT_DELAY), in steps
     dqs_out_delay: u64,
+    /// the PHY's automatic DQS output delay (DQS_AUTO)
+    dqs_auto: u64,
     /// the DQ pins (bit k: DQ k) whose writes reach the DRAM later than the
     /// others, and by how many ticks
     dq_late: (u64, u64),
@@ -176,6 +178,7 @@ async fn run(v: Variant) {
         ("VREF_REPS", v.vref_reps),
         ("BIT_DESKEW", v.bit_deskew),
         ("DQS_OUT_DELAY", v.dqs_out_delay),
+        ("DQS_AUTO", v.dqs_auto),
         ("DQ_LATE_MASK", v.dq_late.0),
         ("DQ_LATE_TICKS", v.dq_late.1),
     ]);
@@ -262,17 +265,29 @@ async fn run(v: Variant) {
     for lane in 0..2 {
         // write leveling takes the board delay of the lane's DQS out, and the
         // DQS output delay (whole ticks in the model: nexus_sim_ticks)
-        let wl = get!(["wl0", "wl1"][lane]);
-        let dqs_out_ticks = (v.dqs_out_delay * 109) >> 10;
-        near(
-            wl,
+        let wl_at = |dqs: u64| {
             steps(v.ck_ticks) / 2.0
                 - nom.wl_before_half_ck
                 - steps(v.wr_skew[lane])
-                - steps(dqs_out_ticks),
-            4.0,
-            &format!("lane {lane} write leveling"),
-        );
+                - steps((dqs * 109) >> 10)
+        };
+        // the DQS output delay: DQS_OUT_DELAY or, with DQS_AUTO, raised to half the per-bit
+        // sweep (BIT_TOP 124) or 16 steps (DQS_GUARD) short of where leveling found the edge
+        // with DQS_OUT_DELAY, whichever is less
+        let dqs = get!(["dqs0", "dqs1"][lane]);
+        if v.dqs_auto == 0 {
+            assert_eq!(dqs, v.dqs_out_delay, "{n}: lane {lane} DQS output delay");
+        } else {
+            let room = v.dqs_out_delay as f64 + wl_at(v.dqs_out_delay) - 16.0;
+            near(
+                dqs,
+                room.min(62.0).max(v.dqs_out_delay as f64),
+                4.0,
+                &format!("lane {lane} automatic DQS output delay"),
+            );
+        }
+        let wl = get!(["wl0", "wl1"][lane]);
+        near(wl, wl_at(dqs), 4.0, &format!("lane {lane} write leveling"));
         // the gate follows tDQSCK and the command delay
         let gate = get!(["gate0", "gate1"][lane]);
         near(
@@ -312,7 +327,8 @@ async fn run(v: Variant) {
             let pos = get!(["bit_pos0", "bit_pos1"][lane]);
             for pin in 0..8 {
                 let late = (v.dq_late.0 >> (8 * lane + pin)) & 1 == 1;
-                let want = nom.wdq - 64.0 + v.dqs_out_delay as f64
+                // the model delays DQS by whole ticks
+                let want = nom.wdq - 64.0 + steps((dqs * 109) >> 10)
                     - steps(v.wr_dq_skew[lane])
                     - if late { steps(v.dq_late.1) } else { 0.0 };
                 near(
@@ -375,6 +391,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -401,6 +418,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -429,6 +447,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -454,6 +473,7 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -479,6 +499,7 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -504,6 +525,7 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -532,6 +554,7 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -559,6 +582,7 @@ async fn lpddr4_dfi_nexus_dq_enable_late() {
         vref_reps: 1,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -587,6 +611,7 @@ async fn lpddr4_dfi_nexus_vref_training() {
         vref_reps: 2,
         bit_deskew: 0,
         dqs_out_delay: 0,
+        dqs_auto: 0,
         dq_late: (0, 0),
     })
     .await;
@@ -616,7 +641,62 @@ async fn lpddr4_dfi_nexus_write_bit_deskew() {
         vref_reps: 1,
         bit_deskew: 1,
         dqs_out_delay: 32,
+        dqs_auto: 0,
         dq_late: (0x1009, 3),
+    })
+    .await;
+}
+
+/// Per-bit write deskew with the DQS output delay picked by the PHY (DQS_AUTO): at
+/// 1066 Mbps write leveling finds the edge 60 steps in, so the strobe goes 16 steps
+/// short of it (44) rather than to the middle of the sweep (62), and is leveled again
+#[tokio::test]
+async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto() {
+    run(Variant {
+        name: "bit_deskew_dqs_auto",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [1, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        bit_deskew: 1,
+        dqs_out_delay: 0,
+        dqs_auto: 1,
+        dq_late: (0x1009, 3),
+    })
+    .await;
+}
+
+/// DQS_AUTO with a longer tCK (22 ticks): the edge is 88 steps in, so the strobe
+/// goes to the middle of the per-bit sweep (62); the DQ come 5 ticks late on the
+/// board, so the pins' eyes (wider than the sweep at this rate) end inside it
+#[tokio::test]
+async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto_slow() {
+    run(Variant {
+        name: "bit_deskew_dqs_auto_slow",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [5, 5],
+        n_bursts: 16,
+        ck_ticks: 22,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        bit_deskew: 1,
+        dqs_out_delay: 0,
+        dqs_auto: 1,
+        dq_late: (0x0410, 2),
     })
     .await;
 }

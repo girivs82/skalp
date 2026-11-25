@@ -51,6 +51,8 @@ entity Lpddr4DfiNexusSim<
     const BIT_DESKEW: nat = 0,
     // the PHY's DQS output delay (DQS_OUT_DELAY)
     const DQS_OUT_DELAY: nat = 0,
+    // the PHY's automatic DQS output delay (DQS_AUTO)
+    const DQS_AUTO: nat = 0,
     // board delay of the DQ pins in DQ_LATE_MASK (bit k: DQ k) behind the others, on writes, in
     // ticks (at most 64)
     const DQ_LATE_MASK: nat = 0,
@@ -107,6 +109,8 @@ entity Lpddr4DfiNexusSim<
     out bit_pos0: bit[64]
     out bit_pos1: bit[64]
     out bit_fail0: bit[8]
+    out dqs0: bit[8]
+    out dqs1: bit[8]
     out bit_fail1: bit[8]
 }
 
@@ -187,7 +191,7 @@ impl Lpddr4DfiNexusSim {
     signal sync_clk: clock
     sync_clk = sk_n[5]
 
-    inst phy = DfiLpddr4NexusPhy<BIT_DESKEW: BIT_DESKEW, DQS_OUT_DELAY: DQS_OUT_DELAY> {
+    inst phy = DfiLpddr4NexusPhy<BIT_DESKEW: BIT_DESKEW, DQS_OUT_DELAY: DQS_OUT_DELAY, DQS_AUTO: DQS_AUTO> {
         eclk: eclk,
         pll_lock: 1,
         sync_clk: sync_clk,
@@ -370,6 +374,8 @@ impl Lpddr4DfiNexusSim {
     bit_pos0 = phy.bit_pos0
     bit_pos1 = phy.bit_pos1
     bit_fail0 = phy.bit_fail0
+    dqs0 = phy.dqs_dly0
+    dqs1 = phy.dqs_dly1
     bit_fail1 = phy.bit_fail1
     wdq1 = phy.wdq_dly1
     wrlvl_fail = phy.wrlvl_fail
