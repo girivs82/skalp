@@ -556,6 +556,8 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     /// ([`super::sites::fill_cap`]): a move may not add a cell to a tile
     /// already holding that many
     fill_limit: f64,
+    /// Cells no move may take anywhere or displace (placed by constraint)
+    fixed: HashSet<CellId>,
 }
 
 /// Move-generation data that stays fixed for a whole annealing run, so a
@@ -578,6 +580,8 @@ struct MoveContext {
     /// Control set of every flip-flop: flip-flops of one control group
     /// ([`Device::ff_control_group`]) must all have the same one
     control_sets: HashMap<CellId, ControlSet>,
+    /// Cells no move may take or displace
+    fixed: HashSet<CellId>,
 }
 
 /// Whether cells of `bel_type` use up other BELs of their tile and so stay
@@ -595,6 +599,9 @@ impl MoveContext {
     /// Distributed-RAM and wide-LUT cells stay fixed too: their BELs use up
     /// LUTs of their tile (`footprint`, [`Device::bel_footprint`]), which the
     /// legalizer kept free and which no move may then fill.
+    ///
+    /// `fixed` cells (placed by constraint) stay where they are, and their
+    /// BELs (with any they use up) are reserved.
     fn build(
         placement: &PlacementResult,
         netlist: &GateNetlist,
@@ -602,8 +609,17 @@ impl MoveContext {
         chain_membership: &HashMap<CellId, usize>,
         carry_layout: Option<&crate::device::CarryChainLayout>,
         footprint: &dyn Fn(u32, u32, usize) -> Vec<usize>,
+        fixed: &HashSet<CellId>,
     ) -> Self {
         let mut reserved = HashSet::new();
+        for cell in fixed {
+            if let Some(loc) = placement.placements.get(cell) {
+                reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
+                for lut in footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
+                    reserved.insert((loc.tile_x, loc.tile_y, lut));
+                }
+            }
+        }
         for loc in placement.placements.values() {
             if has_footprint(loc.bel_type) {
                 reserved.insert((loc.tile_x, loc.tile_y, loc.bel_index));
@@ -623,7 +639,9 @@ impl MoveContext {
                 }
             }
         }
-        let movable = |c: &CellId| carry_layout.is_none() || !chain_membership.contains_key(c);
+        let movable = |c: &CellId| {
+            !fixed.contains(c) && (carry_layout.is_none() || !chain_membership.contains_key(c))
+        };
         let cells: Vec<CellId> = placement
             .placements
             .iter()
@@ -666,6 +684,7 @@ impl MoveContext {
             critical: critical[..top_n].iter().map(|&(c, _)| c).collect(),
             reserved,
             control_sets: control_sets(netlist),
+            fixed: fixed.clone(),
         }
     }
 }
@@ -687,6 +706,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             refine: false,
             seed: DEFAULT_SEED,
             fill_limit: 1.0,
+            fixed: HashSet::new(),
         }
     }
 
@@ -712,6 +732,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             refine: false,
             seed: DEFAULT_SEED,
             fill_limit: 1.0,
+            fixed: HashSet::new(),
         }
     }
 
@@ -722,6 +743,13 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
     }
 
     /// Seed the annealer's random moves and acceptances
+    /// Keep these cells where they are: no move takes them anywhere or
+    /// puts another cell on their BELs
+    pub fn with_fixed_cells(mut self, fixed: HashSet<CellId>) -> Self {
+        self.fixed = fixed;
+        self
+    }
+
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -910,6 +938,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &self.carry_chain_membership,
             carry_layout.as_ref(),
             &|x, y, bel| self.device.bel_footprint(x, y, bel),
+            &self.fixed,
         );
         if move_ctx.cells.is_empty() {
             current.cost = current_cost;
@@ -1085,6 +1114,7 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             &self.carry_chain_membership,
             carry_layout.as_ref(),
             &|x, y, bel| self.device.bel_footprint(x, y, bel),
+            &self.fixed,
         );
         if move_ctx.cells.is_empty() {
             current.cost = current_cost;
@@ -1571,9 +1601,9 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         bels
     }
 
-    /// Whether every flip-flop a move touched (`affected`) shares its control
-    /// group, after the move (`placement`, `loc_map`), only with flip-flops
-    /// of its own control set.
+    /// Whether a move is legal: it touched (`affected`) no fixed cell, and
+    /// every flip-flop it touched shares its control group, after the move
+    /// (`placement`, `loc_map`), only with flip-flops of its own control set.
     fn control_sets_hold(
         &self,
         ctx: &MoveContext,
@@ -1581,6 +1611,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         placement: &PlacementResult,
         loc_map: &HashMap<(u32, u32, usize), CellId>,
     ) -> bool {
+        // A move that would take or displace a fixed cell (a carry chain
+        // relocated onto one, say) is never legal
+        if affected.iter().any(|c| ctx.fixed.contains(c)) {
+            return false;
+        }
         affected.iter().all(|&cell| {
             placement.placements.get(&cell).is_none_or(|loc| {
                 fits_control_group(self.device, &ctx.control_sets, cell, loc, &[], |x, y, b| {
@@ -2201,6 +2236,7 @@ mod tests {
             &HashMap::new(),
             None,
             &|x, y, bel| device.bel_footprint(x, y, bel),
+            &HashSet::new(),
         );
         assert_eq!(ctx.cells, vec![l]);
         assert_eq!(ctx.footprint_count, 2);
@@ -2310,6 +2346,7 @@ mod tests {
             &HashMap::new(),
             None,
             &|x, y, bel| device.bel_footprint(x, y, bel),
+            &HashSet::new(),
         );
         let mut cache =
             NetCostCache::build(&placement, &netlist, Vec::new(), &annealer.delay_model, 0.0);

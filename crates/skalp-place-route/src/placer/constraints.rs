@@ -227,33 +227,34 @@ impl RegionConstraint {
         }
     }
 
-    /// Check if a cell name matches this constraint's pattern
+    /// Check if a cell name matches this constraint's pattern: `*` stands
+    /// for any run of characters (none included), anywhere and any number
+    /// of times
     pub fn matches(&self, cell_name: &str) -> bool {
-        if self.cell_pattern.contains('*') {
-            // Simple wildcard matching
-            let pattern = &self.cell_pattern;
-            if let Some(middle) = pattern.strip_prefix('*').and_then(|s| s.strip_suffix('*')) {
-                // Pattern like "*foo*" - contains
-                cell_name.contains(middle)
-            } else if let Some(suffix) = pattern.strip_prefix('*') {
-                // Pattern like "*foo" - ends with
-                cell_name.ends_with(suffix)
-            } else if let Some(prefix) = pattern.strip_suffix('*') {
-                // Pattern like "foo*" - starts with
-                cell_name.starts_with(prefix)
-            } else {
-                // Pattern like "foo*bar"
-                let parts: Vec<&str> = pattern.split('*').collect();
-                if parts.len() == 2 {
-                    cell_name.starts_with(parts[0]) && cell_name.ends_with(parts[1])
-                } else {
-                    cell_name == pattern
-                }
-            }
-        } else {
-            cell_name == self.cell_pattern
+        glob_matches(&self.cell_pattern, cell_name)
+    }
+}
+
+/// Whether `text` matches `pattern`, where `*` stands for any run of
+/// characters (none included) and every other character for itself.
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let middle: Vec<&str> = parts.collect();
+    let Some((&last, middle)) = middle.split_last() else {
+        // No `*`: the whole text must be the pattern
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
         }
     }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 impl PinConstraint {
@@ -450,6 +451,54 @@ impl IoConstraints {
         self.regions.values()
     }
 
+    /// Whether any cell is constrained to a region
+    pub fn has_region_constraints(&self) -> bool {
+        !self.region_constraints.is_empty()
+    }
+
+    /// The region each region-constrained cell of `netlist` must be placed
+    /// in: a cell matches a `set_cell_region` pattern by its name or by the
+    /// name of a net it drives, and the first matching constraint wins. A
+    /// constraint that matches no cell is an error (a misspelt name would
+    /// otherwise leave the design unconstrained without a word).
+    pub fn cell_regions(
+        &self,
+        netlist: &skalp_lir::gate_netlist::GateNetlist,
+    ) -> Result<HashMap<skalp_lir::gate_netlist::CellId, PlacementRegion>> {
+        let mut regions = HashMap::new();
+        let mut used = vec![false; self.region_constraints.len()];
+        for cell in &netlist.cells {
+            let names = std::iter::once(cell.path.as_str()).chain(
+                cell.outputs
+                    .iter()
+                    .filter_map(|&n| netlist.nets.get(n.0 as usize).map(|n| n.name.as_str())),
+            );
+            let names: Vec<&str> = names.collect();
+            let found = self
+                .region_constraints
+                .iter()
+                .position(|c| names.iter().any(|name| c.matches(name)));
+            if let Some(k) = found {
+                used[k] = true;
+                let constraint = &self.region_constraints[k];
+                let region = self.regions.get(&constraint.region_name).ok_or_else(|| {
+                    PlaceRouteError::InvalidConstraint(format!(
+                        "cells '{}' go to region '{}', which is not defined",
+                        constraint.cell_pattern, constraint.region_name
+                    ))
+                })?;
+                regions.insert(cell.id, region.clone());
+            }
+        }
+        if let Some(k) = used.iter().position(|&u| !u) {
+            return Err(PlaceRouteError::InvalidConstraint(format!(
+                "no cell or net matches '{}' (constrained to region '{}')",
+                self.region_constraints[k].cell_pattern, self.region_constraints[k].region_name
+            )));
+        }
+        Ok(regions)
+    }
+
     /// Validate constraints against a device's package
     pub fn validate<D: Device>(&self, device: &D) -> Result<()> {
         let packages = device.packages();
@@ -535,6 +584,11 @@ impl IoConstraints {
     /// Supported commands:
     /// - `set_io [-nowarn] [-pullup yes|no] [-pullup_resistor 3P3K|6P8K|10K|100K] signal pin`
     /// - `set_frequency net frequency_mhz`
+    /// - `set_region name x_min y_min x_max y_max`: a rectangle of tiles,
+    ///   both corners included
+    /// - `set_cell_region pattern region`: every cell whose name, or the name
+    ///   of a net it drives, matches `pattern` (`*` for any run of
+    ///   characters) is placed inside `region`; the first matching line wins
     pub fn from_pcf(content: &str) -> Result<Self> {
         let mut constraints = IoConstraints::new();
 
@@ -553,6 +607,30 @@ impl IoConstraints {
             // Parse set_frequency command
             else if line.starts_with("set_frequency") {
                 Self::parse_set_frequency(&mut constraints, line, line_num)?;
+            }
+            // set_region NAME X_MIN Y_MIN X_MAX Y_MAX
+            else if line.starts_with("set_region ") {
+                Self::parse_set_region(&mut constraints, line, line_num)?;
+            }
+            // set_cell_region PATTERN REGION
+            else if line.starts_with("set_cell_region ") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let [_, pattern, region] = parts[..] else {
+                    return Err(PlaceRouteError::InvalidConstraint(format!(
+                        "Line {}: expected 'set_cell_region PATTERN REGION': {}",
+                        line_num + 1,
+                        line
+                    )));
+                };
+                if !constraints.regions.contains_key(region) {
+                    return Err(PlaceRouteError::InvalidConstraint(format!(
+                        "Line {}: no region '{}' (set_region it first): {}",
+                        line_num + 1,
+                        region,
+                        line
+                    )));
+                }
+                constraints.constrain_to_region(pattern, region);
             }
             // Unknown command - warn but continue
             else {
@@ -640,6 +718,38 @@ impl IoConstraints {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Parse a set_region command line
+    fn parse_set_region(
+        constraints: &mut IoConstraints,
+        line: &str,
+        line_num: usize,
+    ) -> Result<()> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let bad = || {
+            PlaceRouteError::InvalidConstraint(format!(
+                "Line {}: expected 'set_region NAME X_MIN Y_MIN X_MAX Y_MAX': {}",
+                line_num + 1,
+                line
+            ))
+        };
+        let [_, name, x_min, y_min, x_max, y_max] = parts[..] else {
+            return Err(bad());
+        };
+        let coord = |text: &str| text.parse::<u32>().map_err(|_| bad());
+        let (x_min, y_min, x_max, y_max) =
+            (coord(x_min)?, coord(y_min)?, coord(x_max)?, coord(y_max)?);
+        if x_min > x_max || y_min > y_max {
+            return Err(PlaceRouteError::InvalidConstraint(format!(
+                "Line {}: region '{}' has its minimum corner past its maximum: {}",
+                line_num + 1,
+                name,
+                line
+            )));
+        }
+        constraints.create_region(name, x_min, y_min, x_max, y_max);
         Ok(())
     }
 
@@ -899,6 +1009,35 @@ set_io -pullup_resistor 100K input C7
         assert!(constraint.matches("ringosc"));
         assert!(constraint.matches("my_ring_buffer"));
         assert!(!constraint.matches("other"));
+    }
+
+    #[test]
+    fn patterns_take_any_number_of_wildcards() {
+        assert!(glob_matches("top.*.ring_*.lat0", "top.Probe.ring_12.lat0"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("a*b*c", "abc"));
+        assert!(glob_matches("a*b*c", "a-b-b-c"));
+        assert!(!glob_matches("a*b*c", "a-c-b"));
+        assert!(!glob_matches("a*a", "a"));
+        assert!(glob_matches("exact", "exact"));
+        assert!(!glob_matches("exact", "exactly"));
+    }
+
+    #[test]
+    fn regions_come_from_the_constraint_file() {
+        let pcf = "set_region left 1 2 3 4\nset_cell_region top.ring_* left\n";
+        let constraints = IoConstraints::from_pcf(pcf).unwrap();
+        let region = constraints.find_region_for_cell("top.ring_3").unwrap();
+        assert_eq!(
+            (region.x_min, region.y_min, region.x_max, region.y_max),
+            (1, 2, 3, 4)
+        );
+        assert!(constraints.has_region_constraints());
+        // A cell constrained to a region nobody defined, a region the wrong
+        // way round, a malformed line
+        assert!(IoConstraints::from_pcf("set_cell_region x nowhere\n").is_err());
+        assert!(IoConstraints::from_pcf("set_region r 5 0 1 3\n").is_err());
+        assert!(IoConstraints::from_pcf("set_region r 1 2 3\n").is_err());
     }
 
     #[test]

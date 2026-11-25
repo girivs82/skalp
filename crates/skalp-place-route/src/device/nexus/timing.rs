@@ -447,6 +447,7 @@ impl NexusRetimeDelays {
             &[],
             1000,
             super::sites::HardBlockCounts::default(),
+            &[],
         );
         let mut device = NexusDevice::from_prjoxide_region(
             variant,

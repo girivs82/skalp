@@ -2,6 +2,7 @@
 //!
 //! Snaps analytical placement to valid BEL sites while minimizing displacement.
 
+use super::constraints::PlacementRegion;
 use super::control_sets::control_sets;
 use super::sites::{bel_types_compatible, SiteMap};
 use super::{BelType, PlacementLoc, PlacementResult};
@@ -17,6 +18,8 @@ pub struct Legalizer<'a, D: Device> {
     /// Share of each tile's BELs of a type cells may take
     /// ([`SiteMap::with_fill_limit`])
     fill_limit: f64,
+    /// Cells that must be placed inside a region of tiles
+    regions: HashMap<CellId, PlacementRegion>,
 }
 
 impl<'a, D: Device> Legalizer<'a, D> {
@@ -25,7 +28,15 @@ impl<'a, D: Device> Legalizer<'a, D> {
         Self {
             device,
             fill_limit: 1.0,
+            regions: HashMap::new(),
         }
+    }
+
+    /// Place each of these cells inside its region (they are placed before
+    /// every other cell but carry chains, nearest to where they were)
+    pub fn with_regions(mut self, regions: HashMap<CellId, PlacementRegion>) -> Self {
+        self.regions = regions;
+        self
     }
 
     /// Fill each tile's BELs of a type at most this far (0..=1)
@@ -53,6 +64,17 @@ impl<'a, D: Device> Legalizer<'a, D> {
         let mut result = PlacementResult::new();
         let mut used_bels: HashMap<(u32, u32, usize), CellId> = HashMap::new();
 
+        if let Some(cell) = carry_chains
+            .iter()
+            .flat_map(|chain| &chain.cells)
+            .find(|cell| self.regions.contains_key(cell))
+        {
+            let name = netlist.get_cell(*cell).map_or("?", |c| c.path.as_str());
+            return Err(PlaceRouteError::InvalidConstraint(format!(
+                "{name} is in a carry chain, which a region constraint cannot place yet"
+            )));
+        }
+
         // Phase 1: Legalize carry chains into consecutive carry positions
         let chain_cells = match self.device.carry_chain_layout() {
             Some(layout) => self.legalize_carry_chains_with_layout(
@@ -76,11 +98,14 @@ impl<'a, D: Device> Legalizer<'a, D> {
         // Distributed RAM first: its site needs six free LUTs of one tile,
         // which ordinary logic placed earlier would scatter. Wide LUTs next,
         // for the same reason: each needs both LUTs of one slice.
-        cells.sort_by_key(|(_, loc)| {
+        // Region-constrained cells before all of them: they have only their
+        // region's sites to choose from.
+        cells.sort_by_key(|(id, loc)| {
             let rank = match loc.bel_type {
-                BelType::DistRam => 0,
-                BelType::WideLut => 1,
-                _ => 2,
+                _ if self.regions.contains_key(id) => 0,
+                BelType::DistRam => 1,
+                BelType::WideLut => 2,
+                _ => 3,
             };
             (rank, loc.tile_y * 1000 + loc.tile_x)
         });
@@ -93,20 +118,47 @@ impl<'a, D: Device> Legalizer<'a, D> {
         }
         for (cell_id, loc) in cells {
             let bel_type = loc.bel_type;
-            let (tx, ty, idx) = sites
-                .take_nearest(
-                    loc.tile_x as f64,
-                    loc.tile_y as f64,
-                    bel_type,
-                    sets.get(&cell_id).copied(),
-                    bel_types_compatible,
-                )
-                .ok_or_else(|| {
-                    PlaceRouteError::PlacementFailed(format!(
-                        "No legal location found for BEL type {:?} near ({}, {})",
-                        bel_type, loc.tile_x, loc.tile_y
-                    ))
-                })?;
+            let set = sets.get(&cell_id).copied();
+            let found = match self.regions.get(&cell_id) {
+                Some(region) => {
+                    // Nearest to where the cell was, from inside the region
+                    let x = loc.tile_x.clamp(region.x_min, region.x_max);
+                    let y = loc.tile_y.clamp(region.y_min, region.y_max);
+                    let bounds = (region.x_min, region.y_min, region.x_max, region.y_max);
+                    sites
+                        .take_nearest_within(
+                            x as f64,
+                            y as f64,
+                            bel_type,
+                            set,
+                            bel_types_compatible,
+                            bounds,
+                        )
+                        .ok_or_else(|| {
+                            let name = netlist.get_cell(cell_id).map_or("?", |c| c.path.as_str());
+                            PlaceRouteError::PlacementFailed(format!(
+                                "no free {bel_type:?} site for {name} in region '{}' \
+                                 (tiles {}..={}, {}..={})",
+                                region.name, region.x_min, region.x_max, region.y_min, region.y_max
+                            ))
+                        })?
+                }
+                None => sites
+                    .take_nearest(
+                        loc.tile_x as f64,
+                        loc.tile_y as f64,
+                        bel_type,
+                        set,
+                        bel_types_compatible,
+                    )
+                    .ok_or_else(|| {
+                        PlaceRouteError::PlacementFailed(format!(
+                            "No legal location found for BEL type {:?} near ({}, {})",
+                            bel_type, loc.tile_x, loc.tile_y
+                        ))
+                    })?,
+            };
+            let (tx, ty, idx) = found;
             // Record the BEL's own type, as the ring search always has
             let placed_type = self
                 .device

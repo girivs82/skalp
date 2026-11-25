@@ -302,6 +302,14 @@ enum Commands {
         #[arg(long, value_name = "TIME")]
         settle_wait: Option<String>,
 
+        /// Placement constraint file: `set_region NAME X_MIN Y_MIN X_MAX
+        /// Y_MAX` names a rectangle of tiles, and `set_cell_region PATTERN
+        /// NAME` places every cell whose name (or the name of a net it
+        /// drives) matches PATTERN (`*` for any run of characters) inside
+        /// it; `set_io SIGNAL PIN` and `set_frequency NET MHZ` as in a PCF
+        #[arg(long, value_name = "FILE")]
+        constraints: Option<PathBuf>,
+
         /// Where a bundled-data async block keeps its state: `ff`, flip-flops
         /// clocked by the block's step strobe (on FPGAs whose flip-flop clock
         /// pins only the clock network reaches, one network entry per block);
@@ -336,6 +344,14 @@ enum Commands {
         /// Target frequency in MHz (for timing analysis)
         #[arg(long)]
         frequency: Option<f64>,
+
+        /// Placement constraint file: `set_region NAME X_MIN Y_MIN X_MAX
+        /// Y_MAX` names a rectangle of tiles, and `set_cell_region PATTERN
+        /// NAME` places every cell whose name (or the name of a net it
+        /// drives) matches PATTERN (`*` for any run of characters) inside
+        /// it; `set_io SIGNAL PIN` and `set_frequency NET MHZ` as in a PCF
+        #[arg(long, value_name = "FILE")]
+        constraints: Option<PathBuf>,
     },
 
     /// Program the FPGA device
@@ -945,6 +961,7 @@ fn main() -> Result<()> {
             power_stub,
             debug,
             settle_wait,
+            constraints,
             async_state,
         } => {
             let fixed = match async_state.as_str() {
@@ -971,6 +988,7 @@ fn main() -> Result<()> {
                     power_stub,
                     debug,
                     settle_wait.as_deref(),
+                    constraints.as_deref(),
                     &mut plan,
                 );
                 match result {
@@ -989,8 +1007,16 @@ fn main() -> Result<()> {
             output,
             preset,
             frequency,
+            constraints,
         } => {
-            run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
+            run_place_and_route(
+                &netlist,
+                &device,
+                &output,
+                &preset,
+                frequency,
+                constraints.as_deref(),
+            )?;
         }
 
         Commands::TimedSim {
@@ -4911,6 +4937,7 @@ fn synthesize_design(
     power_stub: bool,
     debug: bool,
     settle_wait: Option<&str>,
+    constraints: Option<&std::path::Path>,
     plan: &mut AsyncStatePlan,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context_for_device;
@@ -5156,13 +5183,27 @@ fn synthesize_design(
     if full_flow && family == "ice40" {
         println!();
         println!("🔧 Running Place & Route...");
-        run_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+        run_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            pnr_preset,
+            None,
+            constraints,
+        )?;
     } else if full_flow && family == "nexus" {
         println!();
         println!("🔧 Running Place & Route...");
         // The frequency latencies were chosen for is also what place and
         // route times unknown clocks against and retimes for
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, frequency)?;
+        run_nexus_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            pnr_preset,
+            frequency,
+            constraints,
+        )?;
     } else if full_flow {
         println!();
         println!("⚠️  Place & route only supported for iCE40 and Nexus devices currently");
@@ -5180,6 +5221,7 @@ fn run_place_and_route(
     output_dir: &PathBuf,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     println!("🔧 Place & Route");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -5219,9 +5261,23 @@ fn run_place_and_route(
 
     // Run P&R
     if family == "nexus" {
-        run_nexus_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+        run_nexus_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            preset,
+            frequency,
+            constraints,
+        )?;
     } else {
-        run_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+        run_pnr_on_netlist(
+            &gate_netlist,
+            variant,
+            output_dir,
+            preset,
+            frequency,
+            constraints,
+        )?;
     }
 
     println!();
@@ -5290,6 +5346,20 @@ fn add_nexus_io_pads(
     }
 }
 
+/// Read a `--constraints` file (see the option's help)
+fn read_placement_constraints(path: &std::path::Path) -> Result<skalp_place_route::IoConstraints> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading the constraint file {}", path.display()))?;
+    let constraints = skalp_place_route::IoConstraints::from_pcf(&text)
+        .with_context(|| format!("in the constraint file {}", path.display()))?;
+    println!(
+        "Constraints: {} ({} in all)",
+        path.display(),
+        constraints.total_constraints()
+    );
+    Ok(constraints)
+}
+
 /// Place and route a gate-level netlist on a Lattice Nexus device.
 fn run_nexus_pnr_on_netlist(
     gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
@@ -5297,6 +5367,7 @@ fn run_nexus_pnr_on_netlist(
     output_dir: &std::path::Path,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     use skalp_place_route::{PnrConfig, TimingConfig};
 
@@ -5316,6 +5387,9 @@ fn run_nexus_pnr_on_netlist(
             ..TimingConfig::default()
         });
         config.placer.retime_target_mhz = Some(freq);
+    }
+    if let Some(path) = constraints {
+        config.placer.io_constraints = read_placement_constraints(path)?;
     }
 
     println!("Variant: {:?}", nexus);
@@ -5702,6 +5776,7 @@ fn run_pnr_on_netlist(
     output_dir: &std::path::Path,
     preset: &str,
     frequency: Option<f64>,
+    constraints: Option<&std::path::Path>,
 ) -> Result<()> {
     use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig, TimingConfig};
 
@@ -5737,6 +5812,9 @@ fn run_pnr_on_netlist(
             target_frequency: freq,
             ..TimingConfig::default()
         });
+    }
+    if let Some(path) = constraints {
+        config.placer.io_constraints = read_placement_constraints(path)?;
     }
 
     println!("Variant: {:?}", ice40_variant);

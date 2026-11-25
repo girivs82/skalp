@@ -881,6 +881,12 @@ pub fn place_and_route_nexus_real_from(
                 large_rams: large_ram_count,
                 multipliers: dsp_count,
             },
+            &config
+                .placer
+                .io_constraints
+                .regions()
+                .flat_map(|r| [(r.x_min, r.y_min), (r.x_max, r.y_max)])
+                .collect::<Vec<_>>(),
         ),
     };
     let timing_db = crate::device::nexus::timing::TimingDb::load(db_root, variant)?;
@@ -2255,6 +2261,70 @@ mod tests {
             luts_per_tile(&placement).values().sum::<usize>(),
             total_luts * 85 / 100
         );
+    }
+
+    /// Cells constrained to a region are placed inside it and stay there
+    /// through refinement; a region on an algorithm that cannot honour it,
+    /// or a pattern naming no cell, is an error
+    #[test]
+    fn test_region_constraints_hold_cells_in_their_regions() {
+        let netlist = create_mesh_netlist(60);
+        let regions = [("nw", (1, 1, 2, 2)), ("se", (11, 15, 12, 16))];
+        let constrained = |config: &mut PlacerConfig| {
+            for (name, (x0, y0, x1, y1)) in regions {
+                config.io_constraints.create_region(name, x0, y0, x1, y1);
+            }
+            for i in 0..4 {
+                let region = if i % 2 == 0 { "nw" } else { "se" };
+                config
+                    .io_constraints
+                    .constrain_to_region(format!("mesh.lut{i}"), region);
+            }
+        };
+        for algorithm in [
+            crate::placer::PlacementAlgorithm::AnalyticalWithRefinement,
+            crate::placer::PlacementAlgorithm::AnalyticalTimingDriven,
+        ] {
+            let mut config = PlacerConfig {
+                algorithm: algorithm.clone(),
+                ..Default::default()
+            };
+            constrained(&mut config);
+            let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+            let placement = placer.place(&netlist).unwrap();
+            for i in 0..4 {
+                let cell = netlist
+                    .cells
+                    .iter()
+                    .find(|c| c.path == format!("mesh.lut{i}"))
+                    .unwrap();
+                let loc = &placement.placements[&cell.id];
+                let (x0, y0, x1, y1) = regions[i % 2].1;
+                assert!(
+                    (x0..=x1).contains(&loc.tile_x) && (y0..=y1).contains(&loc.tile_y),
+                    "{algorithm:?}: mesh.lut{i} at ({}, {}) outside {}",
+                    loc.tile_x,
+                    loc.tile_y,
+                    regions[i % 2].0
+                );
+            }
+        }
+
+        let mut config = PlacerConfig {
+            algorithm: crate::placer::PlacementAlgorithm::SimulatedAnnealing,
+            ..Default::default()
+        };
+        constrained(&mut config);
+        let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+        assert!(placer.place(&netlist).is_err());
+
+        let mut config = PlacerConfig::default();
+        constrained(&mut config);
+        config
+            .io_constraints
+            .constrain_to_region("nothing.here", "nw");
+        let mut placer = Placer::new(config, Ice40Device::new(Ice40Variant::Hx1k));
+        assert!(placer.place(&netlist).is_err());
     }
 
     /// The placer's seed reaches its random choices: a different seed gives
