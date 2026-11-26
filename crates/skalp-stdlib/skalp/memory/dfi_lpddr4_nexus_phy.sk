@@ -487,10 +487,21 @@ impl NexusLpddr4Lane {
     signal dq_ext: bit[8] = 0
     // registered from their lets (their inputs settle long before the next strobe is judged)
     signal wl_room_r: bit[9] = 0
+    // the gate's read-window indices, registered from gsel (it changes only between training
+    // events, which are tens of cycles apart)
+    signal ri0_r: bit[4] = 8
+    signal ri1_r: bit[4] = 9
+    signal ri2_r: bit[4] = 10
+    signal ri3_r: bit[4] = 11
     signal dqs_want_r: bit[8] = 0
     signal dqs_add_r: bit = 0
     signal wl_back_r: bit[8] = 0
     signal wl_late_r: bit = 0
+    // write leveling's end-of-sweep flag, the move back to the last delay and the direction back
+    // to the first pass's, registered (the delay and wl_last hold through each strobe's window)
+    signal wl_end_r: bit = 0
+    signal wl_dhit_r: bit[8] = 0
+    signal wl_bdn_r: bit = 0
     signal dm_p: bit[8] = 0
     signal dm_n: bit[8] = 0
     signal dm_dn: bit = 0
@@ -599,7 +610,7 @@ impl NexusLpddr4Lane {
     // past the four pulses, which the leveling delay moves later
     let read_n: bit[4] = if wl_frame[0] == 1 { 4'b1000 } else {
         if wl_frame[1] == 1 { 4'b1111 } else {
-            if wl_frame[2] == 1 { 4'b0011 } else { {rd_win[ri3], rd_win[ri2], rd_win[ri1], rd_win[ri0]} | wr_gate }
+            if wl_frame[2] == 1 { 4'b0011 } else { {rd_win[ri3_r], rd_win[ri2_r], rd_win[ri1_r], rd_win[ri0_r]} | wr_gate }
         }
     }
     let sel_n: bit[4] = if wl_en == 1 { 4'b0000 } else { {1'b0, gsel[2:0]} }
@@ -1546,10 +1557,17 @@ impl NexusLpddr4Lane {
 
         // ---------------------------------------------------------- write leveling
         wl_room_r = wl_room
+        ri0_r = ri0
+        ri1_r = ri1
+        ri2_r = ri2
+        ri3_r = ri3
         dqs_want_r = dqs_want
         dqs_add_r = dqs_add
         wl_back_r = wl_back
         wl_late_r = wl_late
+        wl_end_r = wl_end
+        wl_dhit_r = wlp_r - wl_last
+        wl_bdn_r = if wlp_r > wl_p1 { 1 } else { 0 }
         if wl_eval == 1 {
             wl_k = wl_k + 1
             if wl_k >= 1 {
@@ -1567,20 +1585,20 @@ impl NexusLpddr4Lane {
                 wl_fb_p = 0
                 wl_dn = 1
                 wl_n = wlp_r
-            } else if wl_p2 == 1 && (wl_end == 1 || (wl_hit == 1 && wl_late_r == 1)) {
+            } else if wl_p2 == 1 && (wl_end_r == 1 || (wl_hit == 1 && wl_late_r == 1)) {
                 fin = 1
                 wl_best = wl_p1
                 dq_dn = 1
                 dq_n = dq_ext
                 dqs_cur = dqs_cur - dq_ext
-                wl_dn = if wlp_r > wl_p1 { 1 } else { 0 }
+                wl_dn = wl_bdn_r
                 wl_n = wl_back_r
             } else if wl_hit == 1 {
                 fin = 1
                 wl_best = wl_last
                 wl_dn = 1
-                wl_n = wlp_r - wl_last
-            } else if wl_end == 1 {
+                wl_n = wl_dhit_r
+            } else if wl_end_r == 1 {
                 fin = 1
                 f_wl = 1
                 wl_dn = 1
