@@ -483,16 +483,17 @@ impl<D: Device + Clone> Placer<D> {
     }
 }
 
-/// Whether replication may copy `cell`: a flip-flop, or a LUT or gate that
-/// sits in one LUT, with one output, that no optimization must keep as it
-/// is and no constraint ties to a site. (A wide LUT is left out: its site
-/// takes BELs around it, which the nearest-site search does not check.)
+/// Whether replication may copy `cell`: a flip-flop, or a LUT or gate
+/// (in one LUT, or a wide LUT over a slice's pair), with one output, that
+/// no optimization must keep as it is and no constraint ties to a site.
+/// A wide LUT's site shares BELs with the LUTs and flip-flop under it; the
+/// site map's footprints keep a copy off those already taken.
 fn replicable(cell: &Cell) -> bool {
     let bel = cell_bel_type(cell);
     let logic = if cell.clock.is_some() {
         bel.is_ff() && !cell.inputs.is_empty()
     } else {
-        bel == super::BelType::Lut4
+        matches!(bel, super::BelType::Lut4 | super::BelType::WideLut)
             && cell.function.is_some()
             && !cell.inputs.is_empty()
             && !super::is_constant_cell(&cell.cell_type)
@@ -810,5 +811,135 @@ mod tests {
         let groups = split(vec![big, unit(50, 10.0, 0.0)], 16, MAX_SPLIT_LEVELS);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0][0].loads.len(), 40);
+    }
+
+    /// A wide LUT (two LUTs and the flip-flop of a slice) driving loads far
+    /// across the die is copied onto wide-LUT sites whose LUTs and
+    /// flip-flop no placed cell uses
+    #[test]
+    fn a_wide_lut_is_copied_onto_free_slices() {
+        use crate::device::nexus::{NexusDevice, NexusVariant};
+        use crate::placer::{BelType, PlacerConfig};
+        use skalp_lir::tech_library::CellFunction;
+
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let (w, h) = device.grid_size();
+        // Logic tiles, by column, with their BELs' types
+        let mut tiles: Vec<(u32, u32, Vec<BelType>)> = Vec::new();
+        for x in 0..w {
+            for y in 0..h {
+                let Some(tile) = device.tile_at(x, y) else {
+                    continue;
+                };
+                let bels: Vec<BelType> = tile.bels().iter().map(|b| b.bel_type).collect();
+                if bels.contains(&BelType::WideLut) {
+                    tiles.push((x, y, bels));
+                }
+            }
+        }
+        let bel = |bels: &[BelType], t: BelType, n: usize| {
+            bels.iter()
+                .enumerate()
+                .filter(|(_, &b)| b == t || (t == BelType::Dff && b.is_ff()))
+                .nth(n)
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+
+        let mut n = GateNetlist::new("t".to_string(), "test".to_string());
+        let net = |n: &mut GateNetlist, name: &str| {
+            n.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let cell = |kind: &str, name: &str, inputs: Vec<GateNetId>, out: GateNetId| {
+            Cell::new_comb(
+                CellId(0),
+                kind.to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                inputs,
+                vec![out],
+            )
+        };
+        let clk = net(&mut n, "clk");
+        let a = net(&mut n, "a");
+        let s = net(&mut n, "s");
+        let wide = net(&mut n, "wide");
+        let mut placed = PlacementResult::new();
+        // The source in the middle of the die, the wide LUT at its left
+        // edge beside half of its loads, the other half at the right edge
+        let (x0, y0, bels0) = &tiles[tiles.len() / 2];
+        let (xw, yw, belsw) = &tiles[0];
+        let mut src = cell("OXIDE_FF", "src", vec![a], s);
+        src.clock = Some(clk);
+        let src = n.add_cell(src);
+        placed.placements.insert(
+            src,
+            PlacementLoc::new(*x0, *y0, bel(bels0, BelType::Dff, 1), BelType::Dff),
+        );
+        let mut driver = cell("OXIDE_LUT5", "wide", vec![s, s, s, s, s], wide);
+        driver.function = Some(CellFunction::Lut5);
+        let driver = n.add_cell(driver);
+        placed.placements.insert(
+            driver,
+            PlacementLoc::new(*xw, *yw, bel(belsw, BelType::WideLut, 0), BelType::WideLut),
+        );
+        // 64 loads, and in each of their tiles the first LUT taken, which
+        // rules out the first slice's wide LUT there
+        let far: Vec<&(u32, u32, Vec<BelType>)> = tiles
+            .iter()
+            .skip(1)
+            .step_by(3)
+            .take(32)
+            .chain(tiles.iter().rev().step_by(3).take(32))
+            .collect();
+        for (i, (x, y, bels)) in far.into_iter().enumerate() {
+            let q = net(&mut n, &format!("q{i}"));
+            let mut load = cell("OXIDE_FF", &format!("load{i}"), vec![wide], q);
+            load.clock = Some(clk);
+            let load = n.add_cell(load);
+            placed.placements.insert(
+                load,
+                PlacementLoc::new(*x, *y, bel(bels, BelType::Dff, 3), BelType::Dff),
+            );
+            let o = net(&mut n, &format!("f{i}"));
+            let filler = n.add_cell(cell("OXIDE_COMB", &format!("filler{i}"), vec![a], o));
+            placed.placements.insert(
+                filler,
+                PlacementLoc::new(*x, *y, bel(bels, BelType::Lut4, 0), BelType::Lut4),
+            );
+        }
+
+        let placer = Placer::new(PlacerConfig::default(), device.clone());
+        let found = placer
+            .replicate_high_fanout(&n, &placed, |_| 1.0)
+            .unwrap()
+            .expect("the wide LUT was not replicated");
+        let copies: Vec<&Cell> = found.netlist.cells[n.cells.len()..].iter().collect();
+        assert!(!copies.is_empty());
+        let mut used = std::collections::HashSet::new();
+        for (_, loc) in placed.cells() {
+            used.insert((loc.tile_x, loc.tile_y, loc.bel_index));
+        }
+        for copy in copies {
+            assert_eq!(copy.function, Some(CellFunction::Lut5));
+            let loc = found.placement.get(copy.id).expect("copy placed");
+            assert_eq!(
+                loc.bel_type,
+                BelType::WideLut,
+                "{} not on a wide LUT",
+                copy.path
+            );
+            assert!(used.insert((loc.tile_x, loc.tile_y, loc.bel_index)));
+            for b in device.bel_footprint(loc.tile_x, loc.tile_y, loc.bel_index) {
+                assert!(
+                    !used.contains(&(loc.tile_x, loc.tile_y, b)),
+                    "{} at ({}, {}) shares BEL {b} with a placed cell",
+                    copy.path,
+                    loc.tile_x,
+                    loc.tile_y
+                );
+            }
+        }
     }
 }
