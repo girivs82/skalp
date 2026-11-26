@@ -1,0 +1,54 @@
+// Register replication check, across clock edges: as
+// fanout_replication_check.sk, but the registers `we` feeds load on the
+// falling edge, so its paths to them have half a clock period.
+//
+// One register, `we`, drives about 400 loads: the clock enable of a
+// 192 bits of registers (`held`), and one LUT input per bit of a 192 bits of
+// registers that folds the stream in while it is high (`mixed`). Place and
+// route copies such a register when its loads are too many and too far
+// apart for its paths, so this design is placed, replicated and simulated
+// at gate level against the same netlist unreplicated: `sig` must agree
+// every cycle.
+
+entity FanoutReplicationFallCheck {
+    in clk: clock
+    out sig: bit[16]
+}
+
+impl FanoutReplicationFallCheck {
+    signal lfsr: bit[32] = 1
+    signal we: bit = 0
+    signal held0: bit[64] = 0
+    signal held1: bit[64] = 0
+    signal held2: bit[64] = 0
+    signal mixed0: bit[64] = 0
+    signal mixed1: bit[64] = 0
+    signal mixed2: bit[64] = 0
+
+    let w0: bit[64] = {lfsr, lfsr & {lfsr[0], lfsr[31:1]}}
+    let w1: bit[64] = {lfsr | {lfsr[4:0], lfsr[31:5]}, {lfsr[15:0], lfsr[31:16]}}
+    let w2: bit[64] = {~lfsr, lfsr ^ {lfsr[30:0], lfsr[31]}}
+    let m0: bit[64] = if we == 1 { w0 } else { 64'b0 }
+    let m1: bit[64] = if we == 1 { w1 } else { 64'b0 }
+    let m2: bit[64] = if we == 1 { w2 } else { 64'b0 }
+    let f: bit[64] = held0 ^ held1 ^ held2 ^ mixed0 ^ mixed1 ^ mixed2
+    let f32: bit[32] = f[63:32] ^ f[31:0]
+
+    sig = f32[31:16] ^ f32[15:0]
+
+    on(clk.rise) {
+        lfsr = {lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31], lfsr[31:1]}
+        we = lfsr[17]
+    }
+
+    on(clk.fall) {
+        if we == 1 {
+            held0 = ~w0
+            held1 = ~w1
+            held2 = ~w2
+        }
+        mixed0 = {mixed0[62:0], mixed2[63]} ^ m0
+        mixed1 = {mixed1[62:0], mixed0[63]} ^ m1
+        mixed2 = {mixed2[62:0], mixed1[63]} ^ m2
+    }
+}

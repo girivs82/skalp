@@ -6,14 +6,20 @@
 //! (measured on the device's routing graph when the placer could). Paths start at registers, pads and constants and end at register
 //! and pad inputs, as in the analyzer that runs after routing.
 //!
+//! As there too, a flip-flop on the falling edge of its clock
+//! ([`ff_clock_falling`]) launches and captures half a period from the
+//! rising edge: [`estimate_slacks`] times a design with any once per
+//! launching edge, a path between opposite edges getting half a period.
+//!
 //! A net's criticality is `1 - slack / worst_delay`: 1 on the worst path, 0 on
 //! a net with a whole clock period to spare. Only how critical nets are
 //! relative to each other matters to the placer, so a rough delay model is
 //! enough.
 
 use crate::collections::HashMap;
+use crate::timing::clock_targets::ClockTargets;
 use crate::timing::DelayModel;
-use skalp_lir::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::{ff_clock_falling, Cell, CellId, GateNetId, GateNetlist};
 use std::collections::VecDeque;
 
 /// Delay of a connection between cells at `from` and `to`
@@ -28,6 +34,12 @@ fn connection_delay(model: &DelayModel, from: (f64, f64), to: (f64, f64)) -> f64
 /// clocked cells, and cells with no inputs (pads, constants).
 fn is_path_boundary(cell: &Cell) -> bool {
     cell.clock.is_some() || cell.inputs.is_empty()
+}
+
+/// Whether `cell` launches and captures on the falling edge of its clock
+/// (pads, constants and other clocked cells count as the rising edge)
+fn on_falling_edge(cell: &Cell) -> bool {
+    cell.clock.is_some() && ff_clock_falling(cell)
 }
 
 /// Arrival and required times of every net's driver output, on a placement.
@@ -62,17 +74,20 @@ fn analyse(
     model: &DelayModel,
     wire_delay: &impl Fn(CellId, CellId, usize) -> f64,
 ) -> Analysis {
-    analyse_ending(netlist, model, wire_delay, None)
+    analyse_ending(netlist, model, wire_delay, None, None)
 }
 
 /// [`analyse`], with each path end (a register or pad input) required by
 /// `end_required(cell)` ns after the launching edge when given, and by the
-/// worst path's delay otherwise
+/// worst path's delay otherwise. With `launch_edge`, only registers on that
+/// edge (`true`: the falling edge; pads and constants count as rising)
+/// launch paths, and nets no such path reaches arrive at minus infinity.
 fn analyse_ending(
     netlist: &GateNetlist,
     model: &DelayModel,
     wire_delay: &impl Fn(CellId, CellId, usize) -> f64,
     end_required: Option<&dyn Fn(&Cell) -> f64>,
+    launch_edge: Option<bool>,
 ) -> Analysis {
     let nets = &netlist.nets;
     let cell_index: HashMap<CellId, usize> =
@@ -123,8 +138,17 @@ fn analyse_ending(
 
     // Arrival at each net's driver output.
     let mut arrival = vec![0.0f64; nets.len()];
+    // What a cell starts from before its inputs: 0 when every register
+    // launches, so that a combinational loop's cells keep a zero arrival
+    let none = if launch_edge.is_some() {
+        f64::NEG_INFINITY
+    } else {
+        0.0
+    };
     for cell in netlist.cells.iter().filter(|c| is_path_boundary(c)) {
-        let launch = if cell.clock.is_some() {
+        let launch = if launch_edge.is_some_and(|falling| falling != on_falling_edge(cell)) {
+            f64::NEG_INFINITY
+        } else if cell.clock.is_some() {
             model.dff_clk_to_q
         } else {
             0.0
@@ -140,7 +164,7 @@ fn analyse_ending(
             .iter()
             .enumerate()
             .map(|(pin, &input)| arrival[input.0 as usize] + wire(input, cell, pin))
-            .fold(0.0, f64::max);
+            .fold(none, f64::max);
         let out_time = latest + model.cell_delay(&cell.cell_type);
         for &out in &cell.outputs {
             arrival[out.0 as usize] = out_time;
@@ -195,16 +219,27 @@ fn analyse_ending(
 }
 
 /// Arrival and required times on a placement, against each path end's own
-/// clock period ([`estimate_slacks`])
+/// clock ([`estimate_slacks`]): one [`EdgeTiming`] for each launching edge
+/// timed apart
 pub struct SlackEstimate {
-    /// Latest arrival at each net's driver output (ns), by net index
+    /// One for paths from every register, or, in a design with
+    /// falling-edge flip-flops, one for paths from each edge
+    pub edges: Vec<EdgeTiming>,
+}
+
+/// Arrival and required times of the paths launched on one clock edge
+/// (or on every edge)
+pub struct EdgeTiming {
+    /// Latest arrival at each net's driver output (ns after the launching
+    /// edge; minus infinity where no path from this edge reaches), by net
+    /// index
     pub arrival: Vec<f64>,
-    /// Latest time each cell may see its inputs (ns), by cell index;
-    /// infinite for a cell that ends no timing path
+    /// Latest time each cell may see its inputs (ns after the launching
+    /// edge), by cell index; infinite for a cell that ends no timing path
     pub input_required: Vec<f64>,
 }
 
-impl SlackEstimate {
+impl EdgeTiming {
     /// Slack (ns) of the connection from a driver whose output switches at
     /// `arrival` to cell index `sink`, the wire taking `wire` ns
     pub fn slack(&self, arrival: f64, wire: f64, sink: usize) -> f64 {
@@ -216,20 +251,47 @@ impl SlackEstimate {
 
 /// Static timing of `netlist` with cells at `position` and each connection
 /// taking [`DelayModel::connection_delay`] for its ends' tile offset (0 when
-/// either is unplaced). A register or pad input must see its data
-/// `period(cell)` ns (less setup) after the launching edge: the period of
-/// the clock that captures it.
+/// either is unplaced). A register or pad input must see its data within
+/// the required time ([`ClockTargets::required_ns`]) of the clock that
+/// captures it (the default frequency for a pad), and half a period sooner
+/// where the data was launched on the other edge, as the analyzer after
+/// routing has it.
 pub fn estimate_slacks(
     netlist: &GateNetlist,
     model: &DelayModel,
     position: impl Fn(CellId) -> Option<(f64, f64)>,
-    period: impl Fn(&Cell) -> f64,
+    clocks: &ClockTargets,
 ) -> SlackEstimate {
-    let a = analyse_ending(netlist, model, &by_position(model, position), Some(&period));
-    SlackEstimate {
-        arrival: a.arrival,
-        input_required: a.input_required,
-    }
+    let wire = by_position(model, position);
+    let mhz = |cell: &Cell| cell.clock.map_or(clocks.default_mhz, |c| clocks.mhz(c));
+    let launch_edges = if netlist
+        .cells
+        .iter()
+        .any(|c| c.clock.is_some() && ff_clock_falling(c))
+    {
+        vec![Some(false), Some(true)]
+    } else {
+        vec![None]
+    };
+    let edges = launch_edges
+        .into_iter()
+        .map(|launch_edge| {
+            let end_required = |cell: &Cell| {
+                let half = if launch_edge.unwrap_or(false) != on_falling_edge(cell) {
+                    500.0 / mhz(cell)
+                } else {
+                    0.0
+                };
+                1000.0 / mhz(cell) - clocks.uncertainty_ns - half
+            };
+            let a = analyse_ending(netlist, model, &wire, Some(&end_required), launch_edge);
+            EdgeTiming {
+                arrival: a.arrival,
+                input_required: a.input_required,
+            }
+        })
+        .collect();
+    SlackEstimate { edges }
 }
 
 /// Criticality of each net in `netlist` (by index), with cells at `position`:
