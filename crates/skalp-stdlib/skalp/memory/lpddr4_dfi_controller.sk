@@ -394,6 +394,15 @@ impl Lpddr4DfiController {
     // the passing run being counted, and the longest so far
     signal vr_rs: bit[7] = 0
     signal vr_cl: bit[7] = 0
+    // a level's result, registered the cycle before it is taken (vr_jq: the judging condition
+    // held a cycle; nothing it depends on changes once all the level's reads are back)
+    signal vr_jq: bit = 0
+    signal vr_pass_r: bit = 0
+    signal vr_rs_nr: bit[7] = 0
+    signal vr_cl_nr: bit[7] = 0
+    signal vr_bs_nr: bit[7] = 0
+    signal vr_be_nr: bit[7] = 0
+    signal vr_bl_nr: bit[7] = 0
     signal vr_bs: bit[7] = 0
     signal vr_be: bit[7] = 0
     signal vr_bl: bit[7] = 0
@@ -465,8 +474,6 @@ impl Lpddr4DfiController {
     // command choice; until it is in, a read of that entry takes rq_data
     signal wq_we_r: bit = 0
     signal wq_wp_d: bit[2] = 0
-    // the same strobe per entry (wq_wp_d decoded), so each enable drives one entry's 256 bits
-    signal wq_en: bit[4] = 0
     signal wq_rp: bit[2] = 0
     // wq_rp + 1, kept in its own register so the second read address is
     // ready at the clock edge
@@ -735,7 +742,7 @@ impl Lpddr4DfiController {
     let vr_bs_n: bit[7] = if vr_better == 1 { vr_rs_n } else { vr_bs }
     let vr_be_n: bit[7] = if vr_better == 1 { vr_c } else { vr_be }
     let vr_bl_n: bit[7] = if vr_better == 1 { vr_cl_n } else { vr_bl }
-    let vr_sum: bit[8] = {1'b0, vr_bs_n} + {1'b0, vr_be_n}
+    let vr_sum: bit[8] = {1'b0, vr_bs_nr} + {1'b0, vr_be_nr}
     let vr_mid: bit[7] = vr_sum[7:1]
     // this code's reads are all back and judged
     let vr_judge: bit = if vr_st == 1 && vr_ph == 5 && rq_v == 0 && quiet == 1 && vr_got == vr_nrd { 1 } else { 0 }
@@ -1057,11 +1064,7 @@ impl Lpddr4DfiController {
         }
         wq_we_r = do_wr
         wq_wp_d = wq_wp
-        wq_en = if do_wr == 1 { 4'b0001 << wq_wp } else { 4'b0000 }
-        if wq_en[0] == 1 { wq[0] = rq_data }
-        if wq_en[1] == 1 { wq[1] = rq_data }
-        if wq_en[2] == 1 { wq[2] = rq_data }
-        if wq_en[3] == 1 { wq[3] = rq_data }
+        if wq_we_r == 1 { wq[wq_wp_d] = rq_data }
         if do_wr == 1 {
             wq_wp = wq_wp + 1
         }
@@ -1117,6 +1120,15 @@ impl Lpddr4DfiController {
         tq_n = if tq_push == 1 && r_emit == 0 { tq_n + 1 } else { if tq_push == 0 && r_emit == 1 { tq_n - 1 } else { tq_n } }
         tq_room = if tq_push == 1 && r_emit == 0 { if tq_n < 7 { 1 } else { 0 } } else { if tq_push == 0 && r_emit == 1 { if tq_n < 9 { 1 } else { 0 } } else { if tq_n < 8 { 1 } else { 0 } } }
         tq_z = if tq_push == 1 && r_emit == 0 { 0 } else { if tq_push == 0 && r_emit == 1 { if tq_n == 1 { 1 } else { 0 } } else { if tq_n == 0 { 1 } else { 0 } } }
+
+        // VREF training: a level's result, a cycle ahead of taking it
+        vr_jq = vr_judge
+        vr_pass_r = vr_pass
+        vr_rs_nr = vr_rs_n
+        vr_cl_nr = vr_cl_n
+        vr_bs_nr = vr_bs_n
+        vr_be_nr = vr_be_n
+        vr_bl_nr = vr_bl_n
 
         // ---------------------------------------------------------------- timers
         t_cmd = if do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
@@ -1438,20 +1450,20 @@ impl Lpddr4DfiController {
                         }
                     },
                     _ => {
-                        if vr_judge == 1 {
-                            vr_map = {vr_map[62:0], vr_pass}
-                            vr_rs = vr_rs_n
-                            vr_cl = if vr_pass == 1 { vr_cl_n } else { 0 }
-                            vr_bs = vr_bs_n
-                            vr_be = vr_be_n
-                            vr_bl = vr_bl_n
+                        if vr_judge == 1 && vr_jq == 1 {
+                            vr_map = {vr_map[62:0], vr_pass_r}
+                            vr_rs = vr_rs_nr
+                            vr_cl = if vr_pass_r == 1 { vr_cl_nr } else { 0 }
+                            vr_bs = vr_bs_nr
+                            vr_be = vr_be_nr
+                            vr_bl = vr_bl_nr
                             vr_gi = 0
                             vr_got = 0
                             vr_bad = 0
                             vr_ph = 0
                             if vr_last == 1 {
                                 vr_fin = 1
-                                if vr_bl_n == 0 {
+                                if vr_bl_nr == 0 {
                                     train_fail_r = 1
                                     vr_keep = 1
                                 } else {
