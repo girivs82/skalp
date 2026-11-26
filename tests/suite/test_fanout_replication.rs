@@ -4,6 +4,7 @@
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_place_route::placer::control_sets::{control_set_conflicts, control_sets};
+use skalp_place_route::timing::clock_targets::ClockTargets;
 use skalp_place_route::{
     CellPacker, NexusDevice, NexusVariant, Placer, PlacerConfig, ReplicationConfig,
     REPLICA_OF_PARAM,
@@ -49,7 +50,7 @@ fn place_and_replicate(netlist: GateNetlist, outcome: &std::sync::Mutex<Outcome>
     }
     .expect("placement");
     let found = placer
-        .replicate_high_fanout(&netlist, &placement, |_| 1.0)
+        .replicate_high_fanout(&netlist, &placement, &ClockTargets::uniform(1000.0))
         .expect("replication")
         .expect("nothing was replicated");
     let out = &found.netlist;
@@ -153,17 +154,17 @@ fn place_and_replicate(netlist: GateNetlist, outcome: &std::sync::Mutex<Outcome>
     found.netlist
 }
 
-/// The write enable is split into copies near its loads, each copy placed
-/// legally, and the design does the same thing cycle for cycle
-#[tokio::test]
-async fn test_high_fanout_register_is_replicated_and_behaves_the_same() {
-    let path = fixture_path("fanout_replication_check.sk");
+/// Replicate the fixture's write enable, which drives about 400 loads, and
+/// simulate it at gate level against the unreplicated netlist: copies
+/// placed legally, and the design doing the same thing cycle for cycle
+async fn replicated_behaves_the_same(fixture: &str, top: &str) {
+    let path = fixture_path(fixture);
     let outcome = std::sync::Mutex::new(Outcome::default());
     let pass = |netlist| place_and_replicate(netlist, &outcome);
-    let mut replicated = Testbench::gate_level_with_netlist_pass(&path, TOP, "nexus", &pass)
+    let mut replicated = Testbench::gate_level_with_netlist_pass(&path, top, "nexus", &pass)
         .await
         .unwrap();
-    let mut plain = Testbench::gate_level_with_top_and_library(&path, TOP, "nexus")
+    let mut plain = Testbench::gate_level_with_top_and_library(&path, top, "nexus")
         .await
         .unwrap();
 
@@ -194,6 +195,25 @@ async fn test_high_fanout_register_is_replicated_and_behaves_the_same() {
     assert!(changed > 100, "the output hardly changed ({changed} times)");
 }
 
+/// The write enable is split into copies near its loads, each copy placed
+/// legally, and the design does the same thing cycle for cycle
+#[tokio::test]
+async fn test_high_fanout_register_is_replicated_and_behaves_the_same() {
+    replicated_behaves_the_same("fanout_replication_check.sk", TOP).await;
+}
+
+/// The same with the loads on the falling edge of the clock: a rising-edge
+/// register copied for falling-edge loads, which keep their own control
+/// sets
+#[tokio::test]
+async fn test_register_feeding_falling_edge_loads_is_replicated_and_behaves_the_same() {
+    replicated_behaves_the_same(
+        "fanout_replication_fall_check.sk",
+        "FanoutReplicationFallCheck",
+    )
+    .await;
+}
+
 /// Replication off, or a clock every path meets, leaves the netlist alone
 #[test]
 fn test_replication_only_when_paths_fail() {
@@ -219,7 +239,7 @@ fn test_replication_only_when_paths_fail() {
     let placement = placer.place(&netlist).expect("placement");
     assert!(
         placer
-            .replicate_high_fanout(&netlist, &placement, |_| 1000.0)
+            .replicate_high_fanout(&netlist, &placement, &ClockTargets::uniform(1.0))
             .unwrap()
             .is_none(),
         "replicated with every path meeting a 1 MHz clock"
@@ -228,7 +248,7 @@ fn test_replication_only_when_paths_fail() {
     off.replication.enabled = false;
     let placer = Placer::new(off, device);
     assert!(placer
-        .replicate_high_fanout(&netlist, &placement, |_| 1.0)
+        .replicate_high_fanout(&netlist, &placement, &ClockTargets::uniform(1000.0))
         .unwrap()
         .is_none());
 }

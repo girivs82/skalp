@@ -40,6 +40,7 @@ use crate::bitstream::prepare::ff_pin;
 use crate::collections::{HashMap, HashMapExt};
 use crate::device::{Device, FF_PIN_CE, FF_PIN_LSR};
 use crate::error::Result;
+use crate::timing::clock_targets::ClockTargets;
 use crate::timing::DelayModel;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
@@ -140,13 +141,15 @@ impl<D: Device + Clone> Placer<D> {
     /// Replicate the placed drivers of `netlist` that drive at least
     /// [`ReplicationConfig::min_fanout`] loads and start a path with less
     /// than [`ReplicationConfig::slack_margin_ns`] slack by the placement
-    /// estimate, each path end being timed against `period_ns` of the clock
-    /// capturing it (`None` for a pad). `None` when nothing is replicated.
+    /// estimate, each path end being timed against the clock in `clocks`
+    /// capturing it (the default frequency for a pad), and against half its
+    /// period for a path between a clock's rising and falling edges.
+    /// `None` when nothing is replicated.
     pub fn replicate_high_fanout(
         &self,
         netlist: &GateNetlist,
         placement: &PlacementResult,
-        period_ns: impl Fn(Option<GateNetId>) -> f64,
+        clocks: &ClockTargets,
     ) -> Result<Option<Replication>> {
         let config = self.config.replication;
         if !config.enabled || netlist.is_ncl || config.max_fanout == 0 {
@@ -175,7 +178,7 @@ impl<D: Device + Clone> Placer<D> {
             if candidates.is_empty() {
                 break;
             }
-            let estimate = estimate_slacks(&out, &model, position, |cell| period_ns(cell.clock));
+            let estimate = estimate_slacks(&out, &model, position, clocks);
             let mut plans: Vec<(f64, usize, Vec<Load>)> = Vec::new();
             for (driver, loads) in candidates {
                 let at = position(CellId(driver as u32)).unwrap_or_default();
@@ -572,36 +575,39 @@ fn driver_slack(
     };
     let cell = &netlist.cells[driver];
     let registered = cell.clock.is_some();
-    // Each input's arrival at `at`, and the slack it leaves a register
-    let mut inputs_at = 0.0f64;
     let mut worst = f64::INFINITY;
-    for &input in &cell.inputs {
-        let input = netlist.resolve_alias(input);
-        let arrival = estimate.arrival[input.0 as usize];
-        let into = netlist.nets[input.0 as usize]
-            .driver
-            .and_then(position)
-            .map_or(0.0, |from| wire(from, at));
-        inputs_at = inputs_at.max(arrival + into);
-        if registered {
-            worst = worst.min(estimate.slack(arrival, into, driver));
+    // The paths launched on each clock edge, timed apart
+    for timing in &estimate.edges {
+        // Each input's arrival at `at`, and the slack it leaves a register
+        let mut inputs_at = f64::NEG_INFINITY;
+        for &input in &cell.inputs {
+            let input = netlist.resolve_alias(input);
+            let arrival = timing.arrival[input.0 as usize];
+            let into = netlist.nets[input.0 as usize]
+                .driver
+                .and_then(position)
+                .map_or(0.0, |from| wire(from, at));
+            inputs_at = inputs_at.max(arrival + into);
+            if registered {
+                worst = worst.min(timing.slack(arrival, into, driver));
+            }
         }
-    }
-    let launch = if registered {
-        let q = netlist.resolve_alias(cell.outputs[0]);
-        estimate.arrival[q.0 as usize]
-    } else {
-        inputs_at + model.cell_delay(&cell.cell_type)
-    };
-    for load in loads {
-        let LoadPin::Input(_) = load.pin else {
-            continue;
+        let launch = if registered {
+            let q = netlist.resolve_alias(cell.outputs[0]);
+            timing.arrival[q.0 as usize]
+        } else {
+            inputs_at + model.cell_delay(&cell.cell_type)
         };
-        let sink = &netlist.cells[load.cell];
-        let Some(to) = position(sink.id) else {
-            continue;
-        };
-        worst = worst.min(estimate.slack(launch, wire(at, to), load.cell));
+        for load in loads {
+            let LoadPin::Input(_) = load.pin else {
+                continue;
+            };
+            let sink = &netlist.cells[load.cell];
+            let Some(to) = position(sink.id) else {
+                continue;
+            };
+            worst = worst.min(timing.slack(launch, wire(at, to), load.cell));
+        }
     }
     worst
 }
@@ -648,7 +654,12 @@ fn latest_input_at(
         .filter_map(|&input| {
             let input = netlist.resolve_alias(input);
             let from = netlist.nets[input.0 as usize].driver.and_then(position)?;
-            Some((estimate.arrival[input.0 as usize], from))
+            let arrival = estimate
+                .edges
+                .iter()
+                .map(|t| t.arrival[input.0 as usize])
+                .fold(f64::NEG_INFINITY, f64::max);
+            Some((arrival, from))
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map_or(home, |(_, from)| from)
@@ -813,6 +824,170 @@ mod tests {
         assert_eq!(groups[0][0].loads.len(), 40);
     }
 
+    /// Logic tiles of a LIFCL-40, column by column, with their BELs' types,
+    /// and the index of the `n`th BEL of a type in a tile's list
+    fn logic_tiles(
+        device: &crate::device::nexus::NexusDevice,
+    ) -> Vec<(u32, u32, Vec<crate::placer::BelType>)> {
+        let (w, h) = device.grid_size();
+        let mut tiles = Vec::new();
+        for x in 0..w {
+            for y in 0..h {
+                let Some(tile) = device.tile_at(x, y) else {
+                    continue;
+                };
+                let bels: Vec<crate::placer::BelType> =
+                    tile.bels().iter().map(|b| b.bel_type).collect();
+                if bels.contains(&crate::placer::BelType::WideLut) {
+                    tiles.push((x, y, bels));
+                }
+            }
+        }
+        tiles
+    }
+
+    fn nth_bel(bels: &[crate::placer::BelType], t: crate::placer::BelType, n: usize) -> usize {
+        bels.iter()
+            .enumerate()
+            .filter(|(_, &b)| b == t || (t == crate::placer::BelType::Dff && b.is_ff()))
+            .nth(n)
+            .map(|(i, _)| i)
+            .unwrap()
+    }
+
+    /// A rising-edge register whose output crosses the die through three
+    /// LUTs to a LUT driving 64 registers, half beside it at the die's
+    /// left edge and half at its right edge: the far half end a path of
+    /// about 6 ns. The 64 registers load on the falling edge with
+    /// `falling`.
+    fn half_cycle_design(falling: bool) -> (GateNetlist, PlacementResult) {
+        use crate::device::nexus::{NexusDevice, NexusVariant};
+        use crate::placer::BelType;
+        use skalp_lir::gate_netlist::{FF_CLOCK_EDGE_PARAM, FF_CLOCK_FALLING};
+
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let tiles = logic_tiles(&device);
+        let mut n = GateNetlist::new("t".to_string(), "test".to_string());
+        let net = |n: &mut GateNetlist, name: &str| {
+            n.add_net(GateNet::new(GateNetId(0), name.to_string()))
+        };
+        let cell = |kind: &str, name: &str, inputs: Vec<GateNetId>, out: GateNetId| {
+            Cell::new_comb(
+                CellId(0),
+                kind.to_string(),
+                "nexus".to_string(),
+                0.0,
+                name.to_string(),
+                inputs,
+                vec![out],
+            )
+        };
+        let mut placed = PlacementResult::new();
+        let mut put = |id: CellId, tile: &(u32, u32, Vec<BelType>), t: BelType, k: usize| {
+            placed.placements.insert(
+                id,
+                PlacementLoc::new(tile.0, tile.1, nth_bel(&tile.2, t, k), t),
+            );
+        };
+        let clk = net(&mut n, "clk");
+        let a = net(&mut n, "a");
+        let (left, right) = (&tiles[0], &tiles[tiles.len() - 1]);
+        // src (left) -> l1 (right) -> l2 (left) -> l3 (right) -> we (left)
+        let q = net(&mut n, "q");
+        let mut src = cell("OXIDE_FF", "src", vec![a], q);
+        src.clock = Some(clk);
+        let src = n.add_cell(src);
+        put(src, left, BelType::Dff, 0);
+        let mut x2 = q;
+        for (k, tile) in [right, left, right].into_iter().enumerate() {
+            let x = net(&mut n, &format!("x{k}"));
+            let l = n.add_cell(cell("OXIDE_COMB", &format!("l{k}"), vec![x2], x));
+            put(l, tile, BelType::Lut4, 2 + k);
+            x2 = x;
+        }
+        let we = net(&mut n, "we");
+        let mut driver = cell("OXIDE_COMB", "we", vec![x2], we);
+        driver.function = Some(skalp_lir::tech_library::CellFunction::Inv);
+        let driver = n.add_cell(driver);
+        put(driver, left, BelType::Lut4, 1);
+        let sides = tiles[1..33]
+            .iter()
+            .chain(tiles[tiles.len() - 33..tiles.len() - 1].iter());
+        for (i, tile) in sides.enumerate() {
+            let o = net(&mut n, &format!("o{i}"));
+            let mut load = cell("OXIDE_FF", &format!("load{i}"), vec![we], o);
+            load.clock = Some(clk);
+            if falling {
+                load.parameters.insert(
+                    FF_CLOCK_EDGE_PARAM.to_string(),
+                    FF_CLOCK_FALLING.to_string(),
+                );
+            }
+            let load = n.add_cell(load);
+            put(load, tile, BelType::Dff, 0);
+        }
+        (n, placed)
+    }
+
+    /// A path from a rising-edge register to falling-edge ones has half a
+    /// period, as the analyzer after routing has it: at 100 MHz a 6 ns path
+    /// meets a whole period but fails half of one, so its driver is copied
+    /// only when the loads are on the falling edge
+    #[test]
+    fn a_rising_to_falling_path_gets_half_a_period() {
+        use crate::device::nexus::{NexusDevice, NexusVariant};
+        use crate::placer::PlacerConfig;
+
+        let device = NexusDevice::new(NexusVariant::Lifcl40);
+        let placer = Placer::new(PlacerConfig::default(), device);
+        let clocks = ClockTargets::uniform(100.0);
+        let model = placer.delay_model();
+        // The far loads' path: 5 to 10 ns from the source's clock edge
+        let (rising, placed) = half_cycle_design(false);
+        let position = |id: CellId| {
+            placed
+                .get(id)
+                .map(|loc| (loc.tile_x as f64, loc.tile_y as f64))
+        };
+        let estimate = estimate_slacks(&rising, &model, position, &clocks);
+        assert_eq!(estimate.edges.len(), 1);
+        let worst = estimate.edges[0]
+            .input_required
+            .iter()
+            .zip(&rising.cells)
+            .filter(|(_, c)| c.path.starts_with("load"))
+            .map(|(&required, c)| {
+                let d = rising.nets[c.inputs[0].0 as usize].driver.unwrap();
+                let (from, to) = (position(d).unwrap(), position(c.id).unwrap());
+                let wire = model
+                    .connection_delay((from.0 - to.0).abs() as u32, (from.1 - to.1).abs() as u32);
+                required - estimate.edges[0].arrival[c.inputs[0].0 as usize] - wire
+            })
+            .fold(f64::INFINITY, f64::min);
+        let delay = 10.0 - model.dff_setup - worst;
+        assert!(
+            (5.5..9.0).contains(&delay),
+            "the far loads' path takes {delay:.2} ns"
+        );
+        assert!(
+            placer
+                .replicate_high_fanout(&rising, &placed, &clocks)
+                .unwrap()
+                .is_none(),
+            "replicated a path that meets a whole period"
+        );
+
+        let (falling, placed) = half_cycle_design(true);
+        let found = placer
+            .replicate_high_fanout(&falling, &placed, &clocks)
+            .unwrap()
+            .expect("the half-period path's driver was not replicated");
+        let we = &found.drivers[0];
+        assert_eq!(we.path, "we");
+        assert!(we.slack_before_ns < 0.0, "{we:?}");
+        assert!(we.slack_after_ns > we.slack_before_ns, "{we:?}");
+    }
+
     /// A wide LUT (two LUTs and the flip-flop of a slice) driving loads far
     /// across the die is copied onto wide-LUT sites whose LUTs and
     /// flip-flop no placed cell uses
@@ -912,7 +1087,7 @@ mod tests {
 
         let placer = Placer::new(PlacerConfig::default(), device.clone());
         let found = placer
-            .replicate_high_fanout(&n, &placed, |_| 1.0)
+            .replicate_high_fanout(&n, &placed, &ClockTargets::uniform(1000.0))
             .unwrap()
             .expect("the wide LUT was not replicated");
         let copies: Vec<&Cell> = found.netlist.cells[n.cells.len()..].iter().collect();
