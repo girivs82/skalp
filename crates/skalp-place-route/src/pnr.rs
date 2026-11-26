@@ -1428,11 +1428,7 @@ fn replicate_placed_drivers<D: crate::device::Device + Clone>(
     flow: &str,
 ) -> Result<Option<crate::placer::Replication>> {
     let t_replicate = std::time::Instant::now();
-    let period = |clock: Option<GateNetId>| match clock {
-        Some(clock) => clocks.required_ns(clock),
-        None => 1000.0 / clocks.default_mhz - clocks.uncertainty_ns,
-    };
-    let found = placer.replicate_high_fanout(netlist, placement, period)?;
+    let found = placer.replicate_high_fanout(netlist, placement, clocks)?;
     if let Some(found) = &found {
         log::info!(
             "{flow}: replicated {} high-fanout drivers in {:.1} s ({} copies)",
