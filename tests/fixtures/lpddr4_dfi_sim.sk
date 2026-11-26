@@ -97,6 +97,7 @@ entity Lpddr4DfiSim<
     out m_t_ck: bit[8]
     out vref: bit[8]
     out vref_win: bit[14]
+    out wl_relevels: bit[2]
     out vref_map: bit[64]
 }
 
@@ -330,5 +331,6 @@ impl Lpddr4DfiSim {
     m_t_ck = dram.t_ck_clks
     vref = ctrl.vref
     vref_win = ctrl.vref_win
+    wl_relevels = ctrl.wl_relevels
     vref_map = ctrl.vref_map
 }

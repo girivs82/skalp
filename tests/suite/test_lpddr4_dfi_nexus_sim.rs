@@ -125,9 +125,12 @@ struct Variant {
     /// the DQ pins (bit k: DQ k) whose writes reach the DRAM later than the
     /// others, and by how many ticks
     dq_late: (u64, u64),
+    /// a read gate sweep miss: gate training read `gate_miss` (from 1) reaches
+    /// lane 0 with DQ0 inverted; 0: none
+    gate_miss: u64,
 }
 
-const STATUS: [&str; 22] = [
+const STATUS: [&str; 23] = [
     "ctrl_state",
     "gen_state",
     "dll_lock",
@@ -150,6 +153,7 @@ const STATUS: [&str; 22] = [
     "m_err_cycle",
     "passes",
     "reads_ok",
+    "phyupd_count",
 ];
 
 async fn status(tb: &mut Testbench) -> String {
@@ -181,6 +185,7 @@ async fn run(v: Variant) {
         ("DQS_AUTO", v.dqs_auto),
         ("DQ_LATE_MASK", v.dq_late.0),
         ("DQ_LATE_TICKS", v.dq_late.1),
+        ("GATE_MISS", v.gate_miss),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -219,6 +224,17 @@ async fn run(v: Variant) {
             tb.get_u64($s).await
         };
     }
+    // the gate sweep's pass map (bit 63 - k: setting k); a miss is injected on the burst for
+    // setting gate_miss - 1, which must fail
+    let gate_map0 = get!("gate_map0");
+    eprintln!("{n}: lane 0 gate map {gate_map0:016X}");
+    if v.gate_miss != 0 {
+        assert_eq!(
+            (gate_map0 >> (64 - v.gate_miss)) & 1,
+            0,
+            "{n}: the injected miss, gate map {gate_map0:016X}"
+        );
+    }
 
     let errors = get!("m_errors");
     assert_eq!(
@@ -233,9 +249,23 @@ async fn run(v: Variant) {
 
     assert_eq!(get!("dll_lock"), 1, "{n}: DLL lock");
     assert_eq!(get!("init_done"), 1, "{n}");
-    // VREF(DQ) training: one MR14 write per code swept and one for the code chosen
+    // DQS_AUTO raises a strobe's output delay in one PHY update window between leveling
+    // rounds; nothing else asks for one
+    let raised =
+        v.dqs_auto != 0 && (get!("dqs0") > v.dqs_out_delay || get!("dqs1") > v.dqs_out_delay);
+    // VREF(DQ) training: one MR14 write per code swept and one for the code chosen; a second
+    // write leveling round (after a PHY update window) enters and leaves leveling with MR2
     let vx = crate::lpddr4_vref::expected(v.vref_ok.0, v.vref_ok.1);
-    assert_eq!(get!("m_n_mrw"), 14 + vx.n_codes + 1, "{n}: MRW count");
+    assert_eq!(
+        get!("m_n_mrw"),
+        14 + vx.n_codes + 1 + 2 * u64::from(raised),
+        "{n}: MRW count"
+    );
+    assert_eq!(
+        get!("wl_relevels"),
+        u64::from(raised),
+        "{n}: write leveling rounds after an update"
+    );
     assert_eq!(get!("vref_map"), vx.map, "{n}: VREF codes passed");
     assert_eq!(get!("vref_win"), vx.win, "{n}: VREF passing run");
     assert_eq!(get!("vref"), vx.mr14, "{n}: MR14 after VREF training");
@@ -341,6 +371,12 @@ async fn run(v: Variant) {
         }
     }
 
+    assert_eq!(
+        get!("phyupd_count"),
+        u64::from(raised),
+        "{n}: PHY update windows"
+    );
+
     // the write DQ sweep went through failing delays where a bit is shorter than it, and
     // nothing failed after it
     let viol_init = get!("m_dq_viol_init");
@@ -393,6 +429,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -420,6 +457,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -449,6 +487,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -475,6 +514,7 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -501,6 +541,7 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -527,6 +568,7 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -556,6 +598,7 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -584,6 +627,7 @@ async fn lpddr4_dfi_nexus_dq_enable_late() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -613,6 +657,7 @@ async fn lpddr4_dfi_nexus_vref_training() {
         dqs_out_delay: 0,
         dqs_auto: 0,
         dq_late: (0, 0),
+        gate_miss: 0,
     })
     .await;
 }
@@ -643,6 +688,7 @@ async fn lpddr4_dfi_nexus_write_bit_deskew() {
         dqs_out_delay: 32,
         dqs_auto: 0,
         dq_late: (0x1009, 3),
+        gate_miss: 0,
     })
     .await;
 }
@@ -670,6 +716,7 @@ async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto() {
         dqs_out_delay: 0,
         dqs_auto: 1,
         dq_late: (0x1009, 3),
+        gate_miss: 0,
     })
     .await;
 }
@@ -697,6 +744,37 @@ async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto_slow() {
         dqs_out_delay: 0,
         dqs_auto: 1,
         dq_late: (0x0410, 2),
+        gate_miss: 0,
+    })
+    .await;
+}
+
+/// [`lpddr4_dfi_nexus_nominal`] with one burst of lane 0's read gate sweep
+/// corrupted: setting 32, inside the preamble (settings 28 to 35 pass), fails.
+/// That splits the passing run into 28-31 and 33-35; the gate must still be
+/// placed from the late end of the whole run (the first DQS rise), not from the
+/// longer, earlier piece, as a single miss on silicon did
+#[tokio::test]
+async fn lpddr4_dfi_nexus_gate_sweep_miss() {
+    run(Variant {
+        name: "gate_sweep_miss",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [0, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        bit_deskew: 0,
+        dqs_out_delay: 0,
+        dqs_auto: 0,
+        dq_late: (0, 0),
+        gate_miss: 33,
     })
     .await;
 }

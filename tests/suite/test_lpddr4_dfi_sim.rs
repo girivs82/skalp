@@ -171,9 +171,24 @@ async fn run(v: Variant) {
     // init: 8 mode-register writes and 2 more for write leveling, ZQ start +
     // latch, MR5/MR8 read back
     assert_eq!(get!("init_done"), 1, "{n}");
+    // a PHY update window granted as write leveling ends is followed by another leveling
+    // round (MR2 in and out again): only a PHY that asks for updates gets one
+    let relevels = get!("wl_relevels");
+    if v.phyupd_every == 0 {
+        assert_eq!(relevels, 0, "{n}: write leveling rounds after an update");
+    } else {
+        assert!(
+            relevels <= 2,
+            "{n}: write leveling rounds after an update, got {relevels}"
+        );
+    }
     // VREF(DQ) training: one MR14 write per code swept and one for the code chosen
     let vx = crate::lpddr4_vref::expected(v.vref_ok.0, v.vref_ok.1);
-    assert_eq!(get!("m_n_mrw"), 14 + vx.n_codes + 1, "{n}: MRW count");
+    assert_eq!(
+        get!("m_n_mrw"),
+        14 + vx.n_codes + 1 + 2 * relevels,
+        "{n}: MRW count"
+    );
     assert_eq!(get!("vref_map"), vx.map, "{n}: VREF codes passed");
     assert_eq!(get!("vref_win"), vx.win, "{n}: VREF passing run");
     assert_eq!(get!("vref"), vx.mr14, "{n}: MR14 after VREF training");

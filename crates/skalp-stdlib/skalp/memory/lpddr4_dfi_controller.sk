@@ -13,7 +13,9 @@
 // the DRAM's defaults, MR15/MR20 = 0x55), ZQ calibration start and latch, then training through the PHY
 // (DFI PHY-evaluation mode, each step until the PHY reports every byte lane done):
 //   write leveling: MR2 with OP7 (WR-LEV) set, tWLMRD, dfi_wrlvl_en with a dfi_wrlvl_strobe
-//     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back;
+//     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back; a PHY update request
+//     then (tMRD on, with nothing else in flight) is granted, and leveling runs again after the
+//     window (at most two windows: the PHY may move a strobe's output delay in one);
 //   read gate, then read eye: Read DQ Calibration reads (at most TRAIN_MAX_READS);
 //   write DQ: dfi_wdqlvl_en with a write and a read-back of TRAIN_ADDR in turn (at most
 //     TRAIN_MAX_READS pairs; the bank is left open);
@@ -134,6 +136,8 @@ pub entity Lpddr4DfiController<
     // VREF training: the longest passing run's first and last levels {last, first}, and one bit
     // per level swept (1 = its bursts came back right), the last level in bit 0
     out vref_win: bit[14]
+    // write leveling rounds run again after a PHY update window (at most two)
+    out wl_relevels: bit[2]
     out vref_map: bit[64]
     // ---------------------------------------------------------------- DFI
     out dfi_cs_p0: bit
@@ -396,8 +400,10 @@ impl Lpddr4DfiController {
     signal wrlvl_en_r: bit = 0
     signal wrlvl_strobe_r: bit = 0
     signal wdqlvl_en_r: bit = 0
-    // write leveling step: 0 MRW in, 1 tWLMRD, 2 strobes, 3 MRW out
-    signal wl_ph: bit[2] = 0
+    // write leveling step: 0 MRW in, 1 tWLMRD, 2 strobes, 3 MRW out, 4 tMRD, then a PHY
+    // update window if one is asked for, 5 the window
+    signal wl_ph: bit[3] = 0
+    signal wl_upds: bit[2] = 0
     // write DQ training: the next training request is a write
     signal tw_w: bit = 0
     signal rt_cnt: bit[24] = 0
@@ -1281,6 +1287,7 @@ impl Lpddr4DfiController {
                     st = 18
                     ref_on = 1
                     wl_ph = 0
+                    wl_upds = 0
                 }
             },
             8 => {
@@ -1394,13 +1401,32 @@ impl Lpddr4DfiController {
                             }
                         }
                     },
-                    _ => {
+                    3 => {
                         if do_wlmrw == 1 {
-                            st = 10
-                            gate_en_r = 1
-                            train_reads = 0
-                            tr_ge = tr_ge0
-                            wl_ge = wl_ge0
+                            wl_ph = 4
+                            wait_c = 16
+                        }
+                    },
+                    4 => {
+                        if wait_c == 0 && quiet == 1 && train_gap == 0 {
+                            if dfi_phyupd_req == 1 && wl_upds != 2 {
+                                wl_ph = 5
+                                phyupd_ack_r = 1
+                            } else {
+                                if dfi_phyupd_req == 1 { train_fail_r = 1 }
+                                st = 10
+                                gate_en_r = 1
+                                train_reads = 0
+                                tr_ge = tr_ge0
+                                wl_ge = wl_ge0
+                            }
+                        }
+                    },
+                    _ => {
+                        if dfi_phyupd_req == 0 {
+                            phyupd_ack_r = 0
+                            wl_upds = wl_upds + 1
+                            wl_ph = 0
                         }
                     }
                 }
@@ -1578,6 +1604,7 @@ impl Lpddr4DfiController {
     mr4_polls = m4_polls
     vref = vref_r
     vref_win = {vr_be, vr_bs}
+    wl_relevels = wl_upds
     vref_map = vr_map
     dfi_init_start = init_start_r
     dfi_ctrlupd_req = ctrlupd_r

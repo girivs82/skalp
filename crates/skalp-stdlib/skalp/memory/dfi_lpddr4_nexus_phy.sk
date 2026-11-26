@@ -92,9 +92,13 @@
 //         (0 to 8 x GATE_SLOTS - 1, from the slot of dfi_rddata_en), sampled with the read delay
 //         in the middle; a setting passes when both half bursts come back as the Read DQ
 //         Calibration pattern, which needs the gate to open in the preamble (opened later it
-//         misses pulses and returns one word). The longest passing run ends where the gate would open
-//         after the first DQS rise; each lane takes the middle of the run but no more than a tCK
-//         before its end, inside the 2 tCK preamble (gate_fail if no run of 4).
+//         misses pulses and returns one word). The latest passing run (one failing setting
+//         inside it does not end it) ends where the gate would open after the first DQS rise;
+//         earlier, before the preamble, settings pass or fail by chance. Each lane takes the
+//         middle of the run but no more than a tCK before its end, inside the 2 tCK preamble
+//         (gate_fail if no run of 4). On a CertusPro-NX at 1066 Mbps the run reaches the top of
+//         an 8-slot sweep; settings past it (GATE_SLOTS 9) pass this check but every read after
+//         training then fails, so GATE_SLOTS stays 8 there.
 //   read eye (dfi_rdlvl_en): the first burst whose words are the pattern's two halves, with
 //         the read delay where the gate training left it, sets the read return latency (see
 //         Reads); then
@@ -116,15 +120,22 @@
 //         delays too, matching the DQ's insertion, set DQS_OUT_DELAY steps up when the delays
 //         load (before write leveling, which aligns the strobe to CK again): the DQ sweep can
 //         only add delay, so this puts the strobe mid-way in it and the pins' eyes inside it.
-//         With DQS_AUTO the lane picks that delay itself: after write leveling finds the edge it
-//         raises the strobe's delay to BIT_TOP / 2, or DQS_GUARD steps short of the leveling
-//         delay it found (the room there is before leveling would have to go below 0), whichever
-//         is less, and levels again from 0. If that second pass finds no edge, or one later than
-//         the first (the strobe went past a CK edge), it takes the added delay off and keeps the
-//         first pass's result. The controller's strobe limit must cover both passes.
+//         With DQS_AUTO the lane picks that delay itself: the first leveling round measures the
+//         edge; the strobe's delay is to go up to BIT_TOP / 2, or DQS_GUARD steps short of the
+//         leveling delay found (the room there is before leveling would have to go below 0),
+//         whichever is less. The delay is not moved while the lane is in use (on a CertusPro-NX
+//         that left a lane's DQS buffer reading stale words, about one load in 20): the PHY asks
+//         for an update window (dfi_phyupd_req) once the controller has left leveling, moves the
+//         delay in it with the lane idle, and the controller levels again from 0. If that round
+//         finds no edge, or one later than the first (the strobe went past a CK edge), the
+//         delay comes back down in a second window and a last round levels at it. The window
+//         does not put the I/O through the DDR reset sequence again: on a CertusPro-NX that
+//         brought the bank-4 lane's read side back a clock or two off (a quarter of loads), and
+//         the move alone, in the idle window, levels cleanly.
 // No read data comes back on DFI while any training enable is set.
 //
-// PHY updates: the PHY acknowledges controller updates and does not request any.
+// PHY updates: the PHY acknowledges controller updates and requests them only for DQS_AUTO
+// (above).
 
 // write DQ training data: byte k of a lane-0 burst. Pin p carries bit (k + 3p) mod 16 of the
 // sequence 0110100110010111, so every pin toggles 4 or 5 times in each half burst and no two
@@ -277,6 +288,8 @@ pub entity NexusLpddr4Lane<
     in wl_frame: bit[3]
     in wr_gate: bit[4]
     in tr_start: bit
+    // a PHY update window is open (DQS_AUTO: the lane moves its DQS output delay in it)
+    in upd_go: bit
     in wl_en_in: bit
     in gate_en_in: bit
     in eye_en_in: bit
@@ -300,6 +313,8 @@ pub entity NexusLpddr4Lane<
     out half: bit[64]
     // training
     out busy: bit
+    // DQS_AUTO: the lane needs a PHY update window to move its DQS output delay in
+    out upd_want: bit
     out resp_wl: bit
     out resp_gate: bit
     out resp_eye: bit
@@ -326,7 +341,8 @@ pub entity NexusLpddr4Lane<
     // burst (3 bits, latest event in [2:0]): 0 in place, 1-3 starting 2/4/6 beats into the burst,
     // 5-7 with 2/4/6 stale beats before the burst's start, 4 none of these
     out slip_map: bit[64]
-    out bursts: bit[16]
+    // the gate sweep's pass map (bit 63 - k: setting k), for debug
+    out gate_map: bit[64]
     // DIAGNOSTIC: the DQS buffer's delay-limit flags seen high (sticky): [0] READCOUT during the
     // read eye sweep, [1] WRCOUT during the write DQ sweep, [2] WRLVCOUT during write leveling,
     // [3..5] the same three at any time
@@ -485,6 +501,11 @@ impl NexusLpddr4Lane {
     signal wl_p2: bit = 0
     signal wl_p1: bit[8] = 0
     signal dq_ext: bit[8] = 0
+    // DQS_AUTO round: 0 leveling measures, 1 the delay waits for an update window to go up,
+    // 2 leveling with it raised, 3 done (leveling just levels), 4 the delay waits for a window
+    // to come back down
+    signal ar_st: bit[3] = 0
+    signal upd_q: bit = 0
     // registered from their lets (their inputs settle long before the next strobe is judged)
     signal wl_room_r: bit[9] = 0
     // the gate's read-window indices, registered from gsel (it changes only between training
@@ -495,18 +516,11 @@ impl NexusLpddr4Lane {
     signal ri3_r: bit[4] = 11
     signal dqs_want_r: bit[8] = 0
     signal dqs_add_r: bit = 0
-    signal wl_back_r: bit[8] = 0
     signal wl_late_r: bit = 0
-    // write leveling's end-of-sweep flag, the move back to the last delay and the direction back
-    // to the first pass's, registered (the delay and wl_last hold through each strobe's window)
+    // write leveling's end-of-sweep flag and the move back to the last delay, registered (the
+    // delay and wl_last hold through each strobe's window)
     signal wl_end_r: bit = 0
     signal wl_dhit_r: bit[8] = 0
-    signal wl_bdn_r: bit = 0
-    // a strobe's judgement, taken the cycle after its window closes (with its feedback and
-    // whether it was the edge), so the moves it starts are not one cone with the window logic
-    signal wl_eval_q: bit = 0
-    signal wl_hit_q: bit = 0
-    signal fb_q: bit = 0
     signal dm_p: bit[8] = 0
     signal dm_n: bit[8] = 0
     signal dm_dn: bit = 0
@@ -533,7 +547,11 @@ impl NexusLpddr4Lane {
     signal run_st: bit[8] = 0
     // the last sweep's results, one bit per evaluated position (the latest in bit 0)
     signal sw_map: bit[64] = 0
+    // the gate sweep's results, kept when the gate is set (bit 63 - k: setting k)
+    signal gmap: bit[64] = 0
     signal run_ln: bit[8] = 0
+    // gate sweep: the run has bridged one failing setting (a second in a row ends it)
+    signal run_hole: bit = 0
     signal best_st: bit[8] = 0
     signal best_end: bit[8] = 0
     signal best_ln: bit[8] = 0
@@ -556,7 +574,6 @@ impl NexusLpddr4Lane {
     signal gate_q: bit = 0
     signal eye_q: bit = 0
     signal wdq_q: bit = 0
-    signal nburst: bit[16] = 0
     signal load_q: bit = 0
     // DATAVALID words the DQS buffer gave outside training, whatever the PHY took
     signal ndv: bit[16] = 0
@@ -606,7 +623,7 @@ impl NexusLpddr4Lane {
     let wdq_bot: bit[8] = 128 - WDQ_HALF
 
     // ------------------------------------------------------------ read gate
-    let gs: bit[4] = {1'b0, gsel[5:3]}
+    let gs: bit[4] = gsel[6:3]
     let ri0: bit[4] = 8 - gs
     let ri1: bit[4] = 9 - gs
     let ri2: bit[4] = 10 - gs
@@ -831,7 +848,13 @@ impl NexusLpddr4Lane {
     let pos: bit[8] = if gate_en == 1 { gsel } else { if eye_en == 1 { rdp_r } else { wrp_r } }
     let rl: bit[8] = run_ln + 1
     let rs: bit[8] = if run_ln == 0 { pos } else { run_st }
-    let better: bit = if pass == 1 && rl > best_ln { 1 } else { 0 }
+    // the gate keeps the latest run, not the longest: its late end is the first rising DQS
+    // edge, the one hard boundary; before the preamble DQS is not driven, so settings there
+    // pass or fail by chance, and on silicon a single miss inside the preamble (1066 Mbps,
+    // one load in a few) split the run and left a longer, earlier chance run as the best,
+    // which put the gate before the preamble. A single failing setting does not end a gate
+    // run (two in a row do), so one miss near the edge cannot shorten it below g_ok either.
+    let better: bit = if pass == 1 && (gate_en == 1 || rl > best_ln) { 1 } else { 0 }
     let bl_n: bit[8] = if better == 1 { rl } else { best_ln }
     let bs_n: bit[8] = if better == 1 { rs } else { best_st }
     let be_n: bit[8] = if better == 1 { pos } else { best_end }
@@ -866,10 +889,8 @@ impl NexusLpddr4Lane {
     let wl_room_s: bit[9] = {1'b0, dqs_cur} + {1'b0, wl_last}
     let wl_room: bit[9] = if wl_room_s > {1'b0, dqs_guard} { wl_room_s - {1'b0, dqs_guard} } else { 0 }
     let dqs_want: bit[8] = if wl_room_r < {1'b0, dqs_tgt} { wl_room_r[7:0] } else { dqs_tgt }
-    let dqs_add: bit = if dqs_auto_c != 0 && wl_p2 == 0 && dqs_want_r > dqs_cur { 1 } else { 0 }
+    let dqs_add: bit = if ar_st == 0 && dqs_want_r > dqs_cur { 1 } else { 0 }
     let wl_late: bit = if wl_last > wl_p1 { 1 } else { 0 }
-    // the second pass's edge comes after the first's: undo the added delay and keep the first
-    let wl_back: bit[8] = if wlp_r > wl_p1 { wlp_r - wl_p1 } else { wl_p1 - wlp_r }
 
     // ------------------------------------------------------------ write per-bit deskew sweep
     // a half's mismatches per pin (pin k: bits 8b+k of the half, every beat b)
@@ -1074,6 +1095,7 @@ impl NexusLpddr4Lane {
             dq_dn = 0
             dqs_cur = dqs_ofs
             wl_p2 = 0
+            ar_st = if dqs_auto_c != 0 { 0 } else { 3 }
             dm_p = 0
             dm_n = 0
             dm_mv = 0
@@ -1222,6 +1244,7 @@ impl NexusLpddr4Lane {
         if any_start == 1 {
             sw_map = 0
             run_ln = 0
+            run_hole = 0
             best_ln = 0
             best_st = 0
             best_end = 0
@@ -1231,10 +1254,30 @@ impl NexusLpddr4Lane {
             wl_k = 0
             wl_fb_p = 0
         }
+        // leveling starts from delay 0 (a later round finds it where the last one left it)
         if wl_en == 1 && wl_q == 0 {
             r_wl = 0
             f_wl = 0
-            wl_p2 = 0
+            wl_p2 = if ar_st == 2 { 1 } else { 0 }
+            wl_dn = 1
+            wl_n = wlp_r
+        }
+        // DQS_AUTO: the update window moves the DQS output delay, with the controller idle and
+        // the DRAM out of leveling, and the controller levels again once the window closes
+        upd_q = upd_go
+        if upd_go == 1 && upd_q == 0 {
+            if ar_st == 1 {
+                dq_dn = 0
+                dq_n = dq_ext
+                dqs_cur = dqs_cur + dq_ext
+            } else if ar_st == 4 {
+                dq_dn = 1
+                dq_n = dq_ext
+                dqs_cur = dqs_cur - dq_ext
+            }
+        }
+        if upd_go == 0 && upd_q == 1 {
+            ar_st = if ar_st == 1 { 2 } else { if ar_st == 4 { 3 } else { ar_st } }
         }
         // each sweep first moves its delay to where it starts: the gate's read delay to the
         // middle (the strobe's quarter cycle, so the training data is sampled in its eye), the
@@ -1346,8 +1389,12 @@ impl NexusLpddr4Lane {
             if pass == 1 {
                 run_st = rs
                 run_ln = rl
+                run_hole = 0
+            } else if gate_en == 1 && run_ln != 0 && run_hole == 0 {
+                run_hole = 1
             } else {
                 run_ln = 0
+                run_hole = 0
             }
             best_ln = bl_n
             best_st = bs_n
@@ -1568,42 +1615,36 @@ impl NexusLpddr4Lane {
         ri3_r = ri3
         dqs_want_r = dqs_want
         dqs_add_r = dqs_add
-        wl_back_r = wl_back
         wl_late_r = wl_late
         wl_end_r = wl_end
         wl_dhit_r = wlp_r - wl_last
-        wl_bdn_r = if wlp_r > wl_p1 { 1 } else { 0 }
-        wl_eval_q = wl_eval
-        wl_hit_q = wl_hit
-        fb_q = fb_n
-        if wl_eval_q == 1 {
+        if wl_eval == 1 {
             wl_k = wl_k + 1
             if wl_k >= 1 {
-                wl_fb_p = fb_q
+                wl_fb_p = fb_n
             }
-            if wl_hit_q == 1 && dqs_add_r == 1 {
-                // DQS_AUTO: delay the strobe and level again from 0
-                wl_p2 = 1
-                wl_p1 = wl_last
-                dq_ext = dqs_want_r - dqs_cur
-                dq_dn = 0
-                dq_n = dqs_want_r - dqs_cur
-                dqs_cur = dqs_want_r
-                wl_k = 0
-                wl_fb_p = 0
-                wl_dn = 1
-                wl_n = wlp_r
-            } else if wl_p2 == 1 && (wl_end_r == 1 || (wl_hit_q == 1 && wl_late_r == 1)) {
-                fin = 1
-                wl_best = wl_p1
-                dq_dn = 1
-                dq_n = dq_ext
-                dqs_cur = dqs_cur - dq_ext
-                wl_dn = wl_bdn_r
-                wl_n = wl_back_r
-            } else if wl_hit_q == 1 {
+            if wl_hit == 1 && dqs_add_r == 1 {
+                // DQS_AUTO, first round: the edge is measured; the strobe's delay goes up in the
+                // update window after this round, and the next round levels again from 0
                 fin = 1
                 wl_best = wl_last
+                wl_p1 = wl_last
+                dq_ext = dqs_want_r - dqs_cur
+                ar_st = 1
+                wl_dn = 1
+                wl_n = wlp_r
+            } else if wl_p2 == 1 && (wl_end_r == 1 || (wl_hit == 1 && wl_late_r == 1)) {
+                // the raised strobe found no edge, or a later one: its delay comes back down
+                // in another window, and a last round levels at it
+                fin = 1
+                wl_best = wl_p1
+                ar_st = 4
+                wl_dn = 1
+                wl_n = wlp_r
+            } else if wl_hit == 1 {
+                fin = 1
+                wl_best = wl_last
+                ar_st = 3
                 wl_dn = 1
                 wl_n = wl_dhit_r
             } else if wl_end_r == 1 {
@@ -1626,6 +1667,7 @@ impl NexusLpddr4Lane {
             }
             if gate_en == 1 && r_gate == 0 {
                 r_gate = 1
+                gmap = sw_map
                 fin = 0
             }
             if eye_en == 1 && r_eye == 0 {
@@ -1637,9 +1679,6 @@ impl NexusLpddr4Lane {
                 fin = 0
                 bsw = 0
             }
-        }
-        if hv_r == 1 && training == 0 {
-            nburst = nburst + 1
         }
     }
 
@@ -1656,7 +1695,9 @@ impl NexusLpddr4Lane {
     dv = if hv_r == 1 && training == 0 { 1 } else { 0 }
     half = hh_r
     busy = moving
-    resp_wl = if wl_en == 1 && r_wl == 1 { 1 } else { 0 }
+    upd_want = if (ar_st == 1 || ar_st == 4) && wl_en == 0 { 1 } else { 0 }
+    // (not in the first cycle of a round: r_wl still holds the last round's result then)
+    resp_wl = if wl_en == 1 && wl_q == 1 && r_wl == 1 { 1 } else { 0 }
     resp_gate = if gate_en == 1 && r_gate == 1 { 1 } else { 0 }
     resp_eye = if eye_en == 1 && r_eye == 1 { 1 } else { 0 }
     resp_wdq = if wdq_en == 1 && r_wdq == 1 { 1 } else { 0 }
@@ -1669,6 +1710,7 @@ impl NexusLpddr4Lane {
     rd_pos = rdp_r
     wr_pos = wrp_r
     sweep_map = sw_map
+    gate_map = gmap
     bit_pos = {bp7, bp6, bp5, bp4, bp3, bp2, bp1, bp0}
     dqs_pos = dqs_cur
     bit_fail = bfail
@@ -1677,7 +1719,6 @@ impl NexusLpddr4Lane {
     dvw_hist = {hw3, hw2, hw1, hw0}
     dvr_hist = {hr3, hr2, hr1, hr0}
     slip_map = slp
-    bursts = nburst
     cout_seen = cflags
     cout_pos = {wc_hi, wc_lo, rc_hi, rc_lo}
 }
@@ -1689,6 +1730,8 @@ pub entity DfiLpddr4NexusPhy<
     const RDC_INV1: nat = 0,
     const CA_DELAY: nat = 0,
     const DQ_IN_DELAY: nat = 0,
+    // read gate sweep length in slots (at most 9: the gate is a copy of dfi_rddata_en from up to
+    // 8 slots back)
     const GATE_SLOTS: nat = 8,
     const TRAIN_WIN: nat = 14,
     const WL_STEP: nat = 4,
@@ -1714,7 +1757,11 @@ pub entity DfiLpddr4NexusPhy<
     // leveling pass, to BIT_TOP / 2 or DQS_GUARD steps short of that pass's result, whichever is
     // less, and levels again (see the lane)
     const DQS_AUTO: nat = 0,
-    const DQS_GUARD: nat = 16
+    const DQS_GUARD: nat = 16,
+    // sync_clk cycles each step of the DDR reset sequence lasts (8 to 255): the edge clocks stay
+    // stopped for three steps around the DDR reset, so every bank they reach (through the
+    // cascade muxes too) has settled before they restart
+    const RST_STEP_CYC: nat = 64
 > {
     // the edge clock (CK rate) and its PLL's lock
     in eclk: clock
@@ -1814,7 +1861,8 @@ pub entity DfiLpddr4NexusPhy<
     out lvl_fail: bit[2]
     out wrlvl_fail: bit[2]
     out wdq_fail: bit[2]
-    // half bursts each lane has returned outside training
+    // half bursts each lane has returned outside training (words dropped in a PHY update
+    // window not counted)
     out bursts0: bit[16]
     out bursts1: bit[16]
     // each lane's last training sweep (after training: the write DQ sweep), one bit per
@@ -1832,6 +1880,8 @@ pub entity DfiLpddr4NexusPhy<
     out dvr_hist1: bit[64]
     out slip_map0: bit[64]
     out slip_map1: bit[64]
+    out gate_map0: bit[64]
+    out gate_map1: bit[64]
     out cout_seen0: bit[6]
     out cout_seen1: bit[6]
     out cout_pos0: bit[32]
@@ -1846,6 +1896,8 @@ pub entity DfiLpddr4NexusPhy<
     out dqs_dly1: bit[8]
     out rd_lat1: bit[8]
     out ctrlupd_count: bit[16]
+    // PHY update windows taken (DQS_AUTO moves its DQS output delays in them)
+    out phyupd_count: bit[8]
 }
 
 impl DfiLpddr4NexusPhy {
@@ -1870,7 +1922,8 @@ impl DfiLpddr4NexusPhy {
     // then starts in step with them), release the DLL, and update the DQS buffers' delay code
     // with their clocks paused. Then the DFI side (SCLK) loads the delay settings.
     // ss: 0 wait for the PLL, 1 DLL reset, 2 wait for the DLL, 3 frozen, 4 stopped, 5 DDR
-    // reset, 6 reset released (still stopped), 7 restarted, 8 unfrozen, 9 code update, 10 ready
+    // reset, 6 reset released (still stopped), 7 restarted, 8 unfrozen (until the DLL is
+    // locked), 9 code update, 10 ready. Steps 3-8 last RST_STEP_CYC cycles each.
     #[cdc]
     signal s_pll_m: bit = 0
     signal s_pll: bit = 0
@@ -1878,14 +1931,12 @@ impl DfiLpddr4NexusPhy {
     signal s_dll_m: bit = 0
     signal s_dll: bit = 0
     signal ss: bit[4] = 0
-    signal scnt: bit[5] = 0
+    signal scnt: bit[8] = 0
+    let step_last: bit[8] = RST_STEP_CYC - 1
     signal dll_rst: bit = 1
     signal dll_freeze: bit = 0
     signal eclk_stop: bit = 0
     signal ddr_rst: bit = 0
-    // the same reset for the command/address output registers, from its own register so it
-    // can sit beside them (they are a bank away from the byte lanes)
-    signal ddr_rst_ca: bit = 0
     signal init_pause: bit = 0
     signal init_udd_n: bit = 1
     signal io_ready: bit = 0
@@ -1902,7 +1953,6 @@ impl DfiLpddr4NexusPhy {
             dll_freeze = 0
             eclk_stop = 0
             ddr_rst = 0
-            ddr_rst_ca = 0
             init_pause = 0
             init_udd_n = 1
             io_ready = 0
@@ -1921,15 +1971,14 @@ impl DfiLpddr4NexusPhy {
                 dll_freeze = 1
             }
         } else if ss < 9 {
-            // eight cycles a step
-            if scnt == 7 {
+            // RST_STEP_CYC cycles a step; the DLL, released in step 7, must report lock again
+            // before its code goes to the DQS buffers
+            if scnt >= step_last && (ss != 8 || s_dll == 1) {
                 scnt = 0
                 ss = ss + 1
                 if ss == 3 { eclk_stop = 1 }
                 if ss == 4 { ddr_rst = 1 }
-                if ss == 4 { ddr_rst_ca = 1 }
                 if ss == 5 { ddr_rst = 0 }
-                if ss == 5 { ddr_rst_ca = 0 }
                 if ss == 6 { eclk_stop = 0 }
                 if ss == 7 { dll_freeze = 0 }
                 if ss == 8 { init_pause = 1 }
@@ -1969,6 +2018,14 @@ impl DfiLpddr4NexusPhy {
     signal init_done_r: bit = 0
     signal ctrlupd_ack_r: bit = 0
     signal ctrlupd_n: bit[16] = 0
+    // PHY update window (DQS_AUTO): 0 none wanted, 1 dfi_phyupd_req up, 2 granted: the lanes
+    // move their DQS output delays, 3 the lanes take the window's end, 4 wait for the
+    // controller to drop its ack
+    signal pu_st: bit[3] = 0
+    signal pu_cnt: bit[4] = 0
+    signal pu_req: bit = 0
+    signal upd_go_r: bit = 0
+    signal upd_n: bit[8] = 0
 
     // ------------------------------------------------------------ DFI frames
     // c: captured (newest), b: being sent to the I/O logic, a and a2: older
@@ -2116,50 +2173,50 @@ impl DfiLpddr4NexusPhy {
     // ------------------------------------------------------------ command pins
     inst ck_od = ODDRX4 {
         D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ckc_od = ODDRX4 {
         D0: 1, D1: 0, D2: 1, D3: 0, D4: 1, D5: 0, D6: 1, D7: 0,
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca0_od = ODDRX4 {
         D0: b_ca[0], D1: b_ca[0], D2: b_ca[6], D3: b_ca[6], D4: b_ca[12], D5: b_ca[12], D6: b_ca[18], D7: b_ca[18],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca0_dl = DELAYB<CA_DELAY> { A: ca0_od.Q }
     inst ca1_od = ODDRX4 {
         D0: b_ca[1], D1: b_ca[1], D2: b_ca[7], D3: b_ca[7], D4: b_ca[13], D5: b_ca[13], D6: b_ca[19], D7: b_ca[19],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca1_dl = DELAYB<CA_DELAY> { A: ca1_od.Q }
     inst ca2_od = ODDRX4 {
         D0: b_ca[2], D1: b_ca[2], D2: b_ca[8], D3: b_ca[8], D4: b_ca[14], D5: b_ca[14], D6: b_ca[20], D7: b_ca[20],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca2_dl = DELAYB<CA_DELAY> { A: ca2_od.Q }
     inst ca3_od = ODDRX4 {
         D0: b_ca[3], D1: b_ca[3], D2: b_ca[9], D3: b_ca[9], D4: b_ca[15], D5: b_ca[15], D6: b_ca[21], D7: b_ca[21],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca3_dl = DELAYB<CA_DELAY> { A: ca3_od.Q }
     inst ca4_od = ODDRX4 {
         D0: b_ca[4], D1: b_ca[4], D2: b_ca[10], D3: b_ca[10], D4: b_ca[16], D5: b_ca[16], D6: b_ca[22], D7: b_ca[22],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca4_dl = DELAYB<CA_DELAY> { A: ca4_od.Q }
     inst ca5_od = ODDRX4 {
         D0: b_ca[5], D1: b_ca[5], D2: b_ca[11], D3: b_ca[11], D4: b_ca[17], D5: b_ca[17], D6: b_ca[23], D7: b_ca[23],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst ca5_dl = DELAYB<CA_DELAY> { A: ca5_od.Q }
     inst cke_od = ODDRX4 {
         D0: b_cke[0], D1: b_cke[0], D2: b_cke[1], D3: b_cke[1], D4: b_cke[2], D5: b_cke[2], D6: b_cke[3], D7: b_cke[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst cke_dl = DELAYB<CA_DELAY> { A: cke_od.Q }
     inst cs_od = ODDRX4 {
         D0: b_cs[0], D1: b_cs[0], D2: b_cs[1], D3: b_cs[1], D4: b_cs[2], D5: b_cs[2], D6: b_cs[3], D7: b_cs[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
     }
     inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
 
@@ -2167,7 +2224,7 @@ impl DfiLpddr4NexusPhy {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
+        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
         dq_i: dq_i[7:0], dqs_i: dqs_i[0]
@@ -2177,7 +2234,7 @@ impl DfiLpddr4NexusPhy {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
-        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start,
+        wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
         dq_i: dq_i[15:8], dqs_i: dqs_i[1]
@@ -2206,8 +2263,14 @@ impl DfiLpddr4NexusPhy {
     #[cdc]
     signal dll_lock_m: bit = 0
     signal dll_lock_s: bit = 0
-    let push0: bit = lane0.dv
-    let push1: bit = lane1.dv
+    // No read is in flight through a PHY update window (the controller grants one only with its
+    // queues empty): a word the DQS buffers mark valid while the window is open is not a read
+    // return and is dropped, so the controller's count of reads in flight stays right
+    let rd_hold: bit = if pu_st != 0 { 1 } else { 0 }
+    let push0: bit = if lane0.dv == 1 && rd_hold == 0 { 1 } else { 0 }
+    let push1: bit = if lane1.dv == 1 && rd_hold == 0 { 1 } else { 0 }
+    signal nb0: bit[16] = 0
+    signal nb1: bit[16] = 0
 
     // the training responses, registered: the controller's training steps hang off them
     signal resp_gate_r: bit[2] = 0
@@ -2253,6 +2316,34 @@ impl DfiLpddr4NexusPhy {
                 ist = 6
                 init_done_r = 1
             }
+        }
+        if pu_st == 0 {
+            if ist == 6 && (lane0.upd_want == 1 || lane1.upd_want == 1) {
+                pu_req = 1
+                pu_st = 1
+            }
+        } else if pu_st == 1 {
+            if dfi_phyupd_ack == 1 {
+                upd_go_r = 1
+                upd_n = upd_n + 1
+                pu_st = 2
+                pu_cnt = 0
+            }
+        } else if pu_st == 2 {
+            if pu_cnt != 15 { pu_cnt = pu_cnt + 1 }
+            if pu_cnt >= 4 && lane0.busy == 0 && lane1.busy == 0 {
+                upd_go_r = 0
+                pu_st = 3
+                pu_cnt = 0
+            }
+        } else if pu_st == 3 {
+            pu_cnt = pu_cnt + 1
+            if pu_cnt == 3 {
+                pu_req = 0
+                pu_st = 4
+            }
+        } else {
+            if dfi_phyupd_ack == 0 { pu_st = 0 }
         }
         if dfi_ctrlupd_req == 1 && ctrlupd_ack_r == 0 {
             ctrlupd_n = ctrlupd_n + 1
@@ -2304,6 +2395,8 @@ impl DfiLpddr4NexusPhy {
         rst_n_r = b_rst[0]
 
         // ---------------------------------------------------------- read data
+        if push0 == 1 { nb0 = nb0 + 1 }
+        if push1 == 1 { nb1 = nb1 + 1 }
         if push0 == 1 {
             q0[qw0] = lane0.half
             qw0 = qw0 + 1
@@ -2335,7 +2428,7 @@ impl DfiLpddr4NexusPhy {
     dfi_rddata_valid_w3 = rdv
     dfi_init_complete = init_done_r
     dfi_ctrlupd_ack = ctrlupd_ack_r
-    dfi_phyupd_req = 0
+    dfi_phyupd_req = pu_req
     dfi_rdlvl_gate_resp = resp_gate_r
     dfi_rdlvl_resp = resp_eye_r
     dfi_wrlvl_resp = resp_wl_r
@@ -2369,8 +2462,8 @@ impl DfiLpddr4NexusPhy {
     lvl_fail = {lane1.eye_fail, lane0.eye_fail}
     wrlvl_fail = {lane1.wl_fail, lane0.wl_fail}
     wdq_fail = {lane1.wdq_fail, lane0.wdq_fail}
-    bursts0 = lane0.bursts
-    bursts1 = lane1.bursts
+    bursts0 = nb0
+    bursts1 = nb1
     sweep_map0 = lane0.sweep_map
     rd_lat0 = lane0.rd_lat_o
     dv_count0 = lane0.dv_count
@@ -2381,6 +2474,8 @@ impl DfiLpddr4NexusPhy {
     dvr_hist1 = lane1.dvr_hist
     slip_map0 = lane0.slip_map
     slip_map1 = lane1.slip_map
+    gate_map0 = lane0.gate_map
+    gate_map1 = lane1.gate_map
     cout_seen0 = lane0.cout_seen
     cout_seen1 = lane1.cout_seen
     cout_pos0 = lane0.cout_pos
@@ -2394,4 +2489,5 @@ impl DfiLpddr4NexusPhy {
     rd_lat1 = lane1.rd_lat_o
     sweep_map1 = lane1.sweep_map
     ctrlupd_count = ctrlupd_n
+    phyupd_count = upd_n
 }

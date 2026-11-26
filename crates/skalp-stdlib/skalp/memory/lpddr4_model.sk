@@ -70,6 +70,7 @@
 //  32 tCCD                                      33 tWR (write recovery before PRE)
 //  34 tRTP                                      35 tWTR
 //  36 more than four reads or writes in flight  37 ACT-1 not followed by ACT-2
+//  38 CKE low after it went high (power-down and self refresh are not modelled)
 // Codes 9 (DQ changed in the clock of a write DQS edge), 10 (DQ changed in the clock after it)
 // and 12 (DQ not driven at it) are DQ timing and count in `dq_viol` (see Writes).
 
@@ -452,6 +453,8 @@ impl Lpddr4ChannelModel {
     // DQ_SKEW_CLKS delay line for the read DQ drive
     signal skew_dq: [bit[16]; 8]
     signal skew_oe: bit[8] = 0
+    // CKE has been high since reset_n last rose
+    signal cke_was: bit = 0
 
     // ------------------------------------------------------------ latencies and timing
     let rl: bit[8] = match mr2[2:0] {
@@ -665,6 +668,7 @@ impl Lpddr4ChannelModel {
     let wr_cas: bit = if is_cas2 == 1 && pending == 1 { 1 } else { 0 }
     let rd_cas: bit = if is_cas2 == 1 && (pending == 2 || pending == 4 || pending == 6) { 1 } else { 0 }
     let q_err: bit[8] = if (wr_cas == 1 && wq_full == 1) || (rd_cas == 1 && rq_full == 1) { 36 } else { 0 }
+    let cke_err: bit[8] = if reset_n == 1 && cke == 0 && cke_was == 1 { 38 } else { 0 }
 
     // write capture checks, per lane
     let wr_err: bit[8] = if lane0.err != 0 { lane0.err } else { lane1.err }
@@ -674,7 +678,8 @@ impl Lpddr4ChannelModel {
         else { if ref_err != 0 { ref_err }
         else { if cont_err != 0 { cont_err }
         else { if q_err != 0 { q_err }
-        else { wr_err } } } } }
+        else { if cke_err != 0 { cke_err }
+        else { wr_err } } } } } }
 
     // a write CAS for the lanes' queues: the window for the first data DQS rise
     let wr_push: bit = if is_cas2 == 1 && pending == 1 && wq_full == 0 { 1 } else { 0 }
@@ -763,6 +768,7 @@ impl Lpddr4ChannelModel {
 
     on(clk.rise) {
         cyc = cyc + 1
+        cke_was = if reset_n == 0 { 0 } else { if cke == 1 { 1 } else { cke_was } }
         ck_prev = ck_t
         ca_prev = ca
         cs_prev = cs
