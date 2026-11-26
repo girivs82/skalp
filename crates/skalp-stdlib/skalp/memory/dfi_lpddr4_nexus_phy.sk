@@ -502,6 +502,11 @@ impl NexusLpddr4Lane {
     signal wl_end_r: bit = 0
     signal wl_dhit_r: bit[8] = 0
     signal wl_bdn_r: bit = 0
+    // a strobe's judgement, taken the cycle after its window closes (with its feedback and
+    // whether it was the edge), so the moves it starts are not one cone with the window logic
+    signal wl_eval_q: bit = 0
+    signal wl_hit_q: bit = 0
+    signal fb_q: bit = 0
     signal dm_p: bit[8] = 0
     signal dm_n: bit[8] = 0
     signal dm_dn: bit = 0
@@ -1568,12 +1573,15 @@ impl NexusLpddr4Lane {
         wl_end_r = wl_end
         wl_dhit_r = wlp_r - wl_last
         wl_bdn_r = if wlp_r > wl_p1 { 1 } else { 0 }
-        if wl_eval == 1 {
+        wl_eval_q = wl_eval
+        wl_hit_q = wl_hit
+        fb_q = fb_n
+        if wl_eval_q == 1 {
             wl_k = wl_k + 1
             if wl_k >= 1 {
-                wl_fb_p = fb_n
+                wl_fb_p = fb_q
             }
-            if wl_hit == 1 && dqs_add_r == 1 {
+            if wl_hit_q == 1 && dqs_add_r == 1 {
                 // DQS_AUTO: delay the strobe and level again from 0
                 wl_p2 = 1
                 wl_p1 = wl_last
@@ -1585,7 +1593,7 @@ impl NexusLpddr4Lane {
                 wl_fb_p = 0
                 wl_dn = 1
                 wl_n = wlp_r
-            } else if wl_p2 == 1 && (wl_end_r == 1 || (wl_hit == 1 && wl_late_r == 1)) {
+            } else if wl_p2 == 1 && (wl_end_r == 1 || (wl_hit_q == 1 && wl_late_r == 1)) {
                 fin = 1
                 wl_best = wl_p1
                 dq_dn = 1
@@ -1593,7 +1601,7 @@ impl NexusLpddr4Lane {
                 dqs_cur = dqs_cur - dq_ext
                 wl_dn = wl_bdn_r
                 wl_n = wl_back_r
-            } else if wl_hit == 1 {
+            } else if wl_hit_q == 1 {
                 fin = 1
                 wl_best = wl_last
                 wl_dn = 1
@@ -1875,6 +1883,9 @@ impl DfiLpddr4NexusPhy {
     signal dll_freeze: bit = 0
     signal eclk_stop: bit = 0
     signal ddr_rst: bit = 0
+    // the same reset for the command/address output registers, from its own register so it
+    // can sit beside them (they are a bank away from the byte lanes)
+    signal ddr_rst_ca: bit = 0
     signal init_pause: bit = 0
     signal init_udd_n: bit = 1
     signal io_ready: bit = 0
@@ -1891,6 +1902,7 @@ impl DfiLpddr4NexusPhy {
             dll_freeze = 0
             eclk_stop = 0
             ddr_rst = 0
+            ddr_rst_ca = 0
             init_pause = 0
             init_udd_n = 1
             io_ready = 0
@@ -1915,7 +1927,9 @@ impl DfiLpddr4NexusPhy {
                 ss = ss + 1
                 if ss == 3 { eclk_stop = 1 }
                 if ss == 4 { ddr_rst = 1 }
+                if ss == 4 { ddr_rst_ca = 1 }
                 if ss == 5 { ddr_rst = 0 }
+                if ss == 5 { ddr_rst_ca = 0 }
                 if ss == 6 { eclk_stop = 0 }
                 if ss == 7 { dll_freeze = 0 }
                 if ss == 8 { init_pause = 1 }
@@ -2102,50 +2116,50 @@ impl DfiLpddr4NexusPhy {
     // ------------------------------------------------------------ command pins
     inst ck_od = ODDRX4 {
         D0: 0, D1: 1, D2: 0, D3: 1, D4: 0, D5: 1, D6: 0, D7: 1,
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ckc_od = ODDRX4 {
         D0: 1, D1: 0, D2: 1, D3: 0, D4: 1, D5: 0, D6: 1, D7: 0,
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca0_od = ODDRX4 {
         D0: b_ca[0], D1: b_ca[0], D2: b_ca[6], D3: b_ca[6], D4: b_ca[12], D5: b_ca[12], D6: b_ca[18], D7: b_ca[18],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca0_dl = DELAYB<CA_DELAY> { A: ca0_od.Q }
     inst ca1_od = ODDRX4 {
         D0: b_ca[1], D1: b_ca[1], D2: b_ca[7], D3: b_ca[7], D4: b_ca[13], D5: b_ca[13], D6: b_ca[19], D7: b_ca[19],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca1_dl = DELAYB<CA_DELAY> { A: ca1_od.Q }
     inst ca2_od = ODDRX4 {
         D0: b_ca[2], D1: b_ca[2], D2: b_ca[8], D3: b_ca[8], D4: b_ca[14], D5: b_ca[14], D6: b_ca[20], D7: b_ca[20],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca2_dl = DELAYB<CA_DELAY> { A: ca2_od.Q }
     inst ca3_od = ODDRX4 {
         D0: b_ca[3], D1: b_ca[3], D2: b_ca[9], D3: b_ca[9], D4: b_ca[15], D5: b_ca[15], D6: b_ca[21], D7: b_ca[21],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca3_dl = DELAYB<CA_DELAY> { A: ca3_od.Q }
     inst ca4_od = ODDRX4 {
         D0: b_ca[4], D1: b_ca[4], D2: b_ca[10], D3: b_ca[10], D4: b_ca[16], D5: b_ca[16], D6: b_ca[22], D7: b_ca[22],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca4_dl = DELAYB<CA_DELAY> { A: ca4_od.Q }
     inst ca5_od = ODDRX4 {
         D0: b_ca[5], D1: b_ca[5], D2: b_ca[11], D3: b_ca[11], D4: b_ca[17], D5: b_ca[17], D6: b_ca[23], D7: b_ca[23],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst ca5_dl = DELAYB<CA_DELAY> { A: ca5_od.Q }
     inst cke_od = ODDRX4 {
         D0: b_cke[0], D1: b_cke[0], D2: b_cke[1], D3: b_cke[1], D4: b_cke[2], D5: b_cke[2], D6: b_cke[3], D7: b_cke[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst cke_dl = DELAYB<CA_DELAY> { A: cke_od.Q }
     inst cs_od = ODDRX4 {
         D0: b_cs[0], D1: b_cs[0], D2: b_cs[1], D3: b_cs[1], D4: b_cs[2], D5: b_cs[2], D6: b_cs[3], D7: b_cs[3],
-        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst
+        ECLK: eclk_ca, SCLK: sclk, RST: ddr_rst_ca
     }
     inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
 

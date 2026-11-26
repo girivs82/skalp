@@ -217,47 +217,87 @@ pub entity Lpddr4BankState {
 impl Lpddr4BankState {
     signal open_r: bit = 0
     signal row_r: bit[17] = 0
+    // the timers as of the cycle before (t_*) and that cycle's commands (*_q): the timers now
+    // (*_now) are worked out from those registers, so the controller's command choice reaches
+    // only the ok flags here, not 24 bits of timer
     signal t_act: bit[8] = 0
     signal t_cas: bit[8] = 0
     signal t_pre: bit[8] = 0
-    let act_d: bit[8] = if t_act == 0 { 0 } else { t_act - 1 }
-    let cas_d: bit[8] = if t_cas == 0 { 0 } else { t_cas - 1 }
-    let pre_d: bit[8] = if t_pre == 0 { 0 } else { t_pre - 1 }
-    let rcd_m1: bit[8] = if f_rcd == 0 { 0 } else { f_rcd - 1 }
-    let ras_m1: bit[8] = if f_ras == 0 { 0 } else { f_ras - 1 }
-    let rp_m1: bit[8] = if f_rp == 0 { 0 } else { f_rp - 1 }
-    let wr_m1: bit[8] = if f_wr == 0 { 0 } else { f_wr - 1 }
-    let rtp_m1: bit[8] = if f_rtp == 0 { 0 } else { f_rtp - 1 }
-    // the precharge wait after a write or a read, worked out before the command is known, so
-    // the command only picks one
-    let pre_w: bit[8] = if wr_m1 > pre_d { wr_m1 } else { pre_d }
-    let pre_r: bit[8] = if rtp_m1 > pre_d { rtp_m1 } else { pre_d }
+    signal act_q: bit = 0
+    signal pre_q: bit = 0
+    signal rd_q: bit = 0
+    signal wr_q: bit = 0
+    // the waits less one, registered (they change only with the refresh-rate derating, which
+    // then takes effect a cycle later), and whether each is at most 1
+    signal rcd_m1: bit[8] = 0
+    signal ras_m1: bit[8] = 0
+    signal rp_m1: bit[8] = 0
+    signal wr_m1: bit[8] = 0
+    signal rtp_m1: bit[8] = 0
+    signal rcd_le1: bit = 1
+    signal ras_le1: bit = 1
+    signal rp_le1: bit = 1
+    signal wr_le1: bit = 1
+    signal rtp_le1: bit = 1
+    signal rcd_z: bit = 1
+    signal ras_z: bit = 1
+    signal rp_z: bit = 1
+    signal wr_z: bit = 1
+    signal rtp_z: bit = 1
+    let act_l: bit[8] = if t_act == 0 { 0 } else { t_act - 1 }
+    let cas_l: bit[8] = if t_cas == 0 { 0 } else { t_cas - 1 }
+    let pre_l: bit[8] = if t_pre == 0 { 0 } else { t_pre - 1 }
+    let act_now: bit[8] = if pre_q == 1 { rp_m1 } else { act_l }
+    let cas_now: bit[8] = if act_q == 1 { rcd_m1 } else { cas_l }
+    let pre_now: bit[8] = if act_q == 1 { ras_m1 } else { if wr_q == 1 { if wr_m1 > pre_l { wr_m1 } else { pre_l } } else { if rd_q == 1 { if rtp_m1 > pre_l { rtp_m1 } else { pre_l } } else { pre_l } } }
+    // whether each timer is at most 1 now (so 0 next cycle unless a command reloads it), from
+    // the registers directly: the max of two waits is at most 1 when both are
+    let act_le1: bit = if pre_q == 1 { rp_le1 } else { if t_act <= 2 { 1 } else { 0 } }
+    let cas_le1: bit = if act_q == 1 { rcd_le1 } else { if t_cas <= 2 { 1 } else { 0 } }
+    let pl_le1: bit = if t_pre <= 2 { 1 } else { 0 }
+    let pre_le1: bit = if act_q == 1 { ras_le1 } else { if wr_q == 1 { wr_le1 & pl_le1 } else { if rd_q == 1 { rtp_le1 & pl_le1 } else { pl_le1 } } }
     // each wait is over when its timer is 0; the flags are registers, set from the value each
     // timer takes, so the controller's command choice starts from them directly
     signal act_ok_r: bit = 1
     signal cas_ok_r: bit = 1
     signal pre_ok_r: bit = 1
     on(clk.rise) {
+        rcd_m1 = if f_rcd == 0 { 0 } else { f_rcd - 1 }
+        ras_m1 = if f_ras == 0 { 0 } else { f_ras - 1 }
+        rp_m1 = if f_rp == 0 { 0 } else { f_rp - 1 }
+        wr_m1 = if f_wr == 0 { 0 } else { f_wr - 1 }
+        rtp_m1 = if f_rtp == 0 { 0 } else { f_rtp - 1 }
+        rcd_le1 = if f_rcd <= 2 { 1 } else { 0 }
+        ras_le1 = if f_ras <= 2 { 1 } else { 0 }
+        rp_le1 = if f_rp <= 2 { 1 } else { 0 }
+        wr_le1 = if f_wr <= 2 { 1 } else { 0 }
+        rtp_le1 = if f_rtp <= 2 { 1 } else { 0 }
+        rcd_z = if f_rcd <= 1 { 1 } else { 0 }
+        ras_z = if f_ras <= 1 { 1 } else { 0 }
+        rp_z = if f_rp <= 1 { 1 } else { 0 }
+        wr_z = if f_wr <= 1 { 1 } else { 0 }
+        rtp_z = if f_rtp <= 1 { 1 } else { 0 }
+        t_act = act_now
+        t_cas = cas_now
+        t_pre = pre_now
+        act_q = act
+        pre_q = pre
+        rd_q = rd
+        wr_q = wr
         if act == 1 {
             open_r = 1
             row_r = row_in
-            t_cas = rcd_m1
-            t_pre = ras_m1
-            cas_ok_r = if rcd_m1 == 0 { 1 } else { 0 }
-            pre_ok_r = if ras_m1 == 0 { 1 } else { 0 }
+            cas_ok_r = rcd_z
+            pre_ok_r = ras_z
         } else {
-            t_cas = cas_d
-            t_pre = if wr == 1 { pre_w } else { if rd == 1 { pre_r } else { pre_d } }
-            cas_ok_r = if cas_d == 0 { 1 } else { 0 }
-            pre_ok_r = if wr == 1 { if pre_w == 0 { 1 } else { 0 } } else { if rd == 1 { if pre_r == 0 { 1 } else { 0 } } else { if pre_d == 0 { 1 } else { 0 } } }
+            cas_ok_r = cas_le1
+            pre_ok_r = if wr == 1 { wr_z & pre_le1 } else { if rd == 1 { rtp_z & pre_le1 } else { pre_le1 } }
         }
         if pre == 1 {
             open_r = 0
-            t_act = rp_m1
-            act_ok_r = if rp_m1 == 0 { 1 } else { 0 }
+            act_ok_r = rp_z
         } else {
-            t_act = act_d
-            act_ok_r = if act_d == 0 { 1 } else { 0 }
+            act_ok_r = act_le1
         }
     }
     is_open = open_r
@@ -425,8 +465,14 @@ impl Lpddr4DfiController {
     // global timers (DFI cycles)
     signal t_cmd: bit[8] = 0
     signal t_actg: bit[8] = 0
+    // t_rd, t_wr: the read and write CAS timers as of the cycle before, and the CAS commands
+    // that cycle sent (cq_*): the timers now are worked out from those registers (rd_t_now,
+    // wr_t_now), so the command choice only reaches the strobes and rd_z / wr_z, not 16 bits of
+    // timer
     signal t_rd: bit[8] = 0
     signal t_wr: bit[8] = 0
+    signal cq_wr: bit = 0
+    signal cq_rd: bit = 0
     signal t_ref: bit[8] = 0
     signal faw0: bit[8] = 0
     signal faw1: bit[8] = 0
@@ -610,6 +656,9 @@ impl Lpddr4DfiController {
     let m1_zqlat: bit[8] = dec8(f_zqlat16[7:0])
     // tCCD (8 nCK) is two cycles; tMRR (8 nCK after an MRR's last edge) three
     let m1_ccd: bit[8] = 1
+    // the CAS timers this cycle, from last cycle's values and commands (see t_rd)
+    let rd_t_now: bit[8] = if cq_rd == 1 { max8(dec8(t_rd), m1_ccd) } else { if cq_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
+    let wr_t_now: bit[8] = if cq_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if cq_rd == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
     let m1_mrr: bit[8] = 2
     let wr_off: bit[16] = wl + adj_w
     let rd_off: bit[16] = rl + adj_r
@@ -1133,8 +1182,10 @@ impl Lpddr4DfiController {
         // ---------------------------------------------------------------- timers
         t_cmd = if do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
         t_actg = if do_act == 1 { max8(dec8(t_actg), m1_rrd) } else { if do_ref == 1 { max8(dec8(t_actg), m1_rfc) } else { dec8(t_actg) } }
-        t_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_rd), m1_ccd) } else { if do_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
-        t_wr = if do_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
+        t_rd = rd_t_now
+        t_wr = wr_t_now
+        cq_wr = do_wr
+        cq_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { 1 } else { 0 }
         t_ref = if do_preab == 1 || do_pre == 1 { max8(dec8(t_ref), m1_rp) } else { dec8(t_ref) }
         faw0 = if do_act == 1 && fp == 0 { m1_faw } else { dec8(faw0) }
         faw1 = if do_act == 1 && fp == 1 { m1_faw } else { dec8(faw1) }
@@ -1144,8 +1195,8 @@ impl Lpddr4DfiController {
         // max8(dec8(t), m) is 0 exactly when t <= 1 and m is 0
         cmd_z = if do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 { z8(m1_mrw) } else { if do_zql == 1 { z8(m1_zqlat) } else { if do_mrr == 1 { z8(m1_mrr) } else { if do_ref == 1 || train_ref == 1 { z8(m1_rfc) } else { le1(t_cmd) } } } }
         actg_z = if do_act == 1 { le1(t_actg) & z8(m1_rrd) } else { if do_ref == 1 { le1(t_actg) & z8(m1_rfc) } else { le1(t_actg) } }
-        rd_z = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_rd) & z8(m1_ccd) } else { if do_wr == 1 { le1(t_rd) & z8(m1_wtr) } else { le1(t_rd) } }
-        wr_z = if do_wr == 1 { le1(t_wr) & z8(m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_wr) & z8(m1_rtw) } else { le1(t_wr) } }
+        rd_z = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(rd_t_now) & z8(m1_ccd) } else { if do_wr == 1 { le1(rd_t_now) & z8(m1_wtr) } else { le1(rd_t_now) } }
+        wr_z = if do_wr == 1 { le1(wr_t_now) & z8(m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(wr_t_now) & z8(m1_rtw) } else { le1(wr_t_now) } }
         fz0 = if do_act == 1 && fp == 0 { z8(m1_faw) } else { le1(faw0) }
         fz1 = if do_act == 1 && fp == 1 { z8(m1_faw) } else { le1(faw1) }
         fz2 = if do_act == 1 && fp == 2 { z8(m1_faw) } else { le1(faw2) }
