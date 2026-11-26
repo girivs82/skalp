@@ -814,7 +814,13 @@ fn tiles_with_option(
     let variant = NexusVariant::Lfcpnx100;
     let tiles = load_tilegrid(db, variant).unwrap();
     let mut types = std::collections::HashMap::new();
-    let mut count = 0;
+    // every (tile, setting) whose option has bits: its bits and their inversions,
+    // read from one parse of the bitstream (the device has thousands of tiles).
+    // Settings that share their bits (the two slices of a pair have one clock
+    // mux) count once.
+    let mut candidates: Vec<(usize, Vec<bool>)> = Vec::new();
+    let mut bits = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for tile in &tiles {
         let data = types.entry(tile.tiletype.clone()).or_insert_with(|| {
             load_tiletype(db, variant.prjoxide_family(), &tile.tiletype).unwrap()
@@ -832,7 +838,7 @@ fn tiles_with_option(
             if option_bits.is_empty() {
                 continue;
             }
-            let bits: Vec<_> = option_bits
+            let tile_bits: Vec<(u32, u32)> = option_bits
                 .iter()
                 .map(|b| {
                     (
@@ -841,17 +847,29 @@ fn tiles_with_option(
                     )
                 })
                 .collect();
-            let values = skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(
-                db, bitstream, &bits,
-            )
-            .unwrap();
-            // an inverted bit is part of the option when it is clear
-            if values.iter().zip(option_bits).all(|(&v, b)| v != b.invert) {
-                count += 1;
+            if !seen.insert(tile_bits.clone()) {
+                continue;
             }
+            candidates.push((bits.len(), option_bits.iter().map(|b| b.invert).collect()));
+            bits.extend(tile_bits);
         }
     }
-    count
+    if bits.is_empty() {
+        return 0;
+    }
+    let values =
+        skalp_place_route::device::nexus::prjoxide_pack::read_frame_bits(db, bitstream, &bits)
+            .unwrap();
+    // an inverted bit is part of the option when it is clear
+    candidates
+        .iter()
+        .filter(|(start, inverts)| {
+            inverts
+                .iter()
+                .enumerate()
+                .all(|(k, &invert)| values[start + k] != invert)
+        })
+        .count()
 }
 
 /// An LVSTL_I output and a bidirectional pad made from a vendor `BB` buffer
@@ -1190,4 +1208,48 @@ fn large_ram_builds_a_bitstream_with_its_contents() {
         "one site's contents"
     );
     assert!(lram.iter().any(|&&(_, byte)| byte != 0));
+}
+
+/// Registers on the falling edge of the oscillator: their slices take the
+/// clock inverted (`CLKMUX` `INV`), no slice mixes them with rising-edge
+/// ones, and the paths between the edges are timed against half a period.
+#[test]
+fn falling_edge_registers_build_with_the_slice_clock_inverted() {
+    let Some(db) = find_database() else {
+        eprintln!("PRJOXIDE_DB not found — skipping");
+        return;
+    };
+    let netlist = netlist_with_pads("nexus_falling_edge.sk", "NexusFallingEdge");
+    let falling = netlist
+        .cells
+        .iter()
+        .filter(|c| skalp_lir::gate_netlist::ff_clock_falling(c))
+        .count();
+    assert_eq!(falling, 8, "the eight `half` registers");
+    let result = skalp_place_route::pnr::place_and_route_nexus_real(
+        &netlist,
+        NexusVariant::Lfcpnx100,
+        PnrConfig::default(),
+        &db,
+    )
+    .expect("falling-edge registers should place, route and emit");
+    assert!(result.routing.success);
+    let data = &result.bitstream.data;
+    let inverted = tiles_with_option(&db, data, "CLKMUX", "INV");
+    assert!(
+        (1..=8).contains(&inverted),
+        "{inverted} tiles with an inverted slice clock"
+    );
+
+    let timing = result.timing.expect("the real flow reports timing");
+    let period = 1000.0 / timing.target_frequency;
+    // The counter's paths into the falling-edge registers have half the
+    // period, so they are the worst slack of the design
+    let worst = timing.critical_paths.first().expect("paths are timed");
+    assert!(
+        worst.required < period / 2.0 + 1e-9,
+        "half a period: {worst:?}"
+    );
+    let hold = timing.hold.expect("hold is checked");
+    assert_eq!(hold.violations, 0, "{:?}", hold.paths.first());
 }

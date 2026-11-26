@@ -1,0 +1,24 @@
+// Registers on both edges of one clock: `r` loads on the rising edge, `f` on
+// the falling edge from `r`, so `f` follows `r` half a cycle later.
+entity FallingEdge {
+    in clk: clock
+    in d: bit[4]
+    out p: bit[4]
+    out q: bit[4]
+}
+
+impl FallingEdge {
+    signal r: bit[4] = 0
+    signal f: bit[4] = 0
+
+    on(clk.rise) {
+        r = d
+    }
+
+    on(clk.fall) {
+        f = r + 1
+    }
+
+    p = r
+    q = f
+}

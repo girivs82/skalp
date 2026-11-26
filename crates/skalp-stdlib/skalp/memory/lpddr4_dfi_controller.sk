@@ -8,13 +8,27 @@
 //
 // Sequence: DFI init (dfi_init_start until dfi_init_complete), RESET_N low T_INIT1_CYC cycles,
 // CKE low T_INIT3_CYC, CKE high T_INIT5_CYC, mode registers (MR13, MR1, MR2, MR3, MR11, MR12,
-// MR14, MR22 from the generics), ZQ calibration start and latch, then training through the PHY
+// MR14, MR22, and the Read DQ Calibration invert masks and patterns MR15, MR20, MR32, MR40, from
+// the generics: the PHY's training compares with them, so they are written rather than left at
+// the DRAM's defaults, MR15/MR20 = 0x55), ZQ calibration start and latch, then training through the PHY
 // (DFI PHY-evaluation mode, each step until the PHY reports every byte lane done):
 //   write leveling: MR2 with OP7 (WR-LEV) set, tWLMRD, dfi_wrlvl_en with a dfi_wrlvl_strobe
-//     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back;
+//     every WL_GAP_CYC cycles (at most WL_MAX_STROBES), then MR2 back; a PHY update request
+//     then (tMRD on, with nothing else in flight) is granted, and leveling runs again after the
+//     window (at most two windows: the PHY may move a strobe's output delay in one);
 //   read gate, then read eye: Read DQ Calibration reads (at most TRAIN_MAX_READS);
 //   write DQ: dfi_wdqlvl_en with a write and a read-back of TRAIN_ADDR in turn (at most
 //     TRAIN_MAX_READS pairs; the bank is left open);
+//   VREF(DQ) (VREF_TRAIN = 1): the reference is swept from level VREF_LO_LEVEL to VREF_HI_LEVEL
+//     in VREF_STEP steps. A level is in 0.4 % of VDDQ (25 = 10 %, 105 = 42 %), across both MR14
+//     ranges: levels up to 75 are range 0 (OP6 = 0, code = level - 25), higher ones range 1
+//     (code = level - 55). Each setting: all banks closed (and a refresh when one is due), MRW
+//     MR14, TVREF_NCK to settle, then VREF_REPS times three bursts written to TRAIN_ADDR and the
+//     two columns below it and read back: isolated ones (beat k drives DQ k and DQ k+8 only,
+//     what a reference set too high loses), isolated zeros (the inverse, lost to one too low)
+//     and every line toggling. MR14 is set to the middle of the longest run of settings whose
+//     bursts all came back right (none: train_fail, and MR14 as the generic gives), and write
+//     DQ training runs again at it, as its eye depends on the reference;
 // then MRR of MR5 and MR8, then normal operation. A step that runs out sets train_fail.
 //
 // Normal operation: one request at a time, in order, open-page per bank (row hit: CAS; other row
@@ -25,7 +39,8 @@
 // User port (DFI clock): a request is taken when req_valid and req_ready are both high.
 // req_addr = {row[16:0], bank[2:0], column[9:4]}, one BL16 burst (32 bytes) per request; write
 // data: beat k in req_wdata[16k+15:16k]. Read data comes back in request order on rsp_valid /
-// rsp_rdata, in the same layout. Data mask is off (MR13 DMD), so writes are whole bursts.
+// rsp_rdata, in the same layout (rsp_rdata means nothing while rsp_valid is low). Data mask is
+// off (MR13 DMD), so writes are whole bursts.
 //
 // Bus safety: a write CAS follows a read CAS by no less than RL - WL + tDQSCK(max) + 10 nCK plus
 // RTW_GUARD_NCK (the read burst, its postamble and the write preamble cannot overlap), and write
@@ -68,8 +83,34 @@ pub entity Lpddr4DfiController<
     const CTRLUPD_CYC: nat = 4,
     const TWLMRD_NCK: nat = 40,
     const WL_GAP_CYC: nat = 16,
-    const WL_MAX_STROBES: nat = 40,
-    const TRAIN_ADDR: nat = 63
+    const WL_MAX_STROBES: nat = 128,
+    const TRAIN_ADDR: nat = 63,
+    // Read DQ Calibration invert masks and patterns (last, so positional generics before them
+    // keep their places)
+    const MR15: nat = 0,
+    const MR20: nat = 0,
+    const MR32: nat = 90,
+    const MR40: nat = 60,
+    // VREF(DQ) training (see above): on (1) or off (0), the levels swept (25 to 105, both MR14
+    // ranges), the step between them, the write/read-back rounds per level (1 to 255), and the
+    // settling time after each MR14 write (tVREF_LONG, 250 ns: 134 nCK at 1066 Mbps)
+    const VREF_TRAIN: nat = 1,
+    const VREF_LO_LEVEL: nat = 25,
+    const VREF_HI_LEVEL: nat = 105,
+    const VREF_STEP: nat = 2,
+    const VREF_REPS: nat = 4,
+    const TVREF_NCK: nat = 134,
+    // A discarded read before the first read after writes (1), for a PHY whose DQS input takes
+    // part of the controller's own write strobe and so returns the next read burst out of step
+    const RD_AFTER_WR_DUMMY: nat = 0,
+    // EXPERIMENT: repeat the write DQ training every RETRAIN_REFS refreshes during traffic (0 = never),
+    // once the user's held request is served and nothing is in flight; the user port waits meanwhile. The training's
+    // write/read-back burst at TRAIN_ADDR overwrites what the user stored there.
+    const RETRAIN_REFS: nat = 0,
+    // Read MR4 every MR4_POLL_REFS refreshes during traffic (0 = never) and refresh at the rate
+    // it asks for (JEDEC: OP[2:0] 4 = 2x, 5 and up = 4x; 6 and 7 also derate tRCD/tRAS/tRP/tRRD
+    // by 1.875 ns, one DFI cycle here). The user port waits while the MRR is due.
+    const MR4_POLL_REFS: nat = 0
 > {
     in clk: clock
     // ---------------------------------------------------------------- user port
@@ -85,6 +126,19 @@ pub entity Lpddr4DfiController<
     out mr5: bit[8]
     out mr8: bit[8]
     out state: bit[5]
+    // write DQ trainings repeated during traffic (RETRAIN_REFS)
+    out retrain_count: bit[16]
+    // the last MR4 read (MR4_POLL_REFS) and how many times it was read
+    out mr4: bit[8]
+    out mr4_polls: bit[16]
+    // MR14 as written after training (the generic when VREF training is off)
+    out vref: bit[8]
+    // VREF training: the longest passing run's first and last levels {last, first}, and one bit
+    // per level swept (1 = its bursts came back right), the last level in bit 0
+    out vref_win: bit[14]
+    // write leveling rounds run again after a PHY update window (at most two)
+    out wl_relevels: bit[2]
+    out vref_map: bit[64]
     // ---------------------------------------------------------------- DFI
     out dfi_cs_p0: bit
     out dfi_address_p0: bit[6]
@@ -167,47 +221,87 @@ pub entity Lpddr4BankState {
 impl Lpddr4BankState {
     signal open_r: bit = 0
     signal row_r: bit[17] = 0
+    // the timers as of the cycle before (t_*) and that cycle's commands (*_q): the timers now
+    // (*_now) are worked out from those registers, so the controller's command choice reaches
+    // only the ok flags here, not 24 bits of timer
     signal t_act: bit[8] = 0
     signal t_cas: bit[8] = 0
     signal t_pre: bit[8] = 0
-    let act_d: bit[8] = if t_act == 0 { 0 } else { t_act - 1 }
-    let cas_d: bit[8] = if t_cas == 0 { 0 } else { t_cas - 1 }
-    let pre_d: bit[8] = if t_pre == 0 { 0 } else { t_pre - 1 }
-    let rcd_m1: bit[8] = if f_rcd == 0 { 0 } else { f_rcd - 1 }
-    let ras_m1: bit[8] = if f_ras == 0 { 0 } else { f_ras - 1 }
-    let rp_m1: bit[8] = if f_rp == 0 { 0 } else { f_rp - 1 }
-    let wr_m1: bit[8] = if f_wr == 0 { 0 } else { f_wr - 1 }
-    let rtp_m1: bit[8] = if f_rtp == 0 { 0 } else { f_rtp - 1 }
-    // the precharge wait after a write or a read, worked out before the command is known, so
-    // the command only picks one
-    let pre_w: bit[8] = if wr_m1 > pre_d { wr_m1 } else { pre_d }
-    let pre_r: bit[8] = if rtp_m1 > pre_d { rtp_m1 } else { pre_d }
+    signal act_q: bit = 0
+    signal pre_q: bit = 0
+    signal rd_q: bit = 0
+    signal wr_q: bit = 0
+    // the waits less one, registered (they change only with the refresh-rate derating, which
+    // then takes effect a cycle later), and whether each is at most 1
+    signal rcd_m1: bit[8] = 0
+    signal ras_m1: bit[8] = 0
+    signal rp_m1: bit[8] = 0
+    signal wr_m1: bit[8] = 0
+    signal rtp_m1: bit[8] = 0
+    signal rcd_le1: bit = 1
+    signal ras_le1: bit = 1
+    signal rp_le1: bit = 1
+    signal wr_le1: bit = 1
+    signal rtp_le1: bit = 1
+    signal rcd_z: bit = 1
+    signal ras_z: bit = 1
+    signal rp_z: bit = 1
+    signal wr_z: bit = 1
+    signal rtp_z: bit = 1
+    let act_l: bit[8] = if t_act == 0 { 0 } else { t_act - 1 }
+    let cas_l: bit[8] = if t_cas == 0 { 0 } else { t_cas - 1 }
+    let pre_l: bit[8] = if t_pre == 0 { 0 } else { t_pre - 1 }
+    let act_now: bit[8] = if pre_q == 1 { rp_m1 } else { act_l }
+    let cas_now: bit[8] = if act_q == 1 { rcd_m1 } else { cas_l }
+    let pre_now: bit[8] = if act_q == 1 { ras_m1 } else { if wr_q == 1 { if wr_m1 > pre_l { wr_m1 } else { pre_l } } else { if rd_q == 1 { if rtp_m1 > pre_l { rtp_m1 } else { pre_l } } else { pre_l } } }
+    // whether each timer is at most 1 now (so 0 next cycle unless a command reloads it), from
+    // the registers directly: the max of two waits is at most 1 when both are
+    let act_le1: bit = if pre_q == 1 { rp_le1 } else { if t_act <= 2 { 1 } else { 0 } }
+    let cas_le1: bit = if act_q == 1 { rcd_le1 } else { if t_cas <= 2 { 1 } else { 0 } }
+    let pl_le1: bit = if t_pre <= 2 { 1 } else { 0 }
+    let pre_le1: bit = if act_q == 1 { ras_le1 } else { if wr_q == 1 { wr_le1 & pl_le1 } else { if rd_q == 1 { rtp_le1 & pl_le1 } else { pl_le1 } } }
     // each wait is over when its timer is 0; the flags are registers, set from the value each
     // timer takes, so the controller's command choice starts from them directly
     signal act_ok_r: bit = 1
     signal cas_ok_r: bit = 1
     signal pre_ok_r: bit = 1
     on(clk.rise) {
+        rcd_m1 = if f_rcd == 0 { 0 } else { f_rcd - 1 }
+        ras_m1 = if f_ras == 0 { 0 } else { f_ras - 1 }
+        rp_m1 = if f_rp == 0 { 0 } else { f_rp - 1 }
+        wr_m1 = if f_wr == 0 { 0 } else { f_wr - 1 }
+        rtp_m1 = if f_rtp == 0 { 0 } else { f_rtp - 1 }
+        rcd_le1 = if f_rcd <= 2 { 1 } else { 0 }
+        ras_le1 = if f_ras <= 2 { 1 } else { 0 }
+        rp_le1 = if f_rp <= 2 { 1 } else { 0 }
+        wr_le1 = if f_wr <= 2 { 1 } else { 0 }
+        rtp_le1 = if f_rtp <= 2 { 1 } else { 0 }
+        rcd_z = if f_rcd <= 1 { 1 } else { 0 }
+        ras_z = if f_ras <= 1 { 1 } else { 0 }
+        rp_z = if f_rp <= 1 { 1 } else { 0 }
+        wr_z = if f_wr <= 1 { 1 } else { 0 }
+        rtp_z = if f_rtp <= 1 { 1 } else { 0 }
+        t_act = act_now
+        t_cas = cas_now
+        t_pre = pre_now
+        act_q = act
+        pre_q = pre
+        rd_q = rd
+        wr_q = wr
         if act == 1 {
             open_r = 1
             row_r = row_in
-            t_cas = rcd_m1
-            t_pre = ras_m1
-            cas_ok_r = if rcd_m1 == 0 { 1 } else { 0 }
-            pre_ok_r = if ras_m1 == 0 { 1 } else { 0 }
+            cas_ok_r = rcd_z
+            pre_ok_r = ras_z
         } else {
-            t_cas = cas_d
-            t_pre = if wr == 1 { pre_w } else { if rd == 1 { pre_r } else { pre_d } }
-            cas_ok_r = if cas_d == 0 { 1 } else { 0 }
-            pre_ok_r = if wr == 1 { if pre_w == 0 { 1 } else { 0 } } else { if rd == 1 { if pre_r == 0 { 1 } else { 0 } } else { if pre_d == 0 { 1 } else { 0 } } }
+            cas_ok_r = cas_le1
+            pre_ok_r = if wr == 1 { wr_z & pre_le1 } else { if rd == 1 { rtp_z & pre_le1 } else { pre_le1 } }
         }
         if pre == 1 {
             open_r = 0
-            t_act = rp_m1
-            act_ok_r = if rp_m1 == 0 { 1 } else { 0 }
+            act_ok_r = rp_z
         } else {
-            t_act = act_d
-            act_ok_r = if act_d == 0 { 1 } else { 0 }
+            act_ok_r = act_le1
         }
     }
     is_open = open_r
@@ -273,12 +367,21 @@ fn ca_mpc(op: bit[7]) -> bit[24] {
     return {6'b000000, 1'b0, 5'b10010, op[5:0], op[6], 5'b00000}
 }
 
+// VREF(DQ) training bursts (beat k in [16k+15:16k]): isolated ones (beat k drives DQ k and
+// DQ k+8, so each line carries one 1 among zeros), isolated zeros, every line toggling
+fn vr_pat(i: bit[2]) -> bit[256] {
+    let ones: bit[256] = {64'h8000400020001000, 64'h0800040002000100, 64'h0080004000200010, 64'h0008000400020001}
+    let zeros: bit[256] = {64'h7FFFBFFFDFFFEFFF, 64'hF7FFFBFFFDFFFEFF, 64'hFF7FFFBFFFDFFFEF, 64'hFFF7FFFBFFFDFFFE}
+    let toggle: bit[256] = {64'h5555AAAA5555AAAA, 64'h5555AAAA5555AAAA, 64'h5555AAAA5555AAAA, 64'h5555AAAA5555AAAA}
+    return if i == 0 { ones } else { if i == 1 { zeros } else { toggle } }
+}
+
 impl Lpddr4DfiController {
     // ------------------------------------------------------------ states
     // 0 PHY init, 1 reset low, 2 CKE low, 3 CKE high, 4 MRW, 5 ZQ start, 6 ZQ wait, 7 ZQ latch,
-    // 18 write leveling, 10 gate training, 11 read-eye training, 19 write DQ training, 8 MRR,
-    // 9 wait for MRR data, 12 settle, 13 ready, 14 refresh precharge, 15 refresh, 16 PHY update,
-    // 17 controller update
+    // 18 write leveling, 10 gate training, 11 read-eye training, 19 write DQ training,
+    // 20 VREF(DQ) training (then 19 again), 8 MRR, 9 wait for MRR data, 12 settle, 13 ready,
+    // 14 refresh precharge, 15 refresh, 16 PHY update, 17 controller update
     signal st: bit[5] = 0
     signal wait_c: bit[32] = 0
     signal mi: bit[4] = 0
@@ -287,16 +390,70 @@ impl Lpddr4DfiController {
     signal mr5_r: bit[8] = 0
     signal mr8_r: bit[8] = 0
     signal train_reads: bit[16] = 0
+    // train_reads >= TRAIN_MAX_READS and >= WL_MAX_STROBES, kept beside it (set with each
+    // count from the register's own +1) so the training steps need no compare
+    signal tr_ge: bit = 0
+    signal wl_ge: bit = 0
     signal train_gap: bit[16] = 0
     signal gate_en_r: bit = 0
     signal rdlvl_en_r: bit = 0
     signal wrlvl_en_r: bit = 0
     signal wrlvl_strobe_r: bit = 0
     signal wdqlvl_en_r: bit = 0
-    // write leveling step: 0 MRW in, 1 tWLMRD, 2 strobes, 3 MRW out
-    signal wl_ph: bit[2] = 0
+    // write leveling step: 0 MRW in, 1 tWLMRD, 2 strobes, 3 MRW out, 4 tMRD, then a PHY
+    // update window if one is asked for, 5 the window
+    signal wl_ph: bit[3] = 0
+    signal wl_upds: bit[2] = 0
     // write DQ training: the next training request is a write
     signal tw_w: bit = 0
+    signal rt_cnt: bit[24] = 0
+    signal rt_busy: bit = 0
+    signal rt_pend: bit = 0
+    signal wdq_armed: bit = 0
+    signal retrains: bit[16] = 0
+    // MR4 polling: refreshes since the last read, a read due, the value, reads done
+    signal m4_cnt: bit[16] = 0
+    signal m4_pend: bit = 0
+    signal mr4_r: bit[8] = 0
+    signal m4_polls: bit[16] = 0
+    // VREF(DQ) training: step 0 close banks, 1 refresh if due, 2 MRW MR14, 3 settle, 4 the
+    // writes and reads, 5 wait for the reads and judge the code
+    signal vr_ph: bit[3] = 0
+    // the level being tried (the chosen one once vr_fin is set); MR14 as the generic gives it
+    // when none passed
+    signal vr_c: bit[7] = 0
+    signal vr_fin: bit = 0
+    signal vr_keep: bit = 0
+    // VREF training is over (write DQ training's second run is after it)
+    signal vr_done: bit = 0
+    // requests issued in this round (3 writes, then 3 reads), rounds done for this level, the
+    // next read-back's pattern, read-backs compared for this level, any wrong
+    signal vr_k: bit[3] = 0
+    signal vr_r: bit[8] = 0
+    signal vr_gi: bit[2] = 0
+    signal vr_got: bit[10] = 0
+    signal vr_bad: bit = 0
+    // a read-back and its pattern, held a cycle so the comparison starts from registers
+    signal vr_rb: bit[256] = 0
+    signal vr_rbi: bit[2] = 0
+    signal vr_rbv: bit = 0
+    // the passing run being counted, and the longest so far
+    signal vr_rs: bit[7] = 0
+    signal vr_cl: bit[7] = 0
+    // a level's result, registered the cycle before it is taken (vr_jq: the judging condition
+    // held a cycle; nothing it depends on changes once all the level's reads are back)
+    signal vr_jq: bit = 0
+    signal vr_pass_r: bit = 0
+    signal vr_rs_nr: bit[7] = 0
+    signal vr_cl_nr: bit[7] = 0
+    signal vr_bs_nr: bit[7] = 0
+    signal vr_be_nr: bit[7] = 0
+    signal vr_bl_nr: bit[7] = 0
+    signal vr_bs: bit[7] = 0
+    signal vr_be: bit[7] = 0
+    signal vr_bl: bit[7] = 0
+    signal vr_map: bit[64] = 0
+    signal vref_r: bit[8] = MR14
     signal init_start_r: bit = 0
     signal ctrlupd_r: bit = 0
     signal phyupd_ack_r: bit = 0
@@ -304,13 +461,24 @@ impl Lpddr4DfiController {
     signal cke_r: bit = 0
     // refresh
     signal refc: bit[16] = 0
-    signal ref_due: bit = 0
+    // refreshes owed: one per tREFI, less one per REF; at most 8 can be postponed (JEDEC), so a
+    // refresh held off past a tREFI (or a rate raised by MR4) is made up, not lost
+    signal ref_owed: bit[4] = 0
+    // ref_owed != 0, kept in its own register: it is at the head of the command choice, whose
+    // write strobe loads the whole write queue
+    signal ref_due_r: bit = 0
     signal ref_on: bit = 0
     // global timers (DFI cycles)
     signal t_cmd: bit[8] = 0
     signal t_actg: bit[8] = 0
+    // t_rd, t_wr: the read and write CAS timers as of the cycle before, and the CAS commands
+    // that cycle sent (cq_*): the timers now are worked out from those registers (rd_t_now,
+    // wr_t_now), so the command choice only reaches the strobes and rd_z / wr_z, not 16 bits of
+    // timer
     signal t_rd: bit[8] = 0
     signal t_wr: bit[8] = 0
+    signal cq_wr: bit = 0
+    signal cq_rd: bit = 0
     signal t_ref: bit[8] = 0
     signal faw0: bit[8] = 0
     signal faw1: bit[8] = 0
@@ -353,13 +521,20 @@ impl Lpddr4DfiController {
     // write bursts waiting to go out
     signal wq: [bit[256]; 4]
     signal wq_wp: bit[2] = 0
+    // a write's data enters the queue the cycle after its WRITE (wq_we_r, at wq_wp_d), from
+    // rq_data, which holds until then: the queue's 1024 enables hang off a register, not the
+    // command choice; until it is in, a read of that entry takes rq_data
+    signal wq_we_r: bit = 0
+    signal wq_wp_d: bit[2] = 0
     signal wq_rp: bit[2] = 0
     // wq_rp + 1, kept in its own register so the second read address is
     // ready at the clock edge
     signal wq_rp1: bit[2] = 1
     signal wq_n: bit[3] = 0
-    // reads in flight: 0 user, 1 MR5, 2 MR8
-    signal tq: [bit[2]; 8]
+    // reads in flight: 0 user, 1 MR5, 2 MR8, 3 VREF training
+    signal tq: [bit[3]; 8]
+    // a write went out since the last read (for RD_AFTER_WR_DUMMY)
+    signal wr_since_rd: bit = 0
     signal tq_wp: bit[3] = 0
     signal tq_rp: bit[3] = 0
     signal tq_n: bit[4] = 0
@@ -400,6 +575,10 @@ impl Lpddr4DfiController {
     let mr13_c: bit[8] = MR13
     let mr14_c: bit[8] = MR14
     let mr22_c: bit[8] = MR22
+    let mr15_c: bit[8] = MR15
+    let mr20_c: bit[8] = MR20
+    let mr32_c: bit[8] = MR32
+    let mr40_c: bit[8] = MR40
     let rl: bit[16] = match mr2_c[2:0] {
         0 => 6,
         1 => 10,
@@ -463,15 +642,19 @@ impl Lpddr4DfiController {
     let f_mrw16: bit[16] = (n_mrw + 6) >> 2
     let f_zqcal32: bit[32] = {16'h0000, (n_zqcal + 3) >> 2}
     let f_zqlat16: bit[16] = (n_zqlat + 4) >> 2
-    let f_refi: bit[16] = n_refi >> 2
-    let f_rcd: bit[8] = f_rcd16[7:0]
-    let f_ras: bit[8] = f_ras16[7:0]
-    let f_rp: bit[8] = f_rp16[7:0]
+    // refresh rate and AC timing derating from MR4 (0 until it is first read: 1x, no derating)
+    let mr4_rate: bit[3] = mr4_r[2:0]
+    let refi_sh: bit[16] = if mr4_rate == 4 { 3 } else { if mr4_rate >= 5 { 4 } else { 2 } }
+    let derate: bit[8] = if mr4_rate >= 6 { 1 } else { 0 }
+    let f_refi: bit[16] = n_refi >> refi_sh
+    let f_rcd: bit[8] = f_rcd16[7:0] + derate
+    let f_ras: bit[8] = f_ras16[7:0] + derate
+    let f_rp: bit[8] = f_rp16[7:0] + derate
     let f_wr: bit[8] = f_wr16[7:0]
     let f_rtp: bit[8] = f_rtp16[7:0]
-    let m1_rp: bit[8] = dec8(f_rp16[7:0])
+    let m1_rp: bit[8] = dec8(f_rp16[7:0]) + derate
     let m1_rfc: bit[8] = dec8(f_rfc16[7:0])
-    let m1_rrd: bit[8] = dec8(f_rrd16[7:0])
+    let m1_rrd: bit[8] = dec8(f_rrd16[7:0]) + derate
     let m1_faw: bit[8] = dec8(f_faw16[7:0])
     let m1_wtr: bit[8] = dec8(f_wtr16[7:0])
     let m1_rtw: bit[8] = dec8(f_rtw16[7:0])
@@ -479,6 +662,9 @@ impl Lpddr4DfiController {
     let m1_zqlat: bit[8] = dec8(f_zqlat16[7:0])
     // tCCD (8 nCK) is two cycles; tMRR (8 nCK after an MRR's last edge) three
     let m1_ccd: bit[8] = 1
+    // the CAS timers this cycle, from last cycle's values and commands (see t_rd)
+    let rd_t_now: bit[8] = if cq_rd == 1 { max8(dec8(t_rd), m1_ccd) } else { if cq_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
+    let wr_t_now: bit[8] = if cq_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if cq_rd == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
     let m1_mrr: bit[8] = 2
     let wr_off: bit[16] = wl + adj_w
     let rd_off: bit[16] = rl + adj_r
@@ -498,7 +684,23 @@ impl Lpddr4DfiController {
     let wlmrd32: bit[32] = {16'h0000, (n_wlmrd + 3) >> 2}
     let wl_gap: bit[16] = WL_GAP_CYC
     let wl_max: bit[16] = WL_MAX_STROBES
+    let tr_inc: bit[16] = train_reads + 1
+    let tr_ge_inc: bit = if tr_inc >= tr_max { 1 } else { 0 }
+    let wl_ge_inc: bit = if tr_inc >= wl_max { 1 } else { 0 }
+    let tr_ge0: bit = if tr_max == 0 { 1 } else { 0 }
+    let wl_ge0: bit = if wl_max == 0 { 1 } else { 0 }
     let tr_addr: bit[26] = TRAIN_ADDR
+    let vr_on_c: bit[8] = VREF_TRAIN
+    let vr_on: bit = if vr_on_c == 0 { 0 } else { 1 }
+    let vr_lo: bit[7] = VREF_LO_LEVEL
+    let vr_hi7: bit[7] = VREF_HI_LEVEL
+    let vr_step7: bit[7] = VREF_STEP
+    let vr_reps: bit[8] = VREF_REPS
+    // read-backs per level: three per round
+    let vr_nrd: bit[10] = {2'b00, vr_reps} + {2'b00, vr_reps} + {2'b00, vr_reps}
+    let n_tvref: bit[16] = TVREF_NCK
+    // from the MRW's last edge
+    let tvref32: bit[32] = {16'h0000, (n_tvref + 3) >> 2}
 
     // ------------------------------------------------------------ banks
     let req_row: bit[17] = req_addr[25:9]
@@ -544,17 +746,23 @@ impl Lpddr4DfiController {
     let idle: bit = if st == 13 { 1 } else { 0 }
     let can_cmd: bit = cmd_z
     let upd_go: bit = if idle == 1 && dfi_phyupd_req == 1 && rq_v == 0 && quiet == 1 { 1 } else { 0 }
+    let ref_due: bit = ref_due_r
+    let ref_tick: bit = if ref_on == 1 && refc + 1 >= f_refi { 1 } else { 0 }
     let ref_go: bit = if idle == 1 && ref_due == 1 && upd_go == 0 { 1 } else { 0 }
-    // write DQ training goes through the request path (refresh waits until it is over)
+    // write DQ training goes through the request path (refresh waits until it is over), and so
+    // does VREF training (which refreshes between codes)
     let wdq_st: bit = if st == 19 { 1 } else { 0 }
+    let vr_st: bit = if st == 20 { 1 } else { 0 }
     // a PHY update is only granted with no request held (upd_go needs rq_v == 0), so it never
     // stops one being served: the condition leaves it out to keep the command choice shallow
-    let serve: bit = if ((idle == 1 && ref_due == 0) || wdq_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
+    let serve: bit = if ((idle == 1 && ref_due == 0) || wdq_st == 1 || vr_st == 1) && rq_v == 1 && can_cmd == 1 { 1 } else { 0 }
     let do_cas: bit = if serve == 1 && q_hit == 1 && b_casok[rq_ba] == 1 && ((rq_w == 1 && wr_z == 1 && wq_room == 1) || (rq_w == 0 && rd_z == 1 && tq_room == 1)) { 1 } else { 0 }
     let do_pre: bit = if serve == 1 && q_open == 1 && q_hit == 0 && b_preok[rq_ba] == 1 { 1 } else { 0 }
     let do_act: bit = if serve == 1 && q_open == 0 && b_actok[rq_ba] == 1 && actg_z == 1 && faw_ok == 1 { 1 } else { 0 }
     let do_wr: bit = if do_cas == 1 && rq_w == 1 { 1 } else { 0 }
     let do_rd: bit = if do_cas == 1 && rq_w == 0 { 1 } else { 0 }
+    // the read goes out but stays held: its data is dropped, and the request's own read follows
+    let rd_dummy: bit = if RD_AFTER_WR_DUMMY == 1 && do_rd == 1 && wr_since_rd == 1 && wdq_st == 0 { 1 } else { 0 }
     // the same commands as strobes for each bank: do_wr && rq_ba == k and so on, from bank k's
     // own flags, with no choice of bank in front of its timers
     let cas_w: bit = if serve == 1 && rq_rowm == 1 && rq_w == 1 && wr_z == 1 && wq_room == 1 { 1 } else { 0 }
@@ -565,25 +773,62 @@ impl Lpddr4DfiController {
     let bk_wr: bit[8] = if cas_w == 1 { cas_k } else { 8'h00 }
     let bk_rd: bit[8] = if cas_r == 1 { cas_k } else { 8'h00 }
     let bk_act: bit[8] = if act_q == 1 { rq_sel & ~b_open & b_actok } else { 8'h00 }
-    // refresh: precharge all once every bank may close, then REF tRP later
-    let do_preab: bit = if st == 14 && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
+    // refresh: precharge all once every bank may close, then REF tRP later (VREF training closes
+    // the banks before each MR14 write the same way)
+    let vr_close: bit = if vr_st == 1 && vr_ph == 0 { 1 } else { 0 }
+    let do_preab: bit = if (st == 14 || vr_close == 1) && can_cmd == 1 && b_preok == 8'hFF && b_open != 0 { 1 } else { 0 }
     let bk_pre: bit[8] = if do_preab == 1 { 8'hFF } else { if pre_q == 1 { rq_sel & b_open & b_preok } else { 8'h00 } }
-    let do_ref: bit = if st == 15 && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
-    let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 8 { 1 } else { 0 }
+    let vr_ref: bit = if vr_st == 1 && vr_ph == 1 && ref_due == 1 { 1 } else { 0 }
+    let do_ref: bit = if (st == 15 || vr_ref == 1) && can_cmd == 1 && t_ref == 0 { 1 } else { 0 }
+    let do_mrw: bit = if st == 4 && can_cmd == 1 && mi < 12 { 1 } else { 0 }
+    // VREF training's MR14 writes
+    let do_vrmrw: bit = if vr_st == 1 && vr_ph == 2 && can_cmd == 1 { 1 } else { 0 }
+    // the level as MR14: range 0 up to level 75, range 1 above
+    let vr_c0: bit[7] = vr_c - 25
+    let vr_c1: bit[7] = vr_c - 55
+    let vr_op: bit[8] = if vr_keep == 1 { mr14_c } else { if vr_c <= 75 { {mr14_c[7], 1'b0, vr_c0[5:0]} } else { {mr14_c[7], 1'b1, vr_c1[5:0]} } }
+    // the next level, and the best run once this level's result is in
+    let vr_nxt: bit[7] = vr_c + vr_step7
+    let vr_last: bit = if vr_nxt > vr_hi7 { 1 } else { 0 }
+    let vr_pass: bit = if vr_bad == 0 { 1 } else { 0 }
+    let vr_rs_n: bit[7] = if vr_cl == 0 { vr_c } else { vr_rs }
+    let vr_cl_n: bit[7] = vr_cl + 1
+    let vr_better: bit = if vr_pass == 1 && vr_cl_n > vr_bl { 1 } else { 0 }
+    let vr_bs_n: bit[7] = if vr_better == 1 { vr_rs_n } else { vr_bs }
+    let vr_be_n: bit[7] = if vr_better == 1 { vr_c } else { vr_be }
+    let vr_bl_n: bit[7] = if vr_better == 1 { vr_cl_n } else { vr_bl }
+    let vr_sum: bit[8] = {1'b0, vr_bs_nr} + {1'b0, vr_be_nr}
+    let vr_mid: bit[7] = vr_sum[7:1]
+    // this code's reads are all back and judged
+    let vr_judge: bit = if vr_st == 1 && vr_ph == 5 && rq_v == 0 && quiet == 1 && vr_got == vr_nrd { 1 } else { 0 }
+    // this code's requests: three writes, then the three reads, TRAIN_ADDR's column and the
+    // two below it
+    let vr_ci: bit[3] = if vr_k < 3 { vr_k } else { vr_k - 3 }
     // MR2 with WR-LEV set (in) and clear (out)
     let do_wlmrw: bit = if st == 18 && can_cmd == 1 && (wl_ph == 0 || wl_ph == 3) { 1 } else { 0 }
     let wl_mr2: bit[8] = if wl_ph == 0 { mr2_c | 8'h80 } else { mr2_c }
     let wl_done: bit = if dfi_wrlvl_resp == 2'b11 { 1 } else { 0 }
-    let do_strobe: bit = if st == 18 && wl_ph == 2 && wl_done == 0 && train_gap == 0 && train_reads < wl_max { 1 } else { 0 }
-    let wdq_done: bit = if dfi_wdqlvl_resp == 2'b11 { 1 } else { 0 }
+    let do_strobe: bit = if st == 18 && wl_ph == 2 && wl_done == 0 && train_gap == 0 && wl_ge == 0 { 1 } else { 0 }
+    // dfi_wdqlvl_resp still holds the last training's result for the first cycles of a new one
+    // (a PHY clears it once it sees dfi_wdqlvl_en rise): it counts only after it was seen not done
+    // the user port takes a request (req_ready): none held, init done, no PHY update pending, and
+    // no repeated write DQ training due or running
+    let can_take: bit = if rq_v == 0 && init_done_r == 1 && rt_busy == 0 && rt_pend == 0 && m4_pend == 0 && dfi_phyupd_req == 0 { 1 } else { 0 }
+    // the MR4 read: from idle, with nothing held or in flight and no refresh or PHY update due,
+    // once a read may follow the last write (tWTR) like any other read
+    let m4_go: bit = if idle == 1 && m4_pend == 1 && rq_v == 0 && quiet == 1 && ref_due == 0 && upd_go == 0 && can_cmd == 1 && rd_z == 1 { 1 } else { 0 }
+    let wdq_resp_all: bit = if dfi_wdqlvl_resp == 2'b11 { 1 } else { 0 }
+    let wdq_done: bit = if wdq_resp_all == 1 && wdq_armed == 1 { 1 } else { 0 }
     let do_zqs: bit = if st == 5 && can_cmd == 1 { 1 } else { 0 }
     let do_zql: bit = if st == 7 && wait_c == 0 { 1 } else { 0 }
-    let do_mrr: bit = if st == 8 && can_cmd == 1 && mi < 2 { 1 } else { 0 }
+    let do_mrr: bit = if (st == 8 && can_cmd == 1 && mi < 2) || m4_go == 1 { 1 } else { 0 }
     let training: bit = if st == 10 || st == 11 { 1 } else { 0 }
     let lvl_done: bit = if (st == 10 && dfi_rdlvl_gate_resp == 2'b11) || (st == 11 && dfi_rdlvl_resp == 2'b11) { 1 } else { 0 }
     // training reads stop for a refresh; one goes in once the gap since the last has passed
     let train_ref: bit = if training == 1 && ref_due == 1 && can_cmd == 1 && actg_z == 1 && train_gap == 0 { 1 } else { 0 }
-    let do_rdc: bit = if training == 1 && lvl_done == 0 && train_ref == 0 && can_cmd == 1 && train_gap == 0 && train_reads < tr_max { 1 } else { 0 }
+    let ref_done: bit = if do_ref == 1 || train_ref == 1 { 1 } else { 0 }
+    let ref_owed_n: bit[4] = if ref_tick == 1 && ref_done == 0 { if ref_owed == 8 { 4'd8 } else { ref_owed + 1 } } else { if ref_tick == 0 && ref_done == 1 && ref_owed != 0 { ref_owed - 1 } else { ref_owed } }
+    let do_rdc: bit = if training == 1 && lvl_done == 0 && train_ref == 0 && can_cmd == 1 && train_gap == 0 && tr_ge == 0 { 1 } else { 0 }
 
     let mrw_ma: bit[6] = match mi {
         0 => 13,
@@ -593,7 +838,11 @@ impl Lpddr4DfiController {
         4 => 11,
         5 => 12,
         6 => 14,
-        _ => 22
+        7 => 22,
+        8 => 15,
+        9 => 20,
+        10 => 32,
+        _ => 40
     }
     let mrw_op: bit[8] = match mi {
         0 => mr13_c,
@@ -603,10 +852,14 @@ impl Lpddr4DfiController {
         4 => mr11_c,
         5 => mr12_c,
         6 => mr14_c,
-        _ => mr22_c
+        7 => mr22_c,
+        8 => mr15_c,
+        9 => mr20_c,
+        10 => mr32_c,
+        _ => mr40_c
     }
-    let mrr_ma: bit[6] = if mi == 0 { 5 } else { 8 }
-    let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_wlmrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
+    let mrr_ma: bit[6] = if m4_go == 1 { 4 } else { if mi == 0 { 5 } else { 8 } }
+    let four: bit = if do_act == 1 || do_cas == 1 || do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
     let two: bit = if do_pre == 1 || do_preab == 1 || do_ref == 1 || train_ref == 1 || do_zqs == 1 || do_zql == 1 { 1 } else { 0 }
     let f_cs: bit[4] = if four == 1 { 4'b0101 } else { if two == 1 { 4'b0001 } else { 4'b0000 } }
     let f_ca: bit[24] =
@@ -615,6 +868,7 @@ impl Lpddr4DfiController {
         else { if do_rd == 1 { ca_cas(5'b00010, rq_ba, rq_col) }
         else { if do_mrw == 1 { ca_mrw(mrw_ma, mrw_op) }
         else { if do_wlmrw == 1 { ca_mrw(6'd2, wl_mr2) }
+        else { if do_vrmrw == 1 { ca_mrw(6'd14, vr_op) }
         else { if do_mrr == 1 { ca_mrr(mrr_ma) }
         else { if do_rdc == 1 { ca_mpc(7'h43) }
         else { if do_pre == 1 { {18'h00000, 3'b000, rq_ba, 6'b010000} }
@@ -622,7 +876,7 @@ impl Lpddr4DfiController {
         else { if do_ref == 1 || train_ref == 1 { {18'h00000, 6'b000000, 6'b101000} }
         else { if do_zqs == 1 { {18'h00000, 6'd15, 6'b100000} }
         else { if do_zql == 1 { {18'h00000, 6'd17, 6'b100000} }
-        else { 24'h000000 } } } } } } } } } } } }
+        else { 24'h000000 } } } } } } } } } } } } }
 
     // ------------------------------------------------------------ data enables
     let rd_issue: bit = if do_rd == 1 || do_mrr == 1 || do_rdc == 1 { 1 } else { 0 }
@@ -644,8 +898,12 @@ impl Lpddr4DfiController {
     let wend1: bit = if wr_mod[1] == 1 && wb1 == 7 { 1 } else { 0 }
     let wend2: bit = if wr_mod[2] == 1 && wb2 == 7 { 1 } else { 0 }
     let wend3: bit = if wr_mod[3] == 1 && wb3 == 7 { 1 } else { 0 }
-    let wd_head: bit[256] = wq[wq_rp]
-    let wd_next: bit[256] = wq[wq_rp1]
+    // a write's first data slot is wr_off slots after its WRITE: from 8 on (every LPDDR4 write
+    // latency but the lowest few) it is never read before its entry is in, and the constant
+    // wq_byp drops the bypass
+    let wq_byp: bit = if wr_off < 8 { 1 } else { 0 }
+    let wd_head: bit[256] = if wq_byp == 1 && wq_we_r == 1 && wq_wp_d == wq_rp { rq_data } else { wq[wq_rp] }
+    let wd_next: bit[256] = if wq_byp == 1 && wq_we_r == 1 && wq_wp_d == wq_rp1 { rq_data } else { wq[wq_rp1] }
     let wd0: bit[32] = burst_word(wd_head, wb0)
     let wd1: bit[32] = if wend0 == 1 { burst_word(wd_next, wb1) } else { burst_word(wd_head, wb1) }
     let wd2: bit[32] = if wend0 == 1 || wend1 == 1 { burst_word(wd_next, wb2) } else { burst_word(wd_head, wb2) }
@@ -735,7 +993,7 @@ impl Lpddr4DfiController {
     let rn6: bit[32] = if r_emit == 1 && rf14 == 1 { rp14 } else { re6 }
     let rn7: bit[32] = if r_emit == 1 && rf15 == 1 { rp15 } else { re7 }
     let r_burst: bit[256] = {re7, re6, re5, re4, re3, re2, re1, re0}
-    let r_tag: bit[2] = tq[tq_rp]
+    let r_tag: bit[3] = tq[tq_rp]
     // write DQ training reads are checked by the PHY and return nothing
     let tq_push: bit = if (do_rd == 1 && wdq_st == 0) || do_mrr == 1 { 1 } else { 0 }
 
@@ -859,8 +1117,10 @@ impl Lpddr4DfiController {
             wq_rp = wq_rp1
             wq_rp1 = wq_rp1 + 1
         }
+        wq_we_r = do_wr
+        wq_wp_d = wq_wp
+        if wq_we_r == 1 { wq[wq_wp_d] = rq_data }
         if do_wr == 1 {
-            wq[wq_wp] = rq_data
             wq_wp = wq_wp + 1
         }
         wq_n = if do_wr == 1 && w_pop == 0 { wq_n + 1 } else { if do_wr == 0 && w_pop == 1 { wq_n - 1 } else { wq_n } }
@@ -885,28 +1145,53 @@ impl Lpddr4DfiController {
         rw7 = rn7
         rc = if r_emit == 1 { rtot - 8 } else { rtot }
         rsp_v_r = 0
+        // the data registers load every cycle: they only count beside their valid flags, and
+        // an enable from the burst-complete decision would hang 256 bits off it
+        rsp_d_r = r_burst
+        vr_rb = r_burst
         if r_emit == 1 {
             tq_rp = tq_rp + 1
             if r_tag == 0 {
                 rsp_v_r = 1
-                rsp_d_r = r_burst
             }
             if r_tag == 1 { mr5_r = re0[7:0] }
             if r_tag == 2 { mr8_r = re0[7:0] }
+            if r_tag == 5 { mr4_r = re0[7:0] }
+            // VREF training's read-backs, in the order written, compared the next cycle
+            if r_tag == 3 {
+                vr_rbi = vr_gi
+                vr_gi = if vr_gi == 2 { 2'd0 } else { vr_gi + 1 }
+            }
+        }
+        vr_rbv = if r_emit == 1 && r_tag == 3 { 1 } else { 0 }
+        if vr_rbv == 1 {
+            if vr_rb != vr_pat(vr_rbi) { vr_bad = 1 }
+            vr_got = vr_got + 1
         }
         if tq_push == 1 {
-            tq[tq_wp] = if do_mrr == 1 { if mi == 0 { 2'd1 } else { 2'd2 } } else { 2'd0 }
+            tq[tq_wp] = if do_mrr == 1 { if m4_go == 1 { 3'd5 } else { if mi == 0 { 3'd1 } else { 3'd2 } } } else { if rd_dummy == 1 { 3'd4 } else { if vr_st == 1 { 3'd3 } else { 3'd0 } } }
             tq_wp = tq_wp + 1
         }
         tq_n = if tq_push == 1 && r_emit == 0 { tq_n + 1 } else { if tq_push == 0 && r_emit == 1 { tq_n - 1 } else { tq_n } }
         tq_room = if tq_push == 1 && r_emit == 0 { if tq_n < 7 { 1 } else { 0 } } else { if tq_push == 0 && r_emit == 1 { if tq_n < 9 { 1 } else { 0 } } else { if tq_n < 8 { 1 } else { 0 } } }
         tq_z = if tq_push == 1 && r_emit == 0 { 0 } else { if tq_push == 0 && r_emit == 1 { if tq_n == 1 { 1 } else { 0 } } else { if tq_n == 0 { 1 } else { 0 } } }
 
+        // VREF training: a level's result, a cycle ahead of taking it
+        vr_jq = vr_judge
+        vr_pass_r = vr_pass
+        vr_rs_nr = vr_rs_n
+        vr_cl_nr = vr_cl_n
+        vr_bs_nr = vr_bs_n
+        vr_be_nr = vr_be_n
+        vr_bl_nr = vr_bl_n
+
         // ---------------------------------------------------------------- timers
-        t_cmd = if do_mrw == 1 || do_wlmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
+        t_cmd = if do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 { m1_mrw } else { if do_zql == 1 { m1_zqlat } else { if do_mrr == 1 { m1_mrr } else { if do_ref == 1 || train_ref == 1 { m1_rfc } else { dec8(t_cmd) } } } }
         t_actg = if do_act == 1 { max8(dec8(t_actg), m1_rrd) } else { if do_ref == 1 { max8(dec8(t_actg), m1_rfc) } else { dec8(t_actg) } }
-        t_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_rd), m1_ccd) } else { if do_wr == 1 { max8(dec8(t_rd), m1_wtr) } else { dec8(t_rd) } }
-        t_wr = if do_wr == 1 { max8(dec8(t_wr), m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { max8(dec8(t_wr), m1_rtw) } else { dec8(t_wr) } }
+        t_rd = rd_t_now
+        t_wr = wr_t_now
+        cq_wr = do_wr
+        cq_rd = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { 1 } else { 0 }
         t_ref = if do_preab == 1 || do_pre == 1 { max8(dec8(t_ref), m1_rp) } else { dec8(t_ref) }
         faw0 = if do_act == 1 && fp == 0 { m1_faw } else { dec8(faw0) }
         faw1 = if do_act == 1 && fp == 1 { m1_faw } else { dec8(faw1) }
@@ -914,10 +1199,10 @@ impl Lpddr4DfiController {
         faw3 = if do_act == 1 && fp == 3 { m1_faw } else { dec8(faw3) }
         if do_act == 1 { fp = fp + 1 }
         // max8(dec8(t), m) is 0 exactly when t <= 1 and m is 0
-        cmd_z = if do_mrw == 1 || do_wlmrw == 1 { z8(m1_mrw) } else { if do_zql == 1 { z8(m1_zqlat) } else { if do_mrr == 1 { z8(m1_mrr) } else { if do_ref == 1 || train_ref == 1 { z8(m1_rfc) } else { le1(t_cmd) } } } }
+        cmd_z = if do_mrw == 1 || do_wlmrw == 1 || do_vrmrw == 1 { z8(m1_mrw) } else { if do_zql == 1 { z8(m1_zqlat) } else { if do_mrr == 1 { z8(m1_mrr) } else { if do_ref == 1 || train_ref == 1 { z8(m1_rfc) } else { le1(t_cmd) } } } }
         actg_z = if do_act == 1 { le1(t_actg) & z8(m1_rrd) } else { if do_ref == 1 { le1(t_actg) & z8(m1_rfc) } else { le1(t_actg) } }
-        rd_z = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_rd) & z8(m1_ccd) } else { if do_wr == 1 { le1(t_rd) & z8(m1_wtr) } else { le1(t_rd) } }
-        wr_z = if do_wr == 1 { le1(t_wr) & z8(m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(t_wr) & z8(m1_rtw) } else { le1(t_wr) } }
+        rd_z = if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(rd_t_now) & z8(m1_ccd) } else { if do_wr == 1 { le1(rd_t_now) & z8(m1_wtr) } else { le1(rd_t_now) } }
+        wr_z = if do_wr == 1 { le1(wr_t_now) & z8(m1_ccd) } else { if do_rd == 1 || do_rdc == 1 || do_mrr == 1 { le1(wr_t_now) & z8(m1_rtw) } else { le1(wr_t_now) } }
         fz0 = if do_act == 1 && fp == 0 { z8(m1_faw) } else { le1(faw0) }
         fz1 = if do_act == 1 && fp == 1 { z8(m1_faw) } else { le1(faw1) }
         fz2 = if do_act == 1 && fp == 2 { z8(m1_faw) } else { le1(faw2) }
@@ -925,18 +1210,14 @@ impl Lpddr4DfiController {
 
         // ---------------------------------------------------------------- refresh interval
         if ref_on == 1 {
-            if refc + 1 >= f_refi {
-                refc = 0
-                ref_due = 1
-            } else {
-                refc = refc + 1
-            }
+            refc = if ref_tick == 1 { 0 } else { refc + 1 }
         }
-        if do_ref == 1 || train_ref == 1 { ref_due = 0 }
+        ref_owed = ref_owed_n
+        ref_due_r = if ref_owed_n != 0 { 1 } else { 0 }
 
         // ---------------------------------------------------------------- the request
         // a pending PHY update stops new requests so the bus drains and the window is granted
-        if req_valid == 1 && rq_v == 0 && init_done_r == 1 && dfi_phyupd_req == 0 {
+        if req_valid == 1 && can_take == 1 {
             rq_v = 1
             rq_w = req_write
             rq_row = req_row
@@ -947,13 +1228,19 @@ impl Lpddr4DfiController {
             rq_rowm = if req_row_open == req_row { 1 } else { 0 }
         }
         if do_act == 1 { rq_rowm = 1 }
-        if do_cas == 1 { rq_v = 0 }
+        if do_cas == 1 && rd_dummy == 0 { rq_v = 0 }
+        wr_since_rd = if do_wr == 1 { 1 } else { if do_rd == 1 { 0 } else { wr_since_rd } }
 
         // ---------------------------------------------------------------- sequence
         wait_c = if wait_c == 0 { 0 } else { wait_c - 1 }
         train_gap = if do_rdc == 1 || (do_rd == 1 && wdq_st == 1) { tr_gap } else { if do_strobe == 1 { wl_gap } else { if train_gap == 0 { 0 } else { train_gap - 1 } } }
-        if do_rdc == 1 || do_strobe == 1 || (do_rd == 1 && wdq_st == 1) { train_reads = train_reads + 1 }
+        if do_rdc == 1 || do_strobe == 1 || (do_rd == 1 && wdq_st == 1) {
+            train_reads = tr_inc
+            tr_ge = tr_ge_inc
+            wl_ge = wl_ge_inc
+        }
         wrlvl_strobe_r = do_strobe
+        wdq_armed = if wdq_st == 1 && wdqlvl_en_r == 1 { if wdq_resp_all == 0 { 1 } else { wdq_armed } } else { 0 }
         match st {
             0 => {
                 init_start_r = 1
@@ -984,7 +1271,7 @@ impl Lpddr4DfiController {
             },
             4 => {
                 if do_mrw == 1 { mi = mi + 1 }
-                if mi == 8 { st = 5 }
+                if mi == 12 { st = 5 }
             },
             5 => {
                 if do_zqs == 1 {
@@ -1000,6 +1287,7 @@ impl Lpddr4DfiController {
                     st = 18
                     ref_on = 1
                     wl_ph = 0
+                    wl_upds = 0
                 }
             },
             8 => {
@@ -1013,18 +1301,20 @@ impl Lpddr4DfiController {
                 }
             },
             10 => {
-                if lvl_done == 1 || train_reads >= tr_max {
+                if lvl_done == 1 || tr_ge == 1 {
                     if lvl_done == 0 { train_fail_r = 1 }
                     if quiet == 1 && train_gap == 0 {
                         st = 11
                         gate_en_r = 0
                         rdlvl_en_r = 1
                         train_reads = 0
+                        tr_ge = tr_ge0
+                        wl_ge = wl_ge0
                     }
                 }
             },
             11 => {
-                if lvl_done == 1 || train_reads >= tr_max {
+                if lvl_done == 1 || tr_ge == 1 {
                     if lvl_done == 0 { train_fail_r = 1 }
                     if quiet == 1 && train_gap == 0 {
                         st = 19
@@ -1032,6 +1322,8 @@ impl Lpddr4DfiController {
                         wdqlvl_en_r = 1
                         tw_w = 1
                         train_reads = 0
+                        tr_ge = tr_ge0
+                        wl_ge = wl_ge0
                     }
                 }
             },
@@ -1039,6 +1331,7 @@ impl Lpddr4DfiController {
                 if wait_c == 0 {
                     st = 13
                     init_done_r = 1
+                    rt_busy = 0
                 }
             },
             13 => {
@@ -1048,6 +1341,21 @@ impl Lpddr4DfiController {
                 } else {
                     if ref_go == 1 {
                         st = 14
+                    } else {
+                        if m4_go == 1 {
+                            m4_pend = 0
+                            m4_polls = m4_polls + 1
+                        } else { if rt_pend == 1 && m4_pend == 0 && rq_v == 0 && quiet == 1 {
+                            st = 19
+                            rt_pend = 0
+                            rt_busy = 1
+                            retrains = retrains + 1
+                            wdqlvl_en_r = 1
+                            tw_w = 1
+                            train_reads = 0
+                            tr_ge = tr_ge0
+                            wl_ge = wl_ge0
+                        } }
                     }
                 }
             },
@@ -1080,10 +1388,12 @@ impl Lpddr4DfiController {
                             wl_ph = 2
                             wrlvl_en_r = 1
                             train_reads = 0
+                            tr_ge = tr_ge0
+                            wl_ge = wl_ge0
                         }
                     },
                     2 => {
-                        if wl_done == 1 || train_reads >= wl_max {
+                        if wl_done == 1 || wl_ge == 1 {
                             if wl_done == 0 { train_fail_r = 1 }
                             if train_gap == 0 {
                                 wl_ph = 3
@@ -1091,11 +1401,32 @@ impl Lpddr4DfiController {
                             }
                         }
                     },
-                    _ => {
+                    3 => {
                         if do_wlmrw == 1 {
-                            st = 10
-                            gate_en_r = 1
-                            train_reads = 0
+                            wl_ph = 4
+                            wait_c = 16
+                        }
+                    },
+                    4 => {
+                        if wait_c == 0 && quiet == 1 && train_gap == 0 {
+                            if dfi_phyupd_req == 1 && wl_upds != 2 {
+                                wl_ph = 5
+                                phyupd_ack_r = 1
+                            } else {
+                                if dfi_phyupd_req == 1 { train_fail_r = 1 }
+                                st = 10
+                                gate_en_r = 1
+                                train_reads = 0
+                                tr_ge = tr_ge0
+                                wl_ge = wl_ge0
+                            }
+                        }
+                    },
+                    _ => {
+                        if dfi_phyupd_req == 0 {
+                            phyupd_ack_r = 0
+                            wl_upds = wl_upds + 1
+                            wl_ph = 0
                         }
                     }
                 }
@@ -1103,22 +1434,123 @@ impl Lpddr4DfiController {
             19 => {
                 // a write and its read-back in turn until every lane is done; each pair waits
                 // TRAIN_GAP_CYC after the last read-back, so the PHY can evaluate it and move
-                if rq_v == 0 && wdq_done == 0 && train_reads < tr_max && train_gap == 0 {
+                if rq_v == 0 && wdq_done == 0 && tr_ge == 0 && train_gap == 0 {
                     rq_v = 1
                     rq_w = tw_w
                     rq_row = tr_addr[25:9]
                     rq_ba = tr_addr[8:6]
                     rq_sel = 8'h01 << tr_addr[8:6]
                     rq_col = tr_addr[5:0]
-                    rq_data = 0
+                    // rq_data is left as it is: with dfi_wdqlvl_en the PHY sends its own data
                     rq_rowm = if tr_row_open == tr_addr[25:9] { 1 } else { 0 }
                     tw_w = ~tw_w
                 }
-                if (wdq_done == 1 || train_reads >= tr_max) && rq_v == 0 && quiet == 1 && train_gap == 0 {
+                if (wdq_done == 1 || tr_ge == 1) && rq_v == 0 && quiet == 1 && train_gap == 0 {
                     if wdq_done == 0 { train_fail_r = 1 }
-                    st = 8
                     wdqlvl_en_r = 0
                     mi = 0
+                    // VREF(DQ) training needs reads that come back: after a failed
+                    // training step it could wait forever, so it is skipped and the
+                    // traffic shows what the failed training gives
+                    if vr_on == 1 && vr_done == 0 && wdq_done == 1 && train_fail_r == 0 {
+                        st = 20
+                        vr_ph = 0
+                        vr_c = vr_lo
+                        vr_fin = 0
+                        vr_keep = 0
+                        vr_gi = 0
+                        vr_got = 0
+                        vr_bad = 0
+                        vr_cl = 0
+                        vr_bl = 0
+                        vr_bs = 0
+                        vr_be = 0
+                        vr_map = 0
+                    } else {
+                        st = 8
+                    }
+                }
+            },
+            20 => {
+                match vr_ph {
+                    0 => {
+                        if b_open == 0 { vr_ph = 1 }
+                    },
+                    1 => {
+                        if do_ref == 1 || (ref_due == 0 && t_ref == 0) { vr_ph = 2 }
+                    },
+                    2 => {
+                        if do_vrmrw == 1 {
+                            vr_ph = 3
+                            wait_c = tvref32
+                        }
+                    },
+                    3 => {
+                        if wait_c == 0 {
+                            if vr_fin == 1 {
+                                // write DQ training again, at the chosen reference
+                                st = 19
+                                vr_done = 1
+                                vref_r = vr_op
+                                wdqlvl_en_r = 1
+                                tw_w = 1
+                                train_reads = 0
+                                tr_ge = tr_ge0
+                                wl_ge = wl_ge0
+                            } else {
+                                vr_ph = 4
+                                vr_k = 0
+                                vr_r = 0
+                            }
+                        }
+                    },
+                    4 => {
+                        if rq_v == 0 {
+                            if vr_k < 6 {
+                                rq_v = 1
+                                rq_w = if vr_k < 3 { 1 } else { 0 }
+                                rq_row = tr_addr[25:9]
+                                rq_ba = tr_addr[8:6]
+                                rq_sel = 8'h01 << tr_addr[8:6]
+                                rq_col = tr_addr[5:0] - {3'b000, vr_ci}
+                                rq_data = vr_pat(vr_ci[1:0])
+                                rq_rowm = if tr_row_open == tr_addr[25:9] { 1 } else { 0 }
+                                vr_k = vr_k + 1
+                            } else {
+                                if vr_r + 1 < vr_reps {
+                                    vr_r = vr_r + 1
+                                    vr_k = 0
+                                } else {
+                                    vr_ph = 5
+                                }
+                            }
+                        }
+                    },
+                    _ => {
+                        if vr_judge == 1 && vr_jq == 1 {
+                            vr_map = {vr_map[62:0], vr_pass_r}
+                            vr_rs = vr_rs_nr
+                            vr_cl = if vr_pass_r == 1 { vr_cl_nr } else { 0 }
+                            vr_bs = vr_bs_nr
+                            vr_be = vr_be_nr
+                            vr_bl = vr_bl_nr
+                            vr_gi = 0
+                            vr_got = 0
+                            vr_bad = 0
+                            vr_ph = 0
+                            if vr_last == 1 {
+                                vr_fin = 1
+                                if vr_bl_nr == 0 {
+                                    train_fail_r = 1
+                                    vr_keep = 1
+                                } else {
+                                    vr_c = vr_mid
+                                }
+                            } else {
+                                vr_c = vr_nxt
+                            }
+                        }
+                    }
                 }
             },
             _ => {
@@ -1132,6 +1564,26 @@ impl Lpddr4DfiController {
                 } else {
                     if wait_c == 0 {
                         ctrlupd_r = 0
+                        // a repeat of the write DQ training is due: the user port stops
+                        // taking requests, and idle starts it once nothing is held or in flight
+                        // (the PHY keeps a training's read data, so a user read must be back first)
+                        // MR4 is due: read from idle once nothing is held or in flight
+                        if MR4_POLL_REFS != 0 {
+                            if m4_cnt + 1 >= MR4_POLL_REFS {
+                                m4_cnt = 0
+                                m4_pend = 1
+                            } else {
+                                m4_cnt = m4_cnt + 1
+                            }
+                        }
+                        if RETRAIN_REFS != 0 {
+                            if rt_cnt >= RETRAIN_REFS {
+                                rt_cnt = 0
+                                rt_pend = 1
+                            } else {
+                                rt_cnt = rt_cnt + 1
+                            }
+                        }
                         st = 13
                     }
                 }
@@ -1139,7 +1591,7 @@ impl Lpddr4DfiController {
         }
     }
 
-    req_ready = if rq_v == 0 && init_done_r == 1 && dfi_phyupd_req == 0 { 1 } else { 0 }
+    req_ready = can_take
     rsp_valid = rsp_v_r
     rsp_rdata = rsp_d_r
     init_done = init_done_r
@@ -1147,6 +1599,13 @@ impl Lpddr4DfiController {
     mr5 = mr5_r
     mr8 = mr8_r
     state = st
+    retrain_count = retrains
+    mr4 = mr4_r
+    mr4_polls = m4_polls
+    vref = vref_r
+    vref_win = {vr_be, vr_bs}
+    wl_relevels = wl_upds
+    vref_map = vr_map
     dfi_init_start = init_start_r
     dfi_ctrlupd_req = ctrlupd_r
     dfi_phyupd_ack = phyupd_ack_r

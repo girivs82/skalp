@@ -26,6 +26,10 @@ use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
 use skalp_lir::tech_library::CellFunction;
 
+/// The clock of a sequential operation: its clock net (`None`: the design's
+/// first clock) and whether it loads on the falling edge
+type SeqClock = (Option<GateNetId>, bool);
+
 // ============================================================================
 // Converter
 // ============================================================================
@@ -193,11 +197,17 @@ impl GateNetlistToSirConverter {
         cells: &[Cell],
         netlist: &GateNetlist,
         module: &mut SirModule,
-    ) -> (Vec<SirOperation>, Vec<(Option<GateNetId>, SirOperation)>) {
+    ) -> (Vec<SirOperation>, Vec<(SeqClock, SirOperation)>) {
         let mut comb_ops = Vec::new();
         // Each sequential operation with the net that clocks it
         let mut seq_ops = Vec::new();
-        let clock_of = |cell: &Cell| cell.clock.map(|net| netlist.resolve_alias(net));
+        // The clock net and whether the cell loads on its falling edge
+        let clock_of = |cell: &Cell| {
+            (
+                cell.clock.map(|net| netlist.resolve_alias(net)),
+                skalp_lir::gate_netlist::ff_clock_falling(cell),
+            )
+        };
 
         for cell in cells {
             let primitive_id = PrimitiveId(self.next_primitive_id);
@@ -371,7 +381,7 @@ impl GateNetlistToSirConverter {
                 && cell.path.ends_with("_and");
             if matched_delay && !inputs.is_empty() {
                 seq_ops.push((
-                    None,
+                    (None, false),
                     SirOperation::Primitive {
                         id: primitive_id,
                         ptype: PrimitiveType::DffP,
@@ -409,7 +419,7 @@ impl GateNetlistToSirConverter {
                     detection_mode: SirDetectionMode::Continuous,
                 });
                 seq_ops.push((
-                    None,
+                    (None, false),
                     SirOperation::Primitive {
                         id: primitive_id,
                         ptype: PrimitiveType::DffP,
@@ -639,7 +649,7 @@ impl GateNetlistToSirConverter {
         &self,
         module: &mut SirModule,
         comb_ops: Vec<SirOperation>,
-        seq_ops: Vec<(Option<GateNetId>, SirOperation)>,
+        seq_ops: Vec<(SeqClock, SirOperation)>,
         netlist: &GateNetlist,
     ) {
         // Build combinational block
@@ -703,17 +713,17 @@ impl GateNetlistToSirConverter {
                     .copied()
             })
             .unwrap_or(SirSignalId(0));
-        let mut by_clock: Vec<(SirSignalId, Vec<SirOperation>)> = Vec::new();
-        for (clock_net, op) in seq_ops {
+        let mut by_clock: Vec<((SirSignalId, bool), Vec<SirOperation>)> = Vec::new();
+        for ((clock_net, falling), op) in seq_ops {
             let clock = clock_net
                 .and_then(|net| self.net_to_signal.get(&net).copied())
                 .unwrap_or(default_clock);
-            match by_clock.iter_mut().find(|(c, _)| *c == clock) {
+            match by_clock.iter_mut().find(|(c, _)| *c == (clock, falling)) {
                 Some((_, ops)) => ops.push(op),
-                None => by_clock.push((clock, vec![op])),
+                None => by_clock.push(((clock, falling), vec![op])),
             }
         }
-        for (index, (clock_signal, operations)) in by_clock.into_iter().enumerate() {
+        for (index, ((clock_signal, falling), operations)) in by_clock.into_iter().enumerate() {
             // No block-wide reset: each flip-flop resets through its own
             // reset pin (see `own_reset_input`), with the polarity and the
             // reset net synthesis gave it. Resetting every flip-flop on the
@@ -732,7 +742,11 @@ impl GateNetlistToSirConverter {
             module.seq_blocks.push(SequentialBlock {
                 id: SeqBlockId(index as u32),
                 clock: clock_signal,
-                clock_edge: EdgeType::Rising,
+                clock_edge: if falling {
+                    EdgeType::Falling
+                } else {
+                    EdgeType::Rising
+                },
                 reset,
                 registers,
                 operations,

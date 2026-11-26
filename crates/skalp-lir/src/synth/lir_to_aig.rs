@@ -263,7 +263,7 @@ impl<'a> LirToSynthAig<'a> {
                         false
                     };
                     // Pre-create with false_lit as placeholder data
-                    let clock_node = self.find_clock_node(node);
+                    let (clock_node, clock_falling) = self.find_clock_node(node);
                     let reset_node = self.find_reset_node(node);
                     let latch_id = self.aig.add_latch(
                         AigLit::false_lit(),
@@ -271,6 +271,9 @@ impl<'a> LirToSynthAig<'a> {
                         clock_node,
                         reset_node,
                     );
+                    if clock_falling {
+                        self.aig.mark_latch_clock_falling(latch_id);
+                    }
                     // AUDIT-2 #4: a SYNC reset must not use the DFFR async
                     // reset pin — mark it so the writer folds it into D.
                     if *has_reset && !*async_reset {
@@ -400,10 +403,17 @@ impl<'a> LirToSynthAig<'a> {
                     // A clock or reset computed by logic (such as a signal
                     // that renames a child instance's output) did not exist
                     // when the latch was pre-created
-                    let clock_node = self.find_clock_node(node);
+                    let (clock_node, clock_falling) = self.find_clock_node(node);
                     let reset_node = self.find_reset_node(node);
+                    let had_clock = matches!(
+                        self.aig.get_node(latch_id),
+                        Some(super::aig::AigNode::Latch { clock: Some(_), .. })
+                    );
                     self.aig
                         .complete_latch_controls(latch_id, clock_node, reset_node);
+                    if !had_clock && clock_falling {
+                        self.aig.mark_latch_clock_falling(latch_id);
+                    }
                 }
             }
         }
@@ -636,9 +646,35 @@ impl<'a> LirToSynthAig<'a> {
     }
 
     /// Find the AIG clock node for a register
-    fn find_clock_node(&self, node: &LirNode) -> Option<AigNodeId> {
-        node.clock
-            .and_then(|clk_id| self.signal_map.get(&(clk_id.0, 0)).map(|lit| lit.node))
+    ///
+    /// A register on the falling edge of a clock (`on(clk.fall)`) has the
+    /// clock's inverse as its clock: this follows inverters (and buffers)
+    /// back to the clock itself and returns whether the register loads on
+    /// its falling edge. Latches are built before the combinational logic,
+    /// so the inverse has no AIG literal yet.
+    fn find_clock_node(&self, node: &LirNode) -> (Option<AigNodeId>, bool) {
+        let Some(mut clock) = node.clock else {
+            return (None, false);
+        };
+        let mut falling = false;
+        loop {
+            if let Some(lit) = self.signal_map.get(&(clock.0, 0)) {
+                return (Some(lit.node), falling != lit.inverted);
+            }
+            let driver = self.lir.signals[clock.0 as usize]
+                .driver
+                .map(|d| &self.lir.nodes[d.0 as usize]);
+            match driver {
+                Some(d) if matches!(d.op, LirOp::Not { width: 1 }) && d.inputs.len() == 1 => {
+                    falling = !falling;
+                    clock = d.inputs[0];
+                }
+                Some(d) if matches!(d.op, LirOp::Buffer { width: 1 }) && d.inputs.len() == 1 => {
+                    clock = d.inputs[0];
+                }
+                _ => return (None, false),
+            }
+        }
     }
 
     /// Find the AIG reset node for a register

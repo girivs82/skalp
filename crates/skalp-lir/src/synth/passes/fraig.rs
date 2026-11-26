@@ -661,6 +661,7 @@ impl Fraig {
                     clock,
                     reset,
                     sync_reset,
+                    clock_falling,
                 } => {
                     let new_clock = clock.and_then(|c| old_to_new.get(&c).map(|l| l.node));
                     let new_reset = reset
@@ -675,6 +676,9 @@ impl Fraig {
                     );
                     if *sync_reset {
                         new_aig.mark_latch_sync_reset(new_id);
+                    }
+                    if *clock_falling {
+                        new_aig.mark_latch_clock_falling(new_id);
                     }
                     old_to_new.insert(old_id, AigLit::new(new_id));
                     latch_ids.push((old_id, *data, *init, *clock, *reset));

@@ -170,3 +170,43 @@ impl Reader {
         "signals with several drivers: {several:?}"
     );
 }
+
+/// A named generic argument binds a generic of the instantiated entity; one
+/// the entity does not have (a typo, or a generic declared on another
+/// entity) is an error, not a silently dropped argument that leaves the
+/// default in place.
+#[test]
+fn a_named_generic_the_entity_lacks_is_an_error() {
+    let source = GENERIC_CORE_AFTER_TOP.replace("Core<8>", "Core<NN: 8>");
+    let path = write("named_unknown", &source);
+    let err = parse_and_build_compilation_context(&path)
+        .err()
+        .expect("an unknown named generic must fail the build");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("`Core` has no generic `NN`") && msg.contains("its generics: N"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn a_named_generic_the_entity_has_binds_it() {
+    let source = GENERIC_CORE_AFTER_TOP.replace("Core<8>", "Core<N: 8>");
+    let path = write("named_known", &source);
+    let mir = compile(&parse_and_build_compilation_context(&path).unwrap());
+    assert_eq!(mir.top_module().unwrap().name, "Top");
+}
+
+#[test]
+fn more_positional_generics_than_the_entity_has_is_an_error() {
+    let source = GENERIC_CORE_AFTER_TOP.replace("Core<8>", "Core<8, 3>");
+    let path = write("too_many", &source);
+    let err = parse_and_build_compilation_context(&path)
+        .err()
+        .expect("extra positional generics must fail the build");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("2 generic arguments for `Core`, which has 1"),
+        "unexpected error: {msg}"
+    );
+}

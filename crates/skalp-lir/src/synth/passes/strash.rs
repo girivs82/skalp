@@ -99,6 +99,7 @@ impl Pass for Strash {
                     clock,
                     reset,
                     sync_reset,
+                    clock_falling,
                 } => {
                     // Pre-create latch with placeholder data, record for phase 2
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
@@ -114,6 +115,9 @@ impl Pass for Strash {
                     );
                     if *sync_reset {
                         new_aig.mark_latch_sync_reset(new_id);
+                    }
+                    if *clock_falling {
+                        new_aig.mark_latch_clock_falling(new_id);
                     }
                     node_map.insert(id, AigLit::new(new_id));
                     latch_ids.push((id, *data, *init, *clock, *reset));

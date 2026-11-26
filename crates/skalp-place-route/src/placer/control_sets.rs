@@ -15,10 +15,13 @@ use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use super::{cell_bel_type, PlacementLoc, PlacementResult};
 
 /// The control signals of a flip-flop. A clock enable tied high and a
-/// set/reset tied low are the same as none.
+/// set/reset tied low are the same as none. The clock edge counts too: the
+/// edge is chosen by the group's clock inversion (Nexus `CLKMUX`), so
+/// flip-flops on opposite edges of one clock keep to separate groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ControlSet {
     pub clock: Option<GateNetId>,
+    pub clock_falling: bool,
     pub reset: Option<GateNetId>,
     pub enable: Option<GateNetId>,
 }
@@ -37,6 +40,7 @@ pub fn control_sets(netlist: &GateNetlist) -> HashMap<CellId, ControlSet> {
         }
         let mut set = ControlSet {
             clock: cell.clock,
+            clock_falling: skalp_lir::gate_netlist::ff_clock_falling(cell),
             reset: cell.reset.filter(|net| constants.get(net) != Some(&false)),
             enable: None,
         };

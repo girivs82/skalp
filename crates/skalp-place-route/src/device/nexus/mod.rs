@@ -2487,6 +2487,11 @@ impl Device for NexusDevice {
             .and_then(|t| crate::device::CarryChainLayout::paired_luts(t.bels(), (1, 0)))
     }
 
+    fn falling_edge_ffs(&self) -> bool {
+        // Each slice's CLKMUX can invert its clock
+        true
+    }
+
     fn ff_control_group(&self, x: u32, y: u32, bel_index: usize) -> Option<usize> {
         // Slices A and B take their CLK, CE and LSR from one set of tile
         // wires (JCLK0, JCE0, JLSR0), and slices C and D from the other

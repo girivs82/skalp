@@ -158,6 +158,8 @@ pub struct MirToLirTransform {
     reset_active_high: HashMap<LirSignalId, bool>,
     /// The inverse of each reset that a register is reset by while low
     reset_inverses: HashMap<LirSignalId, LirSignalId>,
+    /// The inverse of each clock that a register loads on the falling edge of
+    clock_inverses: HashMap<LirSignalId, LirSignalId>,
     /// Counter for generating unique signal names
     temp_counter: u32,
     /// Counter for generating unique node names
@@ -226,6 +228,7 @@ impl MirToLirTransform {
             reset_signals: Vec::new(),
             reset_active_high: HashMap::new(),
             reset_inverses: HashMap::new(),
+            clock_inverses: HashMap::new(),
             temp_counter: 0,
             node_counter: 0,
             async_reset: None,
@@ -5996,16 +5999,39 @@ impl MirToLirTransform {
         result
     }
 
-    /// Get clock signal from sensitivity list
-    fn get_clock_from_sensitivity(&self, sens: &SensitivityList) -> Option<LirSignalId> {
+    /// The clock a sequential process's registers load on: the clock of its
+    /// edge, or for a falling edge (`on(clk.fall)`) the clock's inverse
+    /// (built once per clock), whose rising edge is the clock's falling one.
+    /// Synthesis turns a register on an inverted clock into a flip-flop on
+    /// the falling edge of the clock itself.
+    fn get_clock_from_sensitivity(&mut self, sens: &SensitivityList) -> Option<LirSignalId> {
         if let SensitivityList::Edge(edges) = sens {
             for edge in edges {
-                if matches!(edge.edge, EdgeType::Rising | EdgeType::Falling) {
-                    return self.get_lvalue_signal_readonly(&edge.signal);
+                match edge.edge {
+                    EdgeType::Rising => return self.get_lvalue_signal_readonly(&edge.signal),
+                    EdgeType::Falling => {
+                        let clock = self.get_lvalue_signal_readonly(&edge.signal)?;
+                        return Some(self.inverted_clock(clock));
+                    }
+                    _ => {}
                 }
             }
         }
         self.clock_signals.first().copied()
+    }
+
+    /// The inverse of `clock`, built once
+    fn inverted_clock(&mut self, clock: LirSignalId) -> LirSignalId {
+        if let Some(&existing) = self.clock_inverses.get(&clock) {
+            return existing;
+        }
+        let name = format!("{}_fall", self.get_signal_name(clock));
+        let inverted = self.lir.add_signal(name, 1);
+        let path = self.unique_node_path("clock_not");
+        self.lir
+            .add_node(LirOp::Not { width: 1 }, vec![clock], inverted, path);
+        self.clock_inverses.insert(clock, inverted);
+        inverted
     }
 
     /// Get reset signal from sensitivity list

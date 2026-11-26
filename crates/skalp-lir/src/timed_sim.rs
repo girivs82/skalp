@@ -1160,7 +1160,14 @@ fn comb_kind(cell: &Cell, ptype: &PrimitiveType) -> Option<NodeKind> {
 
 /// How a clocked cell behaves, `None` if not modelled
 fn seq_kind(cell: &Cell, ptype: &PrimitiveType) -> Option<SeqKind> {
+    // A flip-flop marked as loading on its clock's falling edge
+    let falling = crate::gate_netlist::ff_clock_falling(cell);
     let reg = |edge, enable: Option<u16>, reset: Option<u16>, async_reset, sets| {
+        let edge = match (edge, falling) {
+            (Edge::Rising, true) => Edge::Falling,
+            (Edge::Falling, true) => Edge::Rising,
+            (edge, _) => edge,
+        };
         // A reset pin is one of the inputs, or the cell's own reset after them
         let reset = reset.filter(|&r| {
             (r as usize) < cell.inputs.len()

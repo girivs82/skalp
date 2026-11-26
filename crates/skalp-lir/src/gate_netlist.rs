@@ -87,6 +87,19 @@ pub const MEMORY_INIT_PARAM: &str = "MEMORY_INIT";
 /// Parameter set to "1" on a flip-flop that powers up high.
 pub const FF_INIT_PARAM: &str = "INIT";
 
+/// Parameter naming the clock edge a flip-flop loads on: absent for the
+/// rising edge, [`FF_CLOCK_FALLING`] for the falling edge (an `on(clk.fall)`
+/// register). Its clock pin is still wired to the clock itself.
+pub const FF_CLOCK_EDGE_PARAM: &str = "CLK_EDGE";
+
+/// [`FF_CLOCK_EDGE_PARAM`] value of a flip-flop that loads on the falling edge
+pub const FF_CLOCK_FALLING: &str = "FALL";
+
+/// Whether flip-flop `cell` loads on the falling edge of its clock
+pub fn ff_clock_falling(cell: &Cell) -> bool {
+    cell.parameters.get(FF_CLOCK_EDGE_PARAM).map(String::as_str) == Some(FF_CLOCK_FALLING)
+}
+
 /// `source_op` of the buffer cells that make up a matched delay of a
 /// bundled-data async block (`LirOp::NclMatchedDelay`). Their delay is the
 /// point of them, so no optimization may remove or merge them.

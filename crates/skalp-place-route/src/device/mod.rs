@@ -766,6 +766,13 @@ pub trait Device: Send + Sync {
         None
     }
 
+    /// Whether the backend can build flip-flops that load on the falling
+    /// edge of their clock (see `skalp_lir::gate_netlist::ff_clock_falling`).
+    /// Placement refuses a design with one where it cannot.
+    fn falling_edge_ffs(&self) -> bool {
+        false
+    }
+
     /// A lower bound on the routing cost (sum of [`Pip::cost`]) of a path
     /// between tiles `dx` and `dy` apart, for the router's A* search. `None`:
     /// the router uses its generic estimate.

@@ -174,6 +174,8 @@ pub enum AigNode {
         /// AUDIT-2 #4: reset is SYNCHRONOUS — must fold into D (Dff +
         /// ResetMux), never the async reset pin of a DFFR.
         sync_reset: bool,
+        /// Loads on the falling edge of `clock` (an `on(clk.fall)` register)
+        clock_falling: bool,
     },
 
     /// Power domain barrier (optimization boundary)
@@ -596,6 +598,7 @@ impl Aig {
             clock,
             reset,
             sync_reset: false,
+            clock_falling: false,
         });
 
         // Copy safety from data input
@@ -625,6 +628,7 @@ impl Aig {
             clock,
             reset,
             sync_reset: false,
+            clock_falling: false,
         });
         self.safety_info.push(safety);
         id
@@ -636,6 +640,26 @@ impl Aig {
         if let Some(AigNode::Latch { sync_reset, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
             *sync_reset = true;
         }
+    }
+
+    /// Mark a latch as loading on the falling edge of its clock (stored on
+    /// the node so it survives the passes that rebuild the AIG).
+    pub fn mark_latch_clock_falling(&mut self, latch_id: AigNodeId) {
+        if let Some(AigNode::Latch { clock_falling, .. }) = self.nodes.get_mut(latch_id.0 as usize)
+        {
+            *clock_falling = true;
+        }
+    }
+
+    /// Does this latch load on the falling edge of its clock?
+    pub fn is_latch_clock_falling(&self, latch_id: AigNodeId) -> bool {
+        matches!(
+            self.nodes.get(latch_id.0 as usize),
+            Some(AigNode::Latch {
+                clock_falling: true,
+                ..
+            })
+        )
     }
 
     /// Is this latch's reset synchronous?
