@@ -17,8 +17,8 @@
 // Timing at the pins: every DFI phase comes out two dfi_clk cycles after the controller drives
 // it, so DFI slot timing equals DRAM timing. CK rises in the middle of each slot; CA and CS
 // change at slot starts. Write data: a slot with dfi_wrdata_en sends its two beats on DQS edges
-// at the slot middle and end, with a 2 tCK static DQS preamble and a half-tCK postamble, then
-// each byte lane delays its DQS by half a tCK + its write-leveling delay (0 to CLK_PER_CK - 1
+// at the slot middle and end, with a 2 tCK toggling DQS preamble (JESD209-4 tWPRE) and a
+// half-tCK postamble, then each byte lane delays its DQS by half a tCK + its write-leveling delay (0 to CLK_PER_CK - 1
 // clocks, half a tCK until trained) and its DQ and DMI by that + its write DQ delay (0 to half a
 // tCK - 1, a quarter tCK until trained, which centres DQ on DQS). Untrained, writes reach the
 // pins one tCK after commands: with a write command in slot c, the first data slot is
@@ -391,7 +391,10 @@ impl DfiLpddr4BehavPhy {
     // middle of slot 2
     let wlp_drv: bit = if cur_wls == 1 && sl != 3 { 1 } else { 0 }
     let wlp_hi: bit = if cur_wls == 1 && ((sl == 1 && sb >= c_half) || (sl == 2 && sb < c_half)) { 1 } else { 0 }
-    let dqs_hi: bit = if (we_cur == 1 && sb >= c_half) || wlp_hi == 1 { 1 } else { 0 }
+    // DQS toggles through the 2 tCK preamble (the two slots before the first data slot) as in
+    // data slots
+    let w_tg: bit = if we_cur == 1 || we_next1 == 1 || we_next2 == 1 { 1 } else { 0 }
+    let dqs_hi: bit = if (w_tg == 1 && sb >= c_half) || wlp_hi == 1 { 1 } else { 0 }
     let dqs_drv: bit = if we_cur == 1 || we_next1 == 1 || we_next2 == 1 || (we_prev == 1 && sb < c_half) || wlp_drv == 1 { 1 } else { 0 }
     let wb0: bit[11] = {dqs_drv, dqs_hi, dq_drv, dq_base[7:0]}
     let wb1: bit[11] = {dqs_drv, dqs_hi, dq_drv, dq_base[15:8]}

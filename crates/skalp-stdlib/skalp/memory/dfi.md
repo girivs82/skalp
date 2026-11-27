@@ -129,7 +129,8 @@ the file describes the clocking, the pin timing and the training in full; in sho
 - Commands and data reach the pins with the timing contract above, so a controller keeps
   `TPHY_WRLAT_ADJ = 3` and `TRDDATA_EN_ADJ = 3`.
 - Writes: DQS through ODDRX4DQS on DQSW (the write leveling delay), DQ and DMI through ODDRX4DQ on
-  DQSW270 (a quarter tCK early, moved by the write DQ delay); 2 tCK static preamble.
+  DQSW270 (a quarter tCK early, moved by the write DQ delay); 2 tCK toggling preamble
+  (JESD209-4 tWPRE: a preamble held low lost bits of lone writes on silicon).
 - Reads: each lane's DQS buffer gates DQS with READ, which follows `rddata_en` delayed by the
   lane's gate setting in eighths of a tCK (whole slots, then RDCLKSEL). DQ is sampled on DQSR90
   into the IDDRX4DQ FIFO. Each DATAVALID word holds its enabled slots in place, so the lane packs

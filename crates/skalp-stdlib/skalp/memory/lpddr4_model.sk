@@ -15,7 +15,10 @@
 //
 // Writes, per byte lane (Lpddr4WriteLane): the first data DQS_t rising edge must land in WL +
 // tDQSS (0.75 to 1.25 tCK) after the CAS-2 edge, then 16 edges half a tCK (+-1 clock) apart with
-// DQS_c the complement of DQS_t. Bursts may follow each other seamlessly (CAS-to-CAS = 8 tCK); up
+// DQS_c the complement of DQS_t. The 2 tCK write preamble toggles (JESD209-4 tWPRE): DQS_t rises
+// one and two tCK (+-2 and +-3 clocks) before the first data edge; a strobe held low through the
+// preamble is an error (code 39). A burst that follows another seamlessly has the previous
+// burst's last edges as its preamble. Bursts may follow each other seamlessly (CAS-to-CAS = 8 tCK); up
 // to four writes may be in flight. Each DQ must be driven and stable one clock either side of
 // every edge; when one is not, the beat is taken anyway with that DQ's bit stored inverted (every
 // bit when DQ is not driven), and the clock counts in `dq_viol` rather than in `errors`, so that
@@ -71,6 +74,7 @@
 //  34 tRTP                                      35 tWTR
 //  36 more than four reads or writes in flight  37 ACT-1 not followed by ACT-2
 //  38 CKE low after it went high (power-down and self refresh are not modelled)
+//  39 write preamble did not toggle (DQS_t not rising 1 and 2 tCK before the first data edge)
 // Codes 9 (DQ changed in the clock of a write DQS edge), 10 (DQ changed in the clock after it)
 // and 12 (DQ not driven at it) are DQ timing and count in `dq_viol` (see Writes).
 
@@ -149,6 +153,9 @@ impl Lpddr4WriteLane {
     signal dqs_prev: bit = 0
     // the line levels of the burst's previous beat (0 before its first)
     signal pb: bit[8] = 0
+    // the clocks of the last two DQS_t rising edges (the write preamble check)
+    signal rise1: bit[32] = 0
+    signal rise2: bit[32] = 0
 
     let sk: bit[4] = SKEW_CLKS
     let dqk: bit[4] = DQ_SKEW_CLKS
@@ -167,6 +174,11 @@ impl Lpddr4WriteLane {
     let since_edge: bit[32] = cyc - last
     let first: bit = if st == 1 && dqs_rise == 1 && cyc >= lo { 1 } else { 0 }
     let take: bit = if first == 1 || (st == 2 && dqs_edge == 1) { 1 } else { 0 }
+    // the preamble: the two rises before the first data edge one and two tCK before it
+    let ago1: bit[32] = cyc - rise1
+    let ago2: bit[32] = cyc - rise2
+    let tck2: bit[32] = tck32 + tck32
+    let pre_bad: bit = if first == 1 && (ago1 + 2 < tck32 || ago1 > tck32 + 2 || ago2 + 3 < tck2 || ago2 > tck2 + 3) { 1 } else { 0 }
     let setup_v: bit = if take == 1 && (dq != dq_prev || dq_drv == 0) { 1 } else { 0 }
     let hold_v: bit = if hold == 1 && dq != hold_dq { 1 } else { 0 }
     // the DQ bits taken in violation: those that changed in the clock of the edge (all when DQ is
@@ -178,7 +190,8 @@ impl Lpddr4WriteLane {
         else { if st == 2 && dqs_edge == 1 && (since_edge + 1 < half_ck || since_edge > half_ck + 1) { 11 }
         else { if take == 1 && dqs_c == dqs { 20 }
         else { if st == 2 && since_edge > tck32 { 24 }
-        else { 0 } } } }
+        else { if pre_bad == 1 { 39 }
+        else { 0 } } } } }
     let idx: bit[4] = if st == 1 { 4'h0 } else { beat[3:0] }
     // what the receivers take with the reference outside their window
     let dq_v: bit[8] = if vref_hi == 1 { dq & pb } else { if vref_lo == 1 { dq | pb } else { dq } }
@@ -190,6 +203,10 @@ impl Lpddr4WriteLane {
         hist[cyc[3:0]] = raw
         dq_prev = dq
         dqs_prev = dqs
+        if dqs_rise == 1 {
+            rise1 = cyc
+            rise2 = rise1
+        }
         hold = take
         hold_dq = dq
         // a beat is stored the clock after it is taken (edges are at least two clocks apart),
