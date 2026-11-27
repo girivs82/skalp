@@ -27,8 +27,10 @@
 // together, a fixed number of DFI cycles after the controller drives them, commands and data
 // alike. CK rises in the middle of each slot; CA, CS and CKE change at slot starts. Write data:
 // a slot with dfi_wrdata_en is sent in the next slot at the pins; DQS rises at that slot's start
-// plus the lane's write leveling delay and falls half a tCK later, with a 2 tCK static preamble
-// and a 1 tCK postamble (driven low); DQ is centred on DQS (DQSW270 is three quarters of a tCK
+// plus the lane's write leveling delay and falls half a tCK later, with a 2 tCK toggling preamble
+// (two whole DQS cycles before the first data edge, JESD209-4 tWPRE: on a CertusPro-NX at 1066
+// Mbps with differential DQS a preamble held low lost bits of lone writes) and a 1 tCK postamble
+// (driven low); DQ is centred on DQS (DQSW270 is three quarters of a tCK
 // after DQSW, plus the lane's write DQ delay) and holds its last beat one more slot; DQ's drivers
 // turn on a slot before the first data slot (inside the DQS preamble), as on a CertusPro-NX the
 // first beat of a write that follows no other write otherwise reached the DRAM undriven (its ODT
@@ -269,7 +271,8 @@ pub entity NexusLpddr4Lane<
     const BIT_TOP: nat = 124,
     const DQS_OUT_DELAY: nat = 0,
     const DQS_AUTO: nat = 0,
-    const DQS_GUARD: nat = 16
+    const DQS_GUARD: nat = 16,
+    const GATE_BACK: nat = 7
 > {
     in eclk: clock
     in sclk: clock
@@ -865,10 +868,12 @@ impl NexusLpddr4Lane {
     let mid_s: bit[9] = {1'b0, best_st} + {1'b0, best_end}
     let mid: bit[8] = mid_s[8:1]
     // the gate: settings pass while it opens in the DQS preamble (or before DQS is driven), up
-    // to the first rising edge; it goes to the middle of the passing run, but no more than a
-    // tCK (8 settings) before that edge, so it stays inside the 2 tCK preamble
-    let g_ok: bit = if best_ln >= 4 && best_end >= 7 { 1 } else { 0 }
-    let g_floor: bit[8] = best_end - 7
+    // to the first rising edge; it goes to the middle of the passing run, but no more than
+    // GATE_BACK settings (default 7, under a tCK) before that edge, so it stays inside the
+    // 2 tCK preamble
+    let g_back: bit[8] = GATE_BACK
+    let g_ok: bit = if best_ln >= 4 && best_end >= g_back { 1 } else { 0 }
+    let g_floor: bit[8] = best_end - g_back
     signal calc: bit = 0
     // the sweep ends with this event
     let gate_last: bit = if gsel + 1 >= gate_n { 1 } else { 0 }
@@ -1744,6 +1749,11 @@ pub entity DfiLpddr4NexusPhy<
     const WDQ_STEP: nat = 4,
     const WDQ_HALF: nat = 64,
     const WR_GATE_EXT: nat = 0,
+    // 1: the write preamble toggles (two DQS cycles before the first data edge, as LPDDR4 has
+    // it, JESD209-4 tWPRE). 0 holds DQS low through the preamble, against the standard: on a
+    // CertusPro-NX at 1066 Mbps with differential DQS, lone writes then lost bits. 0 is kept
+    // only so a test can show the channel model catching it
+    const WR_PRE_TOGGLE: nat = 1,
     // EXPERIMENT: after the first write DQ training, RD_PUSH more read delay moves (down if
     // RD_PUSH_DN) that the PHY does not count: shows on silicon whether the read delay moves
     const RD_PUSH: nat = 0,
@@ -1761,6 +1771,9 @@ pub entity DfiLpddr4NexusPhy<
     // less, and levels again (see the lane)
     const DQS_AUTO: nat = 0,
     const DQS_GUARD: nat = 16,
+    // the read gate goes to the middle of its passing run, but no more than GATE_BACK settings
+    // (1 to 7, eighths of a tCK) before the run's end, the first rising DQS edge
+    const GATE_BACK: nat = 7,
     // sync_clk cycles each step of the DDR reset sequence lasts (8 to 4096): the edge clocks stay
     // stopped for three steps around the DDR reset, so every bank they reach (through the
     // cascade muxes too) has settled before they restart. On a CertusPro-NX, shorter steps
@@ -2153,7 +2166,21 @@ impl DfiLpddr4NexusPhy {
     // The strobe's data, registered from the frames it comes from (b and c now are a and b
     // next cycle) with its complement, one copy per lane by its gearboxes: built from this
     // cycle's frames, it reached a channel's far strobe pins through three logic levels
-    let dqs_d_w_next: bit[8] = {1'b0, c_we[2], 1'b0, c_we[1], 1'b0, c_we[0], 1'b0, b_we[3]}
+    // The 2 tCK write preamble toggles as data slots do (the LPDDR4 write preamble: DQS makes
+    // two whole cycles before the first data edge); with WR_PRE_TOGGLE = 0 DQS is driven but
+    // held low through it. Slot j of next cycle's frame sends data when
+    // e(j) is set and is preamble when e(j + 1) or e(j + 2) is (the last slot looks into the
+    // frame the controller presents now).
+    let pre_tg: bit = if WR_PRE_TOGGLE != 0 { 1 } else { 0 }
+    let pre_n0: bit = if pre_tg == 1 && (c_we[0] == 1 || c_we[1] == 1) { 1 } else { 0 }
+    let pre_n1: bit = if pre_tg == 1 && (c_we[1] == 1 || c_we[2] == 1) { 1 } else { 0 }
+    let pre_n2: bit = if pre_tg == 1 && (c_we[2] == 1 || c_we[3] == 1) { 1 } else { 0 }
+    let pre_n3: bit = if pre_tg == 1 && (c_we[3] == 1 || dfi_wrdata_en_p0 == 1) { 1 } else { 0 }
+    let tg_n0: bit = if b_we[3] == 1 || pre_n0 == 1 { 1 } else { 0 }
+    let tg_n1: bit = if c_we[0] == 1 || pre_n1 == 1 { 1 } else { 0 }
+    let tg_n2: bit = if c_we[1] == 1 || pre_n2 == 1 { 1 } else { 0 }
+    let tg_n3: bit = if c_we[2] == 1 || pre_n3 == 1 { 1 } else { 0 }
+    let dqs_d_w_next: bit[8] = {1'b0, tg_n3, 1'b0, tg_n2, 1'b0, tg_n1, 1'b0, tg_n0}
     let wl_pulse_next: bit = if b_wls == 1 || b_wls1 == 1 { 1 } else { 0 }
     let wl_any_next: bit = if c_wls == 1 || b_wls == 1 || b_wls1 == 1 || b_wls1b == 1 { 1 } else { 0 }
     let dqs_d_next: bit[8] = if wl_pulse_next == 1 { 8'b01010101 } else { if wl_any_next == 1 { 8'b00000000 } else { dqs_d_w_next } }
@@ -2240,7 +2267,7 @@ impl DfiLpddr4NexusPhy {
     }
     inst cs_dl = DELAYB<CA_DELAY> { A: cs_od.Q }
 
-    inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD> {
+    inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD, GATE_BACK> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d0, dqs_c: dqs_c0, dqs_tt: dqs_tt, rd_win: rd_win,
@@ -2250,7 +2277,7 @@ impl DfiLpddr4NexusPhy {
         dq_i: dq_i[7:0], dqs_i: dqs_i[0]
     }
 
-    inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD> {
+    inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD, GATE_BACK> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
         dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d1, dqs_c: dqs_c1, dqs_tt: dqs_tt, rd_win: rd_win,

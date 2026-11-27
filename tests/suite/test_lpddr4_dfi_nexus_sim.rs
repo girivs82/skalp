@@ -128,6 +128,9 @@ struct Variant {
     /// a read gate sweep miss: gate training read `gate_miss` (from 1) reaches
     /// lane 0 with DQ0 inverted; 0: none
     gate_miss: u64,
+    /// the PHY's write preamble (WR_PRE_TOGGLE): 1 toggles, as JESD209-4 has it; 0 holds
+    /// DQS low, which the channel model must report (39)
+    wr_pre_toggle: u64,
 }
 
 const STATUS: [&str; 23] = [
@@ -186,6 +189,7 @@ async fn run(v: Variant) {
         ("DQ_LATE_MASK", v.dq_late.0),
         ("DQ_LATE_TICKS", v.dq_late.1),
         ("GATE_MISS", v.gate_miss),
+        ("WR_PRE_TOGGLE", v.wr_pre_toggle),
     ]);
     let dir = std::env::temp_dir().join(format!("skalp_lpddr4_nexus_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -237,6 +241,12 @@ async fn run(v: Variant) {
     }
 
     let errors = get!("m_errors");
+    if v.wr_pre_toggle == 0 {
+        // the model must catch the static preamble: the first error is 39
+        assert_ne!(errors, 0, "{n}: a write preamble held low was not reported");
+        assert_eq!(get!("m_err_code"), 39, "{n}: first model error");
+        return;
+    }
     assert_eq!(
         errors,
         0,
@@ -430,6 +440,7 @@ async fn lpddr4_dfi_nexus_nominal() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -458,6 +469,7 @@ async fn lpddr4_dfi_nexus_dqsck_and_board_skew() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -488,6 +500,7 @@ async fn lpddr4_dfi_nexus_gate_level_nominal() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -515,6 +528,7 @@ async fn lpddr4_dfi_nexus_gate_level_dqsck_and_board_skew() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -542,6 +556,7 @@ async fn lpddr4_dfi_nexus_nominal_800() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -569,6 +584,7 @@ async fn lpddr4_dfi_nexus_nominal_400() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -599,6 +615,7 @@ async fn lpddr4_dfi_nexus_command_tck_late() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -628,6 +645,7 @@ async fn lpddr4_dfi_nexus_dq_enable_late() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -658,6 +676,7 @@ async fn lpddr4_dfi_nexus_vref_training() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -689,6 +708,37 @@ async fn lpddr4_dfi_nexus_write_bit_deskew() {
         dqs_auto: 0,
         dq_late: (0x1009, 3),
         gate_miss: 0,
+        wr_pre_toggle: 1,
+    })
+    .await;
+}
+
+/// A write preamble held low (WR_PRE_TOGGLE = 0, against JESD209-4 tWPRE: on a
+/// CertusPro-NX at 1066 Mbps with differential DQS lone writes then lost bits): the
+/// channel model reports it (39) on the first write. Every other test runs the
+/// toggling preamble through training (DQS_AUTO, per-bit deskew here) and traffic.
+#[tokio::test]
+async fn lpddr4_dfi_nexus_static_write_preamble_is_caught() {
+    run(Variant {
+        name: "static_write_preamble",
+        dqsck: 0,
+        dq_skew: 0,
+        wr_skew: [0, 0],
+        wr_dq_skew: [1, 0],
+        n_bursts: 16,
+        ck_ticks: TICKS_PER_CK,
+        gate_level: &[],
+        ca_late: 0,
+        wr_adj: 3,
+        dq_oe_late: 0,
+        vref_ok: (0, 255),
+        vref_reps: 1,
+        bit_deskew: 1,
+        dqs_out_delay: 0,
+        dqs_auto: 1,
+        dq_late: (0x1009, 3),
+        gate_miss: 0,
+        wr_pre_toggle: 0,
     })
     .await;
 }
@@ -717,6 +767,7 @@ async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto() {
         dqs_auto: 1,
         dq_late: (0x1009, 3),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -745,6 +796,7 @@ async fn lpddr4_dfi_nexus_write_bit_deskew_dqs_auto_slow() {
         dqs_auto: 1,
         dq_late: (0x0410, 2),
         gate_miss: 0,
+        wr_pre_toggle: 1,
     })
     .await;
 }
@@ -775,6 +827,7 @@ async fn lpddr4_dfi_nexus_gate_sweep_miss() {
         dqs_auto: 0,
         dq_late: (0, 0),
         gate_miss: 33,
+        wr_pre_toggle: 1,
     })
     .await;
 }

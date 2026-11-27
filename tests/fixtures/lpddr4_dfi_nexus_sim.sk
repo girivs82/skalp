@@ -59,7 +59,9 @@ entity Lpddr4DfiNexusSim<
     const DQ_LATE_TICKS: nat = 0,
     // a read gate sweep miss: the DRAM's burst for gate training read GATE_MISS (from 1) reaches
     // lane 0 with DQ0 inverted, so that setting fails; 0: none
-    const GATE_MISS: nat = 0
+    const GATE_MISS: nat = 0,
+    // the PHY's toggling write preamble (WR_PRE_TOGGLE; 0, a preamble held low, must be caught)
+    const WR_PRE_TOGGLE: nat = 1
 > {
     in sim_tick: clock
     out done: bit
@@ -197,7 +199,7 @@ impl Lpddr4DfiNexusSim {
     signal sync_clk: clock
     sync_clk = sk_n[5]
 
-    inst phy = DfiLpddr4NexusPhy<BIT_DESKEW: BIT_DESKEW, DQS_OUT_DELAY: DQS_OUT_DELAY, DQS_AUTO: DQS_AUTO> {
+    inst phy = DfiLpddr4NexusPhy<BIT_DESKEW: BIT_DESKEW, DQS_OUT_DELAY: DQS_OUT_DELAY, DQS_AUTO: DQS_AUTO, WR_PRE_TOGGLE: WR_PRE_TOGGLE> {
         eclk: eclk,
         pll_lock: 1,
         sync_clk: sync_clk,
