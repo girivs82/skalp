@@ -15,11 +15,12 @@
 //
 // Pins: the PHY ends at the I/O logic. Each bidirectional pin has an output (`*_o`), a tristate
 // control (`*_t`, 1 = not driven) and the pad's input (`*_i`); the design's top level connects
-// them to its pads (on Nexus: a BB per pin, with the LPDDR4 I/O standards). CK and DQS are
-// pseudo-differential: the complement pins (`ck_c`, `dqs_c_*`) are single-ended outputs with their
-// own gearing and the inverted data, as a differential output pad of these devices does not drive
-// its complement pin (seen on a CertusPro-NX: CK_c and DQS_c stayed low, so the DRAM never took a
-// command). Reads take the strobe from DQS_t alone. A simulation connects them to an
+// them to its pads (on Nexus: a BB per pin, with the LPDDR4 I/O standards). Each DQS is one true
+// differential pad pair (LVSTLD_I): the pad drives DQS_c and receives the pair differentially, so
+// the strobe does not depend on the input reference (on a CertusPro-NX at 1066 Mbps, a
+// single-ended DQS read against the reference trained on some loads and not others). CK is
+// pseudo-differential: `ck_c` is a single-ended output with its own gearing and the inverted
+// data. A simulation connects them to an
 // LPDDR4 model, with the pad's value as the input (the PHY reads its own DQS back while it
 // drives it, which write leveling uses).
 //
@@ -286,8 +287,6 @@ pub entity NexusLpddr4Lane<
     in dq_d: bit[64]
     in dq_tt: bit[4]
     in dqs_d: bit[8]
-    // the complement's data (~dqs_d, registered beside it)
-    in dqs_c: bit[8]
     in dqs_tt: bit[4]
     in rd_win: bit[12]
     in wl_frame: bit[3]
@@ -310,9 +309,6 @@ pub entity NexusLpddr4Lane<
     out dqs_o: bit
     out dqs_t: bit
     in dqs_i: bit
-    // the complement strobe pin: the inverted strobe, driven when DQS is
-    out dqs_c_o: bit
-    out dqs_c_t: bit
     // read data: eight beats (beat k in [8k+7:8k]) of a burst, outside training
     out dv: bit
     out half: bit[64]
@@ -696,24 +692,11 @@ impl NexusLpddr4Lane {
         T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
-    inst dqsc_od = ODDRX4DQS {
-        D0: dqs_c[0], D1: dqs_c[1], D2: dqs_c[2], D3: dqs_c[3],
-        D4: dqs_c[4], D5: dqs_c[5], D6: dqs_c[6], D7: dqs_c[7],
-        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
-    }
-    inst dqsc_ts = TSHX4DQS {
-        T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
-        DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
-    }
-    // DQS, its complement and DMI go through output delays too, so the DQ's output delay
+    // DQS and DMI go through output delays too, so the DQ's output delay
     // insertion is matched (as the device's LPDDR4 interface does): DQS's is set DQS_OUT_DELAY
     // steps up at load, DMI's follows the DQ pins (per-bit deskew)
     inst dqs_odl = OUTDELAYA {
         DOUTI: dqs_od.Q, TOUTI: dqs_ts.Q,
-        LOAD_N_LPDDR4_WT: ~load, MOVE_LPDDR4_WT: dq_mv, DIRECTION_LPDDR4_WT: dq_dn
-    }
-    inst dqsc_odl = OUTDELAYA {
-        DOUTI: dqsc_od.Q, TOUTI: dqsc_ts.Q,
         LOAD_N_LPDDR4_WT: ~load, MOVE_LPDDR4_WT: dq_mv, DIRECTION_LPDDR4_WT: dq_dn
     }
     signal w270: clock
@@ -1696,8 +1679,6 @@ impl NexusLpddr4Lane {
     dmi_t = dmi_odl.TOUT
     dqs_o = dqs_odl.DOUT
     dqs_t = dqs_odl.TOUT
-    dqs_c_o = dqsc_odl.DOUT
-    dqs_c_t = dqsc_odl.TOUT
 
     dv = if hv_r == 1 && training == 0 { 1 } else { 0 }
     half = hh_r
@@ -1858,9 +1839,6 @@ pub entity DfiLpddr4NexusPhy<
     out dqs_o: bit[2]
     out dqs_t: bit[2]
     in dqs_i: bit[2]
-    // the complement strobe pins (outputs only: reads use DQS_t)
-    out dqs_c_o: bit[2]
-    out dqs_c_t: bit[2]
     out dmi_o: bit[2]
     out dmi_t: bit[2]
     // ---------------------------------------------------------------- status
@@ -2094,8 +2072,6 @@ impl DfiLpddr4NexusPhy {
     signal dq_tt1: bit[4] = 15
     signal dqs_d0: bit[8] = 0
     signal dqs_d1: bit[8] = 0
-    signal dqs_c0: bit[8] = 255
-    signal dqs_c1: bit[8] = 255
 
     let wde0: bit[3] = {2'b00, dfi_wrdata_en_p0}
     let wde1: bit[3] = {2'b00, dfi_wrdata_en_p1}
@@ -2270,7 +2246,7 @@ impl DfiLpddr4NexusPhy {
     inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD, GATE_BACK> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
-        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d0, dqs_c: dqs_c0, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d0, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
@@ -2280,7 +2256,7 @@ impl DfiLpddr4NexusPhy {
     inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD, GATE_BACK> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
-        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d1, dqs_c: dqs_c1, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d1, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
@@ -2439,8 +2415,6 @@ impl DfiLpddr4NexusPhy {
         dq_tt1 = dq_tt_next
         dqs_d0 = dqs_d_next
         dqs_d1 = dqs_d_next
-        dqs_c0 = ~dqs_d_next
-        dqs_c1 = ~dqs_d_next
         a_wd = b_wd
         a_re = b_re
         rst_n_r = b_rst[0]
@@ -2495,8 +2469,6 @@ impl DfiLpddr4NexusPhy {
     dq_t = {lane1.dq_t, lane0.dq_t}
     dqs_o = {lane1.dqs_o, lane0.dqs_o}
     dqs_t = {lane1.dqs_t, lane0.dqs_t}
-    dqs_c_o = {lane1.dqs_c_o, lane0.dqs_c_o}
-    dqs_c_t = {lane1.dqs_c_t, lane0.dqs_c_t}
     dmi_o = {lane1.dmi_o, lane0.dmi_o}
     dmi_t = {lane1.dmi_t, lane0.dmi_t}
 
