@@ -283,6 +283,8 @@ pub entity NexusLpddr4Lane<
     in dq_d: bit[64]
     in dq_tt: bit[4]
     in dqs_d: bit[8]
+    // the complement's data (~dqs_d, registered beside it)
+    in dqs_c: bit[8]
     in dqs_tt: bit[4]
     in rd_win: bit[12]
     in wl_frame: bit[3]
@@ -357,6 +359,8 @@ pub entity NexusLpddr4Lane<
     out bit_fail: bit[8]
     // the strobe's output delay (DQS_OUT_DELAY, or where DQS_AUTO took it)
     out dqs_pos: bit[8]
+    // DQS_AUTO: the leveling delay at which the first round found the edge (diagnostic)
+    out wl_first: bit[8]
 }
 
 impl NexusLpddr4Lane {
@@ -689,11 +693,9 @@ impl NexusLpddr4Lane {
         T0: dqs_tt[0], T1: dqs_tt[1], T2: dqs_tt[2], T3: dqs_tt[3],
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
-    signal dqs_n: bit[8]
-    dqs_n = ~dqs_d
     inst dqsc_od = ODDRX4DQS {
-        D0: dqs_n[0], D1: dqs_n[1], D2: dqs_n[2], D3: dqs_n[3],
-        D4: dqs_n[4], D5: dqs_n[5], D6: dqs_n[6], D7: dqs_n[7],
+        D0: dqs_c[0], D1: dqs_c[1], D2: dqs_c[2], D3: dqs_c[3],
+        D4: dqs_c[4], D5: dqs_c[5], D6: dqs_c[6], D7: dqs_c[7],
         DQSW: dqs.DQSW, ECLK: eclk, SCLK: sclk, RST: io_rst
     }
     inst dqsc_ts = TSHX4DQS {
@@ -1713,6 +1715,7 @@ impl NexusLpddr4Lane {
     gate_map = gmap
     bit_pos = {bp7, bp6, bp5, bp4, bp3, bp2, bp1, bp0}
     dqs_pos = dqs_cur
+    wl_first = wl_p1
     bit_fail = bfail
     rd_lat_o = rd_lat
     dv_count = ndv
@@ -1758,10 +1761,11 @@ pub entity DfiLpddr4NexusPhy<
     // less, and levels again (see the lane)
     const DQS_AUTO: nat = 0,
     const DQS_GUARD: nat = 16,
-    // sync_clk cycles each step of the DDR reset sequence lasts (8 to 255): the edge clocks stay
+    // sync_clk cycles each step of the DDR reset sequence lasts (8 to 4096): the edge clocks stay
     // stopped for three steps around the DDR reset, so every bank they reach (through the
-    // cascade muxes too) has settled before they restart
-    const RST_STEP_CYC: nat = 64
+    // cascade muxes too) has settled before they restart. On a CertusPro-NX, shorter steps
+    // left a lane's read side a clock or two off on some loads; 256 holds for every lane
+    const RST_STEP_CYC: nat = 256
 > {
     // the edge clock (CK rate) and its PLL's lock
     in eclk: clock
@@ -1898,6 +1902,10 @@ pub entity DfiLpddr4NexusPhy<
     out ctrlupd_count: bit[16]
     // PHY update windows taken (DQS_AUTO moves its DQS output delays in them)
     out phyupd_count: bit[8]
+    // DIAGNOSTIC: each lane's first write leveling round's edge (DQS_AUTO). The DLL's code has
+    // no fabric route on a CertusPro-NX (it reaches only the DQS buffers), so it is not brought out
+    out wl_first0: bit[8]
+    out wl_first1: bit[8]
 }
 
 impl DfiLpddr4NexusPhy {
@@ -1931,8 +1939,8 @@ impl DfiLpddr4NexusPhy {
     signal s_dll_m: bit = 0
     signal s_dll: bit = 0
     signal ss: bit[4] = 0
-    signal scnt: bit[8] = 0
-    let step_last: bit[8] = RST_STEP_CYC - 1
+    signal scnt: bit[12] = 0
+    let step_last: bit[12] = RST_STEP_CYC - 1
     signal dll_rst: bit = 1
     signal dll_freeze: bit = 0
     signal eclk_stop: bit = 0
@@ -2071,6 +2079,10 @@ impl DfiLpddr4NexusPhy {
     // per-lane DQ output enables (1 = not driven)
     signal dq_tt0: bit[4] = 15
     signal dq_tt1: bit[4] = 15
+    signal dqs_d0: bit[8] = 0
+    signal dqs_d1: bit[8] = 0
+    signal dqs_c0: bit[8] = 255
+    signal dqs_c1: bit[8] = 255
 
     let wde0: bit[3] = {2'b00, dfi_wrdata_en_p0}
     let wde1: bit[3] = {2'b00, dfi_wrdata_en_p1}
@@ -2136,10 +2148,15 @@ impl DfiLpddr4NexusPhy {
     // per four strobe pulses, so the feedback needs at least four; eight leave a whole word
     // when the buffer's count is off by a pulse, as seen on silicon from 937 Mbps) and a frame
     // of postamble
-    let dqs_d_w: bit[8] = {1'b0, e3, 1'b0, e2, 1'b0, e1, 1'b0, e0}
     let wl_pulse: bit = if b_wls1 == 1 || b_wls1b == 1 { 1 } else { 0 }
     let wl_any: bit = if b_wls == 1 || wl_pulse == 1 || b_wls2 == 1 { 1 } else { 0 }
-    let dqs_d: bit[8] = if wl_pulse == 1 { 8'b01010101 } else { if wl_any == 1 { 8'b00000000 } else { dqs_d_w } }
+    // The strobe's data, registered from the frames it comes from (b and c now are a and b
+    // next cycle) with its complement, one copy per lane by its gearboxes: built from this
+    // cycle's frames, it reached a channel's far strobe pins through three logic levels
+    let dqs_d_w_next: bit[8] = {1'b0, c_we[2], 1'b0, c_we[1], 1'b0, c_we[0], 1'b0, b_we[3]}
+    let wl_pulse_next: bit = if b_wls == 1 || b_wls1 == 1 { 1 } else { 0 }
+    let wl_any_next: bit = if c_wls == 1 || b_wls == 1 || b_wls1 == 1 || b_wls1b == 1 { 1 } else { 0 }
+    let dqs_d_next: bit[8] = if wl_pulse_next == 1 { 8'b01010101 } else { if wl_any_next == 1 { 8'b00000000 } else { dqs_d_w_next } }
     let dqs_tt: bit[4] = if wl_any == 1 { 4'b0000 } else { dqs_tt_w }
     // the read gate around a write strobe, as around a write leveling strobe: from the last
     // preamble slot to two slots past the last pulse (slot j: e(j + 1), e(j), e(j - 1), e(j - 2))
@@ -2226,7 +2243,7 @@ impl DfiLpddr4NexusPhy {
     inst lane0 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
-        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d0, dq_tt: dq_tt0, dqs_d: dqs_d0, dqs_c: dqs_c0, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc0, exp_wdq: exp_wdq0,
@@ -2236,7 +2253,7 @@ impl DfiLpddr4NexusPhy {
     inst lane1 = NexusLpddr4Lane<DQ_IN_DELAY, GATE_SLOTS, TRAIN_WIN, WL_STEP, WL_MAX, EYE_STEP, EYE_HALF, WDQ_STEP, WDQ_HALF, RD_PUSH, RD_PUSH_DN, BIT_DESKEW, BIT_STEP, BIT_TOP, DQS_OUT_DELAY, DQS_AUTO, DQS_GUARD> {
         eclk: eclk_dq, sclk: sclk, rst: dqs_rst, io_rst: ddr_rst, io_pause: io_pause,
         load: load, dllcode: dll.CODE,
-        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d, dqs_tt: dqs_tt, rd_win: rd_win,
+        dq_d: dq_d1, dq_tt: dq_tt1, dqs_d: dqs_d1, dqs_c: dqs_c1, dqs_tt: dqs_tt, rd_win: rd_win,
         wl_frame: {b_wls2, wl_pulse, b_wls}, wr_gate: wr_gate, tr_start: tr_start, upd_go: upd_go_r,
         wl_en_in: b_wl_en, gate_en_in: b_gate_en, eye_en_in: b_eye_en, wdq_en_in: b_wdq_en,
         exp_rdc: exp_rdc1, exp_wdq: exp_wdq1,
@@ -2393,6 +2410,10 @@ impl DfiLpddr4NexusPhy {
         a_we = b_we
         dq_tt0 = dq_tt_next
         dq_tt1 = dq_tt_next
+        dqs_d0 = dqs_d_next
+        dqs_d1 = dqs_d_next
+        dqs_c0 = ~dqs_d_next
+        dqs_c1 = ~dqs_d_next
         a_wd = b_wd
         a_re = b_re
         rst_n_r = b_rst[0]
@@ -2488,6 +2509,8 @@ impl DfiLpddr4NexusPhy {
     bit_fail0 = lane0.bit_fail
     bit_fail1 = lane1.bit_fail
     dqs_dly0 = lane0.dqs_pos
+    wl_first0 = lane0.wl_first
+    wl_first1 = lane1.wl_first
     dqs_dly1 = lane1.dqs_pos
     rd_lat1 = lane1.rd_lat_o
     sweep_map1 = lane1.sweep_map
