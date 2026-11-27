@@ -349,6 +349,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.record_timing_exceptions(module);
         self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
@@ -433,6 +434,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.record_timing_exceptions(module);
         self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
@@ -583,6 +585,7 @@ impl MirToLirTransform {
         self.mark_async_memory_reads(module);
         self.tie_off_unused_memory_ports();
         self.record_initial_values(module);
+        self.record_timing_exceptions(module);
         self.infer_latches();
 
         // Phase 5: Populate clock and reset nets
@@ -5391,6 +5394,35 @@ impl MirToLirTransform {
                 "combinational loop through {signals}: it holds no register or latch, \
                  so synthesis cannot build it as written"
             ));
+        }
+    }
+
+    /// Record each `#[cdc]` register's static timing exception on its LIR
+    /// signal (and on the segments of one written in parts): a synchronizer's
+    /// first register is not timed into, a quasi-static one is not timed from.
+    fn record_timing_exceptions(&mut self, module: &Module) {
+        use crate::gate_netlist::TimingException;
+        use skalp_frontend::hir::CdcType;
+        for signal in &module.signals {
+            let Some(cdc) = &signal.cdc_config else {
+                continue;
+            };
+            let exception = match cdc.cdc_type {
+                CdcType::QuasiStatic => TimingException::UntimedFrom,
+                CdcType::TwoFF
+                | CdcType::Gray
+                | CdcType::Handshake
+                | CdcType::Pulse
+                | CdcType::AsyncFifo => TimingException::UntimedTo,
+            };
+            if let Some(&lir_signal) = self.signal_to_lir_signal.get(&signal.id) {
+                self.lir.signals[lir_signal.0 as usize].timing_exception = Some(exception);
+            }
+            for segment in &self.register_segments {
+                if segment.base == LValue::Signal(signal.id) {
+                    self.lir.signals[segment.signal.0 as usize].timing_exception = Some(exception);
+                }
+            }
         }
     }
 

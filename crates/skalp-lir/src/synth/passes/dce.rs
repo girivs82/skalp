@@ -192,6 +192,7 @@ impl Pass for Dce {
                     reset,
                     sync_reset,
                     clock_falling,
+                    timing,
                 } => {
                     // Pre-create latch with placeholder data
                     let new_clock = clock.and_then(|c| node_map.get(&c).map(|lit| lit.node));
@@ -211,6 +212,7 @@ impl Pass for Dce {
                     if *clock_falling {
                         new_aig.mark_latch_clock_falling(new_id);
                     }
+                    new_aig.set_latch_timing(new_id, *timing);
                     node_map.insert(id, AigLit::new(new_id));
                     latch_ids.push((id, *data, *init, *clock, *reset));
                 }

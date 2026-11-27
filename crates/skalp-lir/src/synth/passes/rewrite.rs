@@ -540,6 +540,7 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
                     reset,
                     sync_reset,
                     clock_falling,
+                    timing,
                     ..
                 } => {
                     // Resolve clock/reset through node_map (now populated with inputs)
@@ -561,6 +562,7 @@ pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
                     if *clock_falling {
                         new_aig.mark_latch_clock_falling(new_id);
                     }
+                    new_aig.set_latch_timing(new_id, *timing);
                     node_map.insert(id, AigLit::new(new_id));
                 }
                 AigNode::Barrier {

@@ -176,6 +176,8 @@ pub enum AigNode {
         sync_reset: bool,
         /// Loads on the falling edge of `clock` (an `on(clk.fall)` register)
         clock_falling: bool,
+        /// Static timing exception on the flip-flop built for it (`#[cdc]`)
+        timing: Option<crate::gate_netlist::TimingException>,
     },
 
     /// Power domain barrier (optimization boundary)
@@ -599,6 +601,7 @@ impl Aig {
             reset,
             sync_reset: false,
             clock_falling: false,
+            timing: None,
         });
 
         // Copy safety from data input
@@ -629,6 +632,7 @@ impl Aig {
             reset,
             sync_reset: false,
             clock_falling: false,
+            timing: None,
         });
         self.safety_info.push(safety);
         id
@@ -648,6 +652,29 @@ impl Aig {
         if let Some(AigNode::Latch { clock_falling, .. }) = self.nodes.get_mut(latch_id.0 as usize)
         {
             *clock_falling = true;
+        }
+    }
+
+    /// Set the static timing exception of a latch's flip-flop (stored on the
+    /// node so it survives the passes that rebuild the AIG).
+    pub fn set_latch_timing(
+        &mut self,
+        latch_id: AigNodeId,
+        exception: Option<crate::gate_netlist::TimingException>,
+    ) {
+        if let Some(AigNode::Latch { timing, .. }) = self.nodes.get_mut(latch_id.0 as usize) {
+            *timing = exception;
+        }
+    }
+
+    /// The static timing exception of a latch's flip-flop
+    pub fn latch_timing(
+        &self,
+        latch_id: AigNodeId,
+    ) -> Option<crate::gate_netlist::TimingException> {
+        match self.nodes.get(latch_id.0 as usize) {
+            Some(AigNode::Latch { timing, .. }) => *timing,
+            _ => None,
         }
     }
 

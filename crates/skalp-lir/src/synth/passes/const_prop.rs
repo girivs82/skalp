@@ -135,6 +135,7 @@ impl Pass for ConstProp {
                     reset,
                     sync_reset,
                     clock_falling,
+                    timing,
                 } => {
                     let resolved_data = self.resolve(*data);
                     let resolved_clock = clock.map(|c| self.resolve(AigLit::new(c)).node);
@@ -154,6 +155,7 @@ impl Pass for ConstProp {
                     if *clock_falling {
                         new_aig.mark_latch_clock_falling(new_id);
                     }
+                    new_aig.set_latch_timing(new_id, *timing);
                     self.replacements.insert(id, AigLit::new(new_id));
                 }
                 AigNode::Barrier {

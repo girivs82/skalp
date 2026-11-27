@@ -177,6 +177,7 @@ mod test_technology_mapping;
 mod test_temporal_logic;
 mod test_timed_sim_crosscheck;
 mod test_timing_analysis_fix;
+mod test_timing_exceptions;
 mod test_trace_attribute;
 mod test_trait_bounds;
 mod test_trait_method_call_e2e;

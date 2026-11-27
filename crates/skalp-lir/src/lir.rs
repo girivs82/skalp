@@ -1337,6 +1337,9 @@ pub struct LirSignal {
     /// Value of a register at power-up, when the source gives one
     #[serde(default)]
     pub initial: Option<u64>,
+    /// Static timing exception on a register's flip-flops (from `#[cdc]`)
+    #[serde(default)]
+    pub timing_exception: Option<crate::gate_netlist::TimingException>,
 }
 
 /// NCL signal classification at LIR level.
@@ -1433,6 +1436,7 @@ impl Lir {
             is_detection: false,
             ncl_info: None,
             initial: None,
+            timing_exception: None,
         });
         id
     }

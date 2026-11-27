@@ -419,6 +419,11 @@ impl Retiming {
         latch_id: AigNodeId,
         timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> bool {
+        // A register the design excepts from timing (`#[cdc]`) stays where
+        // it is: moved, the exception would cover other logic
+        if aig.latch_timing(latch_id).is_some() {
+            return false;
+        }
         // Get latch info
         let latch_node = match aig.get_node(latch_id) {
             Some(AigNode::Latch {
@@ -480,6 +485,9 @@ impl Retiming {
         latch_id: AigNodeId,
         timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> bool {
+        if aig.latch_timing(latch_id).is_some() {
+            return false;
+        }
         // Record the pipeline stage annotation
         let arrival = timing.get(&latch_id).map(|t| t.arrival).unwrap_or(0.0);
 

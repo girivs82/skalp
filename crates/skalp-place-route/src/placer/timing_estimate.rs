@@ -19,7 +19,9 @@
 use crate::collections::HashMap;
 use crate::timing::clock_targets::ClockTargets;
 use crate::timing::DelayModel;
-use skalp_lir::gate_netlist::{ff_clock_falling, Cell, CellId, GateNetId, GateNetlist};
+use skalp_lir::gate_netlist::{
+    ff_clock_falling, ff_timing_exception, Cell, CellId, GateNetId, GateNetlist, TimingException,
+};
 use std::collections::VecDeque;
 
 /// Delay of a connection between cells at `from` and `to`
@@ -34,6 +36,13 @@ fn connection_delay(model: &DelayModel, from: (f64, f64), to: (f64, f64)) -> f64
 /// clocked cells, and cells with no inputs (pads, constants).
 fn is_path_boundary(cell: &Cell) -> bool {
     cell.clock.is_some() || cell.inputs.is_empty()
+}
+
+/// Whether a path timed into `cell` ends there: a register or pad, but not
+/// the first register of a synchronizer (`#[cdc]`), into which no path is
+/// timed
+fn path_end(cell: &Cell) -> bool {
+    is_path_boundary(cell) && ff_timing_exception(cell) != Some(TimingException::UntimedTo)
 }
 
 /// Whether `cell` launches and captures on the falling edge of its clock
@@ -146,7 +155,9 @@ fn analyse_ending(
         0.0
     };
     for cell in netlist.cells.iter().filter(|c| is_path_boundary(c)) {
-        let launch = if launch_edge.is_some_and(|falling| falling != on_falling_edge(cell)) {
+        let launch = if launch_edge.is_some_and(|falling| falling != on_falling_edge(cell))
+            || ff_timing_exception(cell) == Some(TimingException::UntimedFrom)
+        {
             f64::NEG_INFINITY
         } else if cell.clock.is_some() {
             model.dff_clk_to_q
@@ -173,7 +184,7 @@ fn analyse_ending(
 
     // Path ends: inputs of registers and pads.
     let mut worst = 0.0f64;
-    for cell in netlist.cells.iter().filter(|c| is_path_boundary(c)) {
+    for cell in netlist.cells.iter().filter(|c| path_end(c)) {
         for (pin, &input) in cell.inputs.iter().enumerate() {
             worst = worst.max(arrival[input.0 as usize] + wire(input, cell, pin) + model.dff_setup);
         }
@@ -183,7 +194,7 @@ fn analyse_ending(
     let mut required = vec![f64::INFINITY; nets.len()];
     let mut input_required = vec![f64::INFINITY; netlist.cells.len()];
     for (i, cell) in netlist.cells.iter().enumerate() {
-        if is_path_boundary(cell) {
+        if path_end(cell) {
             input_required[i] = end_required.map_or(worst, |f| f(cell)) - model.dff_setup;
             for (pin, &input) in cell.inputs.iter().enumerate() {
                 let r = input_required[i] - wire(input, cell, pin);

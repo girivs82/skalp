@@ -749,3 +749,99 @@ impl CdcLifetimeTest {
 
     println!("#[cdc] with lifetime-style domains test PASSED!");
 }
+
+/// `quasi_static` parses with both the `cdc_type =` and the `type =`
+/// spelling (`type` lexes as a keyword, not an identifier).
+#[test]
+fn test_cdc_attribute_quasi_static() {
+    let source = r#"
+entity Qs {
+    in clk: clock
+    in d: bit
+    out y: bit
+    out z: bit
+}
+
+impl Qs {
+    #[cdc(cdc_type = quasi_static)]
+    signal a: bit = 0
+    #[cdc(type = quasi_static)]
+    signal b: bit = 0
+    on(clk.rise) {
+        a = d
+        b = d
+    }
+    y = a
+    z = b
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+    let imp = hir.implementations.iter().find(|i| {
+        hir.entities
+            .iter()
+            .any(|e| e.id == i.entity && e.name == "Qs")
+    });
+    let imp = imp.expect("Qs implementation");
+    for name in ["a", "b"] {
+        let sig = imp.signals.iter().find(|s| s.name == name).unwrap();
+        let cdc = sig.cdc_config.as_ref().expect("cdc_config");
+        assert_eq!(cdc.cdc_type, CdcType::QuasiStatic, "signal {name}");
+    }
+}
+
+/// Regression: an implementation's attributes are processed a second time
+/// while its instances are built. A `#[cdc]` on a signal of one
+/// implementation used to stay pending after that pass and land on the
+/// first signal of the next implementation.
+#[test]
+fn test_cdc_attribute_does_not_leak_into_next_impl() {
+    let source = r#"
+entity Sync {
+    in clk: clock
+    in a: bit
+    out y: bit
+}
+
+impl Sync {
+    #[cdc]
+    signal meta: bit = 0
+    signal held: bit = 0
+    on(clk.rise) {
+        meta = a
+        held = meta
+    }
+    y = held
+}
+
+entity Top {
+    in clk: clock
+    in d: bit
+    out y: bit
+    out z: bit
+}
+
+impl Top {
+    signal r: bit = 0
+    inst s = Sync {
+        clk: clk,
+        a: d
+    }
+    on(clk.rise) {
+        r = d
+    }
+    z = r
+    y = s.y
+}
+"#;
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+    let marked: Vec<String> = hir
+        .implementations
+        .iter()
+        .flat_map(|i| i.signals.iter())
+        .filter(|s| s.cdc_config.is_some())
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(marked, vec!["meta".to_string()]);
+}

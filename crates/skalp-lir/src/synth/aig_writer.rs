@@ -369,6 +369,7 @@ impl AigWriterState<'_> {
                     reset,
                     sync_reset: _,
                     clock_falling,
+                    timing,
                 } => {
                     let first_cell = self.netlist.cells.len();
                     self.process_latch_node(aig, id, *data, *init, *clock, *reset);
@@ -381,6 +382,17 @@ impl AigWriterState<'_> {
                                 cell.parameters.insert(
                                     crate::gate_netlist::FF_CLOCK_EDGE_PARAM.to_string(),
                                     crate::gate_netlist::FF_CLOCK_FALLING.to_string(),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(exception) = timing {
+                        // ... and are not timed from (or into), as the design says
+                        for cell in &mut self.netlist.cells[first_cell..] {
+                            if cell.clock.is_some() {
+                                cell.parameters.insert(
+                                    crate::gate_netlist::FF_TIMING_PARAM.to_string(),
+                                    exception.param().to_string(),
                                 );
                             }
                         }
