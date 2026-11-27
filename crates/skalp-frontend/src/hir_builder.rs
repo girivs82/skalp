@@ -2173,6 +2173,21 @@ impl HirBuilderContext {
     }
 
     /// Build implementation from syntax node
+    /// Drop pending attribute state that belongs to a single signal or
+    /// instance (`#[cdc]`, `#[trace]`, `#[memory]`, `#[breakpoint]`, power,
+    /// `#[implements]`, latency, detection). Used when attributes are
+    /// processed a second time for an item that is not built on that pass.
+    fn clear_item_attribute_state(&mut self) {
+        self.pending_cdc_config = None;
+        self.pending_trace_config = None;
+        self.pending_memory_config = None;
+        self.pending_breakpoint_config = None;
+        self.pending_power_config = None;
+        self.pending_safety_config = None;
+        self.pending_latency = None;
+        self.pending_detection_config = None;
+    }
+
     fn build_implementation(&mut self, node: &SyntaxNode) -> Option<HirImplementation> {
         // See build_entity: staged power-intent attributes never cross a
         // construct boundary.
@@ -2565,9 +2580,16 @@ impl HirBuilderContext {
                         instances.push(instance);
                     }
                 }
-                _ => {}
+                _ => {
+                    // Any other item (signal, event block, ...) was built in
+                    // the first pass, which already consumed its attributes.
+                    // The re-processed copies must not reach the next
+                    // instance or, after the loop, the next implementation.
+                    self.clear_item_attribute_state();
+                }
             }
         }
+        self.clear_item_attribute_state();
 
         trace!(
             "[HIR_IMPL_DEBUG] build_implementation '{}' complete: {} signals, {} constants, {} assignments",
@@ -12476,6 +12498,12 @@ impl HirBuilderContext {
                         }
                         current_key = None;
                     }
+                    "quasi_static" => {
+                        if current_key == Some("type") {
+                            cdc_type = Some(CdcType::QuasiStatic);
+                        }
+                        current_key = None;
+                    }
                     // Identifier value for domain (e.g., from = fast without quote)
                     _ => match current_key {
                         Some("from") => {
@@ -12491,7 +12519,7 @@ impl HirBuilderContext {
                         // annotated.
                         Some("type") => {
                             unknown = Some(format!(
-                                "unknown cdc_type `{}` — expected two_ff, gray, handshake, pulse, or async_fifo",
+                                "unknown cdc_type `{}` — expected two_ff, gray, handshake, pulse, async_fifo, or quasi_static",
                                 text
                             ));
                             current_key = None;
@@ -12499,6 +12527,9 @@ impl HirBuilderContext {
                         _ => {}
                     },
                 }
+            } else if token.kind() == SyntaxKind::TypeKw {
+                // `type = ...` spelling of `cdc_type`; `type` lexes as a keyword.
+                current_key = Some("type");
             } else if token.kind() == SyntaxKind::Lifetime {
                 // Lifetime token (e.g., 'fast, 'slow) - the lexer strips the leading '
                 let domain_name = token.text().to_string();

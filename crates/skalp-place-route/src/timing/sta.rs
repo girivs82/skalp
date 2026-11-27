@@ -11,6 +11,10 @@
 //! are not timed. Setup times paths from input pads as launched at the clock
 //! source; hold does not time them.
 //!
+//! A flip-flop the design excepts from timing (`#[cdc]`, see
+//! [`skalp_lir::gate_netlist::TimingException`]) launches no path when it is
+//! quasi-static, and captures none when it is a synchronizer's first stage.
+//!
 //! A flip-flop on the falling edge of its clock (see
 //! [`skalp_lir::gate_netlist::ff_clock_falling`]) launches and captures half
 //! a period from the rising edge. Where a design has any, each analysis runs
@@ -22,7 +26,9 @@ use super::{ClockSummary, CriticalPath, FailingInstance, HoldReport, PathStep, T
 use crate::bitstream::config::PlacedDesign;
 use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use crate::device::{CellPin, Device, PipId, WireId, FF_PIN_CLK};
-use skalp_lir::gate_netlist::{ff_clock_falling, Cell, CellId, GateNetId};
+use skalp_lir::gate_netlist::{
+    ff_clock_falling, ff_timing_exception, Cell, CellId, GateNetId, TimingException,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const PS_PER_NS: f64 = 1000.0;
@@ -156,6 +162,12 @@ struct Engine<'a, D: Device + ?Sized> {
     /// the falling edge); `None`: every register, in a design that has no
     /// falling-edge flip-flops. Untimed inputs count as rising-edge launches.
     launch_edge: Option<bool>,
+}
+
+/// Whether no path into `cell` is timed: the first register of a
+/// synchronizer (`#[cdc]`)
+fn untimed_into(cell: &Cell) -> bool {
+    ff_timing_exception(cell) == Some(TimingException::UntimedTo)
 }
 
 /// Whether `cell` samples (or launches) on the falling edge of the clock on
@@ -389,7 +401,10 @@ impl<D: Device + ?Sized> Engine<'_, D> {
             let other_edge = self
                 .launch_edge
                 .is_some_and(|falling| falling != on_falling_edge(cell, clock_input));
-            if other_edge || (self.early && (clock_net.is_none() || other_clock)) {
+            // A register the design says changes only while the clocks that
+            // read it are stopped launches no path either
+            let untimed_from = ff_timing_exception(cell) == Some(TimingException::UntimedFrom);
+            if untimed_from || other_edge || (self.early && (clock_net.is_none() || other_clock)) {
                 return Arrival {
                     time: NO_PATH,
                     from: None,
@@ -543,6 +558,11 @@ pub fn analyze<D: Device + ?Sized>(
                         .or_insert((0, 0.0, f64::INFINITY))
                         .0 += 1;
                 }
+            }
+            // The first register of a synchronizer: its input changes with no
+            // relation to its clock, so no path into it is timed
+            if untimed_into(cell) {
+                continue;
             }
             for endpoint in endpoints {
                 let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
@@ -741,6 +761,9 @@ pub fn analyze_hold<D: Device + ?Sized>(
                 launch_edge,
             );
             for cell in &cells {
+                if untimed_into(cell) {
+                    continue;
+                }
                 for endpoint in model.endpoints(cell) {
                     let Some(clock) = Engine::<D>::clock_net(cell, endpoint.clock) else {
                         continue;
@@ -1360,6 +1383,90 @@ mod tests {
             assert!(
                 (hold.worst_slack - (9.1 + gain - targets.hold_margin_ns)).abs() < 1e-9,
                 "{falling}: {hold:?}"
+            );
+        }
+    }
+
+    /// Two registers feeding each other through a 9 ns arc. Marking `ra`
+    /// untimed-from (`#[cdc(cdc_type = quasi_static)]`) leaves only the path
+    /// launched from `rb`; marking it untimed-to (a synchronizer's first
+    /// stage) leaves only the path launched from `ra`. Hold follows setup.
+    #[test]
+    fn timing_exceptions_drop_paths_from_or_into_a_register() {
+        use skalp_lir::gate_netlist::{TimingException, FF_TIMING_PARAM};
+        let build = |exception: TimingException| {
+            let mut netlist = GateNetlist::new("top".into(), "test".into());
+            let net = |netlist: &mut GateNetlist, name: &str| {
+                netlist.add_net(GateNet::new(GateNetId(0), name.to_string()))
+            };
+            let clk = net(&mut netlist, "clk");
+            let (qa, da, qb, db) = (
+                net(&mut netlist, "qa"),
+                net(&mut netlist, "da"),
+                net(&mut netlist, "qb"),
+                net(&mut netlist, "db"),
+            );
+            for (name, input, output) in [("la", qb, da), ("lb", qa, db)] {
+                netlist.add_cell(Cell::new_comb(
+                    CellId(0),
+                    "LUT4".into(),
+                    "test".into(),
+                    0.0,
+                    name.into(),
+                    vec![input],
+                    vec![output],
+                ));
+            }
+            for (name, d, q) in [("ra", da, qa), ("rb", db, qb)] {
+                let id = netlist.add_cell(Cell::new_seq(
+                    CellId(0),
+                    "DFF".into(),
+                    "test".into(),
+                    0.0,
+                    name.into(),
+                    vec![d],
+                    vec![q],
+                    clk,
+                    None,
+                ));
+                if name == "ra" {
+                    netlist.cells[id.0 as usize]
+                        .parameters
+                        .insert(FF_TIMING_PARAM.to_string(), exception.param().to_string());
+                }
+            }
+            netlist
+        };
+        let (placement, routing, tied) = (
+            PlacementResult::default(),
+            RoutingResult::default(),
+            TiedInputs::default(),
+        );
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let targets = ClockTargets::uniform(100.0);
+        for (exception, source) in [
+            (TimingException::UntimedFrom, "qb"),
+            (TimingException::UntimedTo, "qa"),
+        ] {
+            let netlist = build(exception);
+            let design = PlacedDesign {
+                netlist: &netlist,
+                placement: &placement,
+                routing: &routing,
+                tied: &tied,
+            };
+            let report = analyze(&device, &Stub, &design, &targets);
+            assert_eq!(
+                report.critical_paths.len(),
+                1,
+                "{exception:?}: {:#?}",
+                report.critical_paths
+            );
+            assert_eq!(report.critical_paths[0].source, source, "{exception:?}");
+            let hold = analyze_hold(&device, &Stub, &design, &targets);
+            assert!(
+                (hold.worst_slack - (9.1 - targets.hold_margin_ns)).abs() < 1e-9,
+                "{exception:?}: {hold:?}"
             );
         }
     }

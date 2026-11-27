@@ -1,0 +1,46 @@
+// Timing exceptions carried by registers through synthesis:
+// `mode` is quasi-static (no timed path from it), `meta` is the first stage
+// of a two-flop synchronizer (no timed path into it), `count` is plain.
+entity Sync2 {
+    in clk: clock
+    in a: bit
+    out y: bit
+}
+
+impl Sync2 {
+    #[cdc]
+    signal meta: bit = 0
+    signal held: bit = 0
+    on(clk.rise) {
+        meta = a
+        held = meta
+    }
+    y = held
+}
+
+entity TimingExceptions {
+    in clk: clock
+    in d: bit[4]
+    in load: bit
+    in async_in: bit
+    out p: bit[4]
+    out s: bit
+}
+
+impl TimingExceptions {
+    #[cdc(cdc_type = quasi_static)]
+    signal mode: bit[4] = 0
+    signal count: bit[4] = 0
+    inst sync = Sync2 {
+        clk: clk,
+        a: async_in
+    }
+    on(clk.rise) {
+        if load {
+            mode = d
+        }
+        count = count + mode
+    }
+    p = count
+    s = sync.y
+}

@@ -258,6 +258,7 @@ fn emit_signal_attributes(out: &mut String, signal: &HirSignal, ind: &str) {
             CdcType::Pulse => parts.push("type=\"pulse\"".to_string()),
             CdcType::Handshake => parts.push("type=\"handshake\"".to_string()),
             CdcType::AsyncFifo => parts.push("type=\"async_fifo\"".to_string()),
+            CdcType::QuasiStatic => parts.push("type=\"quasi_static\"".to_string()),
         }
         if cdc.sync_stages != 2 {
             parts.push(format!("stages={}", cdc.sync_stages));

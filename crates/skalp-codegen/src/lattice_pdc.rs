@@ -81,14 +81,19 @@ fn vref_note(v: &VrefSetting) -> String {
     }
 }
 
-/// The registers marked as the first stage of a synchronizer (`#[cdc]`), by
-/// hierarchical name below `prefix` (`phy/dll_lock_m`)
-fn synchronizers(mir: &Mir, module: &Module, prefix: &str, out: &mut Vec<String>) {
+/// The registers marked `#[cdc]`, by hierarchical name below `prefix`
+/// (`phy/dll_lock_m`), each with whether it is quasi-static (no timing from
+/// it) rather than the first stage of a synchronizer (no timing into it)
+fn synchronizers(mir: &Mir, module: &Module, prefix: &str, out: &mut Vec<(String, bool)>) {
     if module.vendor_ip_config.is_some() {
         return;
     }
-    for signal in module.signals.iter().filter(|s| s.cdc_config.is_some()) {
-        out.push(format!("{prefix}{}", signal.name));
+    for signal in &module.signals {
+        let Some(cdc) = &signal.cdc_config else {
+            continue;
+        };
+        let quasi_static = cdc.cdc_type == skalp_frontend::hir::CdcType::QuasiStatic;
+        out.push((format!("{prefix}{}", signal.name), quasi_static));
     }
     for instance in &module.instances {
         if let Some(child) = mir.modules.iter().find(|m| m.id == instance.module) {
@@ -101,7 +106,8 @@ fn synchronizers(mir: &Mir, module: &Module, prefix: &str, out: &mut Vec<String>
 /// clock on each clock pin whose frequency `pin_mhz` knows (the vendor's
 /// tools derive the PLL and divided clocks from it), and no timing into the
 /// first register of each synchronizer (`#[cdc]`), whose input changes with
-/// no relation to its clock. `None` when there is nothing to constrain.
+/// no relation to its clock, and none from a quasi-static register
+/// (`#[cdc(cdc_type = quasi_static)]`). `None` when there is nothing to constrain.
 pub fn generate_lattice_pdc(mir: &Mir, pin_mhz: &dyn Fn(&str) -> Option<f64>) -> Option<String> {
     let mut pdc = String::new();
     let mut any = false;
@@ -126,8 +132,9 @@ pub fn generate_lattice_pdc(mir: &Mir, pin_mhz: &dyn Fn(&str) -> Option<f64>) ->
         }
         let mut syncs = Vec::new();
         synchronizers(mir, top, "", &mut syncs);
-        for sync in syncs {
-            let _ = writeln!(pdc, "set_false_path -to [get_cells {{{sync}*}}]");
+        for (sync, quasi_static) in syncs {
+            let direction = if quasi_static { "-from" } else { "-to" };
+            let _ = writeln!(pdc, "set_false_path {direction} [get_cells {{{sync}*}}]");
             any = true;
         }
         for port in &top.ports {
@@ -200,6 +207,7 @@ entity Top {
     out cs: bit @ { pin: "AC19", io_standard: "LVSTL_I" }
     in d: bit
     out y: bit
+    out z: bit
 }
 
 entity Sync {
@@ -221,14 +229,18 @@ impl Sync {
 
 impl Top {
     signal r: bit[2] = 0
+    #[cdc(cdc_type = quasi_static)]
+    signal q: bit = 0
     inst s = Sync {
         clk: clk,
         a: d
     }
     on(clk.rise) {
         r = r + 1
+        q = d
     }
     led = r
+    z = q
     cs = r[0]
     dq = r[1]
     y = s.y
@@ -252,6 +264,7 @@ impl Top {
             "# dq: reference level generator code 49",
             "create_clock -name {clk} -period 8 [get_ports clk]",
             "set_false_path -to [get_cells {s/meta*}]",
+            "set_false_path -from [get_cells {q*}]",
         ] {
             assert!(pdc.contains(line), "missing `{line}` in:\n{pdc}");
         }

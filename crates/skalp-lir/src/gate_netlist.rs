@@ -95,6 +95,49 @@ pub const FF_CLOCK_EDGE_PARAM: &str = "CLK_EDGE";
 /// [`FF_CLOCK_EDGE_PARAM`] value of a flip-flop that loads on the falling edge
 pub const FF_CLOCK_FALLING: &str = "FALL";
 
+/// Parameter naming a flip-flop's static timing exception (see
+/// [`TimingException`]): absent for a flip-flop timed as usual.
+pub const FF_TIMING_PARAM: &str = "TIMING";
+
+/// A flip-flop static timing does not time paths through, as the design says
+/// (`#[cdc]`): its input or output changes with no timing relation to the
+/// clocks on the other side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TimingException {
+    /// No path from it is timed: it changes only while every clock that
+    /// reads it is stopped or held (`#[cdc(cdc_type = quasi_static)]`)
+    UntimedFrom,
+    /// No path into it is timed: the first register of a synchronizer, whose
+    /// input changes with no relation to its clock (`#[cdc]`)
+    UntimedTo,
+}
+
+impl TimingException {
+    /// Its [`FF_TIMING_PARAM`] value
+    pub fn param(self) -> &'static str {
+        match self {
+            TimingException::UntimedFrom => "UNTIMED_FROM",
+            TimingException::UntimedTo => "UNTIMED_TO",
+        }
+    }
+
+    /// The exception a [`FF_TIMING_PARAM`] value names
+    pub fn from_param(value: &str) -> Option<Self> {
+        match value {
+            "UNTIMED_FROM" => Some(TimingException::UntimedFrom),
+            "UNTIMED_TO" => Some(TimingException::UntimedTo),
+            _ => None,
+        }
+    }
+}
+
+/// The static timing exception on flip-flop `cell`, if it has one
+pub fn ff_timing_exception(cell: &Cell) -> Option<TimingException> {
+    cell.parameters
+        .get(FF_TIMING_PARAM)
+        .and_then(|v| TimingException::from_param(v))
+}
+
 /// Whether flip-flop `cell` loads on the falling edge of its clock
 pub fn ff_clock_falling(cell: &Cell) -> bool {
     cell.parameters.get(FF_CLOCK_EDGE_PARAM).map(String::as_str) == Some(FF_CLOCK_FALLING)

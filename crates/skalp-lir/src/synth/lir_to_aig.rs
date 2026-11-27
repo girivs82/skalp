@@ -274,6 +274,10 @@ impl<'a> LirToSynthAig<'a> {
                     if clock_falling {
                         self.aig.mark_latch_clock_falling(latch_id);
                     }
+                    self.aig.set_latch_timing(
+                        latch_id,
+                        self.lir.signals[node.output.0 as usize].timing_exception,
+                    );
                     // AUDIT-2 #4: a SYNC reset must not use the DFFR async
                     // reset pin — mark it so the writer folds it into D.
                     if *has_reset && !*async_reset {

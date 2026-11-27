@@ -143,6 +143,8 @@ impl<'a> AigBuilder<'a> {
                 {
                     self.aig.mark_latch_clock_falling(latch_id);
                 }
+                self.aig
+                    .set_latch_timing(latch_id, crate::gate_netlist::ff_timing_exception(cell));
                 let latch_lit = AigLit::new(latch_id);
 
                 // Map all output nets to this latch
@@ -615,6 +617,8 @@ impl<'a> AigBuilder<'a> {
                 {
                     self.aig.mark_latch_clock_falling(latch_id);
                 }
+                self.aig
+                    .set_latch_timing(latch_id, crate::gate_netlist::ff_timing_exception(cell));
                 AigLit::new(latch_id)
             }
 

@@ -1936,6 +1936,9 @@ impl DfiLpddr4NexusPhy {
     signal dll_rst: bit = 1
     signal dll_freeze: bit = 0
     signal eclk_stop: bit = 0
+    // Resets the gearing (ODDRX4/IDDRX4), ECLKDIV and DQS buffers. It changes only in steps
+    // 4 and 5, while the edge clocks are stopped (steps 3-5), so no path from it is timed.
+    #[cdc(cdc_type = quasi_static)]
     signal ddr_rst: bit = 0
     signal init_pause: bit = 0
     signal init_udd_n: bit = 1

@@ -1105,6 +1105,11 @@ pub enum CdcType {
     Pulse,
     /// FIFO-based synchronizer - for data buses
     AsyncFifo,
+    /// No synchronizer: a register (on the source side) that changes only
+    /// while every clock that reads it is stopped or held, such as a reset
+    /// pulsed while the edge clocks are stopped. Static timing does not time
+    /// paths from it.
+    QuasiStatic,
 }
 
 impl CdcConfig {
