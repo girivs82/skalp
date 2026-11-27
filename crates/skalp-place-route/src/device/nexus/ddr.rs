@@ -755,6 +755,110 @@ pub fn bypass_pad_buffers(netlist: &GateNetlist, prims: &Primitives) -> Option<G
     changed.then_some(out)
 }
 
+/// Leave out the chains of primitives that reach no pad and drive nothing:
+/// a chain whose pad-side output is left unconnected (the second pad of a
+/// pair that a design leaves unused, say) does nothing, and has no pad to be
+/// placed at. A chain that drives the fabric, or that has a pad, stays (and
+/// [`analyze`] reports a pad-less one that drives the fabric). Returns the
+/// netlist without them, and the paths of the cells left out.
+pub fn remove_padless_chains(
+    netlist: &GateNetlist,
+    prims: &Primitives,
+    is_pad: &dyn Fn(&Cell) -> bool,
+) -> Option<(GateNetlist, Vec<String>)> {
+    if prims.by_name.is_empty() {
+        return None;
+    }
+    // Everything that reads a net: data inputs, clocks, resets, outputs
+    let mut read: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
+    let mut sinks: HashMap<GateNetId, Vec<(CellId, usize)>> = HashMap::new();
+    for cell in &netlist.cells {
+        for (index, &net) in cell.inputs.iter().enumerate() {
+            read.insert(net);
+            sinks.entry(net).or_default().push((cell.id, index));
+        }
+        read.extend(cell.clock.iter().chain(cell.reset.iter()).copied());
+    }
+    let mut parent: HashMap<CellId, CellId> = HashMap::new();
+    fn find(parent: &mut HashMap<CellId, CellId>, c: CellId) -> CellId {
+        let p = *parent.get(&c).unwrap_or(&c);
+        if p == c {
+            return c;
+        }
+        let root = find(parent, p);
+        parent.insert(c, root);
+        root
+    }
+    // Chains: primitives joined by their pad-side nets. A chain is kept when
+    // any of its nets has a pad, or any primitive output outside the chain
+    // is read.
+    let mut kept: Vec<CellId> = Vec::new();
+    let mut members: Vec<CellId> = Vec::new();
+    for c in netlist.cells.iter().filter(|c| prims.of(c).is_some()) {
+        members.push(c.id);
+        for (index, &net) in c.inputs.iter().enumerate() {
+            if !prims.in_chain(c, false, index) {
+                continue;
+            }
+            match netlist
+                .nets
+                .get(net.0 as usize)
+                .and_then(|n| n.driver)
+                .and_then(|d| netlist.get_cell(d))
+            {
+                Some(d) if is_pad(d) => kept.push(c.id),
+                Some(d) if prims.of(d).is_some() => {
+                    let (a, b) = (find(&mut parent, c.id), find(&mut parent, d.id));
+                    if a != b {
+                        parent.insert(a, b);
+                    }
+                }
+                // Driven from the fabric, or not at all: analyze reports it
+                _ => kept.push(c.id),
+            }
+        }
+        for (index, &net) in c.outputs.iter().enumerate() {
+            if !prims.in_chain(c, true, index) {
+                if read.contains(&net) {
+                    kept.push(c.id);
+                }
+                continue;
+            }
+            for &(sink, _) in sinks.get(&net).map(Vec::as_slice).unwrap_or(&[]) {
+                if netlist
+                    .get_cell(sink)
+                    .is_some_and(|s| prims.of(s).is_none())
+                {
+                    // A pad, or the fabric (which analyze reports)
+                    kept.push(c.id);
+                }
+            }
+            if netlist.outputs.contains(&net) {
+                kept.push(c.id);
+            }
+        }
+    }
+    let kept_roots: HashSet<CellId> = kept.iter().map(|&c| find(&mut parent, c)).collect();
+    let dead: HashSet<CellId> = members
+        .into_iter()
+        .filter(|&c| !kept_roots.contains(&find(&mut parent, c)))
+        .collect();
+    if dead.is_empty() {
+        return None;
+    }
+    let mut out = netlist.clone();
+    let mut removed: Vec<String> = Vec::new();
+    out.cells.retain(|c| {
+        let gone = dead.contains(&c.id);
+        if gone {
+            removed.push(c.path.clone());
+        }
+        !gone
+    });
+    out.rebuild_net_connectivity();
+    Some((out, removed))
+}
+
 /// Find the DDR blocks of a design and check how they connect: each chain
 /// of primitives at one pad reaches exactly that pad, inside the I/O.
 pub fn analyze(
@@ -1364,6 +1468,100 @@ mod tests {
 
         let strobe = blackbox("DQSBUF_IVREF", &["DQSI", "RST"], &[], &[]);
         assert!(prims.of(&strobe).is_some());
+    }
+
+    /// An output chain (ODDRX4 -> DELAYB) whose pad-side output nothing
+    /// reads is dead and left out; the same chain at a pad, or with a fabric
+    /// output read, stays.
+    #[test]
+    fn a_chain_that_reaches_no_pad_and_drives_nothing_is_left_out() {
+        let prims = Primitives::from_json(DATA).unwrap();
+        let is_pad = |c: &Cell| c.cell_type == "PAD";
+        let build = |to_pad: bool, read_fabric: bool| {
+            let mut netlist = GateNetlist::new("top".to_string(), "test".to_string());
+            let mut net = |name: &str| {
+                netlist.add_net(skalp_lir::gate_netlist::GateNet::new(
+                    GateNetId(0),
+                    name.to_string(),
+                ))
+            };
+            let (d, eclk, sclk, q, z, f) = (
+                net("d"),
+                net("eclk"),
+                net("sclk"),
+                net("q"),
+                net("z"),
+                net("f"),
+            );
+            let mut logic = Cell::new_comb(
+                CellId(0),
+                "LUT1".to_string(),
+                "test".to_string(),
+                0.0,
+                "top.logic".to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+            logic.outputs = vec![d];
+            netlist.add_cell(logic);
+            let mut oddr = blackbox("ODDRX4", &["D0", "ECLK", "SCLK"], &["Q"], &[]);
+            oddr.inputs = vec![d, eclk, sclk];
+            oddr.outputs = vec![q];
+            netlist.add_cell(oddr);
+            let mut delay = if read_fabric {
+                let mut c = blackbox("DELAYB", &["A"], &["Z", "CFLAG"], &[]);
+                c.outputs = vec![z, f];
+                c
+            } else {
+                let mut c = blackbox("DELAYB", &["A"], &["Z"], &[]);
+                c.outputs = vec![z];
+                c
+            };
+            delay.inputs = vec![q];
+            netlist.add_cell(delay);
+            if to_pad {
+                let mut pad = Cell::new_comb(
+                    CellId(0),
+                    "PAD".to_string(),
+                    "test".to_string(),
+                    0.0,
+                    "top.pad".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                pad.inputs = vec![z];
+                netlist.add_cell(pad);
+            }
+            if read_fabric {
+                let mut user = Cell::new_comb(
+                    CellId(0),
+                    "LUT1".to_string(),
+                    "test".to_string(),
+                    0.0,
+                    "top.user".to_string(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                user.inputs = vec![f];
+                netlist.add_cell(user);
+            }
+            netlist
+        };
+
+        let (out, removed) = remove_padless_chains(&build(false, false), &prims, &is_pad)
+            .expect("the dead chain is left out");
+        assert_eq!(removed, ["top.ODDRX4", "top.DELAYB"]);
+        assert_eq!(out.cells.len(), 1);
+        assert!(out
+            .cells
+            .iter()
+            .enumerate()
+            .all(|(i, c)| c.id.0 as usize == i));
+        // Nothing is left that analyze would reject
+        assert!(analyze(&out, &prims, &is_pad).unwrap().cells.is_empty());
+
+        assert!(remove_padless_chains(&build(true, false), &prims, &is_pad).is_none());
+        assert!(remove_padless_chains(&build(false, true), &prims, &is_pad).is_none());
     }
 
     #[test]

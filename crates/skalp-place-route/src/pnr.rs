@@ -720,6 +720,18 @@ pub fn place_and_route_nexus_real_from(
             .map_err(PlaceRouteError::BitstreamFailed)?;
     let ddr_bypassed = crate::device::nexus::ddr::bypass_pad_buffers(netlist, &ddr_primitives);
     let netlist = ddr_bypassed.as_ref().unwrap_or(netlist);
+    let ddr_unused = crate::device::nexus::ddr::remove_padless_chains(
+        netlist,
+        &ddr_primitives,
+        &prepare::is_pad,
+    );
+    if let Some((_, removed)) = &ddr_unused {
+        eprintln!(
+            "   I/O primitives left out (their chain reaches no pad and drives nothing): {}",
+            removed.join(", ")
+        );
+    }
+    let netlist = ddr_unused.as_ref().map_or(netlist, |(n, _)| n);
     let ddr_blocks = crate::device::nexus::ddr::analyze(netlist, &ddr_primitives, &prepare::is_pad)
         .map_err(PlaceRouteError::PlacementFailed)?;
     let tiles = load_tilegrid(db_root, variant).map_err(PlaceRouteError::BitstreamFailed)?;
